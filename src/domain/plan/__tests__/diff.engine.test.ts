@@ -1363,11 +1363,11 @@ describe('diffEnvironment — reconciliation safety', () => {
       .toContain('database:railway');
   });
 
-  it.each(['failed', 'unknown'] as const)('does not report a %s service as in sync', (status) => {
+  it('re-converges an exactly bound failed service instead of blocking its repair', () => {
     const result = diffEnvironment({
       spec: spec(),
       envName: 'production',
-      observed: observed({ services: [observedWeb({ status })] }),
+      observed: observed({ services: [observedWeb({ status: 'failed' })] }),
       local: local(),
     });
 
@@ -1375,8 +1375,31 @@ describe('diffEnvironment — reconciliation safety', () => {
       type: 'update',
       verified: true,
       metadata: {
-        blockedReason: `service_status_${status}`,
-        observedStatus: status,
+        observedStatus: 'failed',
+        externalId: 'svc-1',
+      },
+    });
+    expect(result.actions.find((action) => action.id === 'service:web')?.metadata)
+      .not.toHaveProperty('blockedReason');
+    expect(result.warnings).toContainEqual(expect.stringContaining(
+      're-converge the exact bound service configuration'
+    ));
+  });
+
+  it('keeps an unknown service status blocked', () => {
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed({ services: [observedWeb({ status: 'unknown' })] }),
+      local: local(),
+    });
+
+    expect(result.actions.find((action) => action.id === 'service:web')).toMatchObject({
+      type: 'update',
+      verified: true,
+      metadata: {
+        blockedReason: 'service_status_unknown',
+        observedStatus: 'unknown',
       },
     });
   });
@@ -1512,6 +1535,66 @@ describe('diffEnvironment — reconciliation safety', () => {
       },
     });
     expect(result.actions.some((action) => action.resource.kind === 'database' && action.type === 'create')).toBe(false);
+  });
+
+  it('matches a legacy flattened database binding using the exact environment scope', () => {
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed({
+        databases: [{
+          provider: 'railway',
+          engine: 'postgres',
+          externalId: 'db-1',
+          providerScope: { projectId: 'rail-proj-1', environmentId: 'rail-env-1' },
+          status: 'running',
+        }],
+      }),
+      local: local({
+        components: [localComponent({
+          provider: 'railway',
+          projectId: 'rail-proj-1',
+          resourceKind: 'service',
+        })],
+      }),
+    });
+
+    expect(result.actions.find((action) => action.id === 'database:railway')).toMatchObject({
+      type: 'noop',
+      verified: true,
+    });
+    expect(result.unmanaged).not.toContainEqual(expect.objectContaining({ kind: 'database' }));
+  });
+
+  it('does not supplement a legacy database binding from a different environment scope', () => {
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed({
+        databases: [{
+          provider: 'railway',
+          engine: 'postgres',
+          externalId: 'db-1',
+          providerScope: { projectId: 'rail-proj-1', environmentId: 'rail-env-1' },
+          status: 'running',
+        }],
+      }),
+      local: local({
+        components: [localComponent({ provider: 'railway', projectId: 'rail-proj-1' })],
+        bindings: {
+          provider: 'railway',
+          projectId: 'rail-proj-1',
+          environmentId: 'other-environment',
+          services: { web: { serviceId: 'svc-1' } },
+        },
+      }),
+    });
+
+    expect(result.actions.find((action) => action.id === 'database:railway')).toMatchObject({
+      type: 'update',
+      metadata: { blockedReason: 'database_binding_identity_mismatch' },
+    });
+    expect(result.actions.some((action) => action.resource.kind === 'database' && action.type === 'noop')).toBe(false);
   });
 
   it('resolves the durable service id before reporting same-name extras as unmanaged', () => {
@@ -2505,6 +2588,34 @@ describe('diffEnvironment — abandoned provider teardown', () => {
     expect(result.actions.some((a) => a.metadata?.operation === 'previousHostingDestroy')).toBe(false);
   });
 
+  it('emits cleanup for an earlier scope of the current provider', () => {
+    const result = diffEnvironment({
+      spec: spec({ hosting: { provider: 'cloudrun' } }),
+      envName: 'production',
+      observed: observed({ provider: 'cloudrun', services: [] }),
+      previousHostingTeardownBoundary: 'services',
+      local: local({
+        bindings: {
+          provider: 'cloudrun',
+          projectId: 'logical-production',
+          services: { web: { serviceId: 'new-web' } },
+          previousHosting: {
+            provider: 'cloudrun',
+            projectId: 'logical-production',
+            providerScope: { projectId: 'gcp-project', region: 'us-east1' },
+            services: { web: { serviceId: 'old-web' } },
+          },
+        },
+      }),
+    });
+
+    expect(result.actions).toContainEqual(expect.objectContaining({
+      id: 'service:web:previous-destroy',
+      resource: { kind: 'service', name: 'web', provider: 'cloudrun' },
+      requiresConfirm: true,
+    }));
+  });
+
   it('uses one environment-boundary destroy for an abandoned shared-project provider', () => {
     const result = diffEnvironment({
       spec: spec({ hosting: { provider: 'cloudrun' } }),
@@ -2595,6 +2706,24 @@ describe('diffEnvironment — release-command migrations', () => {
   it('is a noop when the live service already runs the release command', () => {
     const live = observedWeb({
       config: { startCommand: 'npm start', healthCheckPath: '/health', public: true, releaseCommand: 'npm run db:setup' },
+    });
+    const result = diffEnvironment({
+      spec: spec({ migrations: { mode: 'releaseCommand', command: 'npm run db:setup' } }),
+      envName: 'production',
+      observed: observed({ services: [live] }),
+      local: local(),
+    });
+    expect(result.actions.find((a) => a.id === 'service:web')!.type).toBe('noop');
+  });
+
+  it('is a noop when the provider exposes only the matching release command hash', () => {
+    const live = observedWeb({
+      config: {
+        startCommand: 'npm start',
+        healthCheckPath: '/health',
+        public: true,
+        releaseCommandHash: hashEnvValue('npm run db:setup'),
+      },
     });
     const result = diffEnvironment({
       spec: spec({ migrations: { mode: 'releaseCommand', command: 'npm run db:setup' } }),

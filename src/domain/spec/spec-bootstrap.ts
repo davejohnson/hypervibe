@@ -8,10 +8,11 @@ export interface BootstrapParams {
   hostingRegion?: string;
   services: string[];
   crons?: DesiredState['crons'];
-  domain?: string;
   serviceConfig?: DesiredState['serviceConfig'];
   envVars?: DesiredState['envVars'];
   deploy?: DesiredState['deploy'];
+  /** Exact immutable commit frozen into the reviewed deployment plan. */
+  expectedSourceCommitSha?: string;
   /** Poll web services' healthCheckPath over HTTP after deploy (hv_deploy). */
   verifyHttpHealth?: boolean;
   /** Managed queue env vars resolved by the caller (see queue-env.ts). */
@@ -121,7 +122,6 @@ export function specToBootstrapParams(
     ...(env.hosting.region ? { hostingRegion: env.hosting.region } : {}),
     services,
     ...(Object.keys(crons).length > 0 ? { crons } : {}),
-    ...(env.domain ? { domain: env.domain } : {}),
     ...(Object.keys(serviceConfig).length > 0 ? { serviceConfig } : {}),
     ...(Object.keys(env.envVars).length > 0 ? { envVars: env.envVars } : {}),
     ...(deploy ? { deploy } : {}),
@@ -194,7 +194,6 @@ export function scopeBootstrapParamsToService(
     ...(serviceEnvVars
       ? { envVarsByService: { [serviceName]: serviceEnvVars } }
       : { envVarsByService: undefined }),
-    domain: undefined,
     ensureHostingProject: false,
   };
 }

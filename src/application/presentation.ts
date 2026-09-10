@@ -331,15 +331,17 @@ function applyPresentation(data: DataRecord): CommandPresentation {
   const statuses = receipts.map((value) => stringValue(record(value)?.status)?.toLowerCase() ?? 'unknown');
   const pending = statuses.filter((status) => status === 'pending').length;
   const blocked = statuses.filter((status) => ['blocked', 'skipped_requires_confirm'].includes(status)).length;
-  const failed = statuses.filter((status) => ['failed', 'failure', 'aborted'].includes(status)).length;
+  const failed = statuses.filter((status) => ['failed', 'failure'].includes(status)).length;
+  const skipped = statuses.filter((status) => status === 'aborted').length;
   const succeeded = statuses.filter((status) => ['success', 'succeeded', 'complete', 'completed'].includes(status)).length;
   const applied = data.applied === true;
-  const stopped = !applied || blocked > 0 || failed > 0;
-  const title = stopped ? 'APPLY STOPPED' : pending > 0 ? 'APPLY PENDING' : 'APPLY COMPLETE';
+  const stopped = failed > 0 || (!applied && pending === 0 && blocked === 0 && skipped === 0);
+  const interrupted = blocked > 0 || pending > 0 || skipped > 0;
+  const title = stopped ? 'APPLY STOPPED' : pending > 0 ? 'APPLY PENDING' : blocked > 0 ? 'APPLY BLOCKED' : skipped > 0 ? 'APPLY ABORTED' : 'APPLY COMPLETE';
   const details = genericLines(data, new Set(['applied', 'applyRunId', 'environment', 'receipts']));
   return {
-    tone: stopped ? 'danger' : pending > 0 ? 'warning' : 'success',
-    icon: stopped ? '❌' : pending > 0 ? '⏳' : '✅',
+    tone: stopped ? 'danger' : interrupted ? 'warning' : 'success',
+    icon: stopped ? '❌' : pending > 0 ? '⏳' : blocked > 0 ? '🚧' : skipped > 0 ? '⏭️' : '✅',
     title,
     context: [
       stringValue(data.environment),
@@ -350,6 +352,7 @@ function applyPresentation(data: DataRecord): CommandPresentation {
       pending > 0 ? plural(pending, 'pending action') : undefined,
       blocked > 0 ? plural(blocked, 'blocked action') : undefined,
       failed > 0 ? plural(failed, 'failed action') : undefined,
+      skipped > 0 ? plural(skipped, 'skipped action') : undefined,
     ].filter(Boolean).join(' · '),
     sections: [
       ...(receipts.length > 0 ? [{ title: '🧾  RECEIPTS', lines: receiptRows(receipts) }] : []),

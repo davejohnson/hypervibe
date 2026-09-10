@@ -9,7 +9,7 @@ import { EnvironmentRepository } from '../../../adapters/db/repositories/environ
 import { ServiceRepository } from '../../../adapters/db/repositories/service.repository.js';
 import { RunRepository } from '../../../adapters/db/repositories/run.repository.js';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
-import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
+import { getSecretStore, SecretStore } from '../../../adapters/secrets/secret-store.js';
 import type { Environment } from '../../entities/environment.entity.js';
 import type { Service } from '../../entities/service.entity.js';
 import type { ObservedState } from '../../ports/observe.port.js';
@@ -25,9 +25,13 @@ import { PlanService } from '../plan.service.js';
 import type { PlanAction } from '../plan.types.js';
 
 const SECRET_KEY = 'SESSION_SECRET';
+const CONFLICT_KEY = 'LEGACY_SESSION_SECRET';
 const SERVICE_NAMES = ['web', 'worker'];
 
-function observed(liveHashes: Map<string, string>): ObservedState {
+function observed(
+  liveHashes: Map<string, string>,
+  liveConflictHashes: Map<string, string | null> = new Map()
+): ObservedState {
   return {
     provider: 'railway',
     observedAt: new Date().toISOString(),
@@ -36,7 +40,12 @@ function observed(liveHashes: Map<string, string>): ObservedState {
     environmentId: 'rail-environment',
     services: SERVICE_NAMES.map((name) => {
       const hash = liveHashes.get(name);
-      const envVarHashes: Record<string, string> = hash ? { [SECRET_KEY]: hash } : {};
+      const conflictHash = liveConflictHashes.get(name);
+      const conflictPresent = liveConflictHashes.has(name);
+      const envVarHashes: Record<string, string> = {
+        ...(hash ? { [SECRET_KEY]: hash } : {}),
+        ...(conflictHash ? { [CONFLICT_KEY]: conflictHash } : {}),
+      };
       return {
         name,
         externalId: `rail-${name}`,
@@ -44,7 +53,10 @@ function observed(liveHashes: Map<string, string>): ObservedState {
         customDomains: [],
         config: {},
         sourceState: 'disconnected' as const,
-        envVarKeys: hash ? [SECRET_KEY] : [],
+        envVarKeys: [
+          ...(hash ? [SECRET_KEY] : []),
+          ...(conflictPresent ? [CONFLICT_KEY] : []),
+        ],
         envVarHashes,
         status: 'running' as const,
       };
@@ -59,12 +71,14 @@ describe('generated secret plan/apply integration', () => {
   let tempDir: string;
   let project: ReturnType<ProjectRepository['create']>;
   let liveHashes: Map<string, string>;
+  let liveConflictHashes: Map<string, string | null>;
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypervibe-generated-apply-'));
     SqliteAdapter.resetInstance();
     initializeDatabase(path.join(tempDir, 'hypervibe.db'));
     liveHashes = new Map();
+    liveConflictHashes = new Map();
 
     project = new ProjectRepository().create({
       name: 'generated-secret-app',
@@ -129,7 +143,12 @@ describe('generated secret plan/apply integration', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  function installAdapter(options: { failOnceFor?: string } = {}) {
+  function installAdapter(options: {
+    failOnceFor?: string;
+    persistWrites?: boolean;
+    persistOnlyFor?: string;
+    conflictAfterWriteFor?: string;
+  } = {}) {
     let remainingFailure = options.failOnceFor;
     const setEnvVars = vi.fn(async (
       _environment: Environment,
@@ -145,7 +164,16 @@ describe('generated secret plan/apply integration', () => {
           error: 'simulated provider failure',
         };
       }
-      if (value) liveHashes.set(service.name, hashEnvValue(value));
+      if (
+        value
+        && options.persistWrites !== false
+        && (!options.persistOnlyFor || options.persistOnlyFor === service.name)
+      ) {
+        liveHashes.set(service.name, hashEnvValue(value));
+      }
+      if (options.conflictAfterWriteFor === service.name) {
+        liveConflictHashes.set(service.name, hashEnvValue('racing-legacy-value'));
+      }
       return { success: true, message: `Synced ${service.name}` };
     });
     const deploy = vi.fn(async (service: Service) => ({
@@ -175,7 +203,7 @@ describe('generated secret plan/apply integration', () => {
         message: 'exists',
         data: { projectId: 'rail-project', environmentId: 'rail-environment' },
       }),
-      observe: vi.fn(async () => observed(liveHashes)),
+      observe: vi.fn(async () => observed(liveHashes, liveConflictHashes)),
       setEnvVars,
       deploy,
     };
@@ -209,6 +237,21 @@ describe('generated secret plan/apply integration', () => {
     });
   }
 
+  function useImmutableSecret() {
+    const currentSpec = new SpecStore().get(project)!.spec;
+    new SpecStore().replace(project, {
+      ...currentSpec,
+      secrets: {
+        ...currentSpec.secrets,
+        [SECRET_KEY]: {
+          ...currentSpec.secrets[SECRET_KEY],
+          replacementPolicy: 'immutable',
+          conflictsWith: [CONFLICT_KEY],
+        },
+      },
+    });
+  }
+
   function generatedSecretCalls(
     setEnvVars: ReturnType<typeof installAdapter>['setEnvVars'],
     fromIndex = 0
@@ -217,6 +260,29 @@ describe('generated secret plan/apply integration', () => {
       .slice(fromIndex)
       .filter(([, , vars]) => typeof vars[SECRET_KEY] === 'string');
   }
+
+  it('preserves pre-immutable generated-secret provenance after reopening the installation', async () => {
+    const { setEnvVars } = installAdapter();
+    const initial = await plan();
+    expect(await apply(initial.planRunId)).toMatchObject({ kind: 'executed', result: { success: true } });
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    const accepted = parseDelegatedSecretBindings(environment);
+    expect(accepted).toHaveLength(1);
+    // This is the persisted 0.1.24 shape, before immutable-policy metadata.
+    expect(accepted[0]).not.toHaveProperty('replacementPolicy');
+    expect(accepted[0]).not.toHaveProperty('conflictsWith');
+    const expected = deriveHypervibeSecretValues(new SpecStore().get(project)!.spec, 'production');
+    SqliteAdapter.resetInstance();
+    SecretStore.resetInstance();
+    initializeDatabase(path.join(tempDir, 'hypervibe.db'));
+    expect(parseDelegatedSecretBindings(new EnvironmentRepository().findById(environment.id)!)).toEqual(accepted);
+    expect(deriveHypervibeSecretValues(new SpecStore().get(project)!.spec, 'production')).toEqual(expected);
+    setEnvVars.mockClear();
+    const reopened = await plan();
+    expect(reopened.actions.find((action) => action.id === `secret:${SECRET_KEY}`)).toMatchObject({ type: 'noop' });
+    expect(await apply(reopened.planRunId)).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(setEnvVars).not.toHaveBeenCalled();
+  });
 
   it('installs one generated value on every service and persists only accepted provenance', async () => {
     const { setEnvVars } = installAdapter();
@@ -304,6 +370,230 @@ describe('generated secret plan/apply integration', () => {
     }
   });
 
+  it('installs an immutable generated value and persists its exact non-secret contract', async () => {
+    useImmutableSecret();
+    const { setEnvVars } = installAdapter();
+    const planned = await plan();
+    expect(planned.actions.find((action) => action.id === `secret:${SECRET_KEY}`)).toMatchObject({
+      type: 'update',
+      metadata: {
+        replacementPolicy: 'immutable',
+        conflictsWith: [CONFLICT_KEY],
+      },
+    });
+
+    const outcome = await apply(planned.planRunId);
+    expect(outcome).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(generatedSecretCalls(setEnvVars)).toHaveLength(2);
+    expect(parseDelegatedSecretBindings(
+      new EnvironmentRepository().findByProjectAndName(project.id, 'production')!
+    )).toEqual([
+      expect.objectContaining({
+        name: SECRET_KEY,
+        replacementPolicy: 'immutable',
+        conflictsWith: [CONFLICT_KEY],
+      }),
+    ]);
+
+    const converged = await plan();
+    expect(converged.actions.find((action) => action.id === `secret:${SECRET_KEY}`)).toMatchObject({
+      type: 'noop',
+      verified: true,
+      metadata: { replacementPolicy: 'immutable' },
+    });
+  });
+
+  it.each([
+    ['not yet visible', { persistWrites: false }],
+    ['visible on only one target', { persistOnlyFor: 'web' }],
+  ])('does not accept an immutable write that is %s', async (_condition, adapterOptions) => {
+    useImmutableSecret();
+    const { setEnvVars } = installAdapter(adapterOptions);
+    const planned = await plan();
+
+    const outcome = await apply(planned.planRunId);
+
+    expect(outcome).toMatchObject({
+      kind: 'executed',
+      result: {
+        success: false,
+        receipts: expect.arrayContaining([
+          expect.objectContaining({
+            actionId: `secret:${SECRET_KEY}`,
+            status: 'pending',
+            data: expect.objectContaining({
+              bindingRecorded: false,
+              failureStage: 'verification',
+            }),
+          }),
+        ]),
+      },
+    });
+    expect(generatedSecretCalls(setEnvVars)).toHaveLength(2);
+    expect(parseDelegatedSecretBindings(
+      new EnvironmentRepository().findByProjectAndName(project.id, 'production')!
+    )).toEqual([]);
+  });
+
+  it('blocks without recording an immutable binding when a conflict appears during the write', async () => {
+    useImmutableSecret();
+    const { setEnvVars } = installAdapter({ conflictAfterWriteFor: 'web' });
+    const planned = await plan();
+
+    const outcome = await apply(planned.planRunId);
+
+    expect(outcome).toMatchObject({
+      kind: 'executed',
+      result: {
+        success: false,
+        receipts: expect.arrayContaining([
+          expect.objectContaining({
+            actionId: `secret:${SECRET_KEY}`,
+            status: 'blocked',
+            error: expect.stringContaining(CONFLICT_KEY),
+            data: expect.objectContaining({ bindingRecorded: false }),
+          }),
+        ]),
+      },
+    });
+    expect(generatedSecretCalls(setEnvVars)).toHaveLength(2);
+    expect(parseDelegatedSecretBindings(
+      new EnvironmentRepository().findByProjectAndName(project.id, 'production')!
+    )).toEqual([]);
+  });
+
+  it.each([
+    ['replacement policy', { replacementPolicy: 'confirm' }],
+    ['value fingerprint', { expectedValueHash: 'f'.repeat(64) }],
+    ['conflict contract', { conflictsWith: [] }],
+  ])('blocks apply when the reviewed immutable %s changes', async (_label, metadataPatch) => {
+    useImmutableSecret();
+    const { setEnvVars } = installAdapter();
+    const planned = await plan();
+    const runRepository = new RunRepository();
+    const storedPlan = runRepository.findById(planned.planRunId)!;
+    const document = storedPlan.plan as Record<string, unknown> & { actions: PlanAction[] };
+    runRepository.updatePlan(planned.planRunId, {
+      ...document,
+      actions: document.actions.map((action) => action.id === `secret:${SECRET_KEY}`
+        ? { ...action, metadata: { ...action.metadata, ...metadataPatch } }
+        : action),
+    });
+
+    const outcome = await apply(planned.planRunId, [`secret:${SECRET_KEY}`]);
+
+    expect(outcome).toMatchObject({ kind: 'executed', result: { success: false } });
+    expect(generatedSecretCalls(setEnvVars)).toEqual([]);
+  });
+
+  it('blocks an immutable apply when a conflicting key appears, even with confirmation', async () => {
+    useImmutableSecret();
+    const { setEnvVars } = installAdapter();
+    const planned = await plan();
+    liveConflictHashes.set('web', hashEnvValue('legacy-live-value'));
+
+    // Exercise the action-scoped fail-closed check even if the broad observed
+    // fingerprint in local plan storage is removed.
+    const runRepository = new RunRepository();
+    const storedPlan = runRepository.findById(planned.planRunId)!;
+    const document = storedPlan.plan as Record<string, unknown> & { actions: PlanAction[] };
+    runRepository.updatePlan(planned.planRunId, {
+      ...document,
+      observedFingerprint: null,
+    });
+
+    const outcome = await apply(planned.planRunId, [`secret:${SECRET_KEY}`]);
+
+    expect(outcome).toMatchObject({
+      kind: 'executed',
+      result: {
+        success: false,
+        receipts: expect.arrayContaining([
+          expect.objectContaining({
+            actionId: `secret:${SECRET_KEY}`,
+            status: 'blocked',
+            error: expect.stringContaining(CONFLICT_KEY),
+          }),
+        ]),
+      },
+    });
+    expect(generatedSecretCalls(setEnvVars)).toEqual([]);
+  });
+
+  it('blocks immutable apply when a conflicting prior binding appears after planning', async () => {
+    useImmutableSecret();
+    const { setEnvVars } = installAdapter();
+    const planned = await plan();
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    new EnvironmentRepository().updatePlatformBindings(environment.id, {
+      delegatedEnvBindings: [{
+        name: SECRET_KEY,
+        principal: 'hypervibe',
+        valueHash: hashEnvValue('different-accepted-value'),
+        source: 'hypervibe-generated',
+        generator: 'random-base64url-32-v1',
+        generation: 1,
+        replacementPolicy: 'immutable',
+        conflictsWith: [CONFLICT_KEY],
+        syncedAt: '2026-09-09T00:00:00.000Z',
+        applyRunId: 'remote-apply-run',
+        actionId: `secret:${SECRET_KEY}`,
+      }],
+    });
+
+    const outcome = await apply(planned.planRunId, [`secret:${SECRET_KEY}`]);
+
+    expect(outcome).toMatchObject({
+      kind: 'executed',
+      result: {
+        success: false,
+        receipts: expect.arrayContaining([
+          expect.objectContaining({
+            actionId: `secret:${SECRET_KEY}`,
+            status: 'blocked',
+            error: expect.stringContaining('immutable'),
+          }),
+        ]),
+      },
+    });
+    expect(generatedSecretCalls(setEnvVars)).toEqual([]);
+  });
+
+  it('blocks immutable apply when the legacy conflict gains prior binding evidence', async () => {
+    useImmutableSecret();
+    const { setEnvVars } = installAdapter();
+    const planned = await plan();
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    new EnvironmentRepository().updatePlatformBindings(environment.id, {
+      delegatedEnvBindings: [{
+        name: CONFLICT_KEY,
+        principal: 'github:owner',
+        valueHash: hashEnvValue('legacy-value'),
+        source: 'delegated-plan-input',
+        syncedAt: '2026-09-09T00:00:00.000Z',
+        applyRunId: 'legacy-apply-run',
+        actionId: `secret:${CONFLICT_KEY}`,
+      }],
+    });
+
+    const outcome = await apply(planned.planRunId, [`secret:${SECRET_KEY}`]);
+
+    expect(outcome).toMatchObject({
+      kind: 'executed',
+      result: {
+        success: false,
+        receipts: expect.arrayContaining([
+          expect.objectContaining({
+            actionId: `secret:${SECRET_KEY}`,
+            status: 'blocked',
+            error: expect.stringContaining(CONFLICT_KEY),
+          }),
+        ]),
+      },
+    });
+    expect(generatedSecretCalls(setEnvVars)).toEqual([]);
+  });
+
   it('does not accept a partial provider write and derives the identical value for retry', async () => {
     const { setEnvVars } = installAdapter({ failOnceFor: 'worker' });
     const firstPlan = await plan();
@@ -372,6 +662,56 @@ describe('generated secret plan/apply integration', () => {
     ]);
     expect(JSON.stringify(updatedEnvironment.platformBindings)).not.toContain(firstGeneratedValue);
     expect(JSON.stringify(retryOutcome)).not.toContain(firstGeneratedValue);
+  });
+
+  it('repairs a partial immutable write only with the identical derived value', async () => {
+    useImmutableSecret();
+    const { setEnvVars } = installAdapter({ failOnceFor: 'worker' });
+    const firstPlan = await plan();
+    const firstOutcome = await apply(firstPlan.planRunId);
+    expect(firstOutcome).toMatchObject({ kind: 'executed', result: { success: false } });
+
+    const firstCalls = generatedSecretCalls(setEnvVars);
+    expect(firstCalls).toHaveLength(2);
+    const generatedValue = firstCalls[0][2][SECRET_KEY];
+    expect(firstCalls.map(([, , vars]) => vars[SECRET_KEY])).toEqual([
+      generatedValue,
+      generatedValue,
+    ]);
+    expect(parseDelegatedSecretBindings(
+      new EnvironmentRepository().findByProjectAndName(project.id, 'production')!
+    )).toEqual([]);
+
+    const callsBeforeRetry = setEnvVars.mock.calls.length;
+    const retryPlan = await plan();
+    expect(retryPlan.actions.find((action) => action.id === `secret:${SECRET_KEY}`)).toMatchObject({
+      type: 'update',
+      metadata: {
+        replacementPolicy: 'immutable',
+        conflictsWith: [CONFLICT_KEY],
+      },
+    });
+    expect(retryPlan.actions.find((action) => action.id === `secret:${SECRET_KEY}`))
+      .not.toHaveProperty('requiresConfirm');
+
+    const retryOutcome = await apply(retryPlan.planRunId);
+    expect(retryOutcome).toMatchObject({ kind: 'executed', result: { success: true } });
+    const retryCalls = generatedSecretCalls(setEnvVars, callsBeforeRetry);
+    expect(retryCalls).toHaveLength(2);
+    expect(retryCalls.map(([, , vars]) => vars[SECRET_KEY])).toEqual([
+      generatedValue,
+      generatedValue,
+    ]);
+    expect(parseDelegatedSecretBindings(
+      new EnvironmentRepository().findByProjectAndName(project.id, 'production')!
+    )).toEqual([
+      expect.objectContaining({
+        name: SECRET_KEY,
+        valueHash: hashEnvValue(generatedValue),
+        replacementPolicy: 'immutable',
+        conflictsWith: [CONFLICT_KEY],
+      }),
+    ]);
   });
 
   it('blocks a persisted generated-secret rotation when its confirmation marker is stripped', async () => {
@@ -521,6 +861,7 @@ describe('generated secret plan/apply integration', () => {
     const bindingsFile = path.join(hypervibeDir, 'bindings.json');
     fs.mkdirSync(path.join(repoDir, '.git'), { recursive: true });
     fs.mkdirSync(hypervibeDir, { recursive: true });
+    fs.writeFileSync(path.join(hypervibeDir, 'spec.json'), JSON.stringify(new SpecStore().get(project)!.spec));
     const oldDisableRepoSpec = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
     process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
 
@@ -583,7 +924,10 @@ describe('generated secret plan/apply integration', () => {
         const exported = JSON.parse(fs.readFileSync(bindingsFile, 'utf8')) as {
           environments: Record<string, { platformBindings: Record<string, unknown> }>;
         };
-        expect(exported.environments.production.platformBindings.delegatedEnvBindings).toEqual([
+        expect(exported.environments.production.platformBindings.delegatedEnvBindings).toBeUndefined();
+        expect(parseDelegatedSecretBindings(
+          new EnvironmentRepository().findByProjectAndName(project.id, 'production')!
+        )).toEqual([
           expect.objectContaining({ name: SECRET_KEY, source: 'hypervibe-generated' }),
         ]);
       });

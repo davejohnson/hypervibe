@@ -7,6 +7,7 @@ import {
 } from '../domain/registry/provider.registry.js';
 import { secretManagerRegistry } from '../domain/registry/secretmanager.registry.js';
 import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
+import { runGcpBootstrap } from '../domain/services/gcp-bootstrap.service.js';
 import { saveConnection, verifyConnection, deleteConnection } from '../domain/services/connection-ops.service.js';
 import { SecretResolver } from '../domain/services/secret.resolver.js';
 import { parseSecretRef } from '../domain/ports/secretmanager.port.js';
@@ -246,7 +247,9 @@ function providerDiscoveryEntry(metadata: Pick<
   'name' | 'displayName' | 'setupHelpUrl' | 'credentialsSchema' | 'credentials' | 'maturity' | 'lifecycle'
 >): ProviderDiscoveryEntry {
   const guidance = getConnectionGuidance(metadata.name);
-  const credentialFields = credentialFieldsFromSchema(metadata.credentialsSchema);
+  const credentialFields = credentialFieldsFromSchema(metadata.credentialsSchema, {
+    exclude: metadata.credentials?.agentManagedKeys,
+  });
   return {
     name: metadata.name,
     displayName: metadata.displayName,
@@ -276,27 +279,28 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
 
   commands.register(
     'hv_connections',
-    'Connection modes: {} lists every connection/provider; {project} lists in validated project context; {provider,...} manages one connection. With provider, action="add" is the default, while "verify", "remove", and "prepare" are explicit. Project context never changes provider scope. Credentials are encrypted at rest and never returned; credentialsRef is preferred. Providers and credential sources that declare native CLI authentication may omit credentials to use the active local/default credential chain.',
+    'Connection modes: {} lists every connection/provider; {project} lists in validated project context; {provider,...} manages connections. With provider, action="add" is the default. Use action="bootstrap" with provider="cloudrun" for the short, opinionated GCP setup; "verify", "remove", and "prepare" remain explicit advanced operations. Project context never changes provider scope. Credentials are encrypted at rest and never returned; credentialsRef is preferred. Providers and credential sources that declare native CLI authentication may omit credentials to use the active local/default credential chain.',
     {
       provider: z.string().optional().describe(`Omit to list. Otherwise select a provider (available: ${providerNames.join(', ')}). action="remove" also accepts unregistered providers so stale connections can be deleted.`),
-      action: z.enum(['add', 'verify', 'remove', 'prepare']).optional().describe('With provider: operation to perform (default: "add")'),
+      action: z.enum(['add', 'verify', 'remove', 'prepare', 'bootstrap']).optional().describe('With provider: operation to perform (default: "add"). For GCP, "bootstrap" is the recommended one-time setup.'),
       credentials: z.record(z.unknown()).optional().describe('action="add": provider-specific credentials object. Omit for providers supporting native CLI/default authentication. credentialsRef is recommended for explicit credentials, but raw credentials are accepted when intentional.'),
       credentialsRef: z.string().optional().describe('action="add": recommended credential reference resolved by Hypervibe. Supports env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path for token/JSON files, secret-manager refs like 1password://vault/item#field, or an already-pulled active Stripe Projects environment with stripe-projects://<environment>/<provider>/<service>. The resolved value may be a JSON credentials object or a scalar.'),
       credentialsKey: z.string().optional().describe('action="add": wraps a scalar credentialsRef value under this provider credential key, e.g. apiToken or accessToken. Optional for common single-token providers.'),
       credentialsMap: z.record(z.string()).optional().describe('action="add": for dotenv or structured secret-manager references, maps provider credential keys to source fields, e.g. {"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}.'),
-      scope: z.string().optional().describe('Optional scope for fine-grained tokens (e.g., "owner/repo" for GitHub, "example.com" for Cloudflare). Use "org/*" for wildcard matching. Leave empty for global.'),
-      project: projectField.describe('Optional Hypervibe project name/id for validated context. With no provider, project-only still lists. Omit for an unscoped list. This never changes provider credential scope.'),
-      gcpProjectId: z.string().optional().describe('action="prepare": GCP project ID (defaults to the Cloud Run connection projectId)'),
+      scope: z.string().optional().describe('Optional scope for fine-grained tokens (e.g., "owner/repo" for GitHub, "example.com" for Cloudflare). Use "org/*" for wildcard matching. Leave empty for global except action="bootstrap", which derives an exact repository scope from the selected project when omitted and never creates global GCP access.'),
+      project: projectField.describe('Hypervibe project name/id for validated context. Required explicitly for action="bootstrap". With no provider, project-only still lists. Omit for an unscoped list. This never changes provider credential scope.'),
+      gcpProjectId: z.string().optional().describe('Exact GCP project ID. Bootstrap preview reuses verified repository-scoped access or derives a stable name when omitted; confirmation requires the exact ID returned by that preview. Prepare defaults to the Cloud Run connection projectId.'),
+      billingAccountName: z.string().optional().describe('action="bootstrap" with confirm=true: exact open billing account name returned by the preview, such as billingAccounts/AAAAAA-BBBBBB-CCCCCC.'),
       deployServiceAccountEmail: z.string().optional().describe('action="prepare": deploy service account email (defaults to the Cloud Run connection service account)'),
       gcsAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add GCS access to the reused service account. "inspect" grants roles/storage.viewer; "lifecycle" grants roles/storage.admin.'),
       memorystoreAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add Memorystore access to the reused service account. "inspect" grants roles/redis.viewer; "lifecycle" grants roles/redis.admin.'),
       queueAccess: z.enum(['lifecycle', 'remove']).optional().describe('action="prepare" for cloudrun: explicitly grant Pub/Sub queue lifecycle access or remove that exact role from the reused service account.'),
-      adminAuth: z.literal('default').optional().describe('action="prepare" with confirm=true: use existing Google Application Default Credentials for the one-time admin operation. Not stored.'),
+      adminAuth: z.literal('default').optional().describe('Required for action="bootstrap" and confirmed action="prepare": use existing Google Application Default Credentials for the one-time admin operation. Not stored.'),
       adminCredentialsJson: z.string().optional().describe('action="prepare": one-time admin service account JSON. Not stored.'),
       adminCredentialsJsonRef: z.string().optional().describe('action="prepare": env:NAME or file:/absolute/path resolving to one-time admin service account JSON. Not stored.'),
       adminAccessToken: z.string().optional().describe('action="prepare": one-time OAuth admin access token. Not stored.'),
       adminAccessTokenRef: z.string().optional().describe('action="prepare": env:NAME or file:/absolute/path resolving to one-time OAuth admin access token. Not stored.'),
-      confirm: confirmField,
+      confirm: confirmField.describe('For action="bootstrap" or action="prepare", omit for a read-only preview and set true only after reviewing that preview. Other connection actions do not accept confirm.'),
     },
     wrapCommandHandler(async ({
       provider,
@@ -308,6 +312,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       scope,
       project: projectRef,
       gcpProjectId,
+      billingAccountName,
       deployServiceAccountEmail,
       gcsAccess,
       memorystoreAccess,
@@ -327,6 +332,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           || credentialsMap !== undefined
           || scope !== undefined
           || gcpProjectId !== undefined
+          || billingAccountName !== undefined
           || deployServiceAccountEmail !== undefined
           || gcsAccess !== undefined
           || memorystoreAccess !== undefined
@@ -339,7 +345,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           || confirm !== undefined;
         if (mutationInput) {
           return commandError('VALIDATION', 'provider is required when connection operation parameters are supplied.', {
-            hint: 'Use hv_connections({}) to list globally, hv_connections({project}) to list in validated project context, or pass provider to add, verify, remove, or prepare one.',
+          hint: 'Use hv_connections({}) to list globally, hv_connections({project}) to list in validated project context, or pass provider to add, verify, remove, prepare, or bootstrap.',
           });
         }
         const project = projectRef
@@ -355,24 +361,40 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           hint: `Available providers: ${providerNames.join(', ')}`,
         });
       }
-      const prepareFields = {
+      const sharedGcpFields = {
         gcpProjectId,
+        adminAuth,
+      };
+      const prepareOnlyFields = {
         deployServiceAccountEmail,
         gcsAccess,
         memorystoreAccess,
         queueAccess,
-        adminAuth,
         adminCredentialsJson,
         adminCredentialsJsonRef,
         adminAccessToken,
         adminAccessTokenRef,
       };
+      const bootstrapOnlyFields = { billingAccountName };
       const credentialFields = { credentials, credentialsRef, credentialsKey, credentialsMap };
       const incompatible = suppliedOptionNames(requestedAction === 'prepare'
-        ? { ...credentialFields, scope }
+        ? { ...credentialFields, ...bootstrapOnlyFields, scope }
+        : requestedAction === 'bootstrap'
+          ? { ...credentialFields, ...prepareOnlyFields }
         : requestedAction === 'remove' || requestedAction === 'verify'
-          ? { ...credentialFields, ...prepareFields, confirm }
-          : { ...prepareFields, confirm });
+          ? {
+            ...credentialFields,
+            ...sharedGcpFields,
+            ...prepareOnlyFields,
+            ...bootstrapOnlyFields,
+            confirm,
+          }
+          : {
+            ...sharedGcpFields,
+            ...prepareOnlyFields,
+            ...bootstrapOnlyFields,
+            confirm,
+          });
       if (incompatible.length > 0) {
         return commandError(
           'VALIDATION',
@@ -423,12 +445,83 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           hint: 'Prefer adminAuth="default" to use existing Google Application Default Credentials. Explicit adminCredentialsJsonRef or adminAccessTokenRef remain available when intentional.',
         });
       }
+      if (requestedAction === 'bootstrap' && provider !== 'cloudrun') {
+        return commandError('VALIDATION', 'action="bootstrap" is supported only with provider="cloudrun". It creates both Cloud Run and Cloud SQL connections.');
+      }
+      if (requestedAction === 'bootstrap' && confirm && !gcpProjectId?.trim()) {
+        return commandError('VALIDATION', 'Confirmed bootstrap requires the exact gcpProjectId returned by the preview.');
+      }
+      if (requestedAction === 'bootstrap' && !projectRef?.trim()) {
+        return commandError('VALIDATION', 'project is required for action="bootstrap" so Hypervibe never stores GCP access against an inferred project.');
+      }
+      if (requestedAction === 'bootstrap' && adminAuth !== 'default') {
+        return commandError('VALIDATION', 'adminAuth="default" is required for action="bootstrap".', {
+          hint: 'Hypervibe uses your current Google Application Default Credentials in memory for this one-time setup and never stores them.',
+        });
+      }
+      if (requestedAction === 'bootstrap' && !confirm && billingAccountName !== undefined) {
+        return commandError('VALIDATION', 'billingAccountName is accepted only with confirm=true for action="bootstrap".', {
+          hint: 'Run the preview first. It lists the exact open billing accounts available to your current Google login.',
+        });
+      }
+      if (requestedAction === 'bootstrap' && confirm && !billingAccountName?.trim()) {
+        return commandError('VALIDATION', 'confirm=true requires the exact billingAccountName returned by the bootstrap preview.', {
+          hint: 'Run the same bootstrap call without confirm first, then choose one exact openBillingAccounts[].name value.',
+        });
+      }
       const project = projectRef
         ? ctx.resolveProjectOrThrow({ project: projectRef })
         : null;
       const projectContext = project
         ? { project: { id: project.id, name: project.name } }
         : {};
+
+      if (requestedAction === 'bootstrap') {
+        const targetProject = project!;
+        const payload = await runGcpBootstrap({
+          project: targetProject,
+          gcpProjectId,
+          scope,
+          billingAccountName,
+          confirm,
+        });
+        if (!payload.success) {
+          return commandError('PROVIDER_ERROR', String(payload.error ?? 'GCP setup failed.'), {
+            details: payload,
+          });
+        }
+        if (payload.mode === 'preview') {
+          const accountNames = Array.isArray(payload.openBillingAccounts)
+            ? payload.openBillingAccounts
+              .map((account) => account && typeof account === 'object'
+                ? (account as Record<string, unknown>).name
+                : undefined)
+              .filter((name): name is string => typeof name === 'string')
+            : [];
+          const hint = accountNames.length === 0
+            ? 'No open billing accounts are visible to the current Google login. Give that login access to an open GCP billing account, then run this preview again.'
+            : accountNames.length === 1
+              ? `Review the preview, then ask the user to approve billing account ${accountNames[0]}. Re-run with that exact billingAccountName and confirm=true only after approval; linking billing can create costs.`
+              : 'Review the preview and ask the user to choose one exact openBillingAccounts[].name. Re-run with that billingAccountName and confirm=true only after approval; linking billing can create costs.';
+          const agentMessage = accountNames.length === 0
+            ? 'No open GCP billing account is available. Ask the user to grant the current Google login access to an open billing account, then run the preview again. Do not confirm or try alternate infrastructure tools.'
+            : 'Show the GCP setup preview and open billing accounts. Ask the user to approve one exact billing account before confirming. Never choose or confirm a billable account on their behalf.';
+          return commandSuccess(
+            { project: { id: targetProject.id, name: targetProject.name }, ...payload },
+            {
+              hint,
+              agentInstruction: {
+                action: 'ask_user',
+                message: agentMessage,
+              },
+            }
+          );
+        }
+        return commandSuccess(
+          { project: { id: targetProject.id, name: targetProject.name }, ...payload },
+          { next: ['hv_plan'] }
+        );
+      }
 
       if (requestedAction === 'prepare') {
         const targetProject = project ?? ctx.resolveProjectOrThrow();
@@ -592,7 +685,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         availableProviders['secrets'].push(providerDiscoveryEntry(p.metadata));
       }
 
-      const discoveryHint = 'This list is credential discovery only. If a concrete task is blocked, use hv_connections with provider only when a safe credentialsRef is already available. Otherwise offer to help connect credentials the user already controls or prepare a value-free handoff naming the provider, scope, and blocked task for the person who manages that access. Do not assume provider membership or run hv_plan, hv_apply, or hv_deploy to bypass the missing connection.';
+      const discoveryHint = 'This list is credential discovery only. If a concrete task is blocked, use hv_connections with provider only when a safe credentialsRef is already available, the provider declares a native/default credential chain, or the user requested the bounded first-GCP bootstrap. Otherwise offer to help connect credentials the user already controls or prepare a value-free handoff naming the provider, scope, and blocked task for the person who manages that access. Do not assume provider membership or run hv_plan, hv_apply, or hv_deploy to bypass the missing connection.';
       return commandSuccess(
         {
           ...(project ? { project: { id: project.id, name: project.name } } : {}),

@@ -22,7 +22,7 @@ import { PlanService } from '../plan.service.js';
 
 const FRIEND_KEY = 'sk-ant-api03-plan-secret';
 
-function observed(): ObservedState {
+function observed(serviceOverrides: Partial<ObservedState['services'][number]> = {}): ObservedState {
   return {
     provider: 'railway',
     observedAt: new Date().toISOString(),
@@ -39,6 +39,7 @@ function observed(): ObservedState {
       envVarKeys: [],
       envVarHashes: {},
       status: 'running',
+      ...serviceOverrides,
     }],
     databases: [{
       provider: 'railway',
@@ -53,7 +54,8 @@ function observed(): ObservedState {
 }
 
 function replaceWithHypervibeManagedSecrets(
-  project: ReturnType<ProjectRepository['create']>
+  project: ReturnType<ProjectRepository['create']>,
+  secretOverrides: Record<string, unknown> = {}
 ): void {
   new SpecStore().replace(project, {
     version: 1,
@@ -63,6 +65,7 @@ function replaceWithHypervibeManagedSecrets(
         ownership: 'hypervibe',
         generator: 'random-base64url-32-v1',
         environments: ['production'],
+        ...secretOverrides,
       },
     },
     environments: {
@@ -196,7 +199,7 @@ describe('PlanService delegated secret inputs', () => {
     });
   });
 
-  it('injects the resolved value at apply and records only its accepted hash', async () => {
+  it('injects the resolved value to recover a failed service and records only its accepted hash', async () => {
     process.env.FRIEND_ANTHROPIC_API_KEY = FRIEND_KEY;
     const connection = new ConnectionRepository().create({
       provider: 'railway',
@@ -231,7 +234,7 @@ describe('PlanService delegated secret inputs', () => {
         message: 'exists',
         data: { projectId: 'rail-project', environmentId: 'rail-environment' },
       }),
-      observe: vi.fn().mockResolvedValue(observed()),
+      observe: vi.fn().mockResolvedValue(observed({ status: 'failed' })),
       setEnvVars,
       deploy,
     };
@@ -249,6 +252,12 @@ describe('PlanService delegated secret inputs', () => {
     });
     expect(planned).not.toHaveProperty('error');
     const plan = planned as Exclude<typeof planned, { error: string }>;
+    expect(plan.actions.find((action) => action.id === 'service:web')).toMatchObject({
+      type: 'update',
+      metadata: { observedStatus: 'failed' },
+    });
+    expect(plan.actions.find((action) => action.id === 'service:web')?.metadata)
+      .not.toHaveProperty('blockedReason');
     const currentSpec = new SpecStore().get(project)!;
     const outcome = await executePlanApply(createToolContext(), {
       project,
@@ -369,6 +378,51 @@ describe('PlanService delegated secret inputs', () => {
     expect(overrides.envFileKeys).toEqual(['PUBLIC_LABEL']);
     expect(overrides.delegatedSecretKeys).toEqual(['SESSION_SECRET']);
     expect(JSON.stringify(document).includes('caller-selected-value')).toBe(false);
+  });
+
+  it('reserves immutable conflict keys from ordinary overrides and deploy env files', async () => {
+    replaceWithHypervibeManagedSecrets(project, {
+      replacementPolicy: 'immutable',
+      conflictsWith: ['LEGACY_SESSION_SECRET'],
+    });
+
+    const overrideResult = await new PlanService().plan(project, 'production', {
+      includeEnvFile: false,
+      envVarOverrides: { LEGACY_SESSION_SECRET: 'legacy-value' },
+    });
+    expect(overrideResult).toMatchObject({
+      error: expect.stringContaining('Managed secret keys cannot be passed through envVars: LEGACY_SESSION_SECRET'),
+    });
+
+    const envFile = path.join(tempDir, '.env.production');
+    fs.writeFileSync(envFile, 'PUBLIC_LABEL=friend\nLEGACY_SESSION_SECRET=legacy-value\n', 'utf8');
+    const fileResult = await new PlanService().plan(project, 'production', { envFile });
+    expect(fileResult).not.toHaveProperty('error');
+    const plan = fileResult as Exclude<typeof fileResult, { error: string }>;
+    const document = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
+    const overrides = document.overrides as Record<string, unknown>;
+    expect(overrides.envFileKeys).toEqual(['PUBLIC_LABEL']);
+    expect(JSON.stringify(document)).not.toContain('legacy-value');
+  });
+
+  it('rejects immutable conflicts owned by another runtime subsystem', async () => {
+    replaceWithHypervibeManagedSecrets(project, {
+      replacementPolicy: 'immutable',
+      conflictsWith: ['DATABASE_URL'],
+    });
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    const runsBefore = new RunRepository().findByEnvironmentId(environment.id).length;
+
+    const result = await new PlanService().plan(project, 'production', {
+      includeEnvFile: false,
+    });
+
+    expect(result).toMatchObject({
+      error: expect.stringContaining(
+        'Immutable generated-secret conflict keys cannot also be managed runtime variables: DATABASE_URL'
+      ),
+    });
+    expect(new RunRepository().findByEnvironmentId(environment.id)).toHaveLength(runsBefore);
   });
 
   it('returns a planning error without saving a run when generated-secret safety is unknown', async () => {

@@ -109,4 +109,140 @@ describe('hosting project provider bindings', () => {
       awsNetwork,
     });
   });
+
+  it.each([
+    ['same provider, new region', { projectId: 'old-gcp-project', region: 'us-west1' }],
+    ['same provider, new project', { projectId: 'new-gcp-project', region: 'us-east1' }],
+    ['omitted returned scope', undefined],
+  ])('retains old hosting identity during a %s apply', async (_label, nextScope) => {
+    const oldScope = { projectId: 'old-gcp-project', region: 'us-east1' };
+    const project = ctx.repos.projects.create({ name: 'scope-transition-app', defaultPlatform: 'cloudrun' });
+    const environment = ctx.repos.environments.create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'cloudrun',
+        projectId: 'logical-production',
+        environmentId: 'us-east1',
+        providerScope: oldScope,
+        services: { web: { serviceId: 'old-web' } },
+      },
+    });
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({
+      success: true,
+      adapter: {
+        name: 'cloudrun',
+        ensureProject: vi.fn().mockResolvedValue({
+          success: true,
+          message: 'GCP scope verified',
+          data: {
+            projectId: 'logical-production',
+            ...(nextScope
+              ? { environmentId: nextScope.region, providerBindings: { providerScope: nextScope } }
+              : {}),
+          },
+        }),
+      } as unknown as IHostingAdapter,
+    });
+    const spec = projectSpecSchema.parse({
+      version: 1,
+      project: project.name,
+      environments: { production: { hosting: { provider: 'cloudrun' }, services: {} } },
+    });
+    const action: PlanAction = {
+      id: 'project:cloudrun',
+      type: 'update',
+      resource: { kind: 'project', name: 'production', provider: 'cloudrun' },
+      verified: true,
+      reason: 'Reconcile canonical provider scope',
+    };
+    const plan = ctx.repos.runs.create({
+      projectId: project.id,
+      environmentId: environment.id,
+      type: 'plan',
+      plan: {
+        kind: 'hv_plan', environmentName: 'production', specRevision: 1,
+        observedFingerprint: null, actions: [action],
+      },
+    });
+
+    const outcome = await executePlanApply(ctx, {
+      project, spec, specRevision: 1, planId: plan.id, confirmActions: [],
+    });
+
+    expect(outcome).toMatchObject({
+      kind: 'executed',
+      result: { success: true, receipts: [{ actionId: action.id, status: 'succeeded' }] },
+    });
+    expect(ctx.repos.environments.findById(environment.id)?.platformBindings).toEqual({
+      provider: 'cloudrun',
+      projectId: 'logical-production',
+      ...(nextScope ? { environmentId: nextScope.region, providerScope: nextScope } : {}),
+      services: {},
+      previousHosting: {
+        provider: 'cloudrun',
+        projectId: 'logical-production',
+        environmentId: 'us-east1',
+        providerScope: oldScope,
+        services: { web: { serviceId: 'old-web' } },
+      },
+    });
+  });
+
+  it('rehomes exact service-create recovery during a normal apply scope transition', async () => {
+    const oldScope = { projectId: 'old-gcp-project', region: 'us-east1' };
+    const recovery = {
+      provider: 'cloudrun', operation: 'create' as const, resourceName: 'worker', providerScope: oldScope,
+      state: 'identified' as const, serviceId: 'old-worker', returnedName: 'worker',
+    };
+    const project = ctx.repos.projects.create({ name: 'recovery-transition-app', defaultPlatform: 'cloudrun' });
+    const environment = ctx.repos.environments.create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'cloudrun', projectId: 'logical-production', environmentId: 'us-east1',
+        providerScope: oldScope, services: {}, serviceCreateRecovery: { worker: recovery },
+      },
+    });
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({
+      success: true,
+      adapter: {
+        name: 'cloudrun',
+        ensureProject: vi.fn().mockResolvedValue({
+          success: true,
+          message: 'GCP scope verified',
+          data: {
+            projectId: 'logical-production', environmentId: 'us-west1',
+            providerBindings: { providerScope: { projectId: 'old-gcp-project', region: 'us-west1' } },
+          },
+        }),
+      } as unknown as IHostingAdapter,
+    });
+    const spec = projectSpecSchema.parse({
+      version: 1, project: project.name,
+      environments: { production: { hosting: { provider: 'cloudrun' }, services: {} } },
+    });
+    const action: PlanAction = {
+      id: 'project:cloudrun', type: 'update',
+      resource: { kind: 'project', name: 'production', provider: 'cloudrun' },
+      verified: true, reason: 'Reconcile canonical provider scope',
+    };
+    const plan = ctx.repos.runs.create({
+      projectId: project.id, environmentId: environment.id, type: 'plan',
+      plan: { kind: 'hv_plan', environmentName: 'production', specRevision: 1, observedFingerprint: null, actions: [action] },
+    });
+
+    const outcome = await executePlanApply(ctx, { project, spec, specRevision: 1, planId: plan.id, confirmActions: [] });
+
+    expect(outcome).toMatchObject({ kind: 'executed', result: { success: true } });
+    const updated = ctx.repos.environments.findById(environment.id)?.platformBindings;
+    expect(updated).not.toHaveProperty('serviceCreateRecovery');
+    expect(updated).toMatchObject({
+      previousHosting: {
+        providerScope: oldScope,
+        serviceCreateRecovery: { worker: recovery },
+        services: { worker: { serviceId: 'old-worker', createRecovery: recovery } },
+      },
+    });
+  });
 });

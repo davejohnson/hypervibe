@@ -128,6 +128,19 @@ describe('server tool surface', () => {
     expect(registry.get('hv_connections')?.inputShape.adminAuth.description).toContain(
       'Google Application Default Credentials'
     );
+    expect(registry.get('hv_connections')?.inputShape.action.safeParse('bootstrap').success).toBe(true);
+    expect(registry.get('hv_connections')?.inputShape.billingAccountName.description).toContain(
+      'exact open billing account name'
+    );
+    expect(registry.get('hv_connections')?.inputShape.project.description).toContain(
+      'Required explicitly for action="bootstrap"'
+    );
+    expect(registry.get('hv_connections')?.inputShape.scope.description).toContain(
+      'never creates global GCP access'
+    );
+    expect(registry.get('hv_connections')?.inputShape.confirm.description).toContain(
+      'omit for a read-only preview'
+    );
     expect(registry.get('hv_connections')?.inputShape.memorystoreAccess.description).toContain(
       'roles/redis.viewer'
     );
@@ -139,6 +152,7 @@ describe('server tool surface', () => {
     expect(registry.get('hv_connections')?.description).toContain('{} lists every connection/provider');
     expect(registry.get('hv_spec')?.description).toContain('fresh git repository');
     expect(registry.get('hv_connections')?.description).toContain('{project} lists');
+    expect(registry.get('hv_connections')?.description).toContain('opinionated GCP setup');
     expect(registry.get('hv_secrets')?.description).toContain('{} or {project} lists sources');
     expect(registry.get('hv_secrets')?.description).toContain('Hosting mode requires explicit env');
     expect(registry.get('hv_inspect')?.description).toContain('{provider,project,env}');
@@ -268,6 +282,18 @@ describe('server tool surface', () => {
     );
     expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
       'Never refer vaguely to a "Hypervibe credential flow"'
+    );
+    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
+      'action="bootstrap" with explicit project, gcpProjectId, and adminAuth="default"'
+    );
+    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
+      'ask the user to choose one exact account'
+    );
+    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
+      'the bounded GCP bootstrap above applies'
+    );
+    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
+      'Never choose a billable account for the user'
     );
   });
 

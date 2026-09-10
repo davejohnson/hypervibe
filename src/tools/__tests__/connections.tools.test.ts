@@ -20,6 +20,13 @@ import { S3StorageAdapter } from '../../adapters/providers/aws/s3.adapter.js';
 import '../../adapters/providers/gcp/cloudrun.adapter.js';
 import '../../adapters/providers/secretmanagers/onepassword.adapter.js';
 import { StripeProjectsAdapter } from '../../adapters/providers/secretmanagers/stripe-projects.adapter.js';
+
+vi.mock('../../domain/services/gcp-bootstrap.service.js', async (original) => {
+  const actual = await original<typeof import('../../domain/services/gcp-bootstrap.service.js')>();
+  return { ...actual, runGcpBootstrap: vi.fn() };
+});
+
+import { runGcpBootstrap } from '../../domain/services/gcp-bootstrap.service.js';
 import { registerConnectionsTools } from '../connections.tools.js';
 import { createToolContext } from '../../application/context.js';
 
@@ -44,6 +51,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.mocked(runGcpBootstrap).mockReset();
   delete process.env.HV_TEST_RAILWAY_TOKEN;
   for (const name of githubTokenEnvironmentNames) {
     const original = originalGitHubTokenEnvironment[name];
@@ -142,6 +150,8 @@ describe('hv_connections', () => {
       { provider: 'railway', action: 'add', queueAccess: 'lifecycle' },
       { provider: 'railway', action: 'add', adminAuth: 'default' },
       { provider: 'railway', action: 'prepare', credentialsRef: 'env:RAILWAY_TOKEN' },
+      { provider: 'cloudrun', action: 'bootstrap', gcpProjectId: 'vibe-project', credentials: {} },
+      { provider: 'cloudrun', action: 'bootstrap', gcpProjectId: 'vibe-project', adminAccessTokenRef: 'env:ADMIN_TOKEN' },
     ];
 
     for (const input of cases) {
@@ -151,6 +161,121 @@ describe('hv_connections', () => {
       expect(result.error.message).toContain('options for another connection action');
     }
     expect(new ConnectionRepository().findAll()).toEqual([]);
+    await t.close();
+  });
+
+  it('previews the opinionated GCP bootstrap and stops for an exact billing choice', async () => {
+    const project = new ProjectRepository().create({
+      name: 'gcp-bootstrap-app',
+      defaultPlatform: 'cloudrun',
+      gitRemoteUrl: 'git@github.com:owner/repo.git',
+    });
+    vi.mocked(runGcpBootstrap).mockResolvedValue({
+      success: true,
+      mode: 'preview',
+      scope: 'owner/repo',
+      openBillingAccounts: [{
+        name: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC',
+        displayName: 'Primary billing',
+      }],
+      plannedSteps: ['create-project', 'link-selected-billing-account'],
+      requiresConfirmation: true,
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_connections', {
+      provider: 'cloudrun',
+      action: 'bootstrap',
+      project: project.name,
+      adminAuth: 'default',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.project).toEqual({ id: project.id, name: project.name });
+    expect(result.data.openBillingAccounts).toEqual([{
+      name: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC',
+      displayName: 'Primary billing',
+    }]);
+    expect(result.hint).toContain('billingAccounts/AAAAAA-BBBBBB-CCCCCC');
+    expect(result.hint).toContain('can create costs');
+    expect(result.agentInstruction).toMatchObject({ action: 'ask_user' });
+    expect(runGcpBootstrap).toHaveBeenCalledWith({
+      project,
+      gcpProjectId: undefined,
+      scope: undefined,
+      billingAccountName: undefined,
+      confirm: undefined,
+    });
+    await t.close();
+  });
+
+  it('confirms GCP bootstrap only with the exact billing account selected by the user', async () => {
+    const project = new ProjectRepository().create({
+      name: 'gcp-bootstrap-confirm',
+      defaultPlatform: 'cloudrun',
+      gitRemoteUrl: 'git@github.com:owner/repo.git',
+    });
+    vi.mocked(runGcpBootstrap).mockResolvedValue({
+      success: true,
+      mode: 'confirm',
+      scope: 'owner/repo',
+      message: 'GCP is ready for Hypervibe Cloud Run and Cloud SQL deploys.',
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_connections', {
+      provider: 'cloudrun',
+      action: 'bootstrap',
+      project: project.name,
+      gcpProjectId: 'vibe-project',
+      adminAuth: 'default',
+      billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC',
+      confirm: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.next).toEqual(['hv_plan']);
+    expect(runGcpBootstrap).toHaveBeenCalledWith(expect.objectContaining({
+      project,
+      gcpProjectId: 'vibe-project',
+      billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC',
+      confirm: true,
+    }));
+    await t.close();
+  });
+
+  it('rejects incomplete or unsafe GCP bootstrap calls before provider access', async () => {
+    const t = await makeClient();
+    const cases = [
+      { provider: 'railway', action: 'bootstrap', gcpProjectId: 'vibe-project' },
+      { provider: 'cloudrun', action: 'bootstrap' },
+      { provider: 'cloudrun', action: 'bootstrap', project: 'app', adminAuth: 'default', confirm: true, billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC' },
+      { provider: 'cloudrun', action: 'bootstrap', project: 'app', gcpProjectId: 'vibe-project' },
+      { provider: 'cloudrun', action: 'bootstrap', gcpProjectId: 'vibe-project', adminAuth: 'default' },
+      {
+        provider: 'cloudrun',
+        action: 'bootstrap',
+        project: 'app',
+        gcpProjectId: 'vibe-project',
+        adminAuth: 'default',
+        billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC',
+      },
+      {
+        provider: 'cloudrun',
+        action: 'bootstrap',
+        project: 'app',
+        gcpProjectId: 'vibe-project',
+        adminAuth: 'default',
+        confirm: true,
+      },
+    ];
+
+    for (const input of cases) {
+      const result = await t.call('hv_connections', input);
+      expect(result.ok).toBe(false);
+      expect(result.error.code).toBe('VALIDATION');
+    }
+    expect(runGcpBootstrap).not.toHaveBeenCalled();
     await t.close();
   });
 

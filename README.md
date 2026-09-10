@@ -157,6 +157,29 @@ You: "Connect those providers using my local credential references"
 Claude: Validates each reference locally and stores the verified connections securely.
 ```
 
+For a first GCP deploy, Hypervibe can create or reuse the project, link the
+billing account you explicitly choose, create the repository-scoped deploy
+identity, prepare Cloud Run and Cloud SQL, and save both verified connections.
+It uses your current Google Application Default Credentials only for setup;
+you never copy a generated key:
+
+```bash
+hypervibe connections --provider cloudrun --action bootstrap \
+  --project my-app --admin-auth default
+# Use target.projectId from the preview and approve one exact billing account:
+hypervibe connections --provider cloudrun --action bootstrap \
+  --project my-app --gcp-project-id PROJECT_ID_FROM_PREVIEW --admin-auth default \
+  --billing-account-name billingAccounts/AAAAAA-BBBBBB-CCCCCC --confirm
+```
+
+The read-only preview chooses a stable project name or reuses verified access
+for this repository. Pass `--gcp-project-id` to preserve an explicit choice.
+The confirmed call can create a project, link
+billing, and create credentials, so Hypervibe always stops for the exact
+billing-account choice first. Staging and production remain separate
+desired-state environments; deploy staging first and promote its verified
+release to production explicitly.
+
 ### 5. Deploy
 
 ```
@@ -622,9 +645,9 @@ hv_plan project="friend-app" env="production" secretRefs={"ANTHROPIC_API_KEY":"d
 hv_apply project="friend-app" planId="<planId>"
 ```
 
-The value is resolved on Alice's machine, encrypted into that specific plan, injected into every service in the target environment, and never returned by a tool. Hypervibe records only the principal, a SHA-256 value hash, timestamp, and apply receipt in `.hypervibe/bindings.json`. Ordinary `envVars` and `.env` loading cannot overwrite a delegated key. Missing values, out-of-band drift, or a changed principal produce an inspectable but non-executable plan that preserves the live value until a new explicit `secretRefs` input is supplied.
+The value is resolved on Alice's machine, encrypted into that specific plan, injected into every service in the target environment, and never returned by a tool. Hypervibe records only the principal, a SHA-256 value hash, timestamp, and apply receipt in local SQLite. That verifier is deliberately omitted from `.hypervibe/bindings.json`, where a low-entropy delegated value could otherwise be brute-forced offline. Ordinary `envVars` and `.env` loading cannot overwrite a delegated key. Missing values, out-of-band drift, or a changed principal produce an inspectable but non-executable plan that preserves the live value until a new explicit `secretRefs` input is supplied.
 
-If a machine or local Hypervibe database is lost, recloning the committed `.hypervibe/spec.json` and `.hypervibe/bindings.json` restores the desired shape and accepted hashes. Provider connections must be reconnected and in-flight plans must be recreated; no runtime secret value is recoverable from the repo.
+If a machine or local Hypervibe database is lost, recloning the committed `.hypervibe/spec.json` and `.hypervibe/bindings.json` restores the desired shape and non-secret provider identities. Accepted managed-secret hashes, provider connections, and in-flight plans must be recreated locally; no runtime secret value or verifier is recoverable from the repo.
 
 ### Deploy env from `.env`
 
@@ -1444,7 +1467,7 @@ Health checks for this apply pass are deferred to the later CI deployment.
 
 For Railway GHCR deploys, the generated workflow grants `packages: write` and uses `${{ github.actor }}` plus `${{ secrets.GITHUB_TOKEN }}` only for the workflow-time image push. The hosting provider also needs durable image-pull credentials because GitHub's workflow token is short-lived and only exists inside the Actions job. Hypervibe syncs those pull credentials into `IMAGE_REGISTRY_USERNAME` and `IMAGE_REGISTRY_TOKEN` from the verified GitHub connection when it has a login and a package-read-capable `packageReadToken`. Do not use `${{ secrets.GITHUB_TOKEN }}` for `IMAGE_REGISTRY_TOKEN`, and do not use a `read:packages`-only token as the GitHub `apiToken`.
 
-When Hypervibe syncs GitHub Actions secrets, it records only secret names plus local one-way value hashes. If the local provider token changes later, `hv_plan` will report the CI deploy action as needing an update and `hv_apply` will resync the GitHub secret value. Raw secret values are never written to `.hypervibe/spec.json`, `.hypervibe/bindings.json`, or tool output.
+When Hypervibe syncs GitHub Actions secrets, it records only secret names plus one-way value hashes in local SQLite. The complete accepted-secret bindings are omitted from `.hypervibe/bindings.json` so low-entropy values cannot be tested against a committed verifier. If the local provider token changes later, `hv_plan` will report the CI deploy action as needing an update and `hv_apply` will resync the GitHub secret value. Raw secret values are never written to `.hypervibe/spec.json`, `.hypervibe/bindings.json`, or tool output.
 
 To repair a stale declared GitHub Actions secret without pasting the token into
 chat, re-plan from the local source of truth:

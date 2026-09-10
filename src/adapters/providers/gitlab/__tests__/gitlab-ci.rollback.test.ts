@@ -20,6 +20,11 @@ import { executeGitLabCiRollback } from '../gitlab-ci.rollback.js';
 const currentSha = 'a'.repeat(40);
 const targetSha = 'b'.repeat(40);
 const programHash = 'c'.repeat(64);
+const deploymentContractFingerprint = 'd'.repeat(64);
+const providerIdentity = {
+  projectId: 'rail-project',
+  environmentId: 'rail-environment',
+};
 const repository = {
   provider: 'gitlab',
   nativeId: '42',
@@ -84,7 +89,7 @@ function seed() {
   return { project, environment };
 }
 
-function program(tagState: { sha?: string }) {
+function program(tagState: { sha?: string }, evidenceServices: string[] = ['web']) {
   const mutationOrder: string[] = [];
   const adapter = {
     listRuns: vi.fn().mockResolvedValue([
@@ -104,12 +109,22 @@ function program(tagState: { sha?: string }) {
       return {
         state: 'present',
         value: JSON.stringify({
-          version: 1,
+          version: 2,
           provider: 'railway',
           repository: repository.canonicalScope,
           environment: 'production',
           sha: current ? currentSha : targetSha,
           programFingerprint: programHash,
+          deploymentContractFingerprint,
+          services: evidenceServices,
+          providerIdentity,
+          providerResources: [],
+          ci: {
+            projectId: repository.nativeId,
+            pipelineId: current ? '20' : '19',
+            jobId: current ? '200' : '190',
+          },
+          deployments: [{ serviceId: 'rail-service', deploymentId: current ? 'current' : 'target' }],
         }),
       };
     }),
@@ -134,6 +149,13 @@ function program(tagState: { sha?: string }) {
     programHash,
     deployJobName: 'hypervibe:deploy:railway:production',
     hostingProvider: 'railway',
+    releaseEvidence: {
+      services: ['web'],
+      providerIdentity,
+      providerResources: [],
+      deploymentContractFingerprint,
+      requiresImmutableImage: false,
+    },
   });
   return { adapter, mutationOrder };
 }
@@ -184,6 +206,19 @@ describe('GitLab CI rollback', () => {
     const result = await executeGitLabCiRollback({ project, environment });
 
     expect(result).toMatchObject({ ok: true, success: false, status: 'blocked' });
+    expect(mutationOrder).toEqual([]);
+    expect(adapter.createTag).not.toHaveBeenCalled();
+    expect(adapter.dispatch).not.toHaveBeenCalled();
+  });
+
+  it('blocks release evidence for a different reviewed service set before mutation', async () => {
+    const { project, environment } = seed();
+    const tagState: { sha?: string } = {};
+    const { adapter, mutationOrder } = program(tagState, ['api']);
+
+    const result = await executeGitLabCiRollback({ project, environment });
+
+    expect(result).toMatchObject({ ok: false, reason: 'observation_failed' });
     expect(mutationOrder).toEqual([]);
     expect(adapter.createTag).not.toHaveBeenCalled();
     expect(adapter.dispatch).not.toHaveBeenCalled();

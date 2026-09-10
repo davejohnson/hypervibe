@@ -43,6 +43,13 @@ function matchingScope(
   return environmentId === target.environmentId ? 'exact' : null;
 }
 
+function matchingHostingScope(
+  value: Record<string, unknown>,
+  target: ProviderBoundaryTarget
+): 'exact' | 'unknown' | null {
+  return matchingScope(record(value.providerScope) ?? value, target);
+}
+
 /**
  * Find any other durable local record that still uses, or may use, the
  * provider boundary reviewed for deletion. Scope ambiguity is destructive,
@@ -69,7 +76,7 @@ export function findLocalProviderBoundaryUse(
       for (const source of hostingSources) {
         if (!source.value || source.excluded) continue;
         if (nonEmptyString(source.value.provider) === target.provider) {
-          const scopeState = matchingScope(source.value, target);
+          const scopeState = matchingHostingScope(source.value, target);
           if (scopeState) {
             return {
               projectName: project.name,

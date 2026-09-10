@@ -17,6 +17,9 @@ export const FLY_CI_REQUIRED_SECRETS = ['FLY_API_TOKEN'];
 export function buildFlyGitHubActionsSteps(
   target: BranchDeployTarget
 ): BranchDeployStepResult {
+  const buildCondition = target.promoteFromEnvironment
+    ? "steps.deploy.outputs.operation != 'rollback' && !steps.promotion_release.outputs.image_uri"
+    : "steps.deploy.outputs.operation != 'rollback'";
   const bindings = target.providerServiceIds.map(parseFlyServiceBinding);
   const organizations = new Set(bindings.map((binding) => binding.organizationSlug));
   if (organizations.size > 1) {
@@ -72,16 +75,19 @@ export function buildFlyGitHubActionsSteps(
     ],
     requiredSecrets: [...FLY_CI_REQUIRED_SECRETS],
     requiredVariables,
-    releaseImageUri: `registry.fly.io/${registryAppImageValue}@\${{ steps.fly_build.outputs.digest }}`,
+    releaseImageUri: "${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}",
     steps: `      - name: Authenticate to Fly.io registry
+        if: ${buildCondition}
         uses: docker/login-action@v3
         with:
           registry: registry.fly.io
           username: x
           password: \${{ secrets.FLY_API_TOKEN }}
-${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
+${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-action@v3
+        if: ${buildCondition}
       - name: Publish exact-SHA Fly.io image
         id: fly_build
+        if: ${buildCondition}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -90,6 +96,21 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
           tags: registry.fly.io/${registryAppImageValue}:\${{ steps.deploy.outputs.sha }}
           secrets: |
             npm_token=\${{ secrets.NODE_AUTH_TOKEN }}
+      - name: Resolve immutable Fly.io image
+        id: release_image
+        if: ${buildCondition}
+        uses: actions/github-script@v9
+        env:
+          FLY_REGISTRY_APP: ${registryAppValue}
+          FLY_IMAGE_DIGEST: \${{ steps.fly_build.outputs.digest }}
+        with:
+          script: |
+            const app = (process.env.FLY_REGISTRY_APP || '').trim().toLowerCase();
+            const digest = (process.env.FLY_IMAGE_DIGEST || '').trim().toLowerCase();
+            if (!/^[a-z0-9][a-z0-9-]*$/.test(app) || !/^sha256:[a-f0-9]{64}$/.test(digest)) {
+              throw new Error('Fly.io image publication did not return an immutable digest');
+            }
+            core.setOutput('image_uri', 'registry.fly.io/' + app + '@' + digest);
       - name: Deploy immutable digest to existing Fly.io Machines
         uses: actions/github-script@v9
         env:
@@ -97,7 +118,7 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
           FLY_ORGANIZATION_SLUG: ${organizationValue}
           FLY_SERVICE_BINDINGS_JSON: ${bindingValue}
           FLY_REGISTRY_APP: ${registryAppValue}
-          FLY_IMAGE_DIGEST: \${{ steps.fly_build.outputs.digest }}
+          FLY_IMAGE_URI: \${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}
           DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
@@ -105,7 +126,8 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
             const token = (process.env.FLY_API_TOKEN || '').trim();
             const organization = (process.env.FLY_ORGANIZATION_SLUG || '').trim();
             const registryApp = (process.env.FLY_REGISTRY_APP || '').trim();
-            const digest = (process.env.FLY_IMAGE_DIGEST || '').trim().toLowerCase();
+            const image = (process.env.FLY_IMAGE_URI || '').trim().toLowerCase();
+            const digest = image.split('@')[1] || '';
             const sha = (process.env.DEPLOY_SHA || '').trim().toLowerCase();
             const repository = (process.env.GITHUB_REPOSITORY || '').trim();
             if (!token) throw new Error('FLY_API_TOKEN is required');
@@ -113,8 +135,8 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
             if (!/^[a-z0-9][a-z0-9-]*$/.test(registryApp)) {
               throw new Error('FLY_REGISTRY_APP is invalid');
             }
-            if (!/^sha256:[a-f0-9]{64}$/.test(digest)) {
-              throw new Error('FLY_IMAGE_DIGEST must be an immutable sha256 digest');
+            if (!/^registry\\.fly\\.io\\/[a-z0-9][a-z0-9-]*@sha256:[a-f0-9]{64}$/.test(image)) {
+              throw new Error('FLY_IMAGE_URI must be an immutable Fly.io registry image');
             }
             if (!/^[a-f0-9]{40}$/.test(sha)) {
               throw new Error('DEPLOY_SHA must be a full 40-character Git SHA');
@@ -184,7 +206,6 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
               return payload;
             }
 
-            const image = 'registry.fly.io/' + registryApp + '@' + digest;
             for (const binding of bindings) {
               const app = await fly(
                 'GET',

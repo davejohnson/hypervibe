@@ -8,6 +8,8 @@ import { EnvironmentRepository } from '../../../adapters/db/repositories/environ
 import { hashEnvValue, type ObservedState } from '../../ports/observe.port.js';
 import { projectSpecSchema } from '../../spec/spec.schema.js';
 import {
+  delegatedGitHubSecretsForEnvironment,
+  delegatedSecretInputsForEnvironment,
   parseDelegatedSecretBindings,
   planDelegatedSecrets,
   recordDelegatedSecretBindings,
@@ -36,7 +38,7 @@ function spec() {
   });
 }
 
-function generatedSpec() {
+function generatedSpec(secretOverrides: Record<string, unknown> = {}) {
   return projectSpecSchema.parse({
     version: 1,
     project: 'generated-secret-app',
@@ -46,6 +48,7 @@ function generatedSpec() {
         generator: 'random-base64url-32-v1' as const,
         generation: 1,
         environments: ['production'],
+        ...secretOverrides,
       },
     },
     environments: {
@@ -101,6 +104,44 @@ describe('delegated-secret.service', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  it('routes canonical GitHub Actions inputs through the selected DevOps environment and fallback', () => {
+    const canonical = projectSpecSchema.parse({
+      version: 1,
+      project: 'canonical-actions-secrets',
+      devops: {
+        code: { provider: 'github', scope: 'owner/canonical-actions-secrets' },
+        ci: { provider: 'github-actions' },
+        canonicalEnvironment: 'staging',
+      },
+      secrets: {
+        NODE_AUTH_TOKEN: {
+          principal: 'github:owner',
+          githubActions: { repository: true },
+        },
+      },
+      environments: {
+        staging: { hosting: { provider: 'railway' }, services: {} },
+        production: { hosting: { provider: 'railway' }, services: {} },
+      },
+    });
+
+    expect(delegatedSecretInputsForEnvironment(canonical, 'staging').map(([name]) => name))
+      .toEqual(['NODE_AUTH_TOKEN']);
+    expect(delegatedGitHubSecretsForEnvironment(canonical, 'staging').map(([name]) => name))
+      .toEqual(['NODE_AUTH_TOKEN']);
+    expect(delegatedGitHubSecretsForEnvironment(canonical, 'production')).toEqual([]);
+
+    const fallback = projectSpecSchema.parse({
+      ...canonical,
+      devops: {
+        code: { provider: 'github', scope: 'owner/canonical-actions-secrets' },
+        ci: { provider: 'github-actions' },
+      },
+    });
+    expect(delegatedGitHubSecretsForEnvironment(fallback, 'production').map(([name]) => name))
+      .toEqual(['NODE_AUTH_TOKEN']);
+  });
+
   it('plans a first-time missing random secret without user input or confirmation', () => {
     const planned = planDelegatedSecrets({
       spec: generatedSpec(),
@@ -133,6 +174,252 @@ describe('delegated-secret.service', () => {
     });
     expect(planned.actions[0]).not.toHaveProperty('requiresConfirm');
     expect(JSON.stringify(planned.actions)).not.toContain(GENERATED_VALUE);
+  });
+
+  it('plans an immutable secret only after its value and conflicts are verified absent', () => {
+    const planned = planDelegatedSecrets({
+      spec: generatedSpec({
+        replacementPolicy: 'immutable',
+        conflictsWith: ['LEGACY_SESSION_SECRET'],
+      }),
+      environmentName: 'production',
+      hostingProvider: 'railway',
+      environment: { platformBindings: {} },
+      observed: observedSecret({ key: GENERATED_KEY }),
+      generatedValues: { [GENERATED_KEY]: GENERATED_VALUE },
+    });
+
+    expect(planned.blockers).toEqual([]);
+    expect(planned.desiredEnvVars).toEqual({ [GENERATED_KEY]: GENERATED_VALUE });
+    expect(planned.actions[0]).toMatchObject({
+      type: 'update',
+      verified: true,
+      metadata: {
+        replacementPolicy: 'immutable',
+        conflictsWith: ['LEGACY_SESSION_SECRET'],
+      },
+    });
+    expect(planned.actions[0]).not.toHaveProperty('requiresConfirm');
+  });
+
+  it.each([
+    ['present', { hash: hashEnvValue('legacy-live-value') }, 'hypervibe_immutable_secret_conflict_present'],
+    ['unobservable', { presentWithoutHash: true }, 'hypervibe_immutable_secret_conflict_unknown'],
+  ])('blocks immutable initialization when a conflicting key is %s', (_condition, conflict, blockedReason) => {
+    const planned = planDelegatedSecrets({
+      spec: generatedSpec({
+        replacementPolicy: 'immutable',
+        conflictsWith: ['LEGACY_SESSION_SECRET'],
+      }),
+      environmentName: 'production',
+      hostingProvider: 'railway',
+      environment: { platformBindings: {} },
+      observed: observedSecret({ key: 'LEGACY_SESSION_SECRET', ...conflict }),
+      generatedValues: { [GENERATED_KEY]: GENERATED_VALUE },
+    });
+
+    expect(planned.desiredEnvVars).toEqual({});
+    expect(planned.blockers).toEqual([
+      expect.objectContaining({ key: GENERATED_KEY, reason: expect.stringContaining('LEGACY_SESSION_SECRET') }),
+    ]);
+    expect(planned.actions[0]).toMatchObject({
+      type: 'update',
+      metadata: { blockedReason },
+    });
+    expect(planned.actions[0]).not.toHaveProperty('requiresConfirm');
+  });
+
+  it('blocks immutable initialization when a conflicting key has prior binding evidence', () => {
+    const planned = planDelegatedSecrets({
+      spec: generatedSpec({
+        replacementPolicy: 'immutable',
+        conflictsWith: ['LEGACY_SESSION_SECRET'],
+      }),
+      environmentName: 'production',
+      hostingProvider: 'railway',
+      environment: {
+        platformBindings: {
+          delegatedEnvBindings: [{
+            name: 'LEGACY_SESSION_SECRET',
+            principal: 'github:owner',
+            valueHash: hashEnvValue('legacy-value'),
+            source: 'delegated-plan-input',
+            syncedAt: '2026-09-08T00:00:00.000Z',
+            applyRunId: 'apply-legacy-1',
+            actionId: 'secret:LEGACY_SESSION_SECRET',
+          }],
+        },
+      },
+      observed: observedSecret({ key: GENERATED_KEY }),
+      generatedValues: { [GENERATED_KEY]: GENERATED_VALUE },
+    });
+
+    expect(planned.desiredEnvVars).toEqual({});
+    expect(planned.blockers).toEqual([
+      expect.objectContaining({
+        key: GENERATED_KEY,
+        reason: expect.stringContaining('LEGACY_SESSION_SECRET'),
+      }),
+    ]);
+    expect(planned.actions[0]).toMatchObject({
+      type: 'update',
+      metadata: { blockedReason: 'hypervibe_immutable_secret_conflict_binding' },
+    });
+    expect(planned.actions[0]).not.toHaveProperty('requiresConfirm');
+  });
+
+  it('blocks a conflicting live value for an immutable secret without offering confirmation', () => {
+    const planned = planDelegatedSecrets({
+      spec: generatedSpec({ replacementPolicy: 'immutable' }),
+      environmentName: 'production',
+      hostingProvider: 'railway',
+      environment: { platformBindings: {} },
+      observed: observedSecret({
+        key: GENERATED_KEY,
+        hash: hashEnvValue('different-live-value'),
+      }),
+      generatedValues: { [GENERATED_KEY]: GENERATED_VALUE },
+    });
+
+    expect(planned.desiredEnvVars).toEqual({});
+    expect(planned.blockers).toEqual([
+      expect.objectContaining({ key: GENERATED_KEY, reason: expect.stringContaining('cannot replace') }),
+    ]);
+    expect(planned.actions[0]).toMatchObject({
+      type: 'update',
+      metadata: { blockedReason: 'hypervibe_immutable_secret_replacement_forbidden' },
+    });
+    expect(planned.actions[0]).not.toHaveProperty('requiresConfirm');
+  });
+
+  it('blocks unknown immutable target observation even with a matching prior binding', () => {
+    const expectedHash = hashEnvValue(GENERATED_VALUE);
+    const planned = planDelegatedSecrets({
+      spec: generatedSpec({ replacementPolicy: 'immutable' }),
+      environmentName: 'production',
+      hostingProvider: 'railway',
+      environment: {
+        platformBindings: {
+          delegatedEnvBindings: [{
+            name: GENERATED_KEY,
+            principal: 'hypervibe',
+            valueHash: expectedHash,
+            source: 'hypervibe-generated',
+            generator: 'random-base64url-32-v1',
+            generation: 1,
+            replacementPolicy: 'immutable',
+            conflictsWith: [],
+            syncedAt: '2026-09-08T00:00:00.000Z',
+            applyRunId: 'apply-generated-1',
+            actionId: `secret:${GENERATED_KEY}`,
+          }],
+        },
+      },
+      observed: observedSecret({ key: GENERATED_KEY, presentWithoutHash: true }),
+      generatedValues: { [GENERATED_KEY]: GENERATED_VALUE },
+    });
+
+    expect(planned.desiredEnvVars).toEqual({});
+    expect(planned.blockers).toEqual([
+      expect.objectContaining({ key: GENERATED_KEY, reason: expect.stringContaining('cannot verify') }),
+    ]);
+    expect(planned.actions[0]).toMatchObject({
+      type: 'update',
+      verified: false,
+      metadata: { blockedReason: 'hypervibe_immutable_secret_observation_unknown' },
+    });
+    expect(planned.actions[0]).not.toHaveProperty('requiresConfirm');
+  });
+
+  it.each([
+    ['generation', { generation: 2 }, {}],
+    ['generator', {}, { generator: 'retired-random-generator-v0' }],
+  ])('blocks an immutable secret when its prior binding has a different %s', (
+    _field,
+    secretOverrides,
+    bindingOverrides
+  ) => {
+    const planned = planDelegatedSecrets({
+      spec: generatedSpec({
+        replacementPolicy: 'immutable',
+        conflictsWith: ['LEGACY_SESSION_SECRET'],
+        ...secretOverrides,
+      }),
+      environmentName: 'production',
+      hostingProvider: 'railway',
+      environment: {
+        platformBindings: {
+          delegatedEnvBindings: [{
+            name: GENERATED_KEY,
+            principal: 'hypervibe',
+            valueHash: hashEnvValue(GENERATED_VALUE),
+            source: 'hypervibe-generated',
+            generator: 'random-base64url-32-v1',
+            generation: 1,
+            replacementPolicy: 'immutable',
+            conflictsWith: ['LEGACY_SESSION_SECRET'],
+            syncedAt: '2026-09-08T00:00:00.000Z',
+            applyRunId: 'apply-generated-1',
+            actionId: `secret:${GENERATED_KEY}`,
+            ...bindingOverrides,
+          }],
+        },
+      },
+      observed: observedSecret({ key: GENERATED_KEY }),
+      generatedValues: { [GENERATED_KEY]: GENERATED_VALUE },
+    });
+
+    expect(planned.desiredEnvVars).toEqual({});
+    expect(planned.blockers).toEqual([
+      expect.objectContaining({ key: GENERATED_KEY, reason: expect.stringContaining('immutable contract') }),
+    ]);
+    expect(planned.actions[0]).toMatchObject({
+      type: 'update',
+      metadata: { blockedReason: 'hypervibe_immutable_secret_binding_mismatch' },
+    });
+    expect(planned.actions[0]).not.toHaveProperty('requiresConfirm');
+  });
+
+  it('allows a safe partial repair of the identical immutable derived value', () => {
+    const expectedHash = hashEnvValue(GENERATED_VALUE);
+    const twoServiceSpec = projectSpecSchema.parse({
+      ...generatedSpec({
+        replacementPolicy: 'immutable',
+        conflictsWith: ['LEGACY_SESSION_SECRET'],
+      }),
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: {}, worker: {} },
+        },
+      },
+    });
+    const live = observedSecret({ key: GENERATED_KEY, hash: expectedHash });
+    live.services.push({
+      ...live.services[0],
+      name: 'worker',
+      externalId: 'service-2',
+      envVarKeys: [],
+      envVarHashes: {},
+    });
+    live.completeness = { services: 'complete' };
+
+    const planned = planDelegatedSecrets({
+      spec: twoServiceSpec,
+      environmentName: 'production',
+      hostingProvider: 'railway',
+      environment: { platformBindings: {} },
+      observed: live,
+      generatedValues: { [GENERATED_KEY]: GENERATED_VALUE },
+    });
+
+    expect(planned.blockers).toEqual([]);
+    expect(planned.desiredEnvVars).toEqual({ [GENERATED_KEY]: GENERATED_VALUE });
+    expect(planned.actions[0]).toMatchObject({
+      type: 'update',
+      metadata: { replacementPolicy: 'immutable' },
+    });
+    expect(planned.actions[0]).not.toHaveProperty('requiresConfirm');
   });
 
   it('plans a verified noop when the generated binding and live hash match', () => {
@@ -450,6 +737,42 @@ describe('delegated-secret.service', () => {
       'source',
       'syncedAt',
       'valueHash',
+    ]);
+    expect(JSON.stringify(updated.platformBindings)).not.toContain(GENERATED_VALUE);
+  });
+
+  it('records the exact immutable policy and conflict contract without a secret value', () => {
+    const project = new ProjectRepository().create({
+      name: 'immutable-generated-secret-app',
+      defaultPlatform: 'railway',
+    });
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: { provider: 'railway' },
+    });
+    const immutableSpec = generatedSpec({
+      replacementPolicy: 'immutable',
+      conflictsWith: ['LEGACY_SESSION_SECRET'],
+    });
+
+    const updated = recordDelegatedSecretBindings({
+      environment,
+      spec: immutableSpec,
+      environmentName: 'production',
+      suppliedValues: { [GENERATED_KEY]: GENERATED_VALUE },
+      applyRunId: 'apply-generated-immutable-1',
+      receipts: [{ actionId: `secret:${GENERATED_KEY}`, status: 'succeeded' }],
+      now: '2026-09-08T00:00:00.000Z',
+    });
+
+    expect(parseDelegatedSecretBindings(updated)).toEqual([
+      expect.objectContaining({
+        name: GENERATED_KEY,
+        source: 'hypervibe-generated',
+        replacementPolicy: 'immutable',
+        conflictsWith: ['LEGACY_SESSION_SECRET'],
+      }),
     ]);
     expect(JSON.stringify(updated.platformBindings)).not.toContain(GENERATED_VALUE);
   });

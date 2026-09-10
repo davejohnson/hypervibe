@@ -163,6 +163,8 @@ export interface ProviderMetadata {
   setupHelpUrl?: string;
   credentials?: {
     defaultScalarKey?: string;
+    /** Credential values supplied by an opinionated Hypervibe workflow, not user-facing forms. */
+    agentManagedKeys?: string[];
     /** The adapter can authenticate through the provider's native local CLI/default chain. */
     supportsNativeCliAuth?: boolean;
     /**
@@ -345,12 +347,19 @@ export class ProviderRegistry {
 
   private assertCredentialMetadata(provider: RegisteredProvider): void {
     const inputs = provider.metadata.credentials?.localEnvInputs ?? [];
-    const schemaKeys = inputs.length > 0
+    const agentManagedKeys = provider.metadata.credentials?.agentManagedKeys ?? [];
+    const schemaKeys = inputs.length > 0 || agentManagedKeys.length > 0
       ? credentialSchemaKeys(provider.metadata.credentialsSchema)
       : null;
     const keys = inputs.map((input) => input.envKey);
     if (new Set(keys).size !== keys.length) {
       throw new Error(`Provider "${provider.metadata.name}" local env input keys must be unique.`);
+    }
+    if (
+      new Set(agentManagedKeys).size !== agentManagedKeys.length
+      || agentManagedKeys.some((key) => !schemaKeys?.has(key))
+    ) {
+      throw new Error(`Provider "${provider.metadata.name}" has invalid agent-managed credential keys.`);
     }
     const credentialRoleOwners = new Map<string, string>();
     for (const input of inputs) {

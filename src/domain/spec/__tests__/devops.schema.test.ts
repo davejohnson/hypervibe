@@ -96,6 +96,61 @@ describe('canonical devops desired state', () => {
     expect(devOpsScopeMatchesRemote(parsed)).toBe(true);
   });
 
+  it('accepts GitHub Actions secret destinations under canonical GitHub DevOps authority', () => {
+    const parsed = projectSpecSchema.parse({
+      ...base(),
+      gitRemoteUrl: 'https://github.com/acme/devops-app.git',
+      devops: {
+        code: { provider: 'github', scope: 'acme/devops-app' },
+        ci: { provider: 'github-actions' },
+        canonicalEnvironment: 'staging',
+      },
+      secrets: {
+        NODE_AUTH_TOKEN: {
+          principal: 'github:acme',
+          environments: [],
+          githubActions: { repository: true },
+        },
+      },
+    });
+
+    expect(parsed.secrets.NODE_AUTH_TOKEN).toMatchObject({
+      githubActions: { repository: true },
+    });
+    expect(parsed.github).toBeUndefined();
+  });
+
+  it.each([
+    {
+      code: { provider: 'github', scope: 'acme/devops-app' },
+    },
+    {
+      code: { provider: 'gitlab', scope: 'https://gitlab.com/acme/apps/devops-app' },
+      ci: { provider: 'gitlab-ci' },
+    },
+  ])('rejects GitHub Actions secret destinations without the canonical GitHub pair', (devops) => {
+    const result = projectSpecSchema.safeParse({
+      ...base(),
+      environments: {
+        staging: { hosting: { provider: 'railway' }, services: {} },
+      },
+      devops,
+      secrets: {
+        NODE_AUTH_TOKEN: {
+          principal: 'github:acme',
+          environments: [],
+          githubActions: { repository: true },
+        },
+      },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.issues).toContainEqual(expect.objectContaining({
+      path: ['devops', 'ci'],
+      message: expect.stringContaining('devops.code.provider="github"'),
+    }));
+  });
+
   it('defaults repository lifecycle to external and runner selection to provider-hosted', () => {
     const parsed = projectSpecSchema.parse({
       ...base(),

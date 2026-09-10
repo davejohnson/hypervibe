@@ -20,6 +20,10 @@ import type {
 } from '../spec/spec.schema.js';
 import type { DatabaseRestoreDrillFile } from '../ports/database-restore-drill.port.js';
 import { effectiveGitHubCheckRuntimeVersion } from '../spec/project-runtime.js';
+import {
+  githubActionsCanonicalEnvironment,
+  resolveGitHubActionsSelection,
+} from '../spec/devops-selection.js';
 import { adapterFactory } from './adapter.factory.js';
 import { compileDatabaseRestoreDrillFiles } from './database-restore-drill.service.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
@@ -1254,7 +1258,16 @@ function repoParts(repository: string): { owner: string; repo: string } | null {
 }
 
 export function resolveGitHubInfrastructureRepository(project: Project, spec: ProjectSpec): string | undefined {
-  return spec.github?.repository ?? parseGitHubRepoFromRemote(spec.gitRemoteUrl ?? project.gitRemoteUrl) ?? undefined;
+  const selection = resolveGitHubActionsSelection(spec);
+  const selectedScope = selection?.code.scope;
+  const selectedRepository = selectedScope
+    ? parseGitHubRepoFromRemote(selectedScope)
+      ?? (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(selectedScope) ? selectedScope : undefined)
+    : undefined;
+  return spec.github?.repository
+    ?? selectedRepository
+    ?? parseGitHubRepoFromRemote(spec.gitRemoteUrl ?? project.gitRemoteUrl)
+    ?? undefined;
 }
 
 export function githubCanonicalEnvironment(spec: ProjectSpec): string | undefined {
@@ -1268,25 +1281,45 @@ export function shouldPlanGitHubInfrastructure(spec: ProjectSpec, environmentNam
   return Boolean(spec.github && spec.github.enabled !== false && githubCanonicalEnvironment(spec) === environmentName);
 }
 
+export function shouldPlanGitHubDelegatedSecrets(spec: ProjectSpec, environmentName: string): boolean {
+  return githubActionsCanonicalEnvironment(spec) === environmentName;
+}
+
 export function githubInfrastructureConnectionBlock(params: {
   project: Project;
   spec: ProjectSpec;
   environmentName: string;
   connectionRepo?: ConnectionRepository;
 }): GitHubInfrastructureConnectionBlock | null {
-  if (!shouldPlanGitHubInfrastructure(params.spec, params.environmentName)) return null;
+  const plansInfrastructure = shouldPlanGitHubInfrastructure(params.spec, params.environmentName);
+  const plansDelegatedSecrets = shouldPlanGitHubDelegatedSecrets(params.spec, params.environmentName);
+  if (!plansInfrastructure && !plansDelegatedSecrets) return null;
   const repository = resolveGitHubInfrastructureRepository(params.project, params.spec);
   const connection = (params.connectionRepo ?? new ConnectionRepository()).findBestVerifiedMatch('github', repository);
   if (connection) return null;
+  const environment = new EnvironmentRepository().findByProjectAndName(
+    params.project.id,
+    params.environmentName
+  );
+  const delegatedActionIds = plansDelegatedSecrets
+    ? githubDelegatedSecretActionIds(params.spec, params.environmentName, environment)
+    : [];
+  const actionIds = [
+    ...(plansInfrastructure ? [GITHUB_INFRASTRUCTURE_ACTION_ID, GITHUB_OPENAI_SECRET_ACTION_ID] : []),
+    ...delegatedActionIds,
+  ];
+  if (actionIds.length === 0) return null;
   return {
     provider: 'github',
     reason: `No verified GitHub connection${repository ? ` for ${repository}` : ''}. ${formatConnectionGuidance('github', {
       scope: repository,
-      intro: 'Connect GitHub to observe and propose the repository files and settings declared under spec.github.',
+      intro: plansInfrastructure
+        ? 'Connect GitHub to observe and propose the repository files and settings declared under spec.github.'
+        : 'Connect GitHub to observe and sync the declared GitHub Actions secret destinations.',
     })}`,
     ...(repository ? { scope: repository } : {}),
     policy: 'action-scoped-if-independent-actions',
-    actionIds: [GITHUB_INFRASTRUCTURE_ACTION_ID, GITHUB_OPENAI_SECRET_ACTION_ID],
+    actionIds,
   };
 }
 
@@ -1399,8 +1432,28 @@ function parseGitHubDelegatedBindings(environment: Environment | null): GitHubDe
   });
 }
 
+function githubDelegatedSecretActionIds(
+  spec: ProjectSpec,
+  environmentName: string,
+  environment: Environment | null
+): string[] {
+  const desired = delegatedGitHubSecretsForEnvironment(spec, environmentName)
+    .flatMap(([name, secret]) => githubSecretTargets(secret)
+      .map((target) => githubDelegatedSecretActionId(name, target)));
+  const desiredIds = new Set(desired);
+  const retired = parseGitHubDelegatedBindings(environment)
+    .filter((binding) => !desiredIds.has(binding.actionId))
+    .map((binding) => `${binding.actionId}:destroy`);
+  return [...new Set([...desired, ...retired])].sort();
+}
+
+type GitHubSecretObservationAdapter = Pick<
+  GitHubAdapter,
+  'listRepositorySecrets' | 'listEnvironmentSecrets'
+>;
+
 async function planGitHubDelegatedSecrets(params: {
-  adapter: GitHubAdapter;
+  adapter: GitHubSecretObservationAdapter;
   owner: string;
   repo: string;
   spec: ProjectSpec;
@@ -1542,14 +1595,16 @@ export async function planGitHubInfrastructure(params: {
   blocked: GitHubInfrastructureConnectionBlock[];
   inputRequired: DelegatedSecretInputRequirement[];
 }> {
-  if (!shouldPlanGitHubInfrastructure(params.spec, params.environmentName) || !params.spec.github) {
+  const plansInfrastructure = shouldPlanGitHubInfrastructure(params.spec, params.environmentName);
+  const plansDelegatedSecrets = shouldPlanGitHubDelegatedSecrets(params.spec, params.environmentName);
+  if (!plansInfrastructure && !plansDelegatedSecrets) {
     return { actions: [], warnings: [], blocked: [], inputRequired: [] };
   }
   const repository = resolveGitHubInfrastructureRepository(params.project, params.spec);
   if (!repository) {
     return {
       actions: [],
-      warnings: ['spec.github is enabled, but github.repository is unset and the project has no GitHub gitRemoteUrl.'],
+      warnings: ['GitHub Actions desired state is enabled, but no GitHub owner/repository scope could be resolved.'],
       blocked: [],
       inputRequired: [],
     };
@@ -1557,8 +1612,53 @@ export async function planGitHubInfrastructure(params: {
   const parts = repoParts(repository);
   if (!parts) return { actions: [], warnings: [`Could not parse GitHub repository ${repository}.`], blocked: [], inputRequired: [] };
 
-  const artifactContractIssues = autofixArtifactContractIssues(params.spec.github);
-  const runtimeIssues = unresolvedGitHubCheckRuntimeIssues(params.spec.github, params.spec.runtime);
+  if (!plansInfrastructure) {
+    const environment = new EnvironmentRepository().findByProjectAndName(
+      params.project.id,
+      params.environmentName
+    );
+    if (githubDelegatedSecretActionIds(params.spec, params.environmentName, environment).length === 0) {
+      return { actions: [], warnings: [], blocked: [], inputRequired: [] };
+    }
+    const adapterResult = getGitHubAdapter(repository);
+    const unavailableError = 'error' in adapterResult ? adapterResult.error : undefined;
+    const observationAdapter: GitHubSecretObservationAdapter = 'error' in adapterResult
+      ? {
+          listRepositorySecrets: async () => { throw new Error(adapterResult.error); },
+          listEnvironmentSecrets: async () => { throw new Error(adapterResult.error); },
+        }
+      : adapterResult.adapter;
+    const delegatedSecrets = await planGitHubDelegatedSecrets({
+      adapter: observationAdapter,
+      owner: parts.owner,
+      repo: parts.repo,
+      spec: params.spec,
+      environmentName: params.environmentName,
+      environment,
+      suppliedValues: params.suppliedSecretValues ?? {},
+    });
+    return {
+      actions: unavailableError
+        ? delegatedSecrets.actions.map((action) => action.type === 'noop'
+          ? action
+          : {
+              ...action,
+              metadata: { ...action.metadata, blockedReason: 'github_connection_unavailable' },
+            })
+        : delegatedSecrets.actions,
+      warnings: [
+        ...delegatedSecrets.warnings,
+        ...(unavailableError ? [`Cannot observe GitHub Actions secret destinations for ${repository}: ${unavailableError}`] : []),
+      ],
+      blocked: [],
+      inputRequired: delegatedSecrets.inputRequired,
+    };
+  }
+
+  const githubSpec = params.spec.github!;
+
+  const artifactContractIssues = autofixArtifactContractIssues(githubSpec);
+  const runtimeIssues = unresolvedGitHubCheckRuntimeIssues(githubSpec, params.spec.runtime);
   if (runtimeIssues.length > 0) {
     return {
       actions: [infrastructureAction({
@@ -1575,7 +1675,7 @@ export async function planGitHubInfrastructure(params: {
     };
   }
   const restoreDrills = compileDatabaseRestoreDrillFiles({ project: params.project, spec: params.spec });
-  const files = compileManagedGitHubFiles(params.spec.github, params.spec.runtime, restoreDrills.files);
+  const files = compileManagedGitHubFiles(githubSpec, params.spec.runtime, restoreDrills.files);
   const adapterResult = getGitHubAdapter(repository);
   if ('error' in adapterResult) {
     return {
@@ -1673,7 +1773,7 @@ export async function planGitHubInfrastructure(params: {
 
   // Secrets/settings are a second stage. A file PR must merge before Hypervibe
   // exposes an AI key to the newly reviewed workflows.
-  if (drift.length === 0 && githubSpecNeedsOpenAI(params.spec.github)) {
+  if (drift.length === 0 && githubSpecNeedsOpenAI(githubSpec)) {
     let secretPresent = false;
     try {
       secretPresent = (await adapterResult.adapter.listRepositorySecrets(parts.owner, parts.repo))
@@ -1736,7 +1836,7 @@ export async function planGitHubInfrastructure(params: {
       warnings.push(`Cannot observe GitHub repository security state: ${error instanceof Error ? error.message : String(error)}`);
     }
 
-    const wantsAlerts = params.spec.github.dependencies.alerts;
+    const wantsAlerts = githubSpec.dependencies.alerts;
     let alertsEnabled = false;
     if (wantsAlerts) {
       try {
@@ -1749,16 +1849,16 @@ export async function planGitHubInfrastructure(params: {
     const security = repositoryState?.security_and_analysis;
     const settingsDrift = {
       alerts: wantsAlerts && !alertsEnabled,
-      securityUpdates: params.spec.github.dependencies.securityUpdates
+      securityUpdates: githubSpec.dependencies.securityUpdates
         && security?.dependabot_security_updates?.status !== 'enabled',
-      secretScanning: params.spec.github.security.secretScanning
+      secretScanning: githubSpec.security.secretScanning
         && security?.secret_scanning?.status !== 'enabled',
-      pushProtection: params.spec.github.security.pushProtection
+      pushProtection: githubSpec.security.pushProtection
         && security?.secret_scanning_push_protection?.status !== 'enabled',
     };
     const requestedSettingNames = Object.entries(settingsDrift).filter(([, value]) => value).map(([name]) => name);
-    if (wantsAlerts || params.spec.github.dependencies.securityUpdates
-      || params.spec.github.security.secretScanning || params.spec.github.security.pushProtection) {
+    if (wantsAlerts || githubSpec.dependencies.securityUpdates
+      || githubSpec.security.secretScanning || githubSpec.security.pushProtection) {
       actions.push({
         id: GITHUB_SECURITY_SETTINGS_ACTION_ID,
         type: requestedSettingNames.length > 0 ? 'update' : 'noop',
@@ -1769,15 +1869,15 @@ export async function planGitHubInfrastructure(params: {
           : 'Requested GitHub security settings are enabled',
         metadata: {
           operation: 'githubSecuritySettings', repository,
-          alerts: params.spec.github.dependencies.alerts,
-          securityUpdates: params.spec.github.dependencies.securityUpdates,
-          secretScanning: params.spec.github.security.secretScanning,
-          pushProtection: params.spec.github.security.pushProtection,
+          alerts: githubSpec.dependencies.alerts,
+          securityUpdates: githubSpec.dependencies.securityUpdates,
+          secretScanning: githubSpec.security.secretScanning,
+          pushProtection: githubSpec.security.pushProtection,
         },
       });
     }
 
-    if (params.spec.github.security.codeScanning) {
+    if (githubSpec.security.codeScanning) {
       let codeScanningConfigured = false;
       try {
         codeScanningConfigured = (await adapterResult.adapter.getCodeScanningDefaultSetup(parts.owner, parts.repo))?.state === 'configured';
@@ -1798,7 +1898,7 @@ export async function planGitHubInfrastructure(params: {
       });
     }
 
-    const hasAutofix = Object.values(params.spec.github.actions)
+    const hasAutofix = Object.values(githubSpec.actions)
       .some((automation) => automation.enabled && automation.kind === 'autofix');
     if (hasAutofix) {
       let allowed = false;
@@ -1820,12 +1920,12 @@ export async function planGitHubInfrastructure(params: {
       });
     }
 
-    const customLabels = params.spec.github.collaboration.issues.labels.map((label) => ({
+    const customLabels = githubSpec.collaboration.issues.labels.map((label) => ({
       name: label.name,
       color: (label.color ?? 'ededed').toLowerCase(),
       description: label.description ?? '',
     }));
-    const needsAuditLabel = Object.values(params.spec.github.actions)
+    const needsAuditLabel = Object.values(githubSpec.actions)
       .some((automation) => automation.enabled && automation.kind === 'code-audit');
     const labelsByName = new Map(DEFAULT_COLLABORATION_LABELS.map((label) => [label.name.toLowerCase(), label]));
     if (needsAuditLabel) {
@@ -1834,7 +1934,7 @@ export async function planGitHubInfrastructure(params: {
       });
     }
     for (const label of customLabels) labelsByName.set(label.name.toLowerCase(), label);
-    const desiredLabels = params.spec.github.collaboration.issues.enabled ? [...labelsByName.values()] : [];
+    const desiredLabels = githubSpec.collaboration.issues.enabled ? [...labelsByName.values()] : [];
     let collaborationDrift = false;
     try {
       const currentLabels = await adapterResult.adapter.listLabels(parts.owner, parts.repo);
@@ -1843,8 +1943,8 @@ export async function planGitHubInfrastructure(params: {
         const current = currentByName.get(label.name.toLowerCase());
         return !current || current.color.toLowerCase() !== label.color || (current.description ?? '') !== label.description;
       });
-      if (params.spec.github.collaboration.pullRequests.requirePr) {
-        const rules = params.spec.github.collaboration.pullRequests;
+      if (githubSpec.collaboration.pullRequests.requirePr) {
+        const rules = githubSpec.collaboration.pullRequests;
         const current = await adapterResult.adapter.getBranchProtection(parts.owner, parts.repo, rules.targetBranch);
         const reviews = current?.required_pull_request_reviews;
         const statusChecks = current?.required_status_checks;
@@ -1884,11 +1984,11 @@ export async function planGitHubInfrastructure(params: {
         operation: 'githubCollaborationSettings',
         repository,
         labels: desiredLabels,
-        pullRequests: params.spec.github.collaboration.pullRequests,
+        pullRequests: githubSpec.collaboration.pullRequests,
       },
     });
-    if (params.spec.github.collaboration.collaborators.length > 0) {
-      warnings.push(`Collaborator invitations remain manual. Confirm repository access for: ${params.spec.github.collaboration.collaborators.map((entry) => entry.username).join(', ')}.`);
+    if (githubSpec.collaboration.collaborators.length > 0) {
+      warnings.push(`Collaborator invitations remain manual. Confirm repository access for: ${githubSpec.collaboration.collaborators.map((entry) => entry.username).join(', ')}.`);
     }
   }
   const actionPriority = (action: PlanAction): number => {

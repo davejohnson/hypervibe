@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { execFileSync } from 'node:child_process';
 import os from 'os';
 import path from 'path';
 import type { Environment } from '../../entities/environment.entity.js';
@@ -11,6 +12,58 @@ import {
 } from '../repo-bindings-file.js';
 
 describe('repo bindings delegated metadata', () => {
+  it.each([
+    ['unrelated remote', 'https://github.com/other/app.git', undefined, false],
+    ['missing remote', undefined, undefined, false],
+    ['matching normalized remote', 'git@github.com:owner/app.git', undefined, true],
+    ['matching spec with wrong remote', 'https://github.com/other/app.git', 'app', false],
+    ['matching spec without readable remote', undefined, 'app', false],
+    ['different spec with matching remote', 'https://github.com/owner/app.git', 'other', false],
+  ])('checks checkout ownership before creating or deleting bindings: %s', (_label, remote, specProject, permitted) => {
+    const parent = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-bindings-identity-'));
+    // Matching basenames must never override a known repository remote.
+    const root = path.join(parent, 'app');
+    execFileSync('git', ['init', '-q', root]);
+    if (remote) execFileSync('git', ['-C', root, 'remote', 'add', 'origin', remote]);
+    const dir = path.join(root, '.hypervibe');
+    if (specProject) {
+      mkdirSync(dir);
+      writeFileSync(path.join(dir, 'spec.json'), JSON.stringify({
+        version: 1, project: specProject, environments: {},
+      }));
+    }
+    const now = new Date();
+    const project: Project = {
+      id: 'project', name: 'app', gitRemoteUrl: 'https://github.com/owner/app.git',
+      defaultPlatform: 'railway', policies: {}, createdAt: now, updatedAt: now,
+    };
+    const environment: Environment = {
+      id: 'environment', projectId: project.id, name: 'production',
+      platformBindings: { provider: 'railway', projectId: 'bound-project' },
+      createdAt: now, updatedAt: now,
+    };
+    const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      const file = path.join(dir, 'bindings.json');
+      expect(writeRepoBindingsForEnvironment(project, environment, root)).toBe(permitted ? file : null);
+      expect(existsSync(file)).toBe(permitted);
+      mkdirSync(dir, { recursive: true });
+      const original = JSON.stringify({
+        version: 1, project: project.name,
+        environments: { production: { platformBindings: environment.platformBindings } },
+      });
+      writeFileSync(file, original);
+      expect(writeRepoBindingsForEnvironment(project, { ...environment, platformBindings: {} }, root)).toBeNull();
+      expect(existsSync(file)).toBe(!permitted);
+      if (!permitted) expect(readFileSync(file, 'utf8')).toBe(original);
+    } finally {
+      if (oldDisable === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable;
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
   it('distinguishes a missing bindings file from corrupt or cross-project state', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-bindings-read-safety-'));
     mkdirSync(path.join(root, '.git'));
@@ -70,6 +123,11 @@ describe('repo bindings delegated metadata', () => {
       updatedAt: now,
     };
 
+    mkdirSync(path.join(root, '.hypervibe'), { recursive: true });
+    writeFileSync(path.join(root, '.hypervibe', 'spec.json'), JSON.stringify({
+      version: 1, project: project.name, environments: {},
+    }));
+
     try {
       process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
       const malformed = '{"secretValue":"do-not-overwrite",';
@@ -96,6 +154,14 @@ describe('repo bindings delegated metadata', () => {
         openAIActionsSecretName: 'OPENAI_API_KEY',
         openAIActionsSecretHash: 'local-hash',
         openAIActionsSecretSyncedAt: '2026-08-20T00:00:00.000Z',
+        delegatedActionsBindings: [{
+          name: 'DEPLOY_PIN',
+          target: 'repository',
+          principal: 'github:alice',
+          valueHash: 'local-delegated-hash',
+          actionId: 'secret:github:repository:DEPLOY_PIN',
+          syncedAt: '2026-08-20T00:00:00.000Z',
+        }],
       },
       localOnlyProvider: { resourceId: 'preserved-top-level' },
     }, {
@@ -108,6 +174,14 @@ describe('repo bindings delegated metadata', () => {
         openAIActionsSecretName: 'OPENAI_API_KEY',
         openAIActionsSecretHash: 'local-hash',
         openAIActionsSecretSyncedAt: '2026-08-20T00:00:00.000Z',
+        delegatedActionsBindings: [{
+          name: 'DEPLOY_PIN',
+          target: 'repository',
+          principal: 'github:alice',
+          valueHash: 'local-delegated-hash',
+          actionId: 'secret:github:repository:DEPLOY_PIN',
+          syncedAt: '2026-08-20T00:00:00.000Z',
+        }],
       },
       localOnlyProvider: { resourceId: 'preserved-top-level' },
     });
@@ -143,7 +217,7 @@ describe('repo bindings delegated metadata', () => {
     });
   });
 
-  it('persists accepted hashes and principals without persisting secret values', () => {
+  it('keeps delegated secret verifiers in local state instead of the repository export', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-delegated-bindings-'));
     mkdirSync(path.join(root, '.git'));
     const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
@@ -163,6 +237,17 @@ describe('repo bindings delegated metadata', () => {
       platformBindings: {
         provider: 'railway',
         apiToken: 'must-never-be-written',
+        github: {
+          repositoryId: 'github-repository',
+          delegatedActionsBindings: [{
+            name: 'DEPLOY_PIN',
+            target: 'repository',
+            principal: 'github:alice',
+            valueHash: 'github-verifier-must-stay-local',
+            actionId: 'secret:github:repository:DEPLOY_PIN',
+            syncedAt: now.toISOString(),
+          }],
+        },
         storageProviders: {
           railway: { projectId: 'railway-project', environmentId: 'railway-production' },
         },
@@ -176,13 +261,13 @@ describe('repo bindings delegated metadata', () => {
           },
         },
         delegatedEnvBindings: [{
-          name: 'ANTHROPIC_API_KEY',
+          name: 'DEFAULT_DOOR_CODE',
           principal: 'github:alice',
-          valueHash: 'sha256-only',
+          valueHash: 'runtime-verifier-must-stay-local',
           source: 'delegated-plan-input',
           syncedAt: now.toISOString(),
           applyRunId: 'apply-1',
-          actionId: 'secret:ANTHROPIC_API_KEY',
+          actionId: 'secret:DEFAULT_DOOR_CODE',
         }],
         runtimeRollouts: [{
           service: 'worker',
@@ -191,12 +276,17 @@ describe('repo bindings delegated metadata', () => {
           baselineDeployment: { state: 'present', id: 'deployment-before-config' },
           requiredAt: now.toISOString(),
           applyRunId: 'apply-1',
-          actionIds: ['secret:ANTHROPIC_API_KEY'],
+          actionIds: ['secret:DEFAULT_DOOR_CODE'],
         }],
       },
       createdAt: now,
       updatedAt: now,
     };
+
+    mkdirSync(path.join(root, '.hypervibe'), { recursive: true });
+    writeFileSync(path.join(root, '.hypervibe', 'spec.json'), JSON.stringify({
+      version: 1, project: project.name, environments: {},
+    }));
 
     try {
       process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
@@ -206,26 +296,24 @@ describe('repo bindings delegated metadata', () => {
       const document = JSON.parse(serialized);
 
       expect(serialized).not.toContain('must-never-be-written');
+      expect(serialized).not.toContain('runtime-verifier-must-stay-local');
+      expect(serialized).not.toContain('github-verifier-must-stay-local');
       expect(document.environments.production.platformBindings.apiToken).toBeUndefined();
+      expect(document.environments.production.platformBindings.github).toEqual({
+        repositoryId: 'github-repository',
+      });
       expect(document.environments.production.platformBindings.storage.documents).toMatchObject({
         provider: 'railway',
         externalId: 'bucket-documents',
         instanceScope: { projectId: 'railway-project', environmentId: 'railway-production' },
       });
-      expect(document.environments.production.platformBindings.delegatedEnvBindings).toEqual([
-        expect.objectContaining({
-          name: 'ANTHROPIC_API_KEY',
-          principal: 'github:alice',
-          valueHash: 'sha256-only',
-          applyRunId: 'apply-1',
-        }),
-      ]);
+      expect(document.environments.production.platformBindings.delegatedEnvBindings).toBeUndefined();
       expect(document.environments.production.platformBindings.runtimeRollouts).toEqual([
         expect.objectContaining({
           service: 'worker',
           provider: 'railway',
           baselineDeployment: { state: 'present', id: 'deployment-before-config' },
-          actionIds: ['secret:ANTHROPIC_API_KEY'],
+          actionIds: ['secret:DEFAULT_DOOR_CODE'],
         }),
       ]);
     } finally {
@@ -234,6 +322,44 @@ describe('repo bindings delegated metadata', () => {
       } else {
         process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable;
       }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores delegated secret verifiers from legacy repository bindings', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-legacy-secret-bindings-'));
+    mkdirSync(path.join(root, '.git'));
+    mkdirSync(path.join(root, '.hypervibe'));
+    const file = path.join(root, '.hypervibe', 'bindings.json');
+    const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+
+    writeFileSync(file, JSON.stringify({
+      version: 1,
+      project: 'safe-app',
+      environments: {
+        production: {
+          platformBindings: {
+            provider: 'railway',
+            delegatedEnvBindings: [{ valueHash: 'legacy-runtime-verifier' }],
+            github: {
+              repositoryId: 'github-repository',
+              delegatedActionsBindings: [{ valueHash: 'legacy-actions-verifier' }],
+            },
+          },
+        },
+      },
+    }), 'utf8');
+
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      const document = readRepoBindingsFile('safe-app', root)?.document;
+      expect(document?.environments.production.platformBindings).toEqual({
+        provider: 'railway',
+        github: { repositoryId: 'github-repository' },
+      });
+    } finally {
+      if (oldDisable === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable;
       rmSync(root, { recursive: true, force: true });
     }
   });
@@ -267,6 +393,11 @@ describe('repo bindings delegated metadata', () => {
       createdAt: now,
       updatedAt: now,
     };
+
+    mkdirSync(path.join(root, '.hypervibe'), { recursive: true });
+    writeFileSync(path.join(root, '.hypervibe', 'spec.json'), JSON.stringify({
+      version: 1, project: project.name, environments: {},
+    }));
 
     try {
       process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';

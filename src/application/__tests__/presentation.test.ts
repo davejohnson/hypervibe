@@ -144,12 +144,33 @@ describe('command presentation', () => {
       ],
     }));
 
-    expect(output).toContain('❌  HYPERVIBE · APPLY STOPPED');
+    expect(output).toContain('⏳  HYPERVIBE · APPLY PENDING');
     expect(output).toContain('1 succeeded action · 1 pending action');
     expect(output).toContain('✅ service:web');
     expect(output).not.toContain('service:web · succeeded');
     expect(output).toContain('⏳ domain:example.com · pending');
     expect(output).toContain('🛑  AGENT INSTRUCTION');
+  });
+
+  it('counts unattempted dependent actions as skipped rather than failed', () => {
+    const output = formatCommandResult('hv_apply', commandSuccess({ applied: false, receipts: [
+      { actionId: 'project:create', status: 'failed', message: 'Provider rejected creation' },
+      { actionId: 'service:web', status: 'aborted', message: 'Skipped after project creation failed' },
+    ] }));
+    expect(output).toContain('1 failed action');
+    expect(output).toContain('1 skipped action');
+    expect(output).not.toContain('2 failed actions');
+    expect(output).toContain('⏭️ service:web · aborted');
+  });
+
+  it('shows missing confirmation as blocked work without a failure count', () => {
+    const output = formatCommandResult('hv_apply', commandSuccess({ applied: false, receipts: [
+      { actionId: 'project:create', status: 'skipped_requires_confirm' },
+      { actionId: 'service:web', status: 'aborted', message: 'Creation requires confirmation' },
+    ] }));
+    expect(output).toContain('APPLY BLOCKED');
+    expect(output).toContain('1 skipped action');
+    expect(output).not.toContain('failed action');
   });
 
   it('renders HTTP health with status and latency', () => {

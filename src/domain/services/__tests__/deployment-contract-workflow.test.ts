@@ -57,6 +57,7 @@ function target(
     providerProjectId: 'provider-project',
     providerEnvironmentId: 'provider-environment',
     providerRegion: 'us-central1',
+    providerScope: { projectId: 'provider-project', region: 'us-central1' },
     providerServiceIds: ['provider-service'],
     providerJobNames: [],
   };

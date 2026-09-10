@@ -8,6 +8,7 @@ import { SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import '../../../adapters/providers/railway/railway.adapter.js';
 import { createRailwayDatabaseAdapter } from '../../../adapters/providers/railway/railway-database.factory.js';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
+import '../../../adapters/providers/gcp/cloudsql.adapter.js';
 import '../../../adapters/providers/aws/s3.adapter.js';
 import '../../../adapters/providers/azure/azure-container-apps.adapter.js';
 import '../../../adapters/providers/azure/azure-managed-redis.adapter.js';
@@ -29,7 +30,10 @@ import { isIosAction } from '../../services/appstore-plan.service.js';
 import { hashEnvValue, type ObservedState } from '../../ports/observe.port.js';
 import type { Project } from '../../entities/project.entity.js';
 import type { Environment } from '../../entities/environment.entity.js';
-import { buildBranchDeployWorkflow } from '../../services/github-ops.service.js';
+import {
+  buildBranchDeployWorkflow,
+  resolveBranchDeployTargets,
+} from '../../services/github-ops.service.js';
 import { StripeAdapter } from '../../../adapters/providers/stripe/stripe.adapter.js';
 import { executePlanApply } from '../../../application/apply-plan.js';
 import { createToolContext } from '../../../application/context.js';
@@ -101,6 +105,148 @@ function mockObservingAdapter(observed: ObservedState, extra: Record<string, unk
 }
 
 describe('PlanService.plan', () => {
+  it('defers an initially unbound Cloud Run seed until managed CI has exact provider bindings', async () => {
+    project = new ProjectRepository().update(project.id, {
+      defaultPlatform: 'cloudrun',
+      gitRemoteUrl: 'https://github.com/davejohnson/cloudrun-seed-app.git',
+    })!;
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      gitRemoteUrl: project.gitRemoteUrl,
+      runtime: {
+        kind: 'node',
+        version: '22',
+        installCommand: 'npm ci',
+      },
+      environments: {
+        staging: {
+          hosting: { provider: 'cloudrun', region: 'us-central1' },
+          services: {
+            web: {
+              workloadKind: 'web' as const,
+              startCommand: 'npm start',
+              healthCheckPath: '/ready',
+              public: true,
+            },
+          },
+          database: {
+            provider: 'cloudsql',
+            engine: 'postgres',
+            seedCommand: 'npm run db:seed',
+          },
+          email: { enabled: false },
+          envVars: {},
+          envFile: { mode: 'off' },
+          deploy: {
+            strategy: 'branch',
+            trigger: 'ci',
+            branch: 'main',
+          },
+        },
+      },
+    });
+
+    const result = await new PlanService().plan(project, 'staging', {
+      includeEnvFile: false,
+    });
+
+    expect(result).not.toHaveProperty('error');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.actions.find((action) => action.metadata?.operation === 'githubActionsRelease'))
+      .toBeUndefined();
+    expect(plan.actions.find((action) => action.metadata?.operation === 'databaseSeed'))
+      .toMatchObject({
+        type: 'update',
+        metadata: { blockedReason: 'managed_ci_release_unavailable' },
+      });
+    expect(plan.warnings).toContainEqual(expect.stringContaining(
+      'Managed CI workflow for staging is deferred until the planned hosting bindings exist.'
+    ));
+    expect(new RunRepository().findById(plan.planRunId)?.status).toBe('succeeded');
+  });
+
+  it('freezes the repository HEAD into a managed Cloud Run deployment plan', async () => {
+    const oldCwd = process.cwd();
+    const oldDisableRepoSpec = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-source-sha-plan-'));
+    const spec = {
+      version: 1,
+      project: 'source-sha-app',
+      gitRemoteUrl: 'https://github.com/davejohnson/source-sha-app.git',
+      environments: {
+        staging: {
+          hosting: { provider: 'cloudrun', region: 'us-central1' },
+          services: { web: { workloadKind: 'web', public: true } },
+          email: { enabled: false },
+          envVars: {},
+          envFile: { mode: 'off' },
+          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+        },
+      },
+    };
+    mkdirSync(path.join(root, '.hypervibe'));
+    writeFileSync(path.join(root, '.hypervibe', 'spec.json'), `${JSON.stringify(spec, null, 2)}\n`);
+    execFileSync('git', ['init', '-b', 'main'], { cwd: root, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@hypervibe.dev'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'Hypervibe Test'], { cwd: root });
+    execFileSync('git', ['remote', 'add', 'origin', spec.gitRemoteUrl], { cwd: root });
+    execFileSync('git', ['add', '.hypervibe/spec.json'], { cwd: root });
+    execFileSync('git', ['commit', '-m', 'test fixture'], { cwd: root, stdio: 'ignore' });
+    const expectedSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      process.chdir(root);
+      const sourceProject = new ProjectRepository().create({
+        name: spec.project,
+        defaultPlatform: 'cloudrun',
+        gitRemoteUrl: spec.gitRemoteUrl,
+      });
+      new EnvironmentRepository().create({
+        projectId: sourceProject.id,
+        name: 'staging',
+        platformBindings: {
+          provider: 'cloudrun',
+          projectId: 'source-sha-gcp-project',
+          environmentId: 'us-central1',
+          providerScope: {
+            projectId: 'source-sha-gcp-project',
+            region: 'us-central1',
+          },
+          services: {},
+        },
+      });
+
+      const result = await new PlanService().plan(sourceProject, 'staging', {
+        includeEnvFile: false,
+      });
+
+      expect(result).not.toHaveProperty('error');
+      const plan = result as Exclude<typeof result, { error: string }>;
+      expect(plan.specSource).toEqual({
+        kind: 'repo',
+        path: path.join(realpathSync(root), '.hypervibe', 'spec.json'),
+      });
+      expect(new RunRepository().findById(plan.planRunId)?.plan).toMatchObject({
+        sourceCommitSha: expectedSha,
+      });
+
+      spec.environments.staging.envVars = { UNCOMMITTED: 'true' };
+      writeFileSync(path.join(root, '.hypervibe', 'spec.json'), `${JSON.stringify(spec, null, 2)}\n`);
+      const dirtyResult = await new PlanService().plan(sourceProject, 'staging', {
+        includeEnvFile: false,
+      });
+      expect(dirtyResult).toEqual({
+        error: expect.stringContaining('will not plan a first Cloud Run release'),
+      });
+    } finally {
+      process.chdir(oldCwd);
+      if (oldDisableRepoSpec === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisableRepoSpec;
+    }
+  });
+
   it('errors when the project has no spec', async () => {
     const bare = new ProjectRepository().create({ name: 'no-spec' });
     expect(bare.defaultPlatform).toBe('unconfigured');
@@ -2547,16 +2693,13 @@ describe('PlanService.plan', () => {
     expect(plan.actions.find((action) => action.id === 'service:worker:destroy')).toMatchObject({ type: 'destroy' });
     const ci = plan.actions.find((action) => action.id === 'ci:github-actions:production:deploy-branch')!;
     expect(ci.type).toBe('update');
-    const desiredWorkflow = buildBranchDeployWorkflow('railway', {
-      environmentName: 'production',
-      kind: 'production',
-      branch: 'main',
-      autoDeployOnPush: false,
-      serviceNames: ['web'],
-      providerProjectId: 'rp-1',
-      providerEnvironmentId: 'rail-env-1',
-      providerServiceIds: ['svc-web'],
-    }, { includeStep: false });
+    const desiredTarget = resolveBranchDeployTargets(project).targets
+      .find((target) => target.environmentName === 'production')!;
+    const desiredWorkflow = buildBranchDeployWorkflow(
+      'railway',
+      desiredTarget,
+      { includeStep: false }
+    );
     expect((ci.metadata?.workflow as { contentHash: string }).contentHash).toBe(sha256(desiredWorkflow.content));
   });
 
@@ -2917,17 +3060,8 @@ describe('PlanService.plan', () => {
     });
     connRepo.updateStatus(railway.id, 'verified');
 
-    const workflow = buildBranchDeployWorkflow('railway', {
-      environmentName: 'production',
-      kind: 'production',
-      branch: 'main',
-      autoDeployOnPush: false,
-      serviceNames: ['web'],
-      providerProjectId: 'rp-1',
-      providerEnvironmentId: 'rail-env-1',
-      providerServiceIds: ['svc-1'],
-    }, { includeStep: false });
-    new EnvironmentRepository().create({
+    const envRepo = new EnvironmentRepository();
+    const environment = envRepo.create({
       projectId: ciProject.id,
       name: 'production',
       platformBindings: {
@@ -2935,16 +3069,21 @@ describe('PlanService.plan', () => {
         projectId: 'rp-1',
         environmentId: 'rail-env-1',
         services: { web: { serviceId: 'svc-1' } },
-        ci: {
-          deployBranch: {
-            [workflow.path]: {
-              contentHash: sha256(workflow.content),
-              syncedSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
-              syncedSecretHashes: {
-                RAILWAY_API_TOKEN: sha256('railway-token'),
-                IMAGE_REGISTRY_USERNAME: sha256('dave'),
-                IMAGE_REGISTRY_TOKEN: sha256('scoped-package-token'),
-              },
+      },
+    });
+    const workflowTarget = resolveBranchDeployTargets(ciProject).targets
+      .find((target) => target.environmentName === 'production')!;
+    const workflow = buildBranchDeployWorkflow('railway', workflowTarget, { includeStep: false });
+    envRepo.updatePlatformBindings(environment.id, {
+      ci: {
+        deployBranch: {
+          [workflow.path]: {
+            contentHash: sha256(workflow.content),
+            syncedSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
+            syncedSecretHashes: {
+              RAILWAY_API_TOKEN: sha256('railway-token'),
+              IMAGE_REGISTRY_USERNAME: sha256('dave'),
+              IMAGE_REGISTRY_TOKEN: sha256('scoped-package-token'),
             },
           },
         },
@@ -3024,17 +3163,8 @@ describe('PlanService.plan', () => {
     });
     connRepo.updateStatus(railway.id, 'verified');
 
-    const workflow = buildBranchDeployWorkflow('railway', {
-      environmentName: 'production',
-      kind: 'production',
-      branch: 'main',
-      autoDeployOnPush: false,
-      serviceNames: ['web'],
-      providerProjectId: 'rp-1',
-      providerEnvironmentId: 'rail-env-1',
-      providerServiceIds: ['svc-1'],
-    }, { includeStep: false });
-    new EnvironmentRepository().create({
+    const envRepo = new EnvironmentRepository();
+    const environment = envRepo.create({
       projectId: ciProject.id,
       name: 'production',
       platformBindings: {
@@ -3042,16 +3172,21 @@ describe('PlanService.plan', () => {
         projectId: 'rp-1',
         environmentId: 'rail-env-1',
         services: { web: { serviceId: 'svc-1' } },
-        ci: {
-          deployBranch: {
-            [workflow.path]: {
-              contentHash: sha256(workflow.content),
-              syncedSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
-              syncedSecretHashes: {
-                RAILWAY_API_TOKEN: sha256('railway-token'),
-                IMAGE_REGISTRY_USERNAME: sha256('dave'),
-                IMAGE_REGISTRY_TOKEN: sha256('global-package-token'),
-              },
+      },
+    });
+    const workflowTarget = resolveBranchDeployTargets(ciProject).targets
+      .find((target) => target.environmentName === 'production')!;
+    const workflow = buildBranchDeployWorkflow('railway', workflowTarget, { includeStep: false });
+    envRepo.updatePlatformBindings(environment.id, {
+      ci: {
+        deployBranch: {
+          [workflow.path]: {
+            contentHash: sha256(workflow.content),
+            syncedSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
+            syncedSecretHashes: {
+              RAILWAY_API_TOKEN: sha256('railway-token'),
+              IMAGE_REGISTRY_USERNAME: sha256('dave'),
+              IMAGE_REGISTRY_TOKEN: sha256('global-package-token'),
             },
           },
         },

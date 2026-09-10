@@ -65,6 +65,9 @@ export interface HostingBindings {
   /** External environment ID (if platform supports multi-env) */
   environmentId?: string;
 
+  /** Provider-native non-secret scope when projectId is a logical resource prefix. */
+  providerScope?: Record<string, string>;
+
   /** Map of service names to their external IDs */
   services: Record<string, {
     serviceId: string;
@@ -75,6 +78,7 @@ export interface HostingBindings {
     resourceType?: string;
     jobName?: string;
     schedulerJobName?: string;
+    releaseJobName?: string;
     source?: {
       repo?: string;
       branch?: string;
@@ -203,6 +207,7 @@ const hostingServiceBindingSchema = z.object({
   resourceType: z.string().optional(),
   jobName: nonEmptyHostingBindingString.optional(),
   schedulerJobName: nonEmptyHostingBindingString.optional(),
+  releaseJobName: nonEmptyHostingBindingString.optional(),
   source: z.object({
     repo: z.string().optional(),
     branch: z.string().optional(),
@@ -250,6 +255,7 @@ export const hostingBindingsSchema = z.object({
   provider: nonEmptyHostingBindingString.optional(),
   projectId: nonEmptyHostingBindingString.optional(),
   environmentId: nonEmptyHostingBindingString.optional(),
+  providerScope: retainedProviderScopeSchema.optional(),
   services: hostingServicesSchema.optional(),
   serviceCreateRecovery: serviceCreateRecoveryMapSchema.optional(),
   previousDatabase: previousDatabaseSchema.optional(),

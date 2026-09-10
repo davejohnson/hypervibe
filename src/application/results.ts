@@ -243,7 +243,8 @@ export function statusSymbol(status: unknown): string {
   if (['ok', 'success', 'succeeded', 'complete', 'completed', 'verified', 'healthy', 'passed', 'pass', 'in_sync', 'ready'].includes(normalized)) {
     return '✅';
   }
-  if (['failed', 'failure', 'error', 'errored', 'rejected', 'missing', 'unverified', 'unhealthy', 'canceled', 'cancelled', 'aborted', 'expired'].includes(normalized)) {
+  if (normalized === 'aborted') return '⏭️';
+  if (['failed', 'failure', 'error', 'errored', 'rejected', 'missing', 'unverified', 'unhealthy', 'canceled', 'cancelled', 'expired'].includes(normalized)) {
     return '❌';
   }
   if (['pending', 'queued', 'in_progress'].includes(normalized)) {

@@ -1041,6 +1041,39 @@ describe('hv_spec', () => {
     await t.close();
   });
 
+  it('defaults repository-only canonical GitHub Actions secret plans to repository', async () => {
+    const t = await makeClient();
+    const set = await t.call('hv_spec', {
+      spec: {
+        project: 'canonical-actions-secret-app',
+        devops: {
+          code: { provider: 'github', scope: 'davejohnson/canonical-actions-secret-app' },
+          ci: { provider: 'github-actions' },
+        },
+        secrets: {
+          CI_TOKEN: {
+            principal: 'github:davejohnson',
+            githubActions: { repository: true },
+          },
+        },
+        environments: {},
+      },
+    });
+
+    expect(set.ok).toBe(true);
+    const plan = await t.call('hv_plan', { project: 'canonical-actions-secret-app' });
+    expect(plan.ok).toBe(true);
+    expect(plan.data.environment).toBe('repository');
+    expect(plan.data.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'secret:github:repository:CI_TOKEN', type: 'update' }),
+    ]));
+    expect(plan.data.actionScopedBlocked).toContainEqual(expect.objectContaining({
+      provider: 'github',
+      actionIds: ['secret:github:repository:CI_TOKEN'],
+    }));
+    await t.close();
+  });
+
   it('does not treat a verified Cloudflare connection for another zone as domain-ready', async () => {
     const repo = new ConnectionRepository();
     const otherZone = repo.create({
@@ -2980,7 +3013,6 @@ describe('hv_plan / hv_status / hv_apply', () => {
         path: '.github/workflows/deploy-railway-production.yml',
         branch: 'main',
         autoDeployOnPush: false,
-        promoteFromEnvironment: 'staging',
       },
     });
     expect(status.data.inSync).toBe(false);

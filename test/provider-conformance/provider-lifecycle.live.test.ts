@@ -231,6 +231,33 @@ async function applyCurrentSpec(): Promise<{ plan: JsonObject; apply?: JsonObjec
   return { plan: planEnvelope, apply: await apply(planEnvelope) };
 }
 
+async function teardownOwnedResources(): Promise<void> {
+  const contract = selectedContract();
+  if (!contract) throw new Error('Live provider contract was not selected');
+  const hostingProvider = contract.kind === 'hosting'
+    ? contract.provider
+    : contract.fixtureHostingProvider;
+  await setSpec(fixtureSpec({
+    hostingProvider,
+    includeService: false,
+  }));
+
+  const teardown = await applyCurrentSpec();
+  expect((teardown.apply?.data.receipts ?? []).filter((receipt: JsonObject) =>
+    !['succeeded', 'skipped_noop'].includes(receipt.status)
+  )).toEqual([]);
+  const verified = await plan();
+  expect(verified.data.blocked ?? []).toEqual([]);
+  const incomplete = (verified.data.actions as JsonObject[]).filter((action) =>
+    ['service', 'database', 'cache'].includes(action.resource.kind)
+    && action.type !== 'noop'
+  );
+  expect(incomplete).toEqual([]);
+  expect((verified.data.unmanaged ?? []).filter((item: JsonObject) =>
+    ['service', 'database', 'cache'].includes(item.kind)
+  )).toEqual([]);
+}
+
 liveDescribe('live provider lifecycle contract', () => {
   const contract = selectedContract();
 
@@ -290,20 +317,16 @@ liveDescribe('live provider lifecycle contract', () => {
   afterAll(async () => {
     try {
       if (workspace && contract && resourcesMayExist) {
-        const hostingProvider = contract.kind === 'hosting'
-          ? contract.provider
-          : contract.fixtureHostingProvider;
-        await setSpec(fixtureSpec({
-          hostingProvider,
-          includeService: false,
-        }));
-        await applyCurrentSpec();
+        await teardownOwnedResources();
       }
-    } finally {
-      if (workspace) {
-        rmSync(workspace, { recursive: true, force: true });
-      }
+    } catch (error) {
+      console.error(
+        `Live provider cleanup failed. Recovery state remains at ${workspace}; `
+        + `use HYPERVIBE_DATA_DIR=${dataDirectory} with project ${projectName} to inspect and retry through spec/plan/apply.`
+      );
+      throw error;
     }
+    if (workspace) rmSync(workspace, { recursive: true, force: true });
   }, 20 * 60_000);
 
   it('applies a real ProjectSpec and records only verified provider identities', async () => {
@@ -378,30 +401,7 @@ liveDescribe('live provider lifecycle contract', () => {
     await apply(updatePlan);
   }, 20 * 60_000);
 
-  it('tears down owned workload and datastore resources through spec/plan/apply', async () => {
-    if (!contract) throw new Error('Live provider contract was not selected');
-    const hostingProvider = contract.kind === 'hosting'
-      ? contract.provider
-      : contract.fixtureHostingProvider;
-    await setSpec(fixtureSpec({
-      hostingProvider,
-      includeService: false,
-    }));
-
-    const teardown = await applyCurrentSpec();
-    expect(teardown.apply?.data.receipts ?? []).not.toContainEqual(
-      expect.objectContaining({ status: 'failed' })
-    );
-    const verified = await plan();
-    const incomplete = (verified.data.actions as JsonObject[]).filter((action) =>
-      ['service', 'database', 'cache'].includes(action.resource.kind)
-      && action.type !== 'noop'
-    );
-    expect(incomplete).toEqual([]);
-    expect((verified.data.unmanaged ?? []).filter((item: JsonObject) =>
-      ['service', 'database', 'cache'].includes(item.kind)
-    )).toEqual([]);
-  }, 20 * 60_000);
+  it('tears down owned workload and datastore resources through spec/plan/apply', teardownOwnedResources, 20 * 60_000);
 
   it.todo(
     'changes the environment itself to desired-absent, removes provider context when Hypervibe owns it, verifies terminal absence, and leaves no local binding'

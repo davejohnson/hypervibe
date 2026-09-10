@@ -9,8 +9,12 @@ import { ConnectionRepository } from '../../../db/repositories/connection.reposi
 import { SecretStore, getSecretStore } from '../../../secrets/secret-store.js';
 import { SpecStore } from '../../../../domain/spec/spec.store.js';
 import { projectSpecSchema } from '../../../../domain/spec/spec.schema.js';
-import { gitLabCiLifecycle } from '../gitlab-ci.lifecycle.js';
+import {
+  findGitLabPortableProviderConnection,
+  gitLabCiLifecycle,
+} from '../gitlab-ci.lifecycle.js';
 import '../../railway/railway.adapter.js';
+import '../../gcp/cloudrun.adapter.js';
 import {
   gitLabShellLiteral,
 } from '../../railway/railway-ci.recipe.js';
@@ -45,7 +49,7 @@ const spec = projectSpecSchema.parse({
       hosting: { provider: 'railway' },
       services: { web: { workloadKind: 'web', startCommand: 'node server.mjs' } },
       envFile: { mode: 'off' },
-      deploy: { strategy: 'branch', trigger: 'ci', branch: 'main', autoDeploy: false },
+      deploy: { strategy: 'branch', trigger: 'ci', branch: 'main', autoDeploy: true },
     },
     production: {
       hosting: { provider: 'railway' },
@@ -147,8 +151,198 @@ function seed() {
 }
 
 describe('GitLab CI reviewed configuration lifecycle', () => {
+  it('uses only an exact repository-scoped provider connection or an intentional global fallback', () => {
+    const repository = new ConnectionRepository();
+    const unrelated = repository.create({
+      provider: 'cloudrun',
+      scope: 'https://gitlab.com/acme/other-project',
+      credentialsEncrypted: 'unrelated',
+    });
+    repository.updateStatus(unrelated.id, 'verified');
+
+    expect(findGitLabPortableProviderConnection(
+      'cloudrun',
+      'https://gitlab.com/acme/storefront'
+    )).toBeNull();
+
+    const global = repository.create({
+      provider: 'cloudrun',
+      credentialsEncrypted: 'global',
+    });
+    repository.updateStatus(global.id, 'verified');
+    expect(findGitLabPortableProviderConnection(
+      'cloudrun',
+      'https://gitlab.com/acme/storefront'
+    )?.id).toBe(global.id);
+
+    const exact = repository.create({
+      provider: 'cloudrun',
+      scope: 'https://gitlab.com/acme/storefront',
+      credentialsEncrypted: 'exact',
+    });
+    repository.updateStatus(exact.id, 'verified');
+    expect(findGitLabPortableProviderConnection(
+      'cloudrun',
+      'https://gitlab.com/acme/storefront'
+    )?.id).toBe(exact.id);
+  });
+
   it('quotes generated shell literals without allowing apostrophes to break the command', () => {
     expect(gitLabShellLiteral("acme's storefront")).toBe("'acme'\\''s storefront'");
+  });
+
+  it('renders bound Cloud Run staging independently while production remains unbound and deferred', async () => {
+    const cloudRunSpec = projectSpecSchema.parse({
+      version: 1,
+      project: 'gitlab-cloudrun-app',
+      gitRemoteUrl: 'https://gitlab.com/acme/storefront.git',
+      runtime: { kind: 'node', version: '22' },
+      devops: {
+        code: { provider: 'gitlab', scope: 'https://gitlab.com/acme/storefront' },
+        ci: { provider: 'gitlab-ci' },
+        canonicalEnvironment: 'production',
+      },
+      environments: {
+        staging: {
+          hosting: { provider: 'cloudrun', region: 'us-west1' },
+          services: { web: { workloadKind: 'web', startCommand: 'node server.mjs' } },
+          envFile: { mode: 'off' },
+          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+        },
+        production: {
+          hosting: { provider: 'cloudrun', region: 'us-west1' },
+          services: { web: { workloadKind: 'web', startCommand: 'node server.mjs' } },
+          envFile: { mode: 'off' },
+          deploy: {
+            strategy: 'branch',
+            trigger: 'ci',
+            branch: 'main',
+            autoDeploy: false,
+            promoteFrom: 'staging',
+          },
+        },
+      },
+    });
+    const project = new ProjectRepository().create({
+      name: cloudRunSpec.project,
+      defaultPlatform: 'cloudrun',
+      gitRemoteUrl: cloudRunSpec.gitRemoteUrl,
+    });
+    new SpecStore().replace(project, cloudRunSpec);
+    const environmentRepository = new EnvironmentRepository();
+    const environment = environmentRepository.create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: { provider: 'cloudrun' },
+    });
+    const productionEnvironment = environmentRepository.create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: { provider: 'cloudrun' },
+    });
+    const gitlab = new ConnectionRepository().create({
+      provider: 'gitlab',
+      scope: cloudRunSpec.devops!.code.scope,
+      credentialsEncrypted: getSecretStore().encryptObject({
+        apiToken: 'gitlab-api-token',
+        instanceUrl: 'https://gitlab.com',
+      }),
+    });
+    new ConnectionRepository().updateStatus(gitlab.id, 'verified');
+    const requests: Array<{ method: string; path: string }> = [];
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+      const decodedPath = decodeURIComponent(url.pathname);
+      requests.push({ method, path: decodedPath });
+      if (method === 'GET' && decodedPath.endsWith('/user')) {
+        return response({ id: 3, username: 'hypervibe' });
+      }
+      if (method === 'GET' && /\/api\/v4\/projects\/(?:42|acme\/storefront)$/.test(decodedPath)) {
+        return response(projectPayload);
+      }
+      if (method === 'GET' && decodedPath.endsWith('/projects/42/runners')) {
+        return response([{
+          id: 100,
+          runner_type: 'instance_type',
+          status: 'online',
+          paused: false,
+          tag_list: ['saas-linux-small-amd64'],
+        }]);
+      }
+      if (method === 'GET' && decodedPath.includes('/repository/files/')) {
+        return response({ message: 'not found' }, 404);
+      }
+      if (method === 'GET' && decodedPath.endsWith('/repository/branches/main')) {
+        return response({ name: 'main', commit: { id: commitSha } });
+      }
+      throw new Error(`Unexpected GitLab request: ${method} ${url}`);
+    });
+
+    const deferred = await gitLabCiLifecycle.planDeploy({
+      project,
+      spec: cloudRunSpec,
+      environmentName: 'staging',
+      environmentSpec: cloudRunSpec.environments.staging,
+      environment,
+      bindingsWillChange: true,
+      dependsOn: ['service:web'],
+    });
+    expect(deferred).toMatchObject({ deferred: true });
+    expect(deferred.actions).toBeUndefined();
+    expect(deferred.warnings.join(' ')).toContain('Apply this plan, then re-run hv_plan');
+    expect(requests.some((request) => request.path.endsWith('/projects/42/runners'))).toBe(false);
+    expect(requests.every((request) => request.method === 'GET')).toBe(true);
+
+    environmentRepository.updatePlatformBindings(environment.id, {
+      provider: 'cloudrun',
+      projectId: 'gitlab-cloudrun-app-staging',
+      providerScope: { projectId: 'gcp-project', region: 'us-west1' },
+      services: {
+        web: {
+          serviceId: 'gitlab-cloudrun-app-staging-web',
+          workloadKind: 'web',
+          resourceType: 'service',
+        },
+      },
+    });
+    requests.length = 0;
+    const compiled = await gitLabCiLifecycle.planDeploy({
+      project,
+      spec: cloudRunSpec,
+      environmentName: 'staging',
+      environmentSpec: cloudRunSpec.environments.staging,
+      environment: environmentRepository.findById(environment.id),
+    });
+    expect(compiled.error).toBeUndefined();
+    expect(compiled.deferred).toBeUndefined();
+    expect(compiled.actions).toHaveLength(1);
+    expect(compiled.actions?.[0]).toMatchObject({
+      id: 'ci:gitlab-ci:configuration',
+      type: 'update',
+      verified: true,
+    });
+    const files = compiled.actions?.[0]?.metadata?.files as Array<{ path: string }>;
+    expect(files.map((file) => file.path)).toContain(
+      '.gitlab/hypervibe/deploy-cloudrun-staging.yml'
+    );
+    expect(files.map((file) => file.path)).not.toContain(
+      '.gitlab/hypervibe/deploy-cloudrun-production.yml'
+    );
+    expect(requests.every((request) => request.method === 'GET')).toBe(true);
+
+    const productionDeferred = await gitLabCiLifecycle.planDeploy({
+      project,
+      spec: cloudRunSpec,
+      environmentName: 'production',
+      environmentSpec: cloudRunSpec.environments.production,
+      environment: productionEnvironment,
+      bindingsWillChange: true,
+      dependsOn: ['service:web'],
+    });
+    expect(productionDeferred).toMatchObject({ deferred: true });
+    expect(productionDeferred.actions).toBeUndefined();
   });
 
   it('publishes one atomic reviewed change, then performs zero mutations at exact convergence', async () => {
@@ -251,6 +445,7 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
           jobs: [
             { name: 'hypervibe:build:railway:staging', stage: 'build' },
             { name: 'hypervibe:deploy:railway:staging', stage: 'deploy', environment: 'staging' },
+            { name: 'hypervibe:promote:railway:production', stage: 'promotion' },
             { name: 'hypervibe:build:railway:production', stage: 'build' },
             { name: 'hypervibe:deploy:railway:production', stage: 'deploy', environment: 'production' },
           ],
@@ -344,13 +539,35 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
       '.gitlab/hypervibe/build-railway-staging.sh',
       '.gitlab/hypervibe/deploy-railway-production.yml',
       '.gitlab/hypervibe/deploy-railway-staging.yml',
+      '.gitlab/hypervibe/finalize-release-evidence.mjs',
       '.gitlab/hypervibe/manifest.yml',
       '.gitlab/hypervibe/railway-deploy.mjs',
       '.gitlab/hypervibe/verify-deployment-order.mjs',
+      '.gitlab/hypervibe/verify-promotion-evidence.mjs',
     ]);
     const committedFiles = Object.fromEntries(commitBody.actions.map((action: { file_path: string; content: string }) => (
       [action.file_path, action.content]
     )));
+    const stagingDeploy = committedFiles['.gitlab/hypervibe/deploy-railway-staging.yml'];
+    const appliedSpecGate = stagingDeploy.match(
+      /test "\$(HYPERVIBE_[0-9A-F]{16}_APPLIED_SPEC_HASH)" = '([0-9a-f]{64})'/
+    );
+    expect(appliedSpecGate).not.toBeNull();
+    const appliedSpecVariable = appliedSpecGate![1];
+    const expectedAppliedSpecHash = appliedSpecGate![2];
+    const stagingPushRule = `$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main" && $${appliedSpecVariable} != ""`;
+    expect(committedFiles['.gitlab-ci.yml']).toContain(stagingPushRule);
+    expect(stagingDeploy).toContain(stagingPushRule);
+    expect(stagingPushRule).not.toContain(expectedAppliedSpecHash);
+    expect(stagingDeploy).toContain(
+      `test "$${appliedSpecVariable}" = '${expectedAppliedSpecHash}'`
+    );
+    const manualRule = stagingDeploy.split('\n').find((line: string) => (
+      line.includes('$CI_PIPELINE_SOURCE == "api"')
+      && line.includes('$[[ inputs.environment ]]')
+    ));
+    expect(manualRule).toBeDefined();
+    expect(manualRule).not.toContain(appliedSpecVariable);
     expect(committedFiles['.gitlab-ci.yml']).toContain('commit_sha:');
     expect(committedFiles['.gitlab/hypervibe/deploy-railway-production.yml']).toContain(
       'test "$HYPERVIBE_'
@@ -368,6 +585,26 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
     expect(committedFiles['.gitlab/hypervibe/deploy-railway-production.yml']).toContain(
       'node .gitlab/hypervibe/verify-deployment-order.mjs'
     );
+    expect(committedFiles['.gitlab/hypervibe/deploy-railway-production.yml']).toContain(
+      'hypervibe:promote:railway:production:'
+    );
+    expect(committedFiles['.gitlab/hypervibe/deploy-railway-production.yml']).toContain(
+      'node .gitlab/hypervibe/verify-promotion-evidence.mjs'
+    );
+    expect(committedFiles['.gitlab/hypervibe/deploy-railway-production.yml']).toContain(
+      'HYPERVIBE_PROMOTION_SERVICES'
+    );
+    expect(committedFiles['.gitlab/hypervibe/deploy-railway-production.yml']).toContain(
+      'HYPERVIBE_PROMOTION_PROVIDER_IDENTITY'
+    );
+    expect(committedFiles['.gitlab/hypervibe/deploy-railway-production.yml']).toContain(
+      'node .gitlab/hypervibe/finalize-release-evidence.mjs'
+    );
+    expect(committedFiles['.gitlab/hypervibe/deploy-railway-production.yml'].indexOf(
+      'hypervibe:promote:railway:production:'
+    )).toBeLessThan(committedFiles['.gitlab/hypervibe/deploy-railway-production.yml'].indexOf(
+      'hypervibe:build:railway:production:'
+    ));
     expect(committedFiles['.gitlab/hypervibe/verify-deployment-order.mjs']).toContain(
       "'JOB-TOKEN': process.env.CI_JOB_TOKEN"
     );

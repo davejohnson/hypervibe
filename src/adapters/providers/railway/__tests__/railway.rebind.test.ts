@@ -53,6 +53,7 @@ describe('RailwayAdapter stale binding recovery', () => {
           id: 'instance-svc-new-env-new',
           serviceId: 'svc-new',
           environmentId: 'env-new',
+          deletedAt: null,
         },
       })
       // ensureServiceInstanceForEnvironment
@@ -61,6 +62,7 @@ describe('RailwayAdapter stale binding recovery', () => {
           id: 'instance-svc-new-env-new',
           serviceId: 'svc-new',
           environmentId: 'env-new',
+          deletedAt: null,
         },
       })
       // variableCollectionUpsert
@@ -156,6 +158,7 @@ describe('RailwayAdapter stale binding recovery', () => {
           id: 'instance-svc-web-env-staging',
           serviceId: 'svc-web',
           environmentId: 'env-staging',
+          deletedAt: null,
         },
       })
       .mockResolvedValueOnce({
@@ -163,6 +166,7 @@ describe('RailwayAdapter stale binding recovery', () => {
           id: 'instance-svc-web-env-staging',
           serviceId: 'svc-web',
           environmentId: 'env-staging',
+          deletedAt: null,
         },
       })
       .mockResolvedValueOnce({ variableCollectionUpsert: true })
@@ -219,6 +223,7 @@ describe('RailwayAdapter stale binding recovery', () => {
           id: 'instance-svc-web-env-staging',
           serviceId: 'svc-web',
           environmentId: 'env-staging',
+          deletedAt: null,
         },
       })
       .mockResolvedValueOnce({
@@ -226,6 +231,7 @@ describe('RailwayAdapter stale binding recovery', () => {
           id: 'instance-svc-web-env-staging',
           serviceId: 'svc-web',
           environmentId: 'env-staging',
+          deletedAt: null,
         },
       })
       .mockRejectedValueOnce(new ClientError(
@@ -287,6 +293,7 @@ describe('RailwayAdapter stale binding recovery', () => {
           id: 'instance-svc-web-env-staging',
           serviceId: 'svc-web',
           environmentId: 'env-staging',
+          deletedAt: null,
         },
       })
       .mockResolvedValueOnce({

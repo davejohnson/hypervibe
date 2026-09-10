@@ -37,12 +37,17 @@ function serviceScope(environmentId = 'env-staging') {
 
 const allowMutation = { allowMutation: true } as const;
 
-function serviceInstance(serviceId = 'svc-1', environmentId = 'env-staging') {
+function serviceInstance(
+  serviceId = 'svc-1',
+  environmentId = 'env-staging',
+  deletedAt: string | null = null
+) {
   return {
     serviceInstance: {
       id: `${serviceId}:${environmentId}`,
       serviceId,
       environmentId,
+      deletedAt,
     },
   };
 }
@@ -331,34 +336,33 @@ describe('RailwayAdapter delete verification', () => {
     expect(request.mock.calls.some(([query]) => String(query).includes('serviceDelete'))).toBe(false);
   });
 
-  it('treats a stale service-instance tombstone as absent when the exact parent service is gone', async () => {
+  it('preserves a live exact service instance when the parent service is gone', async () => {
     const request = vi.fn()
       .mockResolvedValueOnce(serviceInstance())
       .mockResolvedValueOnce({ service: null });
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
-    await expect(adapter.deleteService('svc-1', serviceScope(), { allowMutation: false })).resolves.toEqual({
-      success: true,
-      alreadyAbsent: true,
-    });
+    const result = await adapter.deleteService('svc-1', serviceScope(), { allowMutation: false });
 
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('conflicting service and service-instance evidence');
     expect(request).toHaveBeenCalledTimes(2);
     expect(String(request.mock.calls[1]?.[0])).toContain('service(id: $serviceId)');
     expect(request.mock.calls.some(([query]) => String(query).includes('mutation DeleteEnvironmentService'))).toBe(false);
   });
 
-  it('treats a strict parent-service not-found response as a stale service-instance tombstone', async () => {
+  it('preserves a live exact service instance after a strict parent-service not-found response', async () => {
     const request = vi.fn()
       .mockResolvedValueOnce(serviceInstance())
       .mockRejectedValueOnce(graphqlNotFound('service', 'Service not found'));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
-    await expect(adapter.deleteService('svc-1', serviceScope(), { allowMutation: false })).resolves.toEqual({
-      success: true,
-      alreadyAbsent: true,
-    });
+    const result = await adapter.deleteService('svc-1', serviceScope(), { allowMutation: false });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('conflicting service and service-instance evidence');
     expect(request.mock.calls.some(([query]) => String(query).includes('serviceDelete'))).toBe(false);
   });
 
@@ -374,6 +378,42 @@ describe('RailwayAdapter delete verification', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('service instance inventory is unknown');
     expect(result.error).toContain('Railway parent lookup unavailable');
+    expect(request.mock.calls.some(([query]) => String(query).includes('serviceDelete'))).toBe(false);
+  });
+
+  it('treats a soft-deleted exact service instance as already absent', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(serviceInstance('svc-1', 'env-staging', '2026-09-08T12:00:00.000Z'));
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    await expect(adapter.deleteService('svc-1', serviceScope(), { allowMutation: false })).resolves.toEqual({
+      success: true,
+      alreadyAbsent: true,
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(String(request.mock.calls[0]?.[0])).toContain('deletedAt');
+    expect(request.mock.calls.some(([query]) => String(query).includes('serviceDelete'))).toBe(false);
+  });
+
+  it.each([
+    ['a missing deletion marker', undefined],
+    ['an empty deletion marker', ''],
+    ['an invalid deletion timestamp', 'not-a-timestamp'],
+    ['a non-string deletion marker', 17],
+  ])('preserves the binding for %s', async (_label, deletedAt) => {
+    const response = serviceInstance().serviceInstance as Record<string, unknown>;
+    if (deletedAt === undefined) delete response.deletedAt;
+    else response.deletedAt = deletedAt;
+    const request = vi.fn().mockResolvedValueOnce({ serviceInstance: response });
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.deleteService('svc-1', serviceScope(), { allowMutation: false });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('deletion marker');
+    expect(request).toHaveBeenCalledTimes(1);
     expect(request.mock.calls.some(([query]) => String(query).includes('serviceDelete'))).toBe(false);
   });
 

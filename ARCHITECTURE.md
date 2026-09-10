@@ -34,7 +34,7 @@ Read-only provider forensics belong in `hv_inspect`. Adoption of already-existin
 Desired infrastructure state is repo-backed when Hypervibe runs inside a git worktree:
 
 - `.hypervibe/spec.json` is the committed source of truth for infrastructure shape.
-- `.hypervibe/bindings.json` stores non-secret provider identity bindings needed for team members to observe the same live resources.
+- `.hypervibe/bindings.json` stores non-secret provider identity bindings needed for team members to observe the same live resources. Managed-secret acceptance metadata stays local because even a value hash is an offline verifier for a low-entropy delegated value.
 - Scoped storage identity is the composite of the provider resource id and its
   provider-native context. Keep `externalId` provider-native and present the
   opaque, non-secret `instanceScope` beside it. Railway uses project and
@@ -353,17 +353,16 @@ the mutation. A present target may be deleted only when no other current or
 retained local binding refers to the id and a complete paginated provider
 inventory proves that no sibling environment instance exists. The mutation is
 scoped with `serviceDelete(id, environmentId)`. An exact already-absent result
-removes only the selected local binding. When mutation is already disabled and
-the exact Railway `service(id)` parent lookup is provider-confirmed absent, a
-lingering exact `serviceInstance(serviceId, environmentId)` response is treated
-as a provider tombstone and likewise removes only the selected local binding
-without another provider mutation. Unknown parent evidence, a complete parent
-inventory that omits the target environment, or the same absent-parent conflict
-while mutation is authorized keeps all local state for a safe retry. Before any
-retained hosting boundary is destroyed, apply scans every local Hypervibe
-project and environment for an exact or ambiguously scoped reference to that
-provider boundary; any other reference blocks cleanup, including a database or
-cache provider identity
+removes only the selected local binding. A valid non-null `deletedAt` on the
+exact Railway service instance is provider-confirmed tombstone evidence and
+likewise removes only the selected local binding without another provider
+mutation. A missing or malformed deletion marker, a live exact instance whose
+parent service is absent, unknown parent evidence, or a complete parent
+inventory that omits the target environment keeps all local state for a safe
+retry. Before any retained hosting boundary is destroyed, apply scans every
+local Hypervibe project and environment for an exact or ambiguously scoped
+reference to that provider boundary; any other reference blocks cleanup,
+including a database or cache provider identity
 nested in a component's retained previous binding. Retained hosting cleanup is
 not planned without its required project/environment scope. If rollout rollback
 cannot remove a newly created service, snapshot restoration persists an
@@ -621,17 +620,49 @@ permissions, the official Cloud CLI installation path when `gcloud` is absent,
 caveats, and the complete safe retry call. Do not recommend a third-party
 package-manager wrapper when Google provides a first-party installer or archive;
 package-manager runtime coupling can fail independently of Google credentials.
-Cloud Run authentication is compatible with GCS and Memorystore and is reused
-through provider registry metadata; operators must not create redundant Google
-service-account keys for those capabilities. GCS, Memorystore, and Pub/Sub
+
+The opinionated GCP `hv_connections action="bootstrap"` flow is a narrow
+account-and-credential prerequisite exception, not an imperative application
+lifecycle path. It requires an explicit Hypervibe project, exact repository
+scope, and `adminAuth="default"`. When its GCP project ID is omitted, preview
+reuses verified repository-scoped connections or derives a stable project name;
+unreadable or conflicting scoped connections block that default. Confirmation
+requires the exact GCP project ID returned by preview. Preview is read-only and
+lists the open billing accounts visible to that Google identity. Confirmation
+requires the user-selected exact billing account, and may create the GCP
+project, link billing, create the fixed repository deploy identity and its
+one-time key, create a distinct keyless least-privilege runtime identity,
+prepare base Cloud Run/Cloud SQL access, verify both provider
+connections, and store them atomically. Generated key material never crosses
+the output boundary and is deleted on any pre-persistence failure. This flow
+must not create workloads, databases, domains, runtime secrets, or environments;
+all application infrastructure and separate staging/production lifecycle
+changes remain in spec, plan, and apply.
+
+The deploy identity remains control-plane-only; Cloud Run services, release
+jobs, and scheduled jobs use the distinct runtime identity. Base runtime access
+contains only Cloud SQL client and Secret Manager secret-access roles. Queue
+preparation grants publisher/subscriber to that runtime identity while keeping
+queue lifecycle administration on the deploy identity. Neither principal may
+silently replace the other. When a distinct runtime identity exists, the deploy
+identity receives Service Account User only on that exact runtime service
+account, never at project scope; preparation records the runtime account's
+immutable numeric identity and the scoped grant as `gcp-cloudrun-v2` evidence.
+The project-scoped grant remains compatible only for explicit legacy
+preparation without a runtime identity.
+
+Cloud Run authentication is compatible with GCS and Memorystore and its
+connection is reused through provider registry metadata; operators must not
+create redundant Google service-account keys for those capabilities. GCS, Memorystore, and Pub/Sub
 preparation are explicit independent capabilities. A capability preparation
 must reconcile only its selected APIs and roles; it must not repair base Cloud
 Run permissions or grant another capability's role. Base Cloud Run preparation
 remains a separate provider-only prepare call. Successive preparations preserve
 other previously reviewed capability evidence. Explicit queue-role removal is a standalone,
-removal-only operation; it affects only the connected deploy service-account
-member, including that member's conditional bindings, and never disables the
-Pub/Sub API, grants other access, or edits another principal.
+removal-only operation; it removes the reviewed lifecycle role from the deploy
+identity and the reviewed use roles from the runtime identity, including those
+members' conditional bindings. It never disables the Pub/Sub API, grants other
+access, or edits another principal.
 
 When adding or changing token guidance, include all of these details:
 
@@ -659,8 +690,8 @@ plan override. The value is excluded from `secretRefs`, ordinary `envVars`,
 deploy-env loading, `.env`, `.env.example`, previews, status, logs, receipts,
 and repository bindings. One value is sent to every declared service. A
 successful action records only its SHA-256 hash and generator/generation
-provenance, and binding persistence is part of action success rather than a
-post-apply best effort.
+provenance in local SQLite, and binding persistence is part of action success
+rather than a post-apply best effort.
 
 Provider-confirmed absence is an automatic initial install. Replacing an
 existing random secret requires exact action confirmation. Unknown or masked
@@ -673,6 +704,23 @@ provider and binding evidence. A replacement needs both its persisted
 write, so stripping confirmation metadata cannot turn a rotation into an
 automatic install.
 
+A Hypervibe-owned slot may opt into `replacementPolicy: "immutable"` when its
+value cannot safely rotate in place. Its first write requires the exact target
+key and every declared `conflictsWith` key to be provider-confirmed absent with
+no conflicting prior binding. A matching value may remain a noop, and a
+verified partial write may be repaired only with the identical derived value.
+Changed generator/generation/policy/conflicts, mismatching binding metadata,
+conflicting live values, masked or unknown observation, and any present or
+unobservable conflicting key block without a confirmation override. Plans pin
+the normalized policy, conflict names, and value fingerprint; apply compares
+them with the current spec, freshly observed live evidence, encrypted value,
+and non-secret binding before authorizing a write. A write is not accepted or
+bound until bounded post-write observation proves the exact value on every
+target and proves every conflict still absent. Immutable conflict names are
+excluded from deploy env inputs, cannot simultaneously be desired runtime
+keys, and cannot be retired through `removeEnvVars`; replacing a legacy
+encryption key requires an explicit credential rewrap workflow.
+
 ### Delegated secrets
 
 Delegated secrets are lifecycle-managed slots, not ordinary environment variables and not provider connections:
@@ -681,10 +729,10 @@ Delegated secrets are lifecycle-managed slots, not ordinary environment variable
 - `hv_plan secretRefs={...}` is the only write input. References are resolved locally, values are encrypted into that specific plan, and the plan action/preview contains only key names and non-secret metadata.
 - Declared keys are excluded from deploy env files and rejected from ordinary `envVars` overrides. An owner's local `.env` must never silently become the desired value for a delegated slot.
 - Missing, unaccepted, drifted, or newly reassigned required slots produce `inputRequired`. The plan remains inspectable but `hv_apply` must reject it before connection checks or provider mutations.
-- A successful provider receipt records value-free binding metadata (`delegatedEnvBindings` for hosting and `delegatedActionsBindings` for GitHub): key name, destination, principal, SHA-256 value hash, timestamp, and action id. The value itself is never stored in repo bindings or receipts.
+- A successful provider receipt records binding metadata (`delegatedEnvBindings` for hosting and `delegatedActionsBindings` for GitHub) in authoritative local SQLite: key name, destination, principal, SHA-256 value hash, timestamp, and action id. The value itself is never stored in bindings or receipts. The complete binding collections are omitted from `.hypervibe/bindings.json`; a hash must not become a repository-visible offline verifier for a low-entropy delegated value.
 - Live observation compares provider hashes against the accepted hash. Matching values are preserved without needing the secret locally. Drift is reported and preserved until a new explicit plan input is supplied.
 
-`.hypervibe/spec.json` and the sanitized `.hypervibe/bindings.json` make this state reconstructible after a local database or checkout is lost. Provider connections and encrypted in-flight plans remain local and must be recreated.
+`.hypervibe/spec.json` and the sanitized `.hypervibe/bindings.json` make desired state and non-secret provider identities reconstructible after a local database or checkout is lost. Accepted managed-secret fingerprints, provider connections, and encrypted in-flight plans remain local and must be recreated. A fresh machine therefore needs explicit delegated secret input before it can accept or replace a managed slot; it must never trust a verifier recovered from the repository.
 
 In the no-service model, `principal` is declarative attribution, not authenticated authorization. Git review/branch protection and provider-scoped membership enforce who may change the spec and mutate infrastructure. A local principal or collaborator edit cannot grant a hosting, cloud, or code-host role, but a caller who already holds provider mutation credentials can still change provider state. Do not treat delegated metadata as a centralized ACL or automatically apply unreviewed changes with privileged credentials; authenticated principal enforcement would require a trusted service or signed attestation.
 

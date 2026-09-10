@@ -1,7 +1,10 @@
 import type { LocalSnapshot, PlanAction } from '../plan/plan.types.js';
 import type { ObservedState } from '../ports/observe.port.js';
 import type { EnvironmentSpec } from '../spec/spec.schema.js';
-import { bindingIdentityFingerprint } from './binding-identity.js';
+import {
+  bindingIdentityFingerprint,
+  providerIdentityScopeMatches,
+} from './binding-identity.js';
 import { parseUnresolvedDatastoreMutation } from '../ports/database.port.js';
 import { parseUnresolvedCacheNetworkMutation } from '../ports/cache.port.js';
 
@@ -44,18 +47,6 @@ function stringRecord(value: unknown): Record<string, string> | undefined {
     return undefined;
   }
   return Object.fromEntries(entries) as Record<string, string>;
-}
-
-function scopesMatch(
-  localScope: Record<string, string> | undefined,
-  liveScope: Record<string, string> | undefined
-): boolean {
-  const localEntries = Object.entries(localScope ?? {}).sort(([left], [right]) => left.localeCompare(right));
-  const liveEntries = Object.entries(liveScope ?? {}).sort(([left], [right]) => left.localeCompare(right));
-  return localEntries.length === liveEntries.length
-    && localEntries.every(([key, value], index) => (
-      liveEntries[index]?.[0] === key && liveEntries[index]?.[1] === value
-    ));
 }
 
 function withoutPreviousProviderBinding(
@@ -113,7 +104,7 @@ export function planCache(params: {
   const local = params.local.components.find((component) => component.type === 'redis');
   const localProvider = bindingProvider(local);
   const localBindings = local?.bindings as Record<string, unknown> | undefined;
-  const localProviderScope = stringRecord(localBindings?.providerScope);
+  const persistedLocalProviderScope = stringRecord(localBindings?.providerScope);
   const previousProvider = typeof (local?.bindings as Record<string, unknown> | undefined)?.previousProvider === 'string'
     ? String((local?.bindings as Record<string, unknown>).previousProvider)
     : undefined;
@@ -139,10 +130,19 @@ export function planCache(params: {
     ? observedCaches.filter((cache) => (
       cache.externalId === local.externalId
       && (!localProvider || cache.provider === localProvider)
-      && scopesMatch(localProviderScope, cache.providerScope)
+      && providerIdentityScopeMatches({
+        componentBindings: localBindings,
+        environmentBindings: params.local.bindings as Record<string, unknown> | undefined,
+        provider: localProvider,
+        liveScope: cache.providerScope,
+      })
     ))
     : [];
   const boundObserved = boundObservedCandidates.length === 1 ? boundObservedCandidates[0] : undefined;
+  // A complete, matching observation can safely upgrade an old flattened
+  // binding to the scope required by later reconciliation and cleanup steps.
+  const localProviderScope = stringRecord(boundObserved?.providerScope)
+    ?? persistedLocalProviderScope;
   const observed = boundObserved ?? (!local && observedCaches.length === 1 ? observedCaches[0] : undefined);
   const bindingIdentityMismatch = Boolean(
     local

@@ -1,7 +1,6 @@
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { adapterFactory } from './adapter.factory.js';
-import { getProjectScopeHints } from './project-scope.js';
 import { DeployOrchestrator } from './deploy.orchestrator.js';
 import { InfraTransaction } from './infra.transaction.js';
 import { getCloudPrepareProfile, isCloudPrepared } from './cloud-prepare.js';
@@ -18,7 +17,6 @@ import {
   workloadKindForServiceName,
 } from './spec.service.js';
 import { buildDeploySourceEnvVars, resolveGitDeploySource } from './deploy-source.js';
-import { attachBootstrapDomain } from './bootstrap-domain.js';
 
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
@@ -76,10 +74,10 @@ export async function executeBootstrap(params: {
   hostingRegion?: string;
   services: string[];
   crons?: DesiredState['crons'];
-  domain?: string;
   serviceConfig?: DesiredState['serviceConfig'];
   envVars?: DesiredState['envVars'];
   deploy?: DesiredState['deploy'];
+  expectedSourceCommitSha?: string;
   verifyHttpHealth?: boolean;
   queueEnvVars?: Record<string, string>;
   envVarsByService?: Record<string, Record<string, string>>;
@@ -98,8 +96,6 @@ export async function executeBootstrap(params: {
       },
     };
   }
-  const scopeHints = getProjectScopeHints(project);
-
   let environment = envRepo.findByProjectAndName(project.id, params.environmentName);
   if (!environment) {
     environment = envRepo.create({ projectId: project.id, name: params.environmentName });
@@ -320,6 +316,7 @@ export async function executeBootstrap(params: {
     ...(params.envVarsByService ? { envVarsByService: params.envVarsByService } : {}),
     ...(params.verifyHttpHealth ? { verifyHttpHealth: true } : {}),
     ...(deferProviderDeployment ? { deferProviderDeployment: true } : {}),
+    ...(params.expectedSourceCommitSha ? { expectedSourceCommitSha: params.expectedSourceCommitSha } : {}),
     ensureProject: params.ensureHostingProject !== false,
     adapter: hostingAdapter,
   });
@@ -507,18 +504,6 @@ export async function executeBootstrap(params: {
         'Use hv_ci_status to inspect workflow runs, then hv_health after a successful workflow run.',
       ],
     };
-  }
-
-  if (params.domain) {
-    await attachBootstrapDomain({
-      domain: params.domain,
-      environment,
-      hostingAdapter,
-      serviceWorkloads,
-      scopeHints,
-      targetPlatform,
-      summary,
-    });
   }
 
   return { success: deploy.success, summary };

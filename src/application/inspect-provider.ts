@@ -833,6 +833,32 @@ export async function inspectProvider(
         };
       }
 
+      if (
+        (standardResource === 'database' || standardResource === 'cache')
+        && typeof observe === 'function'
+      ) {
+        const observed = await (observe as (environment: Environment) => Promise<ObservedState>)
+          .call(resolved.adapter, environment);
+        const collection = standardResource === 'database' ? 'databases' : 'caches';
+        const resources = (standardResource === 'database'
+          ? observed.databases
+          : observed.caches ?? [])
+          .filter((item) => !input.name || item.name === input.name);
+        return {
+          provider: providerName,
+          category: registered.metadata.category,
+          mode: standardResource,
+          project: project?.name,
+          environment: environment.name,
+          observed: {
+            [collection]: resources,
+            completeness: observed.completeness?.[collection] ?? 'unknown',
+            partial: observed.partial,
+            warnings: observed.warnings,
+          },
+        };
+      }
+
       if (standardResource === 'storage' && typeof observe === 'function') {
         const observed = await (observe as (environment: Environment) => Promise<ObservedState>)
           .call(resolved.adapter, environment);

@@ -13,6 +13,8 @@ export interface CiLifecycleResult {
   warnings: string[];
   /** Fail-closed planning result for unknown authority or unsupported semantics. */
   error?: string;
+  /** CI rendering must be re-planned after already-reviewed hosting bindings converge. */
+  deferred?: boolean;
 }
 
 export interface CiApplyResult {

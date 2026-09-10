@@ -9,7 +9,10 @@ import {
   DOMAIN_ADOPT_OPERATION,
   DOMAIN_DETACH_OPERATION,
 } from '../services/domain-attach-policy.js';
-import { bindingIdentityFingerprint } from '../services/binding-identity.js';
+import {
+  bindingIdentityFingerprint,
+  providerIdentityScopeMatches,
+} from '../services/binding-identity.js';
 import { parseUnresolvedDatabaseMutation } from '../ports/database.port.js';
 import { parseHostingServiceCreateRecovery } from '../ports/hosting.port.js';
 
@@ -20,19 +23,20 @@ function serviceDeleteMetadata(input: {
   provider?: string;
   projectId?: string;
   environmentId?: string;
+  providerScope?: Record<string, string>;
   serviceName?: string;
   scope?: 'environment' | 'project';
   operation?: 'hostingServiceDestroy' | 'taskServiceCleanup' | 'previousHostingDestroy';
 }): Record<string, unknown> {
   const deleteScope = input.scope;
-  const providerScope = input.projectId && deleteScope
+  const providerScope = input.providerScope ?? (input.projectId && deleteScope
     ? {
         projectId: input.projectId,
         ...(deleteScope === 'environment' && input.environmentId
           ? { environmentId: input.environmentId }
           : {}),
       }
-    : undefined;
+    : undefined);
   const bindingIdentity = input.provider && providerScope && input.serviceName
     ? {
         provider: input.provider,
@@ -71,18 +75,21 @@ export function diffRetainedHostingCleanup(input: {
   const { envName, currentProvider, previousHosting } = input;
   const actions: PlanAction[] = [];
   const warnings: string[] = [];
-  if (!previousHosting?.provider || previousHosting.provider === currentProvider) {
+  if (!previousHosting?.provider) {
     return { actions, warnings };
   }
 
   const previousServices = Object.entries(previousHosting.services ?? {});
+  const retainedProviderScope = previousHosting.providerScope;
+  const retainedProjectId = retainedProviderScope?.projectId ?? previousHosting.projectId;
+  const retainedEnvironmentId = retainedProviderScope?.environmentId ?? previousHosting.environmentId;
   const cleanupBoundary = input.teardownBoundary ?? 'services';
   if (previousServices.length === 0 && cleanupBoundary === 'services') {
     return { actions, warnings };
   }
 
   warnings.push(
-    `${previousServices.length} service binding(s) are still running on ${previousHosting.provider}, with the ${cleanupBoundary} cleanup boundary retained from before the switch to ${currentProvider} — they may keep billing until destroyed. Confirm the previous-provider destroy actions when the ${currentProvider} deployment is verified.`
+    `${previousServices.length} service binding(s) are still running on ${previousHosting.provider} in an earlier scope, with its ${cleanupBoundary} cleanup boundary preserved before rebinding to ${currentProvider} — they may keep billing until destroyed. Confirm the retained-scope destroy actions when the current deployment is verified.`
   );
   const serviceDestroyIds: string[] = [];
   if (cleanupBoundary !== 'environment') {
@@ -95,7 +102,7 @@ export function diffRetainedHostingCleanup(input: {
         type: 'destroy',
         resource: { kind: 'service', name, provider: previousHosting.provider },
         verified: false,
-        reason: `Service "${name}" is still running on ${previousHosting.provider} (abandoned by the switch to ${currentProvider}). Confirm to delete it there.`,
+        reason: `Service "${name}" is retained on an earlier ${previousHosting.provider} scope. Confirm to delete that exact old binding.`,
         requiresConfirm: true,
         metadata: {
           operation: 'previousHostingDestroy',
@@ -104,9 +111,12 @@ export function diffRetainedHostingCleanup(input: {
           ...(serviceId ? { serviceId } : {}),
           ...(serviceId ? serviceDeleteMetadata({
             serviceId,
-            projectId: previousHosting.projectId,
+            projectId: retainedProjectId,
+            environmentId: retainedEnvironmentId,
+            providerScope: retainedProviderScope,
             scope: 'project',
           }) : {}),
+          ...(retainedProviderScope ? { retainedProviderScope } : {}),
         },
       });
     }
@@ -123,8 +133,9 @@ export function diffRetainedHostingCleanup(input: {
         operation: 'previousHostingDestroy',
         previousProvider: previousHosting.provider,
         cleanupBoundary,
-        ...(previousHosting.projectId ? { projectId: previousHosting.projectId } : {}),
-        ...(previousHosting.environmentId ? { environmentId: previousHosting.environmentId } : {}),
+        ...(retainedProjectId ? { projectId: retainedProjectId } : {}),
+        ...(retainedEnvironmentId ? { environmentId: retainedEnvironmentId } : {}),
+        ...(retainedProviderScope ? { retainedProviderScope } : {}),
       },
     });
   } else if (cleanupBoundary === 'project') {
@@ -140,7 +151,8 @@ export function diffRetainedHostingCleanup(input: {
         operation: 'previousHostingDestroy',
         previousProvider: previousHosting.provider,
         cleanupBoundary,
-        ...(previousHosting.projectId ? { projectId: previousHosting.projectId } : {}),
+        ...(retainedProjectId ? { projectId: retainedProjectId } : {}),
+        ...(retainedProviderScope ? { retainedProviderScope } : {}),
       },
     });
   }
@@ -453,23 +465,30 @@ export function diffEnvironment(input: {
         continue;
       }
 
-      if (live.status === 'failed' || live.status === 'unknown') {
+      if (live.status === 'unknown') {
         actions.push({
           id,
           type: 'update',
           resource,
           verified: true,
-          reason: `Service "${name}" live status is ${live.status}; refusing to report configuration convergence`,
+          reason: `Service "${name}" live status is unknown; refusing to report configuration convergence`,
           metadata: {
-            blockedReason: `service_status_${live.status}`,
+            blockedReason: 'service_status_unknown',
             observedStatus: live.status,
             externalId: live.externalId,
           },
         });
         warnings.push(
-          `Service "${name}" is ${live.status}; diagnose its deployment before applying further service mutations.`
+          `Service "${name}" status is unknown; diagnose its deployment before applying further service mutations.`
         );
         continue;
+      }
+
+      const failedDeployment = live.status === 'failed';
+      if (failedDeployment) {
+        warnings.push(
+          `Service "${name}" failed; Hypervibe will re-converge the exact bound service configuration, but runtime health remains failed until a later deployment succeeds.`
+        );
       }
 
       // Only cron-ness is structural for providers that model scheduled jobs
@@ -531,8 +550,11 @@ export function diffEnvironment(input: {
       const sourceIssue = spec.deploy?.strategy === 'branch' && expectedSource
         ? diffDeploySource(expectedSource, live)
         : undefined;
-      if (noCode || sourceIssue || diff.length > 0) {
+      if (failedDeployment || noCode || sourceIssue || diff.length > 0) {
         const reasons: string[] = [];
+        if (failedDeployment) {
+          reasons.push(`Service "${name}" latest deployment failed; re-converge its reviewed configuration before retrying deployment`);
+        }
         if (noCode) {
           reasons.push(spec.deploy?.strategy === 'branch'
             ? `Service "${name}" has no image deployed yet — expected until the first CI deploy succeeds (push to the deploy branch or hv_ci_trigger)`
@@ -551,6 +573,9 @@ export function diffEnvironment(input: {
           verified: !runtimeDrift,
           reason: reasons.join('; '),
           ...(diff.length > 0 ? { diff } : {}),
+          ...(failedDeployment
+            ? { metadata: { observedStatus: live.status, externalId: live.externalId } }
+            : {}),
         });
       } else {
         actions.push({ id, type: 'noop', resource, verified: true, reason: 'In sync' });
@@ -852,11 +877,6 @@ export function diffEnvironment(input: {
   const localDbExternalId = localDb?.externalId
     ?? (typeof localDbBindings?.instanceId === 'string' ? localDbBindings.instanceId : undefined)
     ?? (typeof localDbBindings?.serviceId === 'string' ? localDbBindings.serviceId : undefined);
-  const localDbScope = localDbBindings?.providerScope
-    && typeof localDbBindings.providerScope === 'object'
-    && !Array.isArray(localDbBindings.providerScope)
-    ? localDbBindings.providerScope as Record<string, unknown>
-    : undefined;
   const destroyProviderScope = (value: unknown): Record<string, string> | null => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
     const entries = Object.entries(value);
@@ -865,33 +885,16 @@ export function diffEnvironment(input: {
     }
     return Object.fromEntries(entries) as Record<string, string>;
   };
-  const localDbDestroyScope = destroyProviderScope(localDbBindings?.providerScope);
+  const persistedLocalDbDestroyScope = destroyProviderScope(localDbBindings?.providerScope);
   const previousDbDestroyScope = destroyProviderScope(previousDbBindings?.providerScope);
   const databaseMatchesLocalBinding = (database: NonNullable<ObservedState['databases']>[number]): boolean => {
     if (!localDbExternalId || database.externalId !== localDbExternalId) return false;
     if (localDbProvider && database.provider !== localDbProvider) return false;
-    const localScopeEntries = Object.entries(localDbScope ?? {});
-    const liveScopeEntries = Object.entries(database.providerScope ?? {});
-
-    // Scope is part of a durable provider identity. If persisted state knows a
-    // scope, an unscoped or partially scoped observation cannot prove that the
-    // matching bare id belongs to this environment.
-    if (localScopeEntries.length > 0) {
-      if (liveScopeEntries.length !== localScopeEntries.length) return false;
-      return localScopeEntries.every(([key, value]) => (
-        typeof value === 'string'
-        && value.length > 0
-        && database.providerScope?.[key] === value
-      ));
-    }
-    if (liveScopeEntries.length === 0) return true;
-
-    // Scoped provider ids are identities only together with their provider
-    // scope. Read legacy flattened scope fields when present, but never accept
-    // an unscoped id as proof that a scoped live datastore is the same one.
-    return liveScopeEntries.every(([key, value]) => {
-      const localValue = localDbScope?.[key] ?? localDbBindings?.[key];
-      return typeof localValue === 'string' && localValue === value;
+    return providerIdentityScopeMatches({
+      componentBindings: localDbBindings,
+      environmentBindings: local.bindings as Record<string, unknown> | undefined,
+      provider: localDbProvider,
+      liveScope: database.providerScope,
     });
   };
   const boundObservedDatabases = localDb
@@ -902,6 +905,10 @@ export function diffEnvironment(input: {
     : !localDb && observedDatabases.length === 1
       ? observedDatabases[0]
       : undefined;
+  // Once a legacy identity has been proven against a complete live
+  // observation, retain that exact scope for safe cleanup planning too.
+  const localDbDestroyScope = destroyProviderScope(observedDb?.providerScope)
+    ?? persistedLocalDbDestroyScope;
   const databaseAmbiguous = boundObservedDatabases.length > 1
     || (!observedDb && observedDatabases.length > 1);
   const databaseIdentityMismatch = Boolean(
@@ -1690,7 +1697,6 @@ function diffServiceConfig(
   // Only fields the spec sets are managed; unset spec fields are ignored.
   const fields: Array<[keyof ServiceSpec & keyof ObservedService['config'], string]> = [
     ['startCommand', 'startCommand'],
-    ['releaseCommand', 'releaseCommand'],
     ['healthCheckPath', 'healthCheckPath'],
     ['cronSchedule', 'cronSchedule'],
     ['public', 'public'],
@@ -1701,6 +1707,19 @@ function diffServiceConfig(
     const actual = live.config[key];
     if (actual !== wanted) {
       diff.push({ field, from: actual === undefined ? undefined : String(actual), to: String(wanted) });
+    }
+  }
+
+  if (spec.releaseCommand !== undefined) {
+    const liveReleaseCommandMatches = live.config.releaseCommand === spec.releaseCommand
+      || live.config.releaseCommandHash === hashEnvValue(spec.releaseCommand.trim());
+    if (!liveReleaseCommandMatches) {
+      diff.push({
+        field: 'releaseCommand',
+        from: live.config.releaseCommand
+          ?? (live.config.releaseCommandHash ? 'configured command' : undefined),
+        to: spec.releaseCommand,
+      });
     }
   }
 

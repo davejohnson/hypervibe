@@ -35,12 +35,14 @@ describe('Fly.io exact-SHA workflow', () => {
     expect(result.requiredSecrets).toEqual(['FLY_API_TOKEN']);
     expect(result.requiredVariables).toEqual([]);
     expect(result.releaseImageUri).toContain(
-      'registry.fly.io/hv-web-app@${{ steps.fly_build.outputs.digest }}'
+      "steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri"
     );
+    expect(result.releaseImageUri).toContain('steps.release_image.outputs.image_uri');
+    expect(result.steps).toContain("core.setOutput('image_uri', 'registry.fly.io/' + app + '@' + digest)");
     expect(result.steps).toContain('docker/build-push-action@v6');
     expect(result.steps).toContain('registry.fly.io/hv-web-app:${{ steps.deploy.outputs.sha }}');
     expect(result.steps).toContain('current_version: machine.instance_id');
-    expect(result.steps).toContain("const image = 'registry.fly.io/' + registryApp + '@' + digest");
+    expect(result.steps).toContain("const image = (process.env.FLY_IMAGE_URI || '').trim().toLowerCase()");
     expect(result.steps).toContain('machines.length !== 1 || exact.length !== 1');
     expect(result.steps).toContain('hypervibe_git_sha: sha');
     expect(result.steps).toContain("observedDigest !== digest");

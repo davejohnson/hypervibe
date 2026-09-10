@@ -3,21 +3,69 @@ import type { ProjectRuntime } from '../spec/project-runtime.js';
 export type BranchDeployProvider = string;
 export type BranchDeployEnvironmentKind = 'development' | 'test' | 'staging' | 'production' | 'custom';
 
+export interface BranchDeployReleaseResource {
+  logicalName: string;
+  workloadKind: 'web' | 'worker' | 'cron';
+  providerResourceType: 'service' | 'job';
+  providerResourceId: string;
+}
+
+/** Exact reviewed runtime configuration for one provider-bound workload. */
+export interface BranchDeployRuntimeResource extends BranchDeployReleaseResource {
+  startCommand: string | null;
+  healthCheckPath: string | null;
+}
+
+export interface BranchDeployReleaseTarget {
+  scope: {
+    providerProjectId?: string;
+    providerEnvironmentId?: string;
+    providerRegion?: string;
+    providerScope?: Record<string, string>;
+  };
+  bindingsFingerprint: string;
+  resources: BranchDeployReleaseResource[];
+}
+
 export interface BranchDeployTarget {
   environmentName: string;
   kind: BranchDeployEnvironmentKind;
   branch: string;
   autoDeployOnPush: boolean;
   promoteFromEnvironment?: string;
+  /** Hosting provider used to derive the exact managed source workflow identity. */
+  promoteFromProvider?: string;
+  /** Exact source service set required in downloaded promotion evidence. */
+  promoteFromServiceNames?: string[];
+  /** Reviewed source deployment contract/program required in promotion evidence. */
+  promoteFromProgramFingerprint?: string;
+  /** Exact source binding contract required in promotion evidence. */
+  promoteFromReleaseTarget?: BranchDeployReleaseTarget;
+  /** Deployment contract/program fingerprint written into this target's release evidence. */
+  programFingerprint?: string;
+  /** Exact current provider scope and logical-to-provider workload bindings. */
+  releaseTarget?: BranchDeployReleaseTarget;
   serviceNames: string[];
   providerProjectId?: string;
   providerEnvironmentId?: string;
+  /** Provider-native non-secret scope for identity checks in generated CI. */
+  providerScope?: Record<string, string>;
   /** Non-secret desired hosting placement from the environment spec. */
   providerRegion?: string;
   providerServiceIds: string[];
   /** Provider-observed image locations retained in hosting service bindings. */
   providerImageUris?: string[];
   providerJobNames?: string[];
+  /** Exact per-workload runtime behavior applied atomically with a CI image release. */
+  runtimeResources?: BranchDeployRuntimeResource[];
+  /** Pre-rollout commands and the bound runtime service whose config they inherit. */
+  releaseCommands?: Array<{
+    serviceName: string;
+    providerServiceId?: string;
+    /** Exact release job created and bound by reviewed provider apply. */
+    jobName?: string;
+    command: string;
+  }>;
   needsServiceNames?: boolean;
   needsJobNames?: boolean;
   /** One unambiguous reviewed CMD for generated images; absent when services disagree. */
@@ -44,6 +92,8 @@ export interface BranchDeployWorkflow {
   };
   requiredSecrets: string[];
   requiredVariables: string[];
+  /** Whether rollback can restore provider-verifiable immutable image evidence. */
+  supportsImmutableRollback: boolean;
 }
 
 export interface BranchDeployStepResult {
@@ -100,5 +150,12 @@ export interface PortableCiDeployRecipe {
     path: string;
     content: string;
     npmPackages?: string[];
+  };
+  /** Safe CMD used only to build an image whose provider release installs exact per-resource commands. */
+  containerBuildStartCommand?: string;
+  /** Provider-owned release identities that portable CI must preserve and verify. */
+  releaseEvidence?: {
+    providerResources: string[];
+    requiresImmutableImage: boolean;
   };
 }
