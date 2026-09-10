@@ -94,6 +94,84 @@ describe('github tools', () => {
     expect(spec.environments.staging!.services.cron!.startCommand).toBe('npm run cron');
   });
 
+  it('includes Railway cron services in the exact release target', async () => {
+    const project = new ProjectRepository().create({
+      name: 'railway-cron-release',
+      defaultPlatform: 'railway',
+    });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-project',
+        environmentId: 'rail-production',
+        services: {
+          web: { serviceId: 'rail-web', workloadKind: 'web' },
+          reminders: { serviceId: 'rail-reminders', workloadKind: 'cron' },
+        },
+      },
+    });
+    const spec = projectSpecSchema.parse({
+      version: 1,
+      project: project.name,
+      runtime: { kind: 'node', version: '24', installCommand: 'npm ci' },
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+          services: {
+            web: { workloadKind: 'web', startCommand: 'npm start', public: true },
+            reminders: {
+              workloadKind: 'cron',
+              startCommand: 'npm run reminders',
+              cronSchedule: '0 8 * * *',
+            },
+          },
+        },
+      },
+    });
+
+    const { targets, migration } = resolveReviewedBranchDeployTargets(project, spec);
+    const target = targets[0]!;
+    expect(target.releaseTarget?.resources).toEqual([
+      {
+        logicalName: 'reminders',
+        workloadKind: 'cron',
+        providerResourceType: 'service',
+        providerResourceId: 'rail-reminders',
+      },
+      {
+        logicalName: 'web',
+        workloadKind: 'web',
+        providerResourceType: 'service',
+        providerResourceId: 'rail-web',
+      },
+    ]);
+
+    const workflow = buildBranchDeployWorkflow('railway', target, migration);
+    const script = extractGitHubScript(workflow.content, 'Verify reviewed release target');
+    const execute = new AsyncFunction('require', 'process', 'core', script);
+    await expect(execute(
+      (moduleName: string) => {
+        if (moduleName === 'crypto') return { createHash };
+        throw new Error(`Unexpected module request: ${moduleName}`);
+      },
+      {
+        env: {
+          HYPERVIBE_RELEASE_PROVIDER: 'railway',
+          HYPERVIBE_RELEASE_ENVIRONMENT: 'production',
+          HYPERVIBE_RELEASE_SERVICES: JSON.stringify(target.serviceNames),
+          HYPERVIBE_RELEASE_TARGET_SCOPE: JSON.stringify(target.releaseTarget!.scope),
+          HYPERVIBE_RELEASE_RESOURCES: JSON.stringify(target.releaseTarget!.resources),
+          HYPERVIBE_RELEASE_BINDINGS_FINGERPRINT: target.releaseTarget!.bindingsFingerprint,
+          HYPERVIBE_RELEASE_PROGRAM_FINGERPRINT: target.programFingerprint,
+        },
+      },
+      {}
+    )).resolves.toBeUndefined();
+  });
+
   it.each([
     ['missing worker command', {
       web: { workloadKind: 'web', startCommand: 'npm start' },

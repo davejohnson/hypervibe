@@ -107,12 +107,12 @@ function environmentBindings(projectId: string, environmentName: string, desired
     const workloadKind = boundKind === 'web' || boundKind === 'worker' || boundKind === 'cron'
       ? boundKind
       : isScheduledJob ? 'cron' : 'web';
-    const providerResourceId = workloadKind === 'cron' && jobName ? jobName : serviceId;
+    const providerResourceId = isScheduledJob ? jobName ?? serviceId : serviceId;
     if (providerResourceId) {
       releaseResources.push({
         logicalName: serviceName,
         workloadKind,
-        providerResourceType: workloadKind === 'cron' ? 'job' : 'service',
+        providerResourceType: isScheduledJob ? 'job' : 'service',
         providerResourceId,
       });
     }
@@ -557,7 +557,7 @@ function normalizeEvidenceResource(value, withImage) {
       || !['web', 'worker', 'cron'].includes(resource.workloadKind)
       || !['service', 'job'].includes(resource.providerResourceType)
       || typeof resource.providerResourceId !== 'string' || !resource.providerResourceId.trim()
-      || (resource.workloadKind === 'cron') !== (resource.providerResourceType === 'job')) {
+      || (resource.providerResourceType === 'job' && resource.workloadKind !== 'cron')) {
     throw new Error('Release evidence resource identity is malformed');
   }
   const normalized = {

@@ -189,17 +189,19 @@ export function managedCiEnvironmentBindings(
       ?? (boundKind === 'web' || boundKind === 'worker' || boundKind === 'cron'
         ? boundKind
         : isScheduledJob ? 'cron' : 'web');
-    const providerResourceId = workloadKind === 'cron' && jobName ? jobName : serviceId;
+    const providerResourceId = isScheduledJob ? jobName ?? serviceId : serviceId;
     const boundKindIsKnown = boundKind === 'web' || boundKind === 'worker' || boundKind === 'cron';
     const bindingMatchesDesiredKind = !configuredKind || (
       (!boundKindIsKnown || boundKind === configuredKind)
-      && (configuredKind === 'cron') === isScheduledJob
+      && (isScheduledJob
+        ? configuredKind === 'cron'
+        : configuredKind !== 'cron' || boundKind === 'cron')
     );
     if (providerResourceId && bindingMatchesDesiredKind) {
       releaseResources.push({
         logicalName: serviceName,
         workloadKind,
-        providerResourceType: workloadKind === 'cron' ? 'job' : 'service',
+        providerResourceType: isScheduledJob ? 'job' : 'service',
         providerResourceId,
       });
     }
