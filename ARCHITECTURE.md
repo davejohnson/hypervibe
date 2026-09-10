@@ -78,6 +78,10 @@ it is not the runtime used to execute Hypervibe itself.
   and named package scripts. Those commands become desired state and are
   reviewable. Missing or conflicting evidence blocks generated builds; a
   repository Dockerfile remains the escape hatch for custom build systems.
+- Shared-image builds use an unambiguous explicit web command as the image's
+  default, or a common explicit runtime-service command when no web workload
+  exists. This does not replace per-workload provider start commands; web and
+  worker commands may differ. Missing or ambiguous defaults remain blocked.
 - Cron workloads always declare `startCommand`. Provider adapters must not
   substitute an application command while creating or updating a scheduled job.
 - Hypervibe-owned isolated helpers, such as App Store releases, restore drills,
