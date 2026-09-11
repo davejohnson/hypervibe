@@ -1857,6 +1857,15 @@ export class PlanService {
       }
     }
     const { observed, warnings: observeWarnings } = await this.observeEnvironment(projectForPlan, environmentForObserve, environmentSpec);
+    const hostingMetadata = providerRegistry.getMetadata(environmentSpec.hosting.provider);
+    const boundEnvironmentId = recordValue(effectiveBindingRecord, 'environmentId');
+    const destinationsAreKnownAbsent = Boolean(
+      hostingMetadata?.orchestration?.environment?.separateResource === true
+      && observed
+      && observed.completeness?.environment === 'complete'
+      && !observed.environmentId
+      && !boundEnvironmentId
+    );
     const maintenance = observed && environmentForObserve
       ? planMaintenance({
           environmentName,
@@ -1885,6 +1894,7 @@ export class PlanService {
         observed,
         suppliedValues: delegatedSecretValues,
         generatedValues: generatedSecretValues,
+        destinationsAreKnownAbsent,
       });
     if (delegatedSecrets.blockers.length > 0) {
       const detail = delegatedSecrets.blockers
@@ -2028,7 +2038,6 @@ export class PlanService {
       }
       : environmentSpec;
 
-    const hostingMetadata = providerRegistry.getMetadata(environmentSpec.hosting.provider);
     const databaseConnectivity = environmentSpec.database
       ? providerRegistry.getMetadata(environmentSpec.database.provider)
         ?.lifecycle?.databaseConnectivity
@@ -2166,7 +2175,6 @@ export class PlanService {
     const projectAction = actions.find((action) =>
       action.id === projectActionId && action.type !== 'noop'
     );
-    const boundEnvironmentId = recordValue(effectiveBindingRecord, 'environmentId');
     const observedEnvironmentId = observed?.environmentId;
     const environmentObservationKnown = observed !== null
       && observed.completeness?.environment !== 'unknown';

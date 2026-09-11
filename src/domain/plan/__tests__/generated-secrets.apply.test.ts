@@ -370,6 +370,175 @@ describe('generated secret plan/apply integration', () => {
     }
   });
 
+  it('creates a missing provider environment and its services before installing generated secrets', async () => {
+    const currentSpec = new SpecStore().get(project)!.spec;
+    new SpecStore().replace(project, {
+      ...currentSpec,
+      secrets: {
+        [SECRET_KEY]: {
+          ...currentSpec.secrets[SECRET_KEY],
+          environments: ['staging'],
+        },
+      },
+      environments: {
+        ...currentSpec.environments,
+        staging: {
+          hosting: { provider: 'railway' },
+          services: {
+            web: {},
+            worker: { workloadKind: 'worker' },
+          },
+        },
+      },
+    });
+
+    const deployedServices = new Set<string>();
+    const observe = vi.fn(async (environment: Environment) => {
+      const environmentId = (environment.platformBindings as { environmentId?: string }).environmentId;
+      if (!environmentId) {
+        return {
+          provider: 'railway',
+          observedAt: new Date().toISOString(),
+          projectExists: true,
+          projectId: 'rail-project',
+          services: [],
+          databases: [],
+          completeness: {
+            project: 'complete' as const,
+            environment: 'complete' as const,
+            services: 'unknown' as const,
+            databases: 'unknown' as const,
+          },
+          partial: true,
+          warnings: ['Could not resolve Railway environment for "staging"'],
+        };
+      }
+      const live = {
+        ...observed(liveHashes, liveConflictHashes),
+        environmentId,
+      };
+      live.services = live.services.filter((service) => deployedServices.has(service.name));
+      return live;
+    });
+    const setEnvVars = vi.fn(async (
+      _environment: Environment,
+      service: Service,
+      vars: Record<string, string>
+    ) => {
+      const value = vars[SECRET_KEY];
+      if (value) liveHashes.set(service.name, hashEnvValue(value));
+      return { success: true, message: `Synced ${service.name}` };
+    });
+    const ensureEnvironment = vi.fn(async () => ({
+      success: true,
+      message: 'Created staging',
+      data: {
+        projectId: 'rail-project',
+        environmentId: 'rail-staging',
+        environmentName: 'staging',
+        created: true,
+      },
+    }));
+    const deploy = vi.fn(async (service: Service) => {
+      deployedServices.add(service.name);
+      return {
+        serviceId: service.id,
+        externalId: `rail-staging-${service.name}`,
+        status: 'deployed' as const,
+        receipt: { success: true, message: `Deployed ${service.name}` },
+      };
+    });
+    const adapter = {
+      name: 'railway',
+      capabilities: {
+        supportedBuilders: ['nixpacks'],
+        supportedComponents: [],
+        supportsAutoWiring: true,
+        supportsHealthChecks: true,
+        supportsCronSchedule: true,
+        supportsReleaseCommand: false,
+        supportsMultiEnvironment: true,
+        managedTls: true,
+        supportsAutoScaling: true,
+        supportsObserve: true,
+      },
+      connect: async () => {},
+      verify: async () => ({ success: true }),
+      ensureProject: async () => ({
+        success: true,
+        message: 'exists',
+        data: { projectId: 'rail-project' },
+      }),
+      ensureEnvironment,
+      observe,
+      setEnvVars,
+      deploy,
+    };
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter,
+    } as never);
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({
+      success: true,
+      adapter,
+    } as never);
+
+    const planResult = await new PlanService().plan(project, 'staging', {
+      includeEnvFile: false,
+    });
+    if ('error' in planResult) throw new Error(planResult.error);
+    expect(planResult.actions.find((action) => action.id === `secret:${SECRET_KEY}`)?.dependsOn)
+      .toEqual(expect.arrayContaining(SERVICE_NAMES.map((name) => `service:${name}`)));
+
+    const currentStagingSpec = new SpecStore().get(project)!;
+    const environmentOutcome = await executePlanApply(createToolContext(), {
+      project,
+      spec: currentStagingSpec.spec,
+      specRevision: currentStagingSpec.revision,
+      planId: planResult.planRunId,
+      confirmActions: [],
+    });
+    expect(environmentOutcome).toMatchObject({
+      kind: 'executed',
+      result: {
+        success: false,
+        receipts: expect.arrayContaining([
+          expect.objectContaining({ actionId: 'environment:staging', status: 'pending' }),
+        ]),
+      },
+    });
+
+    const servicePlanResult = await new PlanService().plan(project, 'staging', {
+      includeEnvFile: false,
+    });
+    if ('error' in servicePlanResult) throw new Error(servicePlanResult.error);
+    expect(servicePlanResult.actions.find((action) => action.id === `secret:${SECRET_KEY}`)?.dependsOn)
+      .toEqual(expect.arrayContaining(SERVICE_NAMES.map((name) => `service:${name}`)));
+    const outcome = await executePlanApply(createToolContext(), {
+      project,
+      spec: currentStagingSpec.spec,
+      specRevision: currentStagingSpec.revision,
+      planId: servicePlanResult.planRunId,
+      confirmActions: [],
+    });
+
+    expect(outcome).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(ensureEnvironment).toHaveBeenCalledOnce();
+    expect(deploy).toHaveBeenCalledTimes(2);
+    expect(generatedSecretCalls(setEnvVars)).toHaveLength(2);
+    expect(observe.mock.calls.some(([environment]) => (
+      environment.platformBindings as { environmentId?: string }
+    ).environmentId === 'rail-staging')).toBe(true);
+    expect(parseDelegatedSecretBindings(
+      new EnvironmentRepository().findByProjectAndName(project.id, 'staging')!
+    )).toEqual([
+      expect.objectContaining({
+        name: SECRET_KEY,
+        source: 'hypervibe-generated',
+      }),
+    ]);
+  });
+
   it('installs an immutable generated value and persists its exact non-secret contract', async () => {
     useImmutableSecret();
     const { setEnvVars } = installAdapter();
