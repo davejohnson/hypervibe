@@ -2156,6 +2156,7 @@ function branchBlocked(params: {
   message: string;
   error: string;
   repository: string;
+  branch?: string;
   data?: Record<string, unknown>;
 }): ReconciledInfrastructureBranch {
   return {
@@ -2167,7 +2168,7 @@ function branchBlocked(params: {
       error: params.error,
       data: {
         repository: params.repository,
-        branch: GITHUB_INFRASTRUCTURE_BRANCH,
+        branch: params.branch ?? GITHUB_INFRASTRUCTURE_BRANCH,
         ...(params.data ?? {}),
       },
     },
@@ -2196,34 +2197,20 @@ async function observeGitHubRefAfterWrite(params: {
   return observed;
 }
 
-function isMergedManagedInfrastructurePull(
+function isManagedInfrastructurePull(
   pull: GitHubPullRequestSummary,
   params: {
+    state: 'open' | 'merged';
     baseBranch: string;
     branchSha: string;
+    branch: string;
   }
 ): boolean {
-  return pull.state === 'closed'
-    && pull.merged_at !== null
+  return pull.state === (params.state === 'open' ? 'open' : 'closed')
+    && (pull.merged_at !== null) === (params.state === 'merged')
     && pull.title === GITHUB_INFRASTRUCTURE_PR_TITLE
     && pull.body?.startsWith(GITHUB_INFRASTRUCTURE_PR_BODY_MARKER) === true
-    && pull.head.ref === GITHUB_INFRASTRUCTURE_BRANCH
-    && pull.head.sha === params.branchSha
-    && pull.base.ref === params.baseBranch;
-}
-
-function isOpenManagedInfrastructurePull(
-  pull: GitHubPullRequestSummary,
-  params: {
-    baseBranch: string;
-    branchSha: string;
-  }
-): boolean {
-  return pull.state === 'open'
-    && pull.merged_at === null
-    && pull.title === GITHUB_INFRASTRUCTURE_PR_TITLE
-    && pull.body?.startsWith(GITHUB_INFRASTRUCTURE_PR_BODY_MARKER) === true
-    && pull.head.ref === GITHUB_INFRASTRUCTURE_BRANCH
+    && pull.head.ref === params.branch
     && pull.head.sha === params.branchSha
     && pull.base.ref === params.baseBranch;
 }
@@ -2235,6 +2222,7 @@ async function reconcileGitHubInfrastructureBranch(params: {
   repo: string;
   baseBranch: string;
   baseRef: { ref: string; object: { sha: string } };
+  branch: string;
 }): Promise<ReconciledInfrastructureBranch> {
   const {
     adapter,
@@ -2243,12 +2231,16 @@ async function reconcileGitHubInfrastructureBranch(params: {
     repo,
     baseBranch,
     baseRef,
+    branch,
   } = params;
-  const branchRefName = `heads/${GITHUB_INFRASTRUCTURE_BRANCH}`;
+  const branchRefName = `heads/${branch}`;
   const pullFilter = {
-    head: `${owner}:${GITHUB_INFRASTRUCTURE_BRANCH}`,
+    head: `${owner}:${branch}`,
     base: baseBranch,
   };
+  const blocked = (input: { message: string; error: string; data?: Record<string, unknown> }) => (
+    branchBlocked({ repository, branch, ...input })
+  );
 
   try {
     let branchRef = await adapter.getRef(owner, repo, branchRefName);
@@ -2257,10 +2249,9 @@ async function reconcileGitHubInfrastructureBranch(params: {
       ...pullFilter,
     });
     if (existingPulls.length > 1) {
-      return branchBlocked({
-        repository,
+      return blocked({
         message: 'Multiple GitHub infrastructure pull requests are open',
-        error: `Expected at most one open pull request for ${GITHUB_INFRASTRUCTURE_BRANCH}; resolve the duplicate pull requests before applying.`,
+        error: `Expected at most one open pull request for ${branch}; resolve the duplicate pull requests before applying.`,
         data: { pullRequestUrls: existingPulls.map((pull) => pull.html_url) },
       });
     }
@@ -2268,10 +2259,9 @@ async function reconcileGitHubInfrastructureBranch(params: {
 
     if (!branchRef) {
       if (existingPull) {
-        return branchBlocked({
-          repository,
+        return blocked({
           message: 'GitHub infrastructure pull request has no head branch',
-          error: `Pull request ${existingPull.html_url} is open, but ${GITHUB_INFRASTRUCTURE_BRANCH} is absent. Restore or close the pull request before applying.`,
+          error: `Pull request ${existingPull.html_url} is open, but ${branch} is absent. Restore or close the pull request before applying.`,
           data: { pullRequestUrl: existingPull.html_url },
         });
       }
@@ -2284,22 +2274,22 @@ async function reconcileGitHubInfrastructureBranch(params: {
         expectedSha: baseRef.object.sha,
       });
       if (!branchRef || branchRef.object.sha !== baseRef.object.sha) {
-        return branchBlocked({
-          repository,
+        return blocked({
           message: 'GitHub infrastructure branch creation could not be verified',
-          error: `Created ${GITHUB_INFRASTRUCTURE_BRANCH}, but GitHub did not confirm that it points to ${baseBranch}.`,
+          error: `Created ${branch}, but GitHub did not confirm that it points to ${baseBranch}.`,
         });
       }
       return { success: true };
     }
 
     if (existingPull) {
-      if (!isOpenManagedInfrastructurePull(existingPull, {
+      if (!isManagedInfrastructurePull(existingPull, {
+        state: 'open',
         baseBranch,
         branchSha: branchRef.object.sha,
+        branch,
       })) {
-        return branchBlocked({
-          repository,
+        return blocked({
           message: 'Open GitHub infrastructure pull request has unexpected provenance',
           error: `Pull request ${existingPull.html_url} does not exactly match the current canonical Hypervibe branch, title, body marker, and base. Hypervibe will not update it.`,
           data: { pullRequestUrl: existingPull.html_url },
@@ -2309,11 +2299,10 @@ async function reconcileGitHubInfrastructureBranch(params: {
         owner,
         repo,
         baseBranch,
-        GITHUB_INFRASTRUCTURE_BRANCH
+        branch
       );
       if (comparison.status === 'diverged') {
-        return branchBlocked({
-          repository,
+        return blocked({
           message: 'GitHub infrastructure branch diverged from its base',
           error: `Pull request ${existingPull.html_url} needs a human rebase or conflict resolution. Hypervibe will not force-push an open pull request.`,
           data: {
@@ -2334,7 +2323,7 @@ async function reconcileGitHubInfrastructureBranch(params: {
       owner,
       repo,
       baseBranch,
-      GITHUB_INFRASTRUCTURE_BRANCH
+      branch
     );
     if (comparison.status === 'behind') {
       await adapter.updateRef(owner, repo, branchRefName, baseRef.object.sha);
@@ -2343,10 +2332,9 @@ async function reconcileGitHubInfrastructureBranch(params: {
         adapter.getRef(owner, repo, branchRefName),
       ]);
       if (!verifiedBaseRef || !verifiedBranchRef || verifiedBranchRef.object.sha !== verifiedBaseRef.object.sha) {
-        return branchBlocked({
-          repository,
+        return blocked({
           message: 'GitHub infrastructure branch fast-forward could not be verified',
-          error: `${GITHUB_INFRASTRUCTURE_BRANCH} was advanced, but it does not match the current ${baseBranch} head. Retry with a fresh plan.`,
+          error: `${branch} was advanced, but it does not match the current ${baseBranch} head. Retry with a fresh plan.`,
         });
       }
       return { success: true };
@@ -2357,16 +2345,17 @@ async function reconcileGitHubInfrastructureBranch(params: {
       ...pullFilter,
     });
     const mergedPull = closedPulls
-      .filter((pull) => isMergedManagedInfrastructurePull(pull, {
+      .filter((pull) => isManagedInfrastructurePull(pull, {
+        state: 'merged',
         baseBranch,
         branchSha: branchRef.object.sha,
+        branch,
       }))
       .sort((left, right) => right.number - left.number)[0];
     if (!mergedPull) {
-      return branchBlocked({
-        repository,
+      return blocked({
         message: 'GitHub infrastructure branch has unowned work',
-        error: `${GITHUB_INFRASTRUCTURE_BRANCH} exists without an open pull request, and its current commit is not the verified head of a merged Hypervibe infrastructure pull request. Hypervibe will not overwrite it.`,
+        error: `${branch} exists without an open pull request, and its current commit is not the verified head of a merged Hypervibe infrastructure pull request. Hypervibe will not overwrite it.`,
         data: { comparison: comparison.status },
       });
     }
@@ -2376,20 +2365,18 @@ async function reconcileGitHubInfrastructureBranch(params: {
       adapter.getRef(owner, repo, branchRefName),
     ]);
     if (!latestBaseRef) {
-      return branchBlocked({
-        repository,
+      return blocked({
         message: 'GitHub default branch could not be re-observed',
-        error: `Could not confirm the current ${baseBranch} head before recycling ${GITHUB_INFRASTRUCTURE_BRANCH}.`,
+        error: `Could not confirm the current ${baseBranch} head before recycling ${branch}.`,
       });
     }
     if (!latestBranchRef) {
       await adapter.createRef(owner, repo, `refs/${branchRefName}`, latestBaseRef.object.sha);
     } else {
       if (latestBranchRef.object.sha !== branchRef.object.sha) {
-        return branchBlocked({
-          repository,
+        return blocked({
           message: 'GitHub infrastructure branch changed during apply',
-          error: `${GITHUB_INFRASTRUCTURE_BRANCH} moved after Hypervibe verified its merged pull request. Retry after reviewing the new branch head.`,
+          error: `${branch} moved after Hypervibe verified its merged pull request. Retry after reviewing the new branch head.`,
           data: {
             expectedSha: branchRef.object.sha,
             observedSha: latestBranchRef.object.sha,
@@ -2410,10 +2397,9 @@ async function reconcileGitHubInfrastructureBranch(params: {
       adapter.getRef(owner, repo, branchRefName),
     ]);
     if (!verifiedBaseRef || !verifiedBranchRef || verifiedBranchRef.object.sha !== verifiedBaseRef.object.sha) {
-      return branchBlocked({
-        repository,
+      return blocked({
         message: 'Recycled GitHub infrastructure branch could not be verified',
-        error: `${GITHUB_INFRASTRUCTURE_BRANCH} was recycled from merged pull request ${mergedPull.number}, but it does not match the current ${baseBranch} head. Retry with a fresh plan.`,
+        error: `${branch} was recycled from merged pull request ${mergedPull.number}, but it does not match the current ${baseBranch} head. Retry with a fresh plan.`,
         data: {
           pullRequestNumber: mergedPull.number,
           pullRequestUrl: mergedPull.html_url,
@@ -2431,8 +2417,7 @@ async function reconcileGitHubInfrastructureBranch(params: {
       },
     };
   } catch (error) {
-    return branchBlocked({
-      repository,
+    return blocked({
       message: 'GitHub infrastructure branch reconciliation failed',
       error: error instanceof Error ? error.message : String(error),
     });
@@ -2443,9 +2428,14 @@ export async function proposeGitHubInfrastructureFiles(params: {
   repository: string;
   desiredFiles: ManagedGitHubFile[];
   targetBranch?: string;
+  proposalBranch?: string;
+  requireDefaultTarget?: boolean;
   reconcileManifest?: boolean;
+  /** Exact previously bound workflow paths this reviewed proposal may retire. */
+  retiredManagedPaths?: string[];
 }): Promise<GitHubInfrastructureProposalResult> {
   const { repository, desiredFiles } = params;
+  const proposalBranch = params.proposalBranch ?? GITHUB_INFRASTRUCTURE_BRANCH;
   if (desiredFiles.length === 0) {
     return { success: false, message: 'GitHub infrastructure plan action is invalid', error: 'Repository or desired files are missing.' };
   }
@@ -2464,6 +2454,15 @@ export async function proposeGitHubInfrastructureFiles(params: {
   try {
     const repositoryInfo = await adapter.getRepository(parts.owner, parts.repo);
     baseBranch = params.targetBranch ?? repositoryInfo.default_branch;
+    if (params.requireDefaultTarget && baseBranch !== repositoryInfo.default_branch) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: 'GitHub default branch changed before workflow publication',
+        error: `Reviewed target branch ${baseBranch} is no longer the repository default branch ${repositoryInfo.default_branch}. Re-run hv_plan.`,
+        data: { repository },
+      };
+    }
     baseRef = await adapter.getRef(parts.owner, parts.repo, `heads/${baseBranch}`);
   } catch (error) {
     return {
@@ -2491,6 +2490,7 @@ export async function proposeGitHubInfrastructureFiles(params: {
     repo: parts.repo,
     baseBranch,
     baseRef,
+    branch: proposalBranch,
   });
   if (!branch.success) return branch.result;
   const existingPull = branch.existingPull;
@@ -2500,12 +2500,13 @@ export async function proposeGitHubInfrastructureFiles(params: {
       parts.owner,
       parts.repo,
       GITHUB_INFRASTRUCTURE_MANIFEST,
-      GITHUB_INFRASTRUCTURE_BRANCH
+      proposalBranch
     )
     : null;
-  const previousPaths = params.reconcileManifest
-    ? parseManifest(oldManifest?.content ?? null)
-    : [];
+  const previousPaths = Array.from(new Set([
+    ...(params.reconcileManifest ? parseManifest(oldManifest?.content ?? null) : []),
+    ...(params.retiredManagedPaths ?? []),
+  ])).sort();
   const desiredPaths = new Set(desiredFiles.map((file) => file.path));
   const changed: string[] = [];
   const removed: string[] = [];
@@ -2513,7 +2514,7 @@ export async function proposeGitHubInfrastructureFiles(params: {
   const manifestFile = desiredFiles.find((file) => file.path === GITHUB_INFRASTRUCTURE_MANIFEST);
   const contentFiles = desiredFiles.filter((file) => file.path !== GITHUB_INFRASTRUCTURE_MANIFEST);
   for (const file of contentFiles) {
-    const current = await adapter.getFile(parts.owner, parts.repo, file.path, GITHUB_INFRASTRUCTURE_BRANCH);
+    const current = await adapter.getFile(parts.owner, parts.repo, file.path, proposalBranch);
     if (current?.content === file.content) continue;
     await adapter.createOrUpdateFile(
       parts.owner,
@@ -2521,7 +2522,7 @@ export async function proposeGitHubInfrastructureFiles(params: {
       file.path,
       file.content,
       `Sync Hypervibe GitHub infrastructure: ${file.path}`,
-      GITHUB_INFRASTRUCTURE_BRANCH
+      proposalBranch
     );
     changed.push(file.path);
     fileChanges.push({
@@ -2531,7 +2532,7 @@ export async function proposeGitHubInfrastructureFiles(params: {
     });
   }
   for (const path of previousPaths.filter((path) => !desiredPaths.has(path))) {
-    const current = await adapter.getFile(parts.owner, parts.repo, path, GITHUB_INFRASTRUCTURE_BRANCH);
+    const current = await adapter.getFile(parts.owner, parts.repo, path, proposalBranch);
     if (!current) continue;
     await adapter.deleteFile(
       parts.owner,
@@ -2539,13 +2540,13 @@ export async function proposeGitHubInfrastructureFiles(params: {
       path,
       current.sha,
       `Remove retired Hypervibe GitHub infrastructure: ${path}`,
-      GITHUB_INFRASTRUCTURE_BRANCH
+      proposalBranch
     );
     removed.push(path);
     fileChanges.push({ operation: 'removed', path });
   }
   if (manifestFile) {
-    const current = await adapter.getFile(parts.owner, parts.repo, manifestFile.path, GITHUB_INFRASTRUCTURE_BRANCH);
+    const current = await adapter.getFile(parts.owner, parts.repo, manifestFile.path, proposalBranch);
     if (current?.content !== manifestFile.content) {
       await adapter.createOrUpdateFile(
         parts.owner,
@@ -2553,7 +2554,7 @@ export async function proposeGitHubInfrastructureFiles(params: {
         manifestFile.path,
         manifestFile.content,
         'Sync Hypervibe GitHub infrastructure manifest',
-        GITHUB_INFRASTRUCTURE_BRANCH
+        proposalBranch
       );
       changed.push(manifestFile.path);
       fileChanges.push({
@@ -2566,7 +2567,7 @@ export async function proposeGitHubInfrastructureFiles(params: {
 
   const pull = existingPull ?? await adapter.createPullRequest(parts.owner, parts.repo, {
     title: GITHUB_INFRASTRUCTURE_PR_TITLE,
-    head: GITHUB_INFRASTRUCTURE_BRANCH,
+    head: proposalBranch,
     base: baseBranch,
     draft: false,
     body: buildGitHubInfrastructurePullRequestBody(fileChanges),

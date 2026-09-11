@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { MANAGED_CI_RELEASE_EVIDENCE_VERSION } from '../managed-ci-evidence.js';
 
 const runtimeUrl = new URL('../../../../templates/ios/hypervibe-ios-release.mjs', import.meta.url);
 const runtime = await import(runtimeUrl.href) as {
@@ -6,6 +7,7 @@ const runtime = await import(runtimeUrl.href) as {
     ipaPath: string;
     groups: string[];
     privateKey: string;
+    serverEvidenceVersion: number;
     submitForBetaReview: boolean;
   };
   buildAltoolArgs: (config: Record<string, unknown>) => string[];
@@ -33,6 +35,7 @@ const validEnvironment = {
   HYPERVIBE_SUBMIT_BETA_REVIEW: 'true',
   HYPERVIBE_ENVIRONMENT: 'production',
   HYPERVIBE_RELEASE_SHA: 'a'.repeat(40),
+  HYPERVIBE_SERVER_EVIDENCE_VERSION: String(MANAGED_CI_RELEASE_EVIDENCE_VERSION),
   GITHUB_REPOSITORY: 'owner/repo',
 };
 
@@ -43,6 +46,7 @@ describe('managed iOS release runtime', () => {
     expect(config.groups).toEqual(['Internal', 'External']);
     expect(config.privateKey).toBe('private\nkey');
     expect(config.submitForBetaReview).toBe(true);
+    expect(config.serverEvidenceVersion).toBe(MANAGED_CI_RELEASE_EVIDENCE_VERSION);
 
     const args = runtime.buildAltoolArgs(config as unknown as Record<string, unknown>);
     expect(args.slice(0, 5)).toEqual(['altool', '--upload-app', '--type', 'ios', '--file']);
@@ -82,8 +86,10 @@ describe('managed iOS release runtime', () => {
   it('builds mobile evidence only from matching server evidence', () => {
     const config = runtime.parseReleaseConfig(validEnvironment, '/repo') as unknown as Record<string, unknown>;
     const evidence = {
-      version: 3,
+      version: MANAGED_CI_RELEASE_EVIDENCE_VERSION,
       environment: 'production',
+      deploymentContractFingerprint: 'b'.repeat(64),
+      programFingerprint: 'c'.repeat(64),
       source: { repository: 'owner/repo', sha: 'a'.repeat(40) },
       target: { resources: [{ logicalName: 'web' }] },
     };

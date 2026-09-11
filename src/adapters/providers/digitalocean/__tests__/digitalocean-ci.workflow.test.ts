@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { BranchDeployTarget } from '../../../../domain/ports/ci-deploy.port.js';
 import { buildBranchDeployWorkflow } from '../../../../domain/services/github-ops.service.js';
+import { managedCiReleaseTarget } from '../../../../domain/services/managed-ci-targets.js';
 import {
   buildDigitalOceanGitHubActionsSteps,
   DIGITALOCEAN_CI_REQUIRED_SECRETS,
@@ -113,9 +114,29 @@ describe('DigitalOcean App Platform GitHub Actions workflow', () => {
   });
 
   it('is embedded behind the shared exact-SHA and applied-spec gates', () => {
+    const deployTarget = target({ programFingerprint: 'a'.repeat(64) });
+    deployTarget.releaseTarget = managedCiReleaseTarget({
+      provider: 'digitalocean',
+      environmentName: 'production',
+      scope: { providerProjectId: 'do-app-1' },
+      resources: [
+        {
+          logicalName: 'web',
+          workloadKind: 'web',
+          providerResourceType: 'service',
+          providerResourceId: 'do-app-1:services:web',
+        },
+        {
+          logicalName: 'worker',
+          workloadKind: 'worker',
+          providerResourceType: 'service',
+          providerResourceId: 'do-app-1:workers:worker',
+        },
+      ],
+    });
     const workflow = buildBranchDeployWorkflow(
       'digitalocean',
-      target(),
+      deployTarget,
       { includeStep: false }
     );
 

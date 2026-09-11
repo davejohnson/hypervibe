@@ -3,6 +3,10 @@ import type { BranchDeployTarget } from '../ports/ci-deploy.port.js';
 import type { IosSpec } from '../spec/spec.schema.js';
 import { getManagedIosReleaseRuntimeBase64 } from './ios-release-template.service.js';
 import { HYPERVIBE_MANAGED_NODE_VERSION } from './managed-runtime.js';
+import {
+  MANAGED_CI_RELEASE_EVIDENCE_VERSION,
+  managedCiReleaseArtifactPrefix,
+} from './managed-ci-evidence.js';
 
 export const IOS_RELEASE_REQUIRED_SECRETS = [
   'APP_STORE_CONNECT_KEY_ID',
@@ -15,6 +19,11 @@ export const MATCH_SIGNING_REQUIRED_SECRETS = [
   'MATCH_PASSWORD',
   'MATCH_GIT_BASIC_AUTHORIZATION',
 ] as const;
+
+export function iosReleaseWorkflowPath(environmentName: string): string {
+  const safeEnvironment = environmentName.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
+  return `.github/workflows/hypervibe-ios-release-${safeEnvironment}.yml`;
+}
 
 const workflowTemplateUrl = new URL(
   '../../../templates/ios/github-release-workflow.yml',
@@ -70,16 +79,27 @@ function managedMatchCleanupStep(): string {
 }
 
 export function buildIosReleaseWorkflow(params: {
+  provider: string;
   providerName: string;
+  serverWorkflowPath: string;
   target: BranchDeployTarget;
   ios: IosSpec;
 }): { files: Array<{ path: string; content: string }>; requiredSecrets: string[] } | null {
   const release = params.ios.release;
   if (!release) return null;
 
+  const releaseTarget = params.target.releaseTarget;
+  if (!releaseTarget || !/^[0-9a-f]{64}$/.test(params.target.programFingerprint ?? '')) {
+    throw new Error(`iOS release for ${params.target.environmentName} requires exact managed server release bindings.`);
+  }
+  const boundServices = new Set(releaseTarget.resources.map((resource) => resource.logicalName));
+  if (release.services.some((service) => !boundServices.has(service))) {
+    throw new Error(`iOS release for ${params.target.environmentName} targets an unbound server service.`);
+  }
+
   const environmentName = params.target.environmentName;
   const safeEnvironment = environmentName.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
-  const workflowPath = '.github/workflows/hypervibe-ios-release-' + safeEnvironment + '.yml';
+  const workflowPath = iosReleaseWorkflowPath(environmentName);
   const automaticTrigger = release.trigger === 'after-server-deploy'
     ? [
       '  workflow_run:',
@@ -103,13 +123,20 @@ export function buildIosReleaseWorkflow(params: {
     ENVIRONMENT: environmentName,
     ENVIRONMENT_JSON: JSON.stringify(environmentName),
     SAFE_ENVIRONMENT: safeEnvironment,
+    SERVER_EVIDENCE_VERSION: String(MANAGED_CI_RELEASE_EVIDENCE_VERSION),
+    EXPECTED_SERVER_RELEASE_JSON: JSON.stringify(JSON.stringify({
+      artifactPrefix: managedCiReleaseArtifactPrefix(environmentName),
+      provider: params.provider,
+      programFingerprint: params.target.programFingerprint,
+      target: releaseTarget,
+      workflowPath: params.serverWorkflowPath,
+    })),
     AUTOMATIC_TRIGGER: automaticTrigger,
     PROJECT_RUNTIME_SETUP: projectRuntimeSetup(params.target),
     MANAGED_NODE_VERSION: HYPERVIBE_MANAGED_NODE_VERSION,
     BUNDLE_ID_JSON: JSON.stringify(params.ios.bundleId),
     WORKING_DIRECTORY_JSON: JSON.stringify(release.build.workingDirectory),
     IPA_PATH_JSON: JSON.stringify(release.build.ipaPath),
-    REQUIRED_SERVICES_JSON: JSON.stringify(JSON.stringify(release.services)),
     TESTFLIGHT_GROUPS_JSON: JSON.stringify(JSON.stringify(release.testflight.groups)),
     USES_ENCRYPTION_JSON: JSON.stringify(String(release.testflight.usesNonExemptEncryption)),
     SUBMIT_BETA_REVIEW_JSON: JSON.stringify(String(release.testflight.submitForBetaReview)),

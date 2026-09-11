@@ -31,7 +31,10 @@ import { resolveGitDeploySource } from '../services/deploy-source.js';
 import { diffEnvironment, diffRetainedHostingCleanup } from './diff.engine.js';
 import type { DiffResult, LocalSnapshot, PlanAction } from './plan.types.js';
 import {
+  actionDependencyClosure,
   fingerprintObservedState,
+  isManagedCiBindingAction,
+  isManagedCiBindingRoot,
   orderActions,
   type PlanRunDocument,
 } from './converge.executor.js';
@@ -55,7 +58,6 @@ import {
   planManagedCiAppliedSpecHash,
   planManagedCiDeploy,
 } from '../services/managed-ci.service.js';
-import { CI_CONFIGURATION_SYNC_OPERATION } from '../services/managed-ci.contract.js';
 import { planManagedCodeRepository } from '../services/managed-code-repository.service.js';
 import { environmentUsesManagedCi, resolveDevOpsSelection } from '../spec/devops-selection.js';
 import { devOpsProviderRegistry } from '../registry/devops.registry.js';
@@ -130,7 +132,7 @@ export interface PlanOptions {
 
 export interface EnvironmentPlan {
   planRunId: string;
-  scope: 'full' | 'retained-cleanup';
+  scope: 'full' | 'retained-cleanup' | 'managed-ci-bindings' | 'managed-ci-publication';
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
   environmentName: string;
@@ -1886,14 +1888,6 @@ export class PlanService {
         suppliedValues: delegatedSecretValues,
         generatedValues: generatedSecretValues,
       });
-    if (delegatedSecrets.blockers.length > 0) {
-      const detail = delegatedSecrets.blockers
-        .map((blocker) => `${blocker.key}: ${blocker.reason}`)
-        .join('; ');
-      return {
-        error: `Hypervibe cannot safely plan its managed secrets. ${detail}. No plan was saved or provider mutation authorized.`,
-      };
-    }
     const managedSecretValues = {
       ...delegatedSecretValues,
       ...generatedSecretValues,
@@ -2219,7 +2213,6 @@ export class PlanService {
         resource: { kind: 'environment', name: environmentName, provider: environmentSpec.hosting.provider },
         verified: observed !== null && !observed.partial,
         reason: `Environment "${environmentName}" is not tracked locally`,
-        ...(domainRegistration.action ? { dependsOn: [domainRegistration.action.id] } : {}),
       });
     }
     const email = serviceFilter
@@ -2430,25 +2423,72 @@ export class PlanService {
       };
     }
 
-    // Destroys (including confirm-gated previous-provider cleanup) are never
-    // prerequisites for CI setup — an unconfirmed destroy must not block the
-    // workflow sync.
-    const ciDependsOn = actions
-      .filter((action) => action.type !== 'noop' && action.type !== 'destroy' && ['project', 'environment', 'service', 'payment', 'email', 'messaging'].includes(action.resource.kind))
-      .map((action) => action.id);
-    const ciBindingsWillChange = actions.some((action) =>
-      action.resource.kind === 'service' && (action.type === 'create' || action.type === 'replace')
+    // CI rendering needs durable provider identities. Reconcile those in an
+    // isolated apply, then re-plan against the resulting bindings.
+    const managedCiEnabled = environmentUsesManagedCi(specResult.spec, environmentName);
+    const ciBindingPrerequisites = managedCiEnabled
+      ? actions.filter(isManagedCiBindingRoot)
+      : [];
+    const ciBindingStage = ciBindingPrerequisites.length > 0;
+    const ciBindingServiceNames = new Set(
+      ciBindingPrerequisites
+        .filter((action) => action.resource.kind === 'service')
+        .map((action) => action.resource.name)
     );
-    const ciDeploy = await planManagedCiDeploy({
-      project: projectForPlan,
-      spec: specResult.spec,
-      environmentName,
-      environmentSpec,
-      environment,
-      dependsOn: ciDependsOn,
-      bindingsWillChange: ciBindingsWillChange,
+    const ciBindingInputRequired = delegatedSecrets.inputRequired.filter((requirement) => {
+      const secretAction = delegatedSecrets.actions.find((action) => action.resource.name === requirement.key);
+      const services = Array.isArray(secretAction?.metadata?.services)
+        ? secretAction.metadata.services.filter((name): name is string => typeof name === 'string')
+        : [];
+      return services.some((name) => ciBindingServiceNames.has(name));
     });
+    const possibleCiSecretPrerequisites = actions.filter((action) =>
+      action.resource.kind === 'database'
+      && action.type === 'create'
+      && action.billable === true
+      && action.metadata?.operation === undefined
+    );
+    const ciDeploy: Awaited<ReturnType<typeof planManagedCiDeploy>> = ciBindingStage
+      ? {
+          actions: [],
+          warnings: [
+            'Managed CI reconciliation is deferred until provider identity changes converge. Apply this binding stage, then re-run hv_plan.',
+          ],
+        }
+      : await planManagedCiDeploy({
+        project: projectForPlan,
+        spec: specResult.spec,
+        environmentName,
+        environmentSpec,
+        environment,
+        dependsOn: possibleCiSecretPrerequisites.map((action) => action.id),
+      });
     if (ciDeploy.error) return { error: ciDeploy.error };
+    const ciWorkflowPublicationActions = ciDeploy.actions.filter((action) =>
+      action.type !== 'noop'
+      && action.metadata?.workflowPublicationRequired === true
+    );
+    const ciSyncActions = ciDeploy.actions.filter((action) =>
+      action.type !== 'noop' && action.metadata?.workflowPublicationRequired !== true
+    );
+    const ciWorkflowPublicationStage = !ciBindingStage && ciWorkflowPublicationActions.length > 0;
+    if (delegatedSecrets.blockers.length > 0 && !ciWorkflowPublicationStage) {
+      const detail = delegatedSecrets.blockers
+        .map((blocker) => `${blocker.key}: ${blocker.reason}`)
+        .join('; ');
+      return {
+        error: `Hypervibe cannot safely plan its managed secrets. ${detail}. No plan was saved or provider mutation authorized.`,
+      };
+    }
+    if (
+      serviceFilter
+      && managedCiEnabled
+      && (ciBindingStage || ciWorkflowPublicationActions.length > 0 || ciSyncActions.length > 0)
+    ) {
+      return {
+        error: 'A service-filtered plan cannot safely skip pending managed CI reconciliation. Run hv_plan without a service filter, apply the isolated stage, then re-plan the requested services.',
+      };
+    }
     if (ciDeploy.actions.length > 0) {
       const firstDomainIndex = actions.findIndex((action) => action.resource.kind === 'domain');
       if (firstDomainIndex === -1) {
@@ -2517,9 +2557,7 @@ export class PlanService {
     const appliedSpecHashDependsOn = actions
       .filter((action) => action.type !== 'noop' && action.id !== managedCiSeedAction?.id)
       .map((action) => action.id);
-    const ciConfigurationPending = ciDeploy.deferred || ciDeploy.actions.some((action) => (
-      action.type !== 'noop' && action.metadata?.operation === CI_CONFIGURATION_SYNC_OPERATION
-    ));
+    const ciConfigurationPending = ciBindingStage || ciWorkflowPublicationActions.length > 0;
     const appliedSpecHash = ciConfigurationPending
       ? {
           actions: [] as PlanAction[],
@@ -2562,6 +2600,47 @@ export class PlanService {
         ...(managedCiSeedAction.metadata ?? {}),
         blockedReason: 'managed_ci_release_unavailable',
       };
+    }
+
+    if (
+      !maintenance.pending
+      && !dataMigration.pending
+      && nativeDeploySources.actions.length === 0
+      && !ciBindingStage
+      && ciSyncActions.length > 0
+    ) {
+      const syncNeedsDatabaseUrl = ciSyncActions.some((action) => {
+        const workflow = recordMapValue(action.metadata, 'workflow');
+        return Array.isArray(workflow?.requiredSecrets)
+          && workflow.requiredSecrets.includes('DATABASE_URL');
+      });
+      const prerequisiteRoots = syncNeedsDatabaseUrl
+        ? possibleCiSecretPrerequisites.map((action) => action.id)
+        : [];
+      const prerequisiteIds = new Set(
+        actionDependencyClosure(actions, prerequisiteRoots).map((action) => action.id)
+      );
+      const syncIds = new Set(ciSyncActions.map((action) => action.id));
+      actions = actions.map((action) => {
+        if (syncIds.has(action.id)) {
+          return prerequisiteRoots.length > 0
+            ? { ...action, dependsOn: prerequisiteRoots }
+            : { ...action, dependsOn: undefined };
+        }
+        if (
+          action.type === 'noop'
+          || prerequisiteIds.has(action.id)
+        ) {
+          return action;
+        }
+        return {
+          ...action,
+          dependsOn: Array.from(new Set([
+            ...(action.dependsOn ?? []),
+            ...syncIds,
+          ])),
+        };
+      });
     }
 
     // Data copy is a safety stage of its own. Do not provision the ordinary
@@ -2635,6 +2714,35 @@ export class PlanService {
         });
       nativeDeploySources.warnings.push(
         'This plan is limited to provider-native deploy-source reconciliation. Re-run hv_plan after it converges to review remaining infrastructure drift.'
+      );
+    }
+
+    const providerSafetyStageActive = maintenance.pending
+      || dataMigration.pending
+      || nativeDeploySources.actions.length > 0;
+    const ciBindingStageActive = ciBindingStage && !providerSafetyStageActive;
+    const ciWorkflowPublicationStageActive = ciWorkflowPublicationStage && !providerSafetyStageActive;
+    if (ciBindingStageActive) {
+      const closure = actionDependencyClosure(
+        actions,
+        ciBindingPrerequisites.map((action) => action.id)
+      );
+      const retained = new Set(
+        closure.filter(isManagedCiBindingAction).map((action) => action.id)
+      );
+      actions = closure
+        .filter((action) => retained.has(action.id))
+        .map((action) => ({
+          ...action,
+          dependsOn: action.dependsOn?.filter((dependency) => retained.has(dependency)),
+        }));
+    } else if (ciWorkflowPublicationStageActive) {
+      actions = ciWorkflowPublicationActions.map((action) => ({
+        ...action,
+        dependsOn: undefined,
+      }));
+      ciDeploy.warnings.push(
+        'This plan is limited to managed CI workflow publication. Merge and re-observe the reviewed files, then re-run hv_plan for provider reconciliation.'
       );
     }
 
@@ -2762,6 +2870,37 @@ export class PlanService {
           : {}),
       }
       : undefined;
+    const isolatedCiStage = ciBindingStageActive || ciWorkflowPublicationStageActive;
+    const ciSelection = resolveDevOpsSelection(specResult.spec)?.ci;
+    const ciConnectionProvider = ciSelection
+      ? devOpsProviderRegistry.ciProvider(ciSelection.provider)?.connectionProvider
+      : undefined;
+    const isolatedProviders = ciWorkflowPublicationStageActive && ciConnectionProvider
+      ? [ciConnectionProvider]
+      : actions.map((action) => action.resource.provider);
+    const planBlocked = isolatedCiStage
+      ? this.providerPreflight(isolatedProviders)
+      : blocked;
+    const planInputRequired = ciWorkflowPublicationStageActive
+      ? []
+      : ciBindingStageActive
+        ? ciBindingInputRequired
+        : secretInputRequired;
+    const planOverrides = ciWorkflowPublicationStageActive ? undefined : overrides;
+    const persistedScope = ciBindingStageActive
+      ? 'managed-ci-bindings' as const
+      : ciWorkflowPublicationStageActive
+        ? 'managed-ci-publication' as const
+        : 'full' as const;
+    const actionKinds = new Set(actions.map((action) => action.resource.kind));
+    const integrationFingerprints = ciWorkflowPublicationStageActive ? {} : {
+      ...((!ciBindingStageActive || actionKinds.has('payment')) && stripeSync.fingerprint
+        ? { stripe: stripeSync.fingerprint } : {}),
+      ...((!ciBindingStageActive || actionKinds.has('email')) && email.fingerprint
+        ? { email: email.fingerprint } : {}),
+      ...((!ciBindingStageActive || actionKinds.has('messaging')) && messaging.fingerprint
+        ? { messaging: messaging.fingerprint } : {}),
+    };
 
     try {
       orderActions(actions);
@@ -2774,28 +2913,22 @@ export class PlanService {
 
     const document: PlanRunDocument = {
       kind: 'hv_plan',
-      scope: 'full',
+      scope: persistedScope,
       environmentName,
       specRevision: specResult.revision,
       ...(sourceCommitSha ? { sourceCommitSha } : {}),
-      observedFingerprint: observed ? fingerprintObservedState(observed) : null,
+      observedFingerprint: ciWorkflowPublicationStageActive
+        ? null
+        : observed ? fingerprintObservedState(observed) : null,
       ...(dataMigration.pending && sourceEnvironment
         ? { lockEnvironmentIds: [sourceEnvironment.id] }
         : {}),
-      ...((stripeSync.fingerprint || email.fingerprint || messaging.fingerprint)
-        ? {
-          integrationFingerprints: {
-            ...(stripeSync.fingerprint ? { stripe: stripeSync.fingerprint } : {}),
-            ...(email.fingerprint ? { email: email.fingerprint } : {}),
-            ...(messaging.fingerprint ? { messaging: messaging.fingerprint } : {}),
-          },
-        }
-        : {}),
+      ...(Object.keys(integrationFingerprints).length > 0 ? { integrationFingerprints } : {}),
       actions,
       unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged, ...loadBalancer.unmanaged],
       warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...sourceMaintenanceWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...maintenance.warnings, ...dataMigration.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...loadBalancer.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...managedSeedRelease.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings, ...filterWarnings],
-      ...(secretInputRequired.length > 0 ? { inputRequired: secretInputRequired } : {}),
-      ...(overrides ? { overrides } : {}),
+      ...(planInputRequired.length > 0 ? { inputRequired: planInputRequired } : {}),
+      ...(planOverrides ? { overrides: planOverrides } : {}),
     };
 
     // Plans for untracked environments can't reference an environment row;
@@ -2813,7 +2946,7 @@ export class PlanService {
 
     return {
       planRunId: run.id,
-      scope: 'full',
+      scope: persistedScope,
       specRevision: specResult.revision,
       specSource: specResult.source ?? { kind: 'local' },
       environmentName,
@@ -2822,8 +2955,8 @@ export class PlanService {
       actions,
       unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged],
       warnings: document.warnings ?? [],
-      inputRequired: secretInputRequired,
-      blocked,
+      inputRequired: planInputRequired,
+      blocked: planBlocked,
     };
   }
 }

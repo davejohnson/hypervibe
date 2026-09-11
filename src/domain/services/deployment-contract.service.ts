@@ -1,4 +1,4 @@
-import { createHash } from 'crypto';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { readRepoSpecFile } from '../spec/repo-spec-file.js';
 import type { ProjectSpec } from '../spec/spec.schema.js';
 
@@ -18,21 +18,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
-}
-
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(canonicalize);
-  }
-  const record = asRecord(value);
-  if (!record) {
-    return value;
-  }
-  return Object.fromEntries(
-    Object.entries(record)
-      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-      .map(([key, child]) => [key, canonicalize(child)])
-  );
 }
 
 export function environmentDeploymentContract(
@@ -69,8 +54,7 @@ export function environmentDeploymentContractHash(
   spec: DeploymentContractSpec,
   environmentName: string
 ): string {
-  const canonical = canonicalize(environmentDeploymentContract(spec, environmentName));
-  return createHash('sha256').update(JSON.stringify(canonical), 'utf8').digest('hex');
+  return canonicalJsonSha256(environmentDeploymentContract(spec, environmentName));
 }
 
 /**

@@ -1250,11 +1250,37 @@ automatic code-only staging deploys while preventing a changed desired-state
 contract from deploying before reconciliation. Missing, failed, pending, or
 unconfirmed dependencies must leave the previous marker intact.
 
-Generated deployment workflow files are repository infrastructure and must be
-delivered through the deterministic `hypervibe/github-infrastructure` branch
-and reviewable pull request. Applying file drift returns a pending receipt and
-must defer workflow secrets, bindings, and the applied-spec marker until the
-reviewed file is present on the default branch.
+The environment contract and the generated workflow are separate desired-state
+boundaries. Environment values are enforced by the runtime gate above; they do
+not make the repository workflow a different program. A managed GitHub Actions
+binding records both the exact accepted file-content hash and a canonical hash
+of the inputs that affect workflow behavior. If the live files still match the
+accepted content and those inputs have not changed, a newer Hypervibe renderer
+does not create drift. Intentional renderer migrations increment the renderer
+revision included in the input hash. A real workflow input change renders the
+latest template and requires review.
+
+Generated deployment workflow files use a dedicated per-environment managed-CI
+branch and reviewable pull request, so unrelated repository infrastructure
+cannot enter the same publication stage. The configured deploy branch must be
+the repository's provider-observed default branch because GitHub registers
+`workflow_dispatch` workflows there. Applying file drift returns a pending
+receipt and must defer workflow secrets, bindings, and the applied-spec marker
+until the reviewed file is present on that branch.
+For already-bound provider identities, workflow publication is a plan stage of
+its own and precedes every provider mutation. If publication returns pending or
+blocked, that plan authorizes zero hosting changes. New or replaced identities
+remain a separate prerequisite stage because the workflow cannot name them
+until the provider has created and Hypervibe has recorded them.
+
+Release evidence keeps its exact provider scope, logical resource identities,
+program fingerprint, repository, commit, and immutable image checks. The
+generated workflow materializes that reviewed validator once before checkout
+and reuses it for preflight, promotion, rollback, and evidence writing, so the
+rollback path remains independent of repository contents without copying the
+validator into every step. Workload kind and provider resource type are
+orthogonal: for example, Railway schedules a cron workload on a service, while
+Cloud Run may bind one to a job.
 
 The deterministic branch must be reusable after merge commits, squash merges,
 and rebase merges. A retained branch may be reset to the current default-branch

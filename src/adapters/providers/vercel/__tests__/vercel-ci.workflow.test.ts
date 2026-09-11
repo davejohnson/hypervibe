@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { BranchDeployTarget } from '../../../../domain/ports/ci-deploy.port.js';
 import { buildBranchDeployWorkflow } from '../../../../domain/services/github-ops.service.js';
+import { managedCiReleaseTarget } from '../../../../domain/services/managed-ci-targets.js';
 import {
   VERCEL_CI_REQUIRED_SECRETS,
   buildVercelGitHubActionsSteps,
@@ -112,9 +113,29 @@ describe('Vercel GitHub Actions workflow', () => {
   });
 
   it('is embedded behind the shared exact-SHA and applied-spec gates', () => {
+    const deployTarget = target({ programFingerprint: 'a'.repeat(64) });
+    deployTarget.releaseTarget = managedCiReleaseTarget({
+      provider: 'vercel',
+      environmentName: 'production',
+      scope: { providerProjectId: TEAM_SCOPE },
+      resources: [
+        {
+          logicalName: 'admin',
+          workloadKind: 'web',
+          providerResourceType: 'service',
+          providerResourceId: ADMIN_BINDING,
+        },
+        {
+          logicalName: 'web',
+          workloadKind: 'web',
+          providerResourceType: 'service',
+          providerResourceId: WEB_BINDING,
+        },
+      ],
+    });
     const workflow = buildBranchDeployWorkflow(
       'vercel',
-      target(),
+      deployTarget,
       { includeStep: false }
     );
 

@@ -38,6 +38,23 @@ function action(partial: Partial<PlanAction> & { id: string }): PlanAction {
   } as PlanAction;
 }
 
+function publicationAction(provider: 'github' | 'gitlab-ci' = 'github'): PlanAction {
+  const gitLab = provider === 'gitlab-ci';
+  return action({
+    id: gitLab ? 'ci:gitlab-ci:configuration' : 'ci:github-actions:staging:deploy-branch',
+    type: 'update',
+    resource: {
+      kind: 'ci',
+      name: gitLab ? 'configuration' : 'deploy-branch:staging',
+      provider,
+    },
+    metadata: {
+      operation: gitLab ? 'ciConfigurationSync' : 'githubActionsDeployBranch',
+      workflowPublicationRequired: true,
+    },
+  });
+}
+
 function storePlan(actions: PlanAction[], overrides: Partial<PlanRunDocument> = {}): string {
   const document: PlanRunDocument = {
     kind: 'hv_plan',
@@ -247,6 +264,112 @@ describe('ConvergeExecutor staleness', () => {
     });
     expect(handler).not.toHaveBeenCalled();
     expect(runRepo().findByEnvironmentId(environmentId).filter((run) => run.type === 'apply')).toEqual([]);
+  });
+
+  it.each([
+    {
+      label: 'a mislabeled unrelated action',
+      actions: [action({
+        id: 'domain:example.com',
+        type: 'update',
+        resource: { kind: 'domain', name: 'example.com', provider: 'cloudflare' },
+        metadata: { operation: 'domainAttach', workflowPublicationRequired: true },
+      })],
+      overrides: {},
+    },
+    {
+      label: 'a publication action without its scope marker',
+      actions: [{
+        ...publicationAction(),
+        metadata: { operation: 'githubActionsDeployBranch' },
+      }],
+      overrides: {},
+    },
+    {
+      label: 'deploy overrides',
+      actions: [publicationAction()],
+      overrides: { overrides: { services: ['web'] } },
+    },
+    {
+      label: 'delegated input',
+      actions: [publicationAction()],
+      overrides: { inputRequired: [{ key: 'TOKEN', principal: 'owner', reason: 'test' }] },
+    },
+    {
+      label: 'integration fingerprints',
+      actions: [publicationAction()],
+      overrides: { integrationFingerprints: { stripe: 'stale' } },
+    },
+  ])('rejects a persisted managed-ci-publication plan containing $label', async ({ actions, overrides }) => {
+    const handler = vi.fn().mockResolvedValue({ success: true, message: 'should not run' });
+    const planId = storePlan(actions, {
+      scope: 'managed-ci-publication',
+      ...overrides,
+    });
+
+    const result = await new ConvergeExecutor().execute({
+      planRunId: planId,
+      currentSpecRevision: 1,
+      handler,
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      error: expect.stringContaining('not a valid persisted hv_plan'),
+    });
+    expect(handler).not.toHaveBeenCalled();
+    expect(runRepo().findByEnvironmentId(environmentId).filter((run) => run.type === 'apply')).toEqual([]);
+  });
+
+  it.each([
+    { label: 'GitHub Actions', provider: 'github' as const },
+    { label: 'GitLab CI', provider: 'gitlab-ci' as const },
+  ])('accepts an exact $label publication action', async ({ provider }) => {
+    const handler = vi.fn().mockResolvedValue({ success: true, message: 'published' });
+    const planId = storePlan([publicationAction(provider)], { scope: 'managed-ci-publication' });
+
+    const result = await new ConvergeExecutor().execute({
+      planRunId: planId,
+      currentSpecRevision: 1,
+      handler,
+    });
+
+    expect(result.success).toBe(true);
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    action({
+      id: 'project:old:previous-destroy',
+      type: 'destroy',
+      resource: { kind: 'project', name: 'old', provider: 'railway' },
+      requiresConfirm: true,
+      metadata: { operation: 'previousHostingDestroy' },
+    }),
+    action({
+      id: 'service:web',
+      type: 'create',
+      dependsOn: ['domain:example.com:register'],
+    }),
+  ])('rejects unrelated or destructive managed-CI binding authority ($id)', async (invalid) => {
+    const domain = action({
+      id: 'domain:example.com:register',
+      resource: { kind: 'domain', name: 'example.com', provider: 'cloudflare' },
+      billable: true,
+      requiresConfirm: true,
+    });
+    const actions = invalid.dependsOn ? [domain, invalid] : [invalid];
+    const handler = vi.fn();
+    const planId = storePlan(actions, { scope: 'managed-ci-bindings' });
+
+    const result = await new ConvergeExecutor().execute({
+      planRunId: planId,
+      currentSpecRevision: 1,
+      handler,
+    });
+
+    expect(result.error).toContain('not a valid persisted hv_plan');
+    expect(handler).not.toHaveBeenCalled();
   });
 
   it('rejects plans against a superseded spec revision', async () => {

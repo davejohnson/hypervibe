@@ -473,7 +473,7 @@ async function waitForWorkflowRun(
   expect(artifacts.data.artifacts).toContainEqual(
     expect.objectContaining({
       name:
-        `hypervibe-server-release-${fixture.environmentName}-${commitSha}`,
+        `hypervibe-server-release-v4-${fixture.environmentName}-${commitSha}`,
       expired: false,
       workflowRun: expect.objectContaining({ id: run.id }),
     })

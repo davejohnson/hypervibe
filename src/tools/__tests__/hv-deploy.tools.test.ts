@@ -27,6 +27,10 @@ import {
   buildBranchDeployWorkflow,
   resolveBranchDeployTargets,
 } from '../../domain/services/github-ops.service.js';
+import {
+  githubActionsWorkflowInputHash,
+  workflowFilesContentHash,
+} from '../../domain/services/ci-deploy.service.js';
 import { createToolContext } from '../../application/context.js';
 import { registerHvDeployTools } from '../hv-deploy.tools.js';
 
@@ -36,6 +40,7 @@ beforeEach(() => {
   SqliteAdapter.resetInstance();
   tempDir = mkdtempSync(path.join(tmpdir(), 'hypervibe-hv-deploy-'));
   SqliteAdapter.getInstance(path.join(tempDir, 'test.db')).migrate();
+  vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
 });
 
 afterEach(() => {
@@ -53,7 +58,7 @@ function seedVerifiedConnection(provider: string): void {
   repo.updateStatus(connection.id, 'verified');
 }
 
-function seedManagedCiRollbackProject(name: string) {
+function seedManagedCiRollbackProject(name: string, branch = 'main') {
   const project = new ProjectRepository().create({
     name,
     defaultPlatform: 'railway',
@@ -79,7 +84,7 @@ function seedManagedCiRollbackProject(name: string) {
       production: {
         hosting: { provider: 'railway' },
         services: { web: { workloadKind: 'web' } },
-        deploy: { strategy: 'branch', trigger: 'ci', branch: 'main', autoDeploy: false },
+        deploy: { strategy: 'branch', trigger: 'ci', branch, autoDeploy: false },
       },
     },
   });
@@ -87,7 +92,17 @@ function seedManagedCiRollbackProject(name: string) {
   const resolved = resolveBranchDeployTargets(project);
   const target = resolved.targets.find((candidate) => candidate.environmentName === 'production')!;
   const workflow = buildBranchDeployWorkflow('railway', target, resolved.migration);
-  return { project, environment, workflow };
+  const inputHash = githubActionsWorkflowInputHash({
+    provider: 'railway',
+    target,
+    migration: resolved.migration,
+  });
+  const workflowRefSha = 'f'.repeat(40);
+  const getRef = vi.spyOn(GitHubAdapter.prototype, 'getRef').mockResolvedValue({
+    ref: `refs/heads/${branch}`,
+    object: { sha: workflowRefSha },
+  });
+  return { project, environment, workflow, inputHash, workflowRefSha, getRef };
 }
 
 function workflowRun(
@@ -113,7 +128,7 @@ function workflowRun(
 function releaseArtifact(runId: number, sha: string, artifactId = runId * 10) {
   return {
     id: artifactId,
-    name: `hypervibe-server-release-production-${sha}`,
+    name: `hypervibe-server-release-v4-production-${sha}`,
     expired: false,
     created_at: `2026-07-${String(runId).padStart(2, '0')}T00:05:00Z`,
     updated_at: `2026-07-${String(runId).padStart(2, '0')}T00:05:00Z`,
@@ -125,6 +140,36 @@ function releaseArtifact(runId: number, sha: string, artifactId = runId * 10) {
       head_sha: 'f'.repeat(40),
     },
   };
+}
+
+function mockPreviousSuccessfulRelease(
+  workflow: ReturnType<typeof buildBranchDeployWorkflow>,
+  currentSha: string,
+  previousSha: string
+) {
+  vi.spyOn(GitHubAdapter.prototype, 'listWorkflows').mockResolvedValue({
+    total_count: 1,
+    workflows: [{
+      id: 7,
+      name: workflow.templateName,
+      path: workflow.path,
+      state: 'active',
+      created_at: '2026-07-01T00:00:00Z',
+      updated_at: '2026-07-01T00:00:00Z',
+    }],
+  });
+  vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockResolvedValue({
+    total_count: 2,
+    workflow_runs: [
+      workflowRun(20, 'completed', 'success', '2026-07-20T00:00:00Z'),
+      workflowRun(10, 'completed', 'success', '2026-07-10T00:00:00Z'),
+    ],
+  });
+  vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunArtifacts').mockImplementation(async (_owner, _repo, runId) => ({
+    total_count: 1,
+    artifacts: [runId === 20 ? releaseArtifact(20, currentSha) : releaseArtifact(10, previousSha)],
+  }));
+  return vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockResolvedValue();
 }
 
 async function makeClient() {
@@ -652,33 +697,11 @@ describe('hv_rollback', () => {
   });
 
   it('dispatches the previous verified exact-SHA release for managed production CI', async () => {
-    const { project, workflow } = seedManagedCiRollbackProject('rollback-ci-app');
+    const { project, workflow, workflowRefSha, getRef } = seedManagedCiRollbackProject('rollback-ci-app');
     const currentSha = 'b'.repeat(40);
     const previousSha = 'a'.repeat(40);
     vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
-    vi.spyOn(GitHubAdapter.prototype, 'listWorkflows').mockResolvedValue({
-      total_count: 1,
-      workflows: [{
-        id: 7,
-        name: workflow.templateName,
-        path: workflow.path,
-        state: 'active',
-        created_at: '2026-07-01T00:00:00Z',
-        updated_at: '2026-07-01T00:00:00Z',
-      }],
-    });
-    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockResolvedValue({
-      total_count: 2,
-      workflow_runs: [
-        workflowRun(20, 'completed', 'success', '2026-07-20T00:00:00Z'),
-        workflowRun(10, 'completed', 'success', '2026-07-10T00:00:00Z'),
-      ],
-    });
-    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunArtifacts').mockImplementation(async (_owner, _repo, runId) => ({
-      total_count: 1,
-      artifacts: [runId === 20 ? releaseArtifact(20, currentSha) : releaseArtifact(10, previousSha)],
-    }));
-    const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockResolvedValue();
+    const trigger = mockPreviousSuccessfulRelease(workflow, currentSha, previousSha);
 
     const t = await makeClient();
     const result = await t.call('hv_rollback', {
@@ -731,11 +754,83 @@ describe('hv_rollback', () => {
       repository: `davejohnson/${project.name}`,
       workflow: workflow.path,
       ref: 'main',
+      workflowRefSha,
       targetSha: previousSha,
       targetArtifactId: 100,
       targetWorkflowRunId: 10,
       observedLatestWorkflowRunId: 20,
     });
+    expect(GitHubAdapter.prototype.getFileContent).toHaveBeenCalledWith(
+      'davejohnson',
+      project.name,
+      workflow.path,
+      'main'
+    );
+    expect(getRef).toHaveBeenCalledWith('davejohnson', project.name, 'heads/main');
+    await t.close();
+  });
+
+  it('blocks managed rollback when the deploy branch is not the repository default', async () => {
+    const { project, workflow } = seedManagedCiRollbackProject('rollback-nondefault-app', 'release');
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
+    const trigger = mockPreviousSuccessfulRelease(
+      workflow,
+      'b'.repeat(40),
+      'a'.repeat(40)
+    );
+
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', {
+      project: project.name,
+      env: 'production',
+      confirm: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('PROVIDER_ERROR');
+    expect(result.error.message).toContain(
+      'deploy branch "release" must match repository default branch "main"'
+    );
+    expect(trigger).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('accepts reviewed live workflow bytes across a generator-only renderer change', async () => {
+    const { project, environment, workflow, inputHash } = seedManagedCiRollbackProject(
+      'rollback-pinned-workflow-app'
+    );
+    const acceptedContent = `${workflow.content}\n# output from the previously reviewed renderer\n`;
+    new EnvironmentRepository().updatePlatformBindings(environment.id, {
+      ci: {
+        deployBranch: {
+          [workflow.path]: {
+            contentHash: workflowFilesContentHash([{ path: workflow.path, content: acceptedContent }]),
+            inputHash,
+          },
+        },
+      },
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(acceptedContent);
+    const trigger = mockPreviousSuccessfulRelease(
+      workflow,
+      'b'.repeat(40),
+      'a'.repeat(40)
+    );
+
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', {
+      project: project.name,
+      env: 'production',
+      confirm: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({
+      status: 'pending',
+      rollbackToSha: 'a'.repeat(40),
+      currentSha: 'b'.repeat(40),
+    });
+    expect(trigger).toHaveBeenCalledTimes(1);
     await t.close();
   });
 
@@ -854,8 +949,22 @@ describe('hv_rollback', () => {
   });
 
   it('blocks managed rollback when the generated workflow has drifted', async () => {
-    const { project, workflow } = seedManagedCiRollbackProject('rollback-workflow-drift-app');
-    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue('name: user-modified-workflow\n');
+    const { project, environment, workflow, inputHash } = seedManagedCiRollbackProject(
+      'rollback-workflow-drift-app'
+    );
+    const acceptedContent = `${workflow.content}\n# output from the previously reviewed renderer\n`;
+    new EnvironmentRepository().updatePlatformBindings(environment.id, {
+      ci: {
+        deployBranch: {
+          [workflow.path]: {
+            contentHash: workflowFilesContentHash([{ path: workflow.path, content: acceptedContent }]),
+            inputHash,
+          },
+        },
+      },
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent')
+      .mockResolvedValue(`${acceptedContent}# user-modified workflow\n`);
     vi.spyOn(GitHubAdapter.prototype, 'listWorkflows').mockResolvedValue({
       total_count: 1,
       workflows: [{ id: 7, name: workflow.templateName, path: workflow.path, state: 'active' } as any],
@@ -984,6 +1093,57 @@ describe('hv_rollback', () => {
     expect(result.error.code).toBe('PROVIDER_ERROR');
     expect(result.error.details.status).toBe('blocked');
     expect(result.error.details.errors.join('\n')).toContain('newer workflow run');
+    expect(trigger).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('blocks rollback when the workflow branch advances immediately before dispatch', async () => {
+    const { project, workflow, workflowRefSha, getRef } = seedManagedCiRollbackProject(
+      'rollback-stale-ref-app'
+    );
+    const currentSha = 'e'.repeat(40);
+    const previousSha = 'd'.repeat(40);
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
+    const trigger = mockPreviousSuccessfulRelease(workflow, currentSha, previousSha);
+    getRef
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: workflowRefSha } })
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: workflowRefSha } })
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: '1'.repeat(40) } });
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', {
+      project: project.name,
+      env: 'production',
+      confirm: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('PROVIDER_ERROR');
+    expect(result.error.details.status).toBe('blocked');
+    expect(result.error.details.errors.join('\n')).toContain('no longer points to reviewed workflow commit');
+    expect(trigger).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('blocks rollback when the repository default branch changes immediately before dispatch', async () => {
+    const { project, workflow } = seedManagedCiRollbackProject('rollback-stale-default-app');
+    const currentSha = 'e'.repeat(40);
+    const previousSha = 'd'.repeat(40);
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
+    const trigger = mockPreviousSuccessfulRelease(workflow, currentSha, previousSha);
+    vi.mocked(GitHubAdapter.prototype.getRepository)
+      .mockResolvedValueOnce({ default_branch: 'main' })
+      .mockResolvedValueOnce({ default_branch: 'main' })
+      .mockResolvedValueOnce({ default_branch: 'trunk' });
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', {
+      project: project.name,
+      env: 'production',
+      confirm: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('PROVIDER_ERROR');
+    expect(result.error.details.errors.join('\n')).toContain('default branch is now trunk');
     expect(trigger).not.toHaveBeenCalled();
     await t.close();
   });

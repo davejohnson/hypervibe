@@ -28,6 +28,7 @@ jobs:
     environment: @@ENVIRONMENT@@
     outputs:
       sha: ${{ steps.gate.outputs.sha }}
+      server_artifact_id: ${{ steps.provenance.outputs.artifact_id }}
       server_run_id: ${{ steps.provenance.outputs.server_run_id }}
       marketing_version: ${{ steps.ipa.outputs.version }}
       build_number: ${{ steps.ipa.outputs.build }}
@@ -36,7 +37,8 @@ jobs:
       HYPERVIBE_ENVIRONMENT: @@ENVIRONMENT_JSON@@
       HYPERVIBE_BUNDLE_ID: @@BUNDLE_ID_JSON@@
       HYPERVIBE_WORKING_DIRECTORY: @@WORKING_DIRECTORY_JSON@@
-      HYPERVIBE_IPA_PATH: @@IPA_PATH_JSON@@@@MANAGED_SIGNING_JOB_ENV@@
+      HYPERVIBE_IPA_PATH: @@IPA_PATH_JSON@@
+      HYPERVIBE_EXPECTED_SERVER_RELEASE: @@EXPECTED_SERVER_RELEASE_JSON@@@@MANAGED_SIGNING_JOB_ENV@@
     steps:
       - name: Resolve release provenance
         id: provenance
@@ -51,13 +53,48 @@ jobs:
               ? String(context.payload.workflow_run.id)
               : String(context.payload.inputs.server_run_id || '').trim();
             if (requestedSha && !/^[0-9a-f]{40}$/i.test(requestedSha)) throw new Error('commit_sha must be a full 40-character Git SHA');
-            if (!/^[0-9]+$/.test(serverRunId)) throw new Error('server_run_id must be a GitHub Actions run id');
-            core.setOutput('requested_sha', requestedSha);
+            const numericRunId = Number(serverRunId);
+            if (!/^[0-9]+$/.test(serverRunId) || !Number.isSafeInteger(numericRunId) || numericRunId <= 0) throw new Error('server_run_id must be a GitHub Actions run id');
+            const expected = JSON.parse(process.env.HYPERVIBE_EXPECTED_SERVER_RELEASE);
+            const runResponse = await github.rest.actions.getWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: numericRunId,
+            });
+            const run = runResponse.data;
+            const sha = String(run.head_sha || '').toLowerCase();
+            if (run.conclusion !== 'success' || run.path !== expected.workflowPath || !/^[0-9a-f]{40}$/.test(sha)) {
+              throw new Error('Server release evidence must come from a successful run of ' + expected.workflowPath + ' at a full commit SHA');
+            }
+            if (requestedSha && requestedSha.toLowerCase() !== sha) {
+              throw new Error('commit_sha does not match the selected server workflow run');
+            }
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: numericRunId,
+              per_page: 100,
+            });
+            const expectedArtifactName = expected.artifactPrefix + sha;
+            const matchingArtifacts = artifacts.filter((artifact) => (
+              Number.isSafeInteger(artifact.id)
+              && artifact.id > 0
+              && artifact.name === expectedArtifactName
+              && artifact.expired === false
+              && artifact.workflow_run?.id === numericRunId
+              && String(artifact.workflow_run?.head_sha || '').toLowerCase() === sha
+            ));
+            if (matchingArtifacts.length !== 1) {
+              throw new Error('Expected exactly one unexpired ' + expectedArtifactName
+                + ' artifact from server run ' + serverRunId + ', found ' + matchingArtifacts.length);
+            }
+            core.setOutput('artifact_id', String(matchingArtifacts[0].id));
+            core.setOutput('sha', sha);
             core.setOutput('server_run_id', serverRunId);
       - name: Download verified server release evidence
         uses: actions/download-artifact@v8
         with:
-          pattern: hypervibe-server-release-@@SAFE_ENVIRONMENT@@-*
+          artifact-ids: ${{ steps.provenance.outputs.artifact_id }}
           path: ${{ runner.temp }}/hypervibe-server-evidence
           merge-multiple: true
           github-token: ${{ github.token }}
@@ -67,10 +104,10 @@ jobs:
         shell: bash
         env:
           HYPERVIBE_SERVER_EVIDENCE_PATH: ${{ runner.temp }}/hypervibe-server-evidence/hypervibe-server-release.json
-          HYPERVIBE_REQUESTED_SHA: ${{ steps.provenance.outputs.requested_sha }}
-          HYPERVIBE_REQUIRED_SERVICES: @@REQUIRED_SERVICES_JSON@@
+          HYPERVIBE_SERVER_EVIDENCE_VERSION: "@@SERVER_EVIDENCE_VERSION@@"
+          HYPERVIBE_REQUESTED_SHA: ${{ steps.provenance.outputs.sha }}
         run: |
-          node -e 'const fs=require("fs"); const evidence=JSON.parse(fs.readFileSync(process.env.HYPERVIBE_SERVER_EVIDENCE_PATH,"utf8")); const required=JSON.parse(process.env.HYPERVIBE_REQUIRED_SERVICES); const exact=(value,keys)=>value&&typeof value==="object"&&!Array.isArray(value)&&JSON.stringify(Object.keys(value).sort())===JSON.stringify([...keys].sort()); if(!exact(evidence,["version","provider","environment","source","target","programFingerprint","verifiedAt"])||evidence.version!==3||typeof evidence.provider!=="string"||!evidence.provider||evidence.environment!==process.env.HYPERVIBE_ENVIRONMENT||!/^[0-9a-f]{64}$/.test(evidence.programFingerprint)||Number.isNaN(Date.parse(evidence.verifiedAt))) throw new Error("server evidence contract mismatch"); if(!exact(evidence.source,["repository","sha"])||evidence.source.repository!==process.env.GITHUB_REPOSITORY||!/^[0-9a-f]{40}$/i.test(evidence.source.sha)) throw new Error("server evidence repository/SHA mismatch"); if(process.env.HYPERVIBE_REQUESTED_SHA&&evidence.source.sha!==process.env.HYPERVIBE_REQUESTED_SHA) throw new Error("server evidence does not match requested SHA"); if(!exact(evidence.target,["scope","bindingsFingerprint","resources"])||!exact(evidence.target.scope,Object.keys(evidence.target.scope))||!/^[0-9a-f]{64}$/.test(evidence.target.bindingsFingerprint)||!Array.isArray(evidence.target.resources)||evidence.target.resources.length===0) throw new Error("server evidence target mismatch"); const resources=evidence.target.resources; const names=resources.map((resource)=>resource.logicalName); if(new Set(names).size!==names.length||JSON.stringify([...names].sort())!==JSON.stringify([...required].sort())) throw new Error("server evidence service set mismatch"); for(const resource of resources) if(!exact(resource,["logicalName","workloadKind","providerResourceType","providerResourceId","imageUri"])||typeof resource.providerResourceId!=="string"||!resource.providerResourceId||!(["web","worker","cron"].includes(resource.workloadKind))||(resource.workloadKind==="cron")!==(resource.providerResourceType==="job")||(resource.imageUri!==null&&!/^[^\\s@]+@sha256:[0-9a-f]{64}$/.test(resource.imageUri))) throw new Error("server evidence resource mismatch"); fs.appendFileSync(process.env.GITHUB_OUTPUT, "sha="+evidence.source.sha+"\n");'
+          node -e 'const fs=require("fs"); const evidence=JSON.parse(fs.readFileSync(process.env.HYPERVIBE_SERVER_EVIDENCE_PATH,"utf8")); const expected=JSON.parse(process.env.HYPERVIBE_EXPECTED_SERVER_RELEASE); const exact=(value,keys)=>value&&typeof value==="object"&&!Array.isArray(value)&&JSON.stringify(Object.keys(value).sort())===JSON.stringify([...keys].sort()); const canonical=(value)=>Array.isArray(value)?value.map(canonical):value&&typeof value==="object"?Object.fromEntries(Object.entries(value).sort(([a],[b])=>a.localeCompare(b)).map(([key,child])=>[key,canonical(child)])):value; const same=(left,right)=>JSON.stringify(canonical(left))===JSON.stringify(canonical(right)); if(!exact(evidence,["version","provider","environment","deploymentContractFingerprint","source","target","programFingerprint","verifiedAt"])||evidence.version!==Number(process.env.HYPERVIBE_SERVER_EVIDENCE_VERSION)||evidence.provider!==expected.provider||evidence.environment!==process.env.HYPERVIBE_ENVIRONMENT||evidence.programFingerprint!==expected.programFingerprint||!/^[0-9a-f]{64}$/.test(evidence.deploymentContractFingerprint)||typeof evidence.verifiedAt!=="string"||Number.isNaN(Date.parse(evidence.verifiedAt))) throw new Error("server evidence contract mismatch"); if(!exact(evidence.source,["repository","sha"])||evidence.source.repository!==process.env.GITHUB_REPOSITORY||!/^[0-9a-f]{40}$/i.test(evidence.source.sha)) throw new Error("server evidence repository/SHA mismatch"); if(process.env.HYPERVIBE_REQUESTED_SHA&&evidence.source.sha!==process.env.HYPERVIBE_REQUESTED_SHA) throw new Error("server evidence does not match requested SHA"); if(!exact(evidence.target,["scope","bindingsFingerprint","resources"])||!/^[0-9a-f]{64}$/.test(evidence.target.bindingsFingerprint)||!Array.isArray(evidence.target.resources)||evidence.target.resources.length===0) throw new Error("server evidence target mismatch"); const resources=evidence.target.resources; for(const resource of resources) if(!exact(resource,["logicalName","workloadKind","providerResourceType","providerResourceId","imageUri"])||typeof resource.logicalName!=="string"||!resource.logicalName||typeof resource.providerResourceId!=="string"||!resource.providerResourceId||!(["web","worker","cron"].includes(resource.workloadKind))||!(["service","job"].includes(resource.providerResourceType))||(resource.providerResourceType==="job"&&resource.workloadKind!=="cron")||(resource.imageUri!==null&&!/^[^\\s@]+@sha256:[0-9a-f]{64}$/.test(resource.imageUri))) throw new Error("server evidence resource mismatch"); const identities=resources.map(({imageUri,...identity})=>identity); if(evidence.target.bindingsFingerprint!==expected.target.bindingsFingerprint||!same(evidence.target.scope,expected.target.scope)||!same(identities,expected.target.resources)) throw new Error("server evidence does not match the exact reviewed deployment target"); fs.appendFileSync(process.env.GITHUB_OUTPUT, "sha="+evidence.source.sha+"\n");'
       - uses: actions/checkout@v7
         with:
           ref: ${{ steps.gate.outputs.sha }}
@@ -142,6 +179,7 @@ jobs:
       HYPERVIBE_MARKETING_VERSION: ${{ needs.build.outputs.marketing_version }}
       HYPERVIBE_BUILD_NUMBER: ${{ needs.build.outputs.build_number }}
       HYPERVIBE_EXPECTED_IPA_SHA256: ${{ needs.build.outputs.ipa_sha256 }}
+      HYPERVIBE_SERVER_EVIDENCE_VERSION: "@@SERVER_EVIDENCE_VERSION@@"
     steps:
       - uses: actions/setup-node@v6
         with:
@@ -188,7 +226,7 @@ jobs:
       - name: Download verified server release evidence
         uses: actions/download-artifact@v8
         with:
-          pattern: hypervibe-server-release-@@SAFE_ENVIRONMENT@@-*
+          artifact-ids: ${{ needs.build.outputs.server_artifact_id }}
           path: ${{ runner.temp }}/hypervibe-server-evidence
           merge-multiple: true
           github-token: ${{ github.token }}

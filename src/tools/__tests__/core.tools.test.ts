@@ -21,6 +21,12 @@ import { AppStoreConnectAdapter } from '../../adapters/providers/appstoreconnect
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import { hashEnvValue, type ObservedState } from '../../domain/ports/observe.port.js';
 import { buildBranchDeployWorkflow, resolveBranchDeployTargets } from '../../domain/services/github-ops.service.js';
+import {
+  githubActionsWorkflowInputHash,
+  managedWorkflowPublicationBranch,
+  workflowFiles,
+  workflowFilesContentHash,
+} from '../../domain/services/ci-deploy.service.js';
 import { bootstrapActionResultFromSummary } from '../core.tools.js';
 import { applyDatabaseSeed } from '../../application/apply-plan.js';
 import { createToolContext } from '../../application/context.js';
@@ -35,6 +41,13 @@ beforeEach(() => {
   SqliteAdapter.resetInstance();
   tempDir = mkdtempSync(path.join(tmpdir(), 'hypervibe-core-tools-'));
   SqliteAdapter.getInstance(path.join(tempDir, 'test.db')).migrate();
+  vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
+  vi.spyOn(GitHubAdapter.prototype, 'listRepositorySecrets').mockResolvedValue([
+    'RAILWAY_API_TOKEN',
+    'IMAGE_REGISTRY_USERNAME',
+    'IMAGE_REGISTRY_TOKEN',
+    'DATABASE_URL',
+  ]);
 });
 
 afterEach(() => {
@@ -300,18 +313,15 @@ describe('hv_spec', () => {
         env: 'staging',
       });
       expect(plan.ok).toBe(true);
+      expect(plan.data.scope).toBe('managed-ci-bindings');
       expect(plan.data.blocked).toContainEqual(expect.objectContaining({
         provider: 'railway',
       }));
-      expect(plan.data.blocked).toContainEqual(expect.objectContaining({
-        provider: 'github',
-      }));
-      expect(plan.data.localEnv.addedKeys).toEqual([
-        'HYPERVIBE_GITHUB_TOKEN',
-        'HYPERVIBE_RAILWAY_TOKEN',
-        'NODE_AUTH_TOKEN',
-      ]);
-      expect(readFileSync(path.join(repoDir, '.env'), 'utf8')).toContain('HYPERVIBE_GITHUB_TOKEN=');
+      expect(plan.data.blocked).not.toContainEqual(expect.objectContaining({ provider: 'github' }));
+      expect(plan.data.actions.some((action: { resource: { kind: string } }) =>
+        action.resource.kind === 'ci'
+      )).toBe(false);
+      expect(plan.data.localEnv.addedKeys).toEqual(['HYPERVIBE_RAILWAY_TOKEN']);
     } finally {
       if (t) await t.close();
       process.chdir(oldCwd);
@@ -1258,6 +1268,32 @@ describe('hv_plan / hv_status / hv_apply', () => {
     return plan?.actions?.find((action) => action.id === actionId);
   }
 
+  function acceptManagedWorkflow(
+    project: NonNullable<ReturnType<ProjectRepository['findByName']>>,
+    environmentName: string,
+    syncedSecretHashes: Record<string, string> = {}
+  ) {
+    const { targets, migration } = resolveBranchDeployTargets(project);
+    const target = targets.find((candidate) => candidate.environmentName === environmentName)!;
+    const workflow = buildBranchDeployWorkflow('railway', target, migration);
+    const files = workflowFiles(workflow);
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, environmentName)!;
+    new EnvironmentRepository().updatePlatformBindings(environment.id, {
+      ci: {
+        deployBranch: {
+          [workflow.path]: {
+            contentHash: workflowFilesContentHash(files),
+            inputHash: githubActionsWorkflowInputHash({ provider: 'railway', target, migration }),
+            managedPaths: files.map((file) => file.path),
+            syncedSecrets: Object.keys(syncedSecretHashes),
+            syncedSecretHashes,
+          },
+        },
+      },
+    });
+    return { files, workflow };
+  }
+
   function verifyConnection(provider: string, credentials: Record<string, unknown> = { apiToken: `${provider}-token` }) {
     const repo = new ConnectionRepository();
     const conn = repo.create({ provider, credentialsEncrypted: getSecretStore().encryptObject(credentials) });
@@ -1300,6 +1336,75 @@ describe('hv_plan / hv_status / hv_apply', () => {
         }
         : { success: false, error: 'no adapter' }
     );
+  }
+
+  function bindObservedRailwayWeb(
+    project: NonNullable<ReturnType<ProjectRepository['findByName']>>,
+    options: { url?: string } = {}
+  ) {
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-env-1',
+        services: {
+          web: { serviceId: 'svc-1', ...(options.url ? { url: options.url } : {}) },
+        },
+      },
+    });
+    mockObserved({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'rail-env-1',
+      services: [{
+        name: 'web',
+        externalId: 'svc-1',
+        workloadKind: 'web',
+        customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: [],
+        envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+  }
+
+  function mockPendingGitHubPublication(projectName: string, pullRequestNumber: number) {
+    const proposalBranch = managedWorkflowPublicationBranch('production');
+    const getFileContent = vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
+      success: true,
+      login: 'davejohnson',
+      scopes: ['repo', 'workflow', 'read:packages'],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
+    vi.spyOn(GitHubAdapter.prototype, 'getRef')
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        ref: `refs/heads/${proposalBranch}`,
+        object: { sha: 'base-sha' },
+      });
+    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests').mockResolvedValue([]);
+    vi.spyOn(GitHubAdapter.prototype, 'createRef').mockResolvedValue();
+    vi.spyOn(GitHubAdapter.prototype, 'getFile').mockResolvedValue(null);
+    vi.spyOn(GitHubAdapter.prototype, 'createPullRequest').mockResolvedValue({
+      number: pullRequestNumber,
+      html_url: `https://github.com/davejohnson/${projectName}/pull/${pullRequestNumber}`,
+    });
+    const writeWorkflow = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({
+      created: true,
+      updated: false,
+    });
+    const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+    return { getFileContent, writeWorkflow, setSecret };
   }
 
   it('rejects a stored unsupported workload spec before provider observation or planning', async () => {
@@ -2099,59 +2204,8 @@ describe('hv_plan / hv_status / hv_apply', () => {
     verifyRailwayConnection();
     verifyConnection('github', { apiToken: 'gh-token', login: 'davejohnson', packageReadToken: 'gh-package-token' });
     const project = new ProjectRepository().findByName('ci-plan-app')!;
-    new EnvironmentRepository().create({
-      projectId: project.id,
-      name: 'production',
-      platformBindings: {
-        provider: 'railway',
-        projectId: 'rp-1',
-        environmentId: 'rail-env-1',
-        services: { web: { serviceId: 'svc-1' } },
-      },
-    });
-    mockObserved({
-      provider: 'railway',
-      observedAt: new Date().toISOString(),
-      projectExists: true,
-      projectId: 'rp-1',
-      environmentId: 'rail-env-1',
-      services: [{
-        name: 'web', externalId: 'svc-1', workloadKind: 'web', customDomains: [],
-        config: { startCommand: 'npm start' },
-        envVarKeys: [], envVarHashes: {},
-        sourceState: 'disconnected',
-        status: 'running',
-      }],
-      databases: [],
-      partial: false,
-      warnings: [],
-    });
-    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
-    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
-      success: true,
-      login: 'davejohnson',
-      scopes: ['repo', 'workflow', 'read:packages'],
-    });
-    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
-    vi.spyOn(GitHubAdapter.prototype, 'getRef')
-      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({
-        ref: 'refs/heads/hypervibe/github-infrastructure',
-        object: { sha: 'base-sha' },
-      });
-    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests').mockResolvedValue([]);
-    vi.spyOn(GitHubAdapter.prototype, 'createRef').mockResolvedValue();
-    vi.spyOn(GitHubAdapter.prototype, 'getFile').mockResolvedValue(null);
-    vi.spyOn(GitHubAdapter.prototype, 'createPullRequest').mockResolvedValue({
-      number: 42,
-      html_url: 'https://github.com/davejohnson/ci-plan-app/pull/42',
-    });
-    const writeWorkflow = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({
-      created: true,
-      updated: false,
-    });
-    const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+    bindObservedRailwayWeb(project);
+    const { writeWorkflow, setSecret } = mockPendingGitHubPublication('ci-plan-app', 42);
 
     const plan = await t.call('hv_plan', { project: 'ci-plan-app', env: 'production' });
     expect(plan.ok).toBe(true);
@@ -2182,24 +2236,9 @@ describe('hv_plan / hv_status / hv_apply', () => {
       '.github/workflows/deploy-railway-production.yml',
       expect.stringContaining('Deploy Railway (production)'),
       expect.any(String),
-      'hypervibe/github-infrastructure'
+      managedWorkflowPublicationBranch('production')
     );
-    expect(writeWorkflow).toHaveBeenCalledWith(
-      'davejohnson',
-      'ci-plan-app',
-      '.github/pull_request_template.md',
-      expect.stringContaining('## Summary'),
-      expect.any(String),
-      'hypervibe/github-infrastructure'
-    );
-    expect(writeWorkflow).toHaveBeenCalledWith(
-      'davejohnson',
-      'ci-plan-app',
-      '.github/hypervibe/manifest.json',
-      expect.stringContaining('.github/pull_request_template.md'),
-      expect.any(String),
-      'hypervibe/github-infrastructure'
-    );
+    expect(writeWorkflow).toHaveBeenCalledTimes(1);
     expect(setSecret).not.toHaveBeenCalled();
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
     expect(environment.platformBindings.ci).toBeUndefined();
@@ -2217,6 +2256,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
           production: {
             hosting: { provider: 'railway' },
             services: { web: { startCommand: 'npm start' } },
+            envVars: { RELEASE_MARKER: 'current' },
             deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
           },
         },
@@ -2225,67 +2265,78 @@ describe('hv_plan / hv_status / hv_apply', () => {
     verifyRailwayConnection();
     verifyConnection('github', { apiToken: 'gh-token', login: 'davejohnson' });
     const project = new ProjectRepository().findByName('ci-missing-image-token-app')!;
-    new EnvironmentRepository().create({
-      projectId: project.id,
-      name: 'production',
-      platformBindings: {
-        provider: 'railway',
-        projectId: 'rp-1',
-        environmentId: 'rail-env-1',
-        services: { web: { serviceId: 'svc-1' } },
-      },
-    });
-    mockObserved({
-      provider: 'railway',
-      observedAt: new Date().toISOString(),
-      projectExists: true,
-      projectId: 'rp-1',
-      environmentId: 'rail-env-1',
-      services: [{
-        name: 'web', externalId: 'svc-1', workloadKind: 'web', customDomains: [],
-        config: { startCommand: 'npm start' },
-        envVarKeys: [], envVarHashes: {},
-        status: 'running',
-      }],
-      databases: [],
-      partial: false,
-      warnings: [],
-    });
-    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
-    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
-      success: true,
-      login: 'davejohnson',
-      scopes: ['repo', 'workflow', 'read:packages'],
-    });
-    vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({
-      created: true,
-      updated: false,
-    });
-    const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+    bindObservedRailwayWeb(project);
+    const { getFileContent, setSecret } = mockPendingGitHubPublication(
+      'ci-missing-image-token-app',
+      43
+    );
 
-    const plan = await t.call('hv_plan', { project: 'ci-missing-image-token-app', env: 'production' });
-    expect(plan.ok).toBe(true);
-    const ci = plan.data.actions.find((action: { id: string }) => action.id === 'ci:github-actions:production:deploy-branch');
+    const publicationPlan = await t.call('hv_plan', { project: 'ci-missing-image-token-app', env: 'production' });
+    expect(publicationPlan.ok).toBe(true);
+    expect(publicationPlan.data.scope).toBe('managed-ci-publication');
+    expect(publicationPlan.data.blocked).toEqual([]);
+    expect(publicationPlan.data.actionScopedBlocked).toBeUndefined();
+    const publicationCi = publicationPlan.data.actions.find(
+      (action: { id: string }) => action.id === 'ci:github-actions:production:deploy-branch'
+    );
+    expect(publicationCi).toMatchObject({ type: 'create' });
+    expect(storedPlanAction(publicationPlan.data.planId, publicationCi.id)?.metadata)
+      .toMatchObject({ workflowPublicationRequired: true });
+
+    const publicationApply = await t.call('hv_apply', {
+      project: 'ci-missing-image-token-app',
+      planId: publicationPlan.data.planId,
+    });
+    expect(publicationApply.ok).toBe(true);
+    expect(publicationApply.data.applied).toBe(false);
+    expect(publicationApply.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: publicationCi.id,
+      status: 'pending',
+      data: expect.objectContaining({
+        pullRequestNumber: 43,
+        pullRequestUrl: 'https://github.com/davejohnson/ci-missing-image-token-app/pull/43',
+      }),
+    }));
+    expect(setSecret).not.toHaveBeenCalled();
+
+    const accepted = acceptManagedWorkflow(project, 'production', {
+      RAILWAY_API_TOKEN: sha256('railway-token'),
+    });
+    const acceptedFiles = new Map(accepted.files.map((file) => [file.path, file.content]));
+    getFileContent.mockImplementation(async (_owner, _repo, filePath) => acceptedFiles.get(filePath) ?? null);
+
+    const syncPlan = await t.call('hv_plan', { project: 'ci-missing-image-token-app', env: 'production' });
+    expect(syncPlan.ok).toBe(true);
+    expect(syncPlan.data.scope).toBe('full');
+    const ci = syncPlan.data.actions.find(
+      (action: { id: string }) => action.id === 'ci:github-actions:production:deploy-branch'
+    );
     expect(ci.metadata).toBeUndefined();
-    expect(storedPlanAction(plan.data.planId, ci.id)?.metadata?.missingProviderSecrets).toEqual(['IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']);
-    expect(plan.data.actionScopedBlocked).toContainEqual(expect.objectContaining({
+    expect(storedPlanAction(syncPlan.data.planId, ci.id)?.metadata).toMatchObject({
+      missingProviderSecrets: ['IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
+    });
+    expect(storedPlanAction(syncPlan.data.planId, ci.id)?.metadata?.workflowPublicationRequired).toBeUndefined();
+    const service = syncPlan.data.actions.find((action: { id: string }) => action.id === 'service:web');
+    expect(service).toMatchObject({ type: 'update' });
+    expect(storedPlanAction(syncPlan.data.planId, service.id)?.dependsOn).toContain(ci.id);
+    expect(syncPlan.data.actionScopedBlocked).toContainEqual(expect.objectContaining({
       provider: 'github',
       reason: expect.stringContaining('repo/workflow API access plus packageReadToken'),
     }));
-    expect(plan.warnings).toContainEqual(expect.stringContaining('GitHub apiToken needs repo + workflow'));
-    expect(plan.next).toEqual(['hv_connections', 'hv_plan']);
-    expectActionableConnectionSetup(plan.data.connectionSetup, {
+    expect(syncPlan.warnings).toContainEqual(expect.stringContaining('GitHub apiToken needs repo + workflow'));
+    expect(syncPlan.next).toEqual(['hv_connections', 'hv_plan']);
+    expectActionableConnectionSetup(syncPlan.data.connectionSetup, {
       provider: 'github',
       project: 'ci-missing-image-token-app',
       scope: 'davejohnson/ci-missing-image-token-app',
     });
-    expect(plan.agentInstruction).toMatchObject({ action: 'ask_user' });
-    expect(plan.agentInstruction.message).toContain('exact clickable setup links');
-    expect(plan.agentInstruction.message).toContain('offer to open');
-    expect(plan.agentInstruction.message).toContain('real local path');
-    expect(plan.agentInstruction.message).not.toContain('ask the user for an exported token');
+    expect(syncPlan.agentInstruction).toMatchObject({ action: 'ask_user' });
+    expect(syncPlan.agentInstruction.message).toContain('exact clickable setup links');
+    expect(syncPlan.agentInstruction.message).toContain('offer to open');
+    expect(syncPlan.agentInstruction.message).toContain('real local path');
+    expect(syncPlan.agentInstruction.message).not.toContain('ask the user for an exported token');
 
-    const apply = await t.call('hv_apply', { project: 'ci-missing-image-token-app', planId: plan.data.planId });
+    const apply = await t.call('hv_apply', { project: 'ci-missing-image-token-app', planId: syncPlan.data.planId });
     expect(apply.ok).toBe(false);
     expect(apply.error.code).toBe('MISSING_CONNECTION');
     expect(apply.error.details.blocked).toContainEqual(expect.objectContaining({
@@ -2303,6 +2354,56 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(apply.next).toEqual(['hv_connections', 'hv_plan', 'hv_apply']);
     expect(setSecret).not.toHaveBeenCalledWith('davejohnson', 'ci-missing-image-token-app', 'RAILWAY_API_TOKEN', 'railway-token');
     expect(setSecret).not.toHaveBeenCalledWith('davejohnson', 'ci-missing-image-token-app', 'IMAGE_REGISTRY_TOKEN', expect.any(String));
+    await t.close();
+  });
+
+  it('does not turn a reviewed workflow-publication action into secret sync after the files become accepted', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec', {
+      spec: {
+        project: 'ci-publication-authority-app',
+        gitRemoteUrl: 'git@github.com:davejohnson/ci-publication-authority-app.git',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+    verifyConnection('github', {
+      apiToken: 'gh-token',
+      login: 'davejohnson',
+      packageReadToken: 'gh-package-token',
+    });
+    const project = new ProjectRepository().findByName('ci-publication-authority-app')!;
+    bindObservedRailwayWeb(project);
+    const { getFileContent, writeWorkflow, setSecret } = mockPendingGitHubPublication(
+      project.name,
+      45
+    );
+
+    const plan = await t.call('hv_plan', { project: project.name, env: 'production' });
+    expect(plan.ok).toBe(true);
+    expect(plan.data.scope).toBe('managed-ci-publication');
+    const { targets, migration } = resolveBranchDeployTargets(project);
+    const target = targets.find((candidate) => candidate.environmentName === 'production')!;
+    const acceptedFiles = workflowFiles(buildBranchDeployWorkflow('railway', target, migration));
+    const acceptedByPath = new Map(acceptedFiles.map((file) => [file.path, file.content]));
+    getFileContent.mockImplementation(async (_owner, _repo, filePath) => acceptedByPath.get(filePath) ?? null);
+
+    const apply = await t.call('hv_apply', { project: project.name, planId: plan.data.planId });
+    expect(apply.ok).toBe(true);
+    expect(apply.data.applied).toBe(false);
+    expect(apply.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'ci:github-actions:production:deploy-branch',
+      status: 'blocked',
+      message: 'GitHub Actions workflow publication is no longer pending',
+    }));
+    expect(writeWorkflow).not.toHaveBeenCalled();
+    expect(setSecret).not.toHaveBeenCalled();
     await t.close();
   });
 
@@ -2325,46 +2426,45 @@ describe('hv_plan / hv_status / hv_apply', () => {
     verifyRailwayConnection();
     verifyConnection('github', { apiToken: 'gh-token', login: 'davejohnson', packageReadToken: 'gh-package-token' });
     const project = new ProjectRepository().findByName('ci-domain-soft-block-app')!;
-    new EnvironmentRepository().create({
-      projectId: project.id,
-      name: 'production',
-      platformBindings: {
-        provider: 'railway',
-        projectId: 'rp-1',
-        environmentId: 'rail-env-1',
-        services: { web: { serviceId: 'svc-1', url: 'https://web-production.up.railway.app' } },
-      },
+    bindObservedRailwayWeb(project, { url: 'https://web-production.up.railway.app' });
+    const { getFileContent, setSecret } = mockPendingGitHubPublication(
+      'ci-domain-soft-block-app',
+      44
+    );
+
+    const publicationPlan = await t.call('hv_plan', { project: 'ci-domain-soft-block-app', env: 'production' });
+    expect(publicationPlan.ok).toBe(true);
+    expect(publicationPlan.data.scope).toBe('managed-ci-publication');
+    expect(publicationPlan.data.blocked).toEqual([]);
+    expect(publicationPlan.data.actionScopedBlocked).toBeUndefined();
+
+    const publicationApply = await t.call('hv_apply', {
+      project: 'ci-domain-soft-block-app',
+      planId: publicationPlan.data.planId,
     });
-    mockObserved({
-      provider: 'railway',
-      observedAt: new Date().toISOString(),
-      projectExists: true,
-      projectId: 'rp-1',
-      environmentId: 'rail-env-1',
-      services: [{
-        name: 'web', externalId: 'svc-1', workloadKind: 'web', customDomains: [],
-        config: { startCommand: 'npm start' },
-        envVarKeys: [], envVarHashes: {},
-        status: 'running',
-      }],
-      databases: [],
-      partial: false,
-      warnings: [],
+    expect(publicationApply.ok).toBe(true);
+    expect(publicationApply.data.applied).toBe(false);
+    expect(publicationApply.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'ci:github-actions:production:deploy-branch',
+      status: 'pending',
+      data: expect.objectContaining({
+        pullRequestNumber: 44,
+        pullRequestUrl: 'https://github.com/davejohnson/ci-domain-soft-block-app/pull/44',
+      }),
+    }));
+    expect(setSecret).not.toHaveBeenCalled();
+
+    const accepted = acceptManagedWorkflow(project, 'production', {
+      RAILWAY_API_TOKEN: sha256('railway-token'),
+      IMAGE_REGISTRY_USERNAME: sha256('davejohnson'),
+      IMAGE_REGISTRY_TOKEN: sha256('gh-package-token'),
     });
-    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
-    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
-      success: true,
-      login: 'davejohnson',
-      scopes: ['repo', 'workflow', 'read:packages'],
-    });
-    vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({
-      created: true,
-      updated: false,
-    });
-    const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+    const acceptedFiles = new Map(accepted.files.map((file) => [file.path, file.content]));
+    getFileContent.mockImplementation(async (_owner, _repo, filePath) => acceptedFiles.get(filePath) ?? null);
 
     const plan = await t.call('hv_plan', { project: 'ci-domain-soft-block-app', env: 'production' });
     expect(plan.ok).toBe(true);
+    expect(plan.data.scope).toBe('full');
     expect(plan.data.blocked).toContainEqual(expect.objectContaining({ provider: 'cloudflare' }));
     expect(plan.data.actionScopedBlocked).toBeUndefined();
     expect(plan.next).toEqual(['hv_connections', 'hv_plan']);
@@ -2965,6 +3065,11 @@ describe('hv_plan / hv_status / hv_apply', () => {
         deployBranch: {
           [workflow.path]: {
             contentHash: sha256(workflow.content),
+            inputHash: githubActionsWorkflowInputHash({
+              provider: 'railway',
+              target,
+              migration,
+            }),
             syncedSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
             syncedSecretHashes: {
               RAILWAY_API_TOKEN: sha256('railway-token'),

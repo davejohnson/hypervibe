@@ -531,7 +531,11 @@ export function splitActionScopedConnectionBlocks(
     const missing = Array.isArray(action.metadata?.missingProviderSecrets)
       ? action.metadata.missingProviderSecrets.filter((value): value is string => typeof value === 'string')
       : [];
-    if (missing.length === 0 || !isGitHubActionsDeployAction(action)) {
+    if (
+      missing.length === 0
+      || !isGitHubActionsDeployAction(action)
+      || action.metadata?.workflowPublicationRequired === true
+    ) {
       return [];
     }
     const hasImageRegistrySecret = missing.some((name) => name.startsWith('IMAGE_REGISTRY_'));
@@ -783,6 +787,8 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const envName = loaded.document.environmentName;
   const planScope = loaded.document.scope ?? 'full';
   const retainedCleanupOnly = planScope === 'retained-cleanup';
+  const managedCiBindingsOnly = planScope === 'managed-ci-bindings';
+  const workflowPublicationOnly = planScope === 'managed-ci-publication';
   if (loaded.document.inputRequired?.length) {
     return {
       kind: 'input_required',
@@ -848,6 +854,14 @@ export async function executePlanApply(ctx: CommandContext, params: {
       )
     )
     .map((action) => action.resource.provider);
+  const workflowPublicationActions = loaded.document.actions.filter((action) =>
+    action.type !== 'noop'
+    && action.metadata?.workflowPublicationRequired === true
+  );
+  const workflowPublicationProviders = workflowPublicationActions.map((action) => {
+    const codeProvider = stringField(asRecord(action.metadata), 'codeProvider');
+    return codeProvider ?? action.resource.provider;
+  });
   const blocked = retainedCleanupOnly
     ? planService.providerPreflight([
         envSpec.hosting.provider,
@@ -855,6 +869,14 @@ export async function executePlanApply(ctx: CommandContext, params: {
       ])
     : migrationActions.length > 0
     ? planService.providerPreflight(migrationProviders)
+    : workflowPublicationOnly
+    ? planService.providerPreflight(workflowPublicationProviders)
+    : managedCiBindingsOnly
+    ? planService.providerPreflight(
+        loaded.document.actions
+          .filter((action) => action.type !== 'noop')
+          .map((action) => action.resource.provider)
+      )
     : [
         ...planService.preflight(envSpec, envName, spec),
         ...planService.projectPreflight(projectForPreflight, spec, envName),
@@ -867,8 +889,12 @@ export async function executePlanApply(ctx: CommandContext, params: {
     return { kind: 'blocked', applyBlocked };
   }
   let freshIntegrationFingerprints: Record<string, string> | undefined;
+  const shouldRefreshIntegration = (configured: boolean, planned?: string) =>
+    !retainedCleanupOnly
+    && !workflowPublicationOnly
+    && (managedCiBindingsOnly ? Boolean(planned) : configured || Boolean(planned));
   const stripeSpec = envSpec.payments?.stripe;
-  if (!retainedCleanupOnly && (stripeSpec || loaded.document.integrationFingerprints?.stripe)) {
+  if (shouldRefreshIntegration(Boolean(stripeSpec), loaded.document.integrationFingerprints?.stripe)) {
     const stripeResolution = await resolveStripeIntegrationState({
       environmentName: envName,
       spec: stripeSpec,
@@ -890,7 +916,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
       stripe: stripeIntegrationFingerprint(stripeResolution),
     };
   }
-  if (!retainedCleanupOnly && (envSpec.email.enabled || loaded.document.integrationFingerprints?.email)) {
+  if (shouldRefreshIntegration(envSpec.email.enabled, loaded.document.integrationFingerprints?.email)) {
     const emailState = await resolveEmailIntegrationState({
       project: projectForPreflight,
       environmentSpec: envSpec,
@@ -900,7 +926,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
       email: emailIntegrationFingerprint(emailState),
     };
   }
-  if (!retainedCleanupOnly && (envSpec.messaging || loaded.document.integrationFingerprints?.messaging)) {
+  if (shouldRefreshIntegration(Boolean(envSpec.messaging), loaded.document.integrationFingerprints?.messaging)) {
     if (!envSpec.messaging) {
       return {
         kind: 'blocked',
@@ -925,18 +951,27 @@ export async function executePlanApply(ctx: CommandContext, params: {
     ? project
     : syncProjectGitRemoteUrl(ctx, project, spec);
 
-  // Re-observe for the TOCTOU fingerprint check.
-  const { observed } = await planService.observeEnvironment(
-    projectForApply,
-    environment,
-    envSpec,
-    { hostingOnly: retainedCleanupOnly }
-  );
-  const freshFingerprint = observed ? fingerprintObservedState(observed) : null;
+  // A workflow-publication action re-observes its exact repository files and
+  // proposal state. Unrelated hosting drift cannot stale-reject that stage.
+  let observed: ObservedState | null = null;
+  let freshFingerprint: string | null = null;
+  if (!workflowPublicationOnly) {
+    ({ observed } = await planService.observeEnvironment(
+      projectForApply,
+      environment,
+      envSpec,
+      { hostingOnly: retainedCleanupOnly }
+    ));
+    freshFingerprint = observed ? fingerprintObservedState(observed) : null;
+  }
 
   // The bootstrap path derives the hosting adapter from project.defaultPlatform.
   let applyProject: Project = projectForApply;
-  if (!retainedCleanupOnly && projectForApply.defaultPlatform !== envSpec.hosting.provider) {
+  if (
+    !retainedCleanupOnly
+    && !workflowPublicationOnly
+    && projectForApply.defaultPlatform !== envSpec.hosting.provider
+  ) {
     applyProject = ctx.repos.projects.update(projectForApply.id, { defaultPlatform: envSpec.hosting.provider }) ?? projectForApply;
   }
 
@@ -1146,9 +1181,10 @@ export async function executePlanApply(ctx: CommandContext, params: {
       }
       return applyGitHubActionsDeploy({
         project: applyProject,
-        spec,
         environmentName: envName,
         environmentSpec: envSpec,
+        action,
+        authority: workflowPublicationOnly ? 'publication-only' : 'secret-sync',
       });
     }
     if (
@@ -1225,6 +1261,8 @@ export async function executePlanApply(ctx: CommandContext, params: {
       const workflow = stringField(asRecord(action.metadata), 'workflow');
       const ref = stringField(asRecord(action.metadata), 'ref');
       const targetSha = stringField(asRecord(action.metadata), 'targetSha');
+      const workflowInputHash = stringField(asRecord(action.metadata), 'workflowInputHash');
+      const workflowContentHash = stringField(asRecord(action.metadata), 'workflowContentHash');
       const forceRelease = asRecord(action.metadata)?.forceRelease === true;
       if (
         repository !== expectedRepository
@@ -1233,15 +1271,20 @@ export async function executePlanApply(ctx: CommandContext, params: {
         || !workflow
         || !ref
         || !targetSha
+        || !workflowInputHash
+        || !workflowContentHash
       ) {
         return blockedActionIdentity(action, 'The reviewed repository, environment, workflow, ref, or exact commit no longer matches.');
       }
       return applyGitHubActionsRelease({
         project: applyProject,
         environmentName: envName,
+        environmentSpec: envSpec,
         workflow,
         ref,
         targetSha,
+        workflowInputHash,
+        workflowContentHash,
         forceRelease,
       });
     }

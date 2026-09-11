@@ -9,12 +9,14 @@ import { ConnectionRepository } from '../../../db/repositories/connection.reposi
 import { SecretStore, getSecretStore } from '../../../secrets/secret-store.js';
 import { SpecStore } from '../../../../domain/spec/spec.store.js';
 import { projectSpecSchema } from '../../../../domain/spec/spec.schema.js';
+import { environmentDeploymentContractHash } from '../../../../domain/services/deployment-contract.service.js';
 import {
   findGitLabPortableProviderConnection,
   gitLabCiLifecycle,
 } from '../gitlab-ci.lifecycle.js';
 import '../../railway/railway.adapter.js';
 import '../../gcp/cloudrun.adapter.js';
+import '../../aws/ecs-express.adapter.js';
 import {
   gitLabShellLiteral,
 } from '../../railway/railway-ci.recipe.js';
@@ -191,7 +193,7 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
     expect(gitLabShellLiteral("acme's storefront")).toBe("'acme'\\''s storefront'");
   });
 
-  it('renders bound Cloud Run staging independently while production remains unbound and deferred', async () => {
+  it('refuses to publish or tear down a project config that would omit an unbound environment', async () => {
     const cloudRunSpec = projectSpecSchema.parse({
       version: 1,
       project: 'gitlab-cloudrun-app',
@@ -233,7 +235,18 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
     const environment = environmentRepository.create({
       projectId: project.id,
       name: 'staging',
-      platformBindings: { provider: 'cloudrun' },
+      platformBindings: {
+        provider: 'cloudrun',
+        projectId: 'gitlab-cloudrun-app-staging',
+        providerScope: { projectId: 'gcp-project', region: 'us-west1' },
+        services: {
+          web: {
+            serviceId: 'gitlab-cloudrun-app-staging-web',
+            workloadKind: 'web',
+            resourceType: 'service',
+          },
+        },
+      },
     });
     const productionEnvironment = environmentRepository.create({
       projectId: project.id,
@@ -280,34 +293,6 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
       throw new Error(`Unexpected GitLab request: ${method} ${url}`);
     });
 
-    const deferred = await gitLabCiLifecycle.planDeploy({
-      project,
-      spec: cloudRunSpec,
-      environmentName: 'staging',
-      environmentSpec: cloudRunSpec.environments.staging,
-      environment,
-      bindingsWillChange: true,
-      dependsOn: ['service:web'],
-    });
-    expect(deferred).toMatchObject({ deferred: true });
-    expect(deferred.actions).toBeUndefined();
-    expect(deferred.warnings.join(' ')).toContain('Apply this plan, then re-run hv_plan');
-    expect(requests.some((request) => request.path.endsWith('/projects/42/runners'))).toBe(false);
-    expect(requests.every((request) => request.method === 'GET')).toBe(true);
-
-    environmentRepository.updatePlatformBindings(environment.id, {
-      provider: 'cloudrun',
-      projectId: 'gitlab-cloudrun-app-staging',
-      providerScope: { projectId: 'gcp-project', region: 'us-west1' },
-      services: {
-        web: {
-          serviceId: 'gitlab-cloudrun-app-staging-web',
-          workloadKind: 'web',
-          resourceType: 'service',
-        },
-      },
-    });
-    requests.length = 0;
     const compiled = await gitLabCiLifecycle.planDeploy({
       project,
       spec: cloudRunSpec,
@@ -315,34 +300,109 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
       environmentSpec: cloudRunSpec.environments.staging,
       environment: environmentRepository.findById(environment.id),
     });
-    expect(compiled.error).toBeUndefined();
-    expect(compiled.deferred).toBeUndefined();
-    expect(compiled.actions).toHaveLength(1);
-    expect(compiled.actions?.[0]).toMatchObject({
-      id: 'ci:gitlab-ci:configuration',
-      type: 'update',
-      verified: true,
-    });
-    const files = compiled.actions?.[0]?.metadata?.files as Array<{ path: string }>;
-    expect(files.map((file) => file.path)).toContain(
-      '.gitlab/hypervibe/deploy-cloudrun-staging.yml'
-    );
-    expect(files.map((file) => file.path)).not.toContain(
-      '.gitlab/hypervibe/deploy-cloudrun-production.yml'
-    );
+    expect(compiled.actions).toBeUndefined();
+    expect(compiled.error).toContain('production');
     expect(requests.every((request) => request.method === 'GET')).toBe(true);
 
-    const productionDeferred = await gitLabCiLifecycle.planDeploy({
-      project,
-      spec: cloudRunSpec,
-      environmentName: 'production',
-      environmentSpec: cloudRunSpec.environments.production,
-      environment: productionEnvironment,
-      bindingsWillChange: true,
-      dependsOn: ['service:web'],
+    const teardownSpec = projectSpecSchema.parse({
+      ...cloudRunSpec,
+      environments: {
+        ...cloudRunSpec.environments,
+        staging: {
+          ...cloudRunSpec.environments.staging,
+          services: {
+            ...cloudRunSpec.environments.staging.services,
+            worker: { workloadKind: 'worker', startCommand: 'node worker.mjs' },
+          },
+        },
+        production: {
+          ...cloudRunSpec.environments.production,
+          deploy: { strategy: 'manual' },
+        },
+      },
     });
-    expect(productionDeferred).toMatchObject({ deferred: true });
-    expect(productionDeferred.actions).toBeUndefined();
+    environmentRepository.updatePlatformBindings(productionEnvironment.id, {
+      ci: {
+        gitlabCi: {
+          provider: 'gitlab-ci',
+          repositoryId: '42',
+          instanceScope: 'https://gitlab.com',
+          repositoryScope: projectPayload.web_url,
+          configurationActive: { programHash: 'old-program', files: [] },
+        },
+      },
+    });
+    requests.length = 0;
+    const teardown = await gitLabCiLifecycle.planDeploy({
+      project,
+      spec: teardownSpec,
+      environmentName: 'production',
+      environmentSpec: teardownSpec.environments.production,
+      environment: environmentRepository.findById(productionEnvironment.id),
+    });
+    expect(teardown.actions).toBeUndefined();
+    expect(teardown.error).toContain('staging');
+    expect(requests.some((request) => request.path.includes('/runners'))).toBe(false);
+    expect(requests.some((request) => request.path.includes('/repository/files/'))).toBe(false);
+  });
+
+  it('does not relabel Railway bindings as ECS while another environment plans shared CI', async () => {
+    const { project } = seed();
+    const transitionSpec = projectSpecSchema.parse({
+      ...spec,
+      environments: {
+        ...spec.environments,
+        production: {
+          ...spec.environments.production,
+          hosting: { provider: 'ecs', region: 'us-east-1' },
+          deploy: {
+            ...spec.environments.production.deploy,
+            autoDeploy: true,
+          },
+        },
+      },
+    });
+    const requests: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+      const decodedPath = decodeURIComponent(url.pathname);
+      requests.push(`${method} ${decodedPath}`);
+      if (method === 'GET' && decodedPath.endsWith('/user')) {
+        return response({ id: 3, username: 'hypervibe' });
+      }
+      if (method === 'GET' && /\/api\/v4\/projects\/(?:42|acme\/storefront)$/.test(decodedPath)) {
+        return response(projectPayload);
+      }
+      if (method === 'GET' && decodedPath.endsWith('/projects/42/runners')) {
+        return response([{
+          id: 100,
+          runner_type: 'instance_type',
+          status: 'online',
+          paused: false,
+          tag_list: ['saas-linux-small-amd64'],
+        }]);
+      }
+      if (method === 'GET' && decodedPath.includes('/repository/files/')) {
+        return response({ message: 'not found' }, 404);
+      }
+      if (method === 'GET' && decodedPath.endsWith('/repository/branches/main')) {
+        return response({ name: 'main', commit: { id: commitSha } });
+      }
+      throw new Error(`Unexpected GitLab request: ${method} ${url}`);
+    });
+
+    const planned = await gitLabCiLifecycle.planDeploy({
+      project,
+      spec: transitionSpec,
+      environmentName: 'staging',
+      environmentSpec: transitionSpec.environments.staging,
+      environment: new EnvironmentRepository().findByProjectAndName(project.id, 'staging'),
+    });
+    expect(planned.actions).toBeUndefined();
+    expect(planned.error).toContain('production');
+    expect(requests.some((request) => request.includes('/runners'))).toBe(false);
+    expect(requests.some((request) => request.includes('/repository/files/'))).toBe(false);
   });
 
   it('publishes one atomic reviewed change, then performs zero mutations at exact convergence', async () => {
@@ -440,14 +500,21 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
           file === '.gitlab/hypervibe/manifest.yml'
           || file.startsWith('.gitlab/hypervibe/deploy-')
         ));
+        const productionProvider = committed.has('.gitlab/hypervibe/deploy-cloudrun-production.yml')
+          ? 'cloudrun'
+          : 'railway';
         return response({
           valid: true,
           jobs: [
+            { name: 'hypervibe:contract:railway:staging', stage: 'contract', environment: 'staging' },
+            { name: `hypervibe:contract:${productionProvider}:production`, stage: 'contract', environment: 'production' },
             { name: 'hypervibe:build:railway:staging', stage: 'build' },
             { name: 'hypervibe:deploy:railway:staging', stage: 'deploy', environment: 'staging' },
-            { name: 'hypervibe:promote:railway:production', stage: 'promotion' },
-            { name: 'hypervibe:build:railway:production', stage: 'build' },
-            { name: 'hypervibe:deploy:railway:production', stage: 'deploy', environment: 'production' },
+            ...(productionProvider === 'railway'
+              ? [{ name: 'hypervibe:promote:railway:production', stage: 'promotion' }]
+              : []),
+            { name: `hypervibe:build:${productionProvider}:production`, stage: 'build' },
+            { name: `hypervibe:deploy:${productionProvider}:production`, stage: 'deploy', environment: 'production' },
           ],
           includes: includePaths.map((location) => ({
             type: 'local',
@@ -542,6 +609,7 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
       '.gitlab/hypervibe/finalize-release-evidence.mjs',
       '.gitlab/hypervibe/manifest.yml',
       '.gitlab/hypervibe/railway-deploy.mjs',
+      '.gitlab/hypervibe/verify-deployment-contract.cjs',
       '.gitlab/hypervibe/verify-deployment-order.mjs',
       '.gitlab/hypervibe/verify-promotion-evidence.mjs',
     ]);
@@ -550,18 +618,35 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
     )));
     const stagingDeploy = committedFiles['.gitlab/hypervibe/deploy-railway-staging.yml'];
     const appliedSpecGate = stagingDeploy.match(
-      /test "\$(HYPERVIBE_[0-9A-F]{16}_APPLIED_SPEC_HASH)" = '([0-9a-f]{64})'/
+      /printenv (HYPERVIBE_[0-9A-F]{16}_APPLIED_SPEC_HASH)/
     );
     expect(appliedSpecGate).not.toBeNull();
     const appliedSpecVariable = appliedSpecGate![1];
-    const expectedAppliedSpecHash = appliedSpecGate![2];
+    const expectedAppliedSpecHash = environmentDeploymentContractHash(spec, 'staging');
     const stagingPushRule = `$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main" && $${appliedSpecVariable} != ""`;
     expect(committedFiles['.gitlab-ci.yml']).toContain(stagingPushRule);
     expect(stagingDeploy).toContain(stagingPushRule);
     expect(stagingPushRule).not.toContain(expectedAppliedSpecHash);
+    expect(stagingDeploy).not.toContain(expectedAppliedSpecHash);
+    expect(stagingDeploy).toContain('node .gitlab/hypervibe/verify-deployment-contract.cjs');
     expect(stagingDeploy).toContain(
-      `test "$${appliedSpecVariable}" = '${expectedAppliedSpecHash}'`
+      'export HYPERVIBE_DEPLOYMENT_CONTRACT_FINGERPRINT="$(cat .hypervibe-deployment-contract-fingerprint)"'
     );
+    const liveContractRead = stagingDeploy.lastIndexOf(
+      `export HYPERVIBE_APPLIED_SPEC_HASH="$(printenv ${appliedSpecVariable} || true)"`
+    );
+    const deployContractGate = stagingDeploy.lastIndexOf(
+      'node .gitlab/hypervibe/verify-deployment-contract.cjs'
+    );
+    expect(liveContractRead).toBeGreaterThan(stagingDeploy.indexOf('hypervibe:deploy:railway:staging:'));
+    expect(liveContractRead).toBeLessThan(deployContractGate);
+    expect(deployContractGate).toBeLessThan(
+      stagingDeploy.indexOf('node .gitlab/hypervibe/verify-deployment-order.mjs')
+    );
+    expect(stagingDeploy.match(/node \.gitlab\/hypervibe\/verify-deployment-contract\.cjs/g))
+      .toHaveLength(2);
+    expect(stagingDeploy.indexOf('hypervibe:contract:railway:staging:'))
+      .toBeLessThan(stagingDeploy.indexOf('hypervibe:build:railway:staging:'));
     const manualRule = stagingDeploy.split('\n').find((line: string) => (
       line.includes('$CI_PIPELINE_SOURCE == "api"')
       && line.includes('$[[ inputs.environment ]]')
@@ -569,9 +654,8 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
     expect(manualRule).toBeDefined();
     expect(manualRule).not.toContain(appliedSpecVariable);
     expect(committedFiles['.gitlab-ci.yml']).toContain('commit_sha:');
-    expect(committedFiles['.gitlab/hypervibe/deploy-railway-production.yml']).toContain(
-      'test "$HYPERVIBE_'
-    );
+    expect(committedFiles['.gitlab/hypervibe/deploy-railway-production.yml'])
+      .not.toContain(environmentDeploymentContractHash(spec, 'production'));
     expect(committedFiles['.gitlab/hypervibe/deploy-railway-production.yml']).toContain(
       'sh .gitlab/hypervibe/build-railway-production.sh "$[[ inputs.commit_sha ]]"'
     );
@@ -625,6 +709,47 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
     expect(mutationCalls).toEqual([]);
     mergeRequestSourceSha = 'b'.repeat(40);
 
+    const stagingEnvironment = new EnvironmentRepository()
+      .findByProjectAndName(project.id, 'staging')!;
+    new EnvironmentRepository().updatePlatformBindings(stagingEnvironment.id, {
+      ci: {
+        gitlabCi: {
+          provider: 'gitlab-ci',
+          repositoryId: '42',
+          instanceScope: 'https://gitlab.com',
+          repositoryScope: projectPayload.web_url,
+          variableHashes: { HYPERVIBE_STAGING_LEGACY: 'f'.repeat(64) },
+        },
+      },
+    });
+    const rotatedOwnerSpec = projectSpecSchema.parse({
+      ...spec,
+      environments: {
+        ...spec.environments,
+        production: {
+          ...spec.environments.production,
+          deploy: { strategy: 'manual' },
+        },
+      },
+    });
+    const ownerRotation = await gitLabCiLifecycle.planDeploy({
+      project,
+      spec: rotatedOwnerSpec,
+      environmentName: 'production',
+      environmentSpec: rotatedOwnerSpec.environments.production,
+      environment,
+    });
+    expect(ownerRotation.error).toBeUndefined();
+    expect(ownerRotation.actions).toHaveLength(1);
+    expect(ownerRotation.actions?.[0]?.metadata).toMatchObject({
+      operation: 'ciConfigurationSync',
+      removedPaths: expect.arrayContaining([
+        '.gitlab/hypervibe/build-railway-production.sh',
+        '.gitlab/hypervibe/deploy-railway-production.yml',
+      ]),
+    });
+    new EnvironmentRepository().updatePlatformBindings(stagingEnvironment.id, { ci: null });
+
     const variablePlan = await gitLabCiLifecycle.planDeploy({
       project,
       spec,
@@ -648,6 +773,9 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
     });
     expect(stagingVariablePlan.error).toBeUndefined();
     expect(stagingVariablePlan.actions).toHaveLength(5);
+    const railwayProductionVariableKeys = variablePlan.actions!.map((action) => (
+      String(action.metadata?.variableKey)
+    ));
 
     const firstVariableKey = String(variablePlan.actions?.[0]?.metadata?.variableKey);
     variables.set(`${firstVariableKey}:production`, {
@@ -692,6 +820,16 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
       expect(JSON.stringify(result)).not.toContain('railway-api-token');
       expect(JSON.stringify(result)).not.toContain('gitlab-registry-read-token');
     }
+    for (const action of stagingVariablePlan.actions ?? []) {
+      const result = await gitLabCiLifecycle.applyDeploy({
+        project,
+        spec,
+        environmentName: 'staging',
+        environmentSpec: spec.environments.staging,
+        action,
+      });
+      expect(result, JSON.stringify(result)).toMatchObject({ success: true });
+    }
 
     const appliedHashPlan = await gitLabCiLifecycle.planAppliedSpecHash!({
       project,
@@ -735,16 +873,142 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
     expect(converged).toEqual({ actions: [], warnings: [] });
     expect(mutationCalls).toEqual([]);
 
-    const teardownSpec = projectSpecSchema.parse({
+    const envOnlySpec = projectSpecSchema.parse({
       ...spec,
       environments: {
-        staging: { ...spec.environments.staging, deploy: { strategy: 'manual' } },
-        production: { ...spec.environments.production, deploy: { strategy: 'manual' } },
+        staging: {
+          ...spec.environments.staging,
+          envVars: { RELEASE_CHANNEL: 'candidate' },
+        },
+        production: {
+          ...spec.environments.production,
+          envVars: { RELEASE_CHANNEL: 'stable' },
+        },
+      },
+    });
+    const stableConfiguration = await gitLabCiLifecycle.planDeploy({
+      project,
+      spec: envOnlySpec,
+      environmentName: 'production',
+      environmentSpec: envOnlySpec.environments.production,
+      environment: new EnvironmentRepository().findById(environment.id),
+    });
+    expect(stableConfiguration).toEqual({ actions: [], warnings: [] });
+    expect(mutationCalls).toEqual([]);
+    const changedAppliedContract = await gitLabCiLifecycle.planAppliedSpecHash!({
+      project,
+      spec: envOnlySpec,
+      environmentName: 'production',
+      environmentSpec: envOnlySpec.environments.production,
+      environment: new EnvironmentRepository().findById(environment.id),
+    });
+    expect(changedAppliedContract.actions).toHaveLength(1);
+    expect(changedAppliedContract.actions?.[0]).toMatchObject({
+      type: 'update',
+      metadata: { operation: 'ciAppliedSpecHashSync' },
+    });
+
+    const switchedSpec = projectSpecSchema.parse({
+      ...spec,
+      environments: {
+        ...spec.environments,
+        production: {
+          ...spec.environments.production,
+          hosting: { provider: 'cloudrun', region: 'us-west1' },
+          deploy: { ...spec.environments.production.deploy, autoDeploy: true },
+        },
+      },
+    });
+    new EnvironmentRepository().updatePlatformBindings(environment.id, {
+      provider: 'cloudrun',
+      projectId: 'gitlab-cloudrun-app-production',
+      providerScope: { projectId: 'gcp-project', region: 'us-west1' },
+      services: {
+        web: {
+          serviceId: 'gitlab-cloudrun-app-production-web',
+          workloadKind: 'web',
+          resourceType: 'service',
+        },
+      },
+    });
+    const cloudrun = new ConnectionRepository().create({
+      provider: 'cloudrun',
+      credentialsEncrypted: getSecretStore().encryptObject({
+        credentials: '{"client_email":"ci@example.test"}',
+        projectId: 'gcp-project',
+      }),
+    });
+    new ConnectionRepository().updateStatus(cloudrun.id, 'verified');
+    mergeRequestCreated = false;
+    mutationCalls.length = 0;
+    const switchedConfiguration = await gitLabCiLifecycle.planDeploy({
+      project,
+      spec: switchedSpec,
+      environmentName: 'production',
+      environmentSpec: switchedSpec.environments.production,
+      environment: new EnvironmentRepository().findById(environment.id),
+    });
+    expect(switchedConfiguration.error).toBeUndefined();
+    expect(switchedConfiguration.actions).toHaveLength(1);
+    expect(switchedConfiguration.actions?.[0]?.metadata?.operation).toBe('ciConfigurationSync');
+    const proposedSwitch = await gitLabCiLifecycle.applyDeploy({
+      project,
+      spec: switchedSpec,
+      environmentName: 'production',
+      environmentSpec: switchedSpec.environments.production,
+      action: switchedConfiguration.actions![0],
+    });
+    expect(proposedSwitch).toMatchObject({ success: false, status: 'pending' });
+
+    merged = true;
+    const switchedVariables = await gitLabCiLifecycle.planDeploy({
+      project,
+      spec: switchedSpec,
+      environmentName: 'production',
+      environmentSpec: switchedSpec.environments.production,
+      environment: new EnvironmentRepository().findById(environment.id),
+    });
+    expect(switchedVariables.error).toBeUndefined();
+    const retiredVariables = switchedVariables.actions?.filter((action) => action.type === 'destroy') ?? [];
+    expect(retiredVariables).toHaveLength(railwayProductionVariableKeys.length);
+    expect(retiredVariables.map((action) => action.metadata?.variableKey).sort())
+      .toEqual([...railwayProductionVariableKeys].sort());
+    expect(retiredVariables.every((action) => action.dataBearing && action.requiresConfirm)).toBe(true);
+    expect(switchedVariables.actions?.filter((action) => action.type === 'create')).toHaveLength(9);
+    for (const action of switchedVariables.actions ?? []) {
+      const result = await gitLabCiLifecycle.applyDeploy({
+        project,
+        spec: switchedSpec,
+        environmentName: 'production',
+        environmentSpec: switchedSpec.environments.production,
+        action,
+      });
+      expect(result, JSON.stringify(result)).toMatchObject({ success: true });
+    }
+    const productionVariableKeys = [...variables.values()]
+      .filter((variable) => variable.environment_scope === 'production')
+      .map((variable) => String(variable.key));
+    expect(productionVariableKeys.some((key) => railwayProductionVariableKeys.includes(key))).toBe(false);
+    const productionGitLabBinding = (
+      new EnvironmentRepository().findById(environment.id)?.platformBindings.ci as {
+        gitlabCi?: { variableHashes?: Record<string, string> };
+      }
+    )?.gitlabCi;
+    expect(Object.keys(productionGitLabBinding?.variableHashes ?? {})
+      .some((key) => railwayProductionVariableKeys.includes(key))).toBe(false);
+
+    const teardownSpec = projectSpecSchema.parse({
+      ...switchedSpec,
+      environments: {
+        staging: { ...switchedSpec.environments.staging, deploy: { strategy: 'manual' } },
+        production: { ...switchedSpec.environments.production, deploy: { strategy: 'manual' } },
       },
     });
     merged = true;
     mergeRequestCreated = false;
     mutationCalls.length = 0;
+    const expectedTeardownPaths = [...committed.keys()].sort();
+    expect(expectedTeardownPaths.length).toBeGreaterThan(0);
     const teardownConfig = await gitLabCiLifecycle.planDeploy({
       project,
       spec: teardownSpec,
@@ -756,8 +1020,8 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
     expect(teardownConfig.actions).toHaveLength(1);
     expect(teardownConfig.actions?.[0]?.metadata).toMatchObject({
       operation: 'ciConfigurationSync',
-      removedPaths: expect.arrayContaining(['.gitlab-ci.yml']),
     });
+    expect(teardownConfig.actions?.[0]?.metadata?.removedPaths).toEqual(expectedTeardownPaths);
     const proposedTeardown = await gitLabCiLifecycle.applyDeploy({
       project,
       spec: teardownSpec,
@@ -769,7 +1033,21 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
     const teardownCommit = mutationCalls
       .filter((call) => call.method === 'POST' && call.url.includes('/repository/commits'))
       .at(-1);
-    expect(JSON.parse(teardownCommit!.body!).actions.every((action: { action: string }) => action.action === 'delete')).toBe(true);
+    const teardownActions = JSON.parse(teardownCommit!.body!).actions as Array<{
+      action: string;
+      file_path: string;
+    }>;
+    expect(teardownActions).toHaveLength(expectedTeardownPaths.length);
+    expect(teardownActions.map((action) => action.file_path).sort()).toEqual(expectedTeardownPaths);
+    expect(teardownActions.map((action) => action.action)).toEqual(
+      expectedTeardownPaths.map(() => 'delete')
+    );
+    expect(committed.size).toBe(0);
+    expect((
+      new EnvironmentRepository().findByProjectAndName(project.id, 'staging')?.platformBindings.ci as {
+        gitlabCi?: { configurationProposal?: { programHash?: string } };
+      }
+    )?.gitlabCi?.configurationProposal?.programHash).toBe(teardownConfig.actions?.[0]?.metadata?.programHash);
 
     merged = true;
     mutationCalls.length = 0;
@@ -795,8 +1073,30 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
       });
       expect(result, JSON.stringify(result)).toMatchObject({ success: true });
     }
-    expect(variables.size).toBe(0);
     expect(new EnvironmentRepository().findByProjectAndName(project.id, 'production')?.platformBindings)
+      .toMatchObject({ ci: { gitlabCi: null } });
+
+    const stagingTeardown = await gitLabCiLifecycle.planDeploy({
+      project,
+      spec: teardownSpec,
+      environmentName: 'staging',
+      environmentSpec: teardownSpec.environments.staging,
+      environment: new EnvironmentRepository().findByProjectAndName(project.id, 'staging'),
+    });
+    expect(stagingTeardown.error).toBeUndefined();
+    expect(stagingTeardown.actions?.at(-1)?.metadata?.operation).toBe('ciBindingRemove');
+    for (const action of stagingTeardown.actions ?? []) {
+      const result = await gitLabCiLifecycle.applyDeploy({
+        project,
+        spec: teardownSpec,
+        environmentName: 'staging',
+        environmentSpec: teardownSpec.environments.staging,
+        action,
+      });
+      expect(result, JSON.stringify(result)).toMatchObject({ success: true });
+    }
+    expect(variables.size).toBe(0);
+    expect(new EnvironmentRepository().findByProjectAndName(project.id, 'staging')?.platformBindings)
       .toMatchObject({ ci: { gitlabCi: null } });
   });
 });

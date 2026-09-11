@@ -1,11 +1,21 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { environmentDeploymentContractHash } from '../../../../domain/services/deployment-contract.service.js';
 import { buildGitLabPromotionGateRuntime } from '../gitlab-ci.lifecycle.js';
 
 const sha = 'a'.repeat(40);
 const wrongSha = 'b'.repeat(40);
 const sourceJob = 'hypervibe:deploy:railway:staging';
 const programFingerprint = 'c'.repeat(64);
-const deploymentContractFingerprint = 'd'.repeat(64);
+const deploymentSpec = {
+  version: 1,
+  project: 'storefront',
+  gitRemoteUrl: 'https://gitlab.com/acme/storefront',
+  environments: {
+    staging: { hosting: { provider: 'railway' } },
+  },
+  secrets: {},
+};
+const deploymentContractFingerprint = environmentDeploymentContractHash(deploymentSpec, 'staging');
 const providerIdentity = {
   projectId: 'rail-project',
   environmentId: 'rail-staging',
@@ -43,6 +53,13 @@ function sourceEvidence(deployedSha = sha) {
   };
 }
 
+type PromotionMutation = {
+  label: string;
+  mutateDeployment?: (deployment: ReturnType<typeof sourceDeployment>) => void;
+  mutateEvidence?: (evidence: ReturnType<typeof sourceEvidence>) => void;
+  expectedError?: string;
+};
+
 function stubEnvironment(): void {
   vi.stubEnv('CI_API_V4_URL', 'https://gitlab.example.com/api/v4');
   vi.stubEnv('CI_PROJECT_ID', '42');
@@ -61,7 +78,11 @@ function stubEnvironment(): void {
 }
 
 async function executeRuntime(): Promise<void> {
-  const source = Buffer.from(buildGitLabPromotionGateRuntime(), 'utf8').toString('base64');
+  const runtime = buildGitLabPromotionGateRuntime().replace(
+    "import { readFile } from 'node:fs/promises';",
+    `const readFile = async () => ${JSON.stringify(JSON.stringify(deploymentSpec))};`
+  );
+  const source = Buffer.from(runtime, 'utf8').toString('base64');
   await import(`data:text/javascript;base64,${source}#${Math.random()}`);
 }
 
@@ -185,20 +206,61 @@ describe('GitLab exact-SHA promotion gate', () => {
     );
   });
 
-  it('rejects evidence with different provider scope or CI execution identity', async () => {
+  it.each<PromotionMutation>([
+    {
+      label: 'provider',
+      mutateEvidence: (evidence) => { evidence.provider = 'cloudrun'; },
+    },
+    {
+      label: 'repository',
+      mutateEvidence: (evidence) => { evidence.repository = 'https://gitlab.com/acme/other'; },
+    },
+    {
+      label: 'program fingerprint',
+      mutateEvidence: (evidence) => { evidence.programFingerprint = 'd'.repeat(64); },
+    },
+    {
+      label: 'deployment contract fingerprint',
+      mutateEvidence: (evidence) => { evidence.deploymentContractFingerprint = 'e'.repeat(64); },
+    },
+    {
+      label: 'provider identity',
+      mutateEvidence: (evidence) => {
+        evidence.providerIdentity = { ...providerIdentity, environmentId: 'rail-production' };
+      },
+    },
+    {
+      label: 'managed source job',
+      mutateDeployment: (deployment) => { deployment.deployable.name = 'unreviewed:deploy:job'; },
+      expectedError: `No successful staging deployment of ${sha} was found for exact managed job ${sourceJob}`,
+    },
+    {
+      label: 'CI project identity',
+      mutateEvidence: (evidence) => { evidence.ci = { ...evidence.ci, projectId: '43' }; },
+    },
+    {
+      label: 'CI pipeline identity',
+      mutateEvidence: (evidence) => { evidence.ci = { ...evidence.ci, pipelineId: '18' }; },
+    },
+    {
+      label: 'CI job identity',
+      mutateEvidence: (evidence) => { evidence.ci = { ...evidence.ci, jobId: '191' }; },
+    },
+  ])('rejects evidence with a different $label', async ({ mutateDeployment, mutateEvidence, expectedError }) => {
     stubEnvironment();
+    const deployment = sourceDeployment();
     const evidence = sourceEvidence();
-    evidence.providerIdentity = { ...providerIdentity, environmentId: 'rail-production' };
-    evidence.ci = { ...evidence.ci, pipelineId: '18' };
+    mutateDeployment?.(deployment);
+    mutateEvidence?.(evidence);
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));
       return url.pathname.endsWith('/deployments')
-        ? new Response(JSON.stringify([sourceDeployment()]), { status: 200, headers: { 'Content-Type': 'application/json' } })
+        ? new Response(JSON.stringify([deployment]), { status: 200, headers: { 'Content-Type': 'application/json' } })
         : new Response(JSON.stringify(evidence), { status: 200 });
     }));
 
     await expect(executeRuntime()).rejects.toThrow(
-      `No unexpired Hypervibe staging release artifact for ${sha} was found`
+      expectedError ?? `No unexpired Hypervibe staging release artifact for ${sha} was found`
     );
   });
 

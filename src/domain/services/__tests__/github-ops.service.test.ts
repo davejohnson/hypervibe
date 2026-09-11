@@ -3,39 +3,84 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'crypto';
+import { parseDocument } from 'yaml';
 import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import '../../../adapters/providers/railway/railway.adapter.js';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
-import { resolveBranchDeployTargets, buildBranchDeployWorkflow } from '../github-ops.service.js';
+import {
+  buildBranchDeployWorkflow,
+  githubActionsServerProgramFingerprint,
+  githubActionsWorkflowInputHash,
+  resolveBranchDeployTargets,
+} from '../github-ops.service.js';
 import { resolveReviewedBranchDeployTargets } from '../managed-ci-targets.js';
 import { projectSpecSchema } from '../../spec/spec.schema.js';
 import { SpecStore } from '../../spec/spec.store.js';
 import { managedCiReleaseTarget } from '../managed-ci-targets.js';
 import { cloudRunContainerBuildStartCommand } from '../../../adapters/providers/gcp/cloudrun-ci.release-runtime.js';
 import type { BranchDeployTarget } from '../../ports/ci-deploy.port.js';
+import { MANAGED_CI_RELEASE_EVIDENCE_VERSION } from '../managed-ci-evidence.js';
+import {
+  extractGitHubScript,
+  extractWorkflowShell,
+  installReleaseEvidenceValidator,
+  releaseEvidenceValidatorRequire,
+} from './managed-ci-workflow.test-utils.js';
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
   ...args: string[]
 ) => (...args: unknown[]) => Promise<unknown>;
 
-function extractGitHubScript(workflow: string, stepName: string): string {
-  const stepStart = workflow.indexOf(`      - name: ${stepName}\n`);
-  expect(stepStart).toBeGreaterThan(-1);
-  const marker = '          script: |\n';
-  const scriptStart = workflow.indexOf(marker, stepStart) + marker.length;
-  const nextStep = workflow.indexOf('\n      - ', scriptStart);
-  const nextJob = workflow.indexOf('\n\n  failure_evidence:', scriptStart);
-  const boundaries = [nextStep, nextJob].filter((index) => index >= 0);
-  const scriptEnd = boundaries.length === 0 ? workflow.length : Math.min(...boundaries);
-  return workflow
-    .slice(scriptStart, scriptEnd)
-    .split('\n')
-    .map((line) => line.startsWith('            ') ? line.slice(12) : line)
-    .join('\n')
-    .trimEnd();
+function reviewedTarget(
+  provider: string,
+  target: BranchDeployTarget
+): BranchDeployTarget {
+  if (target.releaseTarget && target.programFingerprint) return target;
+  const providerResources = [
+    ...target.providerServiceIds.map((providerResourceId) => ({
+      providerResourceId,
+      providerResourceType: 'service' as const,
+      workloadKind: 'web' as const,
+    })),
+    ...(target.providerJobNames ?? []).map((providerResourceId) => ({
+      providerResourceId,
+      providerResourceType: 'job' as const,
+      workloadKind: 'cron' as const,
+    })),
+  ];
+  if (providerResources.length !== 1 || target.serviceNames.length !== 1) {
+    throw new Error('Test helper accepts only one unambiguous logical-to-provider resource binding');
+  }
+  return {
+    ...target,
+    programFingerprint: target.programFingerprint ?? 'c'.repeat(64),
+    releaseTarget: target.releaseTarget ?? managedCiReleaseTarget({
+      provider,
+      environmentName: target.environmentName,
+      scope: {
+        providerProjectId: target.providerProjectId,
+        providerEnvironmentId: target.providerEnvironmentId,
+        providerRegion: target.providerRegion,
+        providerScope: target.providerScope,
+      },
+      resources: target.serviceNames.map((logicalName, index) => ({
+        logicalName,
+        ...providerResources[index]!,
+      })),
+    }),
+  };
+}
+
+function executeDockerfileStep(workflowContent: string, directory: string): string {
+  fs.writeFileSync(path.join(directory, 'package.json'), '{}');
+  fs.writeFileSync(path.join(directory, 'requirements.txt'), '');
+  execFileSync('sh', ['-eu', '-c', extractWorkflowShell(workflowContent, 'Resolve Dockerfile')], {
+    cwd: directory,
+    env: { ...process.env, GITHUB_OUTPUT: path.join(directory, 'outputs') },
+  });
+  return fs.readFileSync(path.join(directory, 'Dockerfile.hypervibe'), 'utf8');
 }
 
 describe('github tools', () => {
@@ -54,8 +99,22 @@ describe('github tools', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('generates a shared Railway image for distinct web, worker and cron commands', () => {
+  it('executes one reviewed Railway workflow for web, worker and cron', async () => {
     const project = new ProjectRepository().create({ name: 'multi-service', defaultPlatform: 'railway' });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-project',
+        environmentId: 'rail-staging',
+        services: {
+          web: { serviceId: 'rail-web', workloadKind: 'web' },
+          worker: { serviceId: 'rail-worker', workloadKind: 'worker' },
+          cron: { serviceId: 'rail-cron', workloadKind: 'cron' },
+        },
+      },
+    });
     const spec = projectSpecSchema.parse({
       version: 1,
       project: project.name,
@@ -64,6 +123,10 @@ describe('github tools', () => {
         staging: {
           hosting: { provider: 'railway' },
           deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+          envVars: {
+            SEED_CLIENT_TEST_DATA: 'true',
+            CARE_PLAN_AI_REQUEST_TIMEOUT_MS: '30000',
+          },
           services: {
             worker: { workloadKind: 'worker', startCommand: 'npm run worker' },
             web: { workloadKind: 'web', startCommand: 'npm start', public: true },
@@ -72,74 +135,37 @@ describe('github tools', () => {
         },
       },
     });
-    const { targets, migration } = resolveReviewedBranchDeployTargets(project, spec);
+    new SpecStore().replace(project, spec);
+    const { targets, migration } = resolveBranchDeployTargets(project);
     const workflow = buildBranchDeployWorkflow('railway', targets[0]!, migration);
-    expect(workflow.content).toContain('FROM node:24-slim');
-    expect(workflow.content).toContain('CMD ["sh", "-lc", "npm start"]');
-    expect(workflow.content).not.toContain('requires an explicit service startCommand');
-    // Execute the emitted shell branch without Docker or provider access.
-    fs.writeFileSync(path.join(tempDir, 'package.json'), '{}');
-    const step = workflow.content.split('      - name: Resolve Dockerfile\n')[1]!
-      .split('      - uses: docker/setup-buildx-action')[0]!;
-    const script = step.split('        run: |\n')[1]!
-      .split('\n').map((line) => line.replace(/^          /, '')).join('\n');
-    execFileSync('sh', ['-eu', '-c', script], {
-      cwd: tempDir,
-      env: { ...process.env, GITHUB_OUTPUT: path.join(tempDir, 'outputs') },
-    });
-    const dockerfile = fs.readFileSync(path.join(tempDir, 'Dockerfile.hypervibe'), 'utf8');
-    expect(dockerfile).toContain('FROM node:24-slim');
-    expect(dockerfile).toContain('CMD ["sh", "-lc", "npm start"]');
-    expect(spec.environments.staging!.services.worker!.startCommand).toBe('npm run worker');
-    expect(spec.environments.staging!.services.cron!.startCommand).toBe('npm run cron');
-  });
-
-  it('includes Railway cron services in the exact release target', async () => {
-    const project = new ProjectRepository().create({
-      name: 'railway-cron-release',
-      defaultPlatform: 'railway',
-    });
-    new EnvironmentRepository().create({
-      projectId: project.id,
-      name: 'production',
-      platformBindings: {
-        provider: 'railway',
-        projectId: 'rail-project',
-        environmentId: 'rail-production',
-        services: {
-          web: { serviceId: 'rail-web', workloadKind: 'web' },
-          reminders: { serviceId: 'rail-reminders', workloadKind: 'cron' },
-        },
-      },
-    });
-    const spec = projectSpecSchema.parse({
-      version: 1,
-      project: project.name,
-      runtime: { kind: 'node', version: '24', installCommand: 'npm ci' },
-      environments: {
-        production: {
-          hosting: { provider: 'railway' },
-          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
-          services: {
-            web: { workloadKind: 'web', startCommand: 'npm start', public: true },
-            reminders: {
-              workloadKind: 'cron',
-              startCommand: 'npm run reminders',
-              cronSchedule: '0 8 * * *',
-            },
-          },
-        },
-      },
-    });
-
-    const { targets, migration } = resolveReviewedBranchDeployTargets(project, spec);
     const target = targets[0]!;
+    for (const file of [{ path: workflow.path, content: workflow.content }, ...(workflow.companionFiles ?? [])]
+      .filter((candidate) => /\.ya?ml$/.test(candidate.path))) {
+      const document = parseDocument(file.content, { uniqueKeys: true });
+      expect(document.errors, `${file.path} must be valid YAML with unique keys`).toEqual([]);
+    }
+    const parsedWorkflow = parseDocument(workflow.content).toJS() as {
+      jobs?: { deploy?: { steps?: Array<{ name?: string }> } };
+    };
+    const generatedSteps = parsedWorkflow.jobs?.deploy?.steps;
+    expect(Array.isArray(generatedSteps)).toBe(true);
+    const generatedStepNames = generatedSteps!.map((step) => step.name).filter(Boolean);
+    for (const stepName of [
+      'Prepare release evidence validator',
+      'Verify reviewed release target',
+      'Deployment safety gate: verify Hypervibe reconciliation',
+      'Deploy image to Railway',
+      'Write server release evidence',
+    ]) {
+      expect(generatedStepNames.filter((name) => name === stepName), `${stepName} must appear once`)
+        .toHaveLength(1);
+    }
     expect(target.releaseTarget?.resources).toEqual([
       {
-        logicalName: 'reminders',
+        logicalName: 'cron',
         workloadKind: 'cron',
         providerResourceType: 'service',
-        providerResourceId: 'rail-reminders',
+        providerResourceId: 'rail-cron',
       },
       {
         logicalName: 'web',
@@ -147,20 +173,40 @@ describe('github tools', () => {
         providerResourceType: 'service',
         providerResourceId: 'rail-web',
       },
-    ]);
-
-    const workflow = buildBranchDeployWorkflow('railway', target, migration);
-    const script = extractGitHubScript(workflow.content, 'Verify reviewed release target');
-    const execute = new AsyncFunction('require', 'process', 'core', script);
-    await expect(execute(
-      (moduleName: string) => {
-        if (moduleName === 'crypto') return { createHash };
-        throw new Error(`Unexpected module request: ${moduleName}`);
+      {
+        logicalName: 'worker',
+        workloadKind: 'worker',
+        providerResourceType: 'service',
+        providerResourceId: 'rail-worker',
       },
+    ]);
+    expect(workflow.content).not.toContain('requires an explicit service startCommand');
+    // Execute the emitted shell branch without Docker or provider access.
+    const dockerfile = executeDockerfileStep(workflow.content, tempDir);
+    expect(dockerfile).toContain('FROM node:24-slim');
+    expect(dockerfile).toContain(
+      'RUN --mount=type=secret,id=npm_token,required=false if [ -f /run/secrets/npm_token ]; then export NODE_AUTH_TOKEN="$(cat /run/secrets/npm_token)"; fi; npm ci --omit=dev'
+    );
+    expect(dockerfile).toContain('CMD ["sh", "-lc", "npm start"]');
+
+    const validator = installReleaseEvidenceValidator(workflow.content, tempDir);
+    expect(workflow.content.match(/name: Prepare release evidence validator/g)).toHaveLength(1);
+    expect(workflow.content.match(/function validateReleaseEvidence/g)).toHaveLength(1);
+    expect(workflow.content.split('\n').length).toBeLessThanOrEqual(950);
+    const verifyReleaseTarget = new AsyncFunction(
+      'require',
+      'process',
+      'core',
+      extractGitHubScript(workflow.content, 'Verify reviewed release target')
+    );
+    await expect(verifyReleaseTarget(
+      releaseEvidenceValidatorRequire(validator),
       {
         env: {
+          HYPERVIBE_RELEASE_VALIDATOR_PATH: validator.validatorPath,
+          HYPERVIBE_RELEASE_VALIDATOR_SHA256: validator.validatorSha256,
           HYPERVIBE_RELEASE_PROVIDER: 'railway',
-          HYPERVIBE_RELEASE_ENVIRONMENT: 'production',
+          HYPERVIBE_RELEASE_ENVIRONMENT: 'staging',
           HYPERVIBE_RELEASE_SERVICES: JSON.stringify(target.serviceNames),
           HYPERVIBE_RELEASE_TARGET_SCOPE: JSON.stringify(target.releaseTarget!.scope),
           HYPERVIBE_RELEASE_RESOURCES: JSON.stringify(target.releaseTarget!.resources),
@@ -170,6 +216,101 @@ describe('github tools', () => {
       },
       {}
     )).resolves.toBeUndefined();
+
+    const response = (data: unknown) => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ data }),
+    });
+    const fetch = vi.fn(async (_url: string, request: { body: string }) => {
+      const payload = JSON.parse(request.body) as {
+        query: string;
+        variables: { serviceId?: string; id?: string; input?: Record<string, unknown> };
+      };
+      if (payload.query.includes('ServiceEnvironmentInstance')) {
+        return response({
+          service: {
+            id: payload.variables.serviceId,
+            serviceInstances: { edges: [{ node: { environmentId: 'rail-staging' } }] },
+          },
+        });
+      }
+      if (payload.query.includes('UpdateServiceImage')) {
+        return response({ serviceInstanceUpdate: true });
+      }
+      if (payload.query.includes('DeployServiceImage')) {
+        return response({ serviceInstanceDeployV2: `${payload.variables.serviceId}-deployment` });
+      }
+      if (payload.query.includes('DeploymentStatus')) {
+        return response({
+          deployment: {
+            id: payload.variables.id,
+            status: 'SUCCESS',
+            diagnosis: null,
+            meta: null,
+          },
+        });
+      }
+      throw new Error(`Unexpected Railway operation: ${payload.query}`);
+    });
+    const providerCore = { info: vi.fn(), warning: vi.fn() };
+    const deploy = new AsyncFunction(
+      'fetch',
+      'process',
+      'core',
+      extractGitHubScript(workflow.content, 'Deploy image to Railway')
+    );
+    const emittedServiceIdsYaml = workflow.content.match(/^\s+RAILWAY_SERVICE_IDS:\s*([^\n]+)$/m)?.[1]?.trim();
+    expect(emittedServiceIdsYaml).toBe("'rail-web,rail-worker,rail-cron'");
+    const emittedServiceIds = emittedServiceIdsYaml!.slice(1, -1);
+    await deploy(fetch, {
+      env: {
+        RAILWAY_API_TOKEN: 'test-token',
+        RAILWAY_ENVIRONMENT_ID: 'rail-staging',
+        RAILWAY_SERVICE_IDS: emittedServiceIds,
+        IMAGE_REGISTRY_USERNAME: 'test-user',
+        IMAGE_REGISTRY_TOKEN: 'test-registry-token',
+        IMAGE_URI: `ghcr.io/dave/multi-service@sha256:${'b'.repeat(64)}`,
+        DEPLOY_SHA: '0123456789abcdef0123456789abcdef01234567',
+      },
+    }, providerCore);
+    const operations = fetch.mock.calls.map(([, request]) => {
+      const body = JSON.parse((request as { body: string }).body) as {
+        query: string;
+        variables: { serviceId?: string; id?: string; input?: Record<string, unknown> };
+      };
+      return {
+        name: ['UpdateServiceImage', 'DeployServiceImage', 'ServiceEnvironmentInstance', 'DeploymentStatus']
+          .find((name) => body.query.includes(name)),
+        id: body.variables.serviceId ?? body.variables.id,
+        input: body.variables.input,
+      };
+    });
+    const expectedServiceIds = ['rail-cron', 'rail-web', 'rail-worker'];
+    for (const name of ['UpdateServiceImage', 'DeployServiceImage', 'ServiceEnvironmentInstance']) {
+      expect(operations.filter((operation) => operation.name === name).map((operation) => operation.id).sort())
+        .toEqual(expectedServiceIds);
+    }
+    expect(operations.filter((operation) => operation.name === 'DeploymentStatus').map((operation) => operation.id).sort())
+      .toEqual(expectedServiceIds.map((id) => `${id}-deployment`));
+    expect(operations
+      .filter((operation) => operation.name === 'UpdateServiceImage')
+      .map((operation) => ({ id: operation.id, input: operation.input }))
+      .sort((left, right) => left.id!.localeCompare(right.id!)))
+      .toEqual(expectedServiceIds.map((id) => ({
+        id,
+        input: {
+          source: { image: `ghcr.io/dave/multi-service@sha256:${'b'.repeat(64)}` },
+          registryCredentials: { username: 'test-user', password: 'test-registry-token' },
+        },
+      })));
+    expect(target.runtimeResources?.map(({ logicalName, startCommand }) => ({ logicalName, startCommand })))
+      .toEqual([
+        { logicalName: 'cron', startCommand: 'npm run cron' },
+        { logicalName: 'web', startCommand: 'npm start' },
+        { logicalName: 'worker', startCommand: 'npm run worker' },
+      ]);
+    expect(fetch).toHaveBeenCalledTimes(12);
   });
 
   it.each([
@@ -211,7 +352,7 @@ describe('github tools', () => {
     expect(targets[0]!.containerStartCommand).toBe(expected);
   });
 
-  it('builds only the production branch-deploy workflow using desired deploy state', () => {
+  it('builds only the production branch-deploy workflow from the reviewed spec', () => {
     const projectRepo = new ProjectRepository();
     const envRepo = new EnvironmentRepository();
 
@@ -219,138 +360,96 @@ describe('github tools', () => {
       name: 'billforge',
       defaultPlatform: 'railway',
       gitRemoteUrl: 'https://github.com/davejohnson/billforge',
-      policies: {
-        desiredState: {
-          environmentName: 'production',
-          deploy: {
-            strategy: 'branch',
-            branches: {
-              production: 'release',
-            },
-          },
-          migrations: {
-            mode: 'tool',
-            runInDeploy: true,
-            command: 'npm run migrate',
-          },
-        },
-      },
     });
 
     envRepo.create({
       projectId: project.id,
       name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-project',
+        environmentId: 'rail-production',
+        services: { web: { serviceId: 'rail-web', workloadKind: 'web' } },
+      },
+    });
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      runtime: { kind: 'node', version: '24', installCommand: 'npm ci' },
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          deploy: { strategy: 'branch', trigger: 'ci', branch: 'release' },
+          services: { web: { workloadKind: 'web', startCommand: 'npm start' } },
+          migrations: { mode: 'tool', runInDeploy: true, command: 'npm run migrate' },
+        },
+      },
     });
 
     const { targets, migration } = resolveBranchDeployTargets(projectRepo.findById(project.id)!);
-    expect(targets).toEqual([
-      {
+    expect(targets).toHaveLength(1);
+    expect(targets[0]).toMatchObject({
         environmentName: 'production',
         kind: 'production',
         branch: 'release',
         autoDeployOnPush: false,
-        serviceNames: [],
-        providerProjectId: undefined,
-        providerEnvironmentId: undefined,
-        providerServiceIds: [],
+        serviceNames: ['web'],
+        providerProjectId: 'rail-project',
+        providerEnvironmentId: 'rail-production',
+        providerServiceIds: ['rail-web'],
         providerJobNames: [],
         needsServiceNames: true,
         needsJobNames: false,
-      },
-    ]);
+        programFingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
+        releaseTarget: {
+          resources: [expect.objectContaining({ logicalName: 'web', providerResourceId: 'rail-web' })],
+        },
+      });
     expect(migration.includeStep).toBe(true);
     expect(migration.command).toBe('npm run migrate');
 
-    const workflow = buildBranchDeployWorkflow('railway', {
-      ...targets[0],
-      containerStartCommand: 'npm start',
-      runtime: { kind: 'node', version: '24', installCommand: 'npm ci' },
-    }, migration);
+    const triggerChange = { ...targets[0], branch: 'main', autoDeployOnPush: true };
+    expect(githubActionsServerProgramFingerprint({
+      provider: 'railway',
+      target: triggerChange,
+      migration,
+    })).toBe(targets[0]!.programFingerprint);
+    expect(githubActionsWorkflowInputHash({
+      provider: 'railway',
+      target: triggerChange,
+      migration,
+    })).not.toBe(githubActionsWorkflowInputHash({
+      provider: 'railway',
+      target: targets[0]!,
+      migration,
+    }));
+
+    const workflow = buildBranchDeployWorkflow('railway', targets[0], migration);
     expect(workflow.template).toBe('deploy-railway-production');
     expect(workflow.branch).toBe('release');
     expect(workflow.autoDeployOnPush).toBe(false);
     expect(workflow.environment).toBe('production');
     expect(workflow.requiredSecrets).toEqual(['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN', 'DATABASE_URL']);
-    expect(workflow.requiredVariables).toEqual(['RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS']);
+    expect(workflow.requiredVariables).toEqual([]);
     expect(workflow.review).toMatchObject({
       title: 'production deployment',
       summary: expect.stringContaining('Railway'),
       mergeEffect: expect.stringContaining('started manually'),
     });
-    expect(workflow.review.details).toEqual(expect.arrayContaining([
-      expect.stringContaining('full 40-character commit ID'),
-      expect.stringContaining('Retries short-lived Railway'),
-      expect.stringContaining('release record'),
-      expect.stringContaining('failure details'),
-    ]));
     expect(workflow.content).not.toContain('  push:\n    branches:');
     expect(workflow.content).toContain('workflow_dispatch:');
-    expect(workflow.content).toContain('commit_sha:');
-    expect(workflow.content).toContain('rollback:');
-    expect(workflow.content).toContain('expected_latest_run_id:');
-    expect(workflow.content).toContain("core.setOutput('operation', operation)");
-    expect(workflow.content).toContain('name: Verify rollback release evidence');
-    expect(workflow.content).toContain("if: steps.deploy.outputs.operation == 'rollback'");
-    expect(workflow.content).toContain('listWorkflowRunArtifacts');
-    expect(workflow.content).toContain('Rollback dispatch is stale');
-    expect(workflow.content).toContain('run.data.path !== workflowPath');
-    expect(workflow.content).toContain('actions: read');
     expect(workflow.content).toContain('environment: production');
-    expect(workflow.content).toContain('ref: ${{ steps.deploy.outputs.sha }}');
-    expect(workflow.content).toContain('persist-credentials: false');
-    expect(workflow.content).toContain('name: "Deployment safety gate: verify Hypervibe reconciliation"');
-    expect(workflow.content).toContain('HYPERVIBE_APPLIED_SPEC_HASH: ${{ vars.HYPERVIBE_APPLIED_SPEC_HASH }}');
-    expect(workflow.content).toContain('HYPERVIBE_DEPLOY_SHA: ${{ steps.deploy.outputs.sha }}');
-    expect(workflow.content).toContain("readFileSync('.hypervibe/spec.json', 'utf8')");
-    expect(workflow.content).toContain('Deployment blocked — Hypervibe reconciliation required');
-    expect(workflow.content).toContain('This is not an application build or test failure. No image was built and nothing was deployed.');
     expect(workflow.content).toContain('group: hypervibe-deploy-production');
     expect(workflow.content).toContain('cancel-in-progress: false');
     expect(workflow.content).toContain('run: npm run migrate');
-    expect(workflow.content).toContain("if: steps.deploy.outputs.operation != 'rollback'");
-    // Migrations need dependencies installed on the runner; the deploy steps
-    // build a container image and never run npm ci themselves.
     expect(workflow.content.indexOf('npm ci')).toBeGreaterThan(-1);
     expect(workflow.content.indexOf('npm ci')).toBeLessThan(workflow.content.indexOf('run: npm run migrate'));
     expect(workflow.content.indexOf('Deployment safety gate: verify Hypervibe reconciliation'))
       .toBeLessThan(workflow.content.indexOf('npm ci'));
-    expect(workflow.content).toContain('actions/setup-node@v6');
-    expect(workflow.content).toContain('docker/build-push-action@v6');
-    expect(workflow.content).toContain('COPY . .');
-    expect(workflow.content).toContain('RUN --mount=type=secret,id=npm_token,required=false');
-    expect(workflow.content).toContain('npm_token=${{ secrets.NODE_AUTH_TOKEN }}');
-    expect(workflow.content).toContain('packages: write');
-    expect(workflow.content).toContain('username: ${{ github.actor }}');
-    expect(workflow.content).toContain('password: ${{ secrets.GITHUB_TOKEN }}');
-    expect(workflow.content).toContain('Verify Railway image pull credentials');
-    expect(workflow.content).toContain('username: ${{ secrets.IMAGE_REGISTRY_USERNAME }}');
-    expect(workflow.content).toContain("docker buildx imagetools inspect \"${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}\"");
-    expect(workflow.content).toContain('serviceInstanceUpdate');
-    expect(workflow.content).toContain('IMAGE_REGISTRY_USERNAME: ${{ secrets.IMAGE_REGISTRY_USERNAME }}');
-    expect(workflow.content).toContain('IMAGE_REGISTRY_TOKEN: ${{ secrets.IMAGE_REGISTRY_TOKEN }}');
-    expect(workflow.content).toContain('username: process.env.IMAGE_REGISTRY_USERNAME');
-    expect(workflow.content).toContain('password: process.env.IMAGE_REGISTRY_TOKEN');
-    expect(workflow.content).toContain('DEPLOY_SHA: ${{ steps.deploy.outputs.sha }}');
-    expect(workflow.content).toContain('uses: actions/github-script@v9');
-    expect(workflow.content).toContain('Railway API \' + response.status + \' during \' + operation');
-    expect(workflow.content).toContain('return status === 429 || (status >= 500 && status <= 599)');
-    expect(workflow.content).toContain('async function railway(query, variables, options = {})');
-    expect(workflow.content).toContain('Retrying Railway');
-    expect(workflow.content).toContain("railway(deploymentQuery, { id: deploymentId }, { retryTransient: true })");
-    expect(workflow.content).toContain('traceId=');
-    expect(workflow.content).toContain('const deploymentData = await railway(deployMutation');
-    expect(workflow.content).toContain('const deploymentId = requireString(deploymentData.serviceInstanceDeployV2');
-    expect(workflow.content).toContain('query DeploymentStatus');
-    expect(workflow.content).toContain('await waitForDeployment(deploymentId, serviceId)');
-    expect(workflow.content).toContain('Recent Railway logs');
-    expect(workflow.content).not.toContain('secrets.GHCR_USERNAME');
-    expect(workflow.content).not.toContain('secrets.GHCR_TOKEN');
-    expect(workflow.content).not.toContain('railway-github-action');
     expect(workflow.content).not.toContain('vars.MIGRATION_COMMAND');
-    expect(workflow.content).toContain('retention-days: 90');
   });
 
-  it('uses a real bound staging environment as legacy cross-provider promotion evidence', () => {
+  it('refuses to infer managed CI targets from legacy policy state', () => {
     const projectRepo = new ProjectRepository();
     const envRepo = new EnvironmentRepository();
     const project = projectRepo.create({
@@ -369,15 +468,6 @@ describe('github tools', () => {
     });
     envRepo.create({
       projectId: project.id,
-      name: 'staging',
-      platformBindings: {
-        provider: 'cloudrun',
-        projectId: 'gcp-project',
-        services: { web: { serviceId: 'staging-web' } },
-      },
-    });
-    envRepo.create({
-      projectId: project.id,
       name: 'production',
       platformBindings: {
         provider: 'railway',
@@ -387,26 +477,13 @@ describe('github tools', () => {
       },
     });
 
-    const { targets } = resolveBranchDeployTargets(projectRepo.findById(project.id)!);
-    const staging = targets.find((target) => target.environmentName === 'staging')!;
-    const production = targets.find((target) => target.environmentName === 'production')!;
-
-    expect(staging.programFingerprint).toMatch(/^[0-9a-f]{64}$/);
-    expect(production).toMatchObject({
-      promoteFromEnvironment: 'staging',
-      promoteFromProvider: 'cloudrun',
-      promoteFromServiceNames: ['web'],
-      promoteFromProgramFingerprint: staging.programFingerprint,
-    });
-
-    const workflow = buildBranchDeployWorkflow('railway', production, { includeStep: false });
-    expect(workflow.content).toContain(
-      'HYPERVIBE_PROMOTE_FROM_WORKFLOW: ".github/workflows/deploy-cloudrun-staging.yml"'
+    expect(() => resolveBranchDeployTargets(projectRepo.findById(project.id)!)).toThrow(
+      'Managed CI for project "legacy-cross-provider" requires a valid reviewed project spec.'
     );
   });
 
   it('restores a verified Railway image digest without rebuilding the target SHA', () => {
-    const target: BranchDeployTarget = {
+    const target = reviewedTarget('railway', {
       environmentName: 'production',
       kind: 'production' as const,
       branch: 'main',
@@ -417,7 +494,7 @@ describe('github tools', () => {
       providerServiceIds: ['rail-web'],
       providerJobNames: [],
       runtime: { kind: 'node' as const, version: '24', installCommand: 'npm ci' },
-    };
+    });
     const content = buildBranchDeployWorkflow(
       'railway',
       target,
@@ -433,108 +510,17 @@ describe('github tools', () => {
       content.indexOf('\n      - ', buildAction)
     );
 
-    expect(content).toContain('name: Download rollback release evidence');
-    expect(content).toContain('id: rollback_evidence');
-    expect(content).toContain('evidence.target.resources');
     expect(checkoutStep).toContain("if: steps.deploy.outputs.operation != 'rollback'");
     expect(checkoutStep).toContain('persist-credentials: false');
     expect(buildStep).toContain("if: steps.deploy.outputs.operation != 'rollback'");
     expect(content).toContain(
       "IMAGE_URI: ${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}"
     );
-    expect(content).toContain('imageUri: imageUri || null');
-  });
-
-  it('resolves the exact rollback image from downloaded release evidence', async () => {
-    const targetSha = '0123456789abcdef0123456789abcdef01234567';
-    const imageUri = `ghcr.io/dave/app@sha256:${'a'.repeat(64)}`;
-    const target: BranchDeployTarget = {
-      environmentName: 'production',
-      kind: 'production' as const,
-      branch: 'main',
-      autoDeployOnPush: false,
-      serviceNames: ['web'],
-      providerProjectId: 'rail-project',
-      providerEnvironmentId: 'rail-env',
-      providerServiceIds: ['rail-web'],
-      providerJobNames: [],
-      programFingerprint: 'c'.repeat(64),
-    };
-    const releaseTarget = managedCiReleaseTarget({
-      provider: 'railway',
-      environmentName: 'production',
-      scope: { providerProjectId: 'rail-project', providerEnvironmentId: 'rail-env' },
-      resources: [{
-        logicalName: 'web',
-        workloadKind: 'web',
-        providerResourceType: 'service',
-        providerResourceId: 'rail-web',
-      }],
-    });
-    target.releaseTarget = releaseTarget;
-    const content = buildBranchDeployWorkflow('railway', target, { includeStep: false }).content;
-    const script = extractGitHubScript(content, 'Resolve immutable rollback image');
-    const evidencePath = path.join(tempDir, 'hypervibe-server-release.json');
-    const evidence = {
-      version: 3,
-      provider: 'railway',
-      environment: 'production',
-      source: { repository: 'dave/app', sha: targetSha },
-      target: {
-        scope: releaseTarget.scope,
-        bindingsFingerprint: releaseTarget.bindingsFingerprint,
-        resources: releaseTarget.resources.map((resource) => ({ ...resource, imageUri })),
-      },
-      programFingerprint: 'c'.repeat(64),
-      verifiedAt: '2026-09-10T12:00:00.000Z',
-    };
-    const core = { setOutput: vi.fn(), info: vi.fn() };
-    const execute = new AsyncFunction('require', 'process', 'core', script);
-
-    const validate = (candidate: unknown) => {
-      fs.writeFileSync(evidencePath, JSON.stringify(candidate));
-      return execute(
-        (moduleName: string) => {
-          if (moduleName === 'fs') return { readFileSync: fs.readFileSync };
-          if (moduleName === 'crypto') return { createHash };
-          throw new Error(`Unexpected module request: ${moduleName}`);
-        },
-        {
-          env: {
-            HYPERVIBE_RELEASE_EVIDENCE_PATH: evidencePath,
-            HYPERVIBE_ROLLBACK_PROVIDER: 'railway',
-            HYPERVIBE_ROLLBACK_ENVIRONMENT: 'production',
-            HYPERVIBE_ROLLBACK_SHA: targetSha,
-            HYPERVIBE_ROLLBACK_SERVICES: JSON.stringify(['web']),
-            HYPERVIBE_ROLLBACK_TARGET_SCOPE: JSON.stringify(releaseTarget.scope),
-            HYPERVIBE_ROLLBACK_RESOURCES: JSON.stringify(releaseTarget.resources),
-            HYPERVIBE_ROLLBACK_BINDINGS_FINGERPRINT: releaseTarget.bindingsFingerprint,
-            HYPERVIBE_ROLLBACK_PROGRAM_FINGERPRINT: 'c'.repeat(64),
-            GITHUB_REPOSITORY: 'dave/app',
-          },
-        },
-        core
-      );
-    };
-
-    await expect(validate(evidence)).resolves.toBeUndefined();
-
-    expect(core.setOutput).toHaveBeenCalledWith('image_uri', imageUri);
-    expect(core.info).toHaveBeenCalledWith(`Resolved immutable rollback image ${imageUri}`);
-
-    await expect(validate({
-      ...evidence,
-      target: { ...evidence.target, resources: [] },
-    })).rejects.toThrow(/Rollback release evidence/);
-    await expect(validate({
-      ...evidence,
-      target: { ...evidence.target, bindingsFingerprint: 'f'.repeat(64) },
-    })).rejects.toThrow(/Rollback release evidence/);
   });
 
   it('retries transient Railway reads without replaying deploy mutations', async () => {
     vi.useFakeTimers();
-    const target = {
+    const target = reviewedTarget('railway', {
       environmentName: 'staging',
       kind: 'staging' as const,
       branch: 'main',
@@ -544,7 +530,7 @@ describe('github tools', () => {
       providerEnvironmentId: 'rail-env',
       providerServiceIds: ['rail-web'],
       providerJobNames: [],
-    };
+    });
     const generated = buildBranchDeployWorkflow('railway', target, { includeStep: false });
     const script = extractGitHubScript(generated.content, 'Deploy image to Railway');
     const response = (status: number, data: unknown) => ({
@@ -603,7 +589,7 @@ describe('github tools', () => {
 
   it('verifies exact rollback release evidence before deployment', async () => {
     const targetSha = '0123456789abcdef0123456789abcdef01234567';
-    const target = {
+    const target = reviewedTarget('railway', {
       environmentName: 'production',
       kind: 'production' as const,
       branch: 'main',
@@ -613,7 +599,7 @@ describe('github tools', () => {
       providerEnvironmentId: 'rail-env',
       providerServiceIds: ['rail-web'],
       providerJobNames: [],
-    };
+    });
     const generated = buildBranchDeployWorkflow('railway', target, { includeStep: false });
     const script = extractGitHubScript(generated.content, 'Verify rollback release evidence');
     const listWorkflowRuns = vi.fn().mockResolvedValue({
@@ -629,7 +615,7 @@ describe('github tools', () => {
     });
     const paginate = vi.fn().mockResolvedValue([{
       id: 7,
-      name: `hypervibe-server-release-production-${targetSha}`,
+      name: `hypervibe-server-release-v4-production-${targetSha}`,
       expired: false,
       workflow_run: { id: 42 },
     }]);
@@ -674,7 +660,7 @@ describe('github tools', () => {
 
   it('rejects a stale rollback dispatch before reading release artifacts', async () => {
     const targetSha = '0123456789abcdef0123456789abcdef01234567';
-    const target = {
+    const target = reviewedTarget('railway', {
       environmentName: 'production',
       kind: 'production' as const,
       branch: 'main',
@@ -684,7 +670,7 @@ describe('github tools', () => {
       providerEnvironmentId: 'rail-env',
       providerServiceIds: ['rail-web'],
       providerJobNames: [],
-    };
+    });
     const generated = buildBranchDeployWorkflow('railway', target, { includeStep: false });
     const script = extractGitHubScript(generated.content, 'Verify rollback release evidence');
     const listWorkflowRunArtifacts = vi.fn();
@@ -877,12 +863,12 @@ describe('github tools', () => {
       providerServiceIds: [],
     };
 
-    const cloudRunWorkflow = buildBranchDeployWorkflow('cloudrun', {
+    const cloudRunWorkflow = buildBranchDeployWorkflow('cloudrun', reviewedTarget('cloudrun', {
       ...baseTarget,
       providerServiceIds: ['cloudrun-web'],
       providerScope: { projectId: 'gcp-project', region: 'us-west1' },
       providerRegion: 'us-west1',
-    }, { includeStep: false });
+    }), { includeStep: false });
     expect(cloudRunWorkflow.requiredSecrets).toEqual(['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID']);
     expect(cloudRunWorkflow.requiredVariables).toEqual([]);
     expect(cloudRunWorkflow.content).toContain('GCP_REGION: "us-west1"');
@@ -900,11 +886,11 @@ describe('github tools', () => {
     expect(cloudRunWorkflow.content).toContain('await waitOperation(operation, \'service \' + serviceName + \' deployment\')');
     expect(cloudRunWorkflow.content).toContain("await waitReady(url, serviceName, 'service', process.env.IMAGE_URI, runtimeResource)");
 
-    const railwayWorkflow = buildBranchDeployWorkflow('railway', {
+    const railwayWorkflow = buildBranchDeployWorkflow('railway', reviewedTarget('railway', {
       ...baseTarget,
       providerServiceIds: ['srv-railway'],
       providerEnvironmentId: 'env-railway',
-    }, { includeStep: false });
+    }), { includeStep: false });
     expect(railwayWorkflow.requiredSecrets).toEqual(['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']);
     expect(railwayWorkflow.content).toContain('packages: write');
 
@@ -914,12 +900,12 @@ describe('github tools', () => {
     ].join('\n');
     expect(combinedContent).not.toMatch(/railway-github-action|vercel deploy|doctl apps|gcloud /);
 
-    expect(() => buildBranchDeployWorkflow('cloudrun', {
+    expect(() => buildBranchDeployWorkflow('cloudrun', reviewedTarget('cloudrun', {
       ...baseTarget,
       providerScope: { projectId: 'gcp-project' },
       providerEnvironmentId: 'not-a-region',
       providerServiceIds: ['cloudrun-web'],
-    }, { includeStep: false })).toThrow('has no bound provider project or region');
+    }), { includeStep: false })).toThrow('has no bound provider project or region');
   });
 
   it('separates Cloud Run service and scheduled job deploy targets', () => {
@@ -1021,7 +1007,7 @@ describe('github tools', () => {
     expect(workflow.content).toContain('CLOUDRUN_RELEASE_COMMANDS_B64:');
     expect(workflow.content).toContain('CLOUDRUN_RUNTIME_RESOURCES_B64:');
     expect(workflow.content).toContain('cloudRunContainerWithRuntime');
-    expect(workflow.content.match(/Resolve Dockerfile[\s\S]{0,1200}/)?.[0]).toContain(
+    expect(executeDockerfileStep(workflow.content, tempDir)).toContain(
       'CMD ["sh", "-lc", "npm run web"]'
     );
     expect(workflow.content).toContain('await runCloudRunReleaseCommands({');
@@ -1036,7 +1022,7 @@ describe('github tools', () => {
     expect(workflow.content).toContain("id: gcp\n        if: steps.deploy.outputs.operation != 'rollback'");
     expect(workflow.content).toContain("id: build\n        if: steps.deploy.outputs.operation != 'rollback'");
     expect(workflow.content).toContain("if (process.env.DEPLOY_OPERATION !== 'rollback') {\n              await runCloudRunReleaseCommands({");
-    expect(workflow.content).toContain('version: 3,');
+    expect(workflow.content).toContain('version: 4,');
     expect(workflow.content).toContain('HYPERVIBE_RELEASE_IMAGE_URI: ${{ steps.deploy.outputs.operation ==');
     expect(workflow.content).toContain('Download rollback release evidence');
     expect(workflow.content.match(/^\s+HYPERVIBE_SOURCE_ARTIFACT_ID:/gm)).toHaveLength(1);
@@ -1069,28 +1055,38 @@ describe('github tools', () => {
       runtime: { kind: 'node' as const, version: '24', installCommand: 'npm ci' },
     };
     for (const provider of ['railway', 'cloudrun'] as const) {
-      const workflow = buildBranchDeployWorkflow(provider, baseTarget, { includeStep: false });
+      const workflow = buildBranchDeployWorkflow(
+        provider,
+        reviewedTarget(provider, baseTarget),
+        { includeStep: false }
+      );
       expect(workflow.content).toContain('name: Resolve Dockerfile');
       expect(workflow.content).toContain('file: ${{ steps.dockerfile.outputs.path }}');
       // Repo Dockerfile wins; an explicitly declared runtime can generate a
       // minimal image with the web service start command as CMD.
       expect(workflow.content).toContain('if [ -f Dockerfile ]; then');
-      expect(workflow.content).toContain('FROM node:24-slim');
-      expect(workflow.content).toContain('COPY . .');
-      expect(workflow.content).toContain('RUN --mount=type=secret,id=npm_token,required=false');
       expect(workflow.content).toContain('npm_token=${{ secrets.NODE_AUTH_TOKEN }}');
-      expect(workflow.content).toContain('CMD ["sh", "-lc", "npm run serve"]');
+      const dockerfileDirectory = fs.mkdtempSync(path.join(tempDir, `${provider}-dockerfile-`));
+      const dockerfile = executeDockerfileStep(workflow.content, dockerfileDirectory);
+      expect(dockerfile).toContain('FROM node:24-slim');
+      expect(dockerfile).toContain('COPY . .');
+      expect(dockerfile).toContain('RUN --mount=type=secret,id=npm_token,required=false');
+      expect(dockerfile).toContain('CMD ["sh", "-lc", "npm run serve"]');
       // The generated Dockerfile step precedes the image build.
       expect(workflow.content.indexOf('Resolve Dockerfile')).toBeLessThan(workflow.content.indexOf('docker/build-push-action@v6'));
     }
-    const defaulted = buildBranchDeployWorkflow('railway', { ...baseTarget, containerStartCommand: undefined }, { includeStep: false });
+    const defaulted = buildBranchDeployWorkflow(
+      'railway',
+      reviewedTarget('railway', { ...baseTarget, containerStartCommand: undefined }),
+      { includeStep: false }
+    );
     expect(defaulted.content).not.toContain('CMD ["sh", "-lc", "npm start"]');
     expect(defaulted.content).toContain('requires an explicit service startCommand');
 
-    const custom = buildBranchDeployWorkflow('railway', {
+    const custom = buildBranchDeployWorkflow('railway', reviewedTarget('railway', {
       ...baseTarget,
       runtime: undefined,
-    }, { includeStep: false });
+    }), { includeStep: false });
     expect(custom.content).not.toContain('FROM node:');
     expect(custom.content).not.toContain('FROM python:');
     expect(custom.content).toContain('custom languages require a Dockerfile');
@@ -1109,38 +1105,72 @@ describe('github tools', () => {
     };
     const nodeWorkflow = buildBranchDeployWorkflow(
       'railway',
-      nodeTarget,
+      reviewedTarget('railway', nodeTarget),
       { includeStep: true, command: 'npm run migrate' }
     );
-    expect(nodeWorkflow.content).toContain('FROM node:24.1-slim');
+    const nodeDockerfile = executeDockerfileStep(
+      nodeWorkflow.content,
+      fs.mkdtempSync(path.join(tempDir, 'node-runtime-'))
+    );
+    expect(nodeDockerfile).toContain('FROM node:24.1-slim');
     expect(nodeWorkflow.content).toContain("node-version: '24.1'");
 
     const pythonWorkflow = buildBranchDeployWorkflow(
       'railway',
-      {
+      reviewedTarget('railway', {
         ...nodeTarget,
         containerStartCommand: 'python app.py',
         runtime: { kind: 'python', version: '3.13', installCommand: 'python -m pip install -r requirements.txt' },
-      },
+      }),
       { includeStep: true, command: 'python manage.py migrate' }
     );
-    expect(pythonWorkflow.content).toContain('FROM python:3.13-slim');
+    const pythonDockerfile = executeDockerfileStep(
+      pythonWorkflow.content,
+      fs.mkdtempSync(path.join(tempDir, 'python-runtime-'))
+    );
+    expect(pythonDockerfile).toContain('FROM python:3.13-slim');
     expect(pythonWorkflow.content).toContain("python-version: '3.13'");
-    expect(pythonWorkflow.content).toContain('python -m pip install -r requirements.txt');
-    expect(pythonWorkflow.content).not.toContain('FROM node:20-slim');
+    expect(pythonDockerfile).toContain('python -m pip install -r requirements.txt');
+    expect(pythonDockerfile).not.toContain('FROM node:20-slim');
   });
 
-  it('emits server evidence and a gated iOS release workflow with separate provenance', () => {
+  it('emits server evidence and a gated iOS release workflow with separate provenance', async () => {
+    const target: BranchDeployTarget = {
+      environmentName: 'development',
+      kind: 'development',
+      branch: 'develop',
+      autoDeployOnPush: true,
+      serviceNames: ['api', 'nightly'],
+      providerProjectId: 'rail-project',
+      providerEnvironmentId: 'rail-env',
+      providerServiceIds: ['service-1', 'service-2'],
+      programFingerprint: 'c'.repeat(64),
+      releaseTarget: managedCiReleaseTarget({
+        provider: 'railway',
+        environmentName: 'development',
+        scope: {
+          providerProjectId: 'rail-project',
+          providerEnvironmentId: 'rail-env',
+        },
+        resources: [
+          {
+            logicalName: 'api',
+            workloadKind: 'web',
+            providerResourceType: 'service',
+            providerResourceId: 'service-1',
+          },
+          {
+            logicalName: 'nightly',
+            workloadKind: 'cron',
+            providerResourceType: 'service',
+            providerResourceId: 'service-2',
+          },
+        ],
+      }),
+    };
     const workflow = buildBranchDeployWorkflow(
       'railway',
-      {
-        environmentName: 'development',
-        kind: 'development',
-        branch: 'develop',
-        autoDeployOnPush: true,
-        serviceNames: ['api'],
-        providerServiceIds: ['service-1'],
-      },
+      target,
       { includeStep: false },
       {
         bundleId: 'com.example.app',
@@ -1168,14 +1198,16 @@ describe('github tools', () => {
 
     expect(workflow.path).toBe('.github/workflows/deploy-railway-development.yml');
     expect(workflow.content).toContain('Write server release evidence');
-    expect(workflow.content).toContain('hypervibe-server-release-development');
+    expect(workflow.content).toContain('hypervibe-server-release-v4-development');
     expect(workflow.companionFiles?.map((file) => file.path)).toEqual([
       '.github/workflows/hypervibe-ios-release-development.yml',
     ]);
     const releaseWorkflow = workflow.companionFiles?.[0].content ?? '';
     expect(releaseWorkflow).toContain('Download verified server release evidence');
     expect(releaseWorkflow).toContain('runs-on: macos-26');
-    expect(releaseWorkflow).toContain('pattern: hypervibe-server-release-development-*');
+    expect(releaseWorkflow).toContain('hypervibe-server-release-v4-development-');
+    expect(releaseWorkflow).toContain('artifact-ids: ${{ steps.provenance.outputs.artifact_id }}');
+    expect(releaseWorkflow).toContain('artifact-ids: ${{ needs.build.outputs.server_artifact_id }}');
     expect(releaseWorkflow).toContain('path: ${{ runner.temp }}/hypervibe-server-evidence');
     expect(releaseWorkflow).toContain(
       'HYPERVIBE_SERVER_EVIDENCE_PATH: ${{ runner.temp }}/hypervibe-server-evidence/hypervibe-server-release.json'
@@ -1183,8 +1215,13 @@ describe('github tools', () => {
     expect(releaseWorkflow).toContain(
       'fs.readFileSync(process.env.HYPERVIBE_SERVER_EVIDENCE_PATH,"utf8")'
     );
-    expect(releaseWorkflow).toContain('evidence.version!==3');
-    expect(releaseWorkflow).not.toContain('evidence.version!==2');
+    expect(releaseWorkflow).toContain(
+      `HYPERVIBE_SERVER_EVIDENCE_VERSION: "${MANAGED_CI_RELEASE_EVIDENCE_VERSION}"`
+    );
+    expect(releaseWorkflow).toContain(
+      'evidence.version!==Number(process.env.HYPERVIBE_SERVER_EVIDENCE_VERSION)'
+    );
+    expect(releaseWorkflow).toContain('evidence.deploymentContractFingerprint');
     expect(releaseWorkflow).toContain('server evidence repository/SHA mismatch');
     expect(releaseWorkflow).toContain('concurrency:');
     expect(releaseWorkflow).toContain('group: hypervibe-deploy-development');
@@ -1220,6 +1257,173 @@ describe('github tools', () => {
     expect(buildCommand).not.toContain('MATCH_GIT_BASIC_AUTHORIZATION');
     expect(releaseWorkflow).toContain('Verify release IPA identity');
     expect(releaseWorkflow).toContain('hypervibe-ios-build-development-${{ steps.gate.outputs.sha }}');
+    const releaseSha = 'a'.repeat(40);
+    const imageUri = `ghcr.io/owner/repo@sha256:${'b'.repeat(64)}`;
+    const evidence = {
+      version: MANAGED_CI_RELEASE_EVIDENCE_VERSION,
+      provider: 'railway',
+      environment: 'development',
+      deploymentContractFingerprint: 'b'.repeat(64),
+      source: { repository: 'owner/repo', sha: releaseSha },
+      target: {
+        scope: target.releaseTarget!.scope,
+        bindingsFingerprint: target.releaseTarget!.bindingsFingerprint,
+        resources: target.releaseTarget!.resources.map((resource) => ({ ...resource, imageUri })),
+      },
+      programFingerprint: target.programFingerprint!,
+      verifiedAt: '2026-09-11T00:00:00.000Z',
+    };
+    const releaseDocument = parseDocument(releaseWorkflow, { uniqueKeys: true });
+    expect(releaseDocument.errors).toEqual([]);
+    const parsedRelease = releaseDocument.toJS() as {
+      jobs: { build: { env: Record<string, unknown>; steps: Array<{ name?: string; env?: Record<string, unknown> }> } };
+    };
+    const gateSteps = parsedRelease.jobs.build.steps.filter((step) => step.name === 'Verify server release gate');
+    expect(gateSteps).toHaveLength(1);
+    const emittedGateEnvironment = {
+      ...parsedRelease.jobs.build.env,
+      ...gateSteps[0]!.env,
+    };
+    const expectedServerRelease = JSON.parse(String(
+      emittedGateEnvironment.HYPERVIBE_EXPECTED_SERVER_RELEASE
+    )) as { artifactPrefix: string; workflowPath: string };
+    expect(expectedServerRelease).toMatchObject({
+      artifactPrefix: 'hypervibe-server-release-v4-development-',
+      workflowPath: workflow.path,
+    });
+    const provenanceScript = extractGitHubScript(releaseWorkflow, 'Resolve release provenance');
+    const serverRun = {
+      id: 91,
+      conclusion: 'success',
+      head_sha: releaseSha,
+      path: workflow.path,
+    };
+    const serverArtifact = {
+      id: 72,
+      name: expectedServerRelease.artifactPrefix + releaseSha,
+      expired: false,
+      workflow_run: { id: serverRun.id, head_sha: releaseSha },
+    };
+    const provenanceCase = (options: {
+      run?: Record<string, unknown>;
+      artifacts?: Array<Record<string, unknown>>;
+      eventName?: string;
+      inputs?: Record<string, string>;
+    } = {}) => {
+      const getWorkflowRun = vi.fn(async () => ({ data: options.run ?? serverRun }));
+      const listWorkflowRunArtifacts = vi.fn();
+      const paginate = vi.fn(async () => options.artifacts ?? [serverArtifact]);
+      const outputs = new Map<string, string>();
+      const result = new AsyncFunction(
+        'github',
+        'context',
+        'process',
+        'core',
+        provenanceScript
+      )(
+        { paginate, rest: { actions: { getWorkflowRun, listWorkflowRunArtifacts } } },
+        {
+          eventName: options.eventName ?? 'workflow_dispatch',
+          payload: options.eventName === 'workflow_run'
+            ? { workflow_run: { id: serverRun.id } }
+            : { inputs: options.inputs ?? { commit_sha: releaseSha, server_run_id: String(serverRun.id) } },
+          repo: { owner: 'owner', repo: 'repo' },
+        },
+        { env: { HYPERVIBE_EXPECTED_SERVER_RELEASE: JSON.stringify(expectedServerRelease) } },
+        { setOutput: (name: string, value: string) => outputs.set(name, value) }
+      );
+      return { getWorkflowRun, listWorkflowRunArtifacts, outputs, paginate, result };
+    };
+
+    const provenance = provenanceCase();
+    await expect(provenance.result).resolves.toBeUndefined();
+    expect(provenance.getWorkflowRun).toHaveBeenCalledWith({
+      owner: 'owner',
+      repo: 'repo',
+      run_id: serverRun.id,
+    });
+    expect(provenance.paginate).toHaveBeenCalledWith(provenance.listWorkflowRunArtifacts, {
+      owner: 'owner',
+      repo: 'repo',
+      run_id: serverRun.id,
+      per_page: 100,
+    });
+    expect(Object.fromEntries(provenance.outputs)).toEqual({
+      artifact_id: String(serverArtifact.id),
+      server_run_id: String(serverRun.id),
+      sha: releaseSha,
+    });
+    await expect(provenanceCase({ eventName: 'workflow_run' }).result).resolves.toBeUndefined();
+
+    for (const run of [
+      { ...serverRun, path: '.github/workflows/not-managed.yml' },
+      { ...serverRun, conclusion: 'failure' },
+    ]) {
+      const rejected = provenanceCase({ run });
+      await expect(rejected.result).rejects.toThrow(
+        'Server release evidence must come from a successful run of'
+      );
+      expect(rejected.paginate).not.toHaveBeenCalled();
+    }
+    const wrongRequestedSha = provenanceCase({
+      inputs: { commit_sha: 'd'.repeat(40), server_run_id: String(serverRun.id) },
+    });
+    await expect(wrongRequestedSha.result).rejects.toThrow(
+      'commit_sha does not match the selected server workflow run'
+    );
+    expect(wrongRequestedSha.paginate).not.toHaveBeenCalled();
+    const mismatchedArtifact = provenanceCase({
+      artifacts: [{ ...serverArtifact, name: expectedServerRelease.artifactPrefix + 'd'.repeat(40) }],
+    });
+    await expect(mismatchedArtifact.result).rejects.toThrow('Expected exactly one unexpired');
+    const duplicateArtifacts = provenanceCase({
+      artifacts: [serverArtifact, { ...serverArtifact, id: 73 }],
+    });
+    await expect(duplicateArtifacts.result).rejects.toThrow(/found 2$/);
+
+    const runEvidenceGate = (candidate: unknown, suffix: string) => {
+      const evidencePath = path.join(tempDir, `ios-server-evidence-${suffix}.json`);
+      const outputPath = path.join(tempDir, `ios-gate-output-${suffix}.txt`);
+      fs.writeFileSync(evidencePath, JSON.stringify(candidate));
+      execFileSync('bash', ['-eu', '-c', extractWorkflowShell(releaseWorkflow, 'Verify server release gate')], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          ...Object.fromEntries(Object.entries(emittedGateEnvironment).map(([key, value]) => [key, String(value)])),
+          GITHUB_OUTPUT: outputPath,
+          GITHUB_REPOSITORY: 'owner/repo',
+          HYPERVIBE_REQUESTED_SHA: releaseSha,
+          HYPERVIBE_SERVER_EVIDENCE_PATH: evidencePath,
+        },
+      });
+      return fs.readFileSync(outputPath, 'utf8');
+    };
+
+    expect(runEvidenceGate(evidence, 'accepted')).toBe(`sha=${releaseSha}\n`);
+    expect(runEvidenceGate({
+      ...evidence,
+      deploymentContractFingerprint: 'e'.repeat(64),
+    }, 'new-contract')).toBe(`sha=${releaseSha}\n`);
+
+    const mismatches = [
+      { ...evidence, provider: 'cloudrun' },
+      { ...evidence, programFingerprint: 'd'.repeat(64) },
+      { ...evidence, target: { ...evidence.target, scope: { providerProjectId: 'other-project' } } },
+      { ...evidence, target: { ...evidence.target, bindingsFingerprint: 'd'.repeat(64) } },
+      {
+        ...evidence,
+        target: {
+          ...evidence.target,
+          resources: evidence.target.resources.map((resource, index) => (
+            index === 0 ? { ...resource, providerResourceId: 'other-service' } : resource
+          )),
+        },
+      },
+    ];
+    for (const [index, mismatch] of mismatches.entries()) {
+      expect(() => runEvidenceGate(mismatch, `mismatch-${index}`))
+        .toThrow(/server evidence (?:contract mismatch|does not match the exact reviewed deployment target)/);
+    }
     expect(workflow.requiredSecrets).toEqual(expect.arrayContaining([
       'APP_STORE_CONNECT_KEY_ID',
       'APP_STORE_CONNECT_ISSUER_ID',

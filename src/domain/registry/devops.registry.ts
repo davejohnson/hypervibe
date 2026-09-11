@@ -13,8 +13,6 @@ export interface CiLifecycleResult {
   warnings: string[];
   /** Fail-closed planning result for unknown authority or unsupported semantics. */
   error?: string;
-  /** CI rendering must be re-planned after already-reviewed hosting bindings converge. */
-  deferred?: boolean;
 }
 
 export interface CiApplyResult {
@@ -33,7 +31,6 @@ export interface CiLifecyclePort {
     environmentSpec: EnvironmentSpec;
     environment: Environment | null;
     dependsOn?: string[];
-    bindingsWillChange?: boolean;
   }): Promise<CiLifecycleResult>;
   applyDeploy(params: {
     project: Project;

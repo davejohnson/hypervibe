@@ -1,7 +1,11 @@
-import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { describe, expect, it, vi } from 'vitest';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
 import '../../../adapters/providers/railway/railway.adapter.js';
+import { buildGitLabDeploymentContractRuntime } from '../../../adapters/providers/gitlab/gitlab-ci.lifecycle.js';
 import type {
   BranchDeployEnvironmentKind,
   BranchDeployProvider,
@@ -9,6 +13,13 @@ import type {
 } from '../../ports/ci-deploy.port.js';
 import { environmentDeploymentContractHash } from '../deployment-contract.service.js';
 import { buildBranchDeployWorkflow } from '../github-ops.service.js';
+import { managedCiReleaseTarget } from '../managed-ci-targets.js';
+import {
+  extractGitHubScript,
+  installReleaseEvidenceValidator,
+  releaseEvidenceValidatorRequire,
+  workflowStepIdentifiers,
+} from './managed-ci-workflow.test-utils.js';
 
 const GATE_STEP_NAME = 'Deployment safety gate: verify Hypervibe reconciliation';
 const ANNOTATION_TITLE = 'Deployment blocked — Hypervibe reconciliation required';
@@ -46,9 +57,10 @@ const SPEC = {
 
 function target(
   environmentName: 'staging' | 'production',
-  kind: BranchDeployEnvironmentKind
+  kind: BranchDeployEnvironmentKind,
+  provider: BranchDeployProvider
 ): BranchDeployTarget {
-  return {
+  const branchTarget: BranchDeployTarget = {
     environmentName,
     kind,
     branch: 'main',
@@ -60,7 +72,26 @@ function target(
     providerScope: { projectId: 'provider-project', region: 'us-central1' },
     providerServiceIds: ['provider-service'],
     providerJobNames: [],
+    programFingerprint: 'a'.repeat(64),
+    deploymentContractFingerprint: environmentDeploymentContractHash(SPEC, environmentName),
   };
+  branchTarget.releaseTarget = managedCiReleaseTarget({
+    provider,
+    environmentName,
+    scope: {
+      providerProjectId: branchTarget.providerProjectId,
+      providerEnvironmentId: branchTarget.providerEnvironmentId,
+      providerRegion: branchTarget.providerRegion,
+      providerScope: branchTarget.providerScope,
+    },
+    resources: [{
+      logicalName: 'web',
+      workloadKind: 'web',
+      providerResourceType: 'service',
+      providerResourceId: 'provider-service',
+    }],
+  });
+  return branchTarget;
 }
 
 function workflow(
@@ -69,39 +100,9 @@ function workflow(
 ) {
   return buildBranchDeployWorkflow(
     provider,
-    target(environmentName, environmentName),
+    target(environmentName, environmentName, provider),
     { includeStep: false }
   );
-}
-
-function extractGateScript(content: string): string {
-  const stepStart = content.indexOf(`      - name: ${JSON.stringify(GATE_STEP_NAME)}\n`);
-  expect(stepStart).toBeGreaterThan(-1);
-  const marker = '          script: |\n';
-  const scriptStart = content.indexOf(marker, stepStart) + marker.length;
-  const nextStep = content.indexOf('\n      - ', scriptStart);
-  const scriptEnd = nextStep === -1 ? content.length : nextStep;
-  return content
-    .slice(scriptStart, scriptEnd)
-    .split('\n')
-    .map((line) => line.startsWith('            ') ? line.slice(12) : line)
-    .join('\n')
-    .trimEnd();
-}
-
-function extractFailureEvidenceScript(content: string): string {
-  const stepStart = content.indexOf('      - name: Capture sanitized deployment failure evidence\n');
-  expect(stepStart).toBeGreaterThan(-1);
-  const marker = '          script: |\n';
-  const scriptStart = content.indexOf(marker, stepStart) + marker.length;
-  const nextStep = content.indexOf('\n      - ', scriptStart);
-  const scriptEnd = nextStep === -1 ? content.length : nextStep;
-  return content
-    .slice(scriptStart, scriptEnd)
-    .split('\n')
-    .map((line) => line.startsWith('            ') ? line.slice(12) : line)
-    .join('\n')
-    .trimEnd();
 }
 
 type GateResult = {
@@ -109,14 +110,17 @@ type GateResult = {
     error: ReturnType<typeof vi.fn>;
     info: ReturnType<typeof vi.fn>;
     setFailed: ReturnType<typeof vi.fn>;
+    setOutput: ReturnType<typeof vi.fn>;
   };
+  readFileSync: ReturnType<typeof vi.fn>;
   summaryText: string;
   summaryWrite: ReturnType<typeof vi.fn>;
 };
 
 async function runGate(
   environmentName: 'staging' | 'production',
-  appliedHash?: string
+  appliedHash?: string,
+  operation = 'deploy'
 ): Promise<GateResult> {
   const summaryParts: string[] = [];
   const summary = {
@@ -146,26 +150,43 @@ async function runGate(
     error: vi.fn(),
     info: vi.fn(),
     setFailed: vi.fn(),
+    setOutput: vi.fn(),
     summary,
   };
-  const requireModule = (moduleName: string) => {
-    if (moduleName === 'crypto') return { createHash };
-    if (moduleName === 'fs') {
-      return { readFileSync: () => JSON.stringify(SPEC) };
-    }
-    throw new Error(`Unexpected module request: ${moduleName}`);
-  };
-  const execute = new AsyncFunction('require', 'core', 'process', extractGateScript(workflow('railway', environmentName).content));
-  await execute(requireModule, core, {
-    env: {
-      HYPERVIBE_ENVIRONMENT: environmentName,
-      HYPERVIBE_APPLIED_SPEC_HASH: appliedHash,
-      HYPERVIBE_DEPLOY_SHA: DEPLOY_SHA,
-    },
-  });
+  const generated = workflow('railway', environmentName).content;
+  const readFileSync = vi.fn(() => JSON.stringify(SPEC));
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypervibe-contract-gate-'));
+  try {
+    const validator = installReleaseEvidenceValidator(generated, tempDir);
+    const execute = new AsyncFunction(
+      'require',
+      'core',
+      'process',
+      extractGitHubScript(generated, GATE_STEP_NAME)
+    );
+    await execute(
+      releaseEvidenceValidatorRequire(validator, {
+        readFileSync,
+      }),
+      core,
+      {
+        env: {
+          HYPERVIBE_RELEASE_VALIDATOR_PATH: validator.validatorPath,
+          HYPERVIBE_RELEASE_VALIDATOR_SHA256: validator.validatorSha256,
+          HYPERVIBE_ENVIRONMENT: environmentName,
+          HYPERVIBE_APPLIED_SPEC_HASH: appliedHash,
+          HYPERVIBE_DEPLOY_SHA: DEPLOY_SHA,
+          HYPERVIBE_DEPLOY_OPERATION: operation,
+        },
+      }
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 
   return {
     core,
+    readFileSync,
     summaryText: summaryParts.join('\n'),
     summaryWrite: summary.write,
   };
@@ -183,6 +204,7 @@ describe('generated deployment-contract safety gate', () => {
     expect(result.core.setFailed).toHaveBeenCalledWith(
       'Deployment blocked for staging: applied contract hash is missing.'
     );
+    expect(result.core.setOutput).not.toHaveBeenCalled();
     expect(result.summaryWrite).toHaveBeenCalledOnce();
     expect(result.summaryText).toContain(ANNOTATION_TITLE);
     expect(result.summaryText).toContain('This is not an application build or test failure. No image was built and nothing was deployed.');
@@ -210,6 +232,7 @@ describe('generated deployment-contract safety gate', () => {
     expect(result.core.setFailed).toHaveBeenCalledWith(
       'Deployment blocked for production: desired and applied contract hashes differ.'
     );
+    expect(result.core.setOutput).not.toHaveBeenCalled();
     expect(result.summaryText).toContain('**Cause:** desired and applied hashes differ');
     expect(result.summaryText).toContain(desiredHash);
     expect(result.summaryText).toContain(appliedHash);
@@ -222,24 +245,105 @@ describe('generated deployment-contract safety gate', () => {
 
     expect(result.core.error).not.toHaveBeenCalled();
     expect(result.core.setFailed).not.toHaveBeenCalled();
+    expect(result.core.setOutput).toHaveBeenCalledOnce();
+    expect(result.core.setOutput).toHaveBeenCalledWith('fingerprint', appliedHash);
     expect(result.summaryWrite).not.toHaveBeenCalled();
   });
 
-  it('places the same parseable gate before builds and deploys for every supported provider and environment', () => {
+  it('uses the current applied contract for rollback before provider mutation', async () => {
+    const appliedHash = 'e'.repeat(64);
+    const accepted = await runGate('production', appliedHash, 'rollback');
+    expect(accepted.core.setOutput).toHaveBeenCalledWith('fingerprint', appliedHash);
+    expect(accepted.readFileSync).not.toHaveBeenCalled();
+
+    await expect(runGate('production', undefined, 'rollback')).rejects.toThrow(
+      'Rollback blocked for production: applied contract hash is missing or malformed.'
+    );
+  });
+
+  it('places the parsed contract and evidence steps around every build and provider mutation', () => {
     for (const provider of ['railway', 'cloudrun'] as const) {
       for (const environmentName of ['staging', 'production'] as const) {
         const generated = workflow(provider, environmentName);
-        const gateIndex = generated.content.indexOf(GATE_STEP_NAME);
-        const imageBuildIndex = generated.content.indexOf('docker/build-push-action@v6');
+        const steps = workflowStepIdentifiers(generated.content);
+        const providerMutation = provider === 'railway'
+          ? 'Deploy image to Railway'
+          : 'Deploy image to Cloud Run';
+        const gateIndex = steps.indexOf(GATE_STEP_NAME);
+        const imageBuildIndex = steps.indexOf('docker/build-push-action@v6');
+        const rollbackEvidenceIndex = steps.indexOf('Resolve immutable rollback image');
+        const providerMutationIndex = steps.indexOf(providerMutation);
+        const releaseEvidenceIndex = steps.indexOf('Write server release evidence');
 
         expect(generated.content).toContain(`environment: ${environmentName}`);
         expect(generated.content).toContain(`name: ${JSON.stringify(GATE_STEP_NAME)}`);
         expect(generated.content).toContain('HYPERVIBE_DEPLOY_SHA: ${{ steps.deploy.outputs.sha }}');
         expect(gateIndex).toBeGreaterThan(-1);
         expect(gateIndex).toBeLessThan(imageBuildIndex);
+        expect(imageBuildIndex).toBeLessThan(providerMutationIndex);
+        expect(providerMutationIndex).toBeLessThan(releaseEvidenceIndex);
+        expect(gateIndex).toBeLessThan(rollbackEvidenceIndex);
+        expect(rollbackEvidenceIndex).toBeLessThan(providerMutationIndex);
         expect(generated.content).not.toContain('continue-on-error');
-        expect(() => new AsyncFunction(extractGateScript(generated.content))).not.toThrow();
+        expect(() => new AsyncFunction(
+          extractGitHubScript(generated.content, GATE_STEP_NAME)
+        )).not.toThrow();
       }
+    }
+  });
+});
+
+describe('generated GitLab deployment-contract safety gate', () => {
+  it('executes the emitted runtime against the raw spec before build or provider mutation', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'hypervibe-gitlab-contract-gate-'));
+    const runtimePath = path.join(directory, 'verify-deployment-contract.cjs');
+    fs.mkdirSync(path.join(directory, '.hypervibe'));
+    fs.writeFileSync(path.join(directory, '.hypervibe/spec.json'), JSON.stringify(SPEC));
+    fs.writeFileSync(runtimePath, buildGitLabDeploymentContractRuntime());
+    const baseEnv = {
+      ...process.env,
+      HYPERVIBE_ENVIRONMENT: 'staging',
+      HYPERVIBE_ROLLBACK: 'false',
+    };
+    try {
+      const appliedHash = environmentDeploymentContractHash(SPEC, 'staging');
+      const accepted = spawnSync(process.execPath, [runtimePath], {
+        cwd: directory,
+        encoding: 'utf8',
+        env: { ...baseEnv, HYPERVIBE_APPLIED_SPEC_HASH: appliedHash },
+      });
+      expect(accepted.status, accepted.stderr).toBe(0);
+      expect(fs.readFileSync(
+        path.join(directory, '.hypervibe-deployment-contract-fingerprint'),
+        'utf8'
+      )).toBe(`${appliedHash}\n`);
+
+      const rejected = spawnSync(process.execPath, [runtimePath], {
+        cwd: directory,
+        encoding: 'utf8',
+        env: { ...baseEnv, HYPERVIBE_APPLIED_SPEC_HASH: 'f'.repeat(64) },
+      });
+      expect(rejected.status).not.toBe(0);
+      expect(rejected.stderr).toContain('desired and applied contract hashes differ');
+
+      fs.rmSync(path.join(directory, '.hypervibe/spec.json'));
+      const rollbackHash = 'e'.repeat(64);
+      const rollback = spawnSync(process.execPath, [runtimePath], {
+        cwd: directory,
+        encoding: 'utf8',
+        env: {
+          ...baseEnv,
+          HYPERVIBE_APPLIED_SPEC_HASH: rollbackHash,
+          HYPERVIBE_ROLLBACK: 'true',
+        },
+      });
+      expect(rollback.status, rollback.stderr).toBe(0);
+      expect(fs.readFileSync(
+        path.join(directory, '.hypervibe-deployment-contract-fingerprint'),
+        'utf8'
+      )).toBe(`${rollbackHash}\n`);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
     }
   });
 });
@@ -257,14 +361,19 @@ describe('generated deployment failure evidence', () => {
         expect(generated.content).toContain('      - name: Upload deployment failure evidence');
         expect(generated.content).toContain('          path: hypervibe-deploy-failure.log');
         expect(generated.content).toContain(`          name: deploy-${environmentName}-failure-evidence`);
-        expect(() => new AsyncFunction(extractFailureEvidenceScript(generated.content))).not.toThrow();
+        expect(() => new AsyncFunction(
+          extractGitHubScript(generated.content, 'Capture sanitized deployment failure evidence')
+        )).not.toThrow();
       }
     }
   });
 
   it('keeps the failed deploy diagnosis while redacting credential-shaped log values', async () => {
     const generated = workflow('railway', 'staging');
-    const script = extractFailureEvidenceScript(generated.content);
+    const script = extractGitHubScript(
+      generated.content,
+      'Capture sanitized deployment failure evidence'
+    );
     const writeFileSync = vi.fn();
     const listJobsForWorkflowRun = vi.fn();
     const github = {

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import type { Run, RunReceipt } from '../entities/run.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
+import { CI_CONFIGURATION_SYNC_OPERATION } from '../services/managed-ci.contract.js';
 import type { PlanAction } from './plan.types.js';
 
 /**
@@ -138,11 +139,56 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
   }
 });
 
+/** Keep root actions and every transitive prerequisite they name. */
+export function actionDependencyClosure(actions: PlanAction[], rootIds: string[]): PlanAction[] {
+  const byId = new Map(actions.map((action) => [action.id, action]));
+  const retained = new Set(rootIds);
+  const pending = [...rootIds];
+  while (pending.length > 0) {
+    for (const dependency of byId.get(pending.pop()!)?.dependsOn ?? []) {
+      if (!retained.has(dependency)) {
+        retained.add(dependency);
+        pending.push(dependency);
+      }
+    }
+  }
+  return actions.filter((action) => retained.has(action.id));
+}
+
+export function isManagedCiBindingRoot(action: PlanAction): boolean {
+  return action.type !== 'noop'
+    && action.type !== 'destroy'
+    && (
+      (action.resource.kind === 'project' || action.resource.kind === 'environment')
+      || (action.resource.kind === 'service' && (action.type === 'create' || action.type === 'replace'))
+    );
+}
+
+export function isManagedCiBindingAction(action: PlanAction): boolean {
+  return action.type === 'noop' || (
+    action.type !== 'destroy'
+    && [
+      'project',
+      'environment',
+      'service',
+      'database',
+      'cache',
+      'queue',
+      'storage',
+    ].includes(action.resource.kind)
+  );
+}
+
 /** Runtime-validated document stored in runs.plan for type 'plan' runs. */
 export const planRunDocumentSchema = z.object({
   kind: z.literal('hv_plan'),
   /** Omitted by plans created before scoped planning; those remain full plans. */
-  scope: z.enum(['full', 'retained-cleanup']).optional(),
+  scope: z.enum([
+    'full',
+    'retained-cleanup',
+    'managed-ci-bindings',
+    'managed-ci-publication',
+  ]).optional(),
   environmentName: z.string().min(1),
   specRevision: z.number().int().nonnegative(),
   /** Immutable application revision reviewed with this deployment plan. */
@@ -165,6 +211,61 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'managed-ci-publication') {
+    const invalidAction = document.actions.find((action) =>
+      action.metadata?.workflowPublicationRequired !== true
+      || action.resource.kind !== 'ci'
+      || !(
+        action.resource.provider === 'github'
+          && (action.type === 'create' || action.type === 'update')
+          && action.metadata?.operation === 'githubActionsDeployBranch'
+        || action.resource.provider === 'gitlab-ci'
+          && action.type === 'update'
+          && action.resource.name === 'configuration'
+          && action.metadata?.operation === CI_CONFIGURATION_SYNC_OPERATION
+      )
+    );
+    if (document.actions.length === 0 || invalidAction) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['actions'],
+        message: `managed-ci-publication plan contains ${invalidAction ? `unrelated action ${invalidAction.id}` : 'no publication action'}`,
+      });
+    }
+    if (
+      document.observedFingerprint !== null
+      || document.integrationFingerprints
+      || document.overrides
+      || document.inputRequired?.length
+      || document.lockEnvironmentIds?.length
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'managed-ci-publication plan contains unrelated provider state, integration, deploy-input, or environment-lock state',
+      });
+    }
+    return;
+  }
+
+  if (document.scope === 'managed-ci-bindings') {
+    const roots = document.actions.filter(isManagedCiBindingRoot);
+    const retained = new Set(actionDependencyClosure(
+      document.actions,
+      roots.map((action) => action.id)
+    ).map((action) => action.id));
+    const invalidAction = document.actions.find((action) => (
+      !retained.has(action.id) || !isManagedCiBindingAction(action)
+    ));
+    if (roots.length === 0 || invalidAction) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['actions'],
+        message: `managed-ci-bindings plan contains ${invalidAction ? `unrelated action ${invalidAction.id}` : 'no provider identity action'}`,
+      });
+    }
+    return;
+  }
+
   if (document.scope !== 'retained-cleanup') return;
 
   const invalidAction = document.actions.find((action) =>

@@ -37,12 +37,14 @@ export interface BranchDeployTarget {
   promoteFromProvider?: string;
   /** Exact source service set required in downloaded promotion evidence. */
   promoteFromServiceNames?: string[];
-  /** Reviewed source deployment contract/program required in promotion evidence. */
+  /** Stable reviewed source program required in promotion evidence. */
   promoteFromProgramFingerprint?: string;
   /** Exact source binding contract required in promotion evidence. */
   promoteFromReleaseTarget?: BranchDeployReleaseTarget;
-  /** Deployment contract/program fingerprint written into this target's release evidence. */
+  /** Stable reviewed deployment program written into this target's release evidence. */
   programFingerprint?: string;
+  /** Full environment contract required before this target may deploy. */
+  deploymentContractFingerprint?: string;
   /** Exact current provider scope and logical-to-provider workload bindings. */
   releaseTarget?: BranchDeployReleaseTarget;
   serviceNames: string[];
