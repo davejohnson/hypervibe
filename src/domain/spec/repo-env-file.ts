@@ -2,6 +2,7 @@ import { chmodSync, lstatSync, readFileSync, realpathSync, writeFileSync } from 
 import path from 'path';
 import { spawnSync } from 'child_process';
 import type { ProjectSpec } from './spec.schema.js';
+import { githubActionsCanonicalEnvironment } from './devops-selection.js';
 
 export interface LocalEnvRequirement {
   key: string;
@@ -329,16 +330,39 @@ function joinDestinations(values: string[]): string {
  * secrets are generated inside a reviewed plan and likewise never become
  * local input placeholders.
  */
-export function specLocalEnvRequirements(spec: ProjectSpec): LocalEnvRequirement[] {
+export function specLocalEnvRequirements(
+  spec: ProjectSpec,
+  selectedEnvironmentName?: string
+): LocalEnvRequirement[] {
   const requirements: LocalEnvRequirement[] = [];
+  const canonicalActionsEnvironment = selectedEnvironmentName
+    ? githubActionsCanonicalEnvironment(spec)
+    : undefined;
 
   for (const [key, secret] of Object.entries(spec.secrets)) {
     if (secret.ownership !== 'delegated') continue;
-    const runtimeDestinations = secret.environments.map((environment) => `${environment} runtime`);
-    const actionsDestinations = [
-      ...(secret.githubActions?.repository ? ['repository GitHub Actions'] : []),
-      ...(secret.githubActions?.environments ?? []).map((environment) => `${environment} GitHub Actions`),
-    ];
+    const hasGitHubActionsDestination = Boolean(
+      secret.githubActions?.repository || secret.githubActions?.environments?.length
+    );
+    const actionsApplyToSelectedEnvironment = Boolean(
+      selectedEnvironmentName
+      && canonicalActionsEnvironment === selectedEnvironmentName
+      && hasGitHubActionsDestination
+    );
+    if (
+      selectedEnvironmentName
+      && !secret.environments.includes(selectedEnvironmentName)
+      && !actionsApplyToSelectedEnvironment
+    ) continue;
+    const runtimeDestinations = secret.environments
+      .filter((environment) => !selectedEnvironmentName || environment === selectedEnvironmentName)
+      .map((environment) => `${environment} runtime`);
+    const actionsDestinations = !selectedEnvironmentName || actionsApplyToSelectedEnvironment
+      ? [
+        ...(secret.githubActions?.repository ? ['repository GitHub Actions'] : []),
+        ...(secret.githubActions?.environments ?? []).map((environment) => `${environment} GitHub Actions`),
+      ]
+      : [];
     const destinations = joinDestinations([...runtimeDestinations, ...actionsDestinations]);
     requirements.push({
       key,
@@ -346,6 +370,11 @@ export function specLocalEnvRequirements(spec: ProjectSpec): LocalEnvRequirement
       templateComment: `${secret.required ? 'Required' : 'Optional'} delegated secret for ${destinations}; keep this template empty and place the value only in the gitignored .env before passing this key to hv_plan through secretRefs.`,
     });
   }
+
+  // Environment-specific files hold only scoped delegated secrets. Explicit
+  // deploy inputs stay in the base file until the deploy loader copies a
+  // selected non-empty value, so a generated blank cannot mask it.
+  if (selectedEnvironmentName) return requirements;
 
   const envFileDestinations = new Map<string, string[]>();
   for (const [environmentName, environment] of Object.entries(spec.environments)) {
@@ -381,6 +410,28 @@ export function ensureRepoLocalEnv(
       activateEmptyCommentedAssignments: true,
       createMode: 0o600,
     }),
+    gitignorePath: gitignore.path,
+    gitignoreUpdated: gitignore.updated,
+  };
+}
+
+export function ensureRepoEnvironmentLocalEnv(
+  root: string,
+  environmentName: string,
+  requirements: LocalEnvRequirement[]
+): RepoEnvFileWrite {
+  const fileName = `.env.${environmentName}`;
+  const gitignore = ensureRepoEnvFilesIgnored(root, ['.env', fileName]);
+  const filePath = path.join(root, fileName);
+  const write = ensureCommentedEnvFile(filePath, requirements, {
+    activateEmptyCommentedAssignments: true,
+    createMode: 0o600,
+  });
+  if (!regularFileExists(filePath)) {
+    writeFileSync(filePath, '', { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  }
+  return {
+    ...write,
     gitignorePath: gitignore.path,
     gitignoreUpdated: gitignore.updated,
   };

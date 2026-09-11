@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
 import { expectActionableConnectionSetup, parseToolEnvelope } from './tool-result.js';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -321,7 +321,13 @@ describe('hv_spec', () => {
       expect(plan.data.actions.some((action: { resource: { kind: string } }) =>
         action.resource.kind === 'ci'
       )).toBe(false);
-      expect(plan.data.localEnv.addedKeys).toEqual(['HYPERVIBE_RAILWAY_TOKEN']);
+      expect(plan.data.localEnv).toMatchObject({
+        path: path.join(repoDir, '.env.staging'),
+        addedKeys: [],
+      });
+      expect(readFileSync(path.join(repoDir, '.env'), 'utf8')).toContain('HYPERVIBE_RAILWAY_TOKEN=');
+      expect(readFileSync(path.join(repoDir, '.env.staging'), 'utf8'))
+        .not.toContain('HYPERVIBE_RAILWAY_TOKEN');
     } finally {
       if (t) await t.close();
       process.chdir(oldCwd);
@@ -369,6 +375,189 @@ describe('hv_spec', () => {
       expect(readFileSync(path.join(repoDir, '.env'), 'utf8'))
         .toMatch(/# Hypervibe: [^\n]+\nSESSION_SECRET=/);
       expect(readFileSync(path.join(repoDir, '.gitignore'), 'utf8')).toContain('/.env');
+    } finally {
+      if (t) await t.close();
+      process.chdir(oldCwd);
+      if (oldDisable === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable;
+      rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps delegated base values out of the environment scaffold while syncing explicit deploy inputs', async () => {
+    const oldCwd = process.cwd();
+    const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    const repoDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'hypervibe-environment-secret-inputs-')));
+    const projectName = path.basename(repoDir);
+    execFileSync('git', ['init', '--quiet'], { cwd: repoDir });
+    execFileSync('git', [
+      'remote',
+      'add',
+      'origin',
+      `git@github.com:davejohnson/${projectName}.git`,
+    ], { cwd: repoDir });
+    process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+    process.chdir(repoDir);
+    let t: Awaited<ReturnType<typeof makeClient>> | undefined;
+
+    try {
+      t = await makeClient();
+      const initialized = await t.call('hv_spec', {
+        spec: {
+          project: projectName,
+          gitRemoteUrl: `git@github.com:davejohnson/${projectName}.git`,
+          secrets: {
+            OWNER_MANAGED_SECRET: {
+              principal: 'github:davejohnson',
+              environments: ['production', 'staging'],
+            },
+            PUBLIC_WIDGET_KEY: {
+              principal: 'github:davejohnson',
+              environments: ['production', 'staging'],
+            },
+            WEBHOOK_SIGNING_SECRET: {
+              principal: 'github:davejohnson',
+              environments: ['production', 'staging'],
+            },
+          },
+          environments: {
+            production: {
+              hosting: { provider: 'railway' },
+              services: { web: { startCommand: 'npm start' } },
+              envFile: { mode: 'off' },
+              envVarExceptions: ['PORTABLE_RUNTIME_VALUE'],
+            },
+            staging: {
+              hosting: { provider: 'railway' },
+              services: { preview: { startCommand: 'npm start' } },
+              envFile: { mode: 'explicit', include: ['PORTABLE_RUNTIME_VALUE'] },
+            },
+            review: {
+              hosting: { provider: 'railway' },
+              services: { preview: { startCommand: 'npm start' } },
+              envFile: { mode: 'off' },
+              envVarExceptions: [
+                'OWNER_MANAGED_SECRET',
+                'PORTABLE_RUNTIME_VALUE',
+                'PUBLIC_WIDGET_KEY',
+                'WEBHOOK_SIGNING_SECRET',
+              ],
+            },
+          },
+        },
+      });
+      expect(initialized.ok).toBe(true);
+
+      const baseValues = [
+        'OWNER_MANAGED_SECRET=production-owner-secret',
+        'HYPERVIBE_RAILWAY_TOKEN=',
+        'PORTABLE_RUNTIME_VALUE=shared-runtime-value',
+        'PUBLIC_WIDGET_KEY=production-widget-key',
+        'WEBHOOK_SIGNING_SECRET=production-webhook-secret',
+        '',
+      ].join('\n');
+      writeFileSync(path.join(repoDir, '.env'), baseValues, { mode: 0o600 });
+      const connection = new ConnectionRepository().create({
+        provider: 'railway',
+        credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'railway-account-token' }),
+      });
+      new ConnectionRepository().updateStatus(connection.id, 'verified');
+      vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+        success: true,
+        adapter: {
+          name: 'railway',
+          capabilities: { supportsObserve: false },
+        } as never,
+      });
+      const stagingPath = path.join(repoDir, '.env.staging');
+
+      const plan = await t.call('hv_plan', {
+        project: projectName,
+        env: 'staging',
+        includeEnvFile: false,
+      });
+
+      expect(plan.ok).toBe(true);
+      expect(plan.data.inputRequired.map((entry: { key: string }) => entry.key)).toEqual([
+        'OWNER_MANAGED_SECRET',
+        'PUBLIC_WIDGET_KEY',
+        'WEBHOOK_SIGNING_SECRET',
+      ]);
+      expect(plan.data.localEnv).toMatchObject({
+        path: stagingPath,
+        addedKeys: [
+          'OWNER_MANAGED_SECRET',
+          'PUBLIC_WIDGET_KEY',
+          'WEBHOOK_SIGNING_SECRET',
+        ],
+      });
+      expect(plan.hint).toContain(`dotenv:${stagingPath}#OWNER_MANAGED_SECRET`);
+      expect(plan.hint).toContain(`dotenv:${stagingPath}#PUBLIC_WIDGET_KEY`);
+      expect(plan.hint).toContain(`dotenv:${stagingPath}#WEBHOOK_SIGNING_SECRET`);
+      expect(plan.agentInstruction).toMatchObject({
+        action: 'ask_user',
+        message: expect.stringContaining(`Hypervibe prepared ${stagingPath}`),
+      });
+      expect(existsSync(stagingPath)).toBe(true);
+      const stagingContent = readFileSync(stagingPath, 'utf8');
+      for (const key of ['OWNER_MANAGED_SECRET', 'PUBLIC_WIDGET_KEY', 'WEBHOOK_SIGNING_SECRET']) {
+        expect(stagingContent).toMatch(new RegExp(`# Hypervibe: [^\\n]+\\n${key}=`));
+      }
+      expect(stagingContent).toContain('for staging runtime');
+      expect(stagingContent).not.toContain('production runtime');
+      expect(stagingContent).not.toContain('production-owner-secret');
+      expect(stagingContent).not.toContain('PORTABLE_RUNTIME_VALUE');
+      expect(stagingContent).not.toContain('production-widget-key');
+      expect(stagingContent).not.toContain('production-webhook-secret');
+      const updatedBase = readFileSync(path.join(repoDir, '.env'), 'utf8');
+      expect(updatedBase).toContain('OWNER_MANAGED_SECRET=production-owner-secret');
+      expect(updatedBase).toContain('PORTABLE_RUNTIME_VALUE=shared-runtime-value');
+      expect(updatedBase).toContain('PUBLIC_WIDGET_KEY=production-widget-key');
+      expect(updatedBase).toContain('WEBHOOK_SIGNING_SECRET=production-webhook-secret');
+      expect(execFileSync(
+        'git',
+        ['check-ignore', '--no-index', '--quiet', '--', '.env.staging'],
+        { cwd: repoDir }
+      )).toEqual(Buffer.alloc(0));
+
+      const syncPlan = await t.call('hv_plan', {
+        project: projectName,
+        env: 'staging',
+        includeEnvFile: true,
+      });
+      expect(syncPlan.ok).toBe(true);
+      expect(syncPlan.warnings).toContainEqual(expect.stringContaining(
+        `Updated environment-specific deploy env file ${stagingPath} with 1 key(s) copied from base`
+      ));
+      expect(syncPlan.warnings).toContainEqual(expect.stringContaining(
+        `Loaded 1 deploy env var(s) from ${stagingPath}`
+      ));
+      expect(readFileSync(stagingPath, 'utf8'))
+        .toContain('PORTABLE_RUNTIME_VALUE=shared-runtime-value');
+      const storedSyncPlan = new RunRepository().findById(syncPlan.data.planId)!.plan as Record<string, unknown>;
+      const overrides = storedSyncPlan.overrides as Record<string, unknown>;
+      expect(overrides.envFileKeys).toEqual(['PORTABLE_RUNTIME_VALUE']);
+      expect(getSecretStore().decryptObject(overrides.envFileVarsEncrypted as string)).toEqual({
+        PORTABLE_RUNTIME_VALUE: 'shared-runtime-value',
+      });
+
+      const reviewPath = path.join(repoDir, '.env.review');
+      expect(existsSync(reviewPath)).toBe(false);
+      const reviewPlan = await t.call('hv_plan', {
+        project: projectName,
+        env: 'review',
+        includeEnvFile: false,
+      });
+      expect(reviewPlan.ok).toBe(true);
+      expect(reviewPlan.data.localEnv).toMatchObject({ path: reviewPath });
+      expect(existsSync(reviewPath)).toBe(true);
+      expect(readFileSync(reviewPath, 'utf8')).toBe('');
+      expect(statSync(reviewPath).mode & 0o777).toBe(0o600);
+      expect(execFileSync(
+        'git',
+        ['check-ignore', '--no-index', '--quiet', '--', '.env.review'],
+        { cwd: repoDir }
+      )).toEqual(Buffer.alloc(0));
     } finally {
       if (t) await t.close();
       process.chdir(oldCwd);

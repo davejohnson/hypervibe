@@ -53,6 +53,7 @@ import {
   repositoryProjectIdentity,
 } from '../domain/spec/repo-spec-file.js';
 import {
+  ensureRepoEnvironmentLocalEnv,
   ensureRepoLocalEnv,
   specLocalEnvRequirements,
   type LocalEnvRequirement,
@@ -301,14 +302,16 @@ function mergeLocalEnvWrites(
 ): RepoEnvFileWrite | undefined {
   const present = writes.filter((write): write is RepoEnvFileWrite => Boolean(write));
   if (present.length === 0) return undefined;
+  const primary = present[0];
+  const sameFile = present.filter((write) => write.path === primary.path);
   return {
-    path: present[0].path,
-    addedKeys: [...new Set(present.flatMap((write) => write.addedKeys))].sort(),
-    commentedKeys: [...new Set(present.flatMap((write) => write.commentedKeys))].sort(),
-    ...(present.some((write) => (write.activatedKeys?.length ?? 0) > 0)
-      ? { activatedKeys: [...new Set(present.flatMap((write) => write.activatedKeys ?? []))].sort() }
+    path: primary.path,
+    addedKeys: [...new Set(sameFile.flatMap((write) => write.addedKeys))].sort(),
+    commentedKeys: [...new Set(sameFile.flatMap((write) => write.commentedKeys))].sort(),
+    ...(sameFile.some((write) => (write.activatedKeys?.length ?? 0) > 0)
+      ? { activatedKeys: [...new Set(sameFile.flatMap((write) => write.activatedKeys ?? []))].sort() }
       : {}),
-    ...(present.some((write) => write.permissionsUpdated === true)
+    ...(sameFile.some((write) => write.permissionsUpdated === true)
       ? { permissionsUpdated: true }
       : {}),
     ...(present.find((write) => write.gitignorePath)?.gitignorePath
@@ -326,6 +329,7 @@ function ensureProjectLocalEnv(params: {
   projectGitRemoteUrl?: string;
   spec?: ProjectSpec;
   connectionBlocks?: ConnectionBlock[];
+  environmentName?: string;
   /** Validate the repository secret-file boundary even before any slots are known. */
   verifyRepoSafety?: boolean;
 }): RepoEnvFileWrite | undefined {
@@ -355,15 +359,25 @@ function ensureProjectLocalEnv(params: {
       return undefined;
     }
   }
-  const requirements = [
-    ...(params.spec ? specLocalEnvRequirements(params.spec) : []),
+  const specRequirements = params.spec ? specLocalEnvRequirements(params.spec) : [];
+  const connectionRequirements = [
     ...connectionLocalEnvInputs(params.connectionBlocks ?? []).map((input): LocalEnvRequirement => ({
       key: input.envKey,
       comment: `${input.comment}; add the value locally, then reference this key with hv_connections.`,
     })),
   ];
+  const requirements = [...specRequirements, ...connectionRequirements];
   if (requirements.length === 0 && !params.verifyRepoSafety) return undefined;
-  return ensureRepoLocalEnv(root, requirements);
+  const environmentRequirements = params.spec && params.environmentName
+    ? specLocalEnvRequirements(params.spec, params.environmentName)
+    : [];
+  const environmentLocalEnv = params.spec
+    && params.environmentName
+    && Object.prototype.hasOwnProperty.call(params.spec.environments, params.environmentName)
+    ? ensureRepoEnvironmentLocalEnv(root, params.environmentName, environmentRequirements)
+    : undefined;
+  const baseLocalEnv = ensureRepoLocalEnv(root, requirements);
+  return mergeLocalEnvWrites(environmentLocalEnv, baseLocalEnv);
 }
 
 function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
@@ -740,8 +754,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       scope: z.enum(['full', 'retained-cleanup']).optional().describe('Default full. Use retained-cleanup to persist only exact retained abandoned-host, database, cache, or provider-resource destroy actions.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
       envVars: z.record(z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
-      envFile: z.string().optional().describe('Local .env file to consider as deploy input. Defaults to .env.<env>, creating it from repo .env when missing and syncing newly added base keys when present. Selection follows spec envFile policy; values are encrypted in the stored plan and never returned.'),
-      includeEnvFile: z.boolean().optional().describe('Set false to skip the default repo .env deploy input. Ignored for repository-only plans, which never load deploy env files.'),
+      envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
+      includeEnvFile: z.boolean().optional().describe('Set false to skip default repo .env deploy input and base-value syncing; the private .env.<env> scaffold is still prepared. Ignored for repository-only plans, which never load deploy env files.'),
       secretRefs: z.record(z.string()).optional().describe('Chat-safe local/secret-manager references for delegated secret slots, keyed by declared env var name. Values are resolved locally and encrypted into this plan; never pass raw secrets here.'),
     },
     wrapCommandHandler(async ({ project: projectRef, env, scope, services, envVars, envFile, includeEnvFile, secretRefs }) => {
@@ -779,6 +793,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           projectName: project.name,
           projectGitRemoteUrl: project.gitRemoteUrl,
           ...(scope === 'retained-cleanup' ? {} : { spec: currentSpec }),
+          ...(scope === 'retained-cleanup' ? {} : { environmentName: plannedEnvironment }),
           verifyRepoSafety: true,
         })
         : undefined;
@@ -810,6 +825,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             projectName: project.name,
             projectGitRemoteUrl: project.gitRemoteUrl,
             spec: currentSpec,
+            environmentName: result.environmentName,
             connectionBlocks: [...hardBlocked, ...actionScopedBlocked],
           })
         );
@@ -841,6 +857,12 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           `${entry.reason} This blocks only the related action; independent service and CI actions can still be applied from this plan.`
         ),
       ];
+      const delegatedSecretRefs = localEnv && result.inputRequired.length > 0
+        ? Object.fromEntries(result.inputRequired.map((entry) => [
+          entry.key,
+          `dotenv:${localEnv.path}#${entry.key}`,
+        ]))
+        : undefined;
       let hint: string;
       let next: string[] | undefined;
 
@@ -854,7 +876,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           after: 'Then re-run hv_plan and hv_apply. GitHub Actions push-to-deploy cannot converge until these credentials are available.',
         });
       } else if (result.inputRequired.length > 0) {
-        hint = `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. If the value and provider access are available on this Mac, re-run hv_plan with secretRefs mapping each key to env:, dotenv:, file:, or a secret-manager reference. Otherwise prepare a value-free handoff naming the key, environment, and principal for the project owner; the value can be transferred through their agreed external channel or shared secret manager. Do not paste raw values into chat.`;
+        hint = delegatedSecretRefs
+          ? `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. Hypervibe prepared ${localEnv!.path}; fill those values there, then re-run hv_plan with secretRefs=${JSON.stringify(delegatedSecretRefs)}. Do not paste raw values into chat.`
+          : `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. If the value and provider access are available on this Mac, re-run hv_plan with secretRefs mapping each key to env:, dotenv:, file:, or a secret-manager reference. Otherwise prepare a value-free handoff naming the key, environment, and principal for the project owner; the value can be transferred through their agreed external channel or shared secret manager. Do not paste raw values into chat.`;
       } else if (pending.length === 0) {
         hint = 'Everything is in sync — nothing to apply.';
       } else if (softActionScopedBlocked.length > 0) {
@@ -912,7 +936,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             ? {
               agentInstruction: {
                 action: 'ask_user' as const,
-                message: 'Stop before apply. Use a safe local secretRef when the value is available here; otherwise prepare a value-free owner handoff naming the delegated key, environment, and principal.',
+                message: delegatedSecretRefs
+                  ? `Stop before apply. Hypervibe prepared ${localEnv!.path}; ask the owner to fill the required delegated values there without pasting them into chat, then re-run hv_plan with the disclosed dotenv secretRefs.`
+                  : 'Stop before apply. Use a safe local secretRef when the value is available here; otherwise prepare a value-free owner handoff naming the delegated key, environment, and principal.',
               },
             }
             : {}),

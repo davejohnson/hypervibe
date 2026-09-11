@@ -26,6 +26,12 @@ export interface DeployEnvFileResult {
 
 export type DeployEnvFileMode = 'runtime' | 'all' | 'explicit' | 'off';
 
+interface DeployEnvSyncPolicy {
+  mode: DeployEnvFileMode;
+  includeKeys: Set<string>;
+  excludedKeys: Set<string>;
+}
+
 const PROVIDER_ONLY_EXACT_KEYS = new Set([
   'AWS_ACCESS_KEY_ID',
   'AWS_PROFILE',
@@ -201,27 +207,75 @@ function filteredBaseEnvContent(baseContent: string, copyableKeys: Set<string>):
     .join(eol);
 }
 
-function syncEnvSpecificFromBase(basePath: string, envSpecificPath: string, excludedKeys = new Set<string>()): {
+function deployEnvKeySelected(
+  key: string,
+  mode: DeployEnvFileMode,
+  includeKeys: Set<string>
+): boolean {
+  return includeKeys.has(key)
+    || mode === 'all'
+    || (mode === 'runtime' && isRuntimeDeployEnvKey(key));
+}
+
+function deployEnvValueIsLocal(
+  key: string,
+  value: string,
+  mode: DeployEnvFileMode,
+  includeKeys: Set<string>
+): boolean {
+  return mode === 'runtime' && !includeKeys.has(key) && valueLooksLocal(value);
+}
+
+function syncEnvSpecificFromBase(
+  basePath: string,
+  envSpecificPath: string,
+  policy: DeployEnvSyncPolicy
+): {
   created: boolean;
   syncedKeys: string[];
   divergentKeys: string[];
   emptyKeys: string[];
   skippedProviderKeys: string[];
+  ignoredKeys: string[];
+  localValueKeys: string[];
 } {
   const baseContent = readFileSync(basePath, 'utf-8');
   const baseVars = parseEnvFile(basePath);
   const envSpecificExists = existsSync(envSpecificPath);
   const envSpecificVars = envSpecificExists ? parseEnvFile(envSpecificPath) : {};
   const absentBaseKeys = Object.keys(baseVars)
-    .filter((key) => !excludedKeys.has(key) && !(key in envSpecificVars));
+    .filter((key) => !policy.excludedKeys.has(key) && !(key in envSpecificVars));
   const skippedProviderKeys = absentBaseKeys
     .filter((key) => isProviderOnlyDeployEnvKey(key))
     .sort();
+  const ignoredKeys = absentBaseKeys
+    .filter((key) =>
+      !isProviderOnlyDeployEnvKey(key)
+      && !deployEnvKeySelected(key, policy.mode, policy.includeKeys)
+    )
+    .sort();
   const emptyKeys = absentBaseKeys
-    .filter((key) => !isProviderOnlyDeployEnvKey(key) && baseVars[key].trim() === '')
+    .filter((key) =>
+      !isProviderOnlyDeployEnvKey(key)
+      && deployEnvKeySelected(key, policy.mode, policy.includeKeys)
+      && baseVars[key].trim() === ''
+    )
+    .sort();
+  const localValueKeys = absentBaseKeys
+    .filter((key) =>
+      !isProviderOnlyDeployEnvKey(key)
+      && deployEnvKeySelected(key, policy.mode, policy.includeKeys)
+      && baseVars[key].trim() !== ''
+      && deployEnvValueIsLocal(key, baseVars[key], policy.mode, policy.includeKeys)
+    )
     .sort();
   const copyableKeys = absentBaseKeys
-    .filter((key) => !isProviderOnlyDeployEnvKey(key) && baseVars[key].trim() !== '')
+    .filter((key) =>
+      !isProviderOnlyDeployEnvKey(key)
+      && deployEnvKeySelected(key, policy.mode, policy.includeKeys)
+      && baseVars[key].trim() !== ''
+      && !deployEnvValueIsLocal(key, baseVars[key], policy.mode, policy.includeKeys)
+    )
     .sort();
 
   if (!envSpecificExists) {
@@ -236,15 +290,19 @@ function syncEnvSpecificFromBase(basePath: string, envSpecificPath: string, excl
       divergentKeys: [],
       emptyKeys,
       skippedProviderKeys,
+      ignoredKeys,
+      localValueKeys,
     };
   }
 
   const syncedKeys = copyableKeys;
   const divergentKeys = Object.keys(baseVars)
     .filter((key) =>
-      !excludedKeys.has(key)
+      !policy.excludedKeys.has(key)
       && !isProviderOnlyDeployEnvKey(key)
+      && deployEnvKeySelected(key, policy.mode, policy.includeKeys)
       && baseVars[key].trim() !== ''
+      && !deployEnvValueIsLocal(key, baseVars[key], policy.mode, policy.includeKeys)
       && key in envSpecificVars
       && envSpecificVars[key] !== baseVars[key]
     )
@@ -261,11 +319,24 @@ function syncEnvSpecificFromBase(basePath: string, envSpecificPath: string, excl
         '# Copied from .env by Hypervibe. Review before deploying if values should differ.',
         ...linesToAppend,
       ].join('\n');
-      writeFileSync(envSpecificPath, `${ensureTrailingNewline(envSpecificContent)}\n${block}\n`, 'utf-8');
+      const existingPrefix = ensureTrailingNewline(envSpecificContent);
+      writeFileSync(
+        envSpecificPath,
+        `${existingPrefix}${existingPrefix ? '\n' : ''}${block}\n`,
+        'utf-8'
+      );
     }
   }
 
-  return { created: false, syncedKeys, divergentKeys, emptyKeys, skippedProviderKeys };
+  return {
+    created: false,
+    syncedKeys,
+    divergentKeys,
+    emptyKeys,
+    skippedProviderKeys,
+    ignoredKeys,
+    localValueKeys,
+  };
 }
 
 function hostLooksLocal(host: string): boolean {
@@ -321,7 +392,12 @@ export function defaultDeployEnvFilePath(startDir = primaryWorkspaceDirectory(),
   return resolveDefaultDeployEnvFile(startDir, envName).path;
 }
 
-function resolveDefaultDeployEnvFile(startDir = primaryWorkspaceDirectory(), envName?: string, options: { syncEnvSpecific?: boolean; excludedKeys?: string[] } = {}): {
+function resolveDefaultDeployEnvFile(startDir = primaryWorkspaceDirectory(), envName?: string, options: {
+  syncEnvSpecific?: boolean;
+  excludedKeys?: string[];
+  mode?: DeployEnvFileMode;
+  includeKeys?: string[];
+} = {}): {
   path: string | null;
   baseEnvPath?: string;
   createdEnvSpecificPath?: string;
@@ -332,12 +408,19 @@ function resolveDefaultDeployEnvFile(startDir = primaryWorkspaceDirectory(), env
   permissionsUpdated?: boolean;
   emptyFromBaseKeys?: string[];
   skippedFromBaseKeys?: string[];
+  ignoredFromBaseKeys?: string[];
+  localFromBaseKeys?: string[];
 } {
   const root = findRepoRoot(startDir);
   if (!root) return { path: null };
   const suffix = envFileSuffix(envName);
   const basePath = path.join(root, '.env');
   const envSpecificPath = suffix ? path.join(root, `.env.${suffix}`) : null;
+  const syncPolicy: DeployEnvSyncPolicy = {
+    mode: options.mode ?? 'runtime',
+    includeKeys: new Set(options.includeKeys ?? []),
+    excludedKeys: new Set(options.excludedKeys ?? []),
+  };
   if (
     options.syncEnvSpecific
     && (existsSync(basePath) || (envSpecificPath !== null && existsSync(envSpecificPath)))
@@ -356,11 +439,13 @@ function resolveDefaultDeployEnvFile(startDir = primaryWorkspaceDirectory(), env
       : false;
     const permissionsUpdated = basePermissionsUpdated || envSpecificPermissionsUpdated;
     if (options.syncEnvSpecific && existsSync(basePath)) {
-      const sync = syncEnvSpecificFromBase(basePath, envSpecificPath, new Set(options.excludedKeys ?? []));
+      const sync = syncEnvSpecificFromBase(basePath, envSpecificPath, syncPolicy);
       if (
         sync.syncedKeys.length === 0
         && sync.emptyKeys.length === 0
         && sync.skippedProviderKeys.length === 0
+        && sync.ignoredKeys.length === 0
+        && sync.localValueKeys.length === 0
         && !permissionsUpdated
       ) {
         return { path: envSpecificPath };
@@ -377,6 +462,8 @@ function resolveDefaultDeployEnvFile(startDir = primaryWorkspaceDirectory(), env
           : {}),
         ...(sync.emptyKeys.length > 0 ? { emptyFromBaseKeys: sync.emptyKeys } : {}),
         ...(sync.skippedProviderKeys.length > 0 ? { skippedFromBaseKeys: sync.skippedProviderKeys } : {}),
+        ...(sync.ignoredKeys.length > 0 ? { ignoredFromBaseKeys: sync.ignoredKeys } : {}),
+        ...(sync.localValueKeys.length > 0 ? { localFromBaseKeys: sync.localValueKeys } : {}),
       };
     }
     return {
@@ -386,7 +473,7 @@ function resolveDefaultDeployEnvFile(startDir = primaryWorkspaceDirectory(), env
   }
   if (existsSync(basePath)) {
     if (envSpecificPath && options.syncEnvSpecific) {
-      const sync = syncEnvSpecificFromBase(basePath, envSpecificPath, new Set(options.excludedKeys ?? []));
+      const sync = syncEnvSpecificFromBase(basePath, envSpecificPath, syncPolicy);
       return {
         path: envSpecificPath,
         baseEnvPath: basePath,
@@ -395,6 +482,8 @@ function resolveDefaultDeployEnvFile(startDir = primaryWorkspaceDirectory(), env
         ...(sync.syncedKeys.length > 0 ? { syncedFromBaseKeys: sync.syncedKeys } : {}),
         ...(sync.emptyKeys.length > 0 ? { emptyFromBaseKeys: sync.emptyKeys } : {}),
         ...(sync.skippedProviderKeys.length > 0 ? { skippedFromBaseKeys: sync.skippedProviderKeys } : {}),
+        ...(sync.ignoredKeys.length > 0 ? { ignoredFromBaseKeys: sync.ignoredKeys } : {}),
+        ...(sync.localValueKeys.length > 0 ? { localFromBaseKeys: sync.localValueKeys } : {}),
       };
     }
     return {
@@ -415,6 +504,8 @@ export function loadDeployEnvFile(options: {
   mode?: DeployEnvFileMode;
   includeKeys?: string[];
   excludeKeys?: string[];
+  /** Keys that may be read from the target file but must never be copied there from base .env. */
+  syncExcludeKeys?: string[];
   envName?: string;
   startDir?: string;
   syncEnvSpecific?: boolean;
@@ -425,7 +516,12 @@ export function loadDeployEnvFile(options: {
     ? { path: path.resolve(options.startDir ?? primaryWorkspaceDirectory(), options.envFile) }
     : resolveDefaultDeployEnvFile(options.startDir, options.envName, {
       syncEnvSpecific: options.syncEnvSpecific !== false,
-      excludedKeys: options.excludeKeys,
+      excludedKeys: [...new Set([
+        ...(options.excludeKeys ?? []),
+        ...(options.syncExcludeKeys ?? []),
+      ])],
+      mode,
+      includeKeys: options.includeKeys,
     });
   const filePath = resolvedDefault.path;
   if (!filePath) return null;
@@ -433,17 +529,11 @@ export function loadDeployEnvFile(options: {
   const parsed = parseEnvFile(filePath);
   const vars: Record<string, string> = {};
   const candidates = new Map(Object.entries(parsed));
-  for (const key of resolvedDefault.emptyFromBaseKeys ?? []) {
-    if (!candidates.has(key)) candidates.set(key, '');
-  }
-  for (const key of resolvedDefault.skippedFromBaseKeys ?? []) {
-    if (!candidates.has(key)) candidates.set(key, '');
-  }
-  const skippedKeys = new Set<string>();
-  const ignoredKeys = new Set<string>();
+  const skippedKeys = new Set<string>(resolvedDefault.skippedFromBaseKeys ?? []);
+  const ignoredKeys = new Set<string>(resolvedDefault.ignoredFromBaseKeys ?? []);
   const excludedKeys = new Set<string>();
-  const localValueKeys = new Set<string>();
-  const emptyKeys = new Set<string>();
+  const localValueKeys = new Set<string>(resolvedDefault.localFromBaseKeys ?? []);
+  const emptyKeys = new Set<string>(resolvedDefault.emptyFromBaseKeys ?? []);
   const includeKeys = new Set(options.includeKeys ?? []);
   const excludedKeySet = new Set(options.excludeKeys ?? []);
   for (const [key, value] of candidates) {
@@ -455,9 +545,7 @@ export function loadDeployEnvFile(options: {
       excludedKeys.add(key);
       continue;
     }
-    const selected = includeKeys.has(key)
-      || mode === 'all'
-      || (mode === 'runtime' && isRuntimeDeployEnvKey(key));
+    const selected = deployEnvKeySelected(key, mode, includeKeys);
     if (!selected) {
       ignoredKeys.add(key);
       continue;
@@ -466,7 +554,7 @@ export function loadDeployEnvFile(options: {
       emptyKeys.add(key);
       continue;
     }
-    if (mode === 'runtime' && !includeKeys.has(key) && valueLooksLocal(value)) {
+    if (deployEnvValueIsLocal(key, value, mode, includeKeys)) {
       localValueKeys.add(key);
       continue;
     }

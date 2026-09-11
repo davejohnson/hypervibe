@@ -743,7 +743,13 @@ In the no-service model, `principal` is declarative attribution, not authenticat
 
 ## Deploy Env Files
 
-Local `.env` files are deploy input candidates, not a raw publish list. Prefer `.env.<environment>` over `.env` when present. When an environment deploy/plan uses the default repo convention and `.env` exists but `.env.<environment>` does not, Hypervibe creates `.env.<environment>` from `.env` before loading deploy vars. When both files exist, Hypervibe may copy newly added base `.env` keys into `.env.<environment>`, but it must preserve environment-specific values instead of overwriting them.
+Local `.env` files are deploy input candidates, not a raw publish list. Every
+plan for a declared environment prepares and maintains the exact private
+`.env.<environment>` file, including when deploy-env loading is disabled. When
+the environment policy permits deploy-env loading, Hypervibe copies only
+policy-selected portable values from `.env`; it never clones the base file as a
+whole. Existing environment-specific assignments always win, while newly added
+eligible base keys are appended without overwriting that divergence.
 
 Spec writes in the matching checkout use one shared, non-destructive updater for
 the private `.env` and value-free `.env.example`. It derives exact project input
@@ -760,6 +766,15 @@ the private `.env` without activating a commented example value.
 that are actually blocked. Provider-owned registry metadata maps each dotenv
 name to an exact credential role, so GitHub API, GitHub package-read, and Railway
 tokens remain distinct and aliases are not modeled as separate requirements.
+For an environment plan, Hypervibe adds value-free placeholders for delegated
+inputs consumed by that environment to the prepared `.env.<environment>` file.
+This file remains a safe input surface for `secretRefs`, not an instruction to
+publish its contents. Values from the base `.env` are never copied into those
+delegated slots. Generated secrets never become local placeholders, and
+connection or control-plane requirements remain in the base `.env` rather than
+being added by this environment scaffolding. `envFile.mode: "off"` and
+`includeEnvFile: false` suppress ordinary base-value synchronization without
+suppressing the safe environment-file scaffold.
 Before any repo-backed write, Hypervibe proves the checkout belongs to the
 selected project from its committed spec or normalized repository identity.
 It then refuses each tracked or non-regular private env path, proves an exact

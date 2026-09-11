@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { createHash } from 'crypto';
@@ -3575,8 +3575,29 @@ describe('PlanService.plan', () => {
       const realRoot = realpathSync(root);
       const baseEnvFile = path.join(realRoot, '.env');
       const stagingEnvFile = path.join(realRoot, '.env.staging');
-      writeFileSync(baseEnvFile, 'SENDGRID_API_KEY=SG.base\n');
-      seedObservedRailwayWeb();
+      writeFileSync(baseEnvFile, [
+        'DATABASE_URL=postgres://production-only',
+        'SENDGRID_API_KEY=SG.base',
+        '',
+      ].join('\n'));
+      new SpecStore().replace(project, {
+        version: 1,
+        project: project.name,
+        environments: {
+          staging: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            database: { provider: 'railway', engine: 'postgres' },
+            envVars: { NODE_ENV: 'staging' },
+          },
+        },
+      });
+      const environment = seedObservedRailwayWeb();
+      new ComponentRepository().create({
+        environmentId: environment.id,
+        type: 'postgres',
+        bindings: { provider: 'railway', connectionString: 'postgres://managed-db' },
+      });
 
       try {
         process.chdir(path.join(root, 'app'));
@@ -3586,6 +3607,7 @@ describe('PlanService.plan', () => {
         expect(plan.warnings).toContainEqual(expect.stringContaining(`Created environment-specific deploy env file at ${stagingEnvFile}`));
         expect(plan.warnings).toContainEqual(expect.stringContaining(`from base ${baseEnvFile}`));
         expect(existsSync(stagingEnvFile)).toBe(true);
+        expect(readFileSync(stagingEnvFile, 'utf8')).toBe('SENDGRID_API_KEY=SG.base\n');
         const doc = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
         const overrides = doc.overrides as Record<string, unknown>;
         expect(overrides.envFilePath).toBe(stagingEnvFile);
