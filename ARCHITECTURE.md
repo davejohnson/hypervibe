@@ -760,6 +760,14 @@ the private `.env` without activating a commented example value.
 that are actually blocked. Provider-owned registry metadata maps each dotenv
 name to an exact credential role, so GitHub API, GitHub package-read, and Railway
 tokens remain distinct and aliases are not modeled as separate requirements.
+For an environment plan, Hypervibe also prepares the exact gitignored
+`.env.<environment>` file with value-free placeholders for delegated inputs
+consumed by that environment. This happens even when deploy-env loading is off:
+the file is a safe input surface for `secretRefs`, not an instruction to publish
+its contents. Values from the base `.env` are never copied into those delegated
+slots. Generated secrets never become local placeholders, and connection or
+control-plane requirements remain in the base `.env` rather than being added
+by this environment scaffolding.
 Before any repo-backed write, Hypervibe proves the checkout belongs to the
 selected project from its committed spec or normalized repository identity.
 It then refuses each tracked or non-regular private env path, proves an exact

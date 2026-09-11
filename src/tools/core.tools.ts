@@ -53,6 +53,7 @@ import {
   repositoryProjectIdentity,
 } from '../domain/spec/repo-spec-file.js';
 import {
+  ensureRepoEnvironmentLocalEnv,
   ensureRepoLocalEnv,
   specLocalEnvRequirements,
   type LocalEnvRequirement,
@@ -326,6 +327,7 @@ function ensureProjectLocalEnv(params: {
   projectGitRemoteUrl?: string;
   spec?: ProjectSpec;
   connectionBlocks?: ConnectionBlock[];
+  environmentName?: string;
   /** Validate the repository secret-file boundary even before any slots are known. */
   verifyRepoSafety?: boolean;
 }): RepoEnvFileWrite | undefined {
@@ -355,15 +357,23 @@ function ensureProjectLocalEnv(params: {
       return undefined;
     }
   }
-  const requirements = [
-    ...(params.spec ? specLocalEnvRequirements(params.spec) : []),
+  const specRequirements = params.spec ? specLocalEnvRequirements(params.spec) : [];
+  const connectionRequirements = [
     ...connectionLocalEnvInputs(params.connectionBlocks ?? []).map((input): LocalEnvRequirement => ({
       key: input.envKey,
       comment: `${input.comment}; add the value locally, then reference this key with hv_connections.`,
     })),
   ];
+  const requirements = [...specRequirements, ...connectionRequirements];
   if (requirements.length === 0 && !params.verifyRepoSafety) return undefined;
-  return ensureRepoLocalEnv(root, requirements);
+  const environmentRequirements = params.spec && params.environmentName
+    ? specLocalEnvRequirements(params.spec, params.environmentName)
+    : [];
+  const environmentLocalEnv = params.environmentName && environmentRequirements.length > 0
+    ? ensureRepoEnvironmentLocalEnv(root, params.environmentName, environmentRequirements)
+    : undefined;
+  const baseLocalEnv = ensureRepoLocalEnv(root, requirements);
+  return environmentLocalEnv ?? baseLocalEnv;
 }
 
 function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
@@ -779,6 +789,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           projectName: project.name,
           projectGitRemoteUrl: project.gitRemoteUrl,
           ...(scope === 'retained-cleanup' ? {} : { spec: currentSpec }),
+          ...(scope === 'retained-cleanup' ? {} : { environmentName: plannedEnvironment }),
           verifyRepoSafety: true,
         })
         : undefined;
@@ -810,6 +821,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             projectName: project.name,
             projectGitRemoteUrl: project.gitRemoteUrl,
             spec: currentSpec,
+            environmentName: result.environmentName,
             connectionBlocks: [...hardBlocked, ...actionScopedBlocked],
           })
         );
@@ -841,6 +853,12 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           `${entry.reason} This blocks only the related action; independent service and CI actions can still be applied from this plan.`
         ),
       ];
+      const delegatedSecretRefs = localEnv && result.inputRequired.length > 0
+        ? Object.fromEntries(result.inputRequired.map((entry) => [
+          entry.key,
+          `dotenv:${localEnv.path}#${entry.key}`,
+        ]))
+        : undefined;
       let hint: string;
       let next: string[] | undefined;
 
@@ -854,7 +872,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           after: 'Then re-run hv_plan and hv_apply. GitHub Actions push-to-deploy cannot converge until these credentials are available.',
         });
       } else if (result.inputRequired.length > 0) {
-        hint = `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. If the value and provider access are available on this Mac, re-run hv_plan with secretRefs mapping each key to env:, dotenv:, file:, or a secret-manager reference. Otherwise prepare a value-free handoff naming the key, environment, and principal for the project owner; the value can be transferred through their agreed external channel or shared secret manager. Do not paste raw values into chat.`;
+        hint = delegatedSecretRefs
+          ? `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. Hypervibe prepared ${localEnv!.path}; fill those values there, then re-run hv_plan with secretRefs=${JSON.stringify(delegatedSecretRefs)}. Do not paste raw values into chat.`
+          : `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. If the value and provider access are available on this Mac, re-run hv_plan with secretRefs mapping each key to env:, dotenv:, file:, or a secret-manager reference. Otherwise prepare a value-free handoff naming the key, environment, and principal for the project owner; the value can be transferred through their agreed external channel or shared secret manager. Do not paste raw values into chat.`;
       } else if (pending.length === 0) {
         hint = 'Everything is in sync — nothing to apply.';
       } else if (softActionScopedBlocked.length > 0) {
@@ -912,7 +932,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             ? {
               agentInstruction: {
                 action: 'ask_user' as const,
-                message: 'Stop before apply. Use a safe local secretRef when the value is available here; otherwise prepare a value-free owner handoff naming the delegated key, environment, and principal.',
+                message: delegatedSecretRefs
+                  ? `Stop before apply. Hypervibe prepared ${localEnv!.path}; ask the owner to fill the required delegated values there without pasting them into chat, then re-run hv_plan with the disclosed dotenv secretRefs.`
+                  : 'Stop before apply. Use a safe local secretRef when the value is available here; otherwise prepare a value-free owner handoff naming the delegated key, environment, and principal.',
               },
             }
             : {}),

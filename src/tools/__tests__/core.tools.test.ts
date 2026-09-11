@@ -368,6 +368,135 @@ describe('hv_spec', () => {
     }
   });
 
+  it('scaffolds environment-specific delegated-secret inputs without copying base values', async () => {
+    const oldCwd = process.cwd();
+    const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    const repoDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'hypervibe-environment-secret-inputs-')));
+    const projectName = path.basename(repoDir);
+    execFileSync('git', ['init', '--quiet'], { cwd: repoDir });
+    execFileSync('git', [
+      'remote',
+      'add',
+      'origin',
+      `git@github.com:davejohnson/${projectName}.git`,
+    ], { cwd: repoDir });
+    process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+    process.chdir(repoDir);
+    let t: Awaited<ReturnType<typeof makeClient>> | undefined;
+
+    try {
+      t = await makeClient();
+      const initialized = await t.call('hv_spec', {
+        spec: {
+          project: projectName,
+          gitRemoteUrl: `git@github.com:davejohnson/${projectName}.git`,
+          secrets: {
+            DEFAULT_DOOR_CODE: {
+              principal: 'github:davejohnson',
+              environments: ['production', 'staging'],
+            },
+            RECAPTCHA_SECRET_KEY: {
+              principal: 'github:davejohnson',
+              environments: ['production', 'staging'],
+            },
+            RECAPTCHA_SITE_KEY: {
+              principal: 'github:davejohnson',
+              environments: ['production', 'staging'],
+            },
+          },
+          environments: {
+            production: {
+              hosting: { provider: 'railway' },
+              services: { web: { startCommand: 'npm start' } },
+              envFile: { mode: 'off' },
+            },
+            staging: {
+              hosting: { provider: 'railway' },
+              services: { preview: { startCommand: 'npm start' } },
+              envFile: { mode: 'off' },
+            },
+          },
+        },
+      });
+      expect(initialized.ok).toBe(true);
+
+      const baseValues = [
+        'DEFAULT_DOOR_CODE=production-door-code',
+        'HYPERVIBE_RAILWAY_TOKEN=',
+        'RECAPTCHA_SECRET_KEY=production-recaptcha-secret',
+        'RECAPTCHA_SITE_KEY=production-recaptcha-site-key',
+        '',
+      ].join('\n');
+      writeFileSync(path.join(repoDir, '.env'), baseValues, { mode: 0o600 });
+      const connection = new ConnectionRepository().create({
+        provider: 'railway',
+        credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'railway-account-token' }),
+      });
+      new ConnectionRepository().updateStatus(connection.id, 'verified');
+      vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+        success: true,
+        adapter: {
+          name: 'railway',
+          capabilities: { supportsObserve: false },
+        } as never,
+      });
+      const stagingPath = path.join(repoDir, '.env.staging');
+
+      const plan = await t.call('hv_plan', {
+        project: projectName,
+        env: 'staging',
+        includeEnvFile: false,
+      });
+
+      expect(plan.ok).toBe(true);
+      expect(plan.data.inputRequired.map((entry: { key: string }) => entry.key)).toEqual([
+        'DEFAULT_DOOR_CODE',
+        'RECAPTCHA_SECRET_KEY',
+        'RECAPTCHA_SITE_KEY',
+      ]);
+      expect(plan.data.localEnv).toMatchObject({
+        path: stagingPath,
+        addedKeys: [
+          'DEFAULT_DOOR_CODE',
+          'RECAPTCHA_SECRET_KEY',
+          'RECAPTCHA_SITE_KEY',
+        ],
+      });
+      expect(plan.hint).toContain(`dotenv:${stagingPath}#DEFAULT_DOOR_CODE`);
+      expect(plan.hint).toContain(`dotenv:${stagingPath}#RECAPTCHA_SECRET_KEY`);
+      expect(plan.hint).toContain(`dotenv:${stagingPath}#RECAPTCHA_SITE_KEY`);
+      expect(plan.agentInstruction).toMatchObject({
+        action: 'ask_user',
+        message: expect.stringContaining(`Hypervibe prepared ${stagingPath}`),
+      });
+      expect(existsSync(stagingPath)).toBe(true);
+      const stagingContent = readFileSync(stagingPath, 'utf8');
+      for (const key of ['DEFAULT_DOOR_CODE', 'RECAPTCHA_SECRET_KEY', 'RECAPTCHA_SITE_KEY']) {
+        expect(stagingContent).toMatch(new RegExp(`# Hypervibe: [^\\n]+\\n${key}=`));
+      }
+      expect(stagingContent).toContain('for staging runtime');
+      expect(stagingContent).not.toContain('production runtime');
+      expect(stagingContent).not.toContain('production-door-code');
+      expect(stagingContent).not.toContain('production-recaptcha-secret');
+      expect(stagingContent).not.toContain('production-recaptcha-site-key');
+      const updatedBase = readFileSync(path.join(repoDir, '.env'), 'utf8');
+      expect(updatedBase).toContain('DEFAULT_DOOR_CODE=production-door-code');
+      expect(updatedBase).toContain('RECAPTCHA_SECRET_KEY=production-recaptcha-secret');
+      expect(updatedBase).toContain('RECAPTCHA_SITE_KEY=production-recaptcha-site-key');
+      expect(execFileSync(
+        'git',
+        ['check-ignore', '--no-index', '--quiet', '--', '.env.staging'],
+        { cwd: repoDir }
+      )).toEqual(Buffer.alloc(0));
+    } finally {
+      if (t) await t.close();
+      process.chdir(oldCwd);
+      if (oldDisable === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable;
+      rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps hv_spec and hv_plan from writing local-project env slots into a checkout with a conflicting repo spec', async () => {
     const oldCwd = process.cwd();
     const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
