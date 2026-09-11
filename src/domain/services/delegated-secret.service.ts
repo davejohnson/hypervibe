@@ -217,8 +217,17 @@ export interface LiveSecretHashes {
 export function liveHashesForSecret(
   observed: ObservedState | null,
   serviceNames: string[],
-  key: string
+  key: string,
+  options: { destinationsAreKnownAbsent?: boolean } = {}
 ): LiveSecretHashes {
+  if (options.destinationsAreKnownAbsent) {
+    return {
+      state: 'missing',
+      hashes: [],
+      hasUnknownDestination: false,
+      hasMissingDestination: true,
+    };
+  }
   if (!observed) {
     return {
       state: 'unknown',
@@ -329,10 +338,13 @@ export function immutableSecretConflict(params: {
   observed: ObservedState | null;
   serviceNames: string[];
   conflictsWith: string[];
+  destinationsAreKnownAbsent?: boolean;
 }): { key: string; bindingPresent: boolean; live: LiveSecretHashes } | undefined {
   for (const key of params.conflictsWith) {
     const bindingPresent = runtimeSecretBindingCount(params.environment, key) > 0;
-    const live = liveHashesForSecret(params.observed, params.serviceNames, key);
+    const live = liveHashesForSecret(params.observed, params.serviceNames, key, {
+      destinationsAreKnownAbsent: params.destinationsAreKnownAbsent,
+    });
     if (bindingPresent || live.state !== 'missing') {
       return { key, bindingPresent, live };
     }
@@ -390,6 +402,7 @@ export function planDelegatedSecrets(params: {
   observed: ObservedState | null;
   suppliedValues?: Record<string, string>;
   generatedValues?: Record<string, string>;
+  destinationsAreKnownAbsent?: boolean;
 }): {
   actions: PlanAction[];
   desiredEnvVars: Record<string, string>;
@@ -410,7 +423,9 @@ export function planDelegatedSecrets(params: {
   for (const [key, slot] of slots) {
     const binding = bindings.get(key);
     const suppliedValue = suppliedValues[key];
-    const live = liveHashesForSecret(params.observed, serviceNames, key);
+    const live = liveHashesForSecret(params.observed, serviceNames, key, {
+      destinationsAreKnownAbsent: params.destinationsAreKnownAbsent,
+    });
     const actionId = delegatedSecretActionId(key);
 
     if (slot.ownership === 'hypervibe') {
@@ -502,6 +517,7 @@ export function planDelegatedSecrets(params: {
           observed: params.observed,
           serviceNames,
           conflictsWith: generatedSecretConflicts(slot),
+          destinationsAreKnownAbsent: params.destinationsAreKnownAbsent,
         });
         if (conflict) {
           const bindingPresent = conflict.bindingPresent;

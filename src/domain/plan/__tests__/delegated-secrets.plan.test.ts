@@ -448,4 +448,81 @@ describe('PlanService delegated secret inputs', () => {
     expect((result as { error: string }).error).toContain('No plan was saved or provider mutation authorized');
     expect(new RunRepository().findByEnvironmentId(environment.id)).toHaveLength(runsBefore);
   });
+
+  it('plans generated secrets after creating services in a provider-confirmed absent environment', async () => {
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      secrets: {
+        SESSION_SECRET: {
+          ownership: 'hypervibe',
+          generator: 'random-base64url-32-v1',
+          environments: ['staging'],
+        },
+      },
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: {} },
+          database: { provider: 'railway' },
+        },
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: {} },
+        },
+      },
+    });
+    vi.mocked(adapterFactory.getProviderAdapter).mockResolvedValue({
+      success: true,
+      adapter: {
+        name: 'railway',
+        capabilities: { supportsObserve: true },
+        observe: vi.fn().mockResolvedValue({
+          provider: 'railway',
+          observedAt: new Date().toISOString(),
+          projectExists: true,
+          projectId: 'rail-project',
+          services: [],
+          databases: [],
+          completeness: {
+            project: 'complete',
+            environment: 'complete',
+            services: 'unknown',
+            databases: 'unknown',
+          },
+          partial: true,
+          warnings: ['Could not resolve Railway environment for "staging"'],
+        }),
+      } as never,
+    });
+
+    const result = await new PlanService().plan(project, 'staging', {
+      includeEnvFile: false,
+    });
+
+    expect(result).not.toHaveProperty('error');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.inputRequired).toEqual([]);
+    expect(plan.actions.find((action) => action.id === 'environment:staging')).toMatchObject({
+      type: 'create',
+      metadata: { operation: 'hostingEnvironmentEnsure' },
+    });
+    expect(plan.actions.find((action) => action.id === 'service:web')).toMatchObject({
+      dependsOn: expect.arrayContaining(['environment:staging']),
+    });
+    expect(plan.actions.find((action) => action.id === 'service:web')?.type).not.toBe('noop');
+    expect(plan.actions.find((action) => action.id === 'secret:SESSION_SECRET')).toMatchObject({
+      type: 'update',
+      verified: true,
+      dependsOn: expect.arrayContaining(['service:web']),
+    });
+
+    const document = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
+    const overrides = document.overrides as Record<string, unknown>;
+    expect(overrides.delegatedSecretKeys).toEqual(['SESSION_SECRET']);
+    const encrypted = overrides.delegatedSecretVarsEncrypted as string;
+    const generatedValue = getSecretStore().decryptObject<Record<string, string>>(encrypted).SESSION_SECRET;
+    expect(generatedValue).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(JSON.stringify(document)).not.toContain(generatedValue);
+  });
 });

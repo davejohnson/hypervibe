@@ -1500,15 +1500,12 @@ export async function executePlanApply(ctx: CommandContext, params: {
           );
         }
 
-        let actionObserved = observed;
-        if (declaredReplacementPolicy === 'immutable') {
-          actionObserved = (await planService.observeEnvironment(
-            applyProject,
-            latestEnvironment,
-            envSpec,
-            { hostingOnly: true }
-          )).observed;
-        }
+        const actionObserved = (await planService.observeEnvironment(
+          applyProject,
+          latestEnvironment,
+          envSpec,
+          { hostingOnly: true }
+        )).observed;
         const liveState = liveHashesForSecret(actionObserved, destinationServices, key);
         if (liveState.hasUnknownDestination) {
           return blockedActionIdentity(
