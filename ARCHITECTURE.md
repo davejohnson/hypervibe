@@ -698,6 +698,11 @@ existing random secret requires exact action confirmation. Unknown or masked
 live state without a matching accepted binding blocks mutation. A mismatch
 between an accepted generation's hash and newly derived material means the
 local root key changed; block and restore the original key instead of rotating.
+For providers with a distinct environment resource, confirmed absence of the
+unbound target environment also proves its future service secret destinations
+are initially absent. The plan orders those secret actions after service
+convergence; environment creation still returns pending and requires a fresh
+plan before the dependent service and secret actions can run.
 Apply recomputes whether the reviewed action is still a replacement from fresh
 provider and binding evidence. A replacement needs both its persisted
 `requiresConfirm` marker and exact caller confirmation before any provider
