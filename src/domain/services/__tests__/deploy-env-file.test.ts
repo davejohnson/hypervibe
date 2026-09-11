@@ -195,6 +195,51 @@ describe('deploy-env-file', () => {
     expect(isIgnored(root, '.env.defaults')).toBe(false);
   });
 
+  it('copies only policy-selected portable values into a new environment-specific file', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-deploy-env-portable-'));
+    initRepo(root);
+    mkdirSync(path.join(root, 'app'));
+    const stagingPath = path.join(root, '.env.staging');
+    writeFileSync(path.join(root, '.env'), [
+      'PUBLIC_LABEL=Shared label',
+      'CUSTOM_WORKER_FLAG=true',
+      'APP_BASE_URL=http://localhost:3000',
+      'RAILWAY_TOKEN=provider-token',
+      'OWNER_ONLY_SECRET=production-secret',
+      '',
+    ].join('\n'), { mode: 0o600 });
+
+    const result = loadDeployEnvFile({
+      startDir: path.join(root, 'app'),
+      envName: 'staging',
+      excludeKeys: ['OWNER_ONLY_SECRET'],
+    })!;
+
+    expect(result.vars).toEqual({ PUBLIC_LABEL: 'Shared label' });
+    expect(result.syncedFromBaseKeys).toEqual(['PUBLIC_LABEL']);
+    expect(result.ignoredKeys).toEqual(['CUSTOM_WORKER_FLAG']);
+    expect(result.localValueKeys).toEqual(['APP_BASE_URL']);
+    expect(result.skippedKeys).toEqual(['RAILWAY_TOKEN']);
+    expect(readFileSync(stagingPath, 'utf8')).toBe('PUBLIC_LABEL=Shared label\n');
+  });
+
+  it('syncs portable base values cleanly into an existing empty environment file', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-deploy-env-empty-target-'));
+    initRepo(root);
+    const stagingPath = path.join(root, '.env.staging');
+    writeFileSync(path.join(root, '.env'), 'PUBLIC_LABEL=Shared label\n', { mode: 0o600 });
+    writeFileSync(stagingPath, '', { mode: 0o600 });
+
+    const result = loadDeployEnvFile({ startDir: root, envName: 'staging' })!;
+
+    expect(result.syncedFromBaseKeys).toEqual(['PUBLIC_LABEL']);
+    expect(readFileSync(stagingPath, 'utf8')).toBe([
+      '# Copied from .env by Hypervibe. Review before deploying if values should differ.',
+      'PUBLIC_LABEL=Shared label',
+      '',
+    ].join('\n'));
+  });
+
   it('refuses a symlinked environment-specific env file without changing its external target', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-deploy-env-symlink-repo-'));
     const externalRoot = mkdtempSync(path.join(tmpdir(), 'hypervibe-deploy-env-symlink-target-'));
@@ -229,6 +274,10 @@ describe('deploy-env-file', () => {
       'SENDGRID_API_KEY=SG.base',
       'SESSION_SECRET=session-base',
       'STRIPE_SECRET_KEY=stripe-base',
+      'APP_BASE_URL=http://localhost:3000',
+      'CUSTOM_WORKER_FLAG=true',
+      'OWNER_MANAGED_SECRET=production-owner-secret',
+      'RAILWAY_TOKEN=provider-token',
       '',
     ].join('\n'), { mode: 0o600 });
     writeFileSync(stagingPath, [
@@ -237,7 +286,11 @@ describe('deploy-env-file', () => {
       '',
     ].join('\n'), { mode: 0o600 });
 
-    expect(loadDeployEnvFile({ startDir: path.join(root, 'app'), envName: 'staging' })).toEqual({
+    expect(loadDeployEnvFile({
+      startDir: path.join(root, 'app'),
+      envName: 'staging',
+      excludeKeys: ['OWNER_MANAGED_SECRET'],
+    })).toEqual({
       path: stagingPath,
       baseEnvPath: basePath,
       syncedFromBaseKeys: ['STRIPE_SECRET_KEY'],
@@ -247,14 +300,20 @@ describe('deploy-env-file', () => {
         SESSION_SECRET: 'session-base',
         STRIPE_SECRET_KEY: 'stripe-base',
       },
-      ignoredKeys: [],
-      skippedKeys: [],
+      ignoredKeys: ['CUSTOM_WORKER_FLAG'],
+      skippedKeys: ['RAILWAY_TOKEN'],
       excludedKeys: [],
-      localValueKeys: [],
+      localValueKeys: ['APP_BASE_URL'],
       emptyKeys: [],
     });
-    expect(readFileSync(stagingPath, 'utf-8')).toContain('STRIPE_SECRET_KEY=stripe-base');
-    expect(readFileSync(stagingPath, 'utf-8')).toContain('Copied from .env by Hypervibe');
+    const staging = readFileSync(stagingPath, 'utf-8');
+    expect(staging).toContain('SENDGRID_API_KEY=SG.staging');
+    expect(staging).toContain('STRIPE_SECRET_KEY=stripe-base');
+    expect(staging).toContain('Copied from .env by Hypervibe');
+    expect(staging).not.toContain('APP_BASE_URL');
+    expect(staging).not.toContain('CUSTOM_WORKER_FLAG');
+    expect(staging).not.toContain('OWNER_MANAGED_SECRET');
+    expect(staging).not.toContain('RAILWAY_TOKEN');
   });
 
   it('recognizes common local-only values', () => {
