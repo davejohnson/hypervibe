@@ -1755,6 +1755,31 @@ export class PlanService {
         };
       }
     }
+    const declaredInfrastructureManagedEnvKeys = new Set([
+      ...Object.values(environmentSpec.services)
+        .flatMap((service) => Object.keys(service.databaseEnvAliases ?? {})),
+      ...stripeManagedEnvKeys(environmentSpec),
+      ...(environmentSpec.email.enabled ? EMAIL_MANAGED_ENV_KEYS : []),
+      ...(environmentSpec.messaging ? MESSAGING_MANAGED_ENV_KEYS : []),
+      ...(environmentSpec.database ? DATABASE_ENV_KEYS : []),
+      ...(environmentSpec.cache ? CACHE_ENV_KEYS : []),
+      ...(environmentSpec.queues && Object.keys(environmentSpec.queues).length > 0
+        ? [
+          'QUEUE_BACKEND',
+          'QUEUE_NAMES',
+          ...Object.keys(environmentSpec.queues).flatMap((name) => {
+            const suffix = queueEnvVarSuffix(name);
+            return [`QUEUE_TOPIC_${suffix}`, `QUEUE_SUBSCRIPTION_${suffix}`];
+          }),
+        ]
+        : []),
+      ...(environmentSpec.storage && Object.keys(environmentSpec.storage).length > 0
+        ? storageEnvKeys(Object.keys(environmentSpec.storage)[0])
+        : []),
+      ...(projectForPlan.gitRemoteUrl
+        ? ['HYPERVIBE_SOURCE_REPO_URL', 'HYPERVIBE_SOURCE_REVISION', 'HYPERVIBE_GITHUB_TOKEN']
+        : []),
+    ]);
     let envFile: ReturnType<typeof loadDeployEnvFile> = null;
     try {
       const envFilePolicy = environmentSpec.envFile;
@@ -1789,6 +1814,7 @@ export class PlanService {
         mode: envFilePolicy?.mode,
         includeKeys: envFilePolicy?.include,
         excludeKeys: excludedEnvKeys,
+        syncExcludeKeys: [...declaredInfrastructureManagedEnvKeys],
         envName: environmentName,
       });
     } catch (error) {
@@ -1975,31 +2001,9 @@ export class PlanService {
     const managedQueueEnvVars = await resolveQueueEnvVars(projectForPlan, environmentSpec, environment);
     const infrastructureManagedEnvKeys = new Set([
       ...Object.keys(managedDatabaseEnvVars ?? {}),
-      ...Object.values(environmentSpec.services)
-        .flatMap((service) => Object.keys(service.databaseEnvAliases ?? {})),
       ...Object.keys(managedCacheEnvVars ?? {}),
       ...Object.keys(managedQueueEnvVars ?? {}),
-      ...stripeManagedEnvKeys(environmentSpec),
-      ...(environmentSpec.email.enabled ? EMAIL_MANAGED_ENV_KEYS : []),
-      ...(environmentSpec.messaging ? MESSAGING_MANAGED_ENV_KEYS : []),
-      ...(environmentSpec.database ? DATABASE_ENV_KEYS : []),
-      ...(environmentSpec.cache ? CACHE_ENV_KEYS : []),
-      ...(environmentSpec.queues && Object.keys(environmentSpec.queues).length > 0
-        ? [
-          'QUEUE_BACKEND',
-          'QUEUE_NAMES',
-          ...Object.keys(environmentSpec.queues).flatMap((name) => {
-            const suffix = queueEnvVarSuffix(name);
-            return [`QUEUE_TOPIC_${suffix}`, `QUEUE_SUBSCRIPTION_${suffix}`];
-          }),
-        ]
-        : []),
-      ...(environmentSpec.storage && Object.keys(environmentSpec.storage).length > 0
-        ? storageEnvKeys(Object.keys(environmentSpec.storage)[0])
-        : []),
-      ...(projectForPlan.gitRemoteUrl
-        ? ['HYPERVIBE_SOURCE_REPO_URL', 'HYPERVIBE_SOURCE_REVISION', 'HYPERVIBE_GITHUB_TOKEN']
-        : []),
+      ...declaredInfrastructureManagedEnvKeys,
     ]);
     const immutableManagedKeyCollisions = immutableConflictKeys
       .filter((key) => infrastructureManagedEnvKeys.has(key));

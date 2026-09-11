@@ -418,11 +418,16 @@ export function ensureRepoEnvironmentLocalEnv(
 ): RepoEnvFileWrite {
   const fileName = `.env.${environmentName}`;
   const gitignore = ensureRepoEnvFilesIgnored(root, ['.env', fileName]);
+  const filePath = path.join(root, fileName);
+  const write = ensureCommentedEnvFile(filePath, requirements, {
+    activateEmptyCommentedAssignments: true,
+    createMode: 0o600,
+  });
+  if (!regularFileExists(filePath)) {
+    writeFileSync(filePath, '', { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  }
   return {
-    ...ensureCommentedEnvFile(path.join(root, fileName), requirements, {
-      activateEmptyCommentedAssignments: true,
-      createMode: 0o600,
-    }),
+    ...write,
     gitignorePath: gitignore.path,
     gitignoreUpdated: gitignore.updated,
   };

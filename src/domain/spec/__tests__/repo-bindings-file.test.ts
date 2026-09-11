@@ -261,13 +261,13 @@ describe('repo bindings delegated metadata', () => {
           },
         },
         delegatedEnvBindings: [{
-          name: 'DEFAULT_DOOR_CODE',
+          name: 'OWNER_MANAGED_SECRET',
           principal: 'github:alice',
           valueHash: 'runtime-verifier-must-stay-local',
           source: 'delegated-plan-input',
           syncedAt: now.toISOString(),
           applyRunId: 'apply-1',
-          actionId: 'secret:DEFAULT_DOOR_CODE',
+          actionId: 'secret:OWNER_MANAGED_SECRET',
         }],
         runtimeRollouts: [{
           service: 'worker',
@@ -276,7 +276,7 @@ describe('repo bindings delegated metadata', () => {
           baselineDeployment: { state: 'present', id: 'deployment-before-config' },
           requiredAt: now.toISOString(),
           applyRunId: 'apply-1',
-          actionIds: ['secret:DEFAULT_DOOR_CODE'],
+          actionIds: ['secret:OWNER_MANAGED_SECRET'],
         }],
       },
       createdAt: now,
@@ -313,7 +313,7 @@ describe('repo bindings delegated metadata', () => {
           service: 'worker',
           provider: 'railway',
           baselineDeployment: { state: 'present', id: 'deployment-before-config' },
-          actionIds: ['secret:DEFAULT_DOOR_CODE'],
+          actionIds: ['secret:OWNER_MANAGED_SECRET'],
         }),
       ]);
     } finally {

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
 import { expectActionableConnectionSetup, parseToolEnvelope } from './tool-result.js';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -391,15 +391,15 @@ describe('hv_spec', () => {
           project: projectName,
           gitRemoteUrl: `git@github.com:davejohnson/${projectName}.git`,
           secrets: {
-            DEFAULT_DOOR_CODE: {
+            OWNER_MANAGED_SECRET: {
               principal: 'github:davejohnson',
               environments: ['production', 'staging'],
             },
-            RECAPTCHA_SECRET_KEY: {
+            PUBLIC_WIDGET_KEY: {
               principal: 'github:davejohnson',
               environments: ['production', 'staging'],
             },
-            RECAPTCHA_SITE_KEY: {
+            WEBHOOK_SIGNING_SECRET: {
               principal: 'github:davejohnson',
               environments: ['production', 'staging'],
             },
@@ -415,16 +415,26 @@ describe('hv_spec', () => {
               services: { preview: { startCommand: 'npm start' } },
               envFile: { mode: 'off' },
             },
+            review: {
+              hosting: { provider: 'railway' },
+              services: { preview: { startCommand: 'npm start' } },
+              envFile: { mode: 'off' },
+              envVarExceptions: [
+                'OWNER_MANAGED_SECRET',
+                'PUBLIC_WIDGET_KEY',
+                'WEBHOOK_SIGNING_SECRET',
+              ],
+            },
           },
         },
       });
       expect(initialized.ok).toBe(true);
 
       const baseValues = [
-        'DEFAULT_DOOR_CODE=production-door-code',
+        'OWNER_MANAGED_SECRET=production-owner-secret',
         'HYPERVIBE_RAILWAY_TOKEN=',
-        'RECAPTCHA_SECRET_KEY=production-recaptcha-secret',
-        'RECAPTCHA_SITE_KEY=production-recaptcha-site-key',
+        'PUBLIC_WIDGET_KEY=production-widget-key',
+        'WEBHOOK_SIGNING_SECRET=production-webhook-secret',
         '',
       ].join('\n');
       writeFileSync(path.join(repoDir, '.env'), baseValues, { mode: 0o600 });
@@ -450,42 +460,60 @@ describe('hv_spec', () => {
 
       expect(plan.ok).toBe(true);
       expect(plan.data.inputRequired.map((entry: { key: string }) => entry.key)).toEqual([
-        'DEFAULT_DOOR_CODE',
-        'RECAPTCHA_SECRET_KEY',
-        'RECAPTCHA_SITE_KEY',
+        'OWNER_MANAGED_SECRET',
+        'PUBLIC_WIDGET_KEY',
+        'WEBHOOK_SIGNING_SECRET',
       ]);
       expect(plan.data.localEnv).toMatchObject({
         path: stagingPath,
         addedKeys: [
-          'DEFAULT_DOOR_CODE',
-          'RECAPTCHA_SECRET_KEY',
-          'RECAPTCHA_SITE_KEY',
+          'OWNER_MANAGED_SECRET',
+          'PUBLIC_WIDGET_KEY',
+          'WEBHOOK_SIGNING_SECRET',
         ],
       });
-      expect(plan.hint).toContain(`dotenv:${stagingPath}#DEFAULT_DOOR_CODE`);
-      expect(plan.hint).toContain(`dotenv:${stagingPath}#RECAPTCHA_SECRET_KEY`);
-      expect(plan.hint).toContain(`dotenv:${stagingPath}#RECAPTCHA_SITE_KEY`);
+      expect(plan.hint).toContain(`dotenv:${stagingPath}#OWNER_MANAGED_SECRET`);
+      expect(plan.hint).toContain(`dotenv:${stagingPath}#PUBLIC_WIDGET_KEY`);
+      expect(plan.hint).toContain(`dotenv:${stagingPath}#WEBHOOK_SIGNING_SECRET`);
       expect(plan.agentInstruction).toMatchObject({
         action: 'ask_user',
         message: expect.stringContaining(`Hypervibe prepared ${stagingPath}`),
       });
       expect(existsSync(stagingPath)).toBe(true);
       const stagingContent = readFileSync(stagingPath, 'utf8');
-      for (const key of ['DEFAULT_DOOR_CODE', 'RECAPTCHA_SECRET_KEY', 'RECAPTCHA_SITE_KEY']) {
+      for (const key of ['OWNER_MANAGED_SECRET', 'PUBLIC_WIDGET_KEY', 'WEBHOOK_SIGNING_SECRET']) {
         expect(stagingContent).toMatch(new RegExp(`# Hypervibe: [^\\n]+\\n${key}=`));
       }
       expect(stagingContent).toContain('for staging runtime');
       expect(stagingContent).not.toContain('production runtime');
-      expect(stagingContent).not.toContain('production-door-code');
-      expect(stagingContent).not.toContain('production-recaptcha-secret');
-      expect(stagingContent).not.toContain('production-recaptcha-site-key');
+      expect(stagingContent).not.toContain('production-owner-secret');
+      expect(stagingContent).not.toContain('production-widget-key');
+      expect(stagingContent).not.toContain('production-webhook-secret');
       const updatedBase = readFileSync(path.join(repoDir, '.env'), 'utf8');
-      expect(updatedBase).toContain('DEFAULT_DOOR_CODE=production-door-code');
-      expect(updatedBase).toContain('RECAPTCHA_SECRET_KEY=production-recaptcha-secret');
-      expect(updatedBase).toContain('RECAPTCHA_SITE_KEY=production-recaptcha-site-key');
+      expect(updatedBase).toContain('OWNER_MANAGED_SECRET=production-owner-secret');
+      expect(updatedBase).toContain('PUBLIC_WIDGET_KEY=production-widget-key');
+      expect(updatedBase).toContain('WEBHOOK_SIGNING_SECRET=production-webhook-secret');
       expect(execFileSync(
         'git',
         ['check-ignore', '--no-index', '--quiet', '--', '.env.staging'],
+        { cwd: repoDir }
+      )).toEqual(Buffer.alloc(0));
+
+      const reviewPath = path.join(repoDir, '.env.review');
+      expect(existsSync(reviewPath)).toBe(false);
+      const reviewPlan = await t.call('hv_plan', {
+        project: projectName,
+        env: 'review',
+        includeEnvFile: false,
+      });
+      expect(reviewPlan.ok).toBe(true);
+      expect(reviewPlan.data.localEnv).toMatchObject({ path: reviewPath });
+      expect(existsSync(reviewPath)).toBe(true);
+      expect(readFileSync(reviewPath, 'utf8')).toBe('');
+      expect(statSync(reviewPath).mode & 0o777).toBe(0o600);
+      expect(execFileSync(
+        'git',
+        ['check-ignore', '--no-index', '--quiet', '--', '.env.review'],
         { cwd: repoDir }
       )).toEqual(Buffer.alloc(0));
     } finally {

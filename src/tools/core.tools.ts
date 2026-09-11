@@ -369,11 +369,13 @@ function ensureProjectLocalEnv(params: {
   const environmentRequirements = params.spec && params.environmentName
     ? specLocalEnvRequirements(params.spec, params.environmentName)
     : [];
-  const environmentLocalEnv = params.environmentName && environmentRequirements.length > 0
+  const environmentLocalEnv = params.spec
+    && params.environmentName
+    && Object.prototype.hasOwnProperty.call(params.spec.environments, params.environmentName)
     ? ensureRepoEnvironmentLocalEnv(root, params.environmentName, environmentRequirements)
     : undefined;
   const baseLocalEnv = ensureRepoLocalEnv(root, requirements);
-  return environmentLocalEnv ?? baseLocalEnv;
+  return mergeLocalEnvWrites(environmentLocalEnv, baseLocalEnv);
 }
 
 function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
@@ -750,8 +752,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       scope: z.enum(['full', 'retained-cleanup']).optional().describe('Default full. Use retained-cleanup to persist only exact retained abandoned-host, database, cache, or provider-resource destroy actions.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
       envVars: z.record(z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
-      envFile: z.string().optional().describe('Local .env file to consider as deploy input. Defaults to .env.<env>, creating it from repo .env when missing and syncing newly added base keys when present. Selection follows spec envFile policy; values are encrypted in the stored plan and never returned.'),
-      includeEnvFile: z.boolean().optional().describe('Set false to skip the default repo .env deploy input. Ignored for repository-only plans, which never load deploy env files.'),
+      envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
+      includeEnvFile: z.boolean().optional().describe('Set false to skip default repo .env deploy input and base-value syncing; the private .env.<env> scaffold is still prepared. Ignored for repository-only plans, which never load deploy env files.'),
       secretRefs: z.record(z.string()).optional().describe('Chat-safe local/secret-manager references for delegated secret slots, keyed by declared env var name. Values are resolved locally and encrypted into this plan; never pass raw secrets here.'),
     },
     wrapCommandHandler(async ({ project: projectRef, env, scope, services, envVars, envFile, includeEnvFile, secretRefs }) => {
