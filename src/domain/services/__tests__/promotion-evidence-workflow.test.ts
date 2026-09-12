@@ -7,6 +7,7 @@ import '../../../adapters/providers/railway/railway.adapter.js';
 import '../../../adapters/providers/digitalocean/digitalocean.adapter.js';
 import type { BranchDeployTarget } from '../../ports/ci-deploy.port.js';
 import { buildBranchDeployWorkflow } from '../github-ops.service.js';
+import { environmentDeploymentContractHash } from '../deployment-contract.service.js';
 import {
   MANAGED_CI_RELEASE_EVIDENCE_VERSION,
   managedCiReleaseArtifactName,
@@ -250,7 +251,7 @@ async function runPromotionContentValidation(evidence: unknown) {
   return { result, core, readFileSync };
 }
 
-async function produceProductionReleaseEvidence() {
+async function produceProductionReleaseEvidence(contractHash?: string) {
   const target = productionTarget();
   const releaseTarget = target.releaseTarget!;
   const workflow = generatedWorkflow();
@@ -277,7 +278,7 @@ async function produceProductionReleaseEvidence() {
       HYPERVIBE_RELEASE_RESOURCES: JSON.stringify(releaseTarget.resources),
       HYPERVIBE_RELEASE_BINDINGS_FINGERPRINT: releaseTarget.bindingsFingerprint,
       HYPERVIBE_RELEASE_PROGRAM_FINGERPRINT: target.programFingerprint,
-      HYPERVIBE_RELEASE_DEPLOYMENT_CONTRACT_FINGERPRINT: target.deploymentContractFingerprint,
+      HYPERVIBE_RELEASE_DEPLOYMENT_CONTRACT_FINGERPRINT: contractHash ?? target.deploymentContractFingerprint,
       HYPERVIBE_RELEASE_REQUIRES_IMMUTABLE_IMAGE: 'true',
       HYPERVIBE_RELEASE_IMAGE_URI: imageUri,
     },
@@ -290,7 +291,7 @@ async function produceProductionReleaseEvidence() {
   };
 }
 
-async function runRollbackContentValidation(evidence: unknown) {
+async function runRollbackContentValidation(evidence: unknown, appliedHash?: string) {
   const target = productionTarget();
   const releaseTarget = target.releaseTarget!;
   const workflow = generatedWorkflow();
@@ -320,7 +321,7 @@ async function runRollbackContentValidation(evidence: unknown) {
         HYPERVIBE_ROLLBACK_RESOURCES: JSON.stringify(releaseTarget.resources),
         HYPERVIBE_ROLLBACK_BINDINGS_FINGERPRINT: releaseTarget.bindingsFingerprint,
         HYPERVIBE_ROLLBACK_PROGRAM_FINGERPRINT: target.programFingerprint,
-        HYPERVIBE_ROLLBACK_DEPLOYMENT_CONTRACT_FINGERPRINT: target.deploymentContractFingerprint,
+        HYPERVIBE_ROLLBACK_DEPLOYMENT_CONTRACT_FINGERPRINT: appliedHash ?? target.deploymentContractFingerprint,
       },
     },
     core
@@ -727,4 +728,34 @@ describe('generated managed-CI promotion evidence gate', () => {
     const validation = await runPromotionContentValidation(validReleaseEvidence(override));
     await expect(validation.result).rejects.toThrow(expectedError);
   });
+  it('restores the prior image after an env-only reconciliation', async () => {
+    const spec = { version: 1, project: 'promoted-app', environments: { production: { hosting: { provider: 'railway' }, envVars: {} } } };
+    const oldHash = environmentDeploymentContractHash(spec, 'production');
+    const newHash = environmentDeploymentContractHash({ ...spec, environments: { production: { ...spec.environments.production, envVars: { SEED_CLIENT_TEST_DATA: 'true', CARE_PLAN_AI_REQUEST_TIMEOUT_MS: '30000' } } } }, 'production');
+    expect(oldHash).not.toBe(newHash);
+    const produced = await produceProductionReleaseEvidence(oldHash);
+    const before = await runRollbackContentValidation(produced.evidence, oldHash);
+    await expect(before.result).resolves.toBeUndefined();
+    const generated = generatedWorkflow();
+    const validator = installReleaseEvidenceValidator(generated, tempDir);
+    const core = { setOutput: vi.fn() };
+    const getContent = vi.fn(async () => ({ data: {
+      type: 'file', encoding: 'base64', content: Buffer.from(JSON.stringify(spec)).toString('base64'),
+    }}));
+    await new AsyncFunction('require', 'process', 'core', 'github', 'context', 'Buffer',
+      extractGitHubScript(generated, 'Deployment safety gate: verify Hypervibe reconciliation'))(
+        releaseEvidenceValidatorRequire(validator), { env: {
+          HYPERVIBE_RELEASE_VALIDATOR_PATH: validator.validatorPath,
+          HYPERVIBE_RELEASE_VALIDATOR_SHA256: validator.validatorSha256,
+          HYPERVIBE_ENVIRONMENT: 'production', HYPERVIBE_APPLIED_SPEC_HASH: newHash,
+          HYPERVIBE_DEPLOY_SHA: SHA, HYPERVIBE_DEPLOY_OPERATION: 'rollback',
+        }}, core, { rest: { repos: { getContent } } }, { repo: { owner: 'acme', repo: 'promoted-app' } }, Buffer
+    );
+    const historicalHash = core.setOutput.mock.calls.find(([key]) => key === 'fingerprint')?.[1];
+    expect(getContent).toHaveBeenCalledWith({owner: 'acme', repo: 'promoted-app', path: '.hypervibe/spec.json', ref: SHA});
+    const after = await runRollbackContentValidation(produced.evidence, historicalHash);
+    await expect(after.result).resolves.toBeUndefined();
+    expect(after.core.setOutput).toHaveBeenCalledWith('image_uri', produced.imageUri);
+  });
+
 });

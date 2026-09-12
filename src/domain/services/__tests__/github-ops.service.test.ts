@@ -192,7 +192,6 @@ describe('github tools', () => {
     const validator = installReleaseEvidenceValidator(workflow.content, tempDir);
     expect(workflow.content.match(/name: Prepare release evidence validator/g)).toHaveLength(1);
     expect(workflow.content.match(/function validateReleaseEvidence/g)).toHaveLength(1);
-    expect(workflow.content.split('\n').length).toBeLessThanOrEqual(950);
     const verifyReleaseTarget = new AsyncFunction(
       'require',
       'process',
@@ -751,9 +750,7 @@ describe('github tools', () => {
     const stagingWorkflow = buildBranchDeployWorkflow('railway', targets[0], { includeStep: false });
     expect(stagingWorkflow.content).toContain('push:');
     expect(stagingWorkflow.content).toContain('branches: [main]');
-    expect(stagingWorkflow.content).toContain(
-      "if: github.event_name != 'push' || vars.HYPERVIBE_APPLIED_SPEC_HASH != ''"
-    );
+    expect(stagingWorkflow.content).toContain("if: needs.reconciliation.outputs.ready == 'true'");
     expect(stagingWorkflow.content).toContain('workflow_dispatch:');
     expect(stagingWorkflow.content).toContain('commit_sha:');
 

@@ -14,6 +14,7 @@ import { ComponentRepository } from '../../../adapters/db/repositories/component
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { GitHubAdapter } from '../../../adapters/providers/github/github.adapter.js';
 import { SpecStore } from '../../spec/spec.store.js';
+import { providerRegistry } from '../../registry/provider.registry.js';
 import { environmentSpecSchema } from '../../spec/spec.schema.js';
 import { buildBranchDeployWorkflow, resolveBranchDeployTargets } from '../github-ops.service.js';
 import type { Project } from '../../entities/project.entity.js';
@@ -171,11 +172,10 @@ function reviewedDeployAction(
       ...(publicationOnly ? { workflowPublicationRequired: true } : {}),
       ...(!publicationOnly
         ? {
-            desiredSecretHashes: Object.fromEntries(
+            desiredEnvironmentSecretHashes: Object.fromEntries(
               Object.entries(secretValues).map(([name, value]) => [name, sha256(value)])
             ),
-            desiredEnvironmentSecretHashes: {},
-            reviewedRepositorySecrets: [...new Set([
+            reviewedEnvironmentSecrets: [...new Set([
               ...Object.keys(secretValues),
               ...(workflow.requiredSecrets.includes('DATABASE_URL') ? ['DATABASE_URL'] : []),
             ])].sort(),
@@ -211,8 +211,8 @@ function syncedBinding(
     contentHash: sha256(workflowContent),
     inputHash: expectedWorkflowInputHash(project),
     managedPaths: [expectedWorkflow(project).path],
-    syncedSecrets: Object.keys(secretValues),
-    syncedSecretHashes: Object.fromEntries(
+    syncedEnvironmentSecrets: Object.keys(secretValues),
+    syncedEnvironmentSecretHashes: Object.fromEntries(
       Object.entries(secretValues).map(([name, value]) => [name, sha256(value)])
     ),
   };
@@ -383,7 +383,7 @@ describe('ci-deploy.service', () => {
     SqliteAdapter.resetInstance();
     initializeDatabase(path.join(tempDir, 'hypervibe.db'));
     vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
-    vi.spyOn(GitHubAdapter.prototype, 'listRepositorySecrets').mockResolvedValue([
+    vi.spyOn(GitHubAdapter.prototype, 'listEnvironmentSecrets').mockResolvedValue([
       'RAILWAY_API_TOKEN',
       'IMAGE_REGISTRY_USERNAME',
       'IMAGE_REGISTRY_TOKEN',
@@ -670,7 +670,7 @@ describe('ci-deploy.service', () => {
         'deploy branch "release" must match repository default branch "main"'
       );
       expect(getFileContent).not.toHaveBeenCalled();
-      expect(GitHubAdapter.prototype.listRepositorySecrets).not.toHaveBeenCalled();
+      expect(GitHubAdapter.prototype.listEnvironmentSecrets).not.toHaveBeenCalled();
     });
 
     it('plans managed iOS companion files before resolving environment secrets', async () => {
@@ -956,7 +956,7 @@ describe('ci-deploy.service', () => {
       expect(result.error).toContain('Reconcile hosting identities');
     });
 
-    it('plans an update when the workflow matches but provider secrets were never synced', async () => {
+    it.each([false, true])('migrates unsynced or legacy repository-scoped secrets (legacy=%s)', async (legacy) => {
       const { project, envRepo, environmentId } = seedProjectWithSpec();
       seedVerifiedConnections();
       const workflow = expectedWorkflow(project);
@@ -966,6 +966,7 @@ describe('ci-deploy.service', () => {
             [workflow.path]: {
               contentHash: sha256(workflow.content),
               inputHash: expectedWorkflowInputHash(project),
+              ...(legacy ? { syncedSecrets: ['RAILWAY_API_TOKEN'], syncedSecretHashes: { RAILWAY_API_TOKEN: sha256('railway-token') } } : {}),
             },
           },
         },
@@ -990,7 +991,7 @@ describe('ci-deploy.service', () => {
       seedVerifiedConnections();
       const workflow = expectedWorkflow(project);
       const binding = syncedBinding(project, workflow.content);
-      binding.syncedSecretHashes.RAILWAY_API_TOKEN = sha256('rotated-old-token');
+      binding.syncedEnvironmentSecretHashes.RAILWAY_API_TOKEN = sha256('rotated-old-token');
       acceptWorkflow(project, envRepo, environmentId, workflow, { binding });
 
       const result = await planGitHubActionsDeploy({
@@ -1007,12 +1008,12 @@ describe('ci-deploy.service', () => {
       expect(result.action?.metadata?.staleProviderSecrets).toEqual(['RAILWAY_API_TOKEN']);
     });
 
-    it('plans secret resync when a bound GitHub repository secret was deleted', async () => {
+    it('plans secret resync when a bound GitHub environment secret was deleted', async () => {
       const { project, envRepo, environmentId } = seedProjectWithSpec();
       seedVerifiedConnections();
       const workflow = expectedWorkflow(project);
       acceptWorkflow(project, envRepo, environmentId, workflow);
-      vi.mocked(GitHubAdapter.prototype.listRepositorySecrets).mockResolvedValue([
+      vi.mocked(GitHubAdapter.prototype.listEnvironmentSecrets).mockResolvedValue([
         'IMAGE_REGISTRY_USERNAME',
         'IMAGE_REGISTRY_TOKEN',
       ]);
@@ -1024,9 +1025,9 @@ describe('ci-deploy.service', () => {
         environment: envRepo.findById(environmentId),
       });
 
-      expect(GitHubAdapter.prototype.listRepositorySecrets).toHaveBeenCalledWith(
+      expect(GitHubAdapter.prototype.listEnvironmentSecrets).toHaveBeenCalledWith(
         'davejohnson',
-        'billforge'
+        'billforge', 'production'
       );
       expect(result.action).toMatchObject({
         type: 'update',
@@ -1035,12 +1036,12 @@ describe('ci-deploy.service', () => {
       });
     });
 
-    it('fails closed when GitHub repository secret names cannot be observed', async () => {
+    it('fails closed when GitHub environment secret names cannot be observed', async () => {
       const { project, envRepo, environmentId } = seedProjectWithSpec();
       seedVerifiedConnections();
       const workflow = expectedWorkflow(project);
       acceptWorkflow(project, envRepo, environmentId, workflow);
-      vi.mocked(GitHubAdapter.prototype.listRepositorySecrets)
+      vi.mocked(GitHubAdapter.prototype.listEnvironmentSecrets)
         .mockRejectedValue(new Error('secret inventory unavailable'));
 
       const result = await planGitHubActionsDeploy({
@@ -1056,11 +1057,11 @@ describe('ci-deploy.service', () => {
       });
       expect(result.action?.metadata?.workflowPublicationRequired).toBeUndefined();
       expect(result.warnings).toEqual([
-        'Cannot observe GitHub repository secret names for davejohnson/billforge: secret inventory unavailable',
+        'Cannot observe GitHub environment secret names for production: secret inventory unavailable',
       ]);
 
       mockVerifiedGitHub();
-      const setRepositorySecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret');
+      const setDeploySecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret');
       const applied = await applyGitHubActionsDeploy({
         project,
         environmentName: 'production',
@@ -1073,15 +1074,15 @@ describe('ci-deploy.service', () => {
         status: 'blocked',
         message: 'GitHub Actions managed secret action is stale',
       });
-      expect(setRepositorySecret).not.toHaveBeenCalled();
+      expect(setDeploySecret).not.toHaveBeenCalled();
     });
 
-    it('blocks every secret write when a required repository secret appears after planning', async () => {
+    it('blocks every secret write when a required environment secret appears after planning', async () => {
       const { project, envRepo, environmentId } = seedProjectWithSpec();
       seedVerifiedConnections();
       const workflow = expectedWorkflow(project);
       acceptWorkflow(project, envRepo, environmentId, workflow);
-      vi.mocked(GitHubAdapter.prototype.listRepositorySecrets)
+      vi.mocked(GitHubAdapter.prototype.listEnvironmentSecrets)
         .mockResolvedValueOnce(['IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'])
         .mockResolvedValue([
           'RAILWAY_API_TOKEN',
@@ -1097,7 +1098,7 @@ describe('ci-deploy.service', () => {
       expect(plan.action).toMatchObject({ type: 'update', verified: true });
 
       mockVerifiedGitHub();
-      const setRepositorySecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret');
+      const setDeploySecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret');
       const applied = await applyGitHubActionsDeploy({
         project,
         environmentName: 'production',
@@ -1110,19 +1111,19 @@ describe('ci-deploy.service', () => {
         success: false,
         status: 'blocked',
         message: 'GitHub Actions managed secret action is stale',
-        error: expect.stringContaining('repository secret inventory changed'),
+        error: expect.stringContaining('environment secret inventory changed'),
       });
-      expect(setRepositorySecret).not.toHaveBeenCalled();
+      expect(setDeploySecret).not.toHaveBeenCalled();
     });
 
-    it('blocks every secret write when repository secret inventory becomes unavailable after planning', async () => {
+    it('blocks every secret write when environment secret inventory becomes unavailable after planning', async () => {
       const { project, envRepo, environmentId } = seedProjectWithSpec();
       seedVerifiedConnections();
       const workflow = expectedWorkflow(project);
       acceptWorkflow(project, envRepo, environmentId, workflow);
-      vi.mocked(GitHubAdapter.prototype.listRepositorySecrets)
+      vi.mocked(GitHubAdapter.prototype.listEnvironmentSecrets)
         .mockResolvedValueOnce(['IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'])
-        .mockRejectedValueOnce(new Error('repository inventory unavailable'));
+        .mockRejectedValueOnce(new Error('environment inventory unavailable'));
       const plan = await planGitHubActionsDeploy({
         project,
         environmentName: 'production',
@@ -1145,8 +1146,8 @@ describe('ci-deploy.service', () => {
       expect(applied).toMatchObject({
         success: false,
         status: 'blocked',
-        message: 'Cannot observe GitHub repository secrets before sync',
-        error: 'repository inventory unavailable',
+        message: 'Cannot observe GitHub environment secrets for production',
+        error: 'environment inventory unavailable',
       });
       expect(setRepositorySecret).not.toHaveBeenCalled();
       expect(setEnvironmentSecret).not.toHaveBeenCalled();
@@ -1252,7 +1253,7 @@ describe('ci-deploy.service', () => {
         mockVerifiedGitHub();
         const getFileContent = vi.spyOn(GitHubAdapter.prototype, 'getFileContent');
         const updateFile = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile');
-        const setRepositorySecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret');
+        const setDeploySecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret');
 
         const result = await applyGitHubActionsDeploy({
           project,
@@ -1269,7 +1270,7 @@ describe('ci-deploy.service', () => {
         });
         expect(getFileContent).not.toHaveBeenCalled();
         expect(updateFile).not.toHaveBeenCalled();
-        expect(setRepositorySecret).not.toHaveBeenCalled();
+        expect(setDeploySecret).not.toHaveBeenCalled();
       }
     );
 
@@ -1288,7 +1289,7 @@ describe('ci-deploy.service', () => {
       mockVerifiedGitHub();
       const getFileContent = vi.spyOn(GitHubAdapter.prototype, 'getFileContent');
       const updateFile = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile');
-      const setRepositorySecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret');
+      const setDeploySecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret');
       const createPullRequest = vi.spyOn(GitHubAdapter.prototype, 'createPullRequest');
 
       const result = await applyGitHubActionsDeploy({
@@ -1307,7 +1308,7 @@ describe('ci-deploy.service', () => {
       });
       expect(getFileContent).not.toHaveBeenCalled();
       expect(updateFile).not.toHaveBeenCalled();
-      expect(setRepositorySecret).not.toHaveBeenCalled();
+      expect(setDeploySecret).not.toHaveBeenCalled();
       expect(createPullRequest).not.toHaveBeenCalled();
     });
 
@@ -1323,7 +1324,7 @@ describe('ci-deploy.service', () => {
       });
       const getDatabaseVariables = vi.spyOn(RailwayAdapter.prototype, 'getServiceVariables')
         .mockResolvedValue({ DATABASE_PUBLIC_URL: 'postgresql://app:pw@db.example.test:5432/app' });
-      const setRepositorySecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret');
+      const setDeploySecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret');
       mockVerifiedGitHub();
       vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
       vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
@@ -1365,7 +1366,7 @@ describe('ci-deploy.service', () => {
         status: 'pending',
         data: { pullRequestNumber: 42 },
       });
-      expect(setRepositorySecret).not.toHaveBeenCalled();
+      expect(setDeploySecret).not.toHaveBeenCalled();
       expect(getDatabaseVariables).not.toHaveBeenCalled();
       expect(envRepo.findById(environmentId)?.platformBindings.ci).toBeUndefined();
       expect(createPullRequest).toHaveBeenCalledWith(
@@ -1388,7 +1389,7 @@ describe('ci-deploy.service', () => {
       const createRef = vi.spyOn(GitHubAdapter.prototype, 'createRef');
       const updateFile = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile');
       const createPullRequest = vi.spyOn(GitHubAdapter.prototype, 'createPullRequest');
-      const setRepositorySecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret');
+      const setDeploySecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret');
 
       const result = await applyGitHubActionsDeploy({
         project,
@@ -1408,7 +1409,7 @@ describe('ci-deploy.service', () => {
       expect(createRef).not.toHaveBeenCalled();
       expect(updateFile).not.toHaveBeenCalled();
       expect(createPullRequest).not.toHaveBeenCalled();
-      expect(setRepositorySecret).not.toHaveBeenCalled();
+      expect(setDeploySecret).not.toHaveBeenCalled();
     });
 
     it('syncs secrets only after the reviewed workflow is present on the default branch', async () => {
@@ -1423,7 +1424,7 @@ describe('ci-deploy.service', () => {
       mockVerifiedGitHub();
       vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(acceptedContent);
       const createOrUpdateFile = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile');
-      const setRepositorySecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+      const setDeploySecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret').mockResolvedValue();
 
       const result = await applyGitHubActionsDeploy({
         project,
@@ -1435,7 +1436,7 @@ describe('ci-deploy.service', () => {
 
       expect(result.success).toBe(true);
       expect(createOrUpdateFile).not.toHaveBeenCalled();
-      expect(setRepositorySecret).toHaveBeenCalledTimes(3);
+      expect(setDeploySecret).toHaveBeenCalledTimes(3);
       const binding = (
         envRepo.findById(environmentId)?.platformBindings.ci as {
           deployBranch: Record<string, { contentHash: string; inputHash: string }>;
@@ -1677,7 +1678,7 @@ describe('ci-deploy.service', () => {
       });
       expect(adoptionPlan.action?.metadata?.workflowPublicationRequired).toBeUndefined();
       expect(getFileContent).toHaveBeenCalledWith('davejohnson', 'billforge', retiredPath, 'main');
-      vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+      vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret').mockResolvedValue();
 
       const applied = await applyGitHubActionsDeploy({
         project,
@@ -1722,7 +1723,7 @@ describe('ci-deploy.service', () => {
       const environmentSpec = environmentSpecSchema.parse(CI_ENVIRONMENT_SPEC);
       const workflow = expectedWorkflow(project);
       const binding = syncedBinding(project, workflow.content);
-      binding.syncedSecretHashes.RAILWAY_API_TOKEN = sha256('previous-railway-token');
+      binding.syncedEnvironmentSecretHashes.RAILWAY_API_TOKEN = sha256('previous-railway-token');
       envRepo.updatePlatformBindings(environmentId, {
         ci: { deployBranch: { [workflow.path]: binding } },
       });
@@ -1741,7 +1742,7 @@ describe('ci-deploy.service', () => {
         railway.id,
         getSecretStore().encryptObject({ apiToken: 'rotated-railway-token' })
       );
-      const setRepositorySecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+      const setDeploySecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret').mockResolvedValue();
 
       const result = await applyGitHubActionsDeploy({
         project,
@@ -1756,7 +1757,7 @@ describe('ci-deploy.service', () => {
         status: 'blocked',
         message: 'GitHub Actions managed secret action is stale',
       });
-      expect(setRepositorySecret).not.toHaveBeenCalled();
+      expect(setDeploySecret).not.toHaveBeenCalled();
     });
 
     it('blocks before any secret write when a reviewed migration workflow has no database URL', async () => {
@@ -1769,7 +1770,7 @@ describe('ci-deploy.service', () => {
       });
       mockVerifiedGitHub();
       vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
-      const setRepositorySecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+      const setDeploySecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret').mockResolvedValue();
 
       const result = await applyGitHubActionsDeploy({
         project,
@@ -1782,15 +1783,15 @@ describe('ci-deploy.service', () => {
       expect(result).toMatchObject({
         success: false,
         status: 'blocked',
-        data: { syncedSecrets: [], missingDatabaseSecrets: ['DATABASE_URL'] },
+        data: { syncedEnvironmentSecrets: [], missingDatabaseSecrets: ['DATABASE_URL'] },
       });
       expect(result.error).toContain('Missing managed database secret: DATABASE_URL.');
       expect(result.error).not.toContain('Connect and verify railway');
-      expect(setRepositorySecret).not.toHaveBeenCalled();
+      expect(setDeploySecret).not.toHaveBeenCalled();
       expect(
         (envRepo.findById(environmentId)?.platformBindings.ci as {
-          deployBranch: Record<string, { syncedSecrets: string[] }>;
-        }).deployBranch[workflow.path].syncedSecrets
+          deployBranch: Record<string, { syncedEnvironmentSecrets: string[] }>;
+        }).deployBranch[workflow.path].syncedEnvironmentSecrets
       ).not.toContain('DATABASE_URL');
     });
 
@@ -1811,7 +1812,7 @@ describe('ci-deploy.service', () => {
       });
       mockVerifiedGitHub();
       vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
-      const setRepositorySecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+      const setDeploySecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret').mockResolvedValue();
 
       const result = await applyGitHubActionsDeploy({
         project,
@@ -1822,20 +1823,20 @@ describe('ci-deploy.service', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(setRepositorySecret).toHaveBeenCalledWith(
+      expect(setDeploySecret).toHaveBeenCalledWith(
         'davejohnson',
-        'billforge',
+        'billforge', 'production',
         'DATABASE_URL',
         newUrl
       );
       const binding = (
         envRepo.findById(environmentId)?.platformBindings.ci as {
-          deployBranch: Record<string, { syncedSecrets: string[]; syncedSecretHashes: Record<string, string> }>;
+          deployBranch: Record<string, { syncedEnvironmentSecrets: string[]; syncedEnvironmentSecretHashes: Record<string, string> }>;
         }
       ).deployBranch[workflow.path];
-      expect(binding.syncedSecrets).toContain('DATABASE_URL');
-      expect(binding.syncedSecretHashes.DATABASE_URL).toBe(sha256(newUrl));
-      expect(binding.syncedSecretHashes.DATABASE_URL).not.toBe(sha256(oldUrl));
+      expect(binding.syncedEnvironmentSecrets).toContain('DATABASE_URL');
+      expect(binding.syncedEnvironmentSecretHashes.DATABASE_URL).toBe(sha256(newUrl));
+      expect(binding.syncedEnvironmentSecretHashes.DATABASE_URL).not.toBe(sha256(oldUrl));
     });
 
     it('proposes the latest renderer output when a reviewed workflow input changes', async () => {
@@ -1967,7 +1968,7 @@ describe('ci-deploy.service', () => {
       const updateFile = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile')
         .mockResolvedValue({ created: false, updated: false });
       const deleteFile = vi.spyOn(GitHubAdapter.prototype, 'deleteFile').mockResolvedValue();
-      const setRepositorySecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+      const setDeploySecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret').mockResolvedValue();
 
       const result = await applyGitHubActionsDeploy({
         project,
@@ -1987,7 +1988,7 @@ describe('ci-deploy.service', () => {
         expect.any(String),
         MANAGED_WORKFLOW_BRANCH
       );
-      expect(setRepositorySecret).not.toHaveBeenCalled();
+      expect(setDeploySecret).not.toHaveBeenCalled();
     });
 
     it('leaves a same-named iOS workflow alone when a legacy binding has no ownership evidence', async () => {
@@ -2388,4 +2389,65 @@ describe('ci-deploy.service', () => {
       expect(trigger).not.toHaveBeenCalled();
     });
   });
+  it.each(['railway', 'cloudrun', 'digitalocean'].flatMap(provider => [
+    { provider, order: ['production', 'staging'] },
+    { provider, order: ['staging', 'production'] },
+  ]))('isolates $provider migration secrets applied in $order order', async ({ provider, order }) => {
+    const { project, envRepo, environmentId } = seedProjectWithSpec();
+    seedVerifiedConnections();
+    if (provider !== 'railway') {
+      const ci = providerRegistry.getMetadata(provider)!.orchestration!.ci!;
+      const credentials = Object.fromEntries(Object.values(ci.secretCredentialKeys ?? {}).map(key => [key, 'test-credential']));
+      const connection = new ConnectionRepository().create({provider, credentialsEncrypted: getSecretStore().encryptObject(credentials)});
+      new ConnectionRepository().updateStatus(connection.id, 'verified');
+    }
+    const envSpec = environmentSpecSchema.parse({
+      ...configureToolMigrations(project), hosting: { provider, region: 'us-central1' },
+      // Exercise secret scope without requiring every host to support promotion.
+      deploy: { strategy: 'branch', trigger: 'ci', branch: 'main', autoDeploy: true },
+    });
+    const staging = envRepo.create({ projectId: project.id, name: 'staging' });
+    for (const [name, id] of [['production', environmentId], ['staging', staging.id]]) {
+      envRepo.updatePlatformBindings(id, { provider, projectId: 'provider-project', environmentId: name,
+        providerScope: {projectId: 'provider-project', region: 'us-central1'},
+        services: {web: {serviceId: `provider-${name}-web`}} });
+      new ComponentRepository().create({environmentId: id, type: 'postgres', bindings: {
+        provider: 'railway', connectionUrl: `postgresql://app:fixture@${name}.example.test:5432/app`,
+      }});
+    }
+    new SpecStore().replace(project, { ...new SpecStore().get(project)!.spec, environments: { production: envSpec, staging: envSpec }});
+    const { targets, migration } = resolveBranchDeployTargets(project);
+    const workflows = targets.map(target => buildBranchDeployWorkflow(provider, target, migration));
+    mockVerifiedGitHub();
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockImplementation(async (_owner, _repo, file) =>
+      workflows.find(workflow => workflow.path === file)?.content ?? null);
+    const secrets = new Map<string, Map<string, string>>();
+    vi.spyOn(GitHubAdapter.prototype, 'listEnvironmentSecrets').mockImplementation(async (_owner, _repo, env) =>
+      [...(secrets.get(env)?.keys() ?? [])]);
+    const write = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret').mockImplementation(async (_owner, _repo, env, key, value) => {
+      if (!secrets.has(env)) secrets.set(env, new Map());
+      secrets.get(env)!.set(key, value);
+    });
+    const repositoryWrite = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret');
+    for (const name of order) {
+      const planned = await planGitHubActionsDeploy({project, environmentName: name, environmentSpec: envSpec,
+        environment: envRepo.findByProjectAndName(project.id, name)});
+      const applied = await applyGitHubActionsDeploy({project, environmentName: name, environmentSpec: envSpec,
+        action: planned.action!, authority: 'secret-sync'});
+      expect(applied.success, JSON.stringify(applied)).toBe(true);
+    }
+    SqliteAdapter.resetInstance();
+    initializeDatabase(path.join(tempDir, 'hypervibe.db'));
+    const restartedEnvironments = new EnvironmentRepository();
+    write.mockClear();
+    for (const name of order) {
+      expect(secrets.get(name)?.get('DATABASE_URL')).toBe(`postgresql://app:fixture@${name}.example.test:5432/app`);
+      const after = await planGitHubActionsDeploy({project, environmentName: name, environmentSpec: envSpec,
+        environment: restartedEnvironments.findByProjectAndName(project.id, name)});
+      expect(after.action?.type).toBe('noop');
+    }
+    expect(write).not.toHaveBeenCalled();
+    expect(repositoryWrite).not.toHaveBeenCalled();
+  });
+
 });

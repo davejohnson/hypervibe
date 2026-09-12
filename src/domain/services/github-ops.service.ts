@@ -57,7 +57,7 @@ export type {
   BranchDeployWorkflow,
 };
 
-export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 2;
+export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 3;
 export const GITHUB_ACTIONS_SERVER_PROGRAM_REVISION = 1;
 
 function migrationWorkflowInput(migration: { includeStep: boolean; command?: string }) {
@@ -255,7 +255,14 @@ ${indentWorkflowJavaScript(RELEASE_EVIDENCE_VALIDATION_LOADER)}
             const deploySha = (process.env.HYPERVIBE_DEPLOY_SHA || '').trim();
             if (process.env.HYPERVIBE_DEPLOY_OPERATION === 'rollback') {
               if (!/^[0-9a-f]{64}$/.test(appliedHash)) throw new Error('Rollback blocked for ' + environmentName + ': applied contract hash is missing or malformed.');
-              core.setOutput('fingerprint', appliedHash);
+              const source = await github.rest.repos.getContent({
+                ...context.repo, path: '.hypervibe/spec.json', ref: deploySha,
+              });
+              if (source.data.type !== 'file' || source.data.encoding !== 'base64') {
+                throw new Error('Rollback source contract is missing or unreadable.');
+              }
+              const spec = JSON.parse(Buffer.from(source.data.content, 'base64').toString('utf8'));
+              core.setOutput('fingerprint', deploymentContractFingerprint(spec, environmentName));
               return;
             }
             const { readFileSync } = require('fs');
@@ -1007,10 +1014,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-${target.autoDeployOnPush
-  ? "    if: github.event_name != 'push' || vars.HYPERVIBE_APPLIED_SPEC_HASH != ''\n"
-  : ''}    runs-on: ubuntu-latest
+${target.autoDeployOnPush ? `  reconciliation:
+    runs-on: ubuntu-latest
+    environment: ${target.environmentName}
+    permissions: {}
+    outputs:
+      ready: \${{ steps.ready.outputs.ready }}
+    steps:
+      - id: ready
+        env:
+          HYPERVIBE_APPLIED_SPEC_HASH: \${{ vars.HYPERVIBE_APPLIED_SPEC_HASH }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" != push || -n "$HYPERVIBE_APPLIED_SPEC_HASH" ]]; then echo ready=true; else echo ready=false; fi >> "$GITHUB_OUTPUT"
+` : ''}  deploy:
+${target.autoDeployOnPush ? "    needs: reconciliation\n    if: needs.reconciliation.outputs.ready == 'true'\n" : ''}    runs-on: ubuntu-latest
     environment: ${target.environmentName}
 ${permissionsBlock.trimEnd()}
     steps:

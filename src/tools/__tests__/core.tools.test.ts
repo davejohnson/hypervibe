@@ -42,7 +42,7 @@ beforeEach(() => {
   tempDir = mkdtempSync(path.join(tmpdir(), 'hypervibe-core-tools-'));
   SqliteAdapter.getInstance(path.join(tempDir, 'test.db')).migrate();
   vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
-  vi.spyOn(GitHubAdapter.prototype, 'listRepositorySecrets').mockResolvedValue([
+  vi.spyOn(GitHubAdapter.prototype, 'listEnvironmentSecrets').mockResolvedValue([
     'RAILWAY_API_TOKEN',
     'IMAGE_REGISTRY_USERNAME',
     'IMAGE_REGISTRY_TOKEN',
@@ -1376,8 +1376,8 @@ describe('hv_spec', () => {
           deployBranch: {
             '.github/workflows/deploy-railway-production.yml': {
               contentHash: 'workflow-hash',
-              syncedSecrets: ['IMAGE_REGISTRY_TOKEN'],
-              syncedSecretHashes: { IMAGE_REGISTRY_TOKEN: 'local-secret-hash' },
+              syncedEnvironmentSecrets: ['IMAGE_REGISTRY_TOKEN'],
+              syncedEnvironmentSecretHashes: { IMAGE_REGISTRY_TOKEN: 'local-secret-hash' },
             },
           },
         },
@@ -1400,8 +1400,8 @@ describe('hv_spec', () => {
           deployBranch: {
             '.github/workflows/deploy-railway-production.yml': {
               contentHash: 'workflow-hash',
-              syncedSecrets: ['IMAGE_REGISTRY_TOKEN'],
-              syncedSecretHashes: { IMAGE_REGISTRY_TOKEN: 'local-secret-hash' },
+              syncedEnvironmentSecrets: ['IMAGE_REGISTRY_TOKEN'],
+              syncedEnvironmentSecretHashes: { IMAGE_REGISTRY_TOKEN: 'local-secret-hash' },
             },
           },
         },
@@ -1460,7 +1460,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
   function acceptManagedWorkflow(
     project: NonNullable<ReturnType<ProjectRepository['findByName']>>,
     environmentName: string,
-    syncedSecretHashes: Record<string, string> = {}
+    syncedEnvironmentSecretHashes: Record<string, string> = {}
   ) {
     const { targets, migration } = resolveBranchDeployTargets(project);
     const target = targets.find((candidate) => candidate.environmentName === environmentName)!;
@@ -1474,8 +1474,8 @@ describe('hv_plan / hv_status / hv_apply', () => {
             contentHash: workflowFilesContentHash(files),
             inputHash: githubActionsWorkflowInputHash({ provider: 'railway', target, migration }),
             managedPaths: files.map((file) => file.path),
-            syncedSecrets: Object.keys(syncedSecretHashes),
-            syncedSecretHashes,
+            syncedEnvironmentSecrets: Object.keys(syncedEnvironmentSecretHashes),
+            syncedEnvironmentSecretHashes,
           },
         },
       },
@@ -1592,7 +1592,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       created: true,
       updated: false,
     });
-    const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+    const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret').mockResolvedValue();
     return { getFileContent, writeWorkflow, setSecret };
   }
 
@@ -3259,8 +3259,8 @@ describe('hv_plan / hv_status / hv_apply', () => {
               target,
               migration,
             }),
-            syncedSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
-            syncedSecretHashes: {
+            syncedEnvironmentSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
+            syncedEnvironmentSecretHashes: {
               RAILWAY_API_TOKEN: sha256('railway-token'),
               IMAGE_REGISTRY_USERNAME: sha256('davejohnson'),
               IMAGE_REGISTRY_TOKEN: sha256('gh-package-token'),
@@ -4795,6 +4795,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
     const failed = await t.call('hv_apply', { project: project.name, planId: plan.data.planId, confirmActions: [cleanupId] });
     expect(failed.data.receipts).toContainEqual(expect.objectContaining({ actionId: cleanupId, status: 'failed' }));
+    expect(failed.next).toEqual(['hv_plan']);
     expect((new EnvironmentRepository().findById(environment.id)!.platformBindings as any).previousHosting)
       .toMatchObject({ provider: 'railway', environmentId: 'railway-production' });
 

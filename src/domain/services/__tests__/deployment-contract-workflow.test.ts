@@ -1,4 +1,8 @@
 import fs from 'node:fs';
+import { parse } from 'yaml';
+import { formatFlyOrganizationBinding, formatFlyServiceBinding } from '../../../adapters/providers/fly/fly.binding.js';
+import '../../../application/providers.js';
+import { providerRegistry } from '../../registry/provider.registry.js';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -75,6 +79,13 @@ function target(
     programFingerprint: 'a'.repeat(64),
     deploymentContractFingerprint: environmentDeploymentContractHash(SPEC, environmentName),
   };
+  if (provider === 'fly') {
+    branchTarget.providerProjectId = formatFlyOrganizationBinding('test-org');
+    branchTarget.providerServiceIds = [formatFlyServiceBinding({organizationSlug: 'test-org', appId: 'test-app', appName: 'test-app', machineId: 'test-machine'})];
+  } else if (provider === 'vercel') {
+    branchTarget.providerProjectId = 'team:team_1234567890';
+    branchTarget.providerServiceIds = ['team:team_1234567890:prj_1234567890'];
+  }
   branchTarget.releaseTarget = managedCiReleaseTarget({
     provider,
     environmentName,
@@ -88,7 +99,7 @@ function target(
       logicalName: 'web',
       workloadKind: 'web',
       providerResourceType: 'service',
-      providerResourceId: 'provider-service',
+      providerResourceId: branchTarget.providerServiceIds[0],
     }],
   });
   return branchTarget;
@@ -161,7 +172,7 @@ async function runGate(
     const execute = new AsyncFunction(
       'require',
       'core',
-      'process',
+      'process', 'github', 'context', 'Buffer',
       extractGitHubScript(generated, GATE_STEP_NAME)
     );
     await execute(
@@ -178,7 +189,7 @@ async function runGate(
           HYPERVIBE_DEPLOY_SHA: DEPLOY_SHA,
           HYPERVIBE_DEPLOY_OPERATION: operation,
         },
-      }
+      }, { rest: { repos: { getContent: async () => ({data: {type: 'file', encoding: 'base64', content: Buffer.from(JSON.stringify(SPEC)).toString('base64')}}) } } }, {repo: {owner: 'dave', repo: 'contract-app'}}, Buffer
     );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -250,10 +261,10 @@ describe('generated deployment-contract safety gate', () => {
     expect(result.summaryWrite).not.toHaveBeenCalled();
   });
 
-  it('uses the current applied contract for rollback before provider mutation', async () => {
+  it('uses the historical source contract for rollback before provider mutation', async () => {
     const appliedHash = 'e'.repeat(64);
     const accepted = await runGate('production', appliedHash, 'rollback');
-    expect(accepted.core.setOutput).toHaveBeenCalledWith('fingerprint', appliedHash);
+    expect(accepted.core.setOutput).toHaveBeenCalledWith('fingerprint', environmentDeploymentContractHash(SPEC, 'production'));
     expect(accepted.readFileSync).not.toHaveBeenCalled();
 
     await expect(runGate('production', undefined, 'rollback')).rejects.toThrow(
@@ -426,5 +437,42 @@ describe('generated deployment failure evidence', () => {
     expect(evidence).not.toContain('railway-sensitive-token');
     expect(evidence).not.toContain('database-password');
     expect(evidence).not.toContain('query-sensitive-token');
+  });
+});
+
+
+describe('managed CI readiness across hosting providers', () => {
+  const providers = providerRegistry.namesFor('hosting').filter((provider) =>
+    providerRegistry.getMetadata(provider)?.orchestration?.ci
+  );
+  it.each(providers)('%s admits reconciled pushes after environment variables are available', async (provider) => {
+    const generated = parse(workflow(provider).content);
+    const manual = parse(workflow(provider, 'production').content);
+    expect(manual.jobs.reconciliation).toBeUndefined();
+    expect(manual.jobs.deploy.needs).toBeUndefined();
+    const readiness = generated.jobs.reconciliation;
+    expect(readiness?.environment).toBe('staging');
+    expect(readiness?.if).toBeUndefined();
+    expect(generated.jobs.deploy.needs).toBe('reconciliation');
+    expect(generated.jobs.deploy.if).toBe("needs.reconciliation.outputs.ready == 'true'");
+    const step = readiness.steps[0];
+    expect(step.env.HYPERVIBE_APPLIED_SPEC_HASH).toBe('${{ vars.HYPERVIBE_APPLIED_SPEC_HASH }}');
+    for (const [eventName, hash, ready] of [
+      ['push', '', 'false'],
+      ['push', 'a'.repeat(64), 'true'],
+      ['workflow_dispatch', '', 'true'],
+    ]) {
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'hypervibe-readiness-'));
+      try {
+        const output = path.join(directory, 'output');
+        const result = spawnSync('bash', ['-eu', '-c', step.run], { encoding: 'utf8', env: {
+          ...process.env, GITHUB_EVENT_NAME: eventName, HYPERVIBE_APPLIED_SPEC_HASH: hash, GITHUB_OUTPUT: output,
+        }});
+        expect(result.status, result.stderr).toBe(0);
+        expect(fs.readFileSync(output, 'utf8')).toBe(`ready=${ready}\n`);
+      } finally {
+        fs.rmSync(directory, {recursive: true, force: true});
+      }
+    }
   });
 });

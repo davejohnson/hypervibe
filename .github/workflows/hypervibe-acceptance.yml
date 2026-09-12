@@ -1,10 +1,10 @@
 # Managed by Hypervibe. Change desired state with hv_spec; manual edits will be reconciled.
-name: "Hypervibe / provider-conformance"
+name: "Hypervibe / acceptance"
 
 on:
-  schedule:
-    - cron: "17 4 * * *"
-      timezone: "UTC"
+  pull_request:
+  push:
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   check:
-    name: "Hypervibe / provider-conformance"
+    name: "Hypervibe / acceptance"
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -35,20 +35,20 @@ jobs:
         run: |
           set -o pipefail
           (
-            npm test -- test/provider-conformance/provider-matrix.test.ts
+            npm run typecheck
           ) 2>&1 | tee hypervibe-failure-evidence/1.log
       - name: "test 2"
         shell: bash
         run: |
           set -o pipefail
           (
-            npm run test:providers:upstream-contracts
+            npm test
           ) 2>&1 | tee hypervibe-failure-evidence/2.log
       - name: Upload non-secret failure evidence
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: "provider-conformance-failure-evidence"
+          name: "acceptance-failure-evidence"
           if-no-files-found: error
           retention-days: 14
           path: |

@@ -1422,7 +1422,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
               ? 'Apply complete. Check hv_status to verify convergence.'
               : 'Apply failed; compensations ran where registered. Inspect receipts and re-run hv_plan.',
           warnings: outcome.actionScopedWarnings,
-          next: ['hv_status'],
+          next: [result.success || pending.length > 0 ? 'hv_status' : 'hv_plan'],
         }
       );
     })

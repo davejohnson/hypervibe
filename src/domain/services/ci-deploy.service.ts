@@ -110,8 +110,6 @@ type ManagedWorkflowBinding = {
   contentHash?: string;
   inputHash?: string;
   managedPaths?: string[];
-  syncedSecrets?: string[];
-  syncedSecretHashes?: Record<string, string>;
   syncedEnvironmentSecrets?: string[];
   syncedEnvironmentSecretHashes?: Record<string, string>;
 };
@@ -462,8 +460,6 @@ async function resolveManagedWorkflowSecrets(params: {
   availableSecretHashes: Record<string, string>;
   missingProviderSecrets: string[];
   missingDatabaseSecrets: string[];
-  appStoreSecrets: ProviderSecret[];
-  appStoreSecretHashes: Record<string, string>;
   appStoreError?: string;
 }> {
   const requiredProviderSecrets = requiredProviderSecretNamesForGitHubActions(
@@ -485,6 +481,7 @@ async function resolveManagedWorkflowSecrets(params: {
   }
   const availableSecretNames = availableSecrets.map((secret) => secret.name);
   const appStore = appStoreSecretsForGitHubActions(params.environmentSpec);
+  availableSecrets.push(...appStore.secrets);
   return {
     requiredProviderSecrets,
     requiredDatabaseSecrets,
@@ -492,8 +489,6 @@ async function resolveManagedWorkflowSecrets(params: {
     availableSecretHashes: secretHashes(availableSecrets),
     missingProviderSecrets: requiredProviderSecrets.filter((name) => !availableSecretNames.includes(name)),
     missingDatabaseSecrets: requiredDatabaseSecrets.filter((name) => !availableSecretNames.includes(name)),
-    appStoreSecrets: appStore.secrets,
-    appStoreSecretHashes: secretHashes(appStore.secrets),
     ...(appStore.error ? { appStoreError: appStore.error } : {}),
   };
 }
@@ -510,9 +505,7 @@ function buildAction(params: {
   staleProviderSecrets?: string[];
   missingDatabaseSecrets?: string[];
   staleDatabaseSecrets?: string[];
-  desiredSecretHashes?: Record<string, string>;
   desiredEnvironmentSecretHashes?: Record<string, string>;
-  reviewedRepositorySecrets?: string[];
   reviewedEnvironmentSecrets?: string[];
   missingEnvironmentSecrets?: string[];
   staleEnvironmentSecrets?: string[];
@@ -550,12 +543,8 @@ function buildAction(params: {
       ...(params.staleProviderSecrets?.length ? { staleProviderSecrets: params.staleProviderSecrets } : {}),
       ...(params.missingDatabaseSecrets?.length ? { missingDatabaseSecrets: params.missingDatabaseSecrets } : {}),
       ...(params.staleDatabaseSecrets?.length ? { staleDatabaseSecrets: params.staleDatabaseSecrets } : {}),
-      ...(params.desiredSecretHashes ? { desiredSecretHashes: params.desiredSecretHashes } : {}),
       ...(params.desiredEnvironmentSecretHashes
         ? { desiredEnvironmentSecretHashes: params.desiredEnvironmentSecretHashes }
-        : {}),
-      ...(params.reviewedRepositorySecrets
-        ? { reviewedRepositorySecrets: params.reviewedRepositorySecrets }
         : {}),
       ...(params.reviewedEnvironmentSecrets
         ? { reviewedEnvironmentSecrets: params.reviewedEnvironmentSecrets }
@@ -754,8 +743,6 @@ export async function planGitHubActionsDeploy(params: {
     availableSecretHashes,
     missingProviderSecrets,
     missingDatabaseSecrets,
-    appStoreSecrets,
-    appStoreSecretHashes,
     appStoreError,
   } = await resolveManagedWorkflowSecrets({
     project,
@@ -764,14 +751,6 @@ export async function planGitHubActionsDeploy(params: {
     workflow,
     repository: repo,
   });
-  let repositorySecretsObserved = true;
-  let repositorySecretNames: string[] = [];
-  try {
-    repositorySecretNames = await adapterResult.adapter.listRepositorySecrets(owner, repoName);
-  } catch (error) {
-    repositorySecretsObserved = false;
-    warnings.push(`Cannot observe GitHub repository secret names for ${repo}: ${error instanceof Error ? error.message : String(error)}`);
-  }
   if (missingProviderSecrets.length > 0) {
     warnings.push(
       `GitHub Actions deploy workflow ${workflow.path} requires provider secrets that Hypervibe cannot sync: ${missingProviderSecrets.join(', ')}. `
@@ -787,71 +766,28 @@ export async function planGitHubActionsDeploy(params: {
   if (appStoreError) warnings.push(appStoreError);
   const requiredBuildSecrets = requiredIosBuildSecrets(environmentSpec);
 
-  const syncedSecrets = new Set(binding?.syncedSecrets ?? []);
-  const syncedSecretHashes = asRecord(binding?.syncedSecretHashes) ?? {};
-  const liveRepositorySecrets = new Set(repositorySecretNames);
-  const missingLiveProviderSecrets = requiredProviderSecrets
-    .filter((name) => !liveRepositorySecrets.has(name));
-  const missingLiveDatabaseSecrets = requiredDatabaseSecrets
-    .filter((name) => !liveRepositorySecrets.has(name));
-  const staleProviderSecrets = requiredProviderSecrets.filter((name) =>
-    syncedSecrets.has(name)
-    && availableSecretHashes[name] !== undefined
-    && syncedSecretHashes[name] !== availableSecretHashes[name]
-  );
-  const staleDatabaseSecrets = requiredDatabaseSecrets.filter((name) =>
-    syncedSecrets.has(name)
-    && availableSecretHashes[name] !== undefined
-    && syncedSecretHashes[name] !== availableSecretHashes[name]
-  );
   let environmentSecretNames: string[] = [];
   let environmentSecretsObserved = true;
-  if (environmentSpec.ios?.release) {
-    try {
-      environmentSecretNames = await adapterResult.adapter.listEnvironmentSecrets(
-        owner,
-        repoName,
-        environmentName
-      );
-    } catch (error) {
-      environmentSecretsObserved = false;
-      warnings.push(`Cannot observe GitHub environment secret names for ${environmentName}: ${error instanceof Error ? error.message : String(error)}`);
-    }
+  try {
+    environmentSecretNames = await adapterResult.adapter.listEnvironmentSecrets(owner, repoName, environmentName);
+  } catch (error) {
+    environmentSecretsObserved = false;
+    warnings.push(`Cannot observe GitHub environment secret names for ${environmentName}: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const syncedEnvironmentSecrets = new Set(binding?.syncedEnvironmentSecrets ?? []);
-  const syncedEnvironmentSecretHashes = asRecord(binding?.syncedEnvironmentSecretHashes) ?? {};
-  const staleEnvironmentSecrets = appStoreSecrets
-    .filter((secret) =>
-      syncedEnvironmentSecrets.has(secret.name)
-      && syncedEnvironmentSecretHashes[secret.name] !== appStoreSecretHashes[secret.name]
-    )
-    .map((secret) => secret.name);
-  const missingEnvironmentSecrets = [
-    ...requiredBuildSecrets.filter((name) => !environmentSecretNames.includes(name)),
-    ...(appStoreError ? [...IOS_RELEASE_REQUIRED_SECRETS] : []),
-  ];
-  const missingManagedEnvironmentSecretSync = appStoreSecrets.some((secret) =>
-    !environmentSecretNames.includes(secret.name)
-    || !syncedEnvironmentSecrets.has(secret.name)
-  ) || staleEnvironmentSecrets.length > 0;
-  const missingSecretSync =
-    missingProviderSecrets.length > 0
-    || requiredProviderSecrets.some((name) => !syncedSecrets.has(name))
-    || missingLiveProviderSecrets.length > 0
-    || staleProviderSecrets.length > 0
+  const syncedHashes = binding?.syncedEnvironmentSecretHashes ?? {};
+  const needsSync = (name: string) => !environmentSecretNames.includes(name)
+    || syncedHashes[name] !== availableSecretHashes[name];
+  const staleProviderSecrets = requiredProviderSecrets.filter(needsSync);
+  const staleDatabaseSecrets = requiredDatabaseSecrets.filter(needsSync);
+  const staleEnvironmentSecrets = Object.keys(availableSecretHashes).filter(needsSync);
+  const missingEnvironmentSecrets = requiredBuildSecrets.filter((name) => !environmentSecretNames.includes(name));
+  const missingSecretSync = missingProviderSecrets.length > 0
     || missingDatabaseSecrets.length > 0
-    || requiredDatabaseSecrets.some((name) => !syncedSecrets.has(name))
-    || missingLiveDatabaseSecrets.length > 0
-    || staleDatabaseSecrets.length > 0
-    || missingManagedEnvironmentSecretSync
+    || Boolean(appStoreError)
+    || staleEnvironmentSecrets.length > 0
     || missingEnvironmentSecrets.length > 0
-    || !repositorySecretsObserved
     || !environmentSecretsObserved;
-  const databaseSecretSyncRequired =
-    missingDatabaseSecrets.length > 0
-    || requiredDatabaseSecrets.some((name) => !syncedSecrets.has(name))
-    || missingLiveDatabaseSecrets.length > 0
-    || staleDatabaseSecrets.length > 0;
+  const databaseSecretSyncRequired = missingDatabaseSecrets.length > 0 || staleDatabaseSecrets.length > 0;
   const contentContractNeedsAdoption = acceptance === 'rendered'
     && binding?.contentHash !== observation.liveContentHash;
   const type = inputContractNeedsAdoption || inputContractChanged || contentContractNeedsAdoption
@@ -881,21 +817,17 @@ export async function planGitHubActionsDeploy(params: {
       workflow,
       inputHash,
       reason,
-      verified: repositorySecretsObserved && environmentSecretsObserved,
+      verified: environmentSecretsObserved,
       missingProviderSecrets,
       staleProviderSecrets,
       missingDatabaseSecrets,
       staleDatabaseSecrets,
-      desiredSecretHashes: availableSecretHashes,
-      desiredEnvironmentSecretHashes: appStoreSecretHashes,
-      reviewedRepositorySecrets: repositorySecretsObserved
+      desiredEnvironmentSecretHashes: availableSecretHashes,
+      reviewedEnvironmentSecrets: environmentSecretsObserved
         ? presentManagedSecretNames(
-            [...requiredProviderSecrets, ...requiredDatabaseSecrets],
-            repositorySecretNames
+            [...Object.keys(availableSecretHashes), ...requiredProviderSecrets, ...requiredDatabaseSecrets, ...requiredBuildSecrets],
+            environmentSecretNames
           )
-        : undefined,
-      reviewedEnvironmentSecrets: environmentSpec.ios?.release && environmentSecretsObserved
-        ? presentManagedSecretNames(IOS_RELEASE_REQUIRED_SECRETS, environmentSecretNames)
         : undefined,
       missingEnvironmentSecrets,
       staleEnvironmentSecrets,
@@ -1043,9 +975,7 @@ export async function applyGitHubActionsDeploy(params: {
     availableSecrets,
     missingProviderSecrets,
     missingDatabaseSecrets,
-    appStoreSecrets,
     availableSecretHashes,
-    appStoreSecretHashes,
     appStoreError,
   } = await resolveManagedWorkflowSecrets({
     project,
@@ -1055,90 +985,32 @@ export async function applyGitHubActionsDeploy(params: {
     repository: repo,
   });
 
-  const reviewedRepositorySecrets = reviewedSecretNames(
-    params.action.metadata?.reviewedRepositorySecrets
-  );
-  if (!reviewedRepositorySecrets) {
+  const reviewedEnvironmentSecrets = reviewedSecretNames(params.action.metadata?.reviewedEnvironmentSecrets);
+  if (!reviewedEnvironmentSecrets || !sameSecretHashes(
+    asRecord(params.action.metadata?.desiredEnvironmentSecretHashes), availableSecretHashes
+  )) {
     return {
-      success: false,
-      status: 'blocked',
-      message: 'GitHub Actions managed secret action is stale',
-      error: 'The reviewed repository secret inventory is missing or malformed. Re-run hv_plan before writing GitHub secrets.',
+      success: false, status: 'blocked', message: 'GitHub Actions managed secret action is stale',
+      error: 'The reviewed environment secret inventory or values changed. Re-run hv_plan before writing GitHub secrets.',
     };
   }
-  let repositorySecretNames: string[];
+  let environmentSecretNames: string[];
   try {
-    repositorySecretNames = await adapter.listRepositorySecrets(owner, repoName);
+    environmentSecretNames = await adapter.listEnvironmentSecrets(owner, repoName, environmentName);
   } catch (error) {
     return {
-      success: false,
-      status: 'blocked',
-      message: 'Cannot observe GitHub repository secrets before sync',
+      success: false, status: 'blocked', message: `Cannot observe GitHub environment secrets for ${environmentName}`,
       error: error instanceof Error ? error.message : String(error),
     };
   }
-  const currentRepositorySecrets = presentManagedSecretNames(
-    [...requiredProviderSecrets, ...requiredDatabaseSecrets],
-    repositorySecretNames
+  const currentEnvironmentSecrets = presentManagedSecretNames(
+    [...Object.keys(availableSecretHashes), ...requiredProviderSecrets, ...requiredDatabaseSecrets, ...requiredIosBuildSecrets(environmentSpec)],
+    environmentSecretNames
   );
-  if (!sameStringLists(currentRepositorySecrets, reviewedRepositorySecrets)) {
+  if (!sameStringLists(currentEnvironmentSecrets, reviewedEnvironmentSecrets)) {
     return {
-      success: false,
-      status: 'blocked',
-      message: 'GitHub Actions managed secret action is stale',
-      error: 'The managed repository secret inventory changed after planning. Re-run hv_plan before writing GitHub secrets.',
-    };
-  }
-
-  let environmentSecretNames: string[] = [];
-  if (environmentSpec.ios?.release) {
-    const reviewedEnvironmentSecrets = reviewedSecretNames(
-      params.action.metadata?.reviewedEnvironmentSecrets
-    );
-    if (!reviewedEnvironmentSecrets) {
-      return {
-        success: false,
-        status: 'blocked',
-        message: 'GitHub Actions managed secret action is stale',
-        error: 'The reviewed environment secret inventory is missing or malformed. Re-run hv_plan before writing GitHub secrets.',
-      };
-    }
-    try {
-      environmentSecretNames = await adapter.listEnvironmentSecrets(owner, repoName, environmentName);
-    } catch (error) {
-      return {
-        success: false,
-        status: 'blocked',
-        message: `Cannot observe GitHub environment secrets for ${environmentName}`,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-    const currentEnvironmentSecrets = presentManagedSecretNames(
-      IOS_RELEASE_REQUIRED_SECRETS,
-      environmentSecretNames
-    );
-    if (!sameStringLists(currentEnvironmentSecrets, reviewedEnvironmentSecrets)) {
-      return {
-        success: false,
-        status: 'blocked',
-        message: 'GitHub Actions managed secret action is stale',
-        error: 'The managed environment secret inventory changed after planning. Re-run hv_plan before writing GitHub secrets.',
-      };
-    }
-  }
-
-  if (
-    !sameSecretHashes(asRecord(params.action.metadata?.desiredSecretHashes), availableSecretHashes)
-    || !sameSecretHashes(
-      asRecord(params.action.metadata?.desiredEnvironmentSecretHashes),
-      appStoreSecretHashes
-    )
-  ) {
-    return {
-      success: false,
-      status: 'blocked',
-      message: 'GitHub Actions managed secret action is stale',
-      error: 'One or more reviewed managed secret values changed after planning. Re-run hv_plan before writing GitHub secrets.',
+      success: false, status: 'blocked', message: 'GitHub Actions managed secret action is stale',
+      error: 'The managed environment secret inventory changed after planning. Re-run hv_plan before writing GitHub secrets.',
     };
   }
 
@@ -1151,7 +1023,7 @@ export async function applyGitHubActionsDeploy(params: {
       error: missingProviderSecretsMessage(environmentSpec.hosting.provider, missingManagedSecrets),
       data: {
         workflow: workflow.path,
-        syncedSecrets: [],
+        syncedEnvironmentSecrets: [],
         ...(missingProviderSecrets.length > 0 ? { missingProviderSecrets } : {}),
         ...(missingDatabaseSecrets.length > 0 ? { missingDatabaseSecrets } : {}),
       },
@@ -1185,71 +1057,34 @@ export async function applyGitHubActionsDeploy(params: {
   const secretErrors: Array<{ name: string; error: string }> = [];
   for (const secret of availableSecrets) {
     try {
-      await adapter.setRepositorySecret(owner, repoName, secret.name, secret.value);
+      await adapter.setEnvironmentSecret(owner, repoName, environmentName, secret.name, secret.value);
       syncedSecrets.push(secret);
     } catch (error) {
       secretErrors.push({ name: secret.name, error: error instanceof Error ? error.message : String(error) });
     }
   }
-
-  const syncedEnvironmentSecrets: ProviderSecret[] = [];
-  const environmentSecretErrors: Array<{ name: string; error: string }> = [];
-  for (const secret of appStoreSecrets) {
-    try {
-      await adapter.setEnvironmentSecret(owner, repoName, environmentName, secret.name, secret.value);
-      syncedEnvironmentSecrets.push(secret);
-    } catch (error) {
-      environmentSecretErrors.push({
-        name: secret.name,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
   const syncedSecretNames = syncedSecrets.map((secret) => secret.name);
-  const syncedEnvironmentSecretNames = syncedEnvironmentSecrets.map((secret) => secret.name);
   persistCiBindingPatch(project, environmentName, {
     deployBranch: {
       [workflow.path]: {
         contentHash: observation.liveContentHash!,
         inputHash,
         managedPaths: workflowFiles(workflow).map((file) => file.path),
-        syncedSecrets: syncedSecretNames,
-        syncedSecretHashes: secretHashes(syncedSecrets),
-        syncedEnvironmentSecrets: syncedEnvironmentSecretNames,
-        syncedEnvironmentSecretHashes: secretHashes(syncedEnvironmentSecrets),
+        syncedEnvironmentSecrets: syncedSecretNames,
+        syncedEnvironmentSecretHashes: secretHashes(syncedSecrets),
         updatedAt: new Date().toISOString(),
       },
     },
   });
-  if (secretErrors.length > 0) {
-    return {
-      success: false,
-      message: `Synced ${workflow.path}, but some GitHub secrets failed`,
-      error: secretErrors.map((entry) => `${entry.name}: ${entry.error}`).join('; '),
-      data: { workflow: workflow.path, syncedSecrets: syncedSecretNames, secretErrors },
-    };
-  }
-  if (environmentSecretErrors.length > 0) {
-    return {
-      success: false,
-      message: `Synced ${workflow.path}, but some GitHub environment secrets failed`,
-      error: environmentSecretErrors.map((entry) => `${entry.name}: ${entry.error}`).join('; '),
-      data: {
-        workflow: workflow.path,
-        syncedEnvironmentSecrets: syncedEnvironmentSecretNames,
-        environmentSecretErrors,
-      },
-    };
-  }
   return {
-    success: true,
-    message: `Synced GitHub Actions deploy and iOS release secrets for reviewed files`,
+    success: secretErrors.length === 0,
+    message: `Synced ${syncedSecrets.length} managed GitHub Actions secrets for ${environmentName}`,
+    ...(secretErrors.length ? { error: secretErrors.map((entry) => `${entry.name}: ${entry.error}`).join('; ') } : {}),
     data: {
       workflow: workflow.path,
       companionFiles: (workflow.companionFiles ?? []).map((file) => file.path),
-      syncedSecrets: syncedSecretNames,
-      syncedEnvironmentSecrets: syncedEnvironmentSecrets.map((secret) => secret.name),
+      syncedEnvironmentSecrets: syncedSecretNames,
+      ...(secretErrors.length ? { secretErrors } : {}),
     },
   };
 }

@@ -149,8 +149,8 @@ function seedAcceptedRailwayCiProject(params: {
       deployBranch: {
         [workflow.path]: {
           ...binding,
-          syncedSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
-          syncedSecretHashes: {
+          syncedEnvironmentSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
+          syncedEnvironmentSecretHashes: {
             RAILWAY_API_TOKEN: sha256('railway-token'),
             IMAGE_REGISTRY_USERNAME: sha256('dave'),
             IMAGE_REGISTRY_TOKEN: sha256(params.syncedPackageReadToken ?? params.packageReadToken),
@@ -189,7 +189,7 @@ beforeEach(() => {
   SqliteAdapter.getInstance(path.join(dir, 'test.db')).migrate();
   project = new ProjectRepository().create({ name: 'plan-test', defaultPlatform: 'railway' });
   vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
-  vi.spyOn(GitHubAdapter.prototype, 'listRepositorySecrets').mockResolvedValue([
+  vi.spyOn(GitHubAdapter.prototype, 'listEnvironmentSecrets').mockResolvedValue([
     'RAILWAY_API_TOKEN',
     'IMAGE_REGISTRY_USERNAME',
     'IMAGE_REGISTRY_TOKEN',
@@ -874,13 +874,13 @@ describe('PlanService.plan', () => {
         deployBranch: {
           [workflow.path]: {
             ...binding,
-            syncedSecrets: [
+            syncedEnvironmentSecrets: [
               'DATABASE_URL',
               'RAILWAY_API_TOKEN',
               'IMAGE_REGISTRY_USERNAME',
               'IMAGE_REGISTRY_TOKEN',
             ],
-            syncedSecretHashes: {
+            syncedEnvironmentSecretHashes: {
               DATABASE_URL: sha256('postgresql://test:password@db.example.test:5432/app'),
               RAILWAY_API_TOKEN: sha256('railway-token'),
               IMAGE_REGISTRY_USERNAME: sha256('dave'),
@@ -2725,12 +2725,12 @@ describe('PlanService.plan', () => {
           [acceptedWorkflow.path]: {
             ...acceptedWorkflowBinding,
             managedPaths: [acceptedWorkflow.path],
-            syncedSecrets: [
+            syncedEnvironmentSecrets: [
               'RAILWAY_API_TOKEN',
               'IMAGE_REGISTRY_USERNAME',
               'IMAGE_REGISTRY_TOKEN',
             ],
-            syncedSecretHashes: {
+            syncedEnvironmentSecretHashes: {
               RAILWAY_API_TOKEN: sha256('railway-token'),
               IMAGE_REGISTRY_USERNAME: sha256('dave'),
               IMAGE_REGISTRY_TOKEN: sha256('package-token'),
@@ -2763,7 +2763,7 @@ describe('PlanService.plan', () => {
       warnings: [],
     });
     mockLiveWorkflow(acceptedWorkflow);
-    vi.spyOn(GitHubAdapter.prototype, 'listRepositorySecrets').mockResolvedValue([
+    vi.spyOn(GitHubAdapter.prototype, 'listEnvironmentSecrets').mockResolvedValue([
       'RAILWAY_API_TOKEN',
       'IMAGE_REGISTRY_USERNAME',
       'IMAGE_REGISTRY_TOKEN',

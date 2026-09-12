@@ -1243,6 +1243,11 @@ pending receipt until `hv_ci_status` proves the workflow succeeded and
 `hv_health` proves the endpoint. Rollback never reverses database migrations or
 provider-side manual configuration; tool-mode migration steps are skipped during
 rollback, while startup/release-command migrations must remain backward-compatible.
+Rollback reads the selected immutable commit's raw spec through the code-host API
+and validates release provenance against that historical contract. It retains
+current program and resource-identity compatibility checks, skips checkout/build,
+and records the historical source contract in the resulting release evidence.
+
 
 Direct-provider deploy runs do not currently persist a provider-neutral,
 immutable release identity that can be restored and re-observed. Their service
@@ -1257,6 +1262,19 @@ re-verifies it immediately before and after mutation.
 Do not switch a project to `deploy.trigger: "native"` just to avoid missing CI, package, or image credentials. That changes the desired infrastructure contract. Provider-native deploys are an explicit opt-in and may require provider-specific external app access such as the Railway GitHub App.
 
 Generated provider CI workflow steps belong under provider-owned modules and are exposed through provider registry metadata. Generic GitHub orchestration should assemble workflows, sync files/secrets, inspect runs/logs, and diagnose failures without owning provider API scripts.
+
+Managed deployment credentials, including migration database URLs and provider
+credentials, are synchronized into the exact GitHub environment. Repository-owned
+build secrets remain in the repository-secret lifecycle. Existing repository-scoped
+deployment bindings require an explicit sync into the environment; they do not
+prove that environment's secret state. Legacy repository secrets are not deleted
+because other workflows may still consume them.
+
+Auto-deploy workflows use a small environment-bound readiness job to admit pushes only after the applied
+marker exists. Its runner step reads the environment variable; the deploy job
+consumes its boolean output. Manual dispatch still reaches the normal contract
+gate, and a nonempty stale marker remains a hard failure. Manual-only workflows
+omit this extra job, preserving their single environment approval.
 
 Generated workflows must gate image deployment on the environment-scoped
 `HYPERVIBE_APPLIED_SPEC_HASH` GitHub Actions variable. The desired hash covers

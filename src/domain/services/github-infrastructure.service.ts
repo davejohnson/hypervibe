@@ -359,6 +359,7 @@ function buildCheckWorkflow(
     '',
     'jobs:',
     '  check:',
+    `    name: ${yamlString(githubWorkflowName(id))}`,
     '    runs-on: ubuntu-latest',
     '    timeout-minutes: 30',
     '    steps:',

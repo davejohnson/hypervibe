@@ -1398,7 +1398,7 @@ Typical setup:
 - Define the environment with `deploy: { strategy: "branch", branch: "main" }` or an explicit `trigger: "ci"`. For GitHub Actions, this branch must be the repository's default branch so GitHub can dispatch the managed workflow.
 - Run `hv_apply` first so Hypervibe records provider project, environment, and service ID bindings.
 - Declare `deploy.strategy="branch"` and `deploy.trigger="ci"` with `hv_spec`, then run `hv_plan` and `hv_apply`.
-- Check the returned `requiredSecrets`, `syncedSecrets`, `manualSecrets`, and `requiredVariables`. Hypervibe syncs provider API credentials to GitHub Actions secrets when the provider connection is verified and the GitHub token can write repo secrets.
+- Check the returned `requiredSecrets`, `syncedEnvironmentSecrets`, and `requiredVariables`. Hypervibe syncs deployment credentials and migration database URLs into the selected GitHub environment when its connections are verified. Repository build secrets use their separate declared scope.
 
 Provider workflow behavior:
 

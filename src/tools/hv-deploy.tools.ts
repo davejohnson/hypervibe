@@ -18,6 +18,7 @@ import {
 } from '../application/apply-plan.js';
 import { projectField, envField, confirmField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
+import { resolveReviewedBranchDeployTargets } from '../domain/services/managed-ci-targets.js';
 import { resolveDevOpsSelection } from '../domain/spec/devops-selection.js';
 import { firstProviderSpecValidationFailure } from '../domain/services/provider-spec-validation.js';
 
@@ -29,10 +30,6 @@ function assertConfirmed(project: Project, environment: Environment, confirm: bo
       { hint: `Re-run ${action} with confirm=true to proceed.` }
     );
   }
-}
-
-function defaultBranchForEnvironment(envName: string): string {
-  return envName.toLowerCase().includes('prod') ? 'main' : 'staging';
 }
 
 function ciBranchDeployGuidance(project: Project, envName: string): {
@@ -52,7 +49,10 @@ function ciBranchDeployGuidance(project: Project, envName: string): {
     return null;
   }
 
-  const branch = envSpec.deploy.branch ?? defaultBranchForEnvironment(envName);
+  const target = resolveReviewedBranchDeployTargets(project, specResult.spec).targets
+    .find((candidate) => candidate.environmentName === envName);
+  if (!target) return null;
+  const branch = target.branch;
   const selection = resolveDevOpsSelection(specResult.spec);
   const ciProvider = selection?.ci?.provider;
   if (!ciProvider) return null;

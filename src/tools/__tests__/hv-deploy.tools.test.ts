@@ -235,36 +235,37 @@ describe('hv_deploy', () => {
     await t.close();
   });
 
-  it('does not direct-deploy Railway GitHub Actions branch deploy environments', async () => {
+  it.each([['railway', 'production'], ['railway', 'staging'], ['cloudrun', 'staging']])('routes %s %s deploy guidance through the reviewed branch default', async (provider, environmentName) => {
     const project = new ProjectRepository().create({
       name: 'rail-ci-app',
-      defaultPlatform: 'railway',
+      defaultPlatform: provider,
       gitRemoteUrl: 'https://github.com/davejohnson/rail-ci-app',
     });
-    new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
+    new EnvironmentRepository().create({ projectId: project.id, name: environmentName });
     new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
     new SpecStore().replace(project, {
       version: 1,
       project: project.name,
       gitRemoteUrl: project.gitRemoteUrl,
       environments: {
-        production: {
-          hosting: { provider: 'railway' },
+        [environmentName]: {
+          hosting: { provider },
           services: { web: { workloadKind: 'web' } },
-          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+          deploy: { strategy: 'branch', trigger: 'ci' },
         },
       },
     });
     const adapterSpy = vi.spyOn(adapterFactory, 'getHostingAdapter');
 
     const t = await makeClient();
-    const result = await t.call('hv_deploy', { project: 'rail-ci-app', env: 'production' });
+    const result = await t.call('hv_deploy', { project: 'rail-ci-app', env: environmentName });
 
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('VALIDATION');
     expect(result.error.message).toContain('does not build or push the image');
     expect(result.hint).toContain('hv_ci_trigger');
-    expect(result.hint).toContain('deploy-railway-production.yml');
+    expect(result.hint).toContain(`deploy-${provider}-${environmentName}.yml`);
+    expect(result.hint).toContain('ref="main"');
     expect(result.hint).toContain('Never dispatch or monitor this workflow with gh');
     expect(adapterSpy).not.toHaveBeenCalled();
     await t.close();
