@@ -70,6 +70,7 @@ import { firstProviderSpecValidationFailure } from '../domain/services/provider-
 import { buildManagedDatabaseEnvVars } from '../domain/services/database-env.js';
 import { buildCacheEnvVarsFromComponent } from '../domain/services/cache-env.js';
 import type { ObservedState } from '../domain/ports/observe.port.js';
+import { environmentResourceWarnings } from '../domain/services/environment-resource-parity.service.js';
 import {
   environmentVariableCoverage,
   introducedEnvironmentVariableCoverageIssues,
@@ -569,18 +570,13 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         const checkRuntimeIssues = result.spec.github
           ? unresolvedGitHubCheckRuntimeIssues(result.spec.github, result.spec.runtime)
           : [];
-        const extras = result.adopted && result.source?.kind === 'repo'
-          ? { warnings: [
-            `${result.source.path} changed outside hypervibe; recorded as revision ${result.revision}.`,
-            ...(runtimeReview.status === 'review-required' ? [runtimeReview.message] : []),
-            ...checkRuntimeIssues,
-          ] }
-          : runtimeReview.status === 'review-required' || checkRuntimeIssues.length > 0
-            ? { warnings: [
-              ...(runtimeReview.status === 'review-required' ? [runtimeReview.message] : []),
-              ...checkRuntimeIssues,
-            ] }
-            : undefined;
+        const warnings = [
+          ...(result.adopted && result.source?.kind === 'repo'
+            ? [`${result.source.path} changed outside hypervibe; recorded as revision ${result.revision}.`] : []),
+          ...(runtimeReview.status === 'review-required' ? [runtimeReview.message] : []),
+          ...checkRuntimeIssues,
+          ...environmentResourceWarnings(result.spec),
+        ];
         return commandSuccess({
           project: { id: project.id, name: project.name, gitRemoteUrl },
           revision: result.revision,
@@ -589,7 +585,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           repositoryRuntime,
           runtimeReview,
           connections: requiredConnectionChecklist(ctx, result.spec),
-        }, extras);
+        }, { warnings });
       }
 
       const specProject = typeof spec.project === 'string' && spec.project.trim()
@@ -706,6 +702,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         : [];
       const nativeDeploys = providerNativeDeployChanges(result.spec, null);
       const warnings = [
+        ...environmentResourceWarnings(result.spec),
         ...(nativeDeploys.length > 0 ? [nativeDeployConfirmationHint(nativeDeploys)] : []),
         ...(runtimeReview.status === 'review-required' ? [runtimeReview.message] : []),
         ...checkRuntimeIssues,
@@ -924,7 +921,11 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         },
         {
           hint,
-          warnings: [...result.warnings, ...actionScopedWarnings],
+          warnings: [
+            ...result.warnings,
+            ...actionScopedWarnings,
+            ...(currentSpec && scope !== 'retained-cleanup' ? environmentResourceWarnings(currentSpec, result.environmentName) : []),
+          ],
           next,
           ...(result.inputRequired.length > 0
             ? {

@@ -166,6 +166,70 @@ describe('bootstrap action receipt mapping', () => {
 });
 
 describe('hv_spec', () => {
+  it.each(['railway', 'cloudrun', 'digitalocean', 'fly', 'ecs', 'azure-container-apps', 'vercel'])(
+    'warns about resource differences on spec write/read without copying them for %s', async (provider) => {
+      const t = await makeClient();
+      try {
+        const written = await t.call('hv_spec', {
+          project: 'resource-parity-app',
+          spec: { project: 'resource-parity-app', environments: {
+            production: { hosting: { provider }, services: {
+              web: { startCommand: 'npm start' },
+              reports: { startCommand: 'npm run reports' },
+            } },
+            staging: { hosting: { provider }, services: { web: { startCommand: 'npm start' } } },
+          } },
+        });
+        expect(written.ok).toBe(true);
+        expect(written.warnings).toContainEqual(expect.stringContaining('service:reports'));
+        expect(written.warnings).toContainEqual(expect.stringContaining('may behave differently'));
+        expect(written.data.spec.environments.staging.services.reports).toBeUndefined();
+        const read = await t.call('hv_spec', { project: 'resource-parity-app' });
+        expect(read.ok).toBe(true);
+        expect(read.warnings).toContainEqual(expect.stringContaining('service:reports'));
+        expect(read.data.revision).toBe(written.data.revision);
+        expect(read.data.spec).toEqual(written.data.spec);
+      } finally {
+        await t.close();
+      }
+    }
+  );
+
+  it('keeps resource notes visible in an early managed-CI binding plan without adding missing resources', async () => {
+    const t = await makeClient();
+    try {
+      const written = await t.call('hv_spec', {
+        project: 'resource-parity-plan',
+        spec: {
+          project: 'resource-parity-plan',
+          devops: {
+            code: { provider: 'github', scope: 'test-owner/resource-parity-plan', repository: {
+              state: 'present', management: 'external', visibility: 'private', defaultBranch: 'main',
+            } },
+            ci: { provider: 'github-actions', runner: { mode: 'provider-hosted' } },
+            canonicalEnvironment: 'production',
+          },
+          environments: {
+            production: { hosting: { provider: 'railway' }, services: {
+              web: { startCommand: 'npm start' },
+              reminders: { workloadKind: 'cron', startCommand: 'npm run reminders', cronSchedule: '0 * * * *' },
+            } },
+            staging: { hosting: { provider: 'railway' }, services: { web: { startCommand: 'npm start' } },
+              deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' } },
+          },
+        },
+      });
+      expect(written.ok).toBe(true);
+      const planned = await t.call('hv_plan', { project: 'resource-parity-plan', env: 'staging', includeEnvFile: false });
+      expect(planned.ok).toBe(true);
+      expect(planned.data.scope).toBe('managed-ci-bindings');
+      expect(planned.warnings).toContainEqual(expect.stringContaining('service:reminders'));
+      expect(planned.data.actions.some((action: PlanAction) => action.resource.name === 'reminders')).toBe(false);
+    } finally {
+      await t.close();
+    }
+  });
+
   it('bootstraps the read-first MCP workflow in a completely new git repository', async () => {
     const oldCwd = process.cwd();
     const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;

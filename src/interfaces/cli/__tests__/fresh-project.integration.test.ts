@@ -45,6 +45,31 @@ function captureIo(stdin = '') {
 }
 
 describe('fresh-project CLI workflow', () => {
+  it('exposes the shared resource note in JSON and human output without blocking a divergent spec', async () => {
+    const registry = createCommandRegistry(createCommandContext());
+    const write = captureIo(JSON.stringify({
+      project: 'cli-resource-parity',
+      spec: { project: 'cli-resource-parity', environments: {
+        production: { hosting: { provider: 'railway' }, services: {
+          web: { startCommand: 'npm start' }, jobs: { workloadKind: 'worker', startCommand: 'npm run jobs' },
+        } },
+        staging: { hosting: { provider: 'railway' }, services: { web: { startCommand: 'npm start' } } },
+      } },
+    }));
+    expect(await runCli(['spec', '--input', '-', '--json'], { registry, io: write.io, initialize: false })).toBe(0);
+    const written = JSON.parse(write.stdout());
+    expect(written.warnings).toContainEqual(expect.stringContaining('service:jobs'));
+    expect(written.data.spec.environments.staging.services.jobs).toBeUndefined();
+    const read = captureIo();
+    expect(await runCli(['spec', '--project', 'cli-resource-parity', '--json'], { registry, io: read.io, initialize: false })).toBe(0);
+    expect(JSON.parse(read.stdout()).warnings).toEqual(written.warnings);
+    const human = captureIo();
+    expect(await runCli(['spec', '--project', 'cli-resource-parity'], { registry, io: human.io, initialize: false })).toBe(0);
+    expect(human.stdout()).toContain('service:jobs');
+    expect(human.stdout()).toContain('may behave differently');
+    expect(human.stderr()).toBe('');
+  });
+
   it('reads the bootstrap contract and initializes desired state through the shared command', async () => {
     const oldCwd = process.cwd();
     const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;

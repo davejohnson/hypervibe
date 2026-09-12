@@ -910,6 +910,30 @@ changed configurations, additional services/environments, and mixed secret
 boundaries still undergo validation. Provider observation and AI are not required for this guardrail;
 `hv_plan` and `hv_apply` continue to own convergence of the accepted spec.
 
+### Environment Resource Notes
+
+`hv_spec` reads/writes and `hv_plan` return non-blocking, provider-independent
+notes when release environments declare different logical resources or workload
+definitions. Compare all environment pairs except reserved `local`/`repository`;
+a plan reports only pairs involving its selected environment. The note stays
+visible even when managed CI limits that plan to an initial binding stage.
+Retained-cleanup plans do not include deployment-parity advice.
+
+Compare service presence, kind, commands, schedules, visibility and health probes;
+hosting/datastore providers and engines; named storage and its consumers; queues;
+domain/load-balancer presence; and email, messaging, payment and iOS integration
+presence. Messaging sender presence is distinct from Messaging Service presence.
+Do not compare secret/env values, concrete domain/sender/provider identities,
+placement or capacity. This is a targeted desired-state advisory, not a complete
+configuration equivalence check or proof of live resource absence or health.
+
+Notes use the existing shared command warnings envelope in MCP and CLI, with no
+new schema, blocking gate, provider requests, plan actions or automatic copying.
+They are computed at command time, not persisted into the plan's mutation
+authority. Agents should explain potentially intentional differences before
+claiming staging validates production; changing resources still requires the
+normal reviewed spec/plan/apply flow.
+
 ## Stripe Desired State
 
 Stripe sandboxes are isolated environments with their own API keys and object
