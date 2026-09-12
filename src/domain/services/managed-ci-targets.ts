@@ -1,5 +1,5 @@
-import { createHash } from 'crypto';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import type { Project } from '../entities/project.entity.js';
 import type {
   BranchDeployEnvironmentKind,
@@ -17,17 +17,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
-}
-
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalize);
-  const record = asRecord(value);
-  if (!record) return value;
-  return Object.fromEntries(
-    Object.entries(record)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, child]) => [key, canonicalize(child)])
-  );
 }
 
 function normalizedReleaseResources(
@@ -74,13 +63,13 @@ export function managedCiBindingsFingerprint(params: {
   scope: BranchDeployReleaseTarget['scope'];
   resources: BranchDeployReleaseResource[];
 }): string {
-  return createHash('sha256').update(JSON.stringify(canonicalize({
+  return canonicalJsonSha256({
     version: 1,
     provider: params.provider,
     environment: params.environmentName,
     scope: params.scope,
     resources: normalizedReleaseResources(params.resources),
-  })), 'utf8').digest('hex');
+  });
 }
 
 export function managedCiReleaseTarget(params: {
@@ -135,7 +124,8 @@ export function classifyManagedCiEnvironment(name: string): BranchDeployEnvironm
 export function managedCiEnvironmentBindings(
   projectId: string,
   environmentName: string,
-  desiredWorkloadKinds?: Record<string, 'web' | 'worker' | 'cron'>
+  desiredWorkloadKinds?: Record<string, 'web' | 'worker' | 'cron'>,
+  desiredProvider?: string
 ): {
   providerProjectId?: string;
   providerEnvironmentId?: string;
@@ -150,7 +140,8 @@ export function managedCiEnvironmentBindings(
 } {
   const environment = new EnvironmentRepository().findByProjectAndName(projectId, environmentName);
   const bindings = parseHostingBindings(environment);
-  const services = bindings.services ?? {};
+  const bindingsMatchProvider = !desiredProvider || bindings.provider === desiredProvider;
+  const services = bindingsMatchProvider ? bindings.services ?? {} : {};
   const boundServiceNames = Object.keys(services);
   const providerServiceIds: string[] = [];
   const providerImageUris: string[] = [];
@@ -207,9 +198,13 @@ export function managedCiEnvironmentBindings(
     }
   }
   return {
-    providerProjectId: typeof bindings?.projectId === 'string' ? bindings.projectId : undefined,
-    providerEnvironmentId: typeof bindings?.environmentId === 'string' ? bindings.environmentId : undefined,
-    ...(bindings.providerScope ? { providerScope: bindings.providerScope } : {}),
+    providerProjectId: bindingsMatchProvider && typeof bindings?.projectId === 'string'
+      ? bindings.projectId
+      : undefined,
+    providerEnvironmentId: bindingsMatchProvider && typeof bindings?.environmentId === 'string'
+      ? bindings.environmentId
+      : undefined,
+    ...(bindingsMatchProvider && bindings.providerScope ? { providerScope: bindings.providerScope } : {}),
     providerServiceIds,
     providerImageUris,
     providerJobNames,
@@ -262,7 +257,12 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
       Object.entries(effectiveEnvironment.services)
         .map(([serviceName, service]) => [serviceName, service.workloadKind] as const)
     );
-    const bindings = managedCiEnvironmentBindings(project.id, environmentName, desiredWorkloadKinds);
+    const bindings = managedCiEnvironmentBindings(
+      project.id,
+      environmentName,
+      desiredWorkloadKinds,
+      environment.hosting.provider
+    );
     const runtimeServiceNames = Object.entries(effectiveEnvironment.services)
       .filter(([, service]) => service.workloadKind !== 'cron')
       .map(([name]) => name);
@@ -316,13 +316,9 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
             promoteFromEnvironment,
             promoteFromProvider: spec.environments[promoteFromEnvironment]!.hosting.provider,
             promoteFromServiceNames: Object.keys(promoteFromEnvironmentSpec!.services),
-            promoteFromProgramFingerprint: environmentDeploymentContractHashForApply(
-              spec,
-              promoteFromEnvironment
-            ),
           }
         : {}),
-      programFingerprint: environmentDeploymentContractHashForApply(spec, environmentName),
+      deploymentContractFingerprint: environmentDeploymentContractHashForApply(spec, environmentName),
       serviceNames: serviceNames.length > 0 ? serviceNames : bindings.boundServiceNames,
       providerProjectId: bindings.providerProjectId,
       providerEnvironmentId: bindings.providerEnvironmentId,

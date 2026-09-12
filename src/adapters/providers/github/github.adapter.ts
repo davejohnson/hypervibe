@@ -337,19 +337,13 @@ export class GitHubAdapter {
   /**
    * Create or update a file in a repository via the Contents API.
    */
-  async getFileContent(owner: string, repo: string, path: string): Promise<string | null> {
-    try {
-      const existing = await this.request<{ content: string }>(
-        'GET',
-        `/repos/${owner}/${repo}/contents/${path}`
-      );
-      return decodeFileContent(existing.content);
-    } catch (error) {
-      if (isGitHubNotFound(error)) {
-        return null;
-      }
-      throw error;
-    }
+  async getFileContent(
+    owner: string,
+    repo: string,
+    path: string,
+    ref?: string
+  ): Promise<string | null> {
+    return (await this.getFile(owner, repo, path, ref))?.content ?? null;
   }
 
   async getRepository(owner: string, repo: string): Promise<{

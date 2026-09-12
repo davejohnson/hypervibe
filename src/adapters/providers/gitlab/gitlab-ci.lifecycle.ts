@@ -10,6 +10,7 @@ import type { CiVariableObservation, CodeChangeRequest, CodeRepositoryIdentity }
 import type { CiApplyResult, CiLifecyclePort, CiLifecycleResult } from '../../../domain/registry/devops.registry.js';
 import type { EnvironmentSpec, ProjectSpec } from '../../../domain/spec/spec.schema.js';
 import { environmentDeploymentContractHashForApply } from '../../../domain/services/deployment-contract.service.js';
+import { MANAGED_CI_DEPLOYMENT_CONTRACT_RUNTIME_SOURCE } from '../../../domain/services/managed-ci-evidence.js';
 import type { BranchDeployTarget, PortableCiDeployRecipe } from '../../../domain/ports/ci-deploy.port.js';
 import {
   missingManagedCiReleaseBindings,
@@ -35,9 +36,10 @@ import {
 const ROOT_MARKER = '# hypervibe-managed: gitlab-ci/v1';
 const MANIFEST_PATH = '.gitlab/hypervibe/manifest.yml';
 export const GITLAB_DEPLOYMENT_GATE_PATH = '.gitlab/hypervibe/verify-deployment-order.mjs';
+export const GITLAB_DEPLOYMENT_CONTRACT_PATH = '.gitlab/hypervibe/verify-deployment-contract.cjs';
 export const GITLAB_PROMOTION_GATE_PATH = '.gitlab/hypervibe/verify-promotion-evidence.mjs';
 export const GITLAB_RELEASE_EVIDENCE_PATH = '.gitlab/hypervibe/finalize-release-evidence.mjs';
-const PROGRAM_VERSION = 1;
+const PROGRAM_VERSION = 2;
 const GITLAB_SAAS_RUNNER_TAG = 'saas-linux-small-amd64';
 
 type ManagedFile = { path: string; content: string; hash: string };
@@ -157,7 +159,7 @@ function releaseEvidenceContract(
 ): ReleaseEvidenceContract {
   const services = [...target.serviceNames].sort();
   const providerResources = [...(recipe.releaseEvidence?.providerResources ?? [])].sort();
-  const deploymentContractFingerprint = target.programFingerprint ?? '';
+  const deploymentContractFingerprint = target.deploymentContractFingerprint ?? '';
   if (
     services.length === 0
     || new Set(services).size !== services.length
@@ -234,15 +236,14 @@ async function proveMergedConfigurationOwnership(
 function boundConfigurationPaths(binding: Record<string, unknown> | null): string[] {
   const active = asRecord(binding?.configurationActive);
   const proposal = asRecord(binding?.configurationProposal);
-  const files = Array.isArray(active?.files)
-    ? active.files
-    : Array.isArray(proposal?.files)
-      ? proposal.files
-      : [];
-  return files.flatMap((entry) => {
+  const files = [
+    ...(Array.isArray(active?.files) ? active.files : []),
+    ...(Array.isArray(proposal?.files) ? proposal.files : []),
+  ];
+  return [...new Set(files.flatMap((entry) => {
     const record = asRecord(entry);
     return typeof record?.path === 'string' ? [record.path] : [];
-  });
+  }))];
 }
 
 function persistConfigurationProposal(params: {
@@ -343,27 +344,30 @@ function canonicalEnvironment(spec: ProjectSpec, targets: BranchDeployTarget[]):
     ?? null;
 }
 
+function ownsConfiguration(binding: Record<string, unknown> | null): boolean {
+  return Boolean(
+    asRecord(binding?.configurationActive)
+    || asRecord(binding?.configurationProposal)
+  );
+}
+
 function configurationBindingForSpec(project: Project, spec: ProjectSpec): Record<string, unknown> | null {
   const canonical = canonicalEnvironment(spec, renderableManagedTargets(project, spec));
   const canonicalBinding = canonical ? gitLabCiBinding(project.id, canonical) : null;
-  if (canonicalBinding) return canonicalBinding;
+  if (ownsConfiguration(canonicalBinding)) return canonicalBinding;
   for (const environment of new EnvironmentRepository().findByProjectId(project.id)) {
     const binding = gitLabCiBinding(project.id, environment.name);
-    if (binding && (asRecord(binding.configurationActive) || asRecord(binding.configurationProposal))) {
-      return binding;
-    }
+    if (ownsConfiguration(binding)) return binding;
   }
   return null;
 }
 
 function configurationOwnerEnvironment(project: Project, spec: ProjectSpec): string | null {
   const canonical = canonicalEnvironment(spec, renderableManagedTargets(project, spec));
-  if (canonical && gitLabCiBinding(project.id, canonical)) return canonical;
+  if (canonical && ownsConfiguration(gitLabCiBinding(project.id, canonical))) return canonical;
   for (const environment of new EnvironmentRepository().findByProjectId(project.id)) {
     const binding = gitLabCiBinding(project.id, environment.name);
-    if (binding && (asRecord(binding.configurationActive) || asRecord(binding.configurationProposal))) {
-      return environment.name;
-    }
+    if (ownsConfiguration(binding)) return environment.name;
   }
   return canonical;
 }
@@ -397,6 +401,33 @@ function renderRules(spec: ProjectSpec, target: BranchDeployTarget): string {
   rules.push(`    - if: ${yamlString(`$CI_PIPELINE_SOURCE == "api" && $CI_COMMIT_TAG =~ /^${rollbackTagPrefix}[a-z0-9-]+$/ && "$[[ inputs.environment ]]" == ${gitLabExpressionString(target.environmentName)} && "$[[ inputs.rollback ]]" == "true"`)}`);
   rules.push('    - when: never');
   return rules.join('\n');
+}
+
+export function buildGitLabDeploymentContractRuntime(): string {
+  return `const { createHash } = require('node:crypto');
+const { readFileSync, writeFileSync } = require('node:fs');
+
+${MANAGED_CI_DEPLOYMENT_CONTRACT_RUNTIME_SOURCE}
+
+const environmentName = String(process.env.HYPERVIBE_ENVIRONMENT || '').trim();
+const appliedHash = String(process.env.HYPERVIBE_APPLIED_SPEC_HASH || '').trim();
+const rollback = process.env.HYPERVIBE_ROLLBACK;
+if (!environmentName) throw new Error('HYPERVIBE_ENVIRONMENT is required for the deployment contract gate');
+if (!['false', 'true'].includes(rollback)) throw new Error('HYPERVIBE_ROLLBACK is invalid for the deployment contract gate');
+if (!/^[0-9a-f]{64}$/.test(appliedHash)) {
+  throw new Error((rollback === 'true' ? 'Rollback' : 'Deployment') + ' blocked for ' + environmentName + ': applied contract hash is missing or malformed.');
+}
+if (rollback !== 'true') {
+  let spec;
+  try { spec = JSON.parse(readFileSync('.hypervibe/spec.json', 'utf8')); }
+  catch { throw new Error('Deployment blocked for ' + environmentName + ': .hypervibe/spec.json is missing or invalid.'); }
+  const desiredHash = deploymentContractFingerprint(spec, environmentName);
+  if (appliedHash !== desiredHash) {
+    throw new Error('Deployment blocked for ' + environmentName + ': desired and applied contract hashes differ.');
+  }
+}
+writeFileSync('.hypervibe-deployment-contract-fingerprint', appliedHash + '\\n', { mode: 0o600 });
+`;
 }
 
 export function buildGitLabDeploymentGateRuntime(): string {
@@ -520,13 +551,17 @@ await writeFile('.hypervibe-release.json', JSON.stringify({
 }
 
 export function buildGitLabPromotionGateRuntime(): string {
-  return `const required = ['CI_API_V4_URL', 'CI_PROJECT_ID', 'CI_JOB_TOKEN', 'HYPERVIBE_REPOSITORY', 'HYPERVIBE_PROMOTE_FROM_ENVIRONMENT', 'HYPERVIBE_PROMOTE_FROM_PROVIDER', 'HYPERVIBE_PROMOTE_FROM_JOB', 'HYPERVIBE_PROMOTION_SHA', 'HYPERVIBE_PROGRAM_FINGERPRINT', 'HYPERVIBE_PROMOTION_DEPLOYMENT_CONTRACT_FINGERPRINT', 'HYPERVIBE_PROMOTION_SERVICES', 'HYPERVIBE_PROMOTION_PROVIDER_IDENTITY', 'HYPERVIBE_PROMOTION_PROVIDER_RESOURCES', 'HYPERVIBE_PROMOTION_REQUIRES_IMMUTABLE_IMAGE'];
+  return `import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+
+${MANAGED_CI_DEPLOYMENT_CONTRACT_RUNTIME_SOURCE}
+
+const required = ['CI_API_V4_URL', 'CI_PROJECT_ID', 'CI_JOB_TOKEN', 'HYPERVIBE_REPOSITORY', 'HYPERVIBE_PROMOTE_FROM_ENVIRONMENT', 'HYPERVIBE_PROMOTE_FROM_PROVIDER', 'HYPERVIBE_PROMOTE_FROM_JOB', 'HYPERVIBE_PROMOTION_SHA', 'HYPERVIBE_PROGRAM_FINGERPRINT', 'HYPERVIBE_PROMOTION_SERVICES', 'HYPERVIBE_PROMOTION_PROVIDER_IDENTITY', 'HYPERVIBE_PROMOTION_PROVIDER_RESOURCES', 'HYPERVIBE_PROMOTION_REQUIRES_IMMUTABLE_IMAGE'];
 for (const key of required) if (!process.env[key]) throw new Error(key + ' is required for the promotion gate');
 if (!/^[1-9]\\d*$/.test(process.env.CI_PROJECT_ID)) throw new Error('CI_PROJECT_ID must be a positive GitLab id');
 const targetSha = process.env.HYPERVIBE_PROMOTION_SHA.toLowerCase();
 if (!/^[0-9a-f]{40}$/.test(targetSha)) throw new Error('HYPERVIBE_PROMOTION_SHA must be a full Git SHA');
 if (!/^[0-9a-f]{64}$/.test(process.env.HYPERVIBE_PROGRAM_FINGERPRINT)) throw new Error('HYPERVIBE_PROGRAM_FINGERPRINT must be a SHA-256 fingerprint');
-if (!/^[0-9a-f]{64}$/.test(process.env.HYPERVIBE_PROMOTION_DEPLOYMENT_CONTRACT_FINGERPRINT)) throw new Error('HYPERVIBE_PROMOTION_DEPLOYMENT_CONTRACT_FINGERPRINT must be a SHA-256 fingerprint');
 if (!['false', 'true'].includes(process.env.HYPERVIBE_PROMOTION_REQUIRES_IMMUTABLE_IMAGE)) throw new Error('HYPERVIBE_PROMOTION_REQUIRES_IMMUTABLE_IMAGE is invalid');
 function stringArray(name) {
   let value;
@@ -553,6 +588,10 @@ const requiresImmutableImage = process.env.HYPERVIBE_PROMOTION_REQUIRES_IMMUTABL
 const sourceEnvironment = process.env.HYPERVIBE_PROMOTE_FROM_ENVIRONMENT;
 const sourceProvider = process.env.HYPERVIBE_PROMOTE_FROM_PROVIDER;
 const sourceJob = process.env.HYPERVIBE_PROMOTE_FROM_JOB;
+let deploymentSpec;
+try { deploymentSpec = JSON.parse(await readFile('.hypervibe/spec.json', 'utf8')); }
+catch { throw new Error('GitLab promotion requires a valid .hypervibe/spec.json at the promoted commit'); }
+const expectedDeploymentContractFingerprint = deploymentContractFingerprint(deploymentSpec, sourceEnvironment);
 const headers = { Accept: 'application/json', 'JOB-TOKEN': process.env.CI_JOB_TOKEN };
 const endpoint = new URL(process.env.CI_API_V4_URL.replace(/\\/+$/, '') + '/projects/' + encodeURIComponent(process.env.CI_PROJECT_ID) + '/deployments');
 endpoint.searchParams.set('environment', sourceEnvironment);
@@ -637,7 +676,7 @@ for (const deployment of candidates) {
     && evidence?.environment === sourceEnvironment
     && String(evidence?.sha || '').toLowerCase() === targetSha
     && evidence?.programFingerprint === process.env.HYPERVIBE_PROGRAM_FINGERPRINT
-    && evidence?.deploymentContractFingerprint === process.env.HYPERVIBE_PROMOTION_DEPLOYMENT_CONTRACT_FINGERPRINT
+    && evidence?.deploymentContractFingerprint === expectedDeploymentContractFingerprint
     && actualServices !== null
     && same(actualServices, expectedServices)
     && evidence?.providerIdentity
@@ -688,10 +727,9 @@ function renderPromotionGateJob(
   }
   const sourceEvidence = releaseEvidenceContract(sourceTarget, sourceRecipe);
   const promotedServices = [...(target.promoteFromServiceNames ?? [])].sort();
-  if (
-    JSON.stringify(promotedServices) !== JSON.stringify(sourceEvidence.services)
-    || target.promoteFromProgramFingerprint !== sourceEvidence.deploymentContractFingerprint
-  ) throw new Error(`GitLab promotion target ${target.environmentName} has stale source release expectations`);
+  if (JSON.stringify(promotedServices) !== JSON.stringify(sourceEvidence.services)) {
+    throw new Error(`GitLab promotion target ${target.environmentName} has stale source release expectations`);
+  }
   const slug = safeSlug(target.environmentName);
   const sourceSlug = safeSlug(target.promoteFromEnvironment);
   const sourceProviderSlug = safeSlug(target.promoteFromProvider);
@@ -720,7 +758,6 @@ function renderPromotionGateJob(
       export HYPERVIBE_PROMOTE_FROM_JOB=${gitLabShellLiteral(sourceJob)}
       export HYPERVIBE_PROMOTION_SHA="$[[ inputs.commit_sha ]]"
       export HYPERVIBE_PROGRAM_FINGERPRINT=${gitLabShellLiteral(programFingerprint)}
-      export HYPERVIBE_PROMOTION_DEPLOYMENT_CONTRACT_FINGERPRINT=${gitLabShellLiteral(sourceEvidence.deploymentContractFingerprint)}
       export HYPERVIBE_PROMOTION_SERVICES=${gitLabShellLiteral(JSON.stringify(sourceEvidence.services))}
       export HYPERVIBE_PROMOTION_PROVIDER_IDENTITY=${gitLabShellLiteral(JSON.stringify(sourceEvidence.providerIdentity))}
       export HYPERVIBE_PROMOTION_PROVIDER_RESOURCES=${gitLabShellLiteral(JSON.stringify(sourceEvidence.providerResources))}
@@ -741,10 +778,10 @@ function renderEnvironmentJobs(
   sourceRecipe?: PortableCiDeployRecipe
 ): string {
   const slug = safeSlug(target.environmentName);
-  const appliedHash = environmentDeploymentContractHashForApply(spec, target.environmentName);
   const keys = gitLabVariableKeys(spec, target.environmentName, recipe.values.map((value) => value.name));
   const rules = renderRules(spec, target);
   const selectedRunnerTag = runnerTag(spec);
+  const contractJob = `hypervibe:contract:${hostingProvider}:${slug}`;
   const buildJob = `hypervibe:build:${hostingProvider}:${slug}`;
   const deployJob = `hypervibe:deploy:${hostingProvider}:${slug}`;
   const container = recipe.kind === 'container';
@@ -784,6 +821,35 @@ function renderEnvironmentJobs(
       type: string
       default: ''
 ---
+${contractJob}:
+  stage: contract
+  image: ${HYPERVIBE_MANAGED_NODE_SLIM_IMAGE}
+  tags:
+    - ${selectedRunnerTag}
+  inherit:
+    default: false
+    variables: false
+  interruptible: true
+  timeout: 5m
+  environment:
+    name: ${yamlString(target.environmentName)}
+    action: verify
+  rules:
+${rules}
+  before_script: []
+  script:
+    - |
+      set -eu
+      export HYPERVIBE_ENVIRONMENT=${gitLabShellLiteral(target.environmentName)}
+      export HYPERVIBE_APPLIED_SPEC_HASH="$(printenv ${keys.appliedSpecHash} || true)"
+      export HYPERVIBE_ROLLBACK="$[[ inputs.rollback ]]"
+      node ${GITLAB_DEPLOYMENT_CONTRACT_PATH}
+  after_script: []
+  artifacts:
+    expire_in: 1 day
+    paths:
+      - .hypervibe-deployment-contract-fingerprint
+
 ${promotionGateJob}${buildJob}:
   stage: build
   image: docker:27.5.1-git
@@ -804,7 +870,6 @@ ${rules}
   script:
     - |
       set -eu
-      test "$${keys.appliedSpecHash}" = ${gitLabShellLiteral(appliedHash)}
 ${container
     ? recipe.releaseEvidence?.requiresImmutableImage
       ? `      if test "$[[ inputs.rollback ]]" = "true"; then
@@ -843,6 +908,8 @@ ${container ? `  services:
   environment:
     name: ${yamlString(target.environmentName)}
   needs:
+    - job: ${contractJob}
+      artifacts: true
     - job: ${buildJob}
       artifacts: true
 ${container ? `  variables:
@@ -853,7 +920,6 @@ ${rules}
   script:
     - |
       set -eu
-      test "$${keys.appliedSpecHash}" = ${gitLabShellLiteral(appliedHash)}
       export HYPERVIBE_REPOSITORY=${gitLabShellLiteral(spec.devops!.code.scope)}
       export HYPERVIBE_ENVIRONMENT=${gitLabShellLiteral(target.environmentName)}
       export HYPERVIBE_PROGRAM_FINGERPRINT=${gitLabShellLiteral(programFingerprint)}
@@ -862,7 +928,9 @@ ${rules}
       export HYPERVIBE_SOURCE_PIPELINE_ID="$[[ inputs.source_pipeline_id ]]"
       export HYPERVIBE_EXPECTED_LATEST_RUN_ID="$[[ inputs.expected_latest_run_id ]]"
       export HYPERVIBE_RELEASE_PROVIDER=${gitLabShellLiteral(hostingProvider)}
-      export HYPERVIBE_DEPLOYMENT_CONTRACT_FINGERPRINT=${gitLabShellLiteral(releaseEvidence.deploymentContractFingerprint)}
+      export HYPERVIBE_APPLIED_SPEC_HASH="$(printenv ${keys.appliedSpecHash} || true)"
+      node ${GITLAB_DEPLOYMENT_CONTRACT_PATH}
+      export HYPERVIBE_DEPLOYMENT_CONTRACT_FINGERPRINT="$(cat .hypervibe-deployment-contract-fingerprint)"
       export HYPERVIBE_RELEASE_SERVICES=${gitLabShellLiteral(JSON.stringify(releaseEvidence.services))}
       export HYPERVIBE_RELEASE_PROVIDER_IDENTITY=${gitLabShellLiteral(JSON.stringify(releaseEvidence.providerIdentity))}
       export HYPERVIBE_RELEASE_PROVIDER_RESOURCES=${gitLabShellLiteral(JSON.stringify(releaseEvidence.providerResources))}
@@ -938,6 +1006,7 @@ function renderManagedFiles(project: Project, spec: ProjectSpec, rootPath: strin
     provider: 'gitlab-ci',
     repository: spec.devops?.code,
     runtime,
+    deploymentContractHash: sha256(buildGitLabDeploymentContractRuntime()),
     deploymentGateHash: sha256(buildGitLabDeploymentGateRuntime()),
     releaseEvidenceHash: sha256(buildGitLabReleaseEvidenceRuntime()),
     promotionGateHash: targets.some((target) => target.promoteFromEnvironment)
@@ -950,7 +1019,6 @@ function renderManagedFiles(project: Project, spec: ProjectSpec, rootPath: strin
       autoDeployOnPush: target.autoDeployOnPush,
       promoteFromEnvironment: target.promoteFromEnvironment,
       promoteFromProvider: target.promoteFromProvider,
-      appliedSpecHash: environmentDeploymentContractHashForApply(spec, target.environmentName),
       startCommand,
       recipe: {
         version: recipe.version,
@@ -967,6 +1035,7 @@ function renderManagedFiles(project: Project, spec: ProjectSpec, rootPath: strin
   const jobNames = descriptors.flatMap(({ target, provider }) => {
     const slug = safeSlug(target.environmentName);
     return [
+      `hypervibe:contract:${provider}:${slug}`,
       ...(target.promoteFromEnvironment ? [`hypervibe:promote:${provider}:${slug}`] : []),
       `hypervibe:build:${provider}:${slug}`,
       `hypervibe:deploy:${provider}:${slug}`,
@@ -1055,6 +1124,7 @@ ${targets.filter((target) => target.autoDeployOnPush).map((target) => `    - if:
     - if: '$CI_PIPELINE_SOURCE == "api" || $CI_PIPELINE_SOURCE == "web"'
     - when: never
 stages:
+  - contract
 ${hasPromotion ? '  - promotion\n' : ''}  - build
   - deploy
 include:
@@ -1068,6 +1138,7 @@ include:
       source_pipeline_id: "$[[ inputs.source_pipeline_id ]]"
 `;
   const runtimeFiles = new Map<string, string>([
+    [GITLAB_DEPLOYMENT_CONTRACT_PATH, buildGitLabDeploymentContractRuntime()],
     [GITLAB_DEPLOYMENT_GATE_PATH, buildGitLabDeploymentGateRuntime()],
     [GITLAB_RELEASE_EVIDENCE_PATH, buildGitLabReleaseEvidenceRuntime()],
     ...(hasPromotion
@@ -1446,6 +1517,7 @@ function configAction(
     ...(dependsOn?.length ? { dependsOn } : {}),
     metadata: {
       operation: CI_CONFIGURATION_SYNC_OPERATION,
+      workflowPublicationRequired: true,
       codeProvider: 'gitlab',
       ciProvider: 'gitlab-ci',
       repositoryId: context.repository.nativeId,
@@ -1512,7 +1584,7 @@ function variableDeleteAction(
     verified: true,
     dataBearing: true,
     requiresConfirm: true,
-    reason: `Delete the exact owned GitLab CI variable ${variable.key} after managed jobs are absent`,
+    reason: `Delete the exact owned GitLab CI variable ${variable.key} after it leaves the active managed recipe`,
     metadata: {
       operation: CI_VARIABLE_DELETE_OPERATION,
       codeProvider: 'gitlab',
@@ -1527,6 +1599,50 @@ function variableDeleteAction(
       programHash,
     },
   };
+}
+
+function ownedVariableDeleteActions(params: {
+  context: GitLabContext;
+  environmentName: string;
+  observed: CiVariableObservation[];
+  ownedHashes: Record<string, unknown>;
+  retainedKeys: Set<string>;
+  programHash: string;
+}): PlanAction[] | { error: string } {
+  const actions: PlanAction[] = [];
+  for (const [key, rawHash] of Object.entries(params.ownedHashes).sort(([left], [right]) => left.localeCompare(right))) {
+    if (params.retainedKeys.has(key)) continue;
+    if (typeof rawHash !== 'string' || !rawHash) {
+      return { error: `Owned GitLab variable ${key} has an invalid local fingerprint; refusing deletion.` };
+    }
+    const scope = key.endsWith('_APPLIED_SPEC_HASH') ? '*' : params.environmentName;
+    const matches = params.observed.filter((candidate) => (
+      candidate.key === key && candidate.scope === scope
+    ));
+    if (matches.length > 1) {
+      return { error: `Owned GitLab variable ${key} resolves to multiple provider values at scope ${scope}; refusing deletion.` };
+    }
+    const variable = matches[0] ?? {
+      key,
+      scope,
+      precedence: 'project',
+      protected: true,
+      masked: false,
+      raw: true,
+      valueVisibility: 'omitted' as const,
+    };
+    if (matches[0] && matches[0].valueHash !== rawHash) {
+      return { error: `Owned GitLab variable ${key} changed outside Hypervibe; refusing to delete the new value.` };
+    }
+    actions.push(variableDeleteAction(
+      params.context,
+      params.environmentName,
+      variable,
+      rawHash,
+      params.programHash
+    ));
+  }
+  return actions;
 }
 
 function bindingRemoveAction(
@@ -1797,6 +1913,18 @@ async function planVariables(params: {
       ));
     }
   }
+  if (!params.appliedSpecOnly) {
+    const retired = ownedVariableDeleteActions({
+      context,
+      environmentName: params.environmentName,
+      observed,
+      ownedHashes,
+      retainedKeys: desiredKeys,
+      programHash: rendered.programHash,
+    });
+    if ('error' in retired) return { warnings: [], error: retired.error };
+    actions.push(...retired);
+  }
   return { actions, warnings: [] };
 }
 
@@ -1834,35 +1962,15 @@ async function planTeardown(params: {
   } catch (error) {
     return { warnings: [], error: error instanceof Error ? error.message : String(error) };
   }
-  const actions: PlanAction[] = [];
-  for (const [key, rawHash] of Object.entries(ownedHashes).sort(([left], [right]) => left.localeCompare(right))) {
-    if (typeof rawHash !== 'string' || !rawHash) {
-      return { warnings: [], error: `Owned GitLab variable ${key} has an invalid local fingerprint; refusing deletion.` };
-    }
-    const matches = observed.filter((candidate) => candidate.key === key);
-    if (matches.length > 1) {
-      return { warnings: [], error: `Owned GitLab variable ${key} resolves to multiple provider scopes; refusing teardown.` };
-    }
-    const variable = matches[0] ?? {
-      key,
-      scope: key.includes('_APPLIED_SPEC_HASH') ? '*' : params.environmentName,
-      precedence: 'project',
-      protected: true,
-      masked: false,
-      raw: true,
-      valueVisibility: 'omitted' as const,
-    };
-    if (matches[0] && matches[0].valueHash && matches[0].valueHash !== rawHash) {
-      return { warnings: [], error: `Owned GitLab variable ${key} changed outside Hypervibe; refusing to delete the new value.` };
-    }
-    actions.push(variableDeleteAction(
-      params.context,
-      params.environmentName,
-      variable,
-      rawHash,
-      params.rendered.programHash
-    ));
-  }
+  const actions = ownedVariableDeleteActions({
+    context: params.context,
+    environmentName: params.environmentName,
+    observed,
+    ownedHashes,
+    retainedKeys: new Set(),
+    programHash: params.rendered.programHash,
+  });
+  if ('error' in actions) return { warnings: [], error: actions.error };
   actions.push(bindingRemoveAction(
     params.context,
     params.environmentName,
@@ -1879,7 +1987,6 @@ async function planDeploy(params: {
   environmentSpec: EnvironmentSpec;
   environment: Environment | null;
   dependsOn?: string[];
-  bindingsWillChange?: boolean;
 }): Promise<CiLifecycleResult> {
   const existingEnvironmentBinding = gitLabCiBinding(params.project.id, params.environmentName);
   const wantsManagedDeploy = params.environmentSpec.deploy?.strategy === 'branch'
@@ -1892,25 +1999,13 @@ async function planDeploy(params: {
   const rootPath = activeRootPath(context.project);
   const targets = managedTargets(params.project, params.spec);
   const target = targets.find((candidate) => candidate.environmentName === params.environmentName);
-  const missingReleaseBindings = target ? missingManagedCiReleaseBindings(target) : [];
-  if (
-    params.bindingsWillChange
-    && target
-    && missingReleaseBindings.length > 0
-    && !missingReleaseBindings.includes('invalid-or-duplicate-binding')
-  ) {
-    return {
-      warnings: [
-        `Managed GitLab CI for ${params.environmentName} is deferred until the planned hosting bindings exist. `
-        + 'Apply this plan, then re-run hv_plan so Hypervibe can compile the program against the exact provider scope and resource identities.',
-      ],
-      deferred: true,
-    };
-  }
-  if (missingReleaseBindings.includes('invalid-or-duplicate-binding')) {
+  const incompleteTargets = targets.filter((candidate) => (
+    missingManagedCiReleaseBindings(candidate).length > 0
+  ));
+  if ((wantsManagedDeploy && !target) || incompleteTargets.length > 0) {
     return {
       warnings: [],
-      error: `Managed GitLab CI for ${params.environmentName} cannot be compiled because its current provider bindings are malformed, duplicated, or outside the exact desired service set.`,
+      error: `Managed GitLab CI cannot be compiled until every desired service has one exact current provider binding. Reconcile these environments, then re-run hv_plan: ${incompleteTargets.map((candidate) => candidate.environmentName).join(', ') || params.environmentName}.`,
     };
   }
   const rendered = renderManagedFilesSafely(params.project, params.spec, rootPath);
@@ -1992,12 +2087,6 @@ async function planDeploy(params: {
   }
   const active = await proveActiveConfiguration(context, rendered.files, rendered.jobNames, removedOwnedPaths);
   if ('error' in active) return { warnings: [], error: active.error };
-  if (params.bindingsWillChange) {
-    return {
-      warnings: [`Hosting bindings will change for ${params.environmentName}; re-plan after hosting converges before syncing exact GitLab variables.`],
-      deferred: true,
-    };
-  }
   if (!wantsManagedDeploy) {
     return planTeardown({
       project: params.project,
@@ -2385,6 +2474,22 @@ async function applyConfiguration(params: {
     ? [...params.action.metadata.removedPaths as string[]].sort()
     : [];
   const ownershipBinding = configurationBindingForSpec(params.project, params.spec);
+  const proposalEnvironmentNames = rendered.files.length > 0
+    ? [canonicalEnvironment(params.spec, renderableManagedTargets(params.project, params.spec)) ?? params.environmentName]
+    : new EnvironmentRepository().findByProjectId(params.project.id)
+        .map((environment) => environment.name)
+        .filter((environmentName) => bindingMatchesRepository(
+          gitLabCiBinding(params.project.id, environmentName),
+          context
+        ));
+  if (proposalEnvironmentNames.length === 0) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: 'GitLab CI configuration ownership is missing',
+      error: 'No exact repository binding can retain the reviewed configuration proposal.',
+    };
+  }
   const desiredPaths = new Set(rendered.files.map((file) => file.path));
   const currentRemovedPaths = boundConfigurationPaths(ownershipBinding)
     .filter((path) => !desiredPaths.has(path))
@@ -2618,18 +2723,18 @@ async function applyConfiguration(params: {
         : 'Merging removes the managed jobs before Hypervibe deletes their exact owned CI variables.',
     ].join('\n'),
   });
-  persistConfigurationProposal({
-    project: params.project,
-    environmentName: rendered.files.length > 0
-      ? canonicalEnvironment(params.spec, renderableManagedTargets(params.project, params.spec)) ?? params.environmentName
-      : params.environmentName,
-    context,
-    files: rendered.files,
-    programHash: rendered.programHash,
-    proposalBranch: branchName,
-    proposalSha,
-    targetBranch,
-  });
+  for (const environmentName of proposalEnvironmentNames) {
+    persistConfigurationProposal({
+      project: params.project,
+      environmentName,
+      context,
+      files: rendered.files,
+      programHash: rendered.programHash,
+      proposalBranch: branchName,
+      proposalSha,
+      targetBranch,
+    });
+  }
   return {
     success: false,
     status: 'pending',

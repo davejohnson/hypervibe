@@ -8,12 +8,14 @@ import { resolvePlanActionAuthority } from '../plan/action-authority.js';
 import { ConvergeExecutor, type ActionResult, type PlanRunDocument } from '../plan/converge.executor.js';
 import type { PlanAction } from '../plan/plan.types.js';
 import { SpecStore } from '../spec/spec.store.js';
+import { getGitHubAdapter } from './github-ops.service.js';
 import {
-  buildBranchDeployWorkflow,
-  getGitHubAdapter,
-  resolveBranchDeployTargets,
-} from './github-ops.service.js';
+  managedWorkflowDispatchTargetFailure,
+  observeManagedWorkflowFiles,
+  resolveManagedWorkflowContract,
+} from './ci-deploy.service.js';
 import { GITHUB_ACTIONS_ROLLBACK_OPERATION } from './ci-rollback.contract.js';
+import { MANAGED_CI_RELEASE_EVIDENCE_VERSION, managedCiReleaseArtifactPrefix } from './managed-ci-evidence.js';
 
 const runRepo = new RunRepository();
 const auditRepo = new AuditRepository();
@@ -59,6 +61,7 @@ type ManagedCiRollbackObservation = {
   repo: string;
   workflow: string;
   ref: string;
+  workflowRefSha: string;
   latestWorkflowRunId: number;
   latestWorkflowConclusion: string;
   selection: RollbackSelection;
@@ -89,10 +92,6 @@ export type CiRollbackResult = {
   errors?: string[];
 };
 
-function safeEnvironmentName(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
-}
-
 function sortRunsNewestFirst(runs: WorkflowRun[]): WorkflowRun[] {
   return [...runs].sort((left, right) => (
     new Date(right.created_at).getTime() - new Date(left.created_at).getTime()
@@ -112,7 +111,7 @@ async function releaseEvidenceForRun(params: {
     params.repo,
     params.run.id
   );
-  const prefix = `hypervibe-server-release-${safeEnvironmentName(params.environmentName)}-`;
+  const prefix = managedCiReleaseArtifactPrefix(params.environmentName);
   const matches = artifacts.artifacts
     .filter((artifact) => !artifact.expired && artifact.workflow_run?.id === params.run.id)
     .map((artifact): { artifact: WorkflowRunArtifact; sha: string } | null => {
@@ -170,23 +169,14 @@ async function observeManagedCiRollback(params: {
     return { ok: false, reason: 'invalid_target', error: `Invalid GitHub repository ${repository}.` };
   }
 
-  const targets = resolveBranchDeployTargets(params.project);
-  const target = targets.targets.find((candidate) => candidate.environmentName === params.environment.name);
-  if (!target) {
-    return {
-      ok: false,
-      reason: 'invalid_target',
-      error: `${params.environment.name} is not configured for a Hypervibe-managed GitHub Actions deploy.`,
-    };
-  }
-  let workflow;
+  let contract;
   try {
-    workflow = buildBranchDeployWorkflow(
-      environmentSpec.hosting.provider,
-      target,
-      targets.migration,
-      environmentSpec.ios
-    );
+    contract = resolveManagedWorkflowContract({
+      project: params.project,
+      environmentName: params.environment.name,
+      environmentSpec,
+      environment: params.environment,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (message.includes('does not expose a verifiable immutable artifact')) {
@@ -199,6 +189,17 @@ async function observeManagedCiRollback(params: {
     }
     throw error;
   }
+  if (!contract.ok) {
+    return {
+      ok: false,
+      reason: contract.reason === 'bindings-incomplete' ? 'workflow_drift' : 'invalid_target',
+      error: contract.error,
+      ...(contract.reason === 'bindings-incomplete'
+        ? { hint: 'Reconcile the exact provider bindings with hv_plan and hv_apply, then retry hv_rollback.' }
+        : {}),
+    };
+  }
+  const { workflow } = contract;
   if (!workflow.supportsImmutableRollback) {
     return {
       ok: false,
@@ -214,11 +215,17 @@ async function observeManagedCiRollback(params: {
   const adapter = adapterResult.adapter;
 
   try {
-    const [liveContent, workflows] = await Promise.all([
-      adapter.getFileContent(owner, repo, workflow.path),
+    const [workflowObservation, workflows, workflowRef] = await Promise.all([
+      observeManagedWorkflowFiles({
+        adapter,
+        owner,
+        repo,
+        contract,
+      }),
       adapter.listWorkflows(owner, repo),
+      adapter.getRef(owner, repo, `heads/${workflow.branch}`),
     ]);
-    if (liveContent !== workflow.content) {
+    if (workflowObservation.acceptance === 'drift') {
       return {
         ok: false,
         reason: 'workflow_drift',
@@ -232,6 +239,15 @@ async function observeManagedCiRollback(params: {
         ok: false,
         reason: 'workflow_inactive',
         error: `Managed rollback is blocked because ${workflow.path} is not active.`,
+      };
+    }
+    const workflowRefSha = workflowRef?.object.sha;
+    if (!workflowRefSha || !FULL_SHA.test(workflowRefSha)) {
+      return {
+        ok: false,
+        reason: 'workflow_drift',
+        error: `Managed rollback is blocked because GitHub branch ${workflow.branch} has no exact commit.`,
+        hint: 'Restore the configured deploy branch, then retry hv_rollback.',
       };
     }
 
@@ -346,6 +362,7 @@ async function observeManagedCiRollback(params: {
           : latestRun.conclusion === 'success'
             ? `No previous distinct successful ${params.environment.name} release is available to restore.`
             : `No last-known-good ${params.environment.name} release is available to restore after workflow run ${latestRun.id} failed.`,
+        hint: `Run the current managed deploy workflow once to create compatible v${MANAGED_CI_RELEASE_EVIDENCE_VERSION} release evidence, then retry.`,
       };
     }
 
@@ -356,7 +373,8 @@ async function observeManagedCiRollback(params: {
         owner,
         repo,
         workflow: workflow.path,
-        ref: target.branch,
+        ref: contract.target.branch,
+        workflowRefSha,
         latestWorkflowRunId: latestRun.id,
         latestWorkflowConclusion: latestRun.conclusion ?? 'unknown',
         selection,
@@ -382,6 +400,7 @@ function sameAuthorizedObservation(
     && fresh.repo === planned.repo
     && fresh.workflow === planned.workflow
     && fresh.ref === planned.ref
+    && fresh.workflowRefSha === planned.workflowRefSha
     && fresh.latestWorkflowRunId === planned.latestWorkflowRunId
     && fresh.latestWorkflowConclusion === planned.latestWorkflowConclusion
     && fresh.selection === planned.selection
@@ -411,6 +430,7 @@ export async function executeManagedCiRollback(params: {
       repository,
       workflow: planned.workflow,
       ref: planned.ref,
+      workflowRefSha: planned.workflowRefSha,
       targetSha: planned.targetRelease.sha,
       targetArtifactId: planned.targetRelease.artifactId,
       targetWorkflowRunId: planned.targetRelease.workflowRunId,
@@ -444,6 +464,7 @@ export async function executeManagedCiRollback(params: {
       || metadata.repository !== repository
       || metadata.workflow !== planned.workflow
       || metadata.ref !== planned.ref
+      || metadata.workflowRefSha !== planned.workflowRefSha
       || metadata.targetSha !== planned.targetRelease.sha
       || metadata.targetArtifactId !== planned.targetRelease.artifactId
       || metadata.targetWorkflowRunId !== planned.targetRelease.workflowRunId
@@ -475,6 +496,28 @@ export async function executeManagedCiRollback(params: {
       };
     }
 
+    const dispatchFailure = await managedWorkflowDispatchTargetFailure({
+      adapter: freshResult.observation.adapter,
+      owner: planned.owner,
+      repo: planned.repo,
+      branch: planned.ref,
+      expectedSha: planned.workflowRefSha,
+      expectedShaLabel: 'workflow commit',
+    });
+    if (dispatchFailure) {
+      const [reason, error] = dispatchFailure;
+      return {
+        success: false,
+        status: 'blocked',
+        message: reason === 'default-branch'
+          ? `Rollback default branch changed after plan ${planRun.id}`
+          : reason === 'branch'
+            ? `Rollback workflow branch changed after plan ${planRun.id}`
+            : `Rollback workflow branch could not be re-verified for ${candidate.id}`,
+        error: `${error}${reason === 'observation-failed' ? '' : ' Start a new hv_rollback.'}`,
+      };
+    }
+
     await freshResult.observation.adapter.triggerWorkflow(
       planned.owner,
       planned.repo,
@@ -495,6 +538,7 @@ export async function executeManagedCiRollback(params: {
       details: {
         environment: params.environment.name,
         targetSha: planned.targetRelease.sha,
+        workflowRefSha: planned.workflowRefSha,
         sourceArtifactId: planned.targetRelease.artifactId,
         sourceWorkflowRunId: planned.targetRelease.workflowRunId,
         planId: planRun.id,

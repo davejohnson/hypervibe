@@ -1243,6 +1243,11 @@ pending receipt until `hv_ci_status` proves the workflow succeeded and
 `hv_health` proves the endpoint. Rollback never reverses database migrations or
 provider-side manual configuration; tool-mode migration steps are skipped during
 rollback, while startup/release-command migrations must remain backward-compatible.
+Rollback reads the selected immutable commit's raw spec through the code-host API
+and validates release provenance against that historical contract. It retains
+current program and resource-identity compatibility checks, skips checkout/build,
+and records the historical source contract in the resulting release evidence.
+
 
 Direct-provider deploy runs do not currently persist a provider-neutral,
 immutable release identity that can be restored and re-observed. Their service
@@ -1258,6 +1263,19 @@ Do not switch a project to `deploy.trigger: "native"` just to avoid missing CI, 
 
 Generated provider CI workflow steps belong under provider-owned modules and are exposed through provider registry metadata. Generic GitHub orchestration should assemble workflows, sync files/secrets, inspect runs/logs, and diagnose failures without owning provider API scripts.
 
+Managed deployment credentials, including migration database URLs and provider
+credentials, are synchronized into the exact GitHub environment. Repository-owned
+build secrets remain in the repository-secret lifecycle. Existing repository-scoped
+deployment bindings require an explicit sync into the environment; they do not
+prove that environment's secret state. Legacy repository secrets are not deleted
+because other workflows may still consume them.
+
+Auto-deploy workflows use a small environment-bound readiness job to admit pushes only after the applied
+marker exists. Its runner step reads the environment variable; the deploy job
+consumes its boolean output. Manual dispatch still reaches the normal contract
+gate, and a nonempty stale marker remains a hard failure. Manual-only workflows
+omit this extra job, preserving their single environment approval.
+
 Generated workflows must gate image deployment on the environment-scoped
 `HYPERVIBE_APPLIED_SPEC_HASH` GitHub Actions variable. The desired hash covers
 only that environment plus its applicable delegated-secret declarations.
@@ -1270,11 +1288,37 @@ automatic code-only staging deploys while preventing a changed desired-state
 contract from deploying before reconciliation. Missing, failed, pending, or
 unconfirmed dependencies must leave the previous marker intact.
 
-Generated deployment workflow files are repository infrastructure and must be
-delivered through the deterministic `hypervibe/github-infrastructure` branch
-and reviewable pull request. Applying file drift returns a pending receipt and
-must defer workflow secrets, bindings, and the applied-spec marker until the
-reviewed file is present on the default branch.
+The environment contract and the generated workflow are separate desired-state
+boundaries. Environment values are enforced by the runtime gate above; they do
+not make the repository workflow a different program. A managed GitHub Actions
+binding records both the exact accepted file-content hash and a canonical hash
+of the inputs that affect workflow behavior. If the live files still match the
+accepted content and those inputs have not changed, a newer Hypervibe renderer
+does not create drift. Intentional renderer migrations increment the renderer
+revision included in the input hash. A real workflow input change renders the
+latest template and requires review.
+
+Generated deployment workflow files use a dedicated per-environment managed-CI
+branch and reviewable pull request, so unrelated repository infrastructure
+cannot enter the same publication stage. The configured deploy branch must be
+the repository's provider-observed default branch because GitHub registers
+`workflow_dispatch` workflows there. Applying file drift returns a pending
+receipt and must defer workflow secrets, bindings, and the applied-spec marker
+until the reviewed file is present on that branch.
+For already-bound provider identities, workflow publication is a plan stage of
+its own and precedes every provider mutation. If publication returns pending or
+blocked, that plan authorizes zero hosting changes. New or replaced identities
+remain a separate prerequisite stage because the workflow cannot name them
+until the provider has created and Hypervibe has recorded them.
+
+Release evidence keeps its exact provider scope, logical resource identities,
+program fingerprint, repository, commit, and immutable image checks. The
+generated workflow materializes that reviewed validator once before checkout
+and reuses it for preflight, promotion, rollback, and evidence writing, so the
+rollback path remains independent of repository contents without copying the
+validator into every step. Workload kind and provider resource type are
+orthogonal: for example, Railway schedules a cron workload on a service, while
+Cloud Run may bind one to a job.
 
 The deterministic branch must be reusable after merge commits, squash merges,
 and rebase merges. A retained branch may be reset to the current default-branch

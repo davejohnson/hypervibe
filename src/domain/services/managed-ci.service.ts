@@ -32,8 +32,7 @@ export async function planManagedCiDeploy(params: {
   environmentSpec: EnvironmentSpec;
   environment: Environment | null;
   dependsOn?: string[];
-  bindingsWillChange?: boolean;
-}): Promise<{ actions: PlanAction[]; warnings: string[]; error?: string; deferred?: boolean }> {
+}): Promise<{ actions: PlanAction[]; warnings: string[]; error?: string }> {
   const selection = resolveDevOpsSelection(params.spec);
   if (!selection?.ci) {
     return hasRetainedCiBinding(params.environment)
@@ -53,7 +52,6 @@ export async function planManagedCiDeploy(params: {
       actions: result.action ? [result.action] : [],
       warnings: result.warnings,
       ...(result.error ? { error: result.error } : {}),
-      ...(result.deferred ? { deferred: true } : {}),
     };
   }
 
@@ -73,7 +71,6 @@ export async function planManagedCiDeploy(params: {
     actions: actions(result),
     warnings: result.warnings,
     ...(result.error ? { error: result.error } : {}),
-    ...(result.deferred ? { deferred: true } : {}),
   };
 }
 

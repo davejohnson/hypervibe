@@ -20,13 +20,15 @@
       },
       "pullRequests": {
         "targetBranch": "main",
-        "requirePr": false,
+        "requirePr": true,
         "requireReview": true,
         "requiredReviewers": 1,
         "dismissStaleReviews": false,
         "requireCodeOwnerReviews": false,
-        "requireStatusChecks": false,
-        "statusChecks": [],
+        "requireStatusChecks": true,
+        "statusChecks": [
+          "Hypervibe / acceptance"
+        ],
         "strictStatusChecks": true,
         "enforceAdmins": false
       },
@@ -116,6 +118,27 @@
         "findings": {
           "createIssues": true,
           "closeAfterCleanRuns": 1
+        }
+      },
+      "acceptance": {
+        "kind": "check",
+        "enabled": true,
+        "category": "test",
+        "triggers": {
+          "pullRequest": true,
+          "push": [
+            "main"
+          ],
+          "manual": true
+        },
+        "changeScope": "all",
+        "commands": [
+          "npm run typecheck",
+          "npm test"
+        ],
+        "failureArtifacts": [],
+        "runtime": {
+          "kind": "node"
         }
       }
     },

@@ -94,7 +94,7 @@ function seedConnection() {
     artifacts: [
       {
         id: 201,
-        name: `hypervibe-server-release-production-${'a'.repeat(40)}`,
+        name: `hypervibe-server-release-v4-production-${'a'.repeat(40)}`,
         expired: false,
         created_at: '2026-07-01T00:05:00Z',
         updated_at: '2026-07-01T00:05:00Z',

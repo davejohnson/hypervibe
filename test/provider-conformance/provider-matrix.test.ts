@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
+import { compileGitHubAutomationWorkflow } from '../../src/domain/services/github-infrastructure.service.js';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import '../../src/application/providers.js';
@@ -27,6 +29,19 @@ describe('provider conformance matrix', () => {
       'utf8'
     )));
     const actions = repositorySpec.github?.actions ?? {};
+    expect(actions.acceptance).toMatchObject({
+      kind: 'check', changeScope: 'all', triggers: { pullRequest: true, push: ['main'] },
+      commands: ['npm run typecheck', 'npm test'],
+    });
+    expect(repositorySpec.github?.collaboration.pullRequests).toMatchObject({
+      requirePr: true, requireStatusChecks: true, statusChecks: ['Hypervibe / acceptance'],
+    });
+    for (const id of ['acceptance', 'provider-conformance']) {
+      const committed = readFileSync(path.resolve(`.github/workflows/hypervibe-${id}.yml`), 'utf8');
+      const generated = compileGitHubAutomationWorkflow(id, actions[id]!, repositorySpec.github!, repositorySpec.runtime);
+      expect(parse(committed)).toEqual(parse(generated));
+      expect(parse(committed).jobs.check.name).toBe(`Hypervibe / ${id}`);
+    }
 
     expect(actions['provider-conformance']).toMatchObject({
       kind: 'check',

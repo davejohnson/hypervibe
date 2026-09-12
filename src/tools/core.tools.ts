@@ -302,14 +302,16 @@ function mergeLocalEnvWrites(
 ): RepoEnvFileWrite | undefined {
   const present = writes.filter((write): write is RepoEnvFileWrite => Boolean(write));
   if (present.length === 0) return undefined;
+  const primary = present[0];
+  const sameFile = present.filter((write) => write.path === primary.path);
   return {
-    path: present[0].path,
-    addedKeys: [...new Set(present.flatMap((write) => write.addedKeys))].sort(),
-    commentedKeys: [...new Set(present.flatMap((write) => write.commentedKeys))].sort(),
-    ...(present.some((write) => (write.activatedKeys?.length ?? 0) > 0)
-      ? { activatedKeys: [...new Set(present.flatMap((write) => write.activatedKeys ?? []))].sort() }
+    path: primary.path,
+    addedKeys: [...new Set(sameFile.flatMap((write) => write.addedKeys))].sort(),
+    commentedKeys: [...new Set(sameFile.flatMap((write) => write.commentedKeys))].sort(),
+    ...(sameFile.some((write) => (write.activatedKeys?.length ?? 0) > 0)
+      ? { activatedKeys: [...new Set(sameFile.flatMap((write) => write.activatedKeys ?? []))].sort() }
       : {}),
-    ...(present.some((write) => write.permissionsUpdated === true)
+    ...(sameFile.some((write) => write.permissionsUpdated === true)
       ? { permissionsUpdated: true }
       : {}),
     ...(present.find((write) => write.gitignorePath)?.gitignorePath
@@ -1420,7 +1422,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
               ? 'Apply complete. Check hv_status to verify convergence.'
               : 'Apply failed; compensations ran where registered. Inspect receipts and re-run hv_plan.',
           warnings: outcome.actionScopedWarnings,
-          next: ['hv_status'],
+          next: [result.success || pending.length > 0 ? 'hv_status' : 'hv_plan'],
         }
       );
     })

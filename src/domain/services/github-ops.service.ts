@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
-import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ProjectSpecRepository } from '../../adapters/db/repositories/spec.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
@@ -11,23 +11,23 @@ import { effectiveRuntimeInstallCommand, type ProjectRuntime } from '../spec/pro
 import { providerRegistry } from '../registry/provider.registry.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import { buildIosReleaseWorkflow } from './ios-release-workflow.service.js';
+import { resolveReviewedBranchDeployTargets } from './managed-ci-targets.js';
 import {
-  managedCiProviderScope,
-  managedCiReleaseTarget,
-  resolveReviewedBranchDeployTargets,
-} from './managed-ci-targets.js';
+  MANAGED_CI_DEPLOYMENT_CONTRACT_RUNTIME_SOURCE,
+  MANAGED_CI_RELEASE_EVIDENCE_VERSION,
+  MANAGED_CI_RELEASE_EVIDENCE_FILE,
+  managedCiReleaseArtifactPrefix,
+} from './managed-ci-evidence.js';
 export { IOS_RELEASE_REQUIRED_SECRETS } from './ios-release-workflow.service.js';
 import type {
   BranchDeployEnvironmentKind,
   BranchDeployProvider,
-  BranchDeployReleaseResource,
   BranchDeployReleaseTarget,
   BranchDeployTarget,
   BranchDeployWorkflow,
 } from '../ports/ci-deploy.port.js';
 
 const connectionRepo = new ConnectionRepository();
-const envRepo = new EnvironmentRepository();
 const projectSpecRepo = new ProjectSpecRepository();
 
 
@@ -57,111 +57,70 @@ export type {
   BranchDeployWorkflow,
 };
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
-}
+export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 3;
+export const GITHUB_ACTIONS_SERVER_PROGRAM_REVISION = 1;
 
-function classifyEnvironmentName(name: string): BranchDeployEnvironmentKind | null {
-  const normalized = name.trim().toLowerCase();
-  if (!normalized || normalized === 'local') return null;
-  if (normalized === 'production' || normalized === 'prod' || normalized.includes('prod')) return 'production';
-  if (normalized === 'staging' || normalized === 'stage' || normalized.includes('stag')) return 'staging';
-  if (normalized === 'development' || normalized === 'dev' || normalized.includes('develop')) return 'development';
-  if (normalized === 'test' || normalized.includes('test')) return 'test';
-  return 'custom';
-}
-
-function environmentBindings(projectId: string, environmentName: string, desiredServiceNames?: Set<string>): {
-  provider?: string;
-  providerProjectId?: string;
-  providerEnvironmentId?: string;
-  providerServiceIds: string[];
-  providerJobNames: string[];
-  boundServiceNames: string[];
-  releaseResources: BranchDeployReleaseResource[];
-} {
-  const environment = envRepo.findByProjectAndName(projectId, environmentName);
-  const bindings = asRecord(environment?.platformBindings);
-  const services = asRecord(bindings?.services);
-  const boundServiceNames = Object.keys(services ?? {});
-  const providerServiceIds: string[] = [];
-  const providerJobNames: string[] = [];
-  const releaseResources: BranchDeployReleaseResource[] = [];
-  for (const [serviceName, service] of Object.entries(services ?? {})) {
-    if (desiredServiceNames && !desiredServiceNames.has(serviceName)) continue;
-    const record = asRecord(service);
-    const serviceId = typeof record?.serviceId === 'string' && record.serviceId.trim().length > 0
-      ? record.serviceId.trim()
-      : undefined;
-    const jobName = typeof record?.jobName === 'string' && record.jobName.trim().length > 0
-      ? record.jobName.trim()
-      : undefined;
-    const isScheduledJob = record?.resourceType === 'scheduledJob' || Boolean(jobName);
-    if (isScheduledJob) {
-      const target = jobName ?? serviceId;
-      if (target) providerJobNames.push(target);
-    } else if (serviceId) {
-      providerServiceIds.push(serviceId);
-    }
-    const boundKind = record?.workloadKind;
-    const workloadKind = boundKind === 'web' || boundKind === 'worker' || boundKind === 'cron'
-      ? boundKind
-      : isScheduledJob ? 'cron' : 'web';
-    const providerResourceId = isScheduledJob ? jobName ?? serviceId : serviceId;
-    if (providerResourceId) {
-      releaseResources.push({
-        logicalName: serviceName,
-        workloadKind,
-        providerResourceType: isScheduledJob ? 'job' : 'service',
-        providerResourceId,
-      });
-    }
-  }
+function migrationWorkflowInput(migration: { includeStep: boolean; command?: string }) {
   return {
-    provider: typeof bindings?.provider === 'string' && bindings.provider.trim().length > 0
-      ? bindings.provider.trim()
-      : undefined,
-    providerProjectId: typeof bindings?.projectId === 'string' ? bindings.projectId : undefined,
-    providerEnvironmentId: typeof bindings?.environmentId === 'string' ? bindings.environmentId : undefined,
-    providerServiceIds,
-    providerJobNames,
-    boundServiceNames,
-    releaseResources,
+    includeStep: migration.includeStep,
+    ...(migration.includeStep && migration.command ? { command: migration.command } : {}),
   };
 }
 
-function legacyServiceNames(desiredState: Record<string, unknown> | null): string[] {
-  const names = new Set<string>();
-  const services = Array.isArray(desiredState?.services) ? desiredState.services : [];
-  for (const service of services) {
-    if (typeof service === 'string' && service.trim().length > 0) {
-      names.add(service.trim());
-    }
-  }
-  if (typeof desiredState?.serviceName === 'string' && desiredState.serviceName.trim().length > 0) {
-    names.add(desiredState.serviceName.trim());
-  }
-  const serviceConfig = asRecord(desiredState?.serviceConfig);
-  for (const serviceName of Object.keys(serviceConfig ?? {})) {
-    if (serviceName.trim().length > 0) {
-      names.add(serviceName.trim());
-    }
-  }
-  return Array.from(names);
+/** Stable identity for reviewed inputs that can change generated workflow behavior. */
+export function githubActionsWorkflowInputHash(params: {
+  provider: string;
+  target: BranchDeployTarget;
+  migration: { includeStep: boolean; command?: string };
+  ios?: IosSpec;
+}): string {
+  const target = { ...params.target };
+  delete target.providerImageUris;
+  delete target.programFingerprint;
+  delete target.deploymentContractFingerprint;
+  const ios = params.ios?.release
+    ? { bundleId: params.ios.bundleId, release: params.ios.release }
+    : undefined;
+  return canonicalJsonSha256({
+    version: 1,
+    rendererRevision: GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION,
+    provider: params.provider,
+    target,
+    migration: migrationWorkflowInput(params.migration),
+    ...(ios ? { ios } : {}),
+  });
 }
 
-function legacyBranchDeployProgramFingerprint(
-  provider: string,
-  target: Pick<BranchDeployTarget, 'environmentName' | 'branch' | 'autoDeployOnPush' | 'serviceNames'>
-): string {
-  return createHash('sha256').update(JSON.stringify({
-    version: 1,
-    provider,
-    environment: target.environmentName,
-    branch: target.branch,
-    autoDeployOnPush: target.autoDeployOnPush,
-    services: [...target.serviceNames].sort(),
-  }), 'utf8').digest('hex');
+/**
+ * Stable server release compatibility contract. Repository trigger policy,
+ * iOS release settings, renderer migrations, and provider ids do not change
+ * the application program carried by an immutable server image.
+ */
+export function githubActionsServerProgramFingerprint(params: {
+  provider: string;
+  target: BranchDeployTarget;
+  migration: { includeStep: boolean; command?: string };
+}): string {
+  const runtimeResources = params.target.runtimeResources
+    ?.map((resource) => ({
+      logicalName: resource.logicalName,
+      workloadKind: resource.workloadKind,
+      startCommand: resource.startCommand,
+      healthCheckPath: resource.healthCheckPath,
+    }))
+    .sort((left, right) => left.logicalName.localeCompare(right.logicalName));
+  const releaseCommands = params.target.releaseCommands
+    ?.map(({ serviceName, command }) => ({ serviceName, command }))
+    .sort((left, right) => left.serviceName.localeCompare(right.serviceName));
+  return canonicalJsonSha256({
+    version: GITHUB_ACTIONS_SERVER_PROGRAM_REVISION,
+    provider: params.provider,
+    runtime: params.target.runtime,
+    containerStartCommand: params.target.containerStartCommand,
+    runtimeResources,
+    releaseCommands,
+    migration: migrationWorkflowInput(params.migration),
+  });
 }
 
 export function resolveBranchDeployTargets(project: Project): {
@@ -173,122 +132,34 @@ export function resolveBranchDeployTargets(project: Project): {
   const specRow = projectSpecRepo.findLatest(project.id);
   const parsedSpec = specRow ? projectSpecSchema.safeParse(specRow.document) : null;
   if (parsedSpec?.success) {
-    return resolveReviewedBranchDeployTargets(project, parsedSpec.data);
-  }
-
-  const desiredState = asRecord(project.policies?.desiredState);
-  const desiredServiceNames = legacyServiceNames(desiredState);
-  const desiredDeploy = asRecord(desiredState?.deploy);
-  const desiredBranchesRecord = asRecord(desiredDeploy?.branches);
-  const desiredBranches = {
-    staging:
-      typeof desiredBranchesRecord?.staging === 'string' && desiredBranchesRecord.staging.trim().length > 0
-        ? desiredBranchesRecord.staging.trim()
-        : undefined,
-    production:
-      typeof desiredBranchesRecord?.production === 'string' && desiredBranchesRecord.production.trim().length > 0
-        ? desiredBranchesRecord.production.trim()
-        : undefined,
-  };
-
-  const desiredEnvironmentName =
-    typeof desiredState?.environmentName === 'string' && desiredState.environmentName.trim().length > 0
-      ? desiredState.environmentName.trim()
-      : undefined;
-
-  const migrations = asRecord(desiredState?.migrations);
-  const migrationMode = typeof migrations?.mode === 'string' ? migrations.mode : undefined;
-  const migrationCommand =
-    typeof migrations?.command === 'string' && migrations.command.trim().length > 0
-      ? migrations.command.trim()
-      : undefined;
-  const includeMigrationStep =
-    migrationMode === 'tool' && migrations?.runInDeploy !== false && Boolean(migrationCommand);
-
-  const candidateEnvironmentNames = Array.from(
-    new Set(
-      [
-        ...envRepo.findByProjectId(project.id).map((environment) => environment.name),
-        desiredEnvironmentName,
-      ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
-    )
-  );
-
-  const targetsByKind = new Map<BranchDeployEnvironmentKind, BranchDeployTarget>();
-  const boundProvidersByEnvironment = new Map<string, string>();
-  const skippedEnvironments: string[] = [];
-
-  for (const environmentName of candidateEnvironmentNames) {
-    const kind = classifyEnvironmentName(environmentName);
-    if (!kind) {
-      skippedEnvironments.push(environmentName);
-      continue;
-    }
-    if (targetsByKind.has(kind)) {
-      skippedEnvironments.push(environmentName);
-      continue;
-    }
-
-    const bindings = environmentBindings(project.id, environmentName);
-    const target: BranchDeployTarget = {
-      environmentName,
-      kind,
-      branch: kind === 'production'
-        ? desiredBranches.production ?? 'main'
-        : desiredBranches.staging ?? 'main',
-      autoDeployOnPush: kind !== 'production',
-      serviceNames: desiredServiceNames.length > 0 ? desiredServiceNames : bindings.boundServiceNames,
-      providerProjectId: bindings.providerProjectId,
-      providerEnvironmentId: bindings.providerEnvironmentId,
-      providerServiceIds: bindings.providerServiceIds,
-      providerJobNames: bindings.providerJobNames,
-      needsServiceNames: true,
-      needsJobNames: bindings.providerJobNames.length > 0,
-    };
-    if (bindings.provider) {
-      boundProvidersByEnvironment.set(environmentName, bindings.provider);
-      target.programFingerprint = legacyBranchDeployProgramFingerprint(bindings.provider, target);
-      target.releaseTarget = managedCiReleaseTarget({
-        provider: bindings.provider,
-        environmentName,
-        scope: managedCiProviderScope(target),
-        resources: bindings.releaseResources,
+    const resolved = resolveReviewedBranchDeployTargets(project, parsedSpec.data);
+    const byEnvironment = new Map(resolved.targets.map((target) => [target.environmentName, target]));
+    const resolving = new Set<string>();
+    const resolveProgram = (target: BranchDeployTarget): string => {
+      if (target.programFingerprint) return target.programFingerprint;
+      if (resolving.has(target.environmentName)) {
+        throw new Error(`Managed CI promotion sources contain a cycle at "${target.environmentName}".`);
+      }
+      resolving.add(target.environmentName);
+      const source = target.promoteFromEnvironment
+        ? byEnvironment.get(target.promoteFromEnvironment)
+        : undefined;
+      if (source) {
+        target.promoteFromProgramFingerprint = resolveProgram(source);
+      }
+      const environment = parsedSpec.data.environments[target.environmentName]!;
+      target.programFingerprint = githubActionsServerProgramFingerprint({
+        provider: environment.hosting.provider,
+        target,
+        migration: resolved.migration,
       });
-    }
-    targetsByKind.set(kind, target);
+      resolving.delete(target.environmentName);
+      return target.programFingerprint;
+    };
+    resolved.targets.forEach(resolveProgram);
+    return resolved;
   }
-
-  const productionTarget = targetsByKind.get('production');
-  const stagingTarget = targetsByKind.get('staging');
-  const stagingProvider = stagingTarget
-    ? boundProvidersByEnvironment.get(stagingTarget.environmentName)
-    : undefined;
-  if (productionTarget && stagingTarget && stagingProvider && stagingTarget.programFingerprint) {
-    productionTarget.promoteFromEnvironment = stagingTarget.environmentName;
-    productionTarget.promoteFromProvider = stagingProvider;
-    productionTarget.promoteFromServiceNames = [...stagingTarget.serviceNames];
-    productionTarget.promoteFromProgramFingerprint = stagingTarget.programFingerprint;
-    productionTarget.promoteFromReleaseTarget = stagingTarget.releaseTarget;
-  }
-
-  const targets = Array.from(targetsByKind.values()).sort((a, b) => {
-    if (a.kind === b.kind) return a.environmentName.localeCompare(b.environmentName);
-    return a.kind === 'staging' ? -1 : 1;
-  });
-
-  return {
-    targets,
-    desiredBranches,
-    migration: {
-      includeStep: includeMigrationStep,
-      command: migrationCommand,
-      note:
-        migrationMode === 'releaseCommand'
-          ? 'Project uses release-command migrations; branch workflows will not run migrations in GitHub Actions.'
-          : undefined,
-    },
-    skippedEnvironments,
-  };
+  throw new Error(`Managed CI for project "${project.name}" requires a valid reviewed project spec.`);
 }
 
 function buildMigrationStep(command: string, runtime: ProjectRuntime): string {
@@ -364,59 +235,39 @@ function buildWorkflowTrigger(target: BranchDeployTarget): string {
 ${dispatch}`;
 }
 
-function buildDeploymentContractStep(environmentName: string, ifCondition?: string): string {
+function buildDeploymentContractStep(environmentName: string): string {
   return `      - name: "Deployment safety gate: verify Hypervibe reconciliation"
-${ifCondition ? `        if: ${ifCondition}\n` : ''}        uses: actions/github-script@v9
+        id: deployment_contract
+        uses: actions/github-script@v9
         env:
+          HYPERVIBE_RELEASE_VALIDATOR_PATH: \${{ runner.temp }}/hypervibe-release-evidence.cjs
+          HYPERVIBE_RELEASE_VALIDATOR_SHA256: ${RELEASE_EVIDENCE_VALIDATION_RUNTIME_SHA256}
           HYPERVIBE_ENVIRONMENT: ${JSON.stringify(environmentName)}
           HYPERVIBE_APPLIED_SPEC_HASH: \${{ vars.HYPERVIBE_APPLIED_SPEC_HASH }}
           HYPERVIBE_DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
+          HYPERVIBE_DEPLOY_OPERATION: \${{ steps.deploy.outputs.operation }}
         with:
           script: |
-            const { createHash } = require('crypto');
-            const { readFileSync } = require('fs');
-
-            function asRecord(value) {
-              return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
-            }
-
-            function canonicalize(value) {
-              if (Array.isArray(value)) return value.map(canonicalize);
-              const record = asRecord(value);
-              if (!record) return value;
-              return Object.fromEntries(
-                Object.entries(record)
-                  .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-                  .map(([key, child]) => [key, canonicalize(child)])
-              );
-            }
-
-            const spec = JSON.parse(readFileSync('.hypervibe/spec.json', 'utf8'));
+${indentWorkflowJavaScript(RELEASE_EVIDENCE_VALIDATION_LOADER)}
+            const { deploymentContractFingerprint } = validatorModule.exports;
             const environmentName = process.env.HYPERVIBE_ENVIRONMENT;
-            const environment = asRecord(spec.environments)?.[environmentName];
-            if (!asRecord(environment)) {
-              throw new Error('Hypervibe spec has no environment "' + environmentName + '".');
-            }
-            const secrets = Object.fromEntries(
-              Object.entries(asRecord(spec.secrets) || {})
-                .filter(([, value]) => {
-                  const environments = asRecord(value)?.environments;
-                  return Array.isArray(environments) && environments.includes(environmentName);
-                })
-                .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-            );
-            const contract = canonicalize({
-              version: spec.version,
-              project: spec.project,
-              gitRemoteUrl: spec.gitRemoteUrl || null,
-              ...(spec.runtime ? { runtime: spec.runtime } : {}),
-              environmentName,
-              environment,
-              secrets,
-            });
-            const desiredHash = createHash('sha256').update(JSON.stringify(contract), 'utf8').digest('hex');
             const appliedHash = (process.env.HYPERVIBE_APPLIED_SPEC_HASH || '').trim();
             const deploySha = (process.env.HYPERVIBE_DEPLOY_SHA || '').trim();
+            if (process.env.HYPERVIBE_DEPLOY_OPERATION === 'rollback') {
+              if (!/^[0-9a-f]{64}$/.test(appliedHash)) throw new Error('Rollback blocked for ' + environmentName + ': applied contract hash is missing or malformed.');
+              const source = await github.rest.repos.getContent({
+                ...context.repo, path: '.hypervibe/spec.json', ref: deploySha,
+              });
+              if (source.data.type !== 'file' || source.data.encoding !== 'base64') {
+                throw new Error('Rollback source contract is missing or unreadable.');
+              }
+              const spec = JSON.parse(Buffer.from(source.data.content, 'base64').toString('utf8'));
+              core.setOutput('fingerprint', deploymentContractFingerprint(spec, environmentName));
+              return;
+            }
+            const { readFileSync } = require('fs');
+            const spec = JSON.parse(readFileSync('.hypervibe/spec.json', 'utf8'));
+            const desiredHash = deploymentContractFingerprint(spec, environmentName);
             core.info('Desired Hypervibe contract hash: ' + desiredHash);
             core.info('Applied Hypervibe contract hash: ' + (appliedHash || '(missing)'));
             if (!appliedHash || appliedHash !== desiredHash) {
@@ -458,70 +309,44 @@ ${ifCondition ? `        if: ${ifCondition}\n` : ''}        uses: actions/github
                 ], true)
                 .write();
               core.setFailed(failureMessage);
+              return;
             }
+            core.setOutput('fingerprint', desiredHash);
 `;
 }
 
 function releaseTargetForWorkflow(
-  provider: BranchDeployProvider,
   target: BranchDeployTarget
 ): BranchDeployReleaseTarget {
-  if (target.releaseTarget) return target.releaseTarget;
-  const providerIds = [
-    ...target.providerServiceIds.map((providerResourceId) => ({
-      providerResourceId,
-      providerResourceType: 'service' as const,
-      workloadKind: 'web' as const,
-    })),
-    ...(target.providerJobNames ?? []).map((providerResourceId) => ({
-      providerResourceId,
-      providerResourceType: 'job' as const,
-      workloadKind: 'cron' as const,
-    })),
-  ];
-  const resources = target.serviceNames.length === 1 && providerIds.length === 1
-    ? [{ logicalName: target.serviceNames[0]!, ...providerIds[0]! }]
-    : [];
-  return managedCiReleaseTarget({
-    provider,
-    environmentName: target.environmentName,
-    scope: managedCiProviderScope(target),
-    resources,
-  });
+  if (!target.releaseTarget) {
+    throw new Error(`Managed CI target ${target.environmentName} has no reviewed release bindings.`);
+  }
+  return target.releaseTarget;
 }
 
-function indentWorkflowScript(script: string): string {
+function programFingerprintForWorkflow(target: BranchDeployTarget): string {
+  if (!/^[0-9a-f]{64}$/.test(target.programFingerprint ?? '')) {
+    throw new Error(`Managed CI target ${target.environmentName} has no reviewed program fingerprint.`);
+  }
+  return target.programFingerprint!;
+}
+
+function indentWorkflowShell(script: string): string {
   return script
     .trim()
     .split('\n')
-    .map((line) => `            ${line}`)
+    .map((line) => `          ${line}`)
     .join('\n');
 }
 
 const RELEASE_EVIDENCE_VALIDATION_RUNTIME = `
 const { createHash } = require('crypto');
-
-function asEvidenceRecord(value) {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
-}
-
+${MANAGED_CI_DEPLOYMENT_CONTRACT_RUNTIME_SOURCE}
 function exactEvidenceKeys(value, expected) {
   const record = asEvidenceRecord(value);
   return Boolean(record)
     && JSON.stringify(Object.keys(record).sort()) === JSON.stringify([...expected].sort());
 }
-
-function canonicalizeEvidence(value) {
-  if (Array.isArray(value)) return value.map(canonicalizeEvidence);
-  const record = asEvidenceRecord(value);
-  if (!record) return value;
-  return Object.fromEntries(
-    Object.entries(record)
-      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-      .map(([key, child]) => [key, canonicalizeEvidence(child)])
-  );
-}
-
 function sameEvidence(left, right) {
   return JSON.stringify(canonicalizeEvidence(left)) === JSON.stringify(canonicalizeEvidence(right));
 }
@@ -631,14 +456,17 @@ function expectedReleaseTarget(provider, environment, serviceNamesValue, scopeVa
 
 function validateReleaseEvidence(evidence, expected) {
   const failure = () => {
-    throw new Error(expected.label + ' release evidence does not match the exact reviewed provider, environment, repository, SHA, scope, bindings fingerprint, resources, program, and immutable image');
+    throw new Error(expected.label + ' release evidence does not match the exact reviewed provider, environment, repository, SHA, scope, bindings fingerprint, resources, program, deployment contract provenance, and immutable image');
   };
   try {
-    if (!exactEvidenceKeys(evidence, ['environment', 'programFingerprint', 'provider', 'source', 'target', 'verifiedAt', 'version'])
-        || evidence.version !== 3
+    if (!exactEvidenceKeys(evidence, ['deploymentContractFingerprint', 'environment', 'programFingerprint', 'provider', 'source', 'target', 'verifiedAt', 'version'])
+        || evidence.version !== ${MANAGED_CI_RELEASE_EVIDENCE_VERSION}
         || evidence.provider !== expected.provider
         || evidence.environment !== expected.environment
         || evidence.programFingerprint !== expected.programFingerprint
+        || !/^[0-9a-f]{64}$/.test(expected.deploymentContractFingerprint || '')
+        || !/^[0-9a-f]{64}$/.test(evidence.deploymentContractFingerprint || '')
+        || evidence.deploymentContractFingerprint !== expected.deploymentContractFingerprint
         || typeof evidence.verifiedAt !== 'string'
         || Number.isNaN(Date.parse(evidence.verifiedAt))
         || !exactEvidenceKeys(evidence.source, ['repository', 'sha'])
@@ -663,18 +491,59 @@ function validateReleaseEvidence(evidence, expected) {
     failure();
   }
 }
+
+module.exports = {
+  deploymentContractFingerprint,
+  expectedReleaseTarget,
+  validateReleaseEvidence,
+};
 `;
+
+const RELEASE_EVIDENCE_VALIDATION_RUNTIME_SHA256 = createHash('sha256')
+  .update(`${RELEASE_EVIDENCE_VALIDATION_RUNTIME.trim()}\n`, 'utf8')
+  .digest('hex');
+
+const RELEASE_EVIDENCE_VALIDATION_LOADER = `
+const { createHash: createValidatorHash } = require('crypto');
+const { readFileSync: readValidatorSource } = require('fs');
+const validatorSource = readValidatorSource(process.env.HYPERVIBE_RELEASE_VALIDATOR_PATH, 'utf8');
+if (createValidatorHash('sha256').update(validatorSource, 'utf8').digest('hex') !== process.env.HYPERVIBE_RELEASE_VALIDATOR_SHA256) throw new Error('Release evidence validator failed its integrity check');
+const validatorModule = { exports: {} };
+new Function('require', 'module', 'exports', validatorSource)(require, validatorModule, validatorModule.exports);
+`;
+
+function indentWorkflowJavaScript(script: string): string {
+  return script
+    .trim()
+    .split('\n')
+    .map((line) => `            ${line}`)
+    .join('\n');
+}
+
+function buildReleaseEvidenceRuntimeStep(): string {
+  return `      - name: Prepare release evidence validator
+        shell: bash
+        env:
+          HYPERVIBE_RELEASE_VALIDATOR_PATH: \${{ runner.temp }}/hypervibe-release-evidence.cjs
+        run: |
+          cat > "$HYPERVIBE_RELEASE_VALIDATOR_PATH" <<'HYPERVIBE_RELEASE_VALIDATOR'
+${indentWorkflowShell(RELEASE_EVIDENCE_VALIDATION_RUNTIME)}
+          HYPERVIBE_RELEASE_VALIDATOR
+          chmod 600 "$HYPERVIBE_RELEASE_VALIDATOR_PATH"
+`;
+}
 
 function buildReleaseTargetPreflight(
   provider: BranchDeployProvider,
   target: BranchDeployTarget
 ): string {
-  const releaseTarget = releaseTargetForWorkflow(provider, target);
-  const programFingerprint = target.programFingerprint
-    ?? legacyBranchDeployProgramFingerprint(provider, target);
+  const releaseTarget = releaseTargetForWorkflow(target);
+  const programFingerprint = programFingerprintForWorkflow(target);
   return `      - name: Verify reviewed release target
         uses: actions/github-script@v9
         env:
+          HYPERVIBE_RELEASE_VALIDATOR_PATH: \${{ runner.temp }}/hypervibe-release-evidence.cjs
+          HYPERVIBE_RELEASE_VALIDATOR_SHA256: ${RELEASE_EVIDENCE_VALIDATION_RUNTIME_SHA256}
           HYPERVIBE_RELEASE_PROVIDER: ${JSON.stringify(provider)}
           HYPERVIBE_RELEASE_ENVIRONMENT: ${JSON.stringify(target.environmentName)}
           HYPERVIBE_RELEASE_SERVICES: ${JSON.stringify(JSON.stringify(target.serviceNames))}
@@ -684,7 +553,8 @@ function buildReleaseTargetPreflight(
           HYPERVIBE_RELEASE_PROGRAM_FINGERPRINT: ${programFingerprint}
         with:
           script: |
-${indentWorkflowScript(RELEASE_EVIDENCE_VALIDATION_RUNTIME)}
+${indentWorkflowJavaScript(RELEASE_EVIDENCE_VALIDATION_LOADER)}
+            const { expectedReleaseTarget } = validatorModule.exports;
             expectedReleaseTarget(
               process.env.HYPERVIBE_RELEASE_PROVIDER,
               process.env.HYPERVIBE_RELEASE_ENVIRONMENT,
@@ -703,9 +573,8 @@ function buildImmutableRollbackEvidenceSteps(
   provider: BranchDeployProvider,
   target: BranchDeployTarget
 ): string {
-  const releaseTarget = releaseTargetForWorkflow(provider, target);
-  const programFingerprint = target.programFingerprint
-    ?? legacyBranchDeployProgramFingerprint(provider, target);
+  const releaseTarget = releaseTargetForWorkflow(target);
+  const programFingerprint = programFingerprintForWorkflow(target);
   return `      - name: Download rollback release evidence
         if: steps.deploy.outputs.operation == 'rollback'
         uses: actions/download-artifact@v8
@@ -720,7 +589,9 @@ function buildImmutableRollbackEvidenceSteps(
         if: steps.deploy.outputs.operation == 'rollback'
         uses: actions/github-script@v9
         env:
-          HYPERVIBE_RELEASE_EVIDENCE_PATH: \${{ runner.temp }}/hypervibe-rollback-evidence/hypervibe-server-release.json
+          HYPERVIBE_RELEASE_VALIDATOR_PATH: \${{ runner.temp }}/hypervibe-release-evidence.cjs
+          HYPERVIBE_RELEASE_VALIDATOR_SHA256: ${RELEASE_EVIDENCE_VALIDATION_RUNTIME_SHA256}
+          HYPERVIBE_RELEASE_EVIDENCE_PATH: \${{ runner.temp }}/hypervibe-rollback-evidence/${MANAGED_CI_RELEASE_EVIDENCE_FILE}
           HYPERVIBE_ROLLBACK_PROVIDER: ${JSON.stringify(provider)}
           HYPERVIBE_ROLLBACK_ENVIRONMENT: ${JSON.stringify(target.environmentName)}
           HYPERVIBE_ROLLBACK_SHA: \${{ steps.deploy.outputs.sha }}
@@ -729,9 +600,11 @@ function buildImmutableRollbackEvidenceSteps(
           HYPERVIBE_ROLLBACK_RESOURCES: ${JSON.stringify(JSON.stringify(releaseTarget.resources))}
           HYPERVIBE_ROLLBACK_BINDINGS_FINGERPRINT: ${releaseTarget.bindingsFingerprint}
           HYPERVIBE_ROLLBACK_PROGRAM_FINGERPRINT: ${programFingerprint}
+          HYPERVIBE_ROLLBACK_DEPLOYMENT_CONTRACT_FINGERPRINT: \${{ steps.deployment_contract.outputs.fingerprint }}
         with:
           script: |
-${indentWorkflowScript(RELEASE_EVIDENCE_VALIDATION_RUNTIME)}
+${indentWorkflowJavaScript(RELEASE_EVIDENCE_VALIDATION_LOADER)}
+            const { expectedReleaseTarget, validateReleaseEvidence } = validatorModule.exports;
             const { readFileSync } = require('fs');
             let evidence;
             try {
@@ -755,6 +628,7 @@ ${indentWorkflowScript(RELEASE_EVIDENCE_VALIDATION_RUNTIME)}
               sha: process.env.HYPERVIBE_ROLLBACK_SHA,
               target: expectedTarget,
               programFingerprint: process.env.HYPERVIBE_ROLLBACK_PROGRAM_FINGERPRINT,
+              deploymentContractFingerprint: process.env.HYPERVIBE_ROLLBACK_DEPLOYMENT_CONTRACT_FINGERPRINT,
               requireImmutableImage: true,
             });
             core.setOutput('image_uri', validated.imageUri);
@@ -785,7 +659,6 @@ function buildPromotionEvidenceStep(
   }
   const sourceReleaseTarget = target.promoteFromReleaseTarget;
   const sourceWorkflowPath = branchDeployWorkflowPath(sourceProvider, sourceEnvironment);
-  const safeSourceEnvironment = sourceEnvironment.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
   return `      - name: Verify promotion release evidence
         id: promotion_evidence
         if: steps.deploy.outputs.operation != 'rollback'
@@ -802,7 +675,7 @@ function buildPromotionEvidenceStep(
             if (!/^[0-9a-f]{40}$/.test(targetSha)) {
               throw new Error('Promotion requires a full 40-character Git commit SHA');
             }
-            const expectedArtifactName = 'hypervibe-server-release-${safeSourceEnvironment}-' + targetSha;
+            const expectedArtifactName = '${managedCiReleaseArtifactPrefix(sourceEnvironment)}' + targetSha;
             const response = await github.rest.actions.listWorkflowRuns({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -871,23 +744,43 @@ function buildPromotionEvidenceStep(
           github-token: \${{ github.token }}
           path: \${{ runner.temp }}/hypervibe-promotion-evidence
           merge-multiple: true
+      - name: Resolve promotion deployment contract
+        id: promotion_contract
+        if: steps.deploy.outputs.operation != 'rollback'
+        uses: actions/github-script@v9
+        env:
+          HYPERVIBE_RELEASE_VALIDATOR_PATH: \${{ runner.temp }}/hypervibe-release-evidence.cjs
+          HYPERVIBE_RELEASE_VALIDATOR_SHA256: ${RELEASE_EVIDENCE_VALIDATION_RUNTIME_SHA256}
+          HYPERVIBE_PROMOTE_FROM_ENVIRONMENT: ${JSON.stringify(sourceEnvironment)}
+        with:
+          script: |
+${indentWorkflowJavaScript(RELEASE_EVIDENCE_VALIDATION_LOADER)}
+            const { deploymentContractFingerprint } = validatorModule.exports;
+            const { readFileSync } = require('fs');
+            core.setOutput('fingerprint', deploymentContractFingerprint(
+              JSON.parse(readFileSync('.hypervibe/spec.json', 'utf8')), process.env.HYPERVIBE_PROMOTE_FROM_ENVIRONMENT
+            ));
       - name: Validate promotion release evidence
         id: promotion_release
         if: steps.deploy.outputs.operation != 'rollback'
         uses: actions/github-script@v9
         env:
-          HYPERVIBE_RELEASE_EVIDENCE_PATH: \${{ runner.temp }}/hypervibe-promotion-evidence/hypervibe-server-release.json
+          HYPERVIBE_RELEASE_VALIDATOR_PATH: \${{ runner.temp }}/hypervibe-release-evidence.cjs
+          HYPERVIBE_RELEASE_VALIDATOR_SHA256: ${RELEASE_EVIDENCE_VALIDATION_RUNTIME_SHA256}
+          HYPERVIBE_RELEASE_EVIDENCE_PATH: \${{ runner.temp }}/hypervibe-promotion-evidence/${MANAGED_CI_RELEASE_EVIDENCE_FILE}
           HYPERVIBE_PROMOTE_FROM_ENVIRONMENT: ${JSON.stringify(sourceEnvironment)}
           HYPERVIBE_PROMOTE_FROM_PROVIDER: ${JSON.stringify(sourceProvider)}
           HYPERVIBE_PROMOTION_SHA: \${{ steps.deploy.outputs.sha }}
           HYPERVIBE_PROMOTION_SERVICES: ${JSON.stringify(JSON.stringify(target.promoteFromServiceNames))}
           HYPERVIBE_PROMOTION_PROGRAM_FINGERPRINT: ${target.promoteFromProgramFingerprint}
+          HYPERVIBE_PROMOTION_DEPLOYMENT_CONTRACT_FINGERPRINT: \${{ steps.promotion_contract.outputs.fingerprint }}
           HYPERVIBE_PROMOTION_TARGET_SCOPE: ${JSON.stringify(JSON.stringify(sourceReleaseTarget.scope))}
           HYPERVIBE_PROMOTION_RESOURCES: ${JSON.stringify(JSON.stringify(sourceReleaseTarget.resources))}
           HYPERVIBE_PROMOTION_BINDINGS_FINGERPRINT: ${sourceReleaseTarget.bindingsFingerprint}
         with:
           script: |
-${indentWorkflowScript(RELEASE_EVIDENCE_VALIDATION_RUNTIME)}
+${indentWorkflowJavaScript(RELEASE_EVIDENCE_VALIDATION_LOADER)}
+            const { expectedReleaseTarget, validateReleaseEvidence } = validatorModule.exports;
             const { readFileSync } = require('fs');
             let evidence;
             try {
@@ -911,6 +804,7 @@ ${indentWorkflowScript(RELEASE_EVIDENCE_VALIDATION_RUNTIME)}
               sha: process.env.HYPERVIBE_PROMOTION_SHA,
               target: expectedTarget,
               programFingerprint: process.env.HYPERVIBE_PROMOTION_PROGRAM_FINGERPRINT,
+              deploymentContractFingerprint: process.env.HYPERVIBE_PROMOTION_DEPLOYMENT_CONTRACT_FINGERPRINT,
               requireImmutableImage: true,
             });
             core.setOutput('image_uri', validated.imageUri);
@@ -926,12 +820,13 @@ function buildServerReleaseEvidenceStep(
   target: BranchDeployTarget,
   releaseImageUri?: string
 ): string {
-  const programFingerprint = target.programFingerprint
-    ?? legacyBranchDeployProgramFingerprint(provider, target);
-  const releaseTarget = releaseTargetForWorkflow(provider, target);
+  const programFingerprint = programFingerprintForWorkflow(target);
+  const releaseTarget = releaseTargetForWorkflow(target);
   return `      - name: Write server release evidence
         uses: actions/github-script@v9
         env:
+          HYPERVIBE_RELEASE_VALIDATOR_PATH: \${{ runner.temp }}/hypervibe-release-evidence.cjs
+          HYPERVIBE_RELEASE_VALIDATOR_SHA256: ${RELEASE_EVIDENCE_VALIDATION_RUNTIME_SHA256}
           HYPERVIBE_RELEASE_SHA: \${{ steps.deploy.outputs.sha }}
           HYPERVIBE_RELEASE_PROVIDER: ${JSON.stringify(provider)}
           HYPERVIBE_RELEASE_ENVIRONMENT: ${JSON.stringify(target.environmentName)}
@@ -940,11 +835,13 @@ function buildServerReleaseEvidenceStep(
           HYPERVIBE_RELEASE_RESOURCES: ${JSON.stringify(JSON.stringify(releaseTarget.resources))}
           HYPERVIBE_RELEASE_BINDINGS_FINGERPRINT: ${releaseTarget.bindingsFingerprint}
           HYPERVIBE_RELEASE_PROGRAM_FINGERPRINT: ${programFingerprint}
+          HYPERVIBE_RELEASE_DEPLOYMENT_CONTRACT_FINGERPRINT: \${{ steps.deployment_contract.outputs.fingerprint }}
           HYPERVIBE_RELEASE_REQUIRES_IMMUTABLE_IMAGE: ${releaseImageUri ? 'true' : 'false'}
           HYPERVIBE_RELEASE_IMAGE_URI: ${releaseImageUri ?? "''"}
         with:
           script: |
-${indentWorkflowScript(RELEASE_EVIDENCE_VALIDATION_RUNTIME)}
+${indentWorkflowJavaScript(RELEASE_EVIDENCE_VALIDATION_LOADER)}
+            const { expectedReleaseTarget } = validatorModule.exports;
             const { writeFileSync } = require('fs');
             const sha = String(process.env.HYPERVIBE_RELEASE_SHA || '').trim().toLowerCase();
             const repository = String(process.env.GITHUB_REPOSITORY || '').trim();
@@ -960,15 +857,20 @@ ${indentWorkflowScript(RELEASE_EVIDENCE_VALIDATION_RUNTIME)}
               process.env.HYPERVIBE_RELEASE_BINDINGS_FINGERPRINT
             );
             const imageUri = String(process.env.HYPERVIBE_RELEASE_IMAGE_URI || '').trim().toLowerCase();
+            const deploymentContractFingerprint = String(
+              process.env.HYPERVIBE_RELEASE_DEPLOYMENT_CONTRACT_FINGERPRINT || ''
+            ).trim().toLowerCase();
             const requiresImmutableImage = process.env.HYPERVIBE_RELEASE_REQUIRES_IMMUTABLE_IMAGE === 'true';
-            if ((imageUri && !/^[^\\s@]+@sha256:[0-9a-f]{64}$/.test(imageUri))
+            if (!/^[0-9a-f]{64}$/.test(deploymentContractFingerprint)
+                || (imageUri && !/^[^\\s@]+@sha256:[0-9a-f]{64}$/.test(imageUri))
                 || (requiresImmutableImage && !imageUri)) {
-              throw new Error('Verified deployment did not produce an immutable image digest');
+              throw new Error('Verified deployment did not produce complete contract and image evidence');
             }
-            writeFileSync('hypervibe-server-release.json', JSON.stringify({
-              version: 3,
+            writeFileSync('${MANAGED_CI_RELEASE_EVIDENCE_FILE}', JSON.stringify({
+              version: ${MANAGED_CI_RELEASE_EVIDENCE_VERSION},
               provider: process.env.HYPERVIBE_RELEASE_PROVIDER,
               environment: process.env.HYPERVIBE_RELEASE_ENVIRONMENT,
+              deploymentContractFingerprint,
               source: {
                 repository,
                 sha,
@@ -1064,6 +966,7 @@ export function buildBranchDeployWorkflow(
 ): BranchDeployWorkflow {
   const safeEnvironment = target.environmentName.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
   const template = `deploy-${provider}-${safeEnvironment}`;
+  const workflowPath = branchDeployWorkflowPath(provider, target.environmentName);
   if (migration.includeStep && migration.command && !target.runtime) {
     throw new Error(
       `Managed migration tooling for ${target.environmentName} requires an explicit project runtime. `
@@ -1111,10 +1014,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-${target.autoDeployOnPush
-  ? "    if: github.event_name != 'push' || vars.HYPERVIBE_APPLIED_SPEC_HASH != ''\n"
-  : ''}    runs-on: ubuntu-latest
+${target.autoDeployOnPush ? `  reconciliation:
+    runs-on: ubuntu-latest
+    environment: ${target.environmentName}
+    permissions: {}
+    outputs:
+      ready: \${{ steps.ready.outputs.ready }}
+    steps:
+      - id: ready
+        env:
+          HYPERVIBE_APPLIED_SPEC_HASH: \${{ vars.HYPERVIBE_APPLIED_SPEC_HASH }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" != push || -n "$HYPERVIBE_APPLIED_SPEC_HASH" ]]; then echo ready=true; else echo ready=false; fi >> "$GITHUB_OUTPUT"
+` : ''}  deploy:
+${target.autoDeployOnPush ? "    needs: reconciliation\n    if: needs.reconciliation.outputs.ready == 'true'\n" : ''}    runs-on: ubuntu-latest
     environment: ${target.environmentName}
 ${permissionsBlock.trimEnd()}
     steps:
@@ -1136,7 +1049,7 @@ ${permissionsBlock.trimEnd()}
             core.setOutput('sha', sha);
             core.setOutput('operation', operation);
             core.info((operation === 'rollback' ? 'Restoring' : 'Deploying') + ' commit ' + sha);
-      - name: Verify rollback release evidence
+${buildReleaseEvidenceRuntimeStep()}      - name: Verify rollback release evidence
         if: steps.deploy.outputs.operation == 'rollback'
         uses: actions/github-script@v9
         env:
@@ -1150,8 +1063,7 @@ ${permissionsBlock.trimEnd()}
           script: |
             const environment = process.env.HYPERVIBE_ENVIRONMENT;
             const targetSha = process.env.HYPERVIBE_ROLLBACK_SHA.toLowerCase();
-            const safeEnvironment = environment.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
-            const expectedName = 'hypervibe-server-release-' + safeEnvironment + '-' + targetSha;
+            const expectedName = '${managedCiReleaseArtifactPrefix(target.environmentName)}' + targetSha;
             const expectedLatestRunId = Number(process.env.HYPERVIBE_EXPECTED_LATEST_RUN_ID);
             if (!Number.isSafeInteger(expectedLatestRunId) || expectedLatestRunId <= 0) {
               throw new Error('Rollback requires Hypervibe expected_latest_run_id evidence');
@@ -1196,22 +1108,24 @@ ${permissionsBlock.trimEnd()}
               throw new Error('Rollback evidence for ' + targetSha + ' did not come from a successful run of ' + workflowPath);
             }
             core.info('Verified rollback evidence from successful workflow run ' + run.data.id);
-${buildReleaseTargetPreflight(provider, target)}${rollbackEvidenceSteps}${promotionEvidenceStep}      - uses: actions/checkout@v7
+${buildReleaseTargetPreflight(provider, target)}      - uses: actions/checkout@v7
 ${sourcePreparationCondition ? `        if: ${sourcePreparationCondition}\n` : ''}        with:
           ref: \${{ steps.deploy.outputs.sha }}
           persist-credentials: false
-${buildDeploymentContractStep(target.environmentName, sourcePreparationCondition)}${migrationStep}${deployBlock.steps}${releaseEvidenceStep}      - name: Upload server release evidence
+${buildDeploymentContractStep(target.environmentName)}${rollbackEvidenceSteps}${promotionEvidenceStep}${migrationStep}${deployBlock.steps}${releaseEvidenceStep}      - name: Upload server release evidence
         uses: actions/upload-artifact@v7
         with:
-          name: hypervibe-server-release-${safeEnvironment}-\${{ steps.deploy.outputs.sha }}
-          path: hypervibe-server-release.json
+          name: ${managedCiReleaseArtifactPrefix(target.environmentName)}\${{ steps.deploy.outputs.sha }}
+          path: ${MANAGED_CI_RELEASE_EVIDENCE_FILE}
           if-no-files-found: error
           retention-days: 90
 ${buildDeploymentFailureEvidenceJob(target.environmentName)}`;
 
   const iosRelease = ios
     ? buildIosReleaseWorkflow({
+      provider,
       providerName,
+      serverWorkflowPath: workflowPath,
       target,
       ios,
     })
@@ -1246,7 +1160,7 @@ ${buildDeploymentFailureEvidenceJob(target.environmentName)}`;
     ...(target.promoteFromEnvironment ? { promoteFromEnvironment: target.promoteFromEnvironment } : {}),
     supportsImmutableRollback: immutableRollback,
     environment: target.environmentName,
-    path: branchDeployWorkflowPath(provider, target.environmentName),
+    path: workflowPath,
     content,
     ...(iosRelease ? { companionFiles: iosRelease.files } : {}),
     review: {

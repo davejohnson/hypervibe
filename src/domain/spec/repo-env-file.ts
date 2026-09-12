@@ -371,9 +371,13 @@ export function specLocalEnvRequirements(
     });
   }
 
+  // Environment-specific files hold only scoped delegated secrets. Explicit
+  // deploy inputs stay in the base file until the deploy loader copies a
+  // selected non-empty value, so a generated blank cannot mask it.
+  if (selectedEnvironmentName) return requirements;
+
   const envFileDestinations = new Map<string, string[]>();
   for (const [environmentName, environment] of Object.entries(spec.environments)) {
-    if (selectedEnvironmentName && environmentName !== selectedEnvironmentName) continue;
     if (!environment.envFile || environment.envFile.mode === 'off') continue;
     for (const key of environment.envFile.include) {
       if (environment.envFile.exclude.includes(key)) continue;

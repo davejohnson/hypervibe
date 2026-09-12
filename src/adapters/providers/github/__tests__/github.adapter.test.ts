@@ -308,14 +308,21 @@ describe('GitHub repository infrastructure', () => {
     expect(Buffer.from(body.content, 'base64').toString('utf8')).toBe(unicodeWorkflow);
   });
 
-  it('reads Unicode file content from UTF-8 Base64', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(response({
+  it.each([
+    { ref: undefined, suffix: '' },
+    { ref: 'release/next', suffix: '?ref=release%2Fnext' },
+  ])('reads UTF-8 file content at the selected ref ($ref)', async ({ ref, suffix }) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(response({
       content: Buffer.from(unicodeWorkflow, 'utf8').toString('base64'),
     }));
 
     await expect(
-      connectedAdapter().getFileContent('dave', 'app', '.github/workflows/deploy.yml')
+      connectedAdapter().getFileContent('dave', 'app', '.github/workflows/deploy.yml', ref)
     ).resolves.toBe(unicodeWorkflow);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `https://api.github.com/repos/dave/app/contents/.github/workflows/deploy.yml${suffix}`,
+      expect.objectContaining({ method: 'GET' })
+    );
   });
 
   it('reads branch-scoped Unicode file content from UTF-8 Base64', async () => {

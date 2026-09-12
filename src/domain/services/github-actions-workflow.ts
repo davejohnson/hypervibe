@@ -46,7 +46,7 @@ export function buildDockerfileStep(target: BranchDeployTarget, ifCondition?: st
       ? '[ -f requirements.txt ] || [ -f pyproject.toml ]'
       : 'false';
   const generatedDockerfile = dockerfileContent
-    ? `            printf '%s\\n' ${shellSingleQuoted(dockerfileContent)} > Dockerfile.hypervibe`
+    ? `            node -e 'require("fs").writeFileSync("Dockerfile.hypervibe", Buffer.from(process.argv[1], "base64"))' ${shellSingleQuoted(Buffer.from(dockerfileContent, 'utf8').toString('base64'))}`
     : `            echo ${shellSingleQuoted(generationError)} >&2
             exit 1`;
   return `      - name: Resolve Dockerfile

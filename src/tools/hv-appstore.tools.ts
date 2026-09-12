@@ -10,6 +10,7 @@ import { connectionSetupOptions, formatConnectionGuidance } from '../domain/serv
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
+import { managedCiReleaseArtifactPrefix } from '../domain/services/managed-ci-evidence.js';
 import { projectField } from './schemas.js';
 import { ignoredOptionWarnings } from '../application/command-options.js';
 
@@ -237,7 +238,7 @@ export function registerHvAppstoreTools(commands: CommandRegistrar, ctx: Command
       const successfulIosRuns = new Set(
         iosRuns.workflow_runs.filter((run) => run.conclusion === 'success').map((run) => run.id)
       );
-      const serverPrefix = `hypervibe-server-release-${safeEnvironment}-`;
+      const serverPrefix = managedCiReleaseArtifactPrefix(environmentName);
       const iosPrefix = `hypervibe-ios-release-${safeEnvironment}-`;
       const matchingArtifacts = (prefix: string, runIds: Set<number>) => artifacts.artifacts
         .filter((artifact) =>

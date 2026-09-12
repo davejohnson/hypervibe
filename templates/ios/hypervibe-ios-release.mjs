@@ -59,6 +59,10 @@ export function parseReleaseConfig(env = process.env, cwd = process.cwd()) {
   if (path.extname(ipaPath).toLowerCase() !== ".ipa") {
     throw new Error("HYPERVIBE_IPA_PATH must point to an IPA");
   }
+  const serverEvidenceVersion = Number(required(env, "HYPERVIBE_SERVER_EVIDENCE_VERSION"));
+  if (!Number.isSafeInteger(serverEvidenceVersion) || serverEvidenceVersion <= 0) {
+    throw new Error("HYPERVIBE_SERVER_EVIDENCE_VERSION must be a positive integer");
+  }
 
   return {
     keyId,
@@ -74,6 +78,7 @@ export function parseReleaseConfig(env = process.env, cwd = process.cwd()) {
     environment: required(env, "HYPERVIBE_ENVIRONMENT"),
     releaseSha,
     repository: required(env, "GITHUB_REPOSITORY"),
+    serverEvidenceVersion,
     serverEvidencePath: path.resolve(
       cwd,
       env.HYPERVIBE_SERVER_EVIDENCE_PATH?.trim() || "hypervibe-server-release.json"
@@ -371,10 +376,12 @@ export function buildReleaseManifest(config, serverEvidence, app, build, release
     ? resources.map((resource) => resource?.logicalName)
     : [];
   if (
-    serverEvidence?.version !== 3
+    serverEvidence?.version !== config.serverEvidenceVersion
     || serverEvidence.environment !== config.environment
     || serverEvidence.source?.repository !== config.repository
     || serverEvidence.source?.sha !== config.releaseSha
+    || !/^[0-9a-f]{64}$/.test(serverEvidence.deploymentContractFingerprint ?? "")
+    || !/^[0-9a-f]{64}$/.test(serverEvidence.programFingerprint ?? "")
     || services.length === 0
     || services.some((service) => typeof service !== "string" || !service)
     || new Set(services).size !== services.length
