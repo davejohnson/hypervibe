@@ -4,6 +4,13 @@ Hypervibe provider support is a lifecycle contract, not a provider name in a
 schema. Every supported provider must pass the same resource contract through
 the normal desired-state loop.
 
+The [pinned API contract gate](../test/provider-contracts/README.md) validates
+Railway query documents and executes real-client request/response tests, plus
+focused Supabase/Neon REST request contracts. It runs offline in ordinary PR
+acceptance and the existing scheduled contract entrypoint. Schema updates are
+explicitly reviewed, never fetched automatically during tests. This evidence
+does not replace the live lifecycle gate below.
+
 Catalog and blueprint work is intentionally separate from this contract.
 The active provider scope deliberately excludes Heroku and Render. Fly.io Apps,
 Machines, certificates, and Managed Postgres are now in scope as

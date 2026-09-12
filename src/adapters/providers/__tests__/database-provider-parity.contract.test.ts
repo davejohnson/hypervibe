@@ -77,7 +77,7 @@ async function setupSupabase(
     const method = init?.method ?? 'GET';
 
     if (method === 'GET' && url.pathname === '/v1/organizations') {
-      return Response.json([{ id: 'org-1', name: 'Primary' }]);
+      return Response.json([{ id: 'org-1', slug: 'primary-org', name: 'Primary' }]);
     }
 
     if (method === 'GET' && url.pathname === '/v1/projects') {

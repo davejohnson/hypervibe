@@ -369,9 +369,8 @@ export class RailwayAdapter implements
         };
       }
 
-      // Railway has used multiple input names over time. A second mutation is
-      // safe only when GraphQL validation proves the previous resolver never
-      // ran; transport failures and malformed acknowledgements are unknown.
+      // Use the reviewed GraphQL contract. Never retry a create using a
+      // guessed input shape after an unknown mutation outcome.
       let created: { id: string; name?: string } | null = null;
       let createError: string | undefined;
       try {
@@ -580,17 +579,6 @@ export class RailwayAdapter implements
           }
         `,
         variables: { name: projectName, workspaceId },
-      }, {
-        label: 'input.teamId',
-        mutation: `
-          mutation CreateProject($name: String!, $teamId: String) {
-            projectCreate(input: { name: $name, teamId: $teamId }) {
-              id
-              name
-            }
-          }
-        `,
-        variables: { name: projectName, teamId: this.credentials?.teamId ?? workspaceId },
       }]
       : [{
         label: 'input.name_only',
@@ -609,7 +597,7 @@ export class RailwayAdapter implements
     for (const attempt of attempts) {
       try {
         const result = await this.client.request<unknown>(
-          gql`${attempt.mutation}`,
+          attempt.mutation,
           attempt.variables
         );
         if (!isRecord(result) || !isRecord(result.projectCreate)) {
@@ -671,41 +659,6 @@ export class RailwayAdapter implements
       query: string;
       parse: (payload: unknown) => Array<{ id: string; name?: string }>;
     }> = [
-      {
-        label: 'me.workspaces.edges',
-        // Connection-style shape (older API responses)
-        query: `
-          query MyWorkspacesConnection {
-            me {
-              workspaces {
-                edges {
-                  node {
-                    id
-                    name
-                  }
-                }
-              }
-            }
-          }
-        `,
-        parse: (payload) => {
-          if (!isRecord(payload) || !isRecord(payload.me) || !isRecord(payload.me.workspaces)
-            || !Array.isArray(payload.me.workspaces.edges)) {
-            throw new Error('Railway returned an invalid me.workspaces connection.');
-          }
-          return payload.me.workspaces.edges.map((edge, index) => {
-            if (!isRecord(edge) || !isRecord(edge.node)
-              || typeof edge.node.id !== 'string' || edge.node.id.length === 0
-              || (edge.node.name !== undefined && typeof edge.node.name !== 'string')) {
-              throw new Error(`Railway returned an invalid workspace at edge ${index}.`);
-            }
-            return {
-              id: edge.node.id,
-              ...(typeof edge.node.name === 'string' ? { name: edge.node.name } : {}),
-            };
-          });
-        },
-      },
       {
         label: 'me.workspaces direct',
         // Direct array/object shape (newer API responses)
@@ -774,7 +727,7 @@ export class RailwayAdapter implements
     const schemaErrors: string[] = [];
     for (const attempt of attempts) {
       try {
-        const result = await this.client.request<unknown>(gql`${attempt.query}`);
+        const result = await this.client.request<unknown>(attempt.query);
         const parsed = attempt.parse(result);
         const seen = new Set<string>();
         for (const workspace of parsed) {
@@ -2043,24 +1996,12 @@ export class RailwayAdapter implements
         `,
         variables: { projectId, name: environmentName },
       },
-      {
-        label: 'environmentCreate.arguments',
-        mutation: `
-          mutation CreateEnvironment($projectId: String!, $name: String!) {
-            environmentCreate(projectId: $projectId, name: $name) {
-              id
-              name
-            }
-          }
-        `,
-        variables: { projectId, name: environmentName },
-      },
     ];
 
     const schemaErrors: string[] = [];
     for (const attempt of attempts) {
       try {
-        const result = await this.client.request<unknown>(gql`${attempt.mutation}`, attempt.variables);
+        const result = await this.client.request<unknown>(attempt.mutation, attempt.variables);
         if (!isRecord(result) || !isRecord(result.environmentCreate)) {
           throw new Error(`${attempt.label}: Railway returned an invalid environmentCreate acknowledgement; creation state is unknown and Hypervibe will not issue another mutation.`);
         }
@@ -2238,19 +2179,6 @@ export class RailwayAdapter implements
         }
       `,
       },
-      {
-        label: 'project.services direct',
-        query: gql`
-        query GetProjectServicesDirect($projectId: String!) {
-          project(id: $projectId) {
-            services {
-              id
-              name
-            }
-          }
-        }
-      `,
-      },
     ];
 
     for (const attempt of attempts) {
@@ -2319,30 +2247,12 @@ export class RailwayAdapter implements
         `,
         variables: { id: projectId },
       },
-      {
-        label: 'projectDelete.input.id',
-        mutation: `
-          mutation DeleteProject($id: String!) {
-            projectDelete(input: { id: $id })
-          }
-        `,
-        variables: { id: projectId },
-      },
-      {
-        label: 'projectDelete.input.projectId',
-        mutation: `
-          mutation DeleteProject($id: String!) {
-            projectDelete(input: { projectId: $id })
-          }
-        `,
-        variables: { id: projectId },
-      },
     ];
 
     const errors: string[] = [];
     for (const attempt of attempts) {
       try {
-        const result = await this.client.request<Record<string, unknown>>(gql`${attempt.mutation}`, attempt.variables);
+        const result = await this.client.request<Record<string, unknown>>(attempt.mutation, attempt.variables);
         const accepted = this.isDeleteAccepted(result, 'projectDelete', projectId);
         if (!accepted) {
           return { success: false, error: `${attempt.label}: delete mutation returned unsuccessful payload` };
@@ -2942,6 +2852,19 @@ export class RailwayAdapter implements
       );
       let railwayServiceId = serviceResolution.serviceId;
       let createdService = false;
+
+      if (railwayServiceId && !bindings.services?.[service.name]?.serviceId) {
+        return {
+          serviceId: service.id,
+          status: 'failed',
+          receipt: {
+            success: false,
+            message: `Railway service ${providerServiceName} already exists but is not bound locally`,
+            error: `Hypervibe will not mutate or adopt Railway service ${railwayServiceId} from an unbound deploy. Use hv_import to adopt that exact service, then re-run hv_plan.`,
+            data: { adoptionCandidateServiceId: railwayServiceId, projectId, environmentId: railwayEnvId },
+          },
+        };
+      }
 
       if (!railwayServiceId) {
         // Create service
@@ -3594,8 +3517,8 @@ export class RailwayAdapter implements
       };
     }
 
-    // Second attempt: treat deploymentId as a service ID (current deploy flow),
-    // supporting both connection and array response shapes.
+    // Second attempt: treat deploymentId as a service ID (current deploy flow)
+    // using the reviewed serviceInstances connection contract.
     const serviceQueries = [
       {
         name: 'serviceInstances connection query',
@@ -3613,24 +3536,6 @@ export class RailwayAdapter implements
                       staticUrl
                     }
                   }
-                }
-              }
-            }
-          }
-        `,
-      },
-      {
-        name: 'serviceInstances direct query',
-        query: gql`
-          query GetServiceStatusDirect($id: String!) {
-            service(id: $id) {
-              id
-              serviceInstances {
-                environmentId
-                latestDeployment {
-                  id
-                  status
-                  staticUrl
                 }
               }
             }

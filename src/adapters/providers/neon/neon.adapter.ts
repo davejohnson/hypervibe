@@ -214,11 +214,9 @@ export class NeonAdapter implements IDatabaseAdapter {
       let acknowledged: NeonCreateProjectResponse;
       try {
         acknowledged = await this.request<NeonCreateProjectResponse>('POST', '/projects', {
-          query: {
-            org_id: organizationId,
-          },
           body: {
             project: {
+              ...(organizationId ? { org_id: organizationId } : {}),
               name: resourceName,
               ...(regionId ? { region_id: regionId } : {}),
               branch: {
