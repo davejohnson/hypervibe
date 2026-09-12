@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RailwayAdapter } from '../railway.adapter.js';
+import { serviceInstanceInventory } from './service-instance-inventory.fixture.js';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
 
 function makeEnv(bindings: Record<string, unknown>): Environment {
@@ -702,7 +703,8 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
           },
         },
       })
-      // ensureServiceInstanceForEnvironment
+      .mockResolvedValueOnce(serviceInstanceInventory('rail-proj-1', 'rail-svc-db-existing', ['rail-env-1']))
+      // Exact target instance verification
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-existing', 'rail-env-1'))
       // fetchServiceVariables — bootstrap vars are present
       .mockResolvedValueOnce({
@@ -718,7 +720,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
     expect(result.receipt.error).toContain('hv_import');
     expect(result.receipt.data).toMatchObject({ adoptionCandidateServiceId: 'rail-svc-db-existing' });
     expect(result.component.externalId).toBeNull();
-    expect(request).toHaveBeenCalledTimes(3);
+    expect(request).toHaveBeenCalledTimes(4);
     expect(request.mock.calls.some(([query]) => String(query).includes('variableCollectionUpsert'))).toBe(false);
   });
 
@@ -740,7 +742,8 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
           },
         },
       })
-      // ensureServiceInstanceForEnvironment
+      .mockResolvedValueOnce(serviceInstanceInventory('rail-proj-1', 'rail-svc-db-existing', ['rail-env-1']))
+      // Exact target instance verification
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-existing', 'rail-env-1'))
       // fetchServiceVariables — POSTGRES_PASSWORD missing (crashlooping container)
       .mockResolvedValueOnce({
@@ -763,7 +766,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
     expect(result.receipt.success).toBe(false);
     expect(result.receipt.error).toContain('will not mutate or adopt');
     expect(result.component.externalId).toBeNull();
-    expect(request).toHaveBeenCalledTimes(3);
+    expect(request).toHaveBeenCalledTimes(4);
     expect(request.mock.calls.some(([query]) => (
       String(query).includes('variableCollectionUpsert')
       || String(query).includes('serviceInstanceRedeploy')
@@ -787,7 +790,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         },
       })
       // resolveServiceIdForEnvironment sees the matching service only in production.
-      .mockResolvedValueOnce({ serviceInstance: null })
+      .mockResolvedValueOnce(serviceInstanceInventory('rail-proj-1', 'rail-svc-db-existing', ['rail-env-production']))
       .mockResolvedValueOnce({
         serviceCreate: {
           id: 'rail-svc-db-staging',
@@ -854,7 +857,8 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
           },
         },
       })
-      .mockResolvedValueOnce({ serviceInstance: null })
+      .mockResolvedValueOnce(serviceInstanceInventory('rail-proj-1', 'rail-svc-db-prod', ['rail-env-production']))
+      .mockResolvedValueOnce(serviceInstanceInventory('rail-proj-1', 'rail-svc-db-staging', ['rail-env-staging']))
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-staging', 'rail-env-staging'))
       .mockResolvedValueOnce({
         variables: { POSTGRES_PASSWORD: 'already-set', DATABASE_URL: 'postgres://...' },
@@ -868,7 +872,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
     expect(result.receipt.success).toBe(false);
     expect(result.receipt.data).toMatchObject({ adoptionCandidateServiceId: 'rail-svc-db-staging' });
     expect(result.component.externalId).toBeNull();
-    expect(request).toHaveBeenCalledTimes(4);
+    expect(request).toHaveBeenCalledTimes(5);
     expect(request.mock.calls.some(([query]) => String(query).includes('serviceCreate'))).toBe(false);
   });
 

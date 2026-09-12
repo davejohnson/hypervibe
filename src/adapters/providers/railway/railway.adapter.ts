@@ -2145,9 +2145,21 @@ export class RailwayAdapter implements
     const candidates = services.filter((service) => names.has(service.name));
     const environmentMatches: Array<{ id: string; name: string }> = [];
     for (const candidate of candidates) {
-      // A failed instance read is not evidence that this project-level
-      // service is absent from the target environment. Propagate the failure
-      // so callers cannot create a duplicate service from an unknown read.
+      // Railway can report a missing singular serviceInstance as an internal
+      // server error. Prove membership through the complete scoped inventory
+      // before probing a project-level candidate in this environment.
+      const inventory = await this.serviceInstanceInventory(candidate.id, projectId);
+      if (inventory.state !== 'complete') {
+        throw new Error(
+          `Cannot resolve Railway service ${candidate.id} in environment ${environmentId}: `
+          + (inventory.state === 'unknown'
+            ? inventory.error
+            : `service disappeared from project ${projectId} during lookup.`)
+        );
+      }
+      if (!inventory.environmentIds.includes(environmentId)) continue;
+      // A listed instance still needs its exact identity/deletion state
+      // checked. A failed read remains unknown and cannot authorize creation.
       if (await this.serviceHasEnvironmentInstance(candidate.id, environmentId)) {
         environmentMatches.push(candidate);
       }
