@@ -239,12 +239,12 @@ describe('SpecStore', () => {
       expect(v1.source).toEqual({ kind: 'repo', path: specPath });
       expect(v1.envTemplate).toEqual({
         path: envTemplatePath,
-        addedKeys: expectedKeys,
+        addedKeys: ['NODE_ENV', ...expectedKeys],
         commentedKeys: [],
       });
       expect(v1.localEnv).toEqual({
         path: localEnvPath,
-        addedKeys: expectedKeys,
+        addedKeys: ['NODE_ENV', ...expectedKeys],
         commentedKeys: [],
         gitignorePath: path.join(repoDir, '.gitignore'),
         gitignoreUpdated: true,
@@ -258,7 +258,7 @@ describe('SpecStore', () => {
         }
         expect(content).not.toContain('RECAPTCHA_SITE_KEY=');
         expect(content).not.toContain('RECAPTCHA_SECRET_KEY=');
-        expect(content).not.toContain('NODE_ENV=');
+        expect(content).toContain('# NODE_ENV=');
         expect(content).not.toContain('staging-site');
       }
 

@@ -172,6 +172,7 @@ export interface SpecResult {
   revision: number;
   source?: { kind: 'repo'; path: string } | { kind: 'local' };
   envTemplate?: { path: string; addedKeys: string[]; commentedKeys: string[] };
+  environmentEnvFiles?: import('./repo-env-file.js').RepoEnvFileWrite[];
   localEnv?: {
     path: string;
     addedKeys: string[];
@@ -269,7 +270,7 @@ export class SpecStore {
       spec: converted,
       revision: row.revision,
       source: written ? { kind: 'repo', path: written.path } : { kind: 'local' },
-      ...(written ? { envTemplate: written.envTemplate, localEnv: written.localEnv } : {}),
+      ...(written ? { envTemplate: written.envTemplate, localEnv: written.localEnv, environmentEnvFiles: written.environmentEnvFiles } : {}),
     };
   }
 
@@ -296,7 +297,7 @@ export class SpecStore {
       spec: parsed,
       revision: row.revision,
       source: written ? { kind: 'repo', path: written.path } : { kind: 'local' },
-      ...(written ? { envTemplate: written.envTemplate, localEnv: written.localEnv } : {}),
+      ...(written ? { envTemplate: written.envTemplate, localEnv: written.localEnv, environmentEnvFiles: written.environmentEnvFiles } : {}),
     };
   }
 

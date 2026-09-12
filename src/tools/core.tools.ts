@@ -72,7 +72,7 @@ import { buildCacheEnvVarsFromComponent } from '../domain/services/cache-env.js'
 import type { ObservedState } from '../domain/ports/observe.port.js';
 import {
   environmentVariableCoverage,
-  environmentVariableCoverageIssueId,
+  introducedEnvironmentVariableCoverageIssues,
   type EnvironmentVariableCoverageReport,
 } from '../domain/services/environment-variable-coverage.service.js';
 import { planProviderNativeDeploySources } from '../domain/services/provider-native-deploy-source.service.js';
@@ -652,18 +652,11 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           : mergedInput;
         const candidateSpec = projectSpecSchema.parse(canonicalizeLegacyGitHubSpec(candidateInput));
         coverageReport = environmentVariableCoverage(candidateSpec);
-        const previousIssueIds = new Set(
-          previousSpec
-            ? environmentVariableCoverage(previousSpec).issues.map(environmentVariableCoverageIssueId)
-            : []
-        );
-        const introducedCoverageIssues = coverageReport.issues.filter(
-          (issue) => !previousIssueIds.has(environmentVariableCoverageIssueId(issue))
-        );
+        const introducedCoverageIssues = introducedEnvironmentVariableCoverageIssues(previousSpec, candidateSpec);
         if (introducedCoverageIssues.length > 0) {
           throw new HvError('VALIDATION', 'Environment-variable coverage is incomplete.', {
             details: introducedCoverageIssues,
-            hint: 'Declare each key in every listed matching environment using a separately chosen envVars value, envFile include, or delegated-secret target. If a key intentionally does not apply, add it to that environment\'s envVarExceptions. Hypervibe never copies values between environments.',
+            hint: 'This checks spec declarations, not whether live provider variables exist. Declare each key in every listed matching environment using a separately chosen envVars value, envFile include, or managed-secret target. If a key intentionally does not apply, add it to that environment\'s envVarExceptions. Hypervibe never copies values between environments.',
           });
         }
         const nativeChanges = providerNativeDeployChanges(candidateSpec, previousSpec);
@@ -717,7 +710,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         ...(runtimeReview.status === 'review-required' ? [runtimeReview.message] : []),
         ...checkRuntimeIssues,
         ...(coverageReport.issues.length > 0
-          ? [`The spec still has ${coverageReport.issues.length} pre-existing environment-variable coverage gap(s). Unrelated changes remain allowed, but new gaps are blocked.`]
+          ? [`The spec has ${coverageReport.issues.length} pre-existing or rename-exposed environment-variable declaration gap(s). These are not proof of missing live variables. Existing values and ownership remain unchanged; new input gaps are blocked.`]
           : []),
       ];
 
@@ -727,6 +720,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           revision: result.revision,
           specSource: result.source ?? { kind: 'local' },
           envTemplate: result.envTemplate ?? null,
+          environmentEnvFiles: result.environmentEnvFiles ?? [],
           localEnv: localEnv ?? null,
           spec: result.spec,
           repositoryRuntime,

@@ -761,12 +761,19 @@ whole. Existing environment-specific assignments always win, while newly added
 eligible base keys are appended without overwriting that divergence.
 
 Spec writes in the matching checkout use one shared, non-destructive updater for
-the private `.env` and value-free `.env.example`. It derives exact project input
+the private `.env`, every declared `.env.<environment>`, and value-free `.env.example`.
+They preflight all private paths before writing and return per-file receipts.
+The updater derives exact project input
 names from delegated `secrets` and `envFile.include`, so names such as
 `RECAPTCHA_V3_SITE_KEY` and `RECAPTCHA_V3_SECRET_KEY` come from the spec rather
-than a hard-coded product list. It never copies values or turns ordinary
-`envVars`, generated database/queue/storage outputs, or every possible provider
-credential into local inputs. Each managed assignment has an immediately
+than a hard-coded product list. It never copies values or turns generated
+database/queue/storage outputs or every possible provider credential into local
+inputs. Ordinary `envVars` and Hypervibe-owned secret names appear as commented,
+empty documentation entries, with comments explaining spec or generator
+ownership. A key declared only for a related environment is documented as not
+managed here; that entry does not adopt a live value or extend the secret's
+target environments. Commented entries do not shadow a later policy-selected
+base input. Each managed assignment has an immediately
 preceding purpose comment; missing assignments are empty, existing values and
 ordering are preserved, and an empty commented placeholder may be activated in
 the private `.env` without activating a commented example value.
@@ -779,7 +786,7 @@ For an environment plan, Hypervibe adds value-free placeholders for delegated
 inputs consumed by that environment to the prepared `.env.<environment>` file.
 This file remains a safe input surface for `secretRefs`, not an instruction to
 publish its contents. Values from the base `.env` are never copied into those
-delegated slots. Generated secrets never become local placeholders, and
+delegated slots. Generated secret values never enter local files, and
 connection or control-plane requirements remain in the base `.env` rather than
 being added by this environment scaffolding. `envFile.mode: "off"` and
 `includeEnvFile: false` suppress ordinary base-value synchronization without
@@ -894,7 +901,13 @@ absence explicit. Mixed ordinary/delegated handling for the same key is
 invalid. `hv_spec` blocks newly introduced gaps and gaps created by adding
 a matching environment or service. Pre-existing gaps remain readable and do
 not block unrelated spec changes, but are reported until repaired or explicitly
-excepted. Provider observation and AI are not required for this guardrail;
+excepted. A name-only service rename with unchanged provider and service
+configuration does not introduce runtime inputs: evaluate its old declarations
+under the renamed service names when determining which gaps are new. Keep
+rename-exposed declaration gaps visible as warnings, without claiming live
+variables are missing or changing another environment's ownership. New keys,
+changed configurations, additional services/environments, and mixed secret
+boundaries still undergo validation. Provider observation and AI are not required for this guardrail;
 `hv_plan` and `hv_apply` continue to own convergence of the accepted spec.
 
 ## Stripe Desired State
