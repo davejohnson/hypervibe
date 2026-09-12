@@ -485,11 +485,8 @@ describe('hv_spec', () => {
       ]);
       expect(plan.data.localEnv).toMatchObject({
         path: stagingPath,
-        addedKeys: [
-          'OWNER_MANAGED_SECRET',
-          'PUBLIC_WIDGET_KEY',
-          'WEBHOOK_SIGNING_SECRET',
-        ],
+        // Spec writes now scaffold every declared environment before planning.
+        addedKeys: [],
       });
       expect(plan.hint).toContain(`dotenv:${stagingPath}#OWNER_MANAGED_SECRET`);
       expect(plan.hint).toContain(`dotenv:${stagingPath}#PUBLIC_WIDGET_KEY`);
@@ -542,7 +539,7 @@ describe('hv_spec', () => {
       });
 
       const reviewPath = path.join(repoDir, '.env.review');
-      expect(existsSync(reviewPath)).toBe(false);
+      expect(existsSync(reviewPath)).toBe(true);
       const reviewPlan = await t.call('hv_plan', {
         project: projectName,
         env: 'review',
@@ -984,6 +981,52 @@ describe('hv_spec', () => {
     expect(unrelated.data.environmentVariableCoverage.complete).toBe(false);
     expect(unrelated.warnings).toContainEqual(expect.stringContaining('pre-existing'));
     expect(JSON.stringify(unrelated.data.environmentVariableCoverage)).not.toContain('production-only');
+    await t.close();
+  });
+
+  it.each(['railway', 'cloudrun', 'digitalocean', 'fly', 'ecs', 'azure-container-apps', 'vercel'])(
+    'allows a staging-only service rename on %s without taking ownership of production configuration', async (provider) => {
+      const t = await makeClient();
+      const project = `rename-coverage-${provider}`;
+      const production = { hosting: { provider }, services: { web: { workloadKind: 'web' } } };
+      const initial = await t.call('hv_spec', { spec: {
+        project,
+        secrets: { APP_SIGNING_KEY: { ownership: 'hypervibe', generator: 'random-base64url-32-v1', environments: ['staging'] } },
+        environments: {
+          production,
+          staging: { hosting: { provider }, services: { preview: { workloadKind: 'web' } }, envVars: { CONTACT_EMAIL: 'owner@example.test' } },
+        },
+      } });
+      expect(initial.ok).toBe(true);
+      const beforeProduction = structuredClone(initial.data.spec.environments.production);
+      const renamed = await t.call('hv_spec', { project, spec: {
+        environments: { staging: { services: { preview: null, web: { workloadKind: 'web' } } } },
+      } });
+      expect(renamed, JSON.stringify(renamed.error)).toMatchObject({ ok: true });
+      expect(renamed.data.spec.environments.production).toEqual(beforeProduction);
+      expect(renamed.data.spec.secrets.APP_SIGNING_KEY.environments).toEqual(['staging']);
+      expect(Object.keys(renamed.data.spec.environments.staging.services)).toEqual(['web']);
+      expect(renamed.data.environmentVariableCoverage.issues).toHaveLength(2);
+      expect(renamed.warnings).toContainEqual(expect.stringContaining('declaration'));
+      // A new input is not grandfathered merely because a service was renamed.
+      const newKey = await t.call('hv_spec', { project, spec: {
+        environments: { staging: { envVars: { NEW_REQUIRED_INPUT: 'new-value' } } },
+      } });
+      expect(newKey).toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+      await t.close();
+    }
+  );
+
+  it('does not treat adding a matching service as renaming an existing one', async () => {
+    const t = await makeClient();
+    const project = 'added-service-coverage';
+    const initial = await t.call('hv_spec', { spec: { project, environments: {
+      production: { hosting: { provider: 'railway' }, services: { web: {} } },
+      staging: { hosting: { provider: 'railway' }, services: { preview: {} }, envVars: { CONTACT_EMAIL: 'owner@example.test' } },
+    } } });
+    expect(initial.ok).toBe(true);
+    const added = await t.call('hv_spec', { project, spec: { environments: { staging: { services: { web: {} } } } } });
+    expect(added).toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
     await t.close();
   });
 

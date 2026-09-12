@@ -12,6 +12,7 @@ import {
   ensureCommentedEnvFile,
   ensureRepoEnvTemplate,
   ensureRepoEnvFilesIgnored,
+  ensureRepoEnvironmentLocalEnv,
   specLocalEnvRequirements,
   type RepoEnvFileWrite,
 } from './repo-env-file.js';
@@ -29,6 +30,7 @@ export interface RepoSpecWrite {
   path: string;
   envTemplate: RepoEnvFileWrite;
   localEnv: RepoEnvFileWrite;
+  environmentEnvFiles: RepoEnvFileWrite[];
 }
 
 export interface RepoSpecWritePreflight {
@@ -150,7 +152,7 @@ export function preflightRepoSpecWrite(
   return {
     root,
     project: spec.project,
-    gitignore: ensureRepoEnvFilesIgnored(root),
+    gitignore: ensureRepoEnvFilesIgnored(root, ['.env', ...Object.keys(spec.environments).map((name) => `.env.${name}`)]),
   };
 }
 
@@ -210,6 +212,9 @@ export function writePreflightedRepoSpecFile(
     createMode: 0o600,
   });
   const envTemplate = ensureRepoEnvTemplate(preflight.root, requirements);
+  const environmentEnvFiles = Object.keys(spec.environments).sort().map((name) =>
+    ensureRepoEnvironmentLocalEnv(preflight.root, name, specLocalEnvRequirements(spec, name))
+  );
 
   const dir = path.join(preflight.root, HYPERVIBE_DIR);
   mkdirSync(dir, { recursive: true });
@@ -230,6 +235,7 @@ export function writePreflightedRepoSpecFile(
     root: preflight.root,
     path: specPath,
     envTemplate,
+    environmentEnvFiles,
     localEnv: {
       ...localEnv,
       gitignorePath: preflight.gitignore.path,
