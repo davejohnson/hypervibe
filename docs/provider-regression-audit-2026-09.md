@@ -158,3 +158,39 @@ including the corrected shared Railway parity fixture. Typecheck and diff
 checks passed. The read-only Railway upstream check matched **69 schema
 fields and five CLI behaviors** against official sources. No live provider
 mutation or release was performed.
+
+## Pinned API contract follow-up (September 12 UTC)
+
+After the staging membership fix in #209, API regressions were reproduced
+against checked-in official schemas before changing the adapters. The new
+[offline contract gate](../test/provider-contracts/README.md) replaces the
+latest-upstream Railway check without rewriting managed workflow files.
+
+- The official Railway schema rejected seven guessed query/input variants.
+  Removed those variants; all 65 remaining static query documents validate.
+- Real GraphQL client tests exposed unbound web-service name adoption and
+  redeployment. Deploy now blocks with explicit import guidance; verified
+  bound-service updates remain covered.
+- Neon's project creation sent organization scope in an undocumented query
+  parameter. It now sends `project.org_id` in the documented request body.
+- Supabase project creation omitted required `organization_slug`. It now uses
+  the slug returned for the selected legacy organization id, refuses creation
+  if that slug is unavailable, and retains existing binding identity semantics.
+- Positive service-deletion fixtures now use scoped tombstones rather than
+  impossible successful nulls on a non-null GraphQL field. Synthetic error
+  classification inputs are explicitly distinguished from observed errors.
+
+The 22 API tests cover real request serialization, GraphQL input/response
+execution, malformed fixture rejection, a populated production environment
+beside new staging, pagination, variable updates, deletion/retries, failed
+reads, and a create whose HTTP response is lost. REST coverage is deliberately
+limited to the documented request/response slices, not full live lifecycles.
+Ajv is now a direct exact dev dependency at the already-locked version 8.20.0;
+there is no runtime dependency or package-version change.
+
+Validation: 3,308 offline tests passed in 242 files. After the final static
+query-wrapper cleanup, all 386 focused provider/parity tests passed in 21
+files, plus typecheck and `git diff --check`. The full release gate and billable
+live tests were not run. No infrastructure, production dotenv values, or
+provider support status was changed. Apreskeys live staging/deploy acceptance
+still requires loading the merged runtime and completing the managed lifecycle.

@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RailwayAdapter } from '../railway.adapter.js';
-import { serviceInstanceInventory } from './service-instance-inventory.fixture.js';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../../domain/entities/service.entity.js';
 
@@ -716,7 +715,6 @@ describe('RailwayAdapter service instance updates', () => {
           },
         },
       })
-      .mockResolvedValueOnce(serviceInstanceInventory('rail-project-1', 'svc-web', ['env-prod']))
       // Exact target instance verification
       .mockResolvedValueOnce(serviceEnvironmentInstance('svc-web', 'env-prod'))
       // redeploy
@@ -751,7 +749,7 @@ describe('RailwayAdapter service instance updates', () => {
       platformBindings: {
         projectId: 'rail-project-1',
         environmentId: 'env-prod',
-        services: {},
+        services: { web: { serviceId: 'svc-web' } },
       },
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -774,7 +772,7 @@ describe('RailwayAdapter service instance updates', () => {
     expect(result.receipt.success).toBe(true);
     expect(result.url).toBe('https://web-production.up.railway.app');
     // serviceDomainCreate received the right input
-    expect(request.mock.calls[6]?.[1]).toEqual({
+    expect(request.mock.calls[5]?.[1]).toEqual({
       input: { serviceId: 'svc-web', environmentId: 'env-prod' },
     });
     expect(request.mock.calls.every(([query]) => !String(query).includes('GetProjectPlugins'))).toBe(true);
@@ -796,7 +794,6 @@ describe('RailwayAdapter service instance updates', () => {
           },
         },
       })
-      .mockResolvedValueOnce(serviceInstanceInventory('rail-project-1', 'svc-worker', ['env-prod']))
       .mockResolvedValueOnce(serviceEnvironmentInstance('svc-worker', 'env-prod'))
       .mockResolvedValueOnce({
         serviceInstanceRedeploy: true,
@@ -812,7 +809,7 @@ describe('RailwayAdapter service instance updates', () => {
       platformBindings: {
         projectId: 'rail-project-1',
         environmentId: 'env-prod',
-        services: {},
+        services: { worker: { serviceId: 'svc-worker' } },
       },
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -833,7 +830,7 @@ describe('RailwayAdapter service instance updates', () => {
 
     expect(result.receipt.success).toBe(true);
     expect(result.url).toBeUndefined();
-    expect(request).toHaveBeenCalledTimes(5);
+    expect(request).toHaveBeenCalledTimes(4);
   });
 
   it('does not replace a bound service when it only exists in another environment', async () => {

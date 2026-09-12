@@ -1,0 +1,16 @@
+{
+  "provider": "neon",
+  "apiVersion": "v2",
+  "sourceUrl": "https://neon.com/api_spec/release/v2.json",
+  "sourceRevision": null,
+  "sourceSha256": "731af8e540fc474a7f3da5fe1420d23da8248960ef11fff713f4b741c6471d24",
+  "schemaFile": "openapi.json",
+  "schemaSha256": "99c38079db7b4b9f59df03bab739e74b5ba1e51937c5f8633acaf15551c6b7b9",
+  "operations": {
+    "/projects": [
+      "post"
+    ]
+  },
+  "transformation": "Exact selected operations and transitive component references from the official OpenAPI document; no field or requiredness changes.",
+  "serverRevisionPinned": false
+}

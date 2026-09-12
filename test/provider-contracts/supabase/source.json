@@ -1,0 +1,19 @@
+{
+  "provider": "supabase",
+  "apiVersion": "v1",
+  "sourceUrl": "https://raw.githubusercontent.com/supabase/supabase/26585dd4a4d6db8910a595214c9f6e8fdd206768/apps/docs/spec/api_v1_openapi.json",
+  "sourceRevision": "26585dd4a4d6db8910a595214c9f6e8fdd206768",
+  "sourceSha256": "0a1a19774d3749e84d2e2c2896006c58e4b67779d8cc2806f3135488fc7fb1dc",
+  "schemaFile": "openapi.json",
+  "schemaSha256": "e22e11a51815eb3eb45a0893f9053ac7bd1961cdf42dbccba7f53b517cc88802",
+  "operations": {
+    "/v1/projects": [
+      "post"
+    ],
+    "/v1/organizations": [
+      "get"
+    ]
+  },
+  "transformation": "Exact selected operations and transitive component references from the official OpenAPI document; no field or requiredness changes.",
+  "serverRevisionPinned": false
+}

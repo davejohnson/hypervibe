@@ -1,0 +1,1635 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Neon API",
+    "description": "The Neon API is the management API for Neon. Use it to provision, configure, and manage resources such as projects, branches, databases, roles, functions, and object storage.\n\nSee the [Neon API reference](https://neon.com/docs/reference/api) for details, and [Manage API keys](https://neon.com/docs/manage/api-keys/) to create and use API keys.",
+    "version": "v2",
+    "contact": {
+      "email": "help@databricks.com"
+    },
+    "license": {
+      "name": "Proprietary"
+    }
+  },
+  "paths": {
+    "/projects": {
+      "post": {
+        "summary": "Create project",
+        "description": "Creates a Neon project within an organization.\nIf using a personal API key, include the `org_id` parameter to specify which organization to create the project in.\nIf using an org API key, `org_id` is automatically inferred from the key.\nPlan limits define how many projects you can create.\nFor more information, see [Manage projects](https://neon.com/docs/manage/projects/).\n\nYou can specify a region and Postgres version in the request body.\nNeon supports Postgres 14 through 18, with 19 rolling out to enabled regions.\nFor supported regions and `region_id` values, see [Regions](https://neon.com/docs/introduction/regions/).\n",
+        "tags": [
+          "Project"
+        ],
+        "operationId": "createProject",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectCreateRequest"
+              },
+              "examples": {
+                "required_attributes_only": {
+                  "summary": "Required attributes only",
+                  "value": {
+                    "project": {
+                      "name": "myproject"
+                    }
+                  }
+                },
+                "commonly_specified_attributes": {
+                  "summary": "Commonly-specified attributes",
+                  "value": {
+                    "project": {
+                      "name": "myproject",
+                      "region_id": "aws-us-east-2",
+                      "pg_version": 15
+                    }
+                  }
+                },
+                "with_autoscaling": {
+                  "summary": "With autoscaling attributes",
+                  "value": {
+                    "project": {
+                      "name": "myproject",
+                      "region_id": "aws-us-east-2",
+                      "pg_version": 15,
+                      "autoscaling_limit_min_cu": 0.25,
+                      "autoscaling_limit_max_cu": 1,
+                      "provisioner": "k8s-neonvm"
+                    }
+                  }
+                },
+                "with_branch_attributes": {
+                  "summary": "With branch attributes",
+                  "value": {
+                    "project": {
+                      "name": "myproject",
+                      "region_id": "aws-us-east-2",
+                      "pg_version": 15,
+                      "branch": {
+                        "name": "mybranch",
+                        "role_name": "sally",
+                        "database_name": "mydb"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/CreatedProject"
+          },
+          "default": {
+            "$ref": "#/components/responses/GeneralError"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ProjectCreateRequest": {
+        "type": "object",
+        "required": [
+          "project"
+        ],
+        "properties": {
+          "project": {
+            "type": "object",
+            "description": "Configuration for the new project, including name, region, and Postgres compute and storage settings.",
+            "properties": {
+              "settings": {
+                "$ref": "#/components/schemas/ProjectSettingsData",
+                "description": "Project-level settings applied at creation."
+              },
+              "name": {
+                "description": "The project name. If not specified, the name will be identical to the generated project ID",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "branch": {
+                "type": "object",
+                "description": "Configuration for the initial branch created with the project.",
+                "properties": {
+                  "name": {
+                    "description": "The default branch name. If not specified, the default branch name, `main`, will be used.\n",
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "role_name": {
+                    "description": "The role name. If not specified, the default role name, `{database_name}_owner`, will be used.\n",
+                    "type": "string"
+                  },
+                  "database_name": {
+                    "description": "The database name. If not specified, the default database name, `neondb`, will be used.\n",
+                    "type": "string"
+                  },
+                  "annotations": {
+                    "description": "Arbitrary key-value metadata to attach to the branch.\n",
+                    "$ref": "#/components/schemas/AnnotationValueData"
+                  }
+                }
+              },
+              "autoscaling_limit_min_cu": {
+                "deprecated": true,
+                "description": "Deprecated. Use `default_endpoint_settings.autoscaling_limit_min_cu` instead.\n\nThe minimum number of Compute Units. The minimum value is `0.25`.\nSee [Compute size and Autoscaling configuration](https://neon.com/docs/manage/endpoints#compute-size-and-autoscaling-configuration)\nfor more information.\n",
+                "$ref": "#/components/schemas/ComputeUnit"
+              },
+              "autoscaling_limit_max_cu": {
+                "deprecated": true,
+                "description": "Deprecated. Use `default_endpoint_settings.autoscaling_limit_max_cu` instead.\n\nThe maximum number of Compute Units. See [Compute size and Autoscaling configuration](https://neon.com/docs/manage/endpoints#compute-size-and-autoscaling-configuration)\nfor more information.\n",
+                "$ref": "#/components/schemas/ComputeUnit"
+              },
+              "provisioner": {
+                "$ref": "#/components/schemas/Provisioner",
+                "description": "Compute provisioner. `k8s-neonvm` (default) supports Autoscaling; `k8s-pod` is fixed-size compute. Also `docker` and `serverless-platform`."
+              },
+              "region_id": {
+                "description": "The region identifier. Refer to our [Regions](https://neon.com/docs/introduction/regions) documentation for supported regions. Values are specified in this format: `aws-us-east-1`\n",
+                "type": "string"
+              },
+              "default_endpoint_settings": {
+                "$ref": "#/components/schemas/DefaultEndpointSettings"
+              },
+              "pg_version": {
+                "$ref": "#/components/schemas/PgVersion"
+              },
+              "store_passwords": {
+                "description": "Whether or not passwords are stored for roles in the Neon project. Storing passwords facilitates access to Neon features that require authorization.\n",
+                "type": "boolean"
+              },
+              "history_retention_seconds": {
+                "description": "History window (point-in-time restore range) for all branches, in seconds. `0` disables it. Default 1 day (Free: 6 hours). Maximum depends on plan: Free 6 hours (21600), Launch 7 days (604800), Scale 30 days (2592000).\n",
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0,
+                "maximum": 2592000
+              },
+              "org_id": {
+                "description": "ID of the organization that will own the project. If omitted when using an organization API key, it is inferred from the key.\n",
+                "type": "string",
+                "pattern": "^[a-z0-9-]{1,60}$"
+              }
+            }
+          }
+        }
+      },
+      "ProjectSettingsData": {
+        "type": "object",
+        "properties": {
+          "quota": {
+            "$ref": "#/components/schemas/ProjectQuota"
+          },
+          "allowed_ips": {
+            "$ref": "#/components/schemas/AllowedIps"
+          },
+          "enable_logical_replication": {
+            "description": "Sets wal_level=logical for all compute endpoints in this project.\nAll active endpoints will be suspended.\nOnce enabled, logical replication cannot be disabled.\n",
+            "type": "boolean"
+          },
+          "maintenance_window": {
+            "$ref": "#/components/schemas/MaintenanceWindow"
+          },
+          "block_public_connections": {
+            "description": "When set, connections from the public internet\nare disallowed. This supersedes the AllowedIPs list.\nThis parameter is under active development and its semantics may change in the future.\n",
+            "type": "boolean"
+          },
+          "block_vpc_connections": {
+            "description": "When set, connections using VPC endpoints are disallowed.\nThis parameter is under active development and its semantics may change in the future.\n",
+            "type": "boolean"
+          },
+          "audit_log_level": {
+            "$ref": "#/components/schemas/ProjectAuditLogLevel",
+            "description": "Audit logging level, set only on HIPAA-enabled organizations (absent otherwise). Values: `base`, `extended`, `full`; HIPAA defaults to `extended`. Cannot be lowered back to `base` once `extended` or `full`."
+          },
+          "hipaa": {
+            "type": "boolean",
+            "description": "Enables HIPAA compliance mode for the project, including audit logging."
+          },
+          "preload_libraries": {
+            "$ref": "#/components/schemas/PreloadLibraries"
+          }
+        }
+      },
+      "AnnotationValueData": {
+        "type": "object",
+        "description": "A free-form map of string key-value pairs for attaching metadata to a resource (for example, a git commit reference). Maximum 50 entries.",
+        "x-tags": [
+          "Branch"
+        ],
+        "maxProperties": 50,
+        "additionalProperties": {
+          "type": "string"
+        },
+        "example": {
+          "github-commit-ref": "github-branch-name"
+        }
+      },
+      "ComputeUnit": {
+        "type": "number",
+        "minimum": 0.25
+      },
+      "Provisioner": {
+        "type": "string",
+        "description": "",
+        "example": "k8s-neonvm"
+      },
+      "DefaultEndpointSettings": {
+        "type": "object",
+        "description": "A collection of settings for a Neon endpoint",
+        "properties": {
+          "pg_settings": {
+            "$ref": "#/components/schemas/PgSettingsData"
+          },
+          "pgbouncer_settings": {
+            "deprecated": true,
+            "x-sunset": "2026-06-20",
+            "description": "Deprecated. Use the endpoint-level connection pooler configuration instead. Removal scheduled for June 20, 2026.\n",
+            "$ref": "#/components/schemas/PgbouncerSettingsData"
+          },
+          "autoscaling_limit_min_cu": {
+            "description": "Minimum number of Compute Units for this endpoint. At least 0.25 and no greater than `autoscaling_limit_max_cu`.\n",
+            "$ref": "#/components/schemas/ComputeUnit"
+          },
+          "autoscaling_limit_max_cu": {
+            "description": "Default maximum number of Compute Units for endpoints created under this account. At least 0.25.\n",
+            "$ref": "#/components/schemas/ComputeUnit"
+          },
+          "suspend_timeout_seconds": {
+            "$ref": "#/components/schemas/SuspendTimeoutSeconds",
+            "description": "Scale-to-zero idle timeout, in seconds, before the compute suspends. `0` uses the plan default; `-1` disables scale-to-zero (never suspends). Minimum is plan-dependent (Scale: 60); maximum 604800 (one week). Free cannot change it; Launch can only enable or disable; Scale can set any value."
+          }
+        }
+      },
+      "PgVersion": {
+        "description": "The major Postgres version number. Supported versions are `14`, `15`, `16`, `17`, and `18`. `19` is rolling out and is accepted only in regions where it is enabled; requesting it elsewhere returns an error.",
+        "type": "integer",
+        "minimum": 14,
+        "maximum": 19,
+        "default": 18,
+        "example": 18
+      },
+      "ProjectResponse": {
+        "type": "object",
+        "required": [
+          "project"
+        ],
+        "properties": {
+          "project": {
+            "$ref": "#/components/schemas/Project",
+            "description": "Full details of the project, including configuration, consumption metrics, and ownership."
+          }
+        }
+      },
+      "ConnectionURIsResponse": {
+        "type": "object",
+        "required": [
+          "connection_uris"
+        ],
+        "x-sensitive": [
+          "connection_uris"
+        ],
+        "properties": {
+          "connection_uris": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConnectionDetails"
+            },
+            "description": "Connection URIs for the project. Each entry contains credentials and should be treated as sensitive."
+          }
+        }
+      },
+      "RolesResponse": {
+        "type": "object",
+        "required": [
+          "roles"
+        ],
+        "x-sensitive": [
+          "roles"
+        ],
+        "properties": {
+          "roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Role"
+            },
+            "description": "Roles belonging to the branch. Each role includes fields such as `branch_id`, `name`, `protected`, `created_at`, and `updated_at`.\n"
+          }
+        }
+      },
+      "DatabasesResponse": {
+        "type": "object",
+        "required": [
+          "databases"
+        ],
+        "properties": {
+          "databases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Database"
+            },
+            "description": "Databases on the branch. Each includes `id`, `name`, `owner_name`, and `created_at`."
+          }
+        }
+      },
+      "OperationsResponse": {
+        "type": "object",
+        "required": [
+          "operations"
+        ],
+        "properties": {
+          "operations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Operation"
+            }
+          }
+        }
+      },
+      "BranchResponse": {
+        "type": "object",
+        "required": [
+          "branch"
+        ],
+        "properties": {
+          "branch": {
+            "$ref": "#/components/schemas/Branch",
+            "description": "Branch returned by the request."
+          }
+        }
+      },
+      "EndpointsResponse": {
+        "type": "object",
+        "required": [
+          "endpoints"
+        ],
+        "properties": {
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Endpoint"
+            },
+            "description": "Compute endpoints in the project. Each includes `id`, `branch_id`, `host`, and `type`."
+          }
+        }
+      },
+      "GeneralError": {
+        "type": "object",
+        "required": [
+          "message",
+          "code"
+        ],
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "description": "Unique identifier for the request, useful for debugging.\nYou can set this value manually by including an `X-Request-ID` header in the request. If not provided, the value will be generated automatically.\n"
+          },
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode",
+            "description": "Machine-readable code classifying the error type. See `message` for a human-readable explanation."
+          },
+          "message": {
+            "description": "Error message",
+            "type": "string"
+          }
+        }
+      },
+      "ProjectQuota": {
+        "type": "object",
+        "description": "Per-project consumption quotas. If a quota is exceeded, all active computes\nare automatically suspended and cannot be started via API calls or incoming connections.\n\nThe exception is `logical_size_bytes`, which is enforced per branch.\nIf a branch exceeds its `logical_size_bytes` quota, computes can still be started,\nbut write operations will fail—allowing data to be deleted to free up space.\nComputes on other branches are not affected.\n\nSetting `logical_size_bytes` overrides any lower value set by the `neon.max_cluster_size` Postgres setting.\n\nQuotas are enforced using per-project consumption metrics with the same names.\nThese metrics reset at the start of each billing period. `logical_size_bytes`\nis also an exception—it reflects the total data stored in a branch and does not reset.\n\nA zero or empty quota value means “unlimited.”\n",
+        "properties": {
+          "active_time_seconds": {
+            "description": "The total amount of wall-clock time allowed to be spent by the project's compute endpoints.\n",
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "compute_time_seconds": {
+            "description": "The total amount of CPU seconds allowed to be spent by the project's compute endpoints.\n",
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "written_data_bytes": {
+            "description": "Total amount of data written to all of a project's branches.\n",
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "data_transfer_bytes": {
+            "description": "Total amount of data transferred from all of a project's branches using the proxy.\n",
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "logical_size_bytes": {
+            "description": "Limit on the logical size of every project's branch.\n\nIf a branch exceeds its `logical_size_bytes` quota, computes can still be started,\nbut write operations will fail—allowing data to be deleted to free up space.\nComputes on other branches are not affected.\n\nSetting `logical_size_bytes` overrides any lower value set by the `neon.max_cluster_size` Postgres setting.\n",
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "AllowedIps": {
+        "description": "A list of IP addresses that are allowed to connect to the compute endpoint.\nIf the list is empty or not set, all IP addresses are allowed.\nIf protected_branches_only is true, the list will be applied only to protected branches.\n",
+        "type": "object",
+        "properties": {
+          "ips": {
+            "description": "A list of IP addresses that are allowed to connect to the endpoint.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "protected_branches_only": {
+            "description": "If true, the list will be applied only to protected branches.",
+            "type": "boolean"
+          }
+        }
+      },
+      "MaintenanceWindow": {
+        "description": "A maintenance window is a time period during which Neon may perform maintenance on the project's infrastructure.\nDuring this time, the project's compute endpoints may be unavailable and existing connections can be\ninterrupted.\n",
+        "type": "object",
+        "required": [
+          "weekdays",
+          "start_time",
+          "end_time"
+        ],
+        "properties": {
+          "weekdays": {
+            "description": "A list of weekdays when the maintenance window is active.\nEncoded as ints, where 1 - Monday, and 7 - Sunday.\n",
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "start_time": {
+            "description": "Start time of the maintenance window, in the format of \"HH:MM\". Uses UTC.\n",
+            "type": "string"
+          },
+          "end_time": {
+            "description": "End time of the maintenance window, in the format of \"HH:MM\". Uses UTC.\n",
+            "type": "string"
+          }
+        }
+      },
+      "ProjectAuditLogLevel": {
+        "type": "string",
+        "enum": [
+          "base",
+          "extended",
+          "full"
+        ]
+      },
+      "PreloadLibraries": {
+        "description": "The shared libraries to preload into the project's compute instances.\n",
+        "type": "object",
+        "properties": {
+          "use_defaults": {
+            "type": "boolean",
+            "description": "When true, the project's preload libraries include the platform default set in addition to any libraries listed in `enabled_libraries`."
+          },
+          "enabled_libraries": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Names of shared preload libraries to enable for the project."
+          }
+        }
+      },
+      "PgSettingsData": {
+        "description": "A raw representation of Postgres settings",
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        }
+      },
+      "PgbouncerSettingsData": {
+        "deprecated": true,
+        "x-sunset": "2026-06-20",
+        "description": "Deprecated. A raw representation of PgBouncer settings. Removal scheduled for June 20, 2026.\n",
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        }
+      },
+      "SuspendTimeoutSeconds": {
+        "description": "Duration of inactivity in seconds after which the compute endpoint is\nautomatically suspended. The value `0` means use the default value.\nThe value `-1` means never suspend. The default value is `300` seconds (5 minutes).\nThe minimum value is `60` seconds (1 minute).\nThe maximum value is `604800` seconds (1 week). For more information, see\n[Scale to zero configuration](https://neon.com/docs/manage/endpoints#scale-to-zero-configuration).\n",
+        "type": "integer",
+        "format": "int64",
+        "minimum": -1,
+        "maximum": 604800
+      },
+      "Project": {
+        "type": "object",
+        "required": [
+          "consumption_period_end",
+          "consumption_period_start",
+          "active_time_seconds",
+          "compute_time_seconds",
+          "written_data_bytes",
+          "data_transfer_bytes",
+          "data_storage_bytes_hour",
+          "id",
+          "platform_id",
+          "region_id",
+          "name",
+          "pg_version",
+          "proxy_host",
+          "branch_logical_size_limit",
+          "branch_logical_size_limit_bytes",
+          "store_passwords",
+          "cpu_used_sec",
+          "provisioner",
+          "creation_source",
+          "history_retention_seconds",
+          "created_at",
+          "updated_at",
+          "owner_id"
+        ],
+        "properties": {
+          "data_storage_bytes_hour": {
+            "description": "Bytes-Hour. Project consumed that much Postgres storage hourly during the billing period. The value has some lag.\nThe value is reset at the beginning of each billing period.\n",
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "data_transfer_bytes": {
+            "description": "Bytes. Egress traffic from the Neon cloud to the client for given project over the billing period.\nIncludes deleted endpoints. The value has some lag. The value is reset at the beginning of each billing period.\n",
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "written_data_bytes": {
+            "description": "Bytes. Amount of WAL that travelled through Postgres storage for given project across all branches.\nThe value has some lag. The value is reset at the beginning of each billing period.\n",
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "compute_time_seconds": {
+            "description": "Seconds. The number of CPU seconds used by the project's compute endpoints, including compute endpoints that have been deleted.\nThe value has some lag. The value is reset at the beginning of each billing period.\nExamples:\n1. An endpoint that uses 1 CPU for 1 second is equal to `compute_time=1`.\n2. An endpoint that uses 2 CPUs simultaneously for 1 second is equal to `compute_time=2`.\n",
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "active_time_seconds": {
+            "description": "Seconds. Control plane observed endpoints of this project being active this amount of wall-clock time.\nThe value has some lag.\nThe value is reset at the beginning of each billing period.\n",
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "cpu_used_sec": {
+            "description": "Deprecated. Use `compute_time_seconds` instead.\n",
+            "type": "integer",
+            "format": "int64",
+            "deprecated": true
+          },
+          "id": {
+            "description": "The Neon project ID. Use as the `project_id` path parameter in other endpoints.",
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,60}$"
+          },
+          "platform_id": {
+            "description": "The cloud platform identifier. Currently, only AWS is supported, for which the identifier is `aws`.\n",
+            "type": "string"
+          },
+          "region_id": {
+            "description": "Cloud region where the resource's Postgres compute and storage reside (for example, `aws-us-east-1`). Valid values are returned by `GET /regions`.\n",
+            "type": "string",
+            "example": "aws-us-east-1"
+          },
+          "name": {
+            "description": "The project name\n",
+            "type": "string"
+          },
+          "provisioner": {
+            "$ref": "#/components/schemas/Provisioner",
+            "description": "Compute provisioner. `k8s-neonvm` (default) supports Autoscaling; `k8s-pod` is fixed-size compute. Also `docker` and `serverless-platform`."
+          },
+          "default_endpoint_settings": {
+            "$ref": "#/components/schemas/DefaultEndpointSettings"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/ProjectSettingsData",
+            "description": "Project-level settings, for example `quota`, `allowed_ips`, `enable_logical_replication`, and `maintenance_window`."
+          },
+          "pg_version": {
+            "$ref": "#/components/schemas/PgVersion"
+          },
+          "proxy_host": {
+            "description": "The proxy host for the project. This value combines the `region_id`, the `platform_id`, and the Neon domain (`neon.tech`).\n",
+            "type": "string"
+          },
+          "branch_logical_size_limit": {
+            "description": "The logical size limit for a branch. The value is in MiB.\n",
+            "type": "integer",
+            "format": "int64"
+          },
+          "branch_logical_size_limit_bytes": {
+            "description": "The logical size limit for a branch. The value is in B.\n",
+            "type": "integer",
+            "format": "int64"
+          },
+          "store_passwords": {
+            "description": "Whether or not passwords are stored for roles in the Neon project. Storing passwords facilitates access to Neon features that require authorization.\n",
+            "type": "boolean"
+          },
+          "maintenance_starts_at": {
+            "description": "A timestamp indicating when project maintenance begins. If set, the project is placed into maintenance mode at this time.\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "creation_source": {
+            "description": "The project creation source\n",
+            "type": "string"
+          },
+          "history_retention_seconds": {
+            "description": "The number of seconds to retain the shared history for all branches in this project.\n",
+            "type": "integer",
+            "format": "int32"
+          },
+          "created_at": {
+            "description": "A timestamp indicating when the project was created\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "description": "A timestamp indicating when the project was last updated\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "synthetic_storage_size": {
+            "description": "The current space occupied by the project in Postgres storage, in bytes. Synthetic Postgres storage size combines the logical data size and Write-Ahead Log (WAL) size for all branches in a project.\n",
+            "type": "integer",
+            "format": "int64"
+          },
+          "consumption_period_start": {
+            "description": "A date-time indicating when Neon Cloud started measuring consumption for current consumption period.\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "consumption_period_end": {
+            "description": "A date-time indicating when Neon Cloud plans to stop measuring consumption for current consumption period.\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "quota_reset_at": {
+            "deprecated": true,
+            "description": "Deprecated. Use the `consumption_period_end` field instead. A timestamp indicating when the project quota resets.\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "owner_id": {
+            "type": "string",
+            "description": "ID of the organization that owns the project.",
+            "example": "org-cool-darkness-12345678"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/ProjectOwnerData",
+            "description": "Ownership details for the project, including the owner's name and email."
+          },
+          "compute_last_active_at": {
+            "description": "The most recent time when any endpoint of this project was active.\n\nOmitted when observed no activity for endpoints of this project.\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "org_id": {
+            "description": "The Neon organization ID. Returned as `id` from `GET /users/me/organizations`.",
+            "example": "org-cool-darkness-12345678",
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,60}$"
+          },
+          "maintenance_scheduled_for": {
+            "description": "A timestamp indicating when project update begins. If set, computes might experience a brief restart around this time.\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "hipaa_enabled_at": {
+            "description": "A timestamp indicating when HIPAA was enabled for this project",
+            "type": "string",
+            "format": "date-time"
+          },
+          "effective_project_permission": {
+            "type": "string",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProjectPermissionLevel"
+              }
+            ],
+            "nullable": true
+          }
+        },
+        "example": {
+          "id": "spring-example-302709",
+          "platform_id": "aws",
+          "region_id": "aws-us-east-2",
+          "name": "spring-example-302709",
+          "provisioner": "k8s-pod",
+          "pg_version": 15,
+          "proxy_host": "us-east-2.aws.neon.tech",
+          "store_passwords": true,
+          "creation_source": "console",
+          "history_retention_seconds": 604800,
+          "created_at": "2022-12-13T01:30:55Z",
+          "updated_at": "2022-12-13T01:30:55Z",
+          "owner": {
+            "name": "John Smith",
+            "email": "some@email.com",
+            "branches_limit": 10,
+            "subscription_type": "scale"
+          },
+          "org_id": "org-morning-bread-81040908",
+          "owner_id": "629982cc-de05-43db-ae16-28f2399c4910",
+          "data_storage_bytes_hour": 2831928,
+          "branch_logical_size_limit": 10,
+          "branch_logical_size_limit_bytes": 10485760,
+          "data_transfer_bytes": 1000,
+          "written_data_bytes": 193990002,
+          "compute_time_seconds": 2485760,
+          "active_time_seconds": 621440,
+          "cpu_used_sec": 155350,
+          "consumption_period_start": "2022-11-01T00:00:00Z",
+          "consumption_period_end": "2022-12-01T00:00:00Z"
+        }
+      },
+      "ConnectionDetails": {
+        "type": "object",
+        "required": [
+          "connection_uri",
+          "connection_parameters"
+        ],
+        "x-sensitive": [
+          "connection_uri"
+        ],
+        "properties": {
+          "connection_uri": {
+            "description": "The connection URI is defined as specified here: [Connection URIs](https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING-URIS)\nThe connection URI can be used to connect to a Postgres database with psql or defined in a DATABASE_URL environment variable.\nWhen creating a branch from a parent with more than one role or database, the response body does not include a connection URI.\n",
+            "type": "string"
+          },
+          "connection_parameters": {
+            "$ref": "#/components/schemas/ConnectionParameters",
+            "description": "Individual components of the connection URI (host, port, database, role, and password) as discrete fields, for programmatic use rather than parsing the sibling `connection_uri` string."
+          }
+        }
+      },
+      "Role": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "name",
+          "created_at",
+          "updated_at"
+        ],
+        "x-sensitive": [
+          "password"
+        ],
+        "properties": {
+          "branch_id": {
+            "description": "The ID of the branch this role belongs to.",
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,60}$"
+          },
+          "name": {
+            "description": "Postgres role name within the branch.\n",
+            "type": "string"
+          },
+          "password": {
+            "description": "The role password\n",
+            "type": "string"
+          },
+          "protected": {
+            "description": "Whether or not the role is system-protected\n",
+            "type": "boolean"
+          },
+          "authentication_method": {
+            "description": "Authentication method configured for this role: `password`, `oauth`, or `no_login`.\n",
+            "type": "string",
+            "example": "password"
+          },
+          "created_at": {
+            "description": "A timestamp indicating when the role was created\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "description": "A timestamp indicating when the role was last updated\n",
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "example": {
+          "branch_id": "br-wispy-meadow-118737",
+          "name": "casey",
+          "protected": false,
+          "created_at": "2022-11-23T17:42:25Z",
+          "updated_at": "2022-11-23T17:42:25Z"
+        }
+      },
+      "Database": {
+        "type": "object",
+        "required": [
+          "id",
+          "branch_id",
+          "name",
+          "owner_name",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "description": "The database ID\n",
+            "type": "integer",
+            "format": "int64"
+          },
+          "branch_id": {
+            "description": "The ID of the branch this database belongs to.",
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,60}$"
+          },
+          "name": {
+            "description": "The database name\n",
+            "type": "string"
+          },
+          "owner_name": {
+            "description": "The name of role that owns the database\n",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "A timestamp indicating when the database was created\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "description": "A timestamp indicating when the database was last updated\n",
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "example": {
+          "id": 834686,
+          "branch_id": "br-wispy-meadow-118737",
+          "name": "neondb",
+          "owner_name": "casey",
+          "created_at": "2022-11-30T18:25:15Z",
+          "updated_at": "2022-11-30T18:25:15Z"
+        }
+      },
+      "Operation": {
+        "type": "object",
+        "description": "An asynchronous action Neon performs on your resources (for example, starting a compute or creating a branch). Fields such as `action`, `status`, and `total_duration_ms` describe the operation and its progress.",
+        "required": [
+          "id",
+          "project_id",
+          "action",
+          "status",
+          "failures_count",
+          "created_at",
+          "updated_at",
+          "total_duration_ms"
+        ],
+        "properties": {
+          "id": {
+            "description": "The operation ID",
+            "type": "string",
+            "format": "uuid"
+          },
+          "project_id": {
+            "description": "The ID of the project this operation ran on.",
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,60}$"
+          },
+          "branch_id": {
+            "description": "The ID of the branch this operation ran on.",
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,60}$"
+          },
+          "endpoint_id": {
+            "description": "The ID of the compute endpoint this operation ran on.",
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,60}$"
+          },
+          "action": {
+            "$ref": "#/components/schemas/OperationAction"
+          },
+          "status": {
+            "$ref": "#/components/schemas/OperationStatus",
+            "description": "Current lifecycle state of the operation. On `failed`, see `failures_count` and `retry_at` for retry detail."
+          },
+          "error": {
+            "description": "Human-readable message describing why the operation failed.",
+            "type": "string"
+          },
+          "failures_count": {
+            "description": "The number of times the operation failed",
+            "type": "integer",
+            "format": "int32"
+          },
+          "retry_at": {
+            "description": "A timestamp indicating when the operation was last retried",
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_at": {
+            "description": "A timestamp indicating when the operation was created",
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "description": "A timestamp indicating when the operation status was last updated",
+            "type": "string",
+            "format": "date-time"
+          },
+          "total_duration_ms": {
+            "description": "The total duration of the operation in milliseconds",
+            "type": "integer",
+            "format": "int32"
+          }
+        },
+        "example": {
+          "id": "d8ac46eb-a757-42b1-9907-f78322ee394e",
+          "project_id": "spring-example-302709",
+          "branch_id": "br-wispy-meadow-118737",
+          "endpoint_id": "ep-silent-smoke-806639",
+          "action": "start_compute",
+          "status": "finished",
+          "failures_count": 0,
+          "created_at": "2022-11-15T20:02:00Z",
+          "updated_at": "2022-11-15T20:02:02Z",
+          "total_duration_ms": 200
+        }
+      },
+      "Branch": {
+        "type": "object",
+        "required": [
+          "id",
+          "project_id",
+          "name",
+          "current_state",
+          "state_changed_at",
+          "creation_source",
+          "created_at",
+          "updated_at",
+          "default",
+          "protected",
+          "cpu_used_sec",
+          "active_time_seconds",
+          "compute_time_seconds",
+          "written_data_bytes",
+          "data_transfer_bytes"
+        ],
+        "properties": {
+          "id": {
+            "description": "The branch ID. This value is generated when a branch is created. A `branch_id` value has a `br` prefix. For example: `br-small-term-683261`.\n",
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,60}$"
+          },
+          "project_id": {
+            "description": "The ID of the project this branch belongs to.",
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,60}$"
+          },
+          "parent_id": {
+            "description": "The `branch_id` of the parent branch\n",
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,60}$"
+          },
+          "parent_lsn": {
+            "description": "The Log Sequence Number (LSN) on the parent branch from which this branch was created.\nWhen restoring a branch using the `POST /projects/{project_id}/branches/{branch_id}/restore` endpoint,\nthis value isn’t finalized until all operations related to the restore have completed successfully.\n",
+            "type": "string"
+          },
+          "parent_timestamp": {
+            "description": "The point in time on the parent branch from which this branch was created.\nWhen restoring a branch using the `POST /projects/{project_id}/branches/{branch_id}/restore` endpoint,\nthis value isn’t finalized until all operations related to the restore have completed successfully.\nAfter all the operations completed, this value might stay empty.\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "name": {
+            "description": "The branch name\n",
+            "type": "string"
+          },
+          "current_state": {
+            "$ref": "#/components/schemas/BranchState"
+          },
+          "pending_state": {
+            "$ref": "#/components/schemas/BranchState"
+          },
+          "state_changed_at": {
+            "description": "A UTC timestamp indicating when the `current_state` began\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "logical_size": {
+            "description": "The logical size of the branch, in bytes\n",
+            "type": "integer",
+            "format": "int64"
+          },
+          "creation_source": {
+            "description": "The branch creation source\n",
+            "type": "string"
+          },
+          "primary": {
+            "deprecated": true,
+            "description": "Deprecated. Use the `default` field. Whether the branch is the project's primary branch.\n",
+            "type": "boolean"
+          },
+          "default": {
+            "description": "Whether the branch is the project's default branch\n",
+            "type": "boolean"
+          },
+          "protected": {
+            "description": "Whether the branch is protected. Protected branches (and their computes) cannot be deleted, archived, or reset, and block deletion of the project.\n",
+            "type": "boolean"
+          },
+          "cpu_used_sec": {
+            "deprecated": true,
+            "description": "Deprecated. Use `compute_time_seconds` instead. CPU seconds used by all of the branch's compute endpoints, including deleted ones. This value is reset at the beginning of each billing period.\n",
+            "type": "integer",
+            "format": "int64"
+          },
+          "compute_time_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total Postgres compute time consumed by this branch during the current billing period, in CU-seconds (weighted by compute size). Divide by 3600 for CU-hours."
+          },
+          "active_time_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total time this branch's compute has been active during the current billing period, in seconds (not weighted by compute size). Distinct from `compute_time_seconds`, which is CU-weighted."
+          },
+          "written_data_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Data written by this branch during the current billing period, in bytes."
+          },
+          "data_transfer_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total data transferred out of the branch, in bytes. Used as a consumption metric."
+          },
+          "created_at": {
+            "description": "A timestamp indicating when the branch was created\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "description": "A timestamp indicating when the branch was last updated\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "ttl_interval_seconds": {
+            "description": "The time-to-live (TTL) duration originally configured for the branch, in seconds. This read-only value represents the interval between the time `expires_at` was set and the expiration timestamp itself. It is preserved to ensure the same TTL duration is reapplied when resetting the branch from its parent, and only updates when a new `expires_at` value is set.\n\nAccess to this feature is currently limited to participants in the Early Access Program.\n",
+            "type": "integer",
+            "example": 3600
+          },
+          "expires_at": {
+            "description": "The timestamp when the branch is scheduled to expire and be automatically deleted. Must be set by the client following the [RFC 3339, section 5.6](https://tools.ietf.org/html/rfc3339#section-5.6) format with precision up to seconds (such as 2025-06-09T18:02:16Z). Deletion is performed by a background job and may not occur exactly at the specified time.\n\nAccess to this feature is currently limited to participants in the Early Access Program.\n",
+            "type": "string",
+            "format": "date-time",
+            "example": "2025-06-09T18:02:16Z"
+          },
+          "last_reset_at": {
+            "description": "A timestamp indicating when the branch was last reset\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "description": "The resolved user model that contains details of the user/org/integration/api_key used for branch creation. This field is filled only in listing/get/create/get/update/delete methods, if it is empty when calling other handlers, it does not mean that it is empty in the system.\n",
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Display name of the user who created the branch."
+              },
+              "image": {
+                "type": "string",
+                "description": "The URL to the user's avatar image."
+              }
+            }
+          },
+          "init_source": {
+            "description": "Source of initialization for the branch. `parent-data` (default) copies schema and data from the parent. `parent-schema` copies schema only from the parent. `schema-only` creates a root branch with schema only. `import` initializes from an external import.\n",
+            "type": "string",
+            "example": "parent-data"
+          },
+          "restore_status": {
+            "$ref": "#/components/schemas/BranchRestoreStatus"
+          },
+          "restored_from": {
+            "description": "ID of the snapshot that was the restore source for this branch\n",
+            "type": "string"
+          },
+          "restored_as": {
+            "description": "ID of the target branch which was replaced when this branch was restored\n",
+            "type": "string"
+          },
+          "restricted_actions": {
+            "description": "A list of actions that are currently restricted for this branch and the reason why.\n",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BranchRestrictedAction"
+            }
+          },
+          "recovery": {
+            "$ref": "#/components/schemas/BranchRecoveryInfo"
+          }
+        },
+        "example": {
+          "id": "br-wispy-meadow-118737",
+          "project_id": "spring-example-302709",
+          "parent_id": "br-aged-salad-637688",
+          "parent_lsn": "0/1DE2850",
+          "name": "dev2",
+          "protected": false,
+          "current_state": "ready",
+          "state_changed_at": "2022-11-30T20:09:48Z",
+          "creation_source": "console",
+          "created_at": "2022-11-30T19:09:48Z",
+          "updated_at": "2022-12-01T19:53:05Z",
+          "default": true,
+          "init_source": "parent-data",
+          "data_transfer_bytes": 72911987,
+          "written_data_bytes": 542998300,
+          "compute_time_seconds": 823880990,
+          "active_time_seconds": 922200,
+          "cpu_used_sec": 461100
+        }
+      },
+      "Endpoint": {
+        "type": "object",
+        "required": [
+          "host",
+          "id",
+          "project_id",
+          "branch_id",
+          "region_id",
+          "autoscaling_limit_max_cu",
+          "autoscaling_limit_min_cu",
+          "type",
+          "current_state",
+          "pooler_enabled",
+          "pooler_mode",
+          "disabled",
+          "passwordless_access",
+          "creation_source",
+          "created_at",
+          "updated_at",
+          "settings",
+          "proxy_host",
+          "suspend_timeout_seconds",
+          "provisioner"
+        ],
+        "x-sensitive": [
+          "host"
+        ],
+        "properties": {
+          "host": {
+            "description": "The hostname of the compute endpoint. This is the hostname specified when connecting to a Neon database.\n",
+            "type": "string"
+          },
+          "id": {
+            "description": "The compute endpoint ID. Compute endpoint IDs have an `ep-` prefix. For example: `ep-little-smoke-851426`\n",
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,60}$"
+          },
+          "name": {
+            "type": "string",
+            "description": "Optional name of the compute endpoint\n"
+          },
+          "project_id": {
+            "description": "The ID of the project this compute endpoint belongs to.",
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,60}$"
+          },
+          "branch_id": {
+            "description": "The ID of the branch this compute endpoint belongs to.",
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,60}$"
+          },
+          "autoscaling_limit_min_cu": {
+            "description": "The minimum number of Compute Units\n",
+            "$ref": "#/components/schemas/ComputeUnit"
+          },
+          "autoscaling_limit_max_cu": {
+            "description": "The maximum number of Compute Units\n",
+            "$ref": "#/components/schemas/ComputeUnit"
+          },
+          "region_id": {
+            "type": "string",
+            "description": "Cloud region where the resource's Postgres compute and storage reside (for example, `aws-us-east-1`). Valid values are returned by `GET /regions`.\n",
+            "example": "aws-us-east-1"
+          },
+          "type": {
+            "$ref": "#/components/schemas/EndpointType"
+          },
+          "current_state": {
+            "$ref": "#/components/schemas/EndpointState"
+          },
+          "pending_state": {
+            "$ref": "#/components/schemas/EndpointState",
+            "description": "Target state the compute endpoint is transitioning to. Omitted when no transition is in progress."
+          },
+          "settings": {
+            "$ref": "#/components/schemas/EndpointSettingsData"
+          },
+          "pooler_enabled": {
+            "deprecated": true,
+            "description": "Deprecated. To use connection pooling, append `-pooler` to the endpoint ID in the connection string.\n",
+            "type": "boolean"
+          },
+          "pooler_mode": {
+            "deprecated": true,
+            "x-sunset": "2026-06-20",
+            "description": "Deprecated. The connection pooler mode. Removal scheduled for June 20, 2026.\n",
+            "$ref": "#/components/schemas/EndpointPoolerMode"
+          },
+          "disabled": {
+            "description": "Whether to restrict connections to the compute endpoint.\nEnabling this option schedules a suspend compute operation.\nA disabled compute endpoint cannot be enabled by a connection or\nconsole action.\n",
+            "type": "boolean"
+          },
+          "passwordless_access": {
+            "description": "Whether to permit passwordless access to the compute endpoint\n",
+            "type": "boolean"
+          },
+          "last_active": {
+            "description": "A timestamp indicating when the compute endpoint was last active\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "creation_source": {
+            "description": "The compute endpoint creation source\n",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "A timestamp indicating when the compute endpoint was created\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "description": "A timestamp indicating when the compute endpoint was last updated\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "A timestamp indicating when the compute endpoint was last started\n"
+          },
+          "suspended_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "A timestamp indicating when the compute endpoint was last suspended\n"
+          },
+          "proxy_host": {
+            "description": "Deprecated. Use the `host` property instead.\n",
+            "type": "string"
+          },
+          "suspend_timeout_seconds": {
+            "$ref": "#/components/schemas/SuspendTimeoutSeconds",
+            "description": "Scale-to-zero idle timeout, in seconds, before the compute suspends. `0` means the plan default applies; `-1` means scale-to-zero is disabled (never suspends)."
+          },
+          "provisioner": {
+            "$ref": "#/components/schemas/Provisioner",
+            "description": "Compute provisioner. `k8s-neonvm` (default) supports Autoscaling; `k8s-pod` is fixed-size compute. Also `docker` and `serverless-platform`."
+          },
+          "compute_release_version": {
+            "description": "Attached compute's release version number.\n",
+            "type": "string"
+          }
+        },
+        "example": {
+          "host": "ep-silent-smoke-806639.us-east-2.aws.neon.tech",
+          "id": "ep-silent-smoke-806639",
+          "name": "My cool compute",
+          "project_id": "spring-example-302709",
+          "branch_id": "br-wispy-meadow-118737",
+          "autoscaling_limit_min_cu": 1,
+          "autoscaling_limit_max_cu": 1,
+          "region_id": "aws-us-east-2",
+          "type": "read_write",
+          "current_state": "init",
+          "pending_state": "active",
+          "settings": {
+            "pg_settings": {}
+          },
+          "pooler_enabled": false,
+          "pooler_mode": "transaction",
+          "disabled": false,
+          "passwordless_access": true,
+          "creation_source": "console",
+          "created_at": "2022-12-03T15:37:07Z",
+          "updated_at": "2022-12-03T15:37:07Z",
+          "proxy_host": "us-east-2.aws.neon.tech",
+          "suspend_timeout_seconds": 0,
+          "provisioner": "k8s-neonvm"
+        }
+      },
+      "ErrorCode": {
+        "type": "string",
+        "default": ""
+      },
+      "ProjectOwnerData": {
+        "type": "object",
+        "required": [
+          "email",
+          "name",
+          "branches_limit",
+          "subscription_type"
+        ],
+        "x-sensitive": [
+          "email",
+          "name"
+        ],
+        "properties": {
+          "email": {
+            "description": "Email address of the project owner.",
+            "type": "string",
+            "format": "email",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name of the project owner."
+          },
+          "branches_limit": {
+            "type": "integer",
+            "description": "Maximum number of branches the owner is allowed to create across their projects."
+          },
+          "subscription_type": {
+            "$ref": "#/components/schemas/BillingSubscriptionType"
+          }
+        }
+      },
+      "ProjectPermissionLevel": {
+        "type": "string",
+        "enum": [
+          "VIEWER",
+          "EDITOR",
+          "ADMIN"
+        ],
+        "description": "The caller's effective permission for a project when\nper-project permissions are enabled. `VIEWER` grants read access,\n`EDITOR` adds update access, and `ADMIN` grants full management.\nOmitted for personal projects, flag-off organizations, and non-user\nsubjects.\n"
+      },
+      "ConnectionParameters": {
+        "type": "object",
+        "required": [
+          "database",
+          "password",
+          "role",
+          "host",
+          "pooler_host"
+        ],
+        "x-sensitive": [
+          "database",
+          "host",
+          "pooler_host",
+          "password"
+        ],
+        "properties": {
+          "database": {
+            "description": "Name of the Postgres database used in the connection URI.\n",
+            "type": "string"
+          },
+          "password": {
+            "description": "Authentication password for the role, used in the connection URI.\n",
+            "type": "string"
+          },
+          "role": {
+            "description": "Postgres role used to authenticate the database connection.\n",
+            "type": "string"
+          },
+          "host": {
+            "description": "Hostname of the compute endpoint. Use `pooler_host` for the pooled connection hostname.\n",
+            "type": "string"
+          },
+          "pooler_host": {
+            "description": "PgBouncer (transaction mode) pooled host, the `-pooler` variant of `host`. Connect through it to work around the Postgres `max_connections` limit for serverless or connection-per-request workloads.\n",
+            "type": "string"
+          }
+        }
+      },
+      "OperationAction": {
+        "description": "The action performed by the operation",
+        "type": "string",
+        "enum": [
+          "create_compute",
+          "create_timeline",
+          "start_compute",
+          "suspend_compute",
+          "apply_config",
+          "check_availability",
+          "delete_timeline",
+          "create_branch",
+          "import_data",
+          "tenant_ignore",
+          "tenant_attach",
+          "tenant_detach",
+          "tenant_detach_safekeepers",
+          "tenant_attach_safekeepers",
+          "tenant_reattach",
+          "replace_safekeeper",
+          "disable_maintenance",
+          "apply_storage_config",
+          "prepare_secondary_pageserver",
+          "switch_pageserver",
+          "detach_parent_branch",
+          "timeline_archive",
+          "timeline_unarchive",
+          "start_reserved_compute",
+          "sync_dbs_and_roles_from_compute",
+          "apply_schema_from_branch",
+          "timeline_mark_invisible",
+          "timeline_update_protected_config",
+          "prewarm_replica",
+          "promote_replica",
+          "set_storage_non_dirty",
+          "swap_binding_id",
+          "finalize_migration",
+          "mark_migration_prepared",
+          "update_catalog",
+          "epc_sync"
+        ]
+      },
+      "OperationStatus": {
+        "description": "Lifecycle state of the operation. `scheduling`: queued, not yet started. `running`: actively executing. `finished`: completed successfully. `failed`: ended with a failure. `error`: ended with a terminal error. `cancelling`: cancellation requested but not yet complete. `cancelled`: stopped before completion. `skipped`: bypassed without executing.",
+        "type": "string",
+        "enum": [
+          "scheduling",
+          "running",
+          "finished",
+          "failed",
+          "error",
+          "cancelling",
+          "cancelled",
+          "skipped"
+        ]
+      },
+      "BranchState": {
+        "description": "The branch’s state, indicating if it is initializing, ready for use, or archived.\n  * 'init' - the branch is being created but is not available for querying.\n  * 'resetting' - the branch is being reset to a specific point in time or LSN and is not yet available for querying.\n  * 'ready' - the branch is fully operational and ready for querying. Expect normal query response times.\n  * 'archived' - the branch is stored in cost-effective archival Postgres storage. Expect slow query response times.\n",
+        "type": "string"
+      },
+      "BranchRestoreStatus": {
+        "description": "Could be `restored`, `finalized` or `detaching`.\nA `restored` branch becomes permanently `finalized` when you call `finalizeRestoreBranch`\nA `restored` or `finalized` branch may begin `detaching` as a one-time performance optimisation, after which it will continue in its original state\n",
+        "type": "string"
+      },
+      "BranchRestrictedAction": {
+        "description": "An action that is currently restricted for the branch and the reason why.\n",
+        "type": "object",
+        "required": [
+          "name",
+          "reason"
+        ],
+        "properties": {
+          "name": {
+            "description": "The name of a restricted action on a branch. `restore`: the branch cannot be used as a restore target. `delete-rw-endpoint`: the read-write endpoint for the branch cannot be deleted.\n",
+            "type": "string",
+            "example": "restore"
+          },
+          "reason": {
+            "description": "A human-readable explanation of why the action is restricted.\n",
+            "type": "string"
+          }
+        }
+      },
+      "BranchRecoveryInfo": {
+        "description": "Recovery information for a deleted branch. Only present when listing deleted branches\nwith `include_deleted=true`.\n\nThis is part of the Branch Recovery feature, which is in preview and not available to all users.\n",
+        "type": "object",
+        "required": [
+          "deleted_at",
+          "recoverable_until",
+          "deletion_method"
+        ],
+        "properties": {
+          "deleted_at": {
+            "description": "Timestamp when the branch was deleted\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "recoverable_until": {
+            "description": "Timestamp when the recovery window expires and the branch will be permanently deleted\n",
+            "type": "string",
+            "format": "date-time"
+          },
+          "deletion_method": {
+            "description": "How the branch was deleted: 'user' for manual deletion, 'ttl' for TTL expiration\n",
+            "type": "string",
+            "enum": [
+              "user",
+              "ttl"
+            ]
+          }
+        }
+      },
+      "EndpointType": {
+        "description": "Compute endpoint type. `read_write`: the primary read-write endpoint (one per branch). `read_only`: a read replica endpoint (multiple allowed per branch).",
+        "type": "string",
+        "enum": [
+          "read_only",
+          "read_write"
+        ]
+      },
+      "EndpointState": {
+        "description": "Lifecycle state of the compute endpoint. `init`: being initialized. `active`: running and accepting connections. `idle`: suspended (scaled to zero).",
+        "type": "string",
+        "enum": [
+          "init",
+          "active",
+          "idle"
+        ]
+      },
+      "EndpointSettingsData": {
+        "type": "object",
+        "description": "A collection of settings for a compute endpoint",
+        "properties": {
+          "pg_settings": {
+            "$ref": "#/components/schemas/PgSettingsData"
+          },
+          "pgbouncer_settings": {
+            "deprecated": true,
+            "x-sunset": "2026-06-20",
+            "description": "Deprecated. PgBouncer settings for the compute endpoint. Removal scheduled for June 20, 2026.\n",
+            "$ref": "#/components/schemas/PgbouncerSettingsData"
+          },
+          "preload_libraries": {
+            "$ref": "#/components/schemas/PreloadLibraries"
+          }
+        }
+      },
+      "EndpointPoolerMode": {
+        "deprecated": true,
+        "x-sunset": "2026-06-20",
+        "description": "Deprecated. The connection pooler mode. Neon supports PgBouncer in `transaction` mode only. Removal scheduled for June 20, 2026.\n",
+        "type": "string",
+        "enum": [
+          "transaction"
+        ]
+      },
+      "BillingSubscriptionType": {
+        "type": "string",
+        "description": "Type of subscription to Neon Cloud.\nNotice that for users without billing account this will be \"UNKNOWN\"\n",
+        "enum": [
+          "UNKNOWN",
+          "direct_sales",
+          "direct_sales_v3",
+          "aws_marketplace",
+          "free_v2",
+          "free_v3",
+          "launch",
+          "launch_v3",
+          "scale",
+          "scale_v3",
+          "business",
+          "vercel_pg_legacy"
+        ]
+      }
+    },
+    "responses": {
+      "CreatedProject": {
+        "description": "Created a project.\nThe project includes a connection URI with a database, password, and role.\nAt least one non-protected role is created with a password.\nWait until the operations are finished before attempting to connect to a project database.\n",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ProjectResponse"
+                },
+                {
+                  "$ref": "#/components/schemas/ConnectionURIsResponse"
+                },
+                {
+                  "$ref": "#/components/schemas/RolesResponse"
+                },
+                {
+                  "$ref": "#/components/schemas/DatabasesResponse"
+                },
+                {
+                  "$ref": "#/components/schemas/OperationsResponse"
+                },
+                {
+                  "$ref": "#/components/schemas/BranchResponse"
+                },
+                {
+                  "$ref": "#/components/schemas/EndpointsResponse"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "GeneralError": {
+        "description": "General Error.\n\nThe request may or may not be safe to retry, depending on the HTTP method, response status code,\nand whether a response was received.\n\n- If no response is returned from the API, a network error or timeout likely occurred.\n- In some cases, the request may have reached the server and been successfully processed, but the response failed to reach the client. As a result, retrying non-idempotent requests can lead to unintended results.\n\nThe following HTTP methods are considered non-idempotent: `POST`, `PATCH`, `DELETE`, and `PUT`. Retrying these methods is generally **not safe**.\nThe following methods are considered idempotent: `GET`, `HEAD`, and `OPTIONS`. Retrying these methods is **safe** in the event of a network error or timeout.\n\nAny request that returns a `503 Service Unavailable` response is always safe to retry.\n\nAny request that returns a `423 Locked` response is safe to retry. `423 Locked` indicates that the resource is temporarily locked, for example, due to another operation in progress.\n",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/GeneralError"
+            }
+          }
+        }
+      }
+    }
+  }
+}

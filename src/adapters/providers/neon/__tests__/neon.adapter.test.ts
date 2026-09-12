@@ -223,10 +223,11 @@ describe('NeonAdapter', () => {
       return new URL(rawUrl).pathname === '/api/v2/projects' && init.method === 'POST';
     }) as [string, RequestInit] | undefined;
     expect(createCall).toBeDefined();
-    expect(new URL(createCall![0]).searchParams.get('org_id')).toBe('org-hypervibe');
+    expect(new URL(createCall![0]).searchParams.has('org_id')).toBe(false);
     expect(JSON.parse(String(createCall![1].body))).toEqual({
       project: {
         name: 'invoice-perfect-production-postgres',
+        org_id: 'org-hypervibe',
         region_id: 'aws-us-west-2',
         branch: {
           name: 'main',

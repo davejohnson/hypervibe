@@ -3,6 +3,8 @@ import { RailwayAdapter } from '../railway.adapter.js';
 import type { RailwayVolumeTarget } from '../railway.adapter.js';
 
 function graphqlNotFound(rootField: string, message: string): Error {
+  // Synthetic error-classification input, not a recorded Railway response.
+  // Actual observed INTERNAL_SERVER_ERROR behavior has real-client coverage.
   const error = new Error(message) as Error & {
     response: {
       status: number;
@@ -248,7 +250,7 @@ describe('RailwayAdapter delete verification', () => {
       .mockResolvedValueOnce(serviceInstance())
       .mockResolvedValueOnce(serviceInventory(['env-staging']))
       .mockResolvedValueOnce({ serviceDelete: true })
-      .mockResolvedValueOnce({ serviceInstance: null });
+      .mockResolvedValueOnce(serviceInstance('svc-1', 'env-staging', '2026-09-12T00:00:00Z'));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
@@ -264,7 +266,7 @@ describe('RailwayAdapter delete verification', () => {
       .mockResolvedValueOnce(serviceInstance())
       .mockResolvedValueOnce(serviceInventory(['env-staging']))
       .mockRejectedValueOnce(graphqlNotFound('serviceDelete', 'Service disappeared'))
-      .mockResolvedValueOnce({ serviceInstance: null });
+      .mockResolvedValueOnce(serviceInstance('svc-1', 'env-staging', '2026-09-12T00:00:00Z'));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
@@ -308,7 +310,7 @@ describe('RailwayAdapter delete verification', () => {
   });
 
   it('does not mutate Railway when the exact target is absent even if the service may remain in a sibling environment', async () => {
-    const request = vi.fn().mockResolvedValueOnce({ serviceInstance: null });
+    const request = vi.fn().mockResolvedValueOnce(serviceInstance('svc-1', 'env-staging', '2026-09-12T00:00:00Z'));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
@@ -564,7 +566,7 @@ describe('RailwayAdapter delete verification', () => {
     const request = vi.fn()
       .mockResolvedValueOnce(environmentIdentity())
       .mockResolvedValueOnce({ environmentDelete: true })
-      .mockResolvedValueOnce({ environment: null });
+      .mockRejectedValueOnce(graphqlNotFound('environment', 'Environment not found'));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
@@ -580,7 +582,7 @@ describe('RailwayAdapter delete verification', () => {
   });
 
   it('treats exact preflight absence as idempotent success without mutation', async () => {
-    const request = vi.fn().mockResolvedValueOnce({ environment: null });
+    const request = vi.fn().mockRejectedValueOnce(graphqlNotFound('environment', 'Environment not found'));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
@@ -642,7 +644,7 @@ describe('RailwayAdapter delete verification', () => {
     const request = vi.fn()
       .mockResolvedValueOnce(environmentIdentity())
       .mockRejectedValueOnce(graphqlNotFound('environmentDelete', 'Environment disappeared'))
-      .mockResolvedValueOnce({ environment: null });
+      .mockRejectedValueOnce(graphqlNotFound('environment', 'Environment not found'));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
@@ -680,7 +682,7 @@ describe('RailwayAdapter delete verification', () => {
     for (let attempt = 0; attempt < 6; attempt += 1) {
       request.mockResolvedValueOnce(serviceInstance('svc-slow-delete'));
     }
-    request.mockResolvedValueOnce({ serviceInstance: null });
+    request.mockResolvedValueOnce(serviceInstance('svc-slow-delete', 'env-staging', '2026-09-12T00:00:00Z'));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
@@ -697,7 +699,7 @@ describe('RailwayAdapter delete verification', () => {
     for (let attempt = 0; attempt < 20; attempt += 1) {
       request.mockResolvedValueOnce(serviceInstance('svc-eventually-deleted'));
     }
-    request.mockResolvedValueOnce({ serviceInstance: null });
+    request.mockResolvedValueOnce(serviceInstance('svc-eventually-deleted', 'env-staging', '2026-09-12T00:00:00Z'));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 

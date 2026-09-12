@@ -60,6 +60,7 @@ interface SupabaseProject {
 
 interface SupabaseOrganization {
   id: string;
+  slug?: string;
   name?: string;
 }
 
@@ -181,7 +182,11 @@ export class SupabaseAdapter implements IDatabaseAdapter {
     let createMutationAttempted = false;
     let unresolvedCreateOutcome = false;
     try {
-      const orgId = (await this.resolveConnectedOrganization()).id;
+      const organization = await this.resolveConnectedOrganization();
+      const orgId = organization.id;
+      if (!organization.slug) {
+        throw new Error(`Supabase organization ${orgId} did not return a usable slug; refusing project creation.`);
+      }
       requestedOrganizationId = orgId;
 
       // Create project name from environment
@@ -208,7 +213,7 @@ export class SupabaseAdapter implements IDatabaseAdapter {
       let project: SupabaseProject;
       try {
         project = await this.request<SupabaseProject>('POST', '/projects', {
-          organization_id: orgId,
+          organization_slug: organization.slug,
           name: projectName,
           region: requestedRegion,
           plan: options?.size || 'free',
@@ -637,7 +642,10 @@ export class SupabaseAdapter implements IDatabaseAdapter {
         throw new Error(`Supabase credential verification returned duplicate organization ${id}.`);
       }
       seenIds.add(id);
-      organizations.push({ id, ...(name ? { name } : {}) });
+      const slug = typeof record.slug === 'string' && /^[\w-]+$/.test(record.slug)
+        ? record.slug
+        : undefined;
+      organizations.push({ id, ...(name ? { name } : {}), ...(slug ? { slug } : {}) });
     }
 
     const configuredOrganizationId = this.credentials.organizationId;

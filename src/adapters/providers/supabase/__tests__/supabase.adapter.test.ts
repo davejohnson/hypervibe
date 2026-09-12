@@ -27,7 +27,7 @@ const DEFAULT_PROVIDER_SCOPE = {
 };
 
 function organizationsResponse(
-  organizations: Array<{ id: string; name?: string }> = [{ id: 'org-1', name: 'Primary' }]
+  organizations: Array<{ id: string; name?: string; slug?: string }> = [{ id: 'org-1', slug: 'primary-org', name: 'Primary' }]
 ): Response {
   return jsonResponse(organizations);
 }
