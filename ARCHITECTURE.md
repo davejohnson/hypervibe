@@ -517,6 +517,15 @@ absence may authorize a create based on observed state:
   produce adoption candidates, but multiple matches are ambiguity that must be
   reported and blocked.
 
+Railway service names are project-scoped; environment membership is separate.
+Before resolving an unbound name candidate, read its complete, paginated
+service-instance inventory and validate the project/service identity. Only
+probe an exact instance when that inventory includes the target environment.
+Railway can return `INTERNAL_SERVER_ERROR` for a missing singular instance;
+that error alone never proves absence. Incomplete inventory or conflicting
+exact-instance evidence blocks creation, while a production-only service does
+not prevent creating a separate staging service, database, or cache.
+
 Creates, updates, and destroys must be retry-safe:
 
 - Billable and data-bearing actions require exact action-id confirmation.
