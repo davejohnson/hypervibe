@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { resourceName } from '../../../domain/services/resource-names.js';
 import {
   ACMClient,
   DeleteCertificateCommand,
@@ -297,7 +298,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
           );
         }
       } else {
-        const exact = await this.findClusterArns(resources.clusterName);
+        const exact = await this.findClusterArns([resources.clusterName, this.legacyClusterName(projectName, environment)]);
         if (exact.length > 0) {
           return this.failedReceipt(
             'Failed to ensure AWS ECS Express project',
@@ -453,9 +454,10 @@ export class EcsExpressAdapter implements IProviderAdapter {
           throw new Error(`AWS update response did not preserve bound service ${binding}.`);
         }
       } else {
-        const serviceName = this.serviceName(service);
+        const serviceName = resourceName(service.name, { maxLength: 255 });
+        const legacyName = this.safeName(`hv-${service.name}`, 52, service.id);
         const duplicates = (await this.listServiceArns(clusterArn)).filter(
-          (arn) => arn.split('/').at(-1) === serviceName
+          (arn) => [serviceName, legacyName].includes(arn.split('/').at(-1)!)
         );
         if (duplicates.length > 0) {
           return this.failedDeploy(
@@ -871,7 +873,11 @@ export class EcsExpressAdapter implements IProviderAdapter {
     const environment = environmentForInspection(request);
     const bindings = parseHostingBindings(environment);
     const accountId = await this.resolveAccountId();
-    const clusterArn = bindings.projectId
+    const candidates = bindings.projectId ? [] : await this.findClusterArns([
+      this.clusterName(request.project!.name, environment), this.legacyClusterName(request.project!.name, environment),
+    ]);
+    if (candidates.length > 1) throw new Error('Multiple current/legacy ECS environment candidates require explicit identity selection.');
+    const clusterArn = bindings.projectId ?? candidates[0]
       ?? this.projectResources(
         accountId,
         this.clusterName(request.project!.name, environment)
@@ -924,12 +930,14 @@ export class EcsExpressAdapter implements IProviderAdapter {
     return { clients: this.clients, credentials: this.credentials };
   }
 
-  private clusterName(projectName: string, environment: Environment): string {
-    return this.safeName(`hv-${projectName}-${environment.name}`, 44, `${environment.projectId}:${environment.name}`);
+  private clusterName(_projectName: string, environment: Environment): string {
+    // Bound cluster names also seed IAM names; retain the scope discriminator
+    // inside their shortest prefix limit instead of truncating it downstream.
+    return resourceName(environment.name, { maxLength: 42, scope: [environment.projectId] });
   }
 
-  private serviceName(service: Service): string {
-    return this.safeName(`hv-${service.name}`, 52, service.id);
+  private legacyClusterName(projectName: string, environment: Environment): string {
+    return this.safeName(`hv-${projectName}-${environment.name}`, 44, `${environment.projectId}:${environment.name}`);
   }
 
   private safeName(value: string, prefixLength: number, salt: string): string {
@@ -1400,7 +1408,8 @@ export class EcsExpressAdapter implements IProviderAdapter {
     return cluster;
   }
 
-  private async findClusterArns(name: string): Promise<string[]> {
+  private async findClusterArns(names: string | string[]): Promise<string[]> {
+    const candidates = Array.isArray(names) ? names : [names];
     const arns: string[] = [];
     let nextToken: string | undefined;
     do {
@@ -1408,7 +1417,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
       if (!Array.isArray(output.clusterArns)) {
         throw new Error('AWS ECS cluster observation returned an invalid cluster list.');
       }
-      arns.push(...output.clusterArns.filter((arn) => arn.split('/').at(-1) === name));
+      arns.push(...output.clusterArns.filter((arn) => candidates.includes(arn.split('/').at(-1)!)));
       nextToken = output.nextToken;
     } while (nextToken);
     return arns.sort();

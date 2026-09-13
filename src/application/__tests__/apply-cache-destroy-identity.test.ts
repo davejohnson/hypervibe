@@ -304,7 +304,7 @@ describe('cache destroy apply identity', () => {
     expect(configureTarget).toHaveBeenCalledWith({ projectName: project.name, ...placement });
     expect(provision).toHaveBeenCalledWith('redis', expect.objectContaining({ id: environment.id }), {
       projectName: project.name,
-      resourceName: `${project.name}-staging-redis`,
+      resourceName: expect.stringMatching(/^redis-[a-f0-9]{10}$/),
       component: null,
       ...placement,
     });

@@ -1,3 +1,4 @@
+import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import type { Component } from '../../../domain/entities/component.entity.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type {
@@ -98,7 +99,7 @@ export class DigitalOceanCacheAdapter implements ICacheAdapter {
       return this.reconcileBoundCache(environment, options.component, options);
     }
 
-    const resourceName = options?.resourceName ?? `${environment.name}-redis`;
+    const resourceName = options?.resourceName ?? environmentResourceName('redis', environment);
     const requestedRegion = this.nonEmptyString(options?.region) ?? this.credentials.region;
     let created: DigitalOceanDatabaseCluster | undefined;
     let accountUuid: string | undefined;
@@ -511,7 +512,7 @@ export class DigitalOceanCacheAdapter implements ICacheAdapter {
     } else {
       const resourceName = unresolvedMarker?.resourceName
         ?? options?.resourceName
-        ?? `${environment.name}-redis`;
+        ?? environmentResourceName('redis', environment);
       const matches = (await this.client.findDatabaseClustersByName(resourceName))
         .filter((candidate) => !markerRegion || candidate.region === markerRegion);
       if (matches.length > 1) {

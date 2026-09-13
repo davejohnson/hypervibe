@@ -141,6 +141,22 @@ describe('storage-plan.service', () => {
     expect(result.unmanaged).toContainEqual(expect.objectContaining({ name: 'uploads' }));
   });
 
+  it.each(['railway', 's3', 'gcs', 'azureblob'])('does not confuse another provider\'s same-name storage with %s', (provider) => {
+    const target = environmentSpecSchema.parse({
+      hosting: { provider: 'railway' }, services: {},
+      storage: { uploads: { provider, type: 'bucket', region: 'sjc', injectInto: [] } },
+    });
+    const result = planStorage({
+      environmentSpec: target, environment: env(),
+      observed: observed([{
+        provider: provider === 'railway' ? 'gcs' : 'railway',
+        kind: 'object', externalId: 'unrelated-bucket', name: 'uploads', region: 'sjc', status: 'ready',
+      }]),
+    });
+    expect(result.actions[0]).toMatchObject({ type: 'create', billable: true });
+    expect(result.unmanaged).toEqual([]);
+  });
+
   it('reports every duplicate same-name bucket as an ambiguous adoption candidate', () => {
     const result = planStorage({
       environmentSpec: spec,

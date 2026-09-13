@@ -1,3 +1,4 @@
+import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import type { Component } from '../../../domain/entities/component.entity.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type {
@@ -96,7 +97,7 @@ export class DigitalOceanDatabaseAdapter implements IDatabaseAdapter {
       };
     }
 
-    const resourceName = options?.resourceName ?? `${environment.name}-postgres`;
+    const resourceName = options?.resourceName ?? environmentResourceName('postgres', environment);
     const databaseName = options?.databaseName?.trim() || 'app';
     const requestedRegion = options?.region ?? this.credentials.region;
     let created: DigitalOceanDatabaseCluster | undefined;
@@ -328,7 +329,7 @@ export class DigitalOceanDatabaseAdapter implements IDatabaseAdapter {
     } else {
       const resourceName = unresolved?.resourceName
         ?? options?.resourceName
-        ?? `${environment.name}-postgres`;
+        ?? environmentResourceName('postgres', environment);
       const matches = (await this.client.findDatabaseClustersByName(resourceName))
         .filter((candidate) => (
           !unresolved || candidate.region === unresolved.providerScope.region

@@ -15,6 +15,8 @@ import {
   planStorage,
   STORAGE_OPERATIONS,
 } from '../storage-plan.service.js';
+import { railwayHttpFixture, projectId as railwayProjectId, stagingId, productionId } from '../../../adapters/providers/railway/__tests__/railway-http.fixture.js';
+import { createRailwayStorageAdapter } from '../../../adapters/providers/railway/railway-storage.factory.js';
 
 const environmentSpec = environmentSpecSchema.parse({
   hosting: { provider: 'railway' },
@@ -343,8 +345,36 @@ describe('storage create-recovery apply boundary', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     SqliteAdapter.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('applies the reviewed second-environment bucket plan through the pinned Railway transport', async () => {
+    const fixture = await railwayHttpFixture();
+    const production = structuredClone(fixture.environments.get(productionId));
+    const repository = new EnvironmentRepository();
+    repository.update(environment.id, { platformBindings: {
+      provider: 'railway', projectId: railwayProjectId, environmentId: stagingId,
+    } });
+    const spec = environmentSpecSchema.parse({ hosting: { provider: 'railway' }, services: {},
+      storage: { documents: { provider: 'railway', type: 'bucket', region: 'sjc', injectInto: [] } } });
+    const adapter = createRailwayStorageAdapter(fixture.adapter);
+    vi.spyOn(adapterFactory, 'getStorageAdapter').mockResolvedValue({ success: true, adapter });
+    const plan = async () => planStorage({ environmentSpec: spec,
+      environment: repository.findById(environment.id), observed: await fixture.adapter.observe(fixture.environment) });
+    const action = (await plan()).actions[0];
+    expect(action).toMatchObject({ type: 'create', billable: true });
+    expect(await applyStorageAction({ project, envName: 'staging', environmentSpec: spec, action }))
+      .toMatchObject({ success: true });
+    expect(repository.findById(environment.id)?.platformBindings.storage).toMatchObject({
+      documents: { externalId: 'bucket-documents', instanceScope: { projectId: railwayProjectId, environmentId: stagingId } },
+    });
+    expect(repository.findById(environment.id)?.platformBindings.storageCreateRecovery).toBeUndefined();
+    expect((await plan()).actions.every((entry) => entry.type === 'noop')).toBe(true);
+    expect(fixture.mutations.map(({ field }) => field)).toEqual(['environmentPatchCommit']);
+    expect(fixture.environments.get(productionId)).toEqual(production);
+    expect(fixture.contractErrors).toEqual([]);
   });
 
   function fakeStorageAdapter(

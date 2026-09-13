@@ -1,6 +1,7 @@
 import { createHash } from 'crypto';
 import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
+import { resourceName } from '../../../domain/services/resource-names.js';
 import {
   serviceWorkloadKind,
   type Service,
@@ -190,7 +191,7 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
     const appName = this.appName(environment);
     let matches: DigitalOceanApp[];
     try {
-      matches = await this.client.findAppsByName(appName);
+      matches = await this.findEnvironmentApps(environment);
     } catch (error) {
       return {
         success: false,
@@ -295,7 +296,12 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
           `Bound DigitalOcean app ${appId} was not found. Re-run hv_plan before applying.`
         );
       }
-      const componentName = this.componentName(service.name);
+      const componentName = this.serviceComponentName(service, environment, app);
+      const legacyName = this.sanitizeName(service.name, 32);
+      if (!bindings.services?.[service.name]?.serviceId && legacyName !== componentName
+        && this.componentMatches(app.spec, legacyName).length > 0) {
+        throw new Error(`Legacy DigitalOcean component ${legacyName} requires an explicit binding before a new create.`);
+      }
       const matches = this.componentMatches(app.spec, componentName);
       if (matches.length > 1) {
         return this.failedDeploy(
@@ -730,7 +736,7 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
       app = await this.client.getApp(bindings.projectId);
     } else {
       const appName = this.appName(environment);
-      const matches = await this.client.findAppsByName(appName);
+      const matches = await this.findEnvironmentApps(environment);
       if (matches.length > 0) {
         throw new Error([
           `DigitalOcean app name "${appName}" exists without a durable local binding: ${matches
@@ -772,12 +778,14 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
     const services: ObservedService[] = [];
     for (const collection of this.collections()) {
       for (const component of app.spec[collection] ?? []) {
-        services.push(this.observedService(
+        const observed = this.observedService(
           app,
           collection,
           component,
           domainOwnerId === this.serviceExternalId(app.id, collection, component.name)
-        ));
+        );
+        const logicalName = Object.entries(bindings.services ?? {}).find(([, binding]) => binding.serviceId === observed.externalId)?.[0];
+        services.push({ ...observed, name: logicalName ?? observed.name });
       }
     }
     return {
@@ -1318,7 +1326,7 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
     const bindings = parseHostingBindings(environment);
     const apps = bindings.projectId
       ? [await this.client.getApp(bindings.projectId)].filter((app): app is DigitalOceanApp => Boolean(app))
-      : (await this.client.listApps()).filter((app) => app.spec.name === this.appName(environment));
+      : await this.findEnvironmentApps(environment);
     if (apps.length > 1) {
       return {
         observation: 'ambiguous',
@@ -1341,7 +1349,7 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
         name: component.name,
         workloadKind: collection === 'workers' ? 'worker' : collection === 'jobs' ? 'cron' : 'web',
         resourceType: collection,
-        managedByHypervibe: app.spec.name === this.appName(environment),
+        managedByHypervibe: bindings.projectId === app.id,
       }))
     ));
     return {
@@ -1350,7 +1358,7 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
       project: { id: app.id, name: app.spec.name },
       environment: { name: environment.name, region: app.spec.region },
       services: services.slice(0, request.limit),
-      managedByHypervibe: app.spec.name === this.appName(environment),
+      managedByHypervibe: bindings.projectId === app.id,
       partial: services.length > request.limit,
     };
   }
@@ -1453,7 +1461,7 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
           error: `Bound DigitalOcean app ${appId} was not found.`,
         };
       }
-      const componentName = this.componentName(service.name);
+      const componentName = this.serviceComponentName(service, environment, app);
       const matches = this.componentMatches(app.spec, componentName);
       if (matches.length !== 1) {
         return {
@@ -1566,7 +1574,7 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
     const image = imageUri ? this.parseImageUri(imageUri) : existing?.image;
     const next: DigitalOceanAppComponent = {
       ...(existing ?? {}),
-      name: this.componentName(service.name),
+      name: existing?.name ?? this.componentName(service.name),
       ...(image ? { image } : {}),
       envs: this.mergeEnv(existing?.envs ?? [], envVars, service),
       instance_size_slug:
@@ -1589,9 +1597,9 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
         next.routes = existing?.routes?.length
           ? existing.routes
           : [{
-              path: this.componentName(service.name) === 'web'
+              path: next.name === 'web'
                 ? '/'
-                : `/${this.componentName(service.name)}`,
+                : `/${next.name}`,
             }];
       } else {
         delete next.routes;
@@ -2060,6 +2068,15 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
   }
 
   private appName(environment: Environment): string {
+    return resourceName(environment.name, { maxLength: 32, minLength: 2, scope: [environment.projectId] });
+  }
+
+  private async findEnvironmentApps(environment: Environment): Promise<DigitalOceanApp[]> {
+    const names = [this.appName(environment), this.legacyAppName(environment)];
+    return (await this.client!.listApps()).filter((app) => names.includes(app.spec.name));
+  }
+
+  private legacyAppName(environment: Environment): string {
     const projectHash = createHash('sha256')
       .update(environment.projectId)
       .digest('hex')
@@ -2068,7 +2085,19 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
   }
 
   private componentName(name: string): string {
-    return this.sanitizeName(name, 32);
+    return resourceName(name, { maxLength: 32, minLength: 2 });
+  }
+
+  private serviceComponentName(service: Service, environment: Environment, app: DigitalOceanApp): string {
+    const bindings = parseHostingBindings(environment);
+    const id = bindings.services?.[service.name]?.serviceId;
+    if (!id) return this.componentName(service.name);
+    const identity = this.parseServiceExternalId(id);
+    if (!identity || identity.appId !== bindings.projectId) throw new Error(`Invalid or cross-app DigitalOcean service binding ${id}.`);
+    if (!(app.spec[identity.collection] ?? []).some((component) => component.name === identity.componentName)) {
+      throw new Error(`Bound DigitalOcean component ${id} was not found; refusing to create a replacement.`);
+    }
+    return identity.componentName;
   }
 
   private sanitizeName(value: string, maxLength: number): string {

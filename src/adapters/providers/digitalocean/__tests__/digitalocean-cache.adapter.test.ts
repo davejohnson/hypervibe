@@ -219,7 +219,7 @@ describe('DigitalOceanCacheAdapter', () => {
         return jsonResponse({
           database: {
             id: 'do-valkey-pending',
-            name: 'production-redis',
+            name: 'redis-4a1633ab7b',
             engine: 'valkey',
             status: 'creating',
             region: 'sfo3',
@@ -233,7 +233,7 @@ describe('DigitalOceanCacheAdapter', () => {
         return jsonResponse({
           database: {
             id: 'do-valkey-pending',
-            name: 'production-redis',
+            name: 'redis-4a1633ab7b',
             engine: 'valkey',
             status: 'creating',
             region: 'sfo3',
@@ -280,7 +280,7 @@ describe('DigitalOceanCacheAdapter', () => {
         return jsonResponse({
           database: {
             id: 'do-valkey-malformed-region',
-            name: 'production-redis',
+            name: 'redis-4a1633ab7b',
             engine: 'valkey',
             status: 'creating',
             region: malformedRegion,
@@ -291,7 +291,7 @@ describe('DigitalOceanCacheAdapter', () => {
         return jsonResponse({
           database: {
             id: 'do-valkey-malformed-region',
-            name: 'production-redis',
+            name: 'redis-4a1633ab7b',
             engine: 'valkey',
             status: 'creating',
             region: malformedRegion,
@@ -318,7 +318,7 @@ describe('DigitalOceanCacheAdapter', () => {
         unresolvedMutation: {
           resourceKind: 'cache',
           operation: 'create',
-          resourceName: 'production-redis',
+          resourceName: 'redis-4a1633ab7b',
           providerScope: { accountUuid: 'do-account-uuid', region: 'nyc3' },
         },
       },
@@ -346,7 +346,7 @@ describe('DigitalOceanCacheAdapter', () => {
         return jsonResponse({
           databases: listReads === 1 ? [] : [{
             id: 'do-valkey-recovered',
-            name: 'production-redis',
+            name: 'redis-4a1633ab7b',
             engine: 'valkey',
             status: 'creating',
             region: 'sfo3',
@@ -387,7 +387,7 @@ describe('DigitalOceanCacheAdapter', () => {
     ['transport failure', () => { throw new Error('connection closed after request transmission'); }],
     ['malformed success', () => jsonResponse({
       database: {
-        name: 'production-redis', engine: 'valkey', region: 'sfo3', status: 'creating',
+        name: 'redis-4a1633ab7b', engine: 'valkey', region: 'sfo3', status: 'creating',
       },
     }, 201)],
   ])('retains an unresolved cache marker after ambiguous %s with inconclusive recovery', async (_label, createOutcome) => {
@@ -428,7 +428,7 @@ describe('DigitalOceanCacheAdapter', () => {
         unresolvedMutation: {
           resourceKind: 'cache',
           operation: 'create',
-          resourceName: 'production-redis',
+          resourceName: 'redis-4a1633ab7b',
           providerScope: { accountUuid: 'do-account-uuid', region: 'sfo3' },
         },
       },
@@ -472,8 +472,8 @@ describe('DigitalOceanCacheAdapter', () => {
 
   it.each([
     ['name', { id: 'wrong-ack', name: 'another-cache', engine: 'valkey', region: 'sfo3' }],
-    ['engine', { id: 'wrong-ack', name: 'production-redis', engine: 'pg', region: 'sfo3' }],
-    ['region', { id: 'wrong-ack', name: 'production-redis', engine: 'valkey', region: 'nyc3' }],
+    ['engine', { id: 'wrong-ack', name: 'redis-4a1633ab7b', engine: 'pg', region: 'sfo3' }],
+    ['region', { id: 'wrong-ack', name: 'redis-4a1633ab7b', engine: 'valkey', region: 'nyc3' }],
   ])('does not trust a create acknowledgment with the wrong %s', async (_label, database) => {
     vi.stubEnv('HYPERVIBE_DIGITALOCEAN_DATABASE_READY_DELAY_MS', '0');
     vi.stubEnv('HYPERVIBE_DIGITALOCEAN_DATABASE_READY_ATTEMPTS', '1');
@@ -506,7 +506,7 @@ describe('DigitalOceanCacheAdapter', () => {
       externalId: null,
       bindings: {
         provisioningIncomplete: true,
-        unresolvedMutation: { resourceName: 'production-redis' },
+        unresolvedMutation: { resourceName: 'redis-4a1633ab7b' },
       },
     });
     expect(listReads).toBe(2);
@@ -529,7 +529,7 @@ describe('DigitalOceanCacheAdapter', () => {
         listReads += 1;
         return jsonResponse({
           databases: listReads === 1 ? [] : [{
-            id: 'wrong-region', name: 'production-redis', engine: 'valkey', region: 'nyc3',
+            id: 'wrong-region', name: 'redis-4a1633ab7b', engine: 'valkey', region: 'nyc3',
           }],
           links: {},
         });

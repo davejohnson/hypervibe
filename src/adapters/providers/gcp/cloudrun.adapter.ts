@@ -42,6 +42,7 @@ import type {
   DeploySourceCredentialProjection,
   IDeploySourceCredentialAdapter,
 } from '../../../domain/ports/deploy-source.port.js';
+import { resourceName } from '../../../domain/services/resource-names.js';
 import {
   CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION,
   CLOUD_RUN_SOURCE_COMMIT_ANNOTATION,
@@ -598,7 +599,7 @@ export class CloudRunAdapter implements
     }
   }
 
-  async ensureProject(projectName: string, environment: Environment): Promise<Receipt> {
+  async ensureProject(_projectName: string, environment: Environment): Promise<Receipt> {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }
@@ -610,7 +611,7 @@ export class CloudRunAdapter implements
       provider?: string;
     };
 
-    const projectId = bindings.projectId || `${projectName}-${environment.name}`;
+    const projectId = bindings.projectId || this.credentials.projectId;
     const data: Record<string, unknown> = {
       projectId,
       gcpProjectId: this.credentials.projectId,
@@ -2234,7 +2235,7 @@ export class CloudRunAdapter implements
 
   /** Deterministic Pub/Sub resource ids for a spec queue name (shared with queue-env). */
   queueResourceNames(environment: Environment, queueName: string): { topicId: string; subscriptionId: string } {
-    return pubsubQueueResourceIds(environment, queueName);
+    return pubsubQueueResourceIds(environment, queueName, this.queueProviderScope().projectId);
   }
 
   /** Current provider-native Pub/Sub scope, for plan/apply stale checks. */
@@ -2256,6 +2257,7 @@ export class CloudRunAdapter implements
     if (!this.credentials) throw new Error('Not connected. Call connect() first.');
     this.assertQueueBindingScope(environment, queueName, false);
     const token = await this.getAccessToken();
+    await this.assertNoUnboundLegacyQueue(environment, queueName, token);
     const { topicId, subscriptionId } = this.queueResourceNames(environment, queueName);
     const [topic, subscription] = await Promise.all([
       pubsub.getTopic(token, this.credentials.projectId, topicId),
@@ -2279,6 +2281,7 @@ export class CloudRunAdapter implements
     if (!this.credentials) throw new Error('Not connected. Call connect() first.');
     this.assertQueueBindingScope(environment, queueName, false);
     const token = await this.getAccessToken();
+    await this.assertNoUnboundLegacyQueue(environment, queueName, token);
     const gcpProjectId = this.credentials.projectId;
     const { topicId, subscriptionId } = this.queueResourceNames(environment, queueName);
     const labels = {
@@ -2353,6 +2356,19 @@ export class CloudRunAdapter implements
     }
   }
 
+  private async assertNoUnboundLegacyQueue(environment: Environment, queueName: string, token: string): Promise<void> {
+    const bindings = environment.platformBindings as { projectId?: string; queues?: Record<string, unknown> };
+    if (bindings.queues?.[queueName]) return;
+    const legacy = `${bindings.projectId || 'hypervibe'}-${queueName}`.toLowerCase()
+      .replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 63);
+    const projectId = this.queueProviderScope().projectId;
+    const [topic, subscription] = await Promise.all([
+      pubsub.getTopic(token, projectId, legacy),
+      pubsub.getSubscription(token, projectId, `${legacy}-sub`),
+    ]);
+    if (topic || subscription) throw new Error(`Legacy Pub/Sub queue "${queueName}" exists without a durable binding; explicitly import or clean up that scoped identity before creating another queue.`);
+  }
+
   private assertQueueBindingScope(
     environment: Environment,
     queueName: string,
@@ -2389,17 +2405,9 @@ export class CloudRunAdapter implements
         `Pub/Sub queue ${queueName} is bound to GCP project ${boundProjectId}, but the connected Cloud Run credentials target ${this.credentials.projectId}; refusing queue access in a different project.`
       );
     }
-    const { topicId, subscriptionId } = this.queueResourceNames(environment, queueName);
-    const expectedTopicName = `projects/${boundProjectId}/topics/${topicId}`;
-    const expectedSubscriptionName = `projects/${boundProjectId}/subscriptions/${subscriptionId}`;
-    if (
-      binding.topicName !== expectedTopicName
-      || binding.subscriptionName !== expectedSubscriptionName
-    ) {
-      throw new Error(
-        `Pub/Sub queue ${queueName} binding does not match its exact project-scoped topic and subscription identities; re-import or re-plan it.`
-      );
-    }
+    // The shared resolver validates both exact scoped IDs and preserves legacy
+    // names; runtime wiring must use the very same identity decision.
+    this.queueResourceNames(environment, queueName);
   }
 
   async readProviderLogs(request: ProviderRuntimeLogsRequest): Promise<ProviderRuntimeLogsResult> {
@@ -2842,10 +2850,14 @@ export class CloudRunAdapter implements
         : this.credentials.projectId;
       const prefix = this.environmentResourcePrefix(request.environment, boundProjectId);
       for (const serviceName of request.serviceNames ?? []) {
-        const providerName = this.stableResourceName(`${prefix}-${serviceName}`);
-        deterministicNames.set(providerName, { name: serviceName, resourceType: 'service' });
-        deterministicNames.set(this.schedulerResourceName(providerName), { name: serviceName, resourceType: 'scheduledJob' });
-        deterministicNames.set(this.migrationJobName(providerName), { name: `${serviceName}-migration`, resourceType: 'taskJob' });
+        for (const providerName of [
+          this.workloadResourceName({ ...request.environment, platformBindings: { projectId: boundProjectId } }, serviceName),
+          this.stableResourceName(`${prefix}-${serviceName}`),
+        ]) {
+          deterministicNames.set(providerName, { name: serviceName, resourceType: 'service' });
+          deterministicNames.set(this.schedulerResourceName(providerName), { name: serviceName, resourceType: 'scheduledJob' });
+          deterministicNames.set(this.migrationJobName(providerName), { name: `${serviceName}-migration`, resourceType: 'taskJob' });
+        }
       }
     }
     const [liveServices, liveJobs] = await Promise.all([
@@ -3994,14 +4006,13 @@ export class CloudRunAdapter implements
   }
 
   private workloadResourceName(
-    environment: Environment,
+    environment: Pick<Environment, 'name' | 'platformBindings'>,
     logicalName: string,
     boundId?: string
   ): string {
     if (boundId) return boundId;
-    const bindings = environment.platformBindings as { projectId?: string };
-    const prefix = this.environmentResourcePrefix(environment, bindings.projectId);
-    return this.stableResourceName(`${prefix}-${logicalName}`);
+    return resourceName(logicalName, { maxLength: 49,
+      scope: [this.credentials!.projectId, environment.name] });
   }
 
   private schedulerResourceName(jobName: string, boundId?: string): string {

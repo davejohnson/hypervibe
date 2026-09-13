@@ -1,4 +1,6 @@
 import path from 'path';
+import { environmentResourceName } from '../services/resource-names.js';
+import { parseUnresolvedDatastoreMutation } from '../ports/database.port.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
@@ -246,6 +248,31 @@ export class PlanService {
     return this.specStore.get(project);
   }
 
+  private async observeDatastoreNames<T extends { provider: string; externalId: string; providerScope?: Record<string, string> }>(
+    project: Project,
+    environment: Environment,
+    engine: string,
+    component: Component | null | undefined,
+    observe: (name: string) => Promise<T | null>
+  ): Promise<T | null> {
+    const recovery = parseUnresolvedDatastoreMutation(component?.bindings, engine === 'redis' ? 'cache' : 'database');
+    const names = recovery ? [recovery.resourceName] : [
+      environmentResourceName(engine, environment),
+      ...(!component?.externalId ? [`${project.name}-${environment.name}-${engine}`] : []),
+    ];
+    // Legacy names are read-only candidates. Unknown or ambiguous inventory
+    // must not authorize a second resource under the new naming convention.
+    const candidates = new Map<string, T>();
+    for (const name of names) {
+      const observed = await observe(name);
+      if (observed) candidates.set(JSON.stringify([
+        observed.provider, observed.externalId, Object.entries(observed.providerScope ?? {}).sort(),
+      ]), observed);
+    }
+    if (candidates.size > 1) throw new Error(`Multiple ${engine} resources match current/legacy names; explicitly import the intended scoped identity.`);
+    return candidates.values().next().value ?? null;
+  }
+
   async observeEnvironment(
     project: Project,
     environment: Environment | null,
@@ -432,9 +459,8 @@ export class PlanService {
               && !component.externalId
                 ? { ...component, externalId: localDatabaseExternalId }
                 : component;
-            const db = await dbAdapter.observeDatabase(environment, observationComponent, {
-              resourceName: `${project.name}-${environment.name}-${engine}`,
-            });
+            const db = await this.observeDatastoreNames(project, environment, engine, observationComponent,
+              (resourceName) => dbAdapter.observeDatabase!(environment, observationComponent, { resourceName }));
             if (
               observedBoundDatabaseServices.length === 1
               && (
@@ -520,10 +546,8 @@ export class PlanService {
                 ?? (typeof cacheBindings?.size === 'string' ? cacheBindings.size : undefined),
             };
             await cacheResult.adapter.configureTarget?.(target);
-            const cache = await cacheResult.adapter.observeCache(environment, localCache, {
-              resourceName: `${project.name}-${environment.name}-redis`,
-              ...target,
-            });
+            const cache = await this.observeDatastoreNames(project, environment, 'redis', localCache,
+              (resourceName) => cacheResult.adapter!.observeCache!(environment, localCache, { resourceName, ...target }));
             observed.caches = [
               ...(observed.caches ?? []).filter((item) =>
                 item.provider !== cacheProvider

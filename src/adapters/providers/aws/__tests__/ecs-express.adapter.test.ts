@@ -73,8 +73,25 @@ function service(): Service {
 }
 
 describe('EcsExpressAdapter lifecycle boundaries', () => {
-  it('forensically inventories an abandoned environment from logical context only', async () => {
+  it('keeps scope discrimination in cluster-derived IAM names for long environment names', async () => {
     const adapter = await adapterWithSend(async () => ({}));
+    const subject = adapter as unknown as {
+      clusterName(projectName: string, environment: Environment): string;
+      projectResources(accountId: string, clusterName: string): { executionRoleName: string; infrastructureRoleName: string };
+    };
+    const targets = ['project-a', 'project-b'].map((projectId) => {
+      const name = subject.clusterName('app', { ...environment(), projectId, name: 'long-environment-'.repeat(6) });
+      return subject.projectResources(ACCOUNT_ID, name);
+    });
+    for (const key of ['executionRoleName', 'infrastructureRoleName'] as const) {
+      expect(targets[0]![key]).not.toBe(targets[1]![key]);
+      expect(targets[0]![key].length).toBeLessThanOrEqual(64);
+    }
+  });
+
+  it('forensically inventories an abandoned environment from logical context only', async () => {
+    const adapter = await adapterWithSend(async (command) => (command as { constructor: { name: string } }).constructor.name === 'ListClustersCommand'
+      ? { clusterArns: [] } : {});
     const internal = adapter as any;
     const getCluster = vi.spyOn(internal, 'getCluster').mockImplementation(async (...args: unknown[]) => ({
       clusterArn: String(args[0]),
@@ -480,11 +497,13 @@ describe('EcsExpressAdapter lifecycle boundaries', () => {
         case 'TagRoleCommand':
           return {};
         case 'CreateClusterCommand':
+          expect(input.clusterName).toMatch(/^production-[a-f0-9]{10}$/);
           clusterArn = `arn:aws:ecs:${REGION}:${ACCOUNT_ID}:cluster/${input.clusterName}`;
           return { cluster: { clusterArn, clusterName: input.clusterName, status: 'ACTIVE', tags } };
         case 'ListServicesCommand':
           return { serviceArns: expressService ? [expressService.serviceArn] : [] };
         case 'CreateExpressGatewayServiceCommand': {
+          expect(input.serviceName).toBe('web');
           const serviceArn = String(input.cluster).replace(':cluster/', ':service/') + `/${input.serviceName}`;
           serviceRevision += 1;
           const revisionArn = `${serviceArn}:revision/${serviceRevision}`;

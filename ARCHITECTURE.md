@@ -525,6 +525,55 @@ Railway can return `INTERNAL_SERVER_ERROR` for a missing singular instance;
 that error alone never proves absence. Incomplete inventory or conflicting
 exact-instance evidence blocks creation, while a production-only service does
 not prevent creating a separate staging service, database, or cache.
+Creation and ambiguous-write recovery use the same scoped service resolver.
+New Railway services retain their logical names without environment suffixes;
+legacy suffixed names remain lookup candidates, never a reason to rename a
+durably bound resource. Providers with flat/global namespaces may require unique
+physical identifiers, but those identifiers do not replace logical spec names.
+
+### Resource naming boundary
+
+`src/domain/services/resource-names.ts` is the provider-neutral formatter.
+It keeps valid logical names unchanged, escapes lossy normalization with a
+logical-name hash, and reserves space for a short scope hash before truncation.
+Adapters supply native constraints, not parallel naming algorithms. Plan,
+apply, and standalone datastore defaults use the same environment-name helper;
+project **identity**, not the display name alone, separates local projects.
+Azure hosting and storage share the same resource-group scope resolver.
+
+| Native resource boundary | New default |
+| --- | --- |
+| Railway environment instances; ECS cluster services; Azure resource-group apps; DigitalOcean app components; Azure account containers | Plain logical name, e.g. `web` or `documents` |
+| ECS clusters; Azure resource groups; DigitalOcean apps | Environment name plus a short project-scope hash |
+| Azure managed environment inside its resource group | `runtime` |
+| Cloud Run services/jobs; Pub/Sub topics/subscriptions; Fly apps; Vercel projects; non-Railway datastores; default-namespace S3/GCS buckets and Azure storage accounts | Logical name plus a short scope hash, respecting native limits |
+
+An environment label is not necessarily a provider namespace. Cloud Run and
+Pub/Sub share their connected GCP project between Hypervibe environments, so
+their new IDs include an environment discriminator. Pub/Sub runtime variables
+and queue lifecycle operations share one resolver; retained fully qualified
+topic/subscription bindings override new defaults. Azure storage accounts use
+the same policy with its compact alphabet and 24-character limit. Hashes are
+discriminators, **never** proof of ownership or scope membership.
+
+Existing bindings and uncertain-write markers retain exact physical IDs and
+names. New defaults do not rename infrastructure or regenerate CI targets.
+Old formulas remain only for read-only candidate discovery or reconstruction
+of pre-existing bound auxiliary resources. Name-only candidates cannot certify
+Hypervibe ownership. Ancillary operation IDs, certificate IDs, image revisions,
+and temporary access credentials are not logical workload names.
+
+Provider constraints are grounded in the official
+[ECS service API](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_CreateExpressGatewayService.html),
+[Azure naming rules](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/resource-name-rules),
+[Cloud Run deployment contract](https://docs.cloud.google.com/run/docs/deploying),
+[Pub/Sub resource names](https://docs.cloud.google.com/pubsub/docs/pubsub-basics),
+[DigitalOcean app spec](https://docs.digitalocean.com/products/app-platform/reference/app-spec/),
+[Fly app contract](https://fly.io/docs/machines/api/apps-resource/), and
+[S3 naming rules](https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html).
+Changing these defaults requires the compatibility/lifecycle tests described
+in `test/provider-contracts/README.md`; offline checks do not establish live
+provider support.
 
 Creates, updates, and destroys must be retry-safe:
 
@@ -1570,6 +1619,15 @@ storage account per declared bucket so its account key and deletion boundary do
 not span unrelated Hypervibe storage resources. Generic orchestration must not
 pretend that accepting a provider id is equivalent to implementing this full
 contract.
+
+Railway bucket definitions belong to the project; data-bearing bucket instances
+belong to its environments. A definition used by production does not establish
+an instance in staging. Plan, apply and status must compare the selected
+provider and complete instance scope. When that target instance is confirmed
+absent, a reviewed create may reuse the project definition and create only the
+isolated environment instance; it must not duplicate the definition or adopt
+an existing data instance. Recheck target absence before patching, preserve
+unrelated environments, and report preflight failures as mutation-free.
 
 Storage connections reuse compatible primary cloud authentication (`ecs` for
 S3, `cloudrun` for GCS, and `azure-container-apps` for Blob Storage) when it is

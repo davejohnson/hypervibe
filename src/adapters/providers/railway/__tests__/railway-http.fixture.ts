@@ -14,6 +14,7 @@ type Instance = {
   source: { image?: string }; domains: { serviceDomains: Array<{ domain: string }>; customDomains: [] };
 };
 type ProviderService = { id: string; name: string; instances: Map<string, Instance> };
+type BucketConfig = Record<string, { region: string; isCreated?: boolean; isDeleted?: boolean }>;
 const connection = (nodes: unknown[], more = false, cursor: string | null = null) => ({
   edges: nodes.map((node) => ({ node })), pageInfo: { hasNextPage: more, endCursor: cursor },
 });
@@ -25,7 +26,10 @@ export async function railwayHttpFixture(options: {
 } = {}) {
   let projectExists = options.projectExists !== false;
   const services = new Map<string, ProviderService>();
-  const environments = new Map([[productionId, { id: productionId, name: 'production', config: {} }]]);
+  const buckets = new Map([['bucket-documents', { id: 'bucket-documents', name: 'documents', projectId }]]);
+  const environments = new Map<string, { id: string; name: string; config: { buckets?: BucketConfig }; unmergedChangesCount?: number }>([
+    [productionId, { id: productionId, name: 'production', config: { buckets: { 'bucket-documents': { region: 'iad', isCreated: true, isDeleted: false } } } }],
+  ]);
   if (options.stagingExists !== false) environments.set(stagingId, { id: stagingId, name: 'staging', config: {} });
   const volumes = new Map<string, Record<string, unknown>>();
   const variables = new Map<string, Record<string, string>>();
@@ -68,8 +72,8 @@ export async function railwayHttpFixture(options: {
       expect(id).toBe(projectId);
       expect(projectExists).toBe(true);
       return {
-      id: projectId, name: 'contract-project', environments: connection([...environments.values()]),
-      services: connection([...services.values()].map(serviceNode)), buckets: connection([]), plugins: connection([]),
+        id: projectId, name: 'contract-project', environments: connection([...environments.values()].map((env) => ({ unmergedChangesCount: 0, ...env }))),
+        services: connection([...services.values()].map(serviceNode)), buckets: connection([...buckets.values()]), plugins: connection([]),
       };
     },
     environment: ({ id }) => ({
@@ -126,11 +130,31 @@ export async function railwayHttpFixture(options: {
       services.get(input.serviceId)!.instances.get(input.environmentId)!.domains.serviceDomains.push(domain);
       return domain;
     },
+    bucketCreate: ({ input }) => {
+      expect(input.projectId).toBe(projectId);
+      const bucket = { id: `bucket-${input.name}`, name: input.name, projectId };
+      expect(buckets.has(bucket.id)).toBe(false);
+      buckets.set(bucket.id, bucket);
+      return bucket;
+    },
+    bucketInstanceDetails: ({ bucketId, environmentId }) => {
+      expect(environments.get(environmentId)?.config.buckets?.[bucketId]?.isDeleted).toBe(false);
+      return { objectCount: environmentId === productionId ? 7 : 0, sizeBytes: environmentId === productionId ? 42 : 0 };
+    },
+    environmentPatchCommit: ({ environmentId, patch }) => {
+      const environment = environments.get(environmentId)!;
+      for (const [id, value] of Object.entries(patch.buckets as BucketConfig)) {
+        expect(buckets.has(id)).toBe(true);
+        environment.config.buckets ??= {};
+        environment.config.buckets[id] = { ...environment.config.buckets[id], ...value };
+      }
+      return 'bucket-deployment';
+    },
   };
-  for (const field of ['projectCreate', 'environmentCreate', 'serviceCreate', 'variableCollectionUpsert', 'volumeCreate', 'serviceInstanceRedeploy', 'serviceDelete', 'serviceDomainCreate']) {
+  for (const field of ['projectCreate', 'environmentCreate', 'serviceCreate', 'variableCollectionUpsert', 'volumeCreate', 'serviceInstanceRedeploy', 'serviceDelete', 'serviceDomainCreate', 'bucketCreate', 'environmentPatchCommit']) {
     const resolve = root[field];
     root[field] = (args) => {
-      if (!['projectCreate', 'environmentCreate'].includes(field)) {
+      if (!['projectCreate', 'environmentCreate', 'bucketCreate'].includes(field)) {
         expect(args.input?.environmentId ?? args.environmentId).toBe(stagingId);
       }
       mutations.push({ field, args });
@@ -168,5 +192,5 @@ export async function railwayHttpFixture(options: {
     platformBindings: { projectId, ...(options.stagingExists !== false ? { environmentId: stagingId } : {}) },
     createdAt: new Date(), updatedAt: new Date(),
   };
-  return { adapter, environment, services, environments, mutations, requests, variables, contractErrors };
+  return { adapter, environment, services, environments, buckets, mutations, requests, variables, contractErrors };
 }

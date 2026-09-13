@@ -701,21 +701,23 @@ it('derives environment-qualified names for every unbound Cloud Run workload whi
   };
 
   expect(stagingNames).toEqual({
-    web: 'gcp-project-staging-web',
-    worker: 'gcp-project-staging-worker',
-    scheduledJob: 'gcp-project-staging-cron',
+    web: 'web-7e22b6c2dc',
+    worker: 'worker-7e22b6c2dc',
+    scheduledJob: 'cron-7e22b6c2dc',
   });
   expect(productionNames).toEqual({
-    web: 'gcp-project-production-web',
-    worker: 'gcp-project-production-worker',
-    scheduledJob: 'gcp-project-production-cron',
+    web: 'web-383368e489',
+    worker: 'worker-383368e489',
+    scheduledJob: 'cron-383368e489',
   });
   expect(new Set([...Object.values(stagingNames), ...Object.values(productionNames)]).size).toBe(6);
-  expect(subject.migrationJobName(stagingNames.web)).toBe('gcp-project-staging-web-migration');
-  expect(subject.migrationJobName(productionNames.web)).toBe('gcp-project-production-web-migration');
-  expect(subject.schedulerResourceName(stagingNames.scheduledJob)).toBe('gcp-project-staging-cron-schedule');
-  expect(subject.schedulerResourceName(productionNames.scheduledJob)).toBe('gcp-project-production-cron-schedule');
+  expect(subject.migrationJobName(stagingNames.web)).toBe('web-7e22b6c2dc-migration');
+  expect(subject.migrationJobName(productionNames.web)).toBe('web-383368e489-migration');
+  expect(subject.schedulerResourceName(stagingNames.scheduledJob)).toBe('cron-7e22b6c2dc-schedule');
+  expect(subject.schedulerResourceName(productionNames.scheduledJob)).toBe('cron-383368e489-schedule');
   expect(subject.workloadResourceName(staging, 'web', 'legacy-exact-service')).toBe('legacy-exact-service');
+  expect(subject.workloadResourceName({ ...staging,
+    platformBindings: { projectId: 'legacy-logical-staging' } }, 'web')).toBe(stagingNames.web);
   expect(subject.schedulerResourceName(stagingNames.scheduledJob, 'legacy-exact-scheduler')).toBe('legacy-exact-scheduler');
 });
 
@@ -1577,7 +1579,7 @@ it('refuses to create a release job when neither it nor the existing service has
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
-      if (url.includes('/jobs/gcp-project-production-cron') && method === 'GET') {
+      if (url.includes('/jobs/cron-383368e489') && method === 'GET') {
         jobReads += 1;
         return jobReads === 1
           ? new Response('not found', { status: 404 })
@@ -2050,20 +2052,20 @@ it('refuses to create a release job when neither it nor the existing service has
           results: { images: [{ name: submitted.images[0], digest: imageDigest }] },
         });
       }
-      if (url.includes('/jobs/gcp-project-staging-web-migration:run') && method === 'POST') {
+      if (url.includes('/jobs/web-7e22b6c2dc-migration:run') && method === 'POST') {
         return Response.json({
           name: 'projects/gcp-project/locations/us-central1/operations/run-bootstrap-migration',
           done: true,
           response: {
-            name: 'projects/gcp-project/locations/us-central1/jobs/gcp-project-staging-web-migration/executions/bootstrap-release',
+            name: 'projects/gcp-project/locations/us-central1/jobs/web-7e22b6c2dc-migration/executions/bootstrap-release',
             completionStatus: 'EXECUTION_SUCCEEDED',
           },
         });
       }
-      if (url.includes('/jobs/gcp-project-staging-web-migration') && method === 'GET') {
+      if (url.includes('/jobs/web-7e22b6c2dc-migration') && method === 'GET') {
         if (!migrationJobCreated) return new Response('not found', { status: 404 });
         return Response.json({
-          name: 'projects/gcp-project/locations/us-central1/jobs/gcp-project-staging-web-migration',
+          name: 'projects/gcp-project/locations/us-central1/jobs/web-7e22b6c2dc-migration',
           generation: '1',
           observedGeneration: '1',
           reconciling: false,
@@ -2071,26 +2073,26 @@ it('refuses to create a release job when neither it nor the existing service has
           ...migrationJobSpec,
         });
       }
-      if (url.includes('/jobs?jobId=gcp-project-staging-web-migration') && method === 'POST') {
+      if (url.includes('/jobs?jobId=web-7e22b6c2dc-migration') && method === 'POST') {
         migrationJobCreated = true;
         migrationJobSpec = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return Response.json({
           name: 'projects/gcp-project/locations/us-central1/operations/create-bootstrap-migration',
           done: true,
           response: {
-            name: 'projects/gcp-project/locations/us-central1/jobs/gcp-project-staging-web-migration',
+            name: 'projects/gcp-project/locations/us-central1/jobs/web-7e22b6c2dc-migration',
           },
         });
       }
-      if (url.includes('/services/gcp-project-staging-web') && method === 'GET') {
+      if (url.includes('/services/web-7e22b6c2dc') && method === 'GET') {
         if (!serviceCreated) return new Response('not found', { status: 404 });
         return Response.json({
-          name: 'projects/gcp-project/locations/us-central1/services/gcp-project-staging-web',
+          name: 'projects/gcp-project/locations/us-central1/services/web-7e22b6c2dc',
           uid: 'service-uid',
           generation: '1',
           observedGeneration: '1',
           reconciling: false,
-          uri: 'https://gcp-project-staging-web.run.app',
+          uri: 'https://web-7e22b6c2dc.run.app',
           annotations: {},
           template: {
             serviceAccount: EXPECTED_RUNTIME_SERVICE_ACCOUNT,
@@ -2099,13 +2101,13 @@ it('refuses to create a release job when neither it nor the existing service has
           terminalCondition: { type: 'Ready', state: 'CONDITION_SUCCEEDED' },
         });
       }
-      if (url.includes('/services?serviceId=gcp-project-staging-web') && method === 'POST') {
+      if (url.includes('/services?serviceId=web-7e22b6c2dc') && method === 'POST') {
         serviceCreated = true;
         return Response.json({
           name: 'projects/gcp-project/locations/us-central1/operations/create-bootstrap-service',
           done: true,
           response: {
-            name: 'projects/gcp-project/locations/us-central1/services/gcp-project-staging-web',
+            name: 'projects/gcp-project/locations/us-central1/services/web-7e22b6c2dc',
           },
         });
       }
@@ -2147,7 +2149,7 @@ it('refuses to create a release job when neither it nor the existing service has
     expect(result.receipt.message).toContain('holding image');
     expect(result.receipt.data).toMatchObject({
       imageUri: digestImageUri,
-      releaseJobName: 'gcp-project-staging-web-migration',
+      releaseJobName: 'web-7e22b6c2dc-migration',
       deploymentDeferred: true,
       bootstrapDeployment: {
         expectedSourceCommitSha: resolvedCommitSha,
@@ -2161,11 +2163,11 @@ it('refuses to create a release job when neither it nor the existing service has
       },
     });
     expect(fetchMock.mock.calls.some(([url, init]) => (
-      String(url).includes('/jobs?jobId=gcp-project-staging-web-migration') && init?.method === 'POST'
+      String(url).includes('/jobs?jobId=web-7e22b6c2dc-migration') && init?.method === 'POST'
     ))).toBe(true);
-    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/jobs/gcp-project-staging-web-migration:run'))).toBe(false);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/jobs/web-7e22b6c2dc-migration:run'))).toBe(false);
     const serviceCreate = fetchMock.mock.calls.find(([url, init]) =>
-      String(url).includes('/services?serviceId=gcp-project-staging-web') && init?.method === 'POST'
+      String(url).includes('/services?serviceId=web-7e22b6c2dc') && init?.method === 'POST'
     );
     const serviceBody = JSON.parse(String(serviceCreate?.[1]?.body));
     expect(serviceBody.template.containers[0].image).toBe(digestImageUri);
@@ -3187,17 +3189,17 @@ it('refuses to create a release job when neither it nor the existing service has
       if (url.includes(':getIamPolicy') || url.includes(':setIamPolicy')) {
         throw new Error(`Unexpected IAM fetch: ${method} ${url}`);
       }
-      if (url.includes('/services/gcp-project-production-worker') && method === 'GET') {
+      if (url.includes('/services/worker-383368e489') && method === 'GET') {
         if (!serviceCreated) {
           return new Response('not found', { status: 404 });
         }
         return Response.json({
-          name: 'projects/gcp-project/locations/us-central1/services/gcp-project-production-worker',
+          name: 'projects/gcp-project/locations/us-central1/services/worker-383368e489',
           uid: 'uid-1',
           generation: '1',
           observedGeneration: '1',
           reconciling: false,
-          uri: 'https://gcp-project-production-worker.run.app',
+          uri: 'https://worker-383368e489.run.app',
           terminalCondition: {
             type: 'Ready',
             state: 'CONDITION_SUCCEEDED',
@@ -3219,7 +3221,7 @@ it('refuses to create a release job when neither it nor the existing service has
           name: 'projects/gcp-project/locations/us-central1/operations/create-service',
           done: true,
           response: {
-            name: 'projects/gcp-project/locations/us-central1/services/gcp-project-production-worker',
+            name: 'projects/gcp-project/locations/us-central1/services/worker-383368e489',
           },
         });
       }

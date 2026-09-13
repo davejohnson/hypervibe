@@ -296,7 +296,7 @@ describe('DigitalOceanDatabaseAdapter', () => {
     let listReads = 0;
     const recovered = {
       id: 'do-recovered',
-      name: 'production-postgres',
+      name: 'postgres-4a1633ab7b',
       engine: 'pg',
       status: 'creating',
       region: 'sfo3',

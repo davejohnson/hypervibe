@@ -412,7 +412,7 @@ export function planStorage(params: {
       : [];
     const nameCandidates = binding
       ? []
-      : live.filter((item) => item.name.toLowerCase() === name.toLowerCase());
+      : live.filter((item) => item.provider === spec.provider && item.name.toLowerCase() === name.toLowerCase());
     const observed = binding
       ? boundObserved.length === 1 ? boundObserved[0] : undefined
       : nameCandidates.length === 1 ? nameCandidates[0] : undefined;

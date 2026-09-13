@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { resourceName, resourceScopeSuffix } from '../../../domain/services/resource-names.js';
 import { Buffer } from 'node:buffer';
 import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
@@ -260,7 +261,7 @@ export class FlyAdapter implements IProviderAdapter {
         let matches: FlyApp[];
         try {
           matches = (await this.client.listApps())
-            .filter((candidate) => candidate.name === appName);
+            .filter((candidate) => candidate.name === appName || candidate.name === this.legacyServiceAppName(environment, service.name));
         } catch (error) {
           throw new Error([
             `Could not check whether Fly.io app "${appName}" already exists, so Hypervibe refused to create an app that might be a duplicate.`,
@@ -779,9 +780,8 @@ export class FlyAdapter implements IProviderAdapter {
       }
     );
     const boundIds = new Set(boundServices.map(({ binding }) => binding.appId));
-    const prefix = this.servicePrefix(environment);
     const unbound = apps.filter(
-      (app) => app.name.startsWith(prefix) && !boundIds.has(app.id)
+      (app) => this.matchesServiceName(environment, app.name) && !boundIds.has(app.id)
     );
     if (unbound.length > 0) {
       throw new Error([
@@ -846,9 +846,8 @@ export class FlyAdapter implements IProviderAdapter {
       if (!binding.serviceId) return [];
       return [parseFlyServiceBinding(binding.serviceId).appId];
     }));
-    const prefix = this.servicePrefix(environment);
     const apps = (await this.client.listApps()).filter(
-      (app) => boundIds.has(app.id) || app.name.startsWith(prefix)
+      (app) => boundIds.has(app.id) || this.matchesServiceName(environment, app.name)
     );
     const services = [];
     for (const app of apps.slice(0, request.limit)) {
@@ -863,7 +862,7 @@ export class FlyAdapter implements IProviderAdapter {
         name: app.name,
         resourceType: 'fly-app',
         machineIds: machines.map((machine) => machine.id),
-        managedByHypervibe: app.name.startsWith(prefix),
+        managedByHypervibe: boundIds.has(app.id),
         sourceState: 'disconnected',
       });
     }
@@ -1405,6 +1404,20 @@ export class FlyAdapter implements IProviderAdapter {
   }
 
   private serviceAppName(environment: Environment, logicalName: string): string {
+    return resourceName(logicalName, { scope: this.serviceNameScope(environment) });
+  }
+
+  private serviceNameScope(environment: Environment): string[] {
+    const identity = this.ownershipIdentity(environment);
+    return [this.credentials!.organizationSlug, identity.projectName, identity.environmentId];
+  }
+
+  private matchesServiceName(environment: Environment, name: string): boolean {
+    return name.endsWith(`-${resourceScopeSuffix(this.serviceNameScope(environment))}`)
+      || name.startsWith(this.servicePrefix(environment));
+  }
+
+  private legacyServiceAppName(environment: Environment, logicalName: string): string {
     const serviceHash = createHash('sha256')
       .update(logicalName)
       .digest('hex')
@@ -1438,8 +1451,7 @@ export class FlyAdapter implements IProviderAdapter {
   }
 
   private machineName(logicalName: string): string {
-    const normalized = logicalName.toLowerCase().replace(/[^a-z0-9-]/g, '-');
-    return `hv-${normalized.slice(0, 40)}-${createHash('sha256').update(logicalName).digest('hex').slice(0, 6)}`;
+    return resourceName(logicalName);
   }
 
   private emptyObservation(projectExists: boolean): ObservedState {

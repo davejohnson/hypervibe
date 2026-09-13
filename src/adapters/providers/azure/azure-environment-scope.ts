@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { resourceName } from '../../../domain/services/resource-names.js';
 
 export interface AzureEnvironmentResourceGroupScope {
   subscriptionId: string;
@@ -21,6 +22,15 @@ export function azureEnvironmentResourceGroupScope(params: {
   environmentId: string;
   environmentName: string;
 }): AzureEnvironmentResourceGroupScope {
+  const resourceGroup = resourceName(params.environmentName, { scope: [params.environmentId] });
+  return { subscriptionId: params.subscriptionId, resourceGroup,
+    resourceGroupId: azureResourceGroupId(params.subscriptionId, resourceGroup) };
+}
+
+/** Read-only compatibility candidate; never the default for new resources. */
+export function legacyAzureEnvironmentResourceGroupScope(
+  params: Parameters<typeof azureEnvironmentResourceGroupScope>[0]
+): AzureEnvironmentResourceGroupScope {
   const prefix = `hv-${params.projectName}-${params.environmentName}`
     .toLowerCase()
     .replace(/[^a-z0-9-]+/g, '-')

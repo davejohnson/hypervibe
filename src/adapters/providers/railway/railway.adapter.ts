@@ -1,6 +1,7 @@
 import { GraphQLClient, gql } from 'graphql-request';
 import { randomBytes } from 'crypto';
 import { z } from 'zod';
+import { resourceName } from '../../../domain/services/resource-names.js';
 import type {
   IProviderAdapter,
   Receipt,
@@ -1025,7 +1026,7 @@ export class RailwayAdapter implements
       };
     }
     const baseServiceName = `${type}-db`;
-    const serviceName = this.railwayServiceNameForEnvironment(baseServiceName, environment.name);
+    const serviceName = resourceName(baseServiceName, { maxLength: 64 });
     const serviceResolution = await this.resolveServiceIdForEnvironment(
       projectId,
       this.railwayServiceNameCandidates(baseServiceName, environment.name),
@@ -1357,14 +1358,14 @@ export class RailwayAdapter implements
 
   /**
    * A GraphQL transport failure can happen after Railway committed
-   * serviceCreate. The exact requested name was proved absent immediately
-   * before the mutation, so a later unique name match is attributable to this
-   * attempt and may be retained for explicit recovery/cleanup.
+   * serviceCreate. The exact requested name was proved absent in the target
+   * environment before the mutation. Retain a later unique scoped match for
+   * explicit recovery/cleanup, never automatic adoption.
    */
   private async recoverServiceIdentityAfterCreate(
     projectId: string,
     serviceName: string,
-    environmentId?: string
+    environmentId: string
   ): Promise<{ id: string; name: string } | undefined> {
     const configuredAttempts = Number(process.env.HYPERVIBE_RAILWAY_CREATE_VERIFY_ATTEMPTS ?? 10);
     const configuredDelayMs = Number(process.env.HYPERVIBE_RAILWAY_CREATE_VERIFY_DELAY_MS ?? 250);
@@ -1378,23 +1379,8 @@ export class RailwayAdapter implements
 
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
-        let matches = (await this.listProjectServices(projectId, { throwOnFailure: true }))
-          .filter((service) => service.name === serviceName);
-        if (environmentId) {
-          const environmentMatches: typeof matches = [];
-          for (const match of matches) {
-            if (await this.serviceHasEnvironmentInstance(match.id, environmentId)) {
-              environmentMatches.push(match);
-            }
-          }
-          matches = environmentMatches;
-        }
-        if (matches.length > 1) {
-          throw new Error(
-            `Multiple Railway services named "${serviceName}"${environmentId ? ` in environment ${environmentId}` : ''} appeared after serviceCreate: ${matches.map((service) => service.id).join(', ')}.`
-          );
-        }
-        if (matches.length === 1) return matches[0];
+        const match = await this.resolveServiceIdForEnvironment(projectId, serviceName, environmentId);
+        if (match.serviceId && match.serviceName) return { id: match.serviceId, name: match.serviceName };
       } catch (error) {
         lastError = error;
       }
@@ -2021,22 +2007,14 @@ export class RailwayAdapter implements
     throw new Error(`Railway environment creation is unsupported by the available GraphQL schema variants: ${schemaErrors.join(' | ')}`);
   }
 
-  private railwayServiceNameForEnvironment(baseName: string, environmentName: string): string {
-    const base = railwayNamePart(baseName);
-    const env = railwayNamePart(environmentName);
-    if (env === 'production' || env === 'prod') {
-      return base;
-    }
-    if (base.endsWith(`-${env}`)) {
-      return base;
-    }
-    return `${base}-${env}`.slice(0, 64).replace(/-+$/g, '') || base;
-  }
-
   private railwayServiceNameCandidates(baseName: string, environmentName: string): string[] {
+    // New resources keep their logical name. Recognize old suffixed resources
+    // only for scoped lookup/adoption; durable bound ids always take precedence.
     return Array.from(new Set([
       baseName,
-      this.railwayServiceNameForEnvironment(baseName, environmentName),
+      resourceName(baseName, { maxLength: 64 }),
+      railwayNamePart(baseName),
+      `${railwayNamePart(baseName)}-${railwayNamePart(environmentName)}`.slice(0, 64).replace(/-+$/g, ''),
     ]));
   }
 
@@ -2781,7 +2759,7 @@ export class RailwayAdapter implements
       // Check if a service is already bound to this Railway environment. A
       // project-level service that only has instances in another environment
       // cannot be deployed here; create a target-environment service instead.
-      const providerServiceName = this.railwayServiceNameForEnvironment(service.name, environment.name);
+      const providerServiceName = resourceName(service.name, { maxLength: 64 });
       const providerScope = { projectId, environmentId: railwayEnvId };
       const failedCreateRecovery = (
         recovery: HostingServiceCreateRecovery,
@@ -2821,7 +2799,7 @@ export class RailwayAdapter implements
         const scope = priorRecovery?.providerScope;
         if (!priorRecovery
           || priorRecovery.provider !== this.name
-          || priorRecovery.resourceName !== providerServiceName
+          || !this.railwayServiceNameCandidates(service.name, environment.name).includes(priorRecovery.resourceName)
           || scope?.projectId !== projectId
           || scope?.environmentId !== railwayEnvId
           || Object.keys(scope).length !== 2) {
@@ -5957,14 +5935,16 @@ export class RailwayAdapter implements
     let patchSubmitted = false;
     try {
       const state = await this.getBucketState(bindings.projectId, bindings.environmentId);
-      const existing = state.projectBuckets.filter((bucket) => bucket.name.toLowerCase() === name.toLowerCase());
-      if (existing.length > 0) {
-        const candidate = existing[0]!;
+      const existing = state.projectBuckets.find((bucket) => bucket.name.toLowerCase() === name.toLowerCase());
+      const instance = existing && state.environmentBuckets[existing.id];
+      // A project bucket definition is not a data instance. Only an active
+      // instance in this exact environment requires adoption (as in observe).
+      if (existing && instance && instance.isDeleted !== true) {
         return {
           success: false,
-          message: `Railway bucket "${candidate.name}" already exists but is not bound locally`,
-          error: `Hypervibe will not silently attach or adopt Railway bucket ${candidate.id}. Use hv_import to adopt that exact bucket, then run hv_plan again.`,
-          data: { adoptionCandidateExternalId: candidate.id, region: state.environmentBuckets[candidate.id]?.region },
+          message: `Railway bucket "${existing.name}" already exists in environment ${bindings.environmentId} but is not bound locally`,
+          error: `Hypervibe will not silently adopt Railway bucket ${existing.id} in environment ${bindings.environmentId}. Use hv_import to adopt that exact instance, then run hv_plan again.`,
+          data: { adoptionCandidateExternalId: existing.id, region: instance.region, mutationAttempted: false },
         };
       }
       if (state.unmergedChangesCount > 0) {
@@ -5972,75 +5952,79 @@ export class RailwayAdapter implements
           success: false,
           message: `Railway environment has ${state.unmergedChangesCount} unmerged change(s)`,
           error: 'Commit or discard the staged Railway environment changes before Hypervibe creates the bucket, then re-run hv_plan.',
+          data: { mutationAttempted: false },
         };
       }
-      const mutation = gql`
-        mutation CreateBucket($input: BucketCreateInput!) {
-          bucketCreate(input: $input) { id name projectId }
+      let exactBucket = existing;
+      if (!exactBucket) {
+        const mutation = gql`
+          mutation CreateBucket($input: BucketCreateInput!) {
+            bucketCreate(input: $input) { id name projectId }
+          }
+        `;
+        let created: unknown;
+        try {
+          created = await this.client.request<unknown>(mutation, {
+            input: { projectId: bindings.projectId, name },
+          });
+        } catch (error) {
+          if (!this.isMutationOutcomeUncertain(error)) {
+            return {
+              success: false,
+              message: `Railway rejected bucket creation for "${name}"`,
+              error: this.describeError(error),
+              data: { provider: 'railway', phase: 'bucketCreate', mutationAttempted: false, region: options.region },
+            };
+          }
+          const recovered = await this.recoverBucketIdentityAfterCreate(
+            bindings.projectId,
+            bindings.environmentId,
+            name
+          );
+          const recovery = markerForObservedCandidate(recovered);
+          return failedCreateRecovery(
+            recovery,
+            recovered
+              ? `Railway bucket create for "${name}" was recovered but not applied`
+              : `Railway bucket create outcome for "${name}" is unresolved`,
+            recovered
+              ? 'The provider request failed after it may have committed. Hypervibe retained the observed bucket identity for explicit adoption and will not attach or retry it automatically.'
+              : 'The provider request failed after it may have committed, and bounded exact-name recovery did not resolve an identity. Inspect Railway and explicitly adopt or clean up the result before retrying.',
+            { mutationAttempted: true, verification: recovered ? 'present' : 'unknown' }
+          );
         }
-      `;
-      let created: unknown;
-      try {
-        created = await this.client.request<unknown>(mutation, {
-          input: { projectId: bindings.projectId, name },
-        });
-      } catch (error) {
-        if (!this.isMutationOutcomeUncertain(error)) {
-          return {
-            success: false,
-            message: `Railway rejected bucket creation for "${name}"`,
-            error: this.describeError(error),
-            data: { provider: 'railway', phase: 'bucketCreate', mutationAttempted: false, region: options.region },
-          };
-        }
-        const recovered = await this.recoverBucketIdentityAfterCreate(
-          bindings.projectId,
-          bindings.environmentId,
-          name
-        );
-        const recovery = markerForObservedCandidate(recovered);
-        return failedCreateRecovery(
-          recovery,
-          recovered
-            ? `Railway bucket create for "${name}" was recovered but not applied`
-            : `Railway bucket create outcome for "${name}" is unresolved`,
-          recovered
-            ? 'The provider request failed after it may have committed. Hypervibe retained the observed bucket identity for explicit adoption and will not attach or retry it automatically.'
-            : 'The provider request failed after it may have committed, and bounded exact-name recovery did not resolve an identity. Inspect Railway and explicitly adopt or clean up the result before retrying.',
-          { mutationAttempted: true, verification: recovered ? 'present' : 'unknown' }
-        );
-      }
 
-      const createdRecord = isRecord(created) && isRecord(created.bucketCreate)
-        ? created.bucketCreate
-        : undefined;
-      const returnedId = typeof createdRecord?.id === 'string' && createdRecord.id.trim().length > 0
-        ? createdRecord.id.trim()
-        : undefined;
-      const returnedName = typeof createdRecord?.name === 'string' && createdRecord.name.trim().length > 0
-        ? createdRecord.name
-        : undefined;
-      const exactAcknowledgement = Boolean(
-        returnedId
-        && returnedName === name
-        && createdRecord?.projectId === bindings.projectId
-      );
-      if (!exactAcknowledgement || !returnedId) {
-        const recovered = await this.recoverBucketIdentityAfterCreate(
-          bindings.projectId,
-          bindings.environmentId,
-          name
+        const createdRecord = isRecord(created) && isRecord(created.bucketCreate)
+          ? created.bucketCreate
+          : undefined;
+        const returnedId = typeof createdRecord?.id === 'string' && createdRecord.id.trim().length > 0
+          ? createdRecord.id.trim()
+          : undefined;
+        const returnedName = typeof createdRecord?.name === 'string' && createdRecord.name.trim().length > 0
+          ? createdRecord.name
+          : undefined;
+        const exactAcknowledgement = Boolean(
+          returnedId
+          && returnedName === name
+          && createdRecord?.projectId === bindings.projectId
         );
-        const recovery = markerForObservedCandidate(recovered, returnedId, returnedName);
-        return failedCreateRecovery(
-          recovery,
-          `Railway returned a malformed or mismatched acknowledgement for bucket "${name}"`,
-          'The create acknowledgement was not trustworthy, so no bucket attachment was attempted. Hypervibe retained conservative recovery state; inspect the exact Railway project/environment and explicitly adopt the intended bucket before retrying.',
-          { mutationAttempted: true, verification: recovered ? 'present' : 'unknown' }
-        );
+        if (!exactAcknowledgement || !returnedId) {
+          const recovered = await this.recoverBucketIdentityAfterCreate(
+            bindings.projectId,
+            bindings.environmentId,
+            name
+          );
+          const recovery = markerForObservedCandidate(recovered, returnedId, returnedName);
+          return failedCreateRecovery(
+            recovery,
+            `Railway returned a malformed or mismatched acknowledgement for bucket "${name}"`,
+            'The create acknowledgement was not trustworthy, so no bucket attachment was attempted. Hypervibe retained conservative recovery state; inspect the exact Railway project/environment and explicitly adopt the intended bucket before retrying.',
+            { mutationAttempted: true, verification: recovered ? 'present' : 'unknown' }
+          );
+        }
+        exactBucket = { id: returnedId, name };
+        createdBucket = exactBucket;
       }
-      const exactBucket = { id: returnedId, name };
-      createdBucket = exactBucket;
 
       const { attempts, delayMs } = this.storageVerificationPolicy();
       let creationState: typeof state | undefined;
@@ -6054,6 +6038,7 @@ export class RailwayAdapter implements
         if (attempt < attempts - 1) await this.sleep(Math.min(delayMs * (2 ** attempt), 2000));
       }
       if (!creationState) {
+        if (existing) throw new Error(`Railway bucket definition ${existing.id} disappeared before instance creation; re-run hv_plan.`);
         return failedCreateRecovery(
           createStorageCreateRecovery({
             provider: 'railway', resourceName: name, providerScope,
@@ -6065,6 +6050,7 @@ export class RailwayAdapter implements
         );
       }
       if (creationState.unmergedChangesCount > 0) {
+        if (existing) throw new Error('Railway environment has new staged changes; no bucket instance was created.');
         return failedCreateRecovery(
           createStorageCreateRecovery({
             provider: 'railway', resourceName: name, providerScope,
@@ -6076,6 +6062,15 @@ export class RailwayAdapter implements
         );
       }
 
+      // Recheck the instance immediately before the scoped patch. Never
+      // overwrite an instance that appeared after the initial absence read.
+      const currentInstance = creationState.environmentBuckets[exactBucket.id];
+      if (existing && currentInstance && currentInstance.isDeleted !== true) {
+        return { success: false, message: `Railway bucket "${name}" appeared in the target environment`,
+          error: 'Re-run hv_plan to review the exact existing instance.', data: { mutationAttempted: false } };
+      }
+
+      createdBucket = exactBucket;
       patchSubmitted = true;
       await this.commitBucketPatch(
         bindings.environmentId,
