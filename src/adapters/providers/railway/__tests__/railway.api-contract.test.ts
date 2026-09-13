@@ -5,6 +5,8 @@ import { GraphQLClient } from 'graphql-request';
 import { execute, parse, validate } from 'graphql';
 import { projectId, productionId, stagingId, schema, railwayHttpFixture } from './railway-http.fixture.js';
 import type { Service } from '../../../../domain/entities/service.entity.js';
+import { environmentSpecSchema } from '../../../../domain/spec/spec.schema.js';
+import { planStorage } from '../../../../domain/services/storage-plan.service.js';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -86,6 +88,18 @@ describe('pinned provider API contract', () => {
     expect(fixture.contractErrors).toEqual([]);
   });
 
+  it.each(['Web', 'web-', 'w'.repeat(80)])('uses the shared collision-safe policy in serialized service creation: %s', async (name) => {
+    const fixture = await railwayHttpFixture();
+    const service: Service = { id: 'local-web', projectId: 'local-project', name,
+      buildConfig: { public: true }, envVarSpec: {}, createdAt: new Date(), updatedAt: new Date() };
+    const result = await fixture.adapter.deploy(service, fixture.environment, {});
+    expect(result.receipt).toMatchObject({ success: true });
+    const created = fixture.mutations.find(({ field }) => field === 'serviceCreate')!;
+    expect(created.args.input.name).toMatch(/^[a-z][a-z0-9-]*-[a-f0-9]{8}$/);
+    expect(created.args.input.name.length).toBeLessThanOrEqual(64);
+    expect(fixture.contractErrors).toEqual([]);
+  });
+
   it.each(['postgres', 'redis', 'web'] as const)('creates staging %s through serialized requests, then retries safely', async (kind) => {
     const fixture = await railwayHttpFixture();
     const service: Service = {
@@ -100,6 +114,7 @@ describe('pinned provider API contract', () => {
     const created = fixture.mutations.filter(({ field }) => field === 'serviceCreate');
     expect(created).toHaveLength(1);
     expect(created[0].args.input.environmentId).toBe(stagingId);
+    expect(created[0].args.input.name).toBe(kind === 'web' ? 'web' : `${kind}-db`);
     const before = fixture.mutations.length;
     // A repeated create without binding must request adoption, never duplicate.
     expect((await create()).receipt).toMatchObject({ success: false });
@@ -109,9 +124,13 @@ describe('pinned provider API contract', () => {
     }
     const stagingService = [...fixture.services.values()].find((entry) => entry.id.startsWith('staging-'))!;
     if (kind === 'web') {
+      // Legacy provider names remain valid: runtime updates use the bound id.
+      stagingService.name = 'web-staging';
       fixture.environment.platformBindings = { projectId, environmentId: stagingId, services: { web: { serviceId: stagingService.id } } };
       expect(await fixture.adapter.setEnvVars(fixture.environment, service, { APP_MODE: 'staging' })).toMatchObject({ success: true });
       expect(fixture.variables.get(`${stagingService.id}/${stagingId}`)).toEqual({ APP_MODE: 'staging' });
+      expect(stagingService.name).toBe('web-staging');
+      expect(fixture.mutations.slice(before).map(({ field }) => field)).toEqual(['variableCollectionUpsert']);
     }
     const scope = { scope: 'environment' as const, projectId, environmentId: stagingId };
     expect(await fixture.adapter.deleteService(stagingService.id, scope, { allowMutation: true })).toMatchObject({ success: true });
@@ -127,6 +146,75 @@ describe('pinned provider API contract', () => {
       state: 'unknown', error: expect.stringContaining('ServiceInstance not found (code: INTERNAL_SERVER_ERROR, path: serviceInstance)'),
     });
     expect(fixture.mutations).toEqual([]);
+  });
+
+  it('plans, creates, observes and deletes only the second environment bucket instance', async () => {
+    const fixture = await railwayHttpFixture();
+    const production = structuredClone(fixture.environments.get(productionId));
+    const spec = environmentSpecSchema.parse({
+      hosting: { provider: 'railway' }, services: {},
+      storage: { documents: { provider: 'railway', type: 'bucket', region: 'sjc', injectInto: [] } },
+    });
+    const plan = async () => planStorage({
+      environmentSpec: spec, environment: fixture.environment,
+      observed: await fixture.adapter.observe(fixture.environment),
+    });
+    expect((await plan()).actions).toContainEqual(expect.objectContaining({
+      id: 'storage:documents', type: 'create', billable: true,
+    }));
+    const result = await fixture.adapter.ensureStorage(fixture.environment, 'documents', { region: 'sjc' });
+    expect(result, JSON.stringify(fixture.contractErrors)).toMatchObject({
+      success: true, data: { externalId: 'bucket-documents' },
+    });
+    expect(fixture.mutations.map(({ field }) => field)).toEqual(['environmentPatchCommit']);
+    const live = await fixture.adapter.observe(fixture.environment);
+    expect(live.storage).toEqual([expect.objectContaining({
+      name: 'documents', externalId: 'bucket-documents', region: 'sjc', objectCount: 0,
+      instanceScope: { projectId, environmentId: stagingId },
+    })]);
+    // Present in this environment without a binding is adoption, not creation.
+    const before = fixture.mutations.length;
+    expect((await plan()).actions[0].metadata?.blockedReason).toBe('unmanaged_conflict');
+    expect(await fixture.adapter.ensureStorage(fixture.environment, 'documents', { region: 'sjc' }))
+      .toMatchObject({ success: false, data: { mutationAttempted: false } });
+    expect(fixture.mutations).toHaveLength(before);
+    fixture.environment.platformBindings.storage = {
+      documents: { provider: 'railway', externalId: 'bucket-documents',
+        instanceScope: { projectId, environmentId: stagingId }, region: 'sjc', services: [], envKeys: [] },
+    };
+    expect((await plan()).actions.every((action) => action.type === 'noop')).toBe(true);
+    expect(await fixture.adapter.destroyStorage(fixture.environment, 'bucket-documents')).toMatchObject({ success: true });
+    expect((await fixture.adapter.observe(fixture.environment)).storage).toEqual([]);
+    const afterDelete = fixture.mutations.length;
+    expect(await fixture.adapter.destroyStorage(fixture.environment, 'bucket-documents')).toMatchObject({ success: true });
+    expect(fixture.mutations).toHaveLength(afterDelete);
+    expect(fixture.environments.get(productionId)).toEqual(production);
+    expect(fixture.buckets.get('bucket-documents')?.name).toBe('documents');
+    expect(fixture.contractErrors).toEqual([]);
+  });
+
+  it('does not create an instance when the selected environment bucket read is unknown', async () => {
+    const fixture = await railwayHttpFixture({ responseOverride: ({ query }) => query.includes('GetBucketState')
+      ? Response.json({ errors: [{ message: 'denied' }] }, { status: 403 }) : undefined });
+    expect(await fixture.adapter.ensureStorage(fixture.environment, 'documents', { region: 'sjc' }))
+      .toMatchObject({ success: false, data: { mutationAttempted: false } });
+    expect(fixture.mutations).toEqual([]);
+  });
+
+  it('preserves an instance that appears between planning and the scoped create patch', async () => {
+    let reads = 0;
+    const fixture = await railwayHttpFixture({ responseOverride: ({ query }) => {
+      if (query.includes('GetBucketState') && ++reads === 2) {
+        fixture.environments.get(stagingId)!.config.buckets = {
+          'bucket-documents': { region: 'ams', isCreated: true, isDeleted: false },
+        };
+      }
+      return undefined;
+    } });
+    expect(await fixture.adapter.ensureStorage(fixture.environment, 'documents', { region: 'sjc' }))
+      .toMatchObject({ success: false, data: { mutationAttempted: false } });
+    expect(fixture.mutations).toEqual([]);
+    expect(fixture.environments.get(stagingId)!.config.buckets!['bucket-documents'].region).toBe('ams');
   });
 
   it('consumes later inventory pages before deciding a target is absent', async () => {

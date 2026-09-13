@@ -27,6 +27,7 @@ const interfaceModules: Array<[string, URL]> = [
 ];
 
 const providerNeutralHostingServices: Array<[string, URL]> = [
+  ['src/domain/services/resource-names.ts', new URL('../../domain/services/resource-names.ts', import.meta.url)],
   ['src/domain/services/hosting-env.service.ts', new URL('../../domain/services/hosting-env.service.ts', import.meta.url)],
   ['src/domain/services/deploy-source.ts', new URL('../../domain/services/deploy-source.ts', import.meta.url)],
   ['src/domain/services/bootstrap.service.ts', new URL('../../domain/services/bootstrap.service.ts', import.meta.url)],
@@ -49,6 +50,16 @@ const hostingProviderBranches = [
 ];
 
 describe('provider boundary architecture', () => {
+  it('keeps shared naming deterministic and plan/apply on the same policy', () => {
+    const naming = readFileSync(new URL('../../domain/services/resource-names.ts', import.meta.url), 'utf8');
+    expect(naming).not.toMatch(/\b(?:fetch|process\.env|Date|Math\.random|randomUUID)\b/);
+    for (const file of ['../../domain/plan/plan.service.ts', '../../application/apply-plan.ts']) {
+      const source = readFileSync(new URL(file, import.meta.url), 'utf8');
+      expect(source).toContain('environmentResourceName(engine, environment)');
+      expect(source).toMatch(/import \{ environmentResourceName \} from ['"].*\/resource-names\.js['"]/);
+    }
+  });
+
   it('keeps hosted committed-spec inspection pure and read-only', () => {
     const source = readFileSync(
       new URL('../../application/hosted/committed-spec-inspection.ts', import.meta.url),

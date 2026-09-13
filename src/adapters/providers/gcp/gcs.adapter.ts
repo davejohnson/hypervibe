@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { GoogleAuth } from 'google-auth-library';
 import { z } from 'zod';
@@ -12,6 +11,7 @@ import type {
   StorageObjectClient,
   StorageObjectPayload,
 } from '../../../domain/ports/storage.port.js';
+import { resourceName } from '../../../domain/services/resource-names.js';
 import {
   providerRegistry,
   type ProviderInspectionRequest,
@@ -94,12 +94,8 @@ function slug(value: string): string {
 }
 
 function bucketName(context: StorageContext, environment: Environment, name: string): string {
-  const base = slug(`hv-${context.projectName ?? environment.projectId}-${environment.name}-${name}`);
-  const suffix = createHash('sha256')
-    .update(`${context.projectId}\0${environment.id}\0${name}`)
-    .digest('hex')
-    .slice(0, 10);
-  return `${base.slice(0, 52)}-${suffix}`.replace(/-+$/g, '');
+  return resourceName(name, { minLength: 3, scope: [context.projectId, environment.projectId, environment.name],
+    reservedPrefixes: ['goog'] });
 }
 
 function errorMessage(error: unknown): string {

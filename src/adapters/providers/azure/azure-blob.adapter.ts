@@ -1,5 +1,6 @@
-import { createHash } from 'node:crypto';
+import { azureEnvironmentResourceGroupScope, legacyAzureEnvironmentResourceGroupScope } from './azure-environment-scope.js';
 import { Readable } from 'node:stream';
+import { resourceName } from '../../../domain/services/resource-names.js';
 import {
   BlobServiceClient,
   StorageSharedKeyCredential,
@@ -127,6 +128,10 @@ class ArmStorageControlPlane implements AzureStorageControlPlane {
 
   async listAccounts(): Promise<AzureStorageAccount[]> {
     const resourceGroup = this.arm.credentials.resourceGroup;
+    if (resourceGroup && !await this.arm.getNullable(
+      `/subscriptions/${encodeURIComponent(this.arm.credentials.subscriptionId)}/resourceGroups/${encodeURIComponent(resourceGroup)}`,
+      '2024-11-01'
+    )) return [];
     return this.arm.listAll<AzureStorageAccount>(
       resourceGroup
         ? this.arm.resourceGroupProviderPath('Microsoft.Storage', 'storageAccounts')
@@ -286,36 +291,12 @@ class AzureSdkBlobDataPlane implements AzureBlobDataPlane {
 }
 
 function accountName(context: StorageContext, environment: Environment, name: string): string {
-  const prefix = `hv${String(context.projectName ?? environment.projectId)}${environment.name}${name}`
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '')
-    .slice(0, 12);
-  const suffix = createHash('sha256')
-    .update(`${context.subscriptionId}\0${context.resourceGroup}\0${environment.id}\0${name}`)
-    .digest('hex')
-    .slice(0, 10);
-  return `${prefix}${suffix}`.slice(0, 24).padEnd(3, '0');
-}
-
-function deterministicResourceGroup(projectName: string, environment: Environment): string {
-  const prefix = `hv-${projectName}-${environment.name}`
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 54) || 'hypervibe';
-  const suffix = createHash('sha256')
-    .update(`${environment.projectId}:${environment.name}`)
-    .digest('hex')
-    .slice(0, 8);
-  return `${prefix}-${suffix}`;
+  return resourceName(name, { maxLength: 24, minLength: 3, compact: true,
+    scope: [context.subscriptionId, context.resourceGroup, environment.projectId, environment.name] });
 }
 
 function containerName(name: string): string {
-  const normalized = name.toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  return normalized.slice(0, 63).padEnd(3, '0');
+  return resourceName(name, { minLength: 3 });
 }
 
 function parseExternalId(externalId: string, context: StorageContext): { account: string; container: string } {
@@ -440,7 +421,14 @@ export class AzureBlobStorageAdapter implements IStorageAdapter {
       if (context.subscriptionId && context.subscriptionId.toLowerCase() !== credentials.subscriptionId.toLowerCase()) {
         throw new Error(`Bound Azure subscription ${context.subscriptionId} does not match the connected subscription.`);
       }
-      const resourceGroup = context.resourceGroup ?? deterministicResourceGroup(projectName, environment);
+      const scope = { subscriptionId: credentials.subscriptionId, projectName,
+        environmentId: environment.projectId, environmentName: environment.name };
+      const resourceGroup = context.resourceGroup ?? azureEnvironmentResourceGroupScope(scope).resourceGroup;
+      if (!context.resourceGroup) {
+        const legacyGroup = legacyAzureEnvironmentResourceGroupScope(scope).resourceGroup;
+        const accounts = await this.controlPlaneFactory(credentials, legacyGroup).listAccounts();
+        if (accounts.length > 0) throw new Error(`Legacy Azure storage in ${legacyGroup} requires explicit scoped import before creating new storage.`);
+      }
       const location = context.location ?? desiredRegion;
       if (!location) throw new Error('A desired Azure location is required in the storage spec.');
       this.control = this.controlPlaneFactory(credentials, resourceGroup);
@@ -468,7 +456,11 @@ export class AzureBlobStorageAdapter implements IStorageAdapter {
       if (account.tags?.[ENVIRONMENT_TAG] !== environment.id) continue;
       const name = account.tags[STORAGE_NAME_TAG];
       if (!name) continue;
-      const container = await this.controlPlane().getContainer(account, containerName(name));
+      // Each managed account owns one logical bucket. Observe its native
+      // container identity; never regenerate a retained name from new defaults.
+      const containers = await this.controlPlane().listContainers(account);
+      if (containers.length > 1) throw new Error(`Multiple containers in managed Azure account ${account.name} require explicit identity selection.`);
+      const container = containers[0];
       if (!container) continue;
       const key = await this.controlPlane().listKeys(account);
       const plane = this.dataPlaneFactory(account.name, key, container.name);

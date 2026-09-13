@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { resourceName } from '../../../domain/services/resource-names.js';
 import {
   CreateBucketCommand,
   DeleteBucketCommand,
@@ -82,20 +82,9 @@ function defaultClientFactory(credentials: S3StorageCredentials, region: string)
   return { s3: new S3Client(config), sts: new STSClient(config) };
 }
 
-function slug(value: string): string {
-  return value.toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
 function deterministicBucketName(context: StorageContext, environment: Environment, name: string): string {
-  const base = slug(`hv-${context.projectName ?? environment.projectId}-${environment.name}-${name}`);
-  const suffix = createHash('sha256')
-    .update(`${context.accountId}\0${environment.id}\0${name}`)
-    .digest('hex')
-    .slice(0, 10);
-  return `${base.slice(0, 52)}-${suffix}`.replace(/-+$/g, '');
+  return resourceName(name, { minLength: 3, scope: [context.accountId, environment.projectId, environment.name],
+    reservedPrefixes: ['sthree-', 'amzn-s3-demo-'] });
 }
 
 function statusCode(error: unknown): number | undefined {
@@ -222,7 +211,6 @@ export class S3StorageAdapter implements IStorageAdapter {
     let continuationToken: string | undefined;
     do {
       const result = await this.s3Client().send(new ListBucketsCommand({
-        Prefix: 'hv-',
         BucketRegion: context.region,
         ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
       }));

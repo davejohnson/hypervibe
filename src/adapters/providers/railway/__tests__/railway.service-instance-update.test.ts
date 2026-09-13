@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RailwayAdapter } from '../railway.adapter.js';
+import { serviceInstanceInventory } from './service-instance-inventory.fixture.js';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../../domain/entities/service.entity.js';
 
@@ -1080,7 +1081,7 @@ describe('RailwayAdapter service instance updates', () => {
           serviceCreateRecovery: {
             provider: 'railway',
             operation: 'create',
-            resourceName: 'web-staging',
+            resourceName: 'web',
             providerScope: { projectId: 'rail-project', environmentId: 'env-staging' },
             state: 'mismatched',
             serviceId: 'svc-wrong',
@@ -1103,10 +1104,11 @@ describe('RailwayAdapter service instance updates', () => {
         },
       })
       .mockResolvedValueOnce({ project: { services: { edges: [] } } })
-      .mockResolvedValueOnce({ serviceCreate: { id: '', name: 'web-staging' } })
+      .mockResolvedValueOnce({ serviceCreate: { id: '', name: 'web' } })
       .mockResolvedValueOnce({
-        project: { services: { edges: [{ node: { id: 'svc-recovered', name: 'web-staging' } }] } },
+        project: { services: { edges: [{ node: { id: 'svc-recovered', name: 'web' } }] } },
       })
+      .mockResolvedValueOnce(serviceInstanceInventory('rail-project', 'svc-recovered', ['env-staging']))
       .mockResolvedValueOnce(serviceEnvironmentInstance('svc-recovered', 'env-staging'));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
@@ -1132,12 +1134,12 @@ describe('RailwayAdapter service instance updates', () => {
           serviceCreateRecovery: {
             state: 'identified',
             serviceId: 'svc-recovered',
-            returnedName: 'web-staging',
+            returnedName: 'web',
           },
         },
       },
     });
-    expect(request).toHaveBeenCalledTimes(5);
+    expect(request).toHaveBeenCalledTimes(6);
     expect(request.mock.calls.some(([query]) => /serviceInstance(?:Update|Redeploy)|variableCollectionUpsert|serviceDomainCreate/.test(String(query)))).toBe(false);
   });
 
@@ -1176,7 +1178,7 @@ describe('RailwayAdapter service instance updates', () => {
         mutationAttempted: true,
         serviceCreateRecovery: {
           state: 'unresolved',
-          resourceName: 'web-staging',
+          resourceName: 'web',
           providerScope: { projectId: 'rail-project', environmentId: 'env-staging' },
         },
       },

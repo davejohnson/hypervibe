@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { resourceName, resourceScopeSuffix } from '../../../domain/services/resource-names.js';
 import type { ComponentType } from '../../../domain/entities/component.entity.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import {
@@ -229,7 +230,7 @@ export class VercelAdapter implements IProviderAdapter {
         this.assertProjectScope(project, scope);
       } else {
         const matches = (await this.client.listProjects())
-          .filter((candidate) => candidate.name === expectedName);
+          .filter((candidate) => candidate.name === expectedName || candidate.name === this.legacyServiceProjectName(environment, service.name));
         if (matches.length > 0) {
           return this.failedDeploy(
             service,
@@ -919,10 +920,9 @@ export class VercelAdapter implements IProviderAdapter {
     const boundIds = new Set(
       boundServices.map((binding) => binding.projectId)
     );
-    const prefix = this.servicePrefix(environment);
     const unbound = projects.filter(
       (project) =>
-        project.name.startsWith(prefix)
+        this.matchesServiceName(environment, project.name)
         && !boundIds.has(project.id)
     );
     if (unbound.length > 0) {
@@ -988,9 +988,8 @@ export class VercelAdapter implements IProviderAdapter {
       if (!binding.serviceId) return [];
       return [parseVercelServiceBinding(binding.serviceId).projectId];
     }));
-    const prefix = this.servicePrefix(environment);
     const projects = (await this.client.listProjects()).filter((project) => (
-      boundProjectIds.has(project.id) || project.name.startsWith(prefix)
+      boundProjectIds.has(project.id) || this.matchesServiceName(environment, project.name)
     ));
     return {
       observation: projects.length > 0 ? 'present' : 'absent',
@@ -1003,7 +1002,7 @@ export class VercelAdapter implements IProviderAdapter {
         name: project.name,
         workloadKind: 'web',
         resourceType: 'vercel-project',
-        managedByHypervibe: project.name.startsWith(prefix),
+        managedByHypervibe: boundProjectIds.has(project.id),
         sourceState: project.link ? 'connected' : 'disconnected',
       })),
       partial: projects.length > request.limit,
@@ -1674,6 +1673,18 @@ export class VercelAdapter implements IProviderAdapter {
   }
 
   private serviceProjectName(
+    environment: Environment,
+    logicalName: string
+  ): string {
+    return resourceName(logicalName, { maxLength: 100, scope: [environment.projectId, environment.name] });
+  }
+
+  private matchesServiceName(environment: Environment, name: string): boolean {
+    return name.endsWith(`-${resourceScopeSuffix([environment.projectId, environment.name])}`)
+      || name.startsWith(this.servicePrefix(environment));
+  }
+
+  private legacyServiceProjectName(
     environment: Environment,
     logicalName: string
   ): string {

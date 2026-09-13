@@ -7,6 +7,7 @@ import type {
   AzureStorageControlPlane,
 } from '../azure-blob.adapter.js';
 import { AzureBlobStorageAdapter } from '../azure-blob.adapter.js';
+import { verifyIsolatedStorageLifecycle } from '../../__tests__/storage-lifecycle.contract.js';
 
 const credentials = {
   tenantId: '11111111-1111-4111-8111-111111111111',
@@ -63,6 +64,77 @@ function dataPlane(overrides: Partial<AzureBlobDataPlane> = {}): AzureBlobDataPl
 }
 
 describe('AzureBlobStorageAdapter', () => {
+  it.each([1, 2])('observes legacy container names from native inventory; containers=%s', async (count) => {
+    const managed = account({ tags: { 'hypervibe-environment-id': 'environment-1', 'hypervibe-storage-name': 'a' } });
+    const oldContainer = { id: `${managed.id}/blobServices/default/containers/a00`, name: 'a00' };
+    const control = controlPlane({ listAccounts: vi.fn(async () => [managed]),
+      listContainers: vi.fn(async () => [oldContainer, ...(count === 2 ? [{ id: `${managed.id}/blobServices/default/containers/another`, name: 'another' }] : [])]) });
+    const adapter = new AzureBlobStorageAdapter({ controlPlaneFactory: () => control, dataPlaneFactory: () => dataPlane() });
+    await adapter.connect(credentials);
+    const observation = adapter.observe(environment(), { subscriptionId: credentials.subscriptionId, resourceGroup: 'friend-app-production' });
+    if (count === 1) await expect(observation).resolves.toMatchObject([{ name: 'a', externalId: oldContainer.id }]);
+    else await expect(observation).rejects.toThrow(/Multiple.*containers/);
+    expect(control.createContainer).not.toHaveBeenCalled();
+  });
+
+  it.each([404, 403, 200])('handles legacy resource-group evidence (%s) through the real ARM HTTP client', async (status) => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.hostname === 'login.microsoftonline.com') return Response.json({ access_token: 'token' });
+      expect(init?.method ?? 'GET').toBe('GET');
+      if (url.pathname.includes('/resourceGroups/hv-')) {
+        if (url.pathname.endsWith('/storageAccounts')) return Response.json({ value: [account()] });
+        return status === 200 ? Response.json({ id: url.pathname }) : new Response(null, { status });
+      }
+      if (url.pathname === `/subscriptions/${credentials.subscriptionId}`) {
+        return Response.json({ subscriptionId: credentials.subscriptionId, state: 'Enabled' });
+      }
+      throw new Error(`Unexpected ARM read ${url.pathname}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const adapter = new AzureBlobStorageAdapter();
+      await adapter.connect(credentials);
+      const resolved = await adapter.resolveObservationContext('friend-app', environment(), 'westus2');
+      expect(resolved.receipt.success).toBe(status === 404);
+      if (status !== 404) expect(resolved.receipt.error).toMatch(status === 403 ? /403/ : /Legacy.*import/);
+      expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('management.azure.com'))
+        .every(([, init]) => (init?.method ?? 'GET') === 'GET')).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps same logical names isolated through shared plan/apply and observation', async () => {
+    const accounts = new Map<string, AzureStorageAccount>();
+    const containers = new Map<string, { id: string; name: string }>();
+    const adapter = new AzureBlobStorageAdapter({
+      controlPlaneFactory: (_credentials, group) => controlPlane({
+        listAccounts: vi.fn(async () => [...accounts.values()].filter((entry) => entry.id.includes(`/resourceGroups/${group}/`))),
+        getAccount: vi.fn(async (name) => accounts.get(name) ?? null),
+        createAccount: vi.fn(async (name, location, tags) => {
+          expect(accounts.has(name)).toBe(false);
+          const created = account({ name, location, tags,
+            id: `/subscriptions/${credentials.subscriptionId}/resourceGroups/${group}/providers/Microsoft.Storage/storageAccounts/${name}` });
+          accounts.set(name, created);
+          return created;
+        }),
+        getContainer: vi.fn(async (parent, name) => containers.get(`${parent.id}/${name}`) ?? null),
+        listContainers: vi.fn(async (parent) => [...containers.values()].filter((entry) => entry.id.startsWith(`${parent.id}/`))),
+        createContainer: vi.fn(async (parent, name) => {
+          const container = { id: `${parent.id}/blobServices/default/containers/${name}`, name };
+          containers.set(`${parent.id}/${name}`, container);
+          return container;
+        }),
+      }),
+      dataPlaneFactory: () => dataPlane(),
+    });
+    await adapter.connect(credentials);
+    await verifyIsolatedStorageLifecycle(adapter, 'westus2');
+    expect(accounts.size).toBe(2);
+    expect([...containers.values()].map((entry) => entry.name)).toEqual(['documents', 'documents']);
+  });
+
   afterEach(() => {
     vi.unstubAllEnvs();
   });
@@ -122,7 +194,7 @@ describe('AzureBlobStorageAdapter', () => {
     expect(defaultCredentialProvider).toHaveBeenCalledOnce();
     expect(controlPlaneFactory).toHaveBeenCalledWith(
       { authMode: 'default', subscriptionId: credentials.subscriptionId },
-      expect.stringMatching(/^hv-friend-app-production-/)
+      expect.stringMatching(/^production-[a-f0-9]{10}$/)
     );
   });
 
@@ -158,12 +230,12 @@ describe('AzureBlobStorageAdapter', () => {
 
     expect(contextResult.context).toMatchObject({
       subscriptionId: credentials.subscriptionId,
-      resourceGroup: expect.stringMatching(/^hv-friend-app-production-[0-9a-f]{8}$/),
+      resourceGroup: expect.stringMatching(/^production-[0-9a-f]{10}$/),
       location: 'westus2',
     });
     expect(result.receipt.success).toBe(true);
     expect(result.externalId).toMatch(/\/blobServices\/default\/containers\/documents$/);
-    expect(control.createAccount).toHaveBeenCalledWith(expect.stringMatching(/^hv[a-z0-9]{10,22}$/), 'westus2', expect.objectContaining({
+    expect(control.createAccount).toHaveBeenCalledWith(expect.stringMatching(/^documents[a-f0-9]{10}$/), 'westus2', expect.objectContaining({
       'hypervibe-environment-id': 'environment-1',
       'hypervibe-storage-name': 'documents',
     }));
@@ -174,9 +246,9 @@ describe('AzureBlobStorageAdapter', () => {
     const managed = account();
     const control = controlPlane({
       listAccounts: vi.fn(async () => [managed, account({ name: 'unmanaged', tags: {} })]),
-      getContainer: vi.fn(async (storageAccount, container) => storageAccount.name === managed.name
-        ? { id: `${storageAccount.id}/blobServices/default/containers/${container}`, name: container }
-        : null),
+      listContainers: vi.fn(async (storageAccount) => storageAccount.name === managed.name
+        ? [{ id: `${storageAccount.id}/blobServices/default/containers/documents`, name: 'documents' }]
+        : []),
     });
     const plane = dataPlane({ list: vi.fn(async () => [{ key: 'a.pdf', size: 42 }]) });
     const adapter = new AzureBlobStorageAdapter({ controlPlaneFactory: () => control, dataPlaneFactory: () => plane });

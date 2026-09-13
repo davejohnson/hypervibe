@@ -275,7 +275,7 @@ describe('AzureManagedRedisAdapter', () => {
       resourceName: CLUSTER_NAME,
     })).resolves.toBeNull();
     expect(paths).toHaveLength(1);
-    expect(paths[0]).toMatch(/^GET \/subscriptions\/.*\/resourceGroups\/hv-invoice-perfect-production-[0-9a-f]{8}$/);
+    expect(paths[0]).toMatch(/^GET \/subscriptions\/.*\/resourceGroups\/production-[0-9a-f]{10}$/);
   });
 
   it('rejects unsupported network placement instead of ignoring it', async () => {

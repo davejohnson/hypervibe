@@ -11,10 +11,12 @@ import {
   PutBucketEncryptionCommand,
   PutBucketTaggingCommand,
   PutPublicAccessBlockCommand,
+  type Tag,
 } from '@aws-sdk/client-s3';
 import { GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
 import { S3StorageAdapter } from '../s3.adapter.js';
+import { verifyIsolatedStorageLifecycle } from '../../__tests__/storage-lifecycle.contract.js';
 
 const credentials = {
   accessKeyId: 'A'.repeat(20),
@@ -30,6 +32,31 @@ function environment(): Environment {
 }
 
 describe('S3StorageAdapter', () => {
+  it('keeps same logical names isolated through shared plan/apply and observation', async () => {
+    const buckets = new Map<string, Tag[]>();
+    const s3 = { destroy: vi.fn(), send: vi.fn(async (command: any) => {
+      const name = command.input.Bucket;
+      if (command instanceof HeadBucketCommand) {
+        if (!buckets.has(name)) throw Object.assign(new Error('missing'), { name: 'NotFound' });
+        return {};
+      }
+      if (command instanceof CreateBucketCommand) { expect(buckets.has(name)).toBe(false); buckets.set(name, []); return {}; }
+      if (command instanceof PutBucketTaggingCommand) { buckets.set(name, command.input.Tagging!.TagSet!); return {}; }
+      if (command instanceof GetBucketTaggingCommand) return { TagSet: buckets.get(name) };
+      if (command instanceof ListBucketsCommand) return { Buckets: [...buckets.keys()]
+        .filter((name) => !command.input.Prefix || name.startsWith(command.input.Prefix))
+        .map((Name) => ({ Name })) };
+      if (command instanceof ListObjectsV2Command) return { Contents: [], IsTruncated: false };
+      expect([PutBucketEncryptionCommand, PutPublicAccessBlockCommand]).toContain(command.constructor);
+      return {};
+    }) };
+    const sts = { send: vi.fn(async () => ({ Account: '123456789012' })), destroy: vi.fn() };
+    const adapter = new S3StorageAdapter(() => ({ s3, sts }));
+    await adapter.connect(credentials);
+    await verifyIsolatedStorageLifecycle(adapter, region);
+    expect(buckets.size).toBe(2);
+  });
+
   it('inventories bounded buckets with durable account scope', async () => {
     const s3 = {
       send: vi.fn(async (command: unknown) => {
@@ -117,7 +144,7 @@ describe('S3StorageAdapter', () => {
 
     expect(contextResult.context).toMatchObject({ accountId: '123456789012', region: 'us-west-2' });
     expect(result.receipt.success).toBe(true);
-    expect(result.externalId).toMatch(/^hv-friend-app-production-documents-[0-9a-f]{10}$/);
+    expect(result.externalId).toMatch(/^documents-[0-9a-f]{10}$/);
     expect(s3.send.mock.calls.map(([command]) => (command as object).constructor)).toEqual([
       HeadBucketCommand,
       CreateBucketCommand,
@@ -139,7 +166,8 @@ describe('S3StorageAdapter', () => {
         return { Contents: [{ Key: 'a.pdf', Size: 42 }], IsTruncated: false };
       }
       if (command instanceof ListBucketsCommand) {
-        expect(command.input).toMatchObject({ Prefix: 'hv-', BucketRegion: 'us-west-2' });
+        expect(command.input).toMatchObject({ BucketRegion: 'us-west-2' });
+        expect(command.input).not.toHaveProperty('Prefix');
       }
       return { Buckets: [{ Name: 'managed-bucket' }, { Name: 'unmanaged-bucket' }] };
     }), destroy: vi.fn() };
@@ -203,13 +231,13 @@ describe('S3StorageAdapter', () => {
         success: false,
         error: expect.stringContaining('rollback failed: rollback denied'),
         data: {
-          externalId: expect.stringMatching(/^hv-friend-app-production-documents-/),
+          externalId: expect.stringMatching(/^documents-[0-9a-f]{10}$/),
           created: true,
           rollback: 'failed',
           recoveryRequired: true,
         },
       },
-      externalId: expect.stringMatching(/^hv-friend-app-production-documents-/),
+      externalId: expect.stringMatching(/^documents-[0-9a-f]{10}$/),
       context,
     });
     const rollback = s3.send.mock.calls.find(([command]) => command instanceof DeleteBucketCommand)?.[0] as DeleteBucketCommand;

@@ -80,7 +80,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
       })
       .mockResolvedValueOnce({ project: { services: { edges: [] } } })
       .mockResolvedValueOnce({
-        serviceCreate: { id: 'rail-svc-redis-1', name: 'redis-db-staging' },
+        serviceCreate: { id: 'rail-svc-redis-1', name: 'redis-db' },
       })
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-redis-1', 'rail-env-1'))
       .mockResolvedValueOnce({ variableCollectionUpsert: true })
@@ -104,14 +104,14 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
       input: {
         projectId: 'rail-proj-1',
         environmentId: 'rail-env-1',
-        name: 'redis-db-staging',
+        name: 'redis-db',
         source: { image: 'bitnami/redis:7.4' },
       },
     });
     const variables = request.mock.calls[4]?.[1]?.variables as Record<string, string>;
     expect(variables.REDIS_PASSWORD).toMatch(/^[A-Za-z0-9_-]+$/);
     expect(variables.ALLOW_EMPTY_PASSWORD).toBe('no');
-    expect(variables.REDIS_URL).toContain('@redis-db-staging.railway.internal:6379');
+    expect(variables.REDIS_URL).toContain('@redis-db.railway.internal:6379');
     expect(request.mock.calls[6]?.[1]?.input).toMatchObject({
       serviceId: 'rail-svc-redis-1',
       mountPath: '/bitnami/redis/data',
@@ -151,7 +151,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
       })
       // serviceCreate
       .mockResolvedValueOnce({
-        serviceCreate: { id: 'rail-svc-db-1', name: 'postgres-db-staging' },
+        serviceCreate: { id: 'rail-svc-db-1', name: 'postgres-db' },
       })
       // ensureServiceInstanceForEnvironment
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-1', 'rail-env-1'))
@@ -223,7 +223,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         project: { services: { edges: [] } },
       })
       .mockResolvedValueOnce({
-        serviceCreate: { id: 'rail-svc-db-1', name: 'postgres-db-staging' },
+        serviceCreate: { id: 'rail-svc-db-1', name: 'postgres-db' },
       })
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-1', 'rail-env-1'))
       .mockResolvedValueOnce({
@@ -246,7 +246,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         provider: 'railway',
         providerScope: { projectId: 'rail-proj-1' },
         resourceKind: 'service',
-        pluginName: 'postgres-db-staging',
+        pluginName: 'postgres-db',
         volumeTarget: {
           projectId: 'rail-proj-1',
           environmentId: 'rail-env-1',
@@ -266,7 +266,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         project: { environments: { edges: [{ node: { id: 'rail-env-1', name: 'staging' } }] } },
       })
       .mockResolvedValueOnce({ project: { services: { edges: [] } } })
-      .mockResolvedValueOnce({ serviceCreate: { id: 'rail-svc-db-1', name: 'postgres-db-staging' } })
+      .mockResolvedValueOnce({ serviceCreate: { id: 'rail-svc-db-1', name: 'postgres-db' } })
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-1', 'rail-env-1'))
       .mockResolvedValueOnce({ variableCollectionUpsert: true })
       .mockResolvedValueOnce(volumeInventory('rail-env-1'))
@@ -308,7 +308,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         project: { environments: { edges: [{ node: { id: 'rail-env-1', name: 'staging' } }] } },
       })
       .mockResolvedValueOnce({ project: { services: { edges: [] } } })
-      .mockResolvedValueOnce({ serviceCreate: { id: 'rail-svc-db-1', name: 'postgres-db-staging' } })
+      .mockResolvedValueOnce({ serviceCreate: { id: 'rail-svc-db-1', name: 'postgres-db' } })
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-1', 'rail-env-1'))
       .mockResolvedValueOnce({ variableCollectionUpsert: true })
       .mockResolvedValueOnce(volumeInventory('rail-env-1'))
@@ -343,7 +343,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         project: { environments: { edges: [{ node: { id: 'rail-env-1', name: 'staging' } }] } },
       })
       .mockResolvedValueOnce({ project: { services: { edges: [] } } })
-      .mockResolvedValueOnce({ serviceCreate: { id: 'rail-svc-db-1', name: 'postgres-db-staging' } })
+      .mockResolvedValueOnce({ serviceCreate: { id: 'rail-svc-db-1', name: 'postgres-db' } })
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-1', 'rail-env-1'))
       .mockResolvedValueOnce({ variableCollectionUpsert: true })
       .mockResolvedValueOnce(volumeInventory('rail-env-1', [{
@@ -444,7 +444,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         project: { environments: { edges: [{ node: { id: 'rail-env-1', name: 'staging' } }] } },
       })
       .mockResolvedValueOnce({ project: { services: { edges: [] } } })
-      .mockResolvedValueOnce({ serviceCreate: { id: 'rail-svc-db-1', name: 'postgres-db-staging' } })
+      .mockResolvedValueOnce({ serviceCreate: { id: 'rail-svc-db-1', name: 'postgres-db' } })
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-1', 'rail-env-1'))
       .mockResolvedValueOnce({ variableCollectionUpsert: true })
       .mockResolvedValueOnce(volumeInventory('rail-env-1', [{
@@ -482,10 +482,11 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
       .mockResolvedValueOnce({
         project: {
           services: {
-            edges: [{ node: { id: 'rail-svc-db-recovered', name: 'postgres-db-staging' } }],
+            edges: [{ node: { id: 'rail-svc-db-recovered', name: 'postgres-db' } }],
           },
         },
       })
+      .mockResolvedValueOnce(serviceInstanceInventory('rail-proj-1', 'rail-svc-db-recovered', ['rail-env-1']))
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-recovered', 'rail-env-1'));
 
     const adapter = new RailwayAdapter();
@@ -503,14 +504,14 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         provider: 'railway',
         providerScope: { projectId: 'rail-proj-1' },
         resourceKind: 'service',
-        pluginName: 'postgres-db-staging',
+        pluginName: 'postgres-db',
       },
     });
     expect(result.receipt.data).toMatchObject({
       mutationAttempted: true,
       recoveredServiceId: 'rail-svc-db-recovered',
     });
-    expect(request).toHaveBeenCalledTimes(5);
+    expect(request).toHaveBeenCalledTimes(6);
   });
 
   it('retains a scoped unresolved marker when a transport failure cannot recover the service id', async () => {
@@ -541,7 +542,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         unresolvedMutation: {
           resourceKind: 'database',
           operation: 'create',
-          resourceName: 'postgres-db-staging',
+          resourceName: 'postgres-db',
           providerScope: { projectId: 'rail-proj-1', environmentId: 'rail-env-1' },
         },
       },
@@ -560,11 +561,11 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
       .mockResolvedValueOnce({
         project: {
           services: {
-            edges: [{ node: { id: 'redis-in-production', name: 'redis-db-staging' } }],
+            edges: [{ node: { id: 'redis-in-production', name: 'redis-db' } }],
           },
         },
       })
-      .mockResolvedValueOnce({ serviceInstance: null });
+      .mockResolvedValueOnce(serviceInstanceInventory('rail-proj-1', 'redis-in-production', ['rail-env-production']));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
@@ -580,7 +581,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         providerScope: { projectId: 'rail-proj-1', environmentId: 'rail-env-1' },
         unresolvedMutation: {
           resourceKind: 'cache',
-          resourceName: 'redis-db-staging',
+          resourceName: 'redis-db',
           providerScope: { projectId: 'rail-proj-1', environmentId: 'rail-env-1' },
         },
       },
@@ -623,14 +624,15 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         project: { environments: { edges: [{ node: { id: 'rail-env-1', name: 'staging' } }] } },
       })
       .mockResolvedValueOnce({ project: { services: { edges: [] } } })
-      .mockResolvedValueOnce({ serviceCreate: { id: '', name: 'postgres-db-staging' } })
+      .mockResolvedValueOnce({ serviceCreate: { id: '', name: 'postgres-db' } })
       .mockResolvedValueOnce({
         project: {
           services: {
-            edges: [{ node: { id: 'rail-svc-db-recovered', name: 'postgres-db-staging' } }],
+            edges: [{ node: { id: 'rail-svc-db-recovered', name: 'postgres-db' } }],
           },
         },
       })
+      .mockResolvedValueOnce(serviceInstanceInventory('rail-proj-1', 'rail-svc-db-recovered', ['rail-env-1']))
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-recovered', 'rail-env-1'));
 
     const adapter = new RailwayAdapter();
@@ -646,11 +648,11 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
     expect(result.component).toMatchObject({
       externalId: 'rail-svc-db-recovered',
       bindings: {
-        pluginName: 'postgres-db-staging',
+        pluginName: 'postgres-db',
         resourceKind: 'service',
       },
     });
-    expect(request).toHaveBeenCalledTimes(5);
+    expect(request).toHaveBeenCalledTimes(6);
     expect(request.mock.calls.some(([query]) => (
       String(query).includes('serviceInstanceRedeploy')
       || String(query).includes('variableCollectionUpsert')
@@ -794,7 +796,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
       .mockResolvedValueOnce({
         serviceCreate: {
           id: 'rail-svc-db-staging',
-          name: 'postgres-db-staging',
+          name: 'postgres-db',
         },
       })
       // ensureServiceInstanceForEnvironment verifies the newly created service.
@@ -830,7 +832,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
       input: {
         projectId: 'rail-proj-1',
         environmentId: 'rail-env-staging',
-        name: 'postgres-db-staging',
+        name: 'postgres-db',
         source: {
           image: 'postgres:16',
         },
@@ -838,7 +840,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
     });
   });
 
-  it('requires explicit adoption for an environment-scoped datastore after local bindings are missing', async () => {
+  it.each(['postgres-db', 'postgres-db-staging'])('requires explicit adoption for scoped datastore %s after local bindings are missing', async (name) => {
     const request = vi.fn()
       .mockResolvedValueOnce({
         project: {
@@ -852,7 +854,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
           services: {
             edges: [
               { node: { id: 'rail-svc-db-prod', name: 'postgres-db' } },
-              { node: { id: 'rail-svc-db-staging', name: 'postgres-db-staging' } },
+              { node: { id: 'rail-svc-db-staging', name } },
             ],
           },
         },
@@ -888,7 +890,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
       .mockResolvedValueOnce({
         project: {
           services: {
-            edges: [{ node: { id: 'rail-svc-db-existing', name: 'postgres-db-staging' } }],
+            edges: [{ node: { id: 'rail-svc-db-existing', name: 'postgres-db' } }],
           },
         },
       })

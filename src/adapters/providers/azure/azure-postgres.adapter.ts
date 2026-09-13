@@ -1,3 +1,4 @@
+import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { createHash, randomBytes } from 'crypto';
 import type { Component } from '../../../domain/entities/component.entity.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
@@ -130,7 +131,7 @@ export class AzurePostgresAdapter implements IDatabaseAdapter {
     }
 
     let resourceId: string | null = null;
-    const resourceName = this.resourceName(options?.resourceName ?? `${environment.name}-postgres`);
+    const resourceName = this.resourceName(options?.resourceName ?? environmentResourceName('postgres', environment));
     const databaseName = options?.databaseName?.trim() || 'app';
     let createMayHaveCommitted = false;
 
@@ -398,7 +399,7 @@ export class AzurePostgresAdapter implements IDatabaseAdapter {
       if (!(await this.resourceGroupExists(scope, environment))) return null;
       client = this.scopedClient(scope.resourceGroup);
       const name = this.resourceName(
-        options?.resourceName ?? `${environment.name}-postgres`
+        options?.resourceName ?? environmentResourceName('postgres', environment)
       );
       const matches = await client.findServersByName(name);
       if (matches.length > 1) {

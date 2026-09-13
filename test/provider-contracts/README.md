@@ -17,7 +17,7 @@ API definitions.
 
 | Contract | Pinned source | Executed coverage |
 | --- | --- | --- |
-| Railway | Full schema from official CLI commit `f60f3a77b980c47f1136909fbd9a443e29a2b95f` | Static adapter query validation; real `graphql-request` serialization, GraphQL input coercion and response execution; project/environment creation; staging web/PostgreSQL/Redis beside production; variables, domains, volumes, delete/retry, pagination, unknown reads and uncertain writes |
+| Railway | Full schema from official CLI commit `f60f3a77b980c47f1136909fbd9a443e29a2b95f` | Static adapter query validation; real `graphql-request` serialization, GraphQL input coercion and response execution; project/environment creation; unsuffixed staging web/PostgreSQL/Redis beside production; isolated second-environment bucket creation through shared plan/apply, scoped deletion and noop replan; variables, domains, volumes, delete/retry, pagination, unknown reads and uncertain writes |
 | Supabase v1 | Official OpenAPI commit `26585dd4a4d6db8910a595214c9f6e8fdd206768` | Organization response and project-create request validation through the adapter's HTTP transport; ID/slug distinction; negative project-response fixture validation |
 | Neon v2 | Official release OpenAPI snapshot, content hash in `source.json` | Real serialized project-create body/query validation; organization scope; negative input validation |
 
@@ -56,6 +56,23 @@ the table are not thereby schema-certified. Generated workflow execution and
 shared lifecycle parity tests remain complementary gates. No provider is
 promoted to `supported` by these offline tests.
 
+S3, GCS and Azure Blob Storage also run the shared storage plan/apply/binding
+path with two environments using the same logical resource name. Their
+stateful transport/SDK fixtures check isolated physical identities and noop
+replanning; they are synthetic lifecycle tests, not pinned-schema or live API
+certification. Railway runs that shared path against the schema-executed
+fixture above, preserving the populated production bucket instance.
+
+The resource-name unit contract checks native plain names, scope isolation,
+lossy normalization, truncation, reserved prefixes, and minimum lengths.
+Hosting transport tests assert the names actually sent on creation while
+retaining historical-name fixtures for bound updates and read-only discovery.
+The Pub/Sub queue test composes real adapter HTTP requests with shared plan,
+apply, persisted bindings, runtime variables, noop and staging-only teardown
+inside one synthetic GCP project. Legacy topic/subscription IDs remain bound;
+unbound legacy resources and unknown reads block creation. These additional
+tests do not expand the pinned-schema certification table above.
+
 ## Changing an integration
 
 1. Reproduce the regression through the real client/transport before changing
@@ -68,6 +85,10 @@ promoted to `supported` by these offline tests.
    environment, pagination, bound/unbound retries, failed observations and
    ambiguous mutation outcomes. Unbound resources require explicit adoption;
    an unknown read is never absence.
+   For naming changes also exercise normalization/length collisions, retained
+   old names and uncertain-write markers, runtime/CI binding consumers, noop
+   mutation counts and teardown. Update every affected provider's contract;
+   do not declare a shared naming cleanup complete from one adapter's test.
 4. Update a schema only in an explicit reviewed PR. Fetch the official URL in
    `source.json`, record the new immutable revision where offered, and hash the
    exact downloaded bytes. Reapply the documented transformation, review the

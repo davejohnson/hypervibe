@@ -1,3 +1,4 @@
+import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { z } from 'zod';
 import { lookup } from 'dns/promises';
 import pg from 'pg';
@@ -178,7 +179,7 @@ export class SupabaseAdapter implements IDatabaseAdapter {
     let acknowledgedProject: SupabaseProject | undefined;
     let requestedOrganizationId: string | undefined;
     const requestedRegion = options?.region || 'us-east-1';
-    const projectName = options?.resourceName || `${environment.name}-db`;
+    const projectName = options?.resourceName || environmentResourceName('postgres', environment);
     let createMutationAttempted = false;
     let unresolvedCreateOutcome = false;
     try {
@@ -534,7 +535,7 @@ export class SupabaseAdapter implements IDatabaseAdapter {
       }
       const expectedName = unresolved?.resourceName
         ?? options?.resourceName
-        ?? `${environment.name}-db`;
+        ?? environmentResourceName('postgres', environment);
       const candidates = (await this.listProjects()).filter((item) =>
         item.organization_id === orgId
         && item.name.toLowerCase() === expectedName.toLowerCase()

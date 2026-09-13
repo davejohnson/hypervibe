@@ -13,6 +13,8 @@ import type { IProviderAdapter } from '../../ports/provider.port.js';
 import type { PlanAction } from '../../plan/plan.types.js';
 import type { Project } from '../../entities/project.entity.js';
 import type { Environment } from '../../entities/environment.entity.js';
+import { CloudRunAdapter } from '../../../adapters/providers/gcp/cloudrun.adapter.js';
+import { buildQueueEnvVars } from '../queue-env.js';
 
 function cloudrunPolicies(options: { queueAddon: boolean }): Record<string, unknown> {
   const profile = CLOUD_PREPARE_PROFILES.cloudrun;
@@ -145,6 +147,7 @@ describe('queue-plan.service', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
     SqliteAdapter.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -179,6 +182,64 @@ describe('queue-plan.service', () => {
   }
 
   describe('pubsub backend', () => {
+    it('isolates same-name queues through real adapter plan/apply, runtime wiring, noop and teardown', async () => {
+      const { project, environment: production } = seedProject();
+      const staging = envRepo().create({ projectId: project.id, name: 'staging',
+        platformBindings: { provider: 'cloudrun', projectId: 'gcp-project' } });
+      const adapter = new CloudRunAdapter();
+      await adapter.connect({ projectId: 'gcp-project', credentials: '{}' });
+      vi.spyOn(adapter as unknown as { getAccessToken(): Promise<string> }, 'getAccessToken').mockResolvedValue('token');
+      vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter });
+      // Synthetic Pub/Sub v1 REST state; exercises the real request/parser path,
+      // not live or pinned-schema certification (see provider-contracts/README).
+      const resources = new Map<string, Record<string, unknown>>();
+      const writes: string[] = [];
+      vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const name = new URL(String(input)).pathname.replace(/^\/v1\//, '');
+        const method = init?.method ?? 'GET';
+        expect(name).toMatch(/^projects\/gcp-project\/(topics|subscriptions)\/[a-z0-9-]+$/);
+        if (method === 'GET') return resources.has(name) ? Response.json(resources.get(name)) : new Response(null, { status: 404 });
+        writes.push(`${method} ${name}`);
+        if (method === 'PUT') {
+          if (resources.has(name)) return new Response(null, { status: 409 });
+          const resource = { ...JSON.parse(String(init?.body)), name };
+          resources.set(name, resource);
+          return Response.json(resource);
+        }
+        if (method === 'DELETE') { resources.delete(name); return new Response(null, { status: 204 }); }
+        throw new Error(`Unexpected Pub/Sub method ${method}`);
+      }));
+      const spec = pubsubSpec();
+      for (const target of [production, staging]) {
+        const planned = await planQueues({ project, environmentSpec: spec, environment: target });
+        expect(planned.actions).toHaveLength(1);
+        expect(planned.actions[0]).toMatchObject({ type: 'create', verified: true });
+        expect(await applyQueueAction({ project, envName: target.name, environmentSpec: spec, action: planned.actions[0]! }))
+          .toMatchObject({ success: true });
+        const bound = envRepo().findById(target.id)!;
+        const vars = buildQueueEnvVars({ environmentSpec: spec, environment: bound, backend: 'pubsub', gcpProjectId: 'gcp-project' });
+        expect(resources.has(vars.QUEUE_TOPIC_EMAIL_JOBS!)).toBe(true);
+        expect(resources.get(vars.QUEUE_SUBSCRIPTION_EMAIL_JOBS!)?.topic).toBe(vars.QUEUE_TOPIC_EMAIL_JOBS);
+        const before = writes.length;
+        const replanned = await planQueues({ project, environmentSpec: spec, environment: bound });
+        expect(replanned.actions.every((action) => action.type === 'noop')).toBe(true);
+        for (const action of replanned.actions) {
+          expect(await applyQueueAction({ project, envName: target.name, environmentSpec: spec, action })).toMatchObject({ success: true });
+        }
+        expect(writes).toHaveLength(before);
+      }
+      expect(resources.size).toBe(4);
+      const removedSpec = pubsubSpec({ queues: {} });
+      const plan = await planQueues({ project, environmentSpec: removedSpec, environment: envRepo().findById(staging.id)! });
+      expect(plan.actions).toHaveLength(1);
+      expect(plan.actions[0]).toMatchObject({ type: 'destroy' });
+      expect(await applyQueueAction({ project, envName: staging.name, environmentSpec: removedSpec, action: plan.actions[0]! }))
+        .toMatchObject({ success: true });
+      expect(resources.size).toBe(2);
+      expect((await planQueues({ project, environmentSpec: spec, environment: envRepo().findById(production.id)! }))
+        .actions.every((action) => action.type === 'noop')).toBe(true);
+    });
+
     it('plans a verified create when the subscription does not exist', async () => {
       const { project, environment } = seedProject();
       const adapter = stubAdapter({ queues: { backend: 'pubsub' } });

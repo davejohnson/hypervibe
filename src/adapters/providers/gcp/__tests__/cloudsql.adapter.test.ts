@@ -895,13 +895,13 @@ describe('CloudSqlAdapter', () => {
       const url = String(input);
       const method = init?.method ?? 'GET';
 
-      if (url.endsWith('/instances/production-postgres') && method === 'GET') {
+      if (url.endsWith('/instances/postgres-4a1633ab7b') && method === 'GET') {
         return Response.json({
-          name: 'production-postgres',
+          name: 'postgres-4a1633ab7b',
           state: 'RUNNABLE',
           databaseVersion: 'POSTGRES_15',
           region: 'us-central1',
-          replicaNames: ['production-postgres-rr-analytics'],
+          replicaNames: ['postgres-4a1633ab7b-rr-analytics'],
           settings: {
             availabilityType: 'REGIONAL',
             backupConfiguration: {
@@ -913,14 +913,14 @@ describe('CloudSqlAdapter', () => {
           },
         });
       }
-      if (url.endsWith('/instances/production-postgres-rr-analytics') && method === 'GET') {
+      if (url.endsWith('/instances/postgres-4a1633ab7b-rr-analytics') && method === 'GET') {
         return Response.json({
-          name: 'production-postgres-rr-analytics',
+          name: 'postgres-4a1633ab7b-rr-analytics',
           state: 'RUNNABLE',
           databaseVersion: 'POSTGRES_15',
           region: 'us-west1',
-          connectionName: 'gcp-project:us-west1:production-postgres-rr-analytics',
-          masterInstanceName: 'production-postgres',
+          connectionName: 'gcp-project:us-west1:postgres-4a1633ab7b-rr-analytics',
+          masterInstanceName: 'postgres-4a1633ab7b',
           settings: {
             tier: 'db-custom-2-7680',
             userLabels: { 'hypervibe-replica': 'analytics' },
@@ -947,9 +947,9 @@ describe('CloudSqlAdapter', () => {
     expect(observed).toEqual({
       provider: 'cloudsql',
       engine: 'postgres',
-      externalId: 'production-postgres',
+      externalId: 'postgres-4a1633ab7b',
       providerScope: { projectId: 'gcp-project', region: 'us-central1' },
-      name: 'production-postgres',
+      name: 'postgres-4a1633ab7b',
       status: 'running',
       resilience: {
         availability: 'regional',
@@ -961,11 +961,11 @@ describe('CloudSqlAdapter', () => {
         },
         replicas: [{
           name: 'analytics',
-          externalId: 'production-postgres-rr-analytics',
+          externalId: 'postgres-4a1633ab7b-rr-analytics',
           status: 'running',
           region: 'us-west1',
           tier: 'db-custom-2-7680',
-          connectionName: 'gcp-project:us-west1:production-postgres-rr-analytics',
+          connectionName: 'gcp-project:us-west1:postgres-4a1633ab7b-rr-analytics',
         }],
       },
     });
@@ -990,7 +990,7 @@ describe('CloudSqlAdapter', () => {
       const url = String(input);
       const method = init?.method ?? 'GET';
 
-      if (url.endsWith('/instances/production-postgres') && method === 'GET') {
+      if (url.endsWith('/instances/postgres-4a1633ab7b') && method === 'GET') {
         return new Response('not found', { status: 404 });
       }
 

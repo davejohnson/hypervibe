@@ -1,4 +1,5 @@
 import { PlanService } from '../domain/plan/plan.service.js';
+import { environmentResourceName } from '../domain/services/resource-names.js';
 import {
   ConvergeExecutor,
   fingerprintObservedState,
@@ -4116,7 +4117,7 @@ async function createDatabase(
   const engine = desired.engine as DatabaseType;
   const provisioned = await adapterResult.adapter.provision(engine, environment, {
     databaseName: 'app',
-    resourceName: `${project.name}-${envName}-${engine}`,
+    resourceName: environmentResourceName(engine, environment),
   });
   if (!provisioned.receipt.success) {
     const recoverableComponentRetained = retainFailedProvisionIdentity({
@@ -4288,7 +4289,7 @@ async function createCache(
     };
   }
   const provisioned = await adapterResult.adapter.provision(engine, environment, {
-    resourceName: `${project.name}-${envName}-${engine}`,
+    resourceName: unresolvedNetworkCreate?.cacheName ?? environmentResourceName(engine, environment),
     ...target,
     component: existingProvider === action.resource.provider ? existing : null,
   });

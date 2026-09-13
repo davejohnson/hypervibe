@@ -270,16 +270,17 @@ describe('Railway storage buckets', () => {
     expect(request.mock.calls.some(([query]) => String(query).includes('environmentPatchCommit'))).toBe(true);
   });
 
-  it('reports an unbound same-name bucket as an adoption candidate without attaching it', async () => {
+  it('reports an unbound same-name instance in the target environment as an adoption candidate', async () => {
     const request = vi.fn().mockResolvedValueOnce(bucketState({
       buckets: [{ id: 'bucket-1', name: 'documents' }],
+      config: { 'bucket-1': { region: 'sjc', isCreated: true, isDeleted: false } },
     }));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: typeof request } }).client = { request };
     const receipt = await adapter.ensureStorage(environment(), 'documents', { region: 'sjc' });
     expect(receipt).toMatchObject({
       success: false,
-      data: { adoptionCandidateExternalId: 'bucket-1' },
+      data: { adoptionCandidateExternalId: 'bucket-1', mutationAttempted: false },
     });
     expect(receipt.error).toContain('hv_import');
     expect(request).toHaveBeenCalledTimes(1);

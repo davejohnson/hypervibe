@@ -10,6 +10,7 @@ import type {
   MaintenanceWorkloadObservation,
   MaintenanceWorkloadSnapshot,
 } from '../../../domain/ports/maintenance.port.js';
+import { resourceName } from '../../../domain/services/resource-names.js';
 import {
   hashEnvValue,
   type ObservedService,
@@ -36,6 +37,7 @@ import { buildAzureContainerAppsPortableRecipe } from './azure-container-apps-ci
 import { AzureResourceManagerClient } from './azure-resource-manager.client.js';
 import {
   azureEnvironmentResourceGroupScope,
+  legacyAzureEnvironmentResourceGroupScope,
   parseAzureResourceGroupScope,
 } from './azure-environment-scope.js';
 
@@ -154,8 +156,14 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     try {
       const bindings = parseHostingBindings(environment);
       const desired = bindings.projectId
-        ? this.projectFromResourceGroup(bindings.projectId)
+        ? this.projectFromResourceGroup(bindings.projectId, bindings.environmentId)
         : this.desiredProject(projectName, environment);
+      if (!bindings.projectId) {
+        const legacy = this.desiredProject(projectName, environment, true);
+        if (await this.getResource(legacy.resourceGroupId, RESOURCE_API)) {
+          throw new Error(`Legacy Azure resource group ${legacy.resourceGroupId} exists without a durable binding; explicit import is required.`);
+        }
+      }
       if (bindings.environmentId && bindings.environmentId !== desired.environmentId) {
         throw new Error(`Bound Container Apps environment ${bindings.environmentId} does not match ${desired.environmentId}.`);
       }
@@ -269,7 +277,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     let attemptedApp: AzureResource | null = null;
     let createdService = false;
     try {
-      const project = this.projectFromResourceGroup(bindings.projectId);
+      const project = this.projectFromResourceGroup(bindings.projectId, bindings.environmentId);
       if (project.environmentId !== bindings.environmentId) {
         throw new Error(`Bound managed environment ${bindings.environmentId} is outside ${bindings.projectId}.`);
       }
@@ -292,9 +300,10 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
           : undefined;
       } else {
         const name = this.appName(service);
+        const legacyName = this.safeName(`hv-${service.name}`, 20, service.id);
         const appId = `${project.resourceGroupId}/providers/Microsoft.App/containerApps/${name}`;
         const duplicates = (await this.listApps(project.resourceGroupId)).filter(
-          (candidate) => candidate.name.toLowerCase() === name
+          (candidate) => [name, legacyName].includes(candidate.name.toLowerCase())
         );
         if (duplicates.length > 0) {
           return this.failedDeploy(service, `Azure Container App "${name}" already exists (${duplicates.map((item) => item.id).join(', ')}). Hypervibe will not silently adopt it.`);
@@ -442,7 +451,11 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       const expectedIds = new Set([
         project.registryId.toLowerCase(),
         project.environmentId.toLowerCase(),
+        `${project.resourceGroupId}/providers/Microsoft.App/managedEnvironments/runtime`.toLowerCase(),
       ]);
+      if (resources.filter((resource) => /\/managedEnvironments\//i.test(resource.id)).length > 1) {
+        throw new Error('Multiple Azure managed environments require explicit cleanup identity selection.');
+      }
       const unexpected = resources.filter((resource) => !expectedIds.has(resource.id.toLowerCase()));
       if (unexpected.length > 0) {
         return {
@@ -476,7 +489,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
   }): Promise<Receipt> {
     try {
       if (!params.projectId) throw new Error('Azure custom-domain attachment requires a bound resource group.');
-      const project = this.projectFromResourceGroup(params.projectId);
+      const project = this.projectFromResourceGroup(params.projectId, params.environmentId);
       if (params.environmentId !== project.environmentId) throw new Error('Azure custom-domain environment identity changed.');
       this.assertAppScope(params.serviceId, project.resourceGroupId);
       let app = await this.getResource(params.serviceId, CONTAINER_APPS_API);
@@ -585,7 +598,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
   }): Promise<Receipt> {
     try {
       if (!params.projectId) throw new Error('Azure custom-domain detachment requires a bound resource group.');
-      const project = this.projectFromResourceGroup(params.projectId);
+      const project = this.projectFromResourceGroup(params.projectId, params.environmentId);
       if (params.environmentId !== project.environmentId) {
         throw new Error('Azure custom-domain environment identity changed.');
       }
@@ -643,7 +656,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
   async observe(environment: Environment): Promise<ObservedState> {
     const bindings = parseHostingBindings(environment);
     if (!bindings.projectId) return this.emptyObservation(false);
-    const project = this.projectFromResourceGroup(bindings.projectId);
+    const project = this.projectFromResourceGroup(bindings.projectId, bindings.environmentId);
     const [group, registry, managedEnvironment] = await Promise.all([
       this.getResource(project.resourceGroupId, RESOURCE_API),
       this.getResource(project.registryId, REGISTRY_API),
@@ -741,10 +754,16 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
   ): Promise<Record<string, unknown>> {
     const environment = environmentForInspection(request);
     const bindings = parseHostingBindings(environment);
-    const project = bindings.projectId
-      ? this.projectFromResourceGroup(bindings.projectId)
+    let project = bindings.projectId
+      ? this.projectFromResourceGroup(bindings.projectId, bindings.environmentId)
       : this.desiredProject(request.project!.name, environment);
-    const group = await this.getResource(project.resourceGroupId, RESOURCE_API);
+    let group = await this.getResource(project.resourceGroupId, RESOURCE_API);
+    if (!bindings.projectId) {
+      const legacy = this.desiredProject(request.project!.name, environment, true);
+      const legacyGroup = await this.getResource(legacy.resourceGroupId, RESOURCE_API);
+      if (group && legacyGroup) throw new Error('Multiple current/legacy Azure environment candidates require explicit identity selection.');
+      if (legacyGroup) { project = legacy; group = legacyGroup; }
+    }
     if (!group) {
       return {
         observation: 'absent',
@@ -849,24 +868,31 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     return { client: this.client, credentials: this.credentials };
   }
 
-  private desiredProject(projectName: string, environment: Environment): AzureProject {
-    const scope = azureEnvironmentResourceGroupScope({
+  private desiredProject(projectName: string, environment: Environment, legacy = false): AzureProject {
+    const scope = (legacy ? legacyAzureEnvironmentResourceGroupScope : azureEnvironmentResourceGroupScope)({
       subscriptionId: this.connected().credentials.subscriptionId,
       projectName,
       environmentId: environment.projectId,
       environmentName: environment.name,
     });
-    return this.projectFromResourceGroup(scope.resourceGroupId);
+    return this.projectFromResourceGroup(scope.resourceGroupId,
+      legacy ? undefined : `${scope.resourceGroupId}/providers/Microsoft.App/managedEnvironments/runtime`);
   }
 
-  private projectFromResourceGroup(resourceGroupId: string): AzureProject {
+  private projectFromResourceGroup(resourceGroupId: string, boundEnvironmentId?: string): AzureProject {
     const scope = parseAzureResourceGroupScope(
       resourceGroupId,
       this.connected().credentials.subscriptionId
     );
     const canonical = scope.resourceGroupId;
     const registryName = azureRegistryName(canonical);
-    const environmentName = this.safeName(`hv-${scope.resourceGroup}-env`, 50, canonical);
+    const environmentPrefix = `${canonical}/providers/Microsoft.App/managedEnvironments/`;
+    if (boundEnvironmentId && (!boundEnvironmentId.toLowerCase().startsWith(environmentPrefix.toLowerCase())
+      || !/^[a-z0-9-]+$/i.test(boundEnvironmentId.slice(environmentPrefix.length)))) {
+      throw new Error(`Bound managed environment ${boundEnvironmentId} is outside ${canonical}.`);
+    }
+    const environmentName = boundEnvironmentId?.slice(environmentPrefix.length)
+      ?? this.safeName(`hv-${scope.resourceGroup}-env`, 50, canonical);
     return {
       resourceGroupId: canonical,
       resourceGroupName: scope.resourceGroup,
@@ -874,7 +900,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       registryServer: `${registryName}.azurecr.io`,
       registryId: `${canonical}/providers/Microsoft.ContainerRegistry/registries/${registryName}`,
       environmentName,
-      environmentId: `${canonical}/providers/Microsoft.App/managedEnvironments/${environmentName}`,
+      environmentId: boundEnvironmentId ?? `${environmentPrefix}${environmentName}`,
     };
   }
 
@@ -1241,7 +1267,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
   }
 
   private appName(service: Service): string {
-    return this.safeName(`hv-${service.name}`, 20, service.id);
+    return resourceName(service.name, { maxLength: 32, minLength: 2 });
   }
 
   private secretName(key: string): string {

@@ -80,6 +80,35 @@ function mutationCalls(fetchMock: ReturnType<typeof vi.fn>): unknown[][] {
 }
 
 describe('DigitalOceanAdapter', () => {
+  it.each([[true, 'services'], [false, 'services'], [true, 'workers']] as const)('preserves the exact legacy-bound component; present=%s, collection=%s', async (present, collection) => {
+    const name = 'long-workload-name-that-used-to-be-truncated';
+    const oldName = name.slice(0, 32);
+    let spec = { name: 'legacy-app', services: present ? [{ name: oldName,
+      image: { registry_type: 'DOCR', registry: 'registry', repository: 'repo', tag: 'old' } }] : [] };
+    const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === 'PUT') spec = JSON.parse(String(init.body)).spec;
+      return jsonResponse({ app: { id: 'do-app-1', spec } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = await connectedAdapter();
+    const environment = makeEnvironment({
+      provider: 'digitalocean', projectId: 'do-app-1',
+      services: { [name]: { serviceId: `do-app-1:${collection}:${oldName}` } },
+    });
+    const result = await adapter.deploy({ ...makeService(), name }, environment,
+      { IMAGE_URI: 'registry.digitalocean.com/registry/repo@sha256:abcdef' });
+    expect(result.receipt.success).toBe(present && collection === 'services');
+    if (present && collection === 'services') {
+      expect(spec.services.map((component) => component.name)).toEqual([oldName]);
+      expect(result.externalId).toBe(`do-app-1:services:${oldName}`);
+      expect((await adapter.observe(environment)).services[0]).toMatchObject({ name,
+        externalId: `do-app-1:services:${oldName}` });
+    } else {
+      expect(mutationCalls(fetchMock)).toEqual([]);
+      expect(result.receipt.error).toMatch(/bound.*not found/i);
+    }
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
@@ -184,8 +213,8 @@ describe('DigitalOceanAdapter', () => {
       observation: 'present',
       resource: 'environment',
       project: { id: app.id, name: app.spec.name },
-      managedByHypervibe: true,
-      services: [{ id: 'do-app-legacy:services:web', name: 'web', managedByHypervibe: true }],
+      managedByHypervibe: false,
+      services: [{ id: 'do-app-legacy:services:web', name: 'web', managedByHypervibe: false }],
     });
     expect(mutationCalls(fetchMock)).toEqual([]);
   });
@@ -273,7 +302,7 @@ describe('DigitalOceanAdapter', () => {
       success: true,
       data: {
         projectId: 'do-app-created',
-        projectName: expectedAppName(environment),
+        projectName: expect.stringMatching(/^production-[a-f0-9]{10}$/),
         registryName: 'existing-registry',
         created: true,
       },
@@ -284,7 +313,7 @@ describe('DigitalOceanAdapter', () => {
     ) as [string, RequestInit] | undefined;
     expect(JSON.parse(String(createCall![1].body))).toEqual({
       spec: {
-        name: expectedAppName(environment),
+        name: expect.stringMatching(/^production-[a-f0-9]{10}$/),
         region: 'sfo',
       },
     });

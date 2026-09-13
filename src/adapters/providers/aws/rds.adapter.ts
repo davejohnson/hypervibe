@@ -1,3 +1,4 @@
+import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import {
@@ -241,7 +242,7 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
       return this.failedProvision(environment, type, `Amazon RDS adapter supports postgres. Requested type: ${type}`);
     }
 
-    const identifier = this.sanitizeIdentifier(options?.resourceName || `${environment.name}-postgres`);
+    const identifier = this.sanitizeIdentifier(options?.resourceName || environmentResourceName('postgres', environment));
     const database = this.sanitizeDatabaseName(options?.databaseName ?? 'app');
     const username = 'hypervibe_admin';
     const password = this.generatePassword();
@@ -649,7 +650,7 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
   ): Promise<ObservedDatabase | null> {
     if (component) await this.assertComponentScope(component);
     const identifier = component?.externalId
-      ?? this.sanitizeIdentifier(options?.resourceName || `${environment.name}-postgres`);
+      ?? this.sanitizeIdentifier(options?.resourceName || environmentResourceName('postgres', environment));
     const instance = await this.describeInstance(identifier);
     if (!instance) return null;
     if (component) {

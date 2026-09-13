@@ -1,3 +1,4 @@
+import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { z } from 'zod';
 import { randomInt, randomUUID } from 'crypto';
 import { mkdtemp, rm } from 'fs/promises';
@@ -332,7 +333,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
       const { projectId, region } = this.credentials;
       const targetRegion = options?.region?.trim() || region;
 
-      const instanceName = this.sanitizeName(options?.resourceName || `${environment.name}-${type}`);
+      const instanceName = this.sanitizeName(options?.resourceName || environmentResourceName(type, environment));
       requestedInstanceName = instanceName;
       requestedRegion = targetRegion;
       const existing = await this.getInstance(instanceName);
@@ -863,7 +864,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
 
     // Backward-compatible discovery for components created before resourceName.
     for (const type of ['postgres'] as const) {
-      const instanceName = this.sanitizeName(options?.resourceName || `${environment.name}-${type}`);
+      const instanceName = this.sanitizeName(options?.resourceName || environmentResourceName(type, environment));
       const instance = await this.getInstance(instanceName);
       if (!instance) {
         continue;

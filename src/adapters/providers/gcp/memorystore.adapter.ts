@@ -1,3 +1,4 @@
+import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { GoogleAuth } from 'google-auth-library';
 import { z } from 'zod';
 import type { Component } from '../../../domain/entities/component.entity.js';
@@ -212,7 +213,7 @@ export class MemorystoreAdapter implements ICacheAdapter {
       ? this.instanceIdentity(options.component.externalId)?.region
       : undefined;
     const region = options?.region ?? this.target.region ?? boundRegion ?? DEFAULT_REGION;
-    const resourceName = options?.resourceName ?? `${environment.name}-redis`;
+    const resourceName = options?.resourceName ?? environmentResourceName('redis', environment);
     const instanceId = this.sanitizeId(resourceName);
     const externalId = options?.component?.externalId ?? this.instanceResourceName(region, instanceId);
     let mutationAttempted = false;
@@ -478,7 +479,7 @@ export class MemorystoreAdapter implements ICacheAdapter {
       this.assertBoundComponentScope(component, region);
       instance = await this.getInstance(component.externalId);
     } else {
-      const resourceName = options?.resourceName ?? `${environment.name}-redis`;
+      const resourceName = options?.resourceName ?? environmentResourceName('redis', environment);
       const instanceId = this.sanitizeId(resourceName);
       const matches = await this.findInstancesByName(
         region,

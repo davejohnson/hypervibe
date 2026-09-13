@@ -6,6 +6,7 @@ import type { Project } from '../domain/entities/project.entity.js';
 import type { Component } from '../domain/entities/component.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import type { DatabaseAccessAcquireResult } from '../domain/services/database-access.service.js';
+import { resourceName } from '../domain/services/resource-names.js';
 import {
   acquireDatabaseComponentAccess,
   acquireManagedDatabaseAccess,
@@ -64,12 +65,7 @@ function exactStringRecord(left: unknown, right: unknown): boolean {
 }
 
 function candidateResourceName(project: string, environment: string, resource: string, migrationId: string): string {
-  const suffix = createHash('sha256').update(migrationId).digest('hex').slice(0, 8);
-  return `${project}-${environment}-${resource}-migration-${suffix}`
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 63);
+  return resourceName(`${resource}-migration`, { scope: [project, environment, migrationId] });
 }
 
 function stale(action: PlanAction, detail: string): ActionResult {

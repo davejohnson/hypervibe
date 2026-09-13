@@ -1,3 +1,4 @@
+import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import type { Component } from '../../../domain/entities/component.entity.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type {
@@ -132,7 +133,7 @@ export class AzureManagedRedisAdapter implements ICacheAdapter {
     }
 
     let resourceId: string | null = null;
-    const resourceName = this.resourceName(options?.resourceName ?? `${environment.name}-redis`);
+    const resourceName = this.resourceName(options?.resourceName ?? environmentResourceName('redis', environment));
     let mutationAttempted = false;
 
     try {
@@ -404,7 +405,7 @@ export class AzureManagedRedisAdapter implements ICacheAdapter {
       if (!(await this.resourceGroupExists(scope, environment))) return null;
       client = this.scopedClient(scope.resourceGroup);
       const name = this.resourceName(
-        options?.resourceName ?? `${environment.name}-redis`
+        options?.resourceName ?? environmentResourceName('redis', environment)
       );
       const matches = await client.findClustersByName(name);
       if (matches.length > 1) {

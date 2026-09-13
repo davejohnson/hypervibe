@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
+import { verifyIsolatedStorageLifecycle } from '../../__tests__/storage-lifecycle.contract.js';
 import { GcsStorageAdapter } from '../gcs.adapter.js';
 
 const serviceAccount = JSON.stringify({
@@ -24,6 +25,29 @@ function json(body: unknown, status = 200): Response {
 }
 
 describe('GcsStorageAdapter', () => {
+  it('keeps same logical names isolated through shared plan/apply and observation', async () => {
+    const buckets = new Map<string, Record<string, any>>();
+    const request = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/storage/v1/b' && init?.method === 'POST') {
+        const bucket = JSON.parse(String(init.body));
+        expect(buckets.has(bucket.name)).toBe(false);
+        buckets.set(bucket.name, bucket);
+        return json(bucket);
+      }
+      expect(init?.method ?? 'GET').toBe('GET');
+      if (url.pathname === '/storage/v1/b') return json({ items: [...buckets.values()] });
+      if (url.pathname.endsWith('/o')) return json({ items: [] });
+      const bucket = buckets.get(url.pathname.split('/').pop()!);
+      return bucket ? json(bucket) : json({ error: { message: 'missing' } }, 404);
+    });
+    const adapter = new GcsStorageAdapter({ fetch: request as typeof fetch,
+      tokenProvider: async () => ({ token: 'token', email: 'contract@cloud-project.iam.gserviceaccount.com' }) });
+    await adapter.connect({ projectId: 'cloud-project', credentials: serviceAccount });
+    await verifyIsolatedStorageLifecycle(adapter, 'us-central1');
+    expect(buckets.size).toBe(2);
+  });
+
   it('inventories bounded buckets with durable project scope', async () => {
     const request = vi.fn(async () => json({ items: [
       { name: 'customer-documents', location: 'US-CENTRAL1' },
@@ -137,7 +161,7 @@ describe('GcsStorageAdapter', () => {
 
     expect(contextResult.context).toMatchObject({ projectId: 'cloud-project' });
     expect(result.receipt.success).toBe(true);
-    expect(result.externalId).toMatch(/^hv-friend-app-production-documents-[0-9a-f]{10}$/);
+    expect(result.externalId).toMatch(/^documents-[0-9a-f]{10}$/);
   });
 
   it('observes only buckets labeled for the selected environment with usage', async () => {

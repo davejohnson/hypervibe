@@ -220,7 +220,7 @@ describe('VercelAdapter', () => {
       observation: 'present',
       resource: 'environment',
       project: { id: SCOPE_BINDING },
-      services: [{ id: SERVICE_BINDING, name: expectedServiceName(), managedByHypervibe: true }],
+      services: [{ id: SERVICE_BINDING, name: expectedServiceName(), managedByHypervibe: false }],
     });
     expect(mutationCalls(fetchMock)).toEqual([]);
   });
@@ -413,7 +413,7 @@ describe('VercelAdapter', () => {
         data: {
           serviceId: SERVICE_BINDING,
           vercelProjectId: PROJECT_ID,
-          serviceName: expectedServiceName(),
+          serviceName: expect.stringMatching(/^web-[a-f0-9]{10}$/),
           resourceType: 'web',
           createdService: true,
           deploymentDeferred: true,
@@ -431,7 +431,7 @@ describe('VercelAdapter', () => {
       new URL(String(call[0])).pathname === '/v11/projects'
     ) as [URL, RequestInit] | undefined;
     expect(JSON.parse(String(createCall![1].body))).toEqual({
-      name: expectedServiceName(),
+      name: expect.stringMatching(/^web-[a-f0-9]{10}$/),
     });
     const envCall = fetchMock.mock.calls.find((call) =>
       new URL(String(call[0])).pathname.endsWith('/env')

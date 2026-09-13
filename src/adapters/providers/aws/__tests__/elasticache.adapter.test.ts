@@ -960,7 +960,7 @@ describe('ElastiCacheAdapter', () => {
     });
   });
 
-  it('updates only the exact bound cache size while preserving its reviewed network', async () => {
+  it('updates only the exact legacy-bound cache despite a changed naming default', async () => {
     vi.stubEnv('HYPERVIBE_ELASTICACHE_READY_ATTEMPTS', '2');
     vi.stubEnv('HYPERVIBE_ELASTICACHE_READY_DELAY_MS', '0');
     let modified = false;
@@ -994,7 +994,6 @@ describe('ElastiCacheAdapter', () => {
     });
 
     const result = await adapter.provision('redis', environment(), {
-      resourceName: CACHE_NAME,
       component: component(),
       size: '10',
       region: REGION,

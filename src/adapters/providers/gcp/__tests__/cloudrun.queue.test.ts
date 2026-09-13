@@ -55,6 +55,27 @@ afterEach(() => {
 });
 
 describe('CloudRunAdapter Pub/Sub queue identity safety', () => {
+  it.each(['topic', 'subscription', 'unknown'])('blocks unbound legacy %s evidence before creating a queue', async (evidence) => {
+    const adapter = await connectedAdapter();
+    const unbound = { ...environment, platformBindings: { provider: 'cloudrun', projectId: PROJECT } };
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      expect(init?.method ?? 'GET').toBe('GET');
+      const url = String(input);
+      if (evidence === 'unknown') return new Response('denied', { status: 403 });
+      if (evidence === 'topic' && url.endsWith('/topics/gcp-project-email-jobs')) {
+        return Response.json({ name: 'projects/gcp-project/topics/gcp-project-email-jobs' });
+      }
+      if (evidence === 'subscription' && url.endsWith('/subscriptions/gcp-project-email-jobs-sub')) {
+        return Response.json({ name: 'projects/gcp-project/subscriptions/gcp-project-email-jobs-sub',
+          topic: 'projects/gcp-project/topics/gcp-project-email-jobs' });
+      }
+      return new Response(null, { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(adapter.ensureQueue(unbound, 'email-jobs')).rejects.toThrow(evidence === 'unknown' ? /403/ : /Legacy.*binding/);
+    expect(fetchMock.mock.calls.every(([, init]) => (init?.method ?? 'GET') === 'GET')).toBe(true);
+  });
+
   it.each([
     ['subscription observation', (adapter: CloudRunAdapter, target: Environment) => adapter.getQueueSubscription(target, 'email-jobs')],
     ['ensure', (adapter: CloudRunAdapter, target: Environment) => adapter.ensureQueue(target, 'email-jobs')],
@@ -95,6 +116,9 @@ describe('CloudRunAdapter Pub/Sub queue identity safety', () => {
     const subscriptionName = `projects/${PROJECT}/subscriptions/${ids.subscriptionId}`;
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
+      if (url.endsWith('/topics/logical-production-email-jobs') || url.endsWith('/subscriptions/logical-production-email-jobs-sub')) {
+        return new Response('missing', { status: 404 });
+      }
       if (url.endsWith(`/topics/${ids.topicId}`)) {
         return Response.json({
           name: topicName,

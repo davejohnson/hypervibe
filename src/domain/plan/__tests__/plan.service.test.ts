@@ -30,6 +30,9 @@ import { isIosAction } from '../../services/appstore-plan.service.js';
 import { hashEnvValue, type ObservedState } from '../../ports/observe.port.js';
 import type { Project } from '../../entities/project.entity.js';
 import type { Environment } from '../../entities/environment.entity.js';
+import type { Component } from '../../entities/component.entity.js';
+import { environmentResourceName } from '../../services/resource-names.js';
+import { createUnresolvedDatastoreMutation } from '../../ports/database.port.js';
 import {
   buildBranchDeployWorkflow,
   resolveBranchDeployTargets,
@@ -246,6 +249,48 @@ function mockObservingAdapter(observed: ObservedState, extra: Record<string, unk
     },
   });
 }
+
+describe('PlanService datastore naming compatibility policy', () => {
+  // This callback contract tests orchestration, not provider response schemas.
+  it.each(['postgres', 'redis'])('retains scoped %s candidates without treating old names as new-create authority', async (engine) => {
+    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: {} });
+    const policy = new PlanService() as unknown as {
+      observeDatastoreNames(project: Project, environment: Environment, engine: string,
+        component: Component | null, observe: (name: string) => Promise<{ provider: string; externalId: string; providerScope: Record<string, string> } | null>): Promise<unknown>;
+    };
+    const desiredName = environmentResourceName(engine, environment);
+    const oldName = `${project.name}-staging-${engine}`;
+    const identity = { provider: 'test-provider', externalId: 'same-native-id', providerScope: { environmentId: 'staging' } };
+    const observe = vi.fn(async (name: string) => name === oldName ? identity : null);
+    expect(await policy.observeDatastoreNames(project, environment, engine, null, observe)).toEqual(identity);
+    expect(observe.mock.calls.map(([name]) => name)).toEqual([desiredName, oldName]);
+    expect(desiredName).toMatch(new RegExp(`^${engine}-[a-f0-9]{10}$`));
+    expect(environmentResourceName(engine, { ...environment, projectId: 'another-project' })).not.toBe(desiredName);
+
+    const bound = new ComponentRepository().create({ environmentId: environment.id, type: engine,
+      externalId: identity.externalId, bindings: { provider: identity.provider } });
+    const exact = vi.fn(async () => identity);
+    await policy.observeDatastoreNames(project, environment, engine, bound, exact);
+    expect(exact).toHaveBeenCalledOnce();
+
+    const retained = { ...bound, externalId: null, bindings: { provider: identity.provider,
+      unresolvedMutation: createUnresolvedDatastoreMutation(engine === 'redis' ? 'cache' : 'database',
+        'retained-exact-old-name', identity.providerScope) } };
+    const recovery = vi.fn(async () => null);
+    await policy.observeDatastoreNames(project, environment, engine, retained, recovery);
+    expect(recovery.mock.calls).toEqual([['retained-exact-old-name']]);
+
+    await expect(policy.observeDatastoreNames(project, environment, engine, null, async (name) => ({
+      ...identity, providerScope: { environmentId: name === oldName ? 'production' : 'staging' },
+    }))).rejects.toThrow(/Multiple/);
+    for (const unknownName of [desiredName, oldName]) {
+      await expect(policy.observeDatastoreNames(project, environment, engine, null, async (name) => {
+        if (name === unknownName) throw new Error('provider observation denied');
+        return null;
+      })).rejects.toThrow(/denied/);
+    }
+  });
+});
 
 describe('PlanService.plan', () => {
   it('defers an initially unbound Cloud Run seed until managed CI has exact provider bindings', async () => {

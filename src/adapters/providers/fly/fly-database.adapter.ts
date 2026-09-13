@@ -1,3 +1,4 @@
+import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import nacl from 'tweetnacl';
@@ -133,7 +134,7 @@ export class FlyDatabaseAdapter implements IDatabaseAdapter {
       };
     }
 
-    const resourceName = options?.resourceName ?? `${environment.name}-postgres`;
+    const resourceName = options?.resourceName ?? environmentResourceName('postgres', environment);
     const databaseName = this.postgresIdentifier(options?.databaseName?.trim() || 'app');
     const username = this.postgresIdentifier(`hypervibe_${databaseName}`);
     const plan = options?.size?.trim() || 'basic';
@@ -345,7 +346,7 @@ export class FlyDatabaseAdapter implements IDatabaseAdapter {
       }
       const resourceName = unresolved?.resourceName
         ?? options?.resourceName
-        ?? `${environment.name}-postgres`;
+        ?? environmentResourceName('postgres', environment);
       const matches = (await this.client.listPostgresClusters())
         .filter((candidate) => candidate.name === resourceName);
       if (matches.length > 1) {

@@ -248,7 +248,7 @@ describe('NeonAdapter', () => {
       }
       if (url.pathname === '/api/v2/projects' && method === 'POST') {
         return jsonResponse({
-          project: { id: 'neon-pending', name: 'production-db', region_id: 'aws-us-west-2' },
+          project: { id: 'neon-pending', name: 'postgres-4a1633ab7b', region_id: 'aws-us-west-2' },
           branch: { id: 'br-main', name: 'main' },
           databases: [{ name: 'app' }],
           roles: [{ name: 'app_owner' }],

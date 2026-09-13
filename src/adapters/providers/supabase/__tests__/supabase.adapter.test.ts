@@ -96,7 +96,7 @@ describe('SupabaseAdapter.provision', () => {
       if (isOrganizationList(url, init)) return organizationsResponse();
       if (href.endsWith('/projects') && init?.method === 'GET') {
         return jsonResponse([
-          { id: 'supabase-1', name: 'production-db', organization_id: 'org-1', region: 'us-east-1', status: 'ACTIVE_HEALTHY' },
+          { id: 'supabase-1', name: 'postgres-4a1633ab7b', organization_id: 'org-1', region: 'us-east-1', status: 'ACTIVE_HEALTHY' },
         ]);
       }
       throw new Error(`unexpected request: ${init?.method} ${href}`);
@@ -109,7 +109,7 @@ describe('SupabaseAdapter.provision', () => {
     const result = await adapter.provision('postgres', makeEnv('production'));
 
     expect(result.receipt.success).toBe(false);
-    expect(result.receipt.error).toContain('Supabase project "production-db" already exists');
+    expect(result.receipt.error).toContain('Supabase project "postgres-4a1633ab7b" already exists');
     expect(result.receipt.error).toContain('supabase-1');
     expect(fetchMock).not.toHaveBeenCalledWith(
       expect.stringMatching(/\/projects$/),
@@ -194,7 +194,7 @@ describe('SupabaseAdapter.provision', () => {
       if (href.endsWith('/projects') && init?.method === 'POST') {
         return jsonResponse({
           id: 'supabase-new',
-          name: 'production-db',
+          name: 'postgres-4a1633ab7b',
           organization_id: 'org-1',
           region: 'us-east-1',
           status: 'COMING_UP',
@@ -285,7 +285,7 @@ describe('SupabaseAdapter.provision', () => {
         projectReads += 1;
         return jsonResponse(projectReads < 3 ? [] : [{
           id: 'supabase-recovered',
-          name: 'production-db',
+          name: 'postgres-4a1633ab7b',
           organization_id: 'org-1',
           region: 'us-east-1',
           status: 'COMING_UP',
@@ -356,7 +356,7 @@ describe('SupabaseAdapter.provision', () => {
         unresolvedMutation: {
           resourceKind: 'database',
           operation: 'create',
-          resourceName: 'production-db',
+          resourceName: 'postgres-4a1633ab7b',
           providerScope: { organizationId: 'org-1', region: 'us-east-1' },
         },
       },

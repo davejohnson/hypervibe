@@ -245,7 +245,7 @@ describe('AzurePostgresAdapter', () => {
       resourceName: SERVER_NAME,
     })).resolves.toBeNull();
     expect(paths).toHaveLength(1);
-    expect(paths[0]).toMatch(/^GET \/subscriptions\/.*\/resourceGroups\/hv-invoice-perfect-production-[0-9a-f]{8}$/);
+    expect(paths[0]).toMatch(/^GET \/subscriptions\/.*\/resourceGroups\/production-[0-9a-f]{10}$/);
   });
 
   it('creates a server and logical database while keeping receipts secret-safe', async () => {

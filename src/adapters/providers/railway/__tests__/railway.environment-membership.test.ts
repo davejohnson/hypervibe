@@ -53,7 +53,7 @@ function makeFixture(kind: 'postgres' | 'redis' | 'web', inventoryOverride?: (af
       } };
     }
     if (operation === 'CreateService') {
-      expect(variables.input).toMatchObject({ projectId, environmentId, name: `${baseName}-staging` });
+      expect(variables.input).toMatchObject({ projectId, environmentId, name: baseName });
       services.set('service-staging', { name: variables.input.name, environments: [environmentId] });
       return { serviceCreate: { id: 'service-staging', name: variables.input.name } };
     }

@@ -1,3 +1,4 @@
+import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { z } from 'zod';
 import type { Component } from '../../../domain/entities/component.entity.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
@@ -173,7 +174,7 @@ export class NeonAdapter implements IDatabaseAdapter {
       };
     }
 
-    const resourceName = options?.resourceName ?? `${environment.name}-db`;
+    const resourceName = options?.resourceName ?? environmentResourceName('postgres', environment);
     const databaseName = options?.databaseName ?? 'app';
     const organizationId = this.credentials.organizationId?.trim();
     if (!organizationId) {
@@ -541,7 +542,7 @@ export class NeonAdapter implements IDatabaseAdapter {
     } else {
       const expectedName = unresolved?.resourceName
         ?? options?.resourceName
-        ?? `${environment.name}-db`;
+        ?? environmentResourceName('postgres', environment);
       const matches = await this.findProjectsByName(expectedName);
       if (matches.length > 1) {
         throw new Error(

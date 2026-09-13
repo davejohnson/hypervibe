@@ -1,3 +1,4 @@
+import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { z } from 'zod';
 import {
   CreateServerlessCacheCommand,
@@ -231,9 +232,9 @@ export class ElastiCacheAdapter implements ICacheAdapter {
     }
     const dataStorageGb = this.dataStorageGb(options?.size);
 
-    const cacheName = this.sanitizeName(
-      options?.resourceName ?? `${environment.name}-redis`
-    );
+    const cacheName = options?.component?.externalId && typeof options.component.bindings.cacheName === 'string'
+      ? options.component.bindings.cacheName
+      : this.sanitizeName(options?.resourceName ?? environmentResourceName('redis', environment));
     const arnPartition = hosting.projectId.split(':')[1]!;
     const expectedCacheArn = `arn:${arnPartition}:elasticache:${hostingRegion}:${hostingAccountId}:serverlesscache:${cacheName}`;
     let securityGroupId: string | undefined;
@@ -595,7 +596,7 @@ export class ElastiCacheAdapter implements ICacheAdapter {
       cache = await this.cacheByDurableId(component.externalId);
     } else {
       const cacheName = this.sanitizeName(
-        options?.resourceName ?? `${environment.name}-redis`
+        options?.resourceName ?? environmentResourceName('redis', environment)
       );
       const matches = (await this.listServerlessCaches()).filter(
         (candidate) => candidate.ServerlessCacheName === cacheName

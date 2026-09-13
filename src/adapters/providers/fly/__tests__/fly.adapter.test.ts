@@ -195,6 +195,7 @@ describe('FlyAdapter', () => {
       if (url.pathname === '/v1/apps' && method === 'POST') {
         const body = JSON.parse(String(init?.body));
         appName = body.app_name;
+        expect(appName).toMatch(/^web-[a-f0-9]{10}$/);
         expect(body).not.toHaveProperty('name');
         expect(body.org_slug).toBe('hypervibe-test');
         return json({ id: 'fly-app-1' }, 201);

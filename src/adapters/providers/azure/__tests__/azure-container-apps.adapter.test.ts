@@ -83,7 +83,7 @@ describe('AzureContainerAppsAdapter lifecycle boundaries', () => {
   it('forensically inventories an abandoned environment from logical context only', async () => {
     const adapter = await connectedAdapter();
     const internal = adapter as any;
-    vi.spyOn(internal, 'getResource').mockImplementation(async (...args: unknown[]) => ({
+    vi.spyOn(internal, 'getResource').mockImplementation(async (...args: unknown[]) => String(args[0]).includes('/resourceGroups/hv-') ? null : ({
       id: String(args[0]),
       name: String(args[0]).split('/').at(-1),
       tags: { 'managed-by': 'hypervibe' },
@@ -236,6 +236,7 @@ describe('AzureContainerAppsAdapter lifecycle boundaries', () => {
       }
 
       if (method === 'PUT' && /^\/subscriptions\/[^/]+\/resourceGroups\/[^/]+$/i.test(path)) {
+        expect(path.split('/').at(-1)).toMatch(/^production-[a-f0-9]{10}$/);
         group = { id: path, name: path.split('/').at(-1), location: body?.location, tags, properties: {} };
         return json(group, 201);
       }
@@ -256,6 +257,7 @@ describe('AzureContainerAppsAdapter lifecycle boundaries', () => {
         return json(registry, 201);
       }
       if (method === 'PUT' && path.includes('/providers/Microsoft.App/managedEnvironments/')) {
+        expect(path.split('/').at(-1)).toBe('runtime');
         managedEnvironment = {
           id: path,
           name: path.split('/').at(-1),
@@ -370,6 +372,7 @@ describe('AzureContainerAppsAdapter lifecycle boundaries', () => {
     });
     expect(deployed.receipt.data?.runtimeRolloutRequired).toBeUndefined();
     const serviceId = String(deployed.externalId);
+    expect(serviceId.split('/').at(-1)).toBe('web');
     expect((app as Record<string, any> | null)?.id).toBe(serviceId);
     expect(roleAssignments.size).toBe(2);
     const mutationCount = calls.filter(({ method }) => ['PUT', 'PATCH', 'DELETE'].includes(method)).length;
