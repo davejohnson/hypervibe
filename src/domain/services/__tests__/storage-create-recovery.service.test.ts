@@ -346,12 +346,14 @@ describe('storage create-recovery apply boundary', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
     SqliteAdapter.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('applies the reviewed second-environment bucket plan through the pinned Railway transport', async () => {
-    const fixture = await railwayHttpFixture();
+  it.each([0, 25_000, 120_000])('reconciles a second-environment bucket through the pinned transport with %i ms delay', async (delay) => {
+    vi.useFakeTimers();
+    const fixture = await railwayHttpFixture({ bucketDelayMs: delay, omitBucketFlags: true });
     const production = structuredClone(fixture.environments.get(productionId));
     const repository = new EnvironmentRepository();
     repository.update(environment.id, { platformBindings: {
@@ -365,8 +367,25 @@ describe('storage create-recovery apply boundary', () => {
       environment: repository.findById(environment.id), observed: await fixture.adapter.observe(fixture.environment) });
     const action = (await plan()).actions[0];
     expect(action).toMatchObject({ type: 'create', billable: true });
-    expect(await applyStorageAction({ project, envName: 'staging', environmentSpec: spec, action }))
-      .toMatchObject({ success: true });
+    const applying = applyStorageAction({ project, envName: 'staging', environmentSpec: spec, action });
+    await vi.runAllTimersAsync();
+    const result = await applying;
+    if (delay === 120_000) {
+      expect(result).toMatchObject({ success: false, status: 'pending' });
+      expect(repository.findById(environment.id)?.platformBindings.storage).toBeUndefined();
+      expect(repository.findById(environment.id)?.platformBindings.storageCreateRecovery).toMatchObject({
+        documents: { state: 'identified', externalId: 'bucket-documents' },
+      });
+      await vi.advanceTimersByTimeAsync(delay);
+      const finalize = (await plan()).actions[0];
+      expect(finalize).toMatchObject({ type: 'update', metadata: { operation: STORAGE_OPERATIONS.finalizeCreateRecovery } });
+      expect(finalize.billable).not.toBe(true);
+      expect(finalize.requiresConfirm).not.toBe(true);
+      expect(await applyStorageAction({ project, envName: 'staging', environmentSpec: spec, action: finalize }))
+        .toMatchObject({ success: true, data: { recovered: true } });
+    } else {
+      expect(result).toMatchObject({ success: true });
+    }
     expect(repository.findById(environment.id)?.platformBindings.storage).toMatchObject({
       documents: { externalId: 'bucket-documents', instanceScope: { projectId: railwayProjectId, environmentId: stagingId } },
     });
@@ -601,7 +620,7 @@ describe('storage create-recovery apply boundary', () => {
         success: false,
         message: 'bucket inventory could not be read',
         error: 'provider response was malformed',
-        data: { phase: 'bucketCreate', mutationAttempted: false },
+        data: { phase: 'bucketCreate', mutationAttempted: false, pending: true },
       },
       context: { projectId: 'rp', environmentId: 're' },
     });
@@ -616,6 +635,7 @@ describe('storage create-recovery apply boundary', () => {
     const persisted = new EnvironmentRepository().findById(environment.id);
 
     expect(result).toMatchObject({ success: false });
+    expect(result.status).not.toBe('pending');
     expect(result.data).not.toHaveProperty('storageCreateRecovery');
     expect(persisted?.platformBindings.storageCreateRecovery).toBeUndefined();
   });
@@ -626,7 +646,7 @@ describe('storage create-recovery apply boundary', () => {
         success: false,
         message: 'bad recovery payload',
         data: {
-          phase: 'bucketCreate', mutationAttempted: true,
+          phase: 'bucketCreate', mutationAttempted: true, pending: true,
           storageCreateRecovery: { provider: 'other', state: 'identified' },
         },
       },
@@ -643,6 +663,7 @@ describe('storage create-recovery apply boundary', () => {
     const persisted = new EnvironmentRepository().findById(environment.id);
 
     expect(result.error).toContain('malformed or inconsistent');
+    expect(result.status).not.toBe('pending');
     expect(persisted?.platformBindings).toMatchObject({
       storageCreateRecovery: { uploads: recovery },
     });

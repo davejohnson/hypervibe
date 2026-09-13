@@ -1193,7 +1193,7 @@ describe('GitHub infrastructure plan/apply', () => {
       'owner',
       'example',
       '.github/pull_request_template.md',
-      expect.stringContaining('## Summary'),
+      expect.stringMatching(/## Summary[\s\S]+### Assumption challenged/),
       expect.any(String),
       GITHUB_INFRASTRUCTURE_BRANCH
     );

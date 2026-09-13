@@ -258,6 +258,10 @@ describe('GitHub infrastructure compiler', () => {
     const template = files.find((file) => file.path === '.github/pull_request_template.md');
 
     expect(template?.content).toContain('## Related issue');
+    expect(template?.content).toContain('### Assumption challenged');
+    expect(template?.content).toContain('Independent evidence');
+    expect(template?.content).toContain('Counterexample and regression test');
+    expect(template?.content).toContain('Remaining uncertainty');
     expect(template?.content).toContain('## Deployment and infrastructure impact');
     expect(template?.content).toContain('## Existing behavior or tests changed');
     expect(template?.content).toContain('## Risks and follow-up');

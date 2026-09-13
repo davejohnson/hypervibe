@@ -1166,6 +1166,9 @@ export async function applyStorageAction(params: {
         : undefined;
       return {
         success: false,
+        ...(!result.receipt.success && result.receipt.data?.pending === true
+          && returnedRecovery?.state === 'identified' && contextMatches && !persistenceError
+          ? { status: 'pending' as const } : {}),
         message: result.receipt.success
           ? `Storage provider returned an incomplete or inconsistent success for "${name}"`
           : result.receipt.message,

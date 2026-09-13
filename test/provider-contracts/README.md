@@ -43,6 +43,18 @@ Non-null fields cannot become successful null responses through this fixture.
 Deletion uses scoped tombstones. Other synthetic `NOT_FOUND` classification
 unit tests do not establish that Railway emits that code for every resource.
 
+Delayed bucket tests use a fake clock at the HTTP boundary and exercise both
+same-apply convergence and timeout -> persisted recovery -> re-plan -> finalization
+without a second create or import. Bucket configuration may omit mutation flags,
+following the official CLI's optional
+[`BucketInstance` model](https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/controllers/config/environment.rs)
+and active-instance selection in
+[`bucket.rs`](https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/commands/bucket.rs).
+These timings and payloads are synthetic, not captured live responses. The
+GraphQL schema treats `EnvironmentConfig` as an opaque scalar; it does not
+validate those JSON internals. Exact scope, region, instance reads, unchanged
+production and mutation counts therefore also have behavioral assertions.
+
 REST tests intercept only HTTP transport and inspect the actual serialized
 body. Creation receives a deliberate HTTP 400 after inspection: these tests
 do not claim a successful database connection or full REST lifecycle. OpenAPI
@@ -75,12 +87,18 @@ tests do not expand the pinned-schema certification table above.
 
 ## Changing an integration
 
-1. Reproduce the regression through the real client/transport before changing
-   runtime code. A fixture copied from the adapter's TypeScript interface is
-   not independent API evidence.
+1. State the assumption, independent evidence and counterexample before changing
+   runtime code. Reproduce it as a failing test through the real client/transport.
+   A fixture copied from our types, implementation or submitted request is not
+   independent API evidence. Record the source and observed failing/passing
+   results in the PR template's assumption section; distinguish a reproduced bug
+   from a proven customer-incident cause.
 2. Validate positive requests **and** responses against the pinned official
-   contract. Keep malformed fixtures in named negative tests. Add semantic
-   assertions for durable identity, environment isolation and mutation count.
+   contract. Check its validation boundary: opaque JSON/scalars require separate
+   evidence for nested fields and semantics. Exercise valid omitted/null/defaulted
+   fields where permitted; keep malformed fixtures in named negative tests. Add
+   semantic assertions for durable identity, environment isolation and mutation
+   count. Keep these regressions in the ordinary `npm test` acceptance gate.
 3. For lifecycle changes include a populated first environment, a second
    environment, pagination, bound/unbound retries, failed observations and
    ambiguous mutation outcomes. Unbound resources require explicit adoption;

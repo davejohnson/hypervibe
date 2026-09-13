@@ -12,6 +12,17 @@ Closes #
 - [ ] Typecheck passes
 - [ ] Manual testing completed, or limitations documented
 
+### Assumption challenged
+
+<!-- Required for bug fixes and provider behavior changes; otherwise explain why N/A.
+     Existing code, matching mocks, and request echoes are not independent evidence. -->
+
+- Assumption and affected behavior:
+- Independent evidence (requirement/source URL + revision, or redacted observation; label synthetic/reconstructed/recorded):
+- Counterexample and regression test (observed failure before fix -> passing afterward):
+- Other affected lifecycle paths/providers checked, and checks not performed:
+- Remaining uncertainty (including whether the customer incident's cause is proven):
+
 ## Risks / uncertainties
 
 ## Product-owner review checklist
