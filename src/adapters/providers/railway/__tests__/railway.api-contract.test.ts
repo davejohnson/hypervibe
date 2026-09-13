@@ -8,7 +8,11 @@ import type { Service } from '../../../../domain/entities/service.entity.js';
 import { environmentSpecSchema } from '../../../../domain/spec/spec.schema.js';
 import { planStorage } from '../../../../domain/services/storage-plan.service.js';
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+  vi.useRealTimers();
+});
 
 describe('pinned provider API contract', () => {
   it('keeps the existing managed-check entrypoints wired to offline API tests', () => {
@@ -200,6 +204,73 @@ describe('pinned provider API contract', () => {
       .toMatchObject({ success: false, data: { mutationAttempted: false } });
     expect(fixture.mutations).toEqual([]);
   });
+
+  it.each([
+    { name: 'documents', delay: 25_000, omitFlags: false },
+    { name: 'uploads', delay: 25_000, omitFlags: true },
+    { name: 'documents', delay: 0, omitFlags: true },
+  ])('waits for exact bucket creation with delayed/normalized config: $name/$delay/$omitFlags', async ({ name, delay, omitFlags }) => {
+    vi.useFakeTimers();
+    const fixture = await railwayHttpFixture({ bucketDelayMs: delay, omitBucketFlags: omitFlags });
+    const production = structuredClone(fixture.environments.get(productionId));
+    const resultPromise = fixture.adapter.ensureStorage(fixture.environment, name, { region: 'sjc' });
+    await vi.runAllTimersAsync();
+    expect(await resultPromise).toMatchObject({ success: true, data: { externalId: `bucket-${name}` } });
+    expect(fixture.mutations.map(({ field }) => field)).toEqual(name === 'documents'
+      ? ['environmentPatchCommit'] : ['bucketCreate', 'environmentPatchCommit']);
+    expect(fixture.environments.get(productionId)).toEqual(production);
+    expect(fixture.requests).toContainEqual(expect.objectContaining({
+      variables: { bucketId: `bucket-${name}`, environmentId: stagingId },
+    }));
+    expect(fixture.contractErrors).toEqual([]);
+  });
+
+  it('retains exact pending creation after a bounded wait without repeating the mutation', async () => {
+    vi.useFakeTimers();
+    const startedAt = Date.now();
+    const fixture = await railwayHttpFixture({ bucketDelayMs: 120_000 });
+    const resultPromise = fixture.adapter.ensureStorage(fixture.environment, 'documents', { region: 'sjc' });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+    expect(result).toMatchObject({ success: false, data: {
+      pending: true, verification: 'pending',
+      storageCreateRecovery: { state: 'identified', externalId: 'bucket-documents',
+        providerScope: { projectId, environmentId: stagingId } },
+    } });
+    expect(result.error).toContain('hv_plan');
+    expect(result.error).not.toContain('adopt');
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(30_000);
+    expect(Date.now() - startedAt).toBeLessThan(120_000);
+    expect(fixture.mutations.map(({ field }) => field)).toEqual(['environmentPatchCommit']);
+    expect(fixture.contractErrors).toEqual([]);
+  });
+
+  it.each(['deleted', 'wrong-region', 'unknown-instance'])(
+    'does not accept an unsafe post-create state: %s', async (state) => {
+      vi.stubEnv('HYPERVIBE_RAILWAY_STORAGE_VERIFY_ATTEMPTS', '1');
+      let patched = false;
+      const fixture = await railwayHttpFixture({ responseOverride: ({ query }) => {
+        if (query.includes('mutation CommitBucketPatch')) patched = true;
+        if (patched && query.includes('query GetBucketState') && state !== 'unknown-instance') {
+          fixture.environments.get(stagingId)!.config.buckets = {
+            'bucket-documents': { region: state === 'wrong-region' ? 'ams' : 'sjc', isDeleted: state === 'deleted' },
+          };
+        }
+        return state === 'unknown-instance' && query.includes('query BucketUsage')
+          ? Response.json({ errors: [{ message: 'Synthetic denied instance read' }] }, { status: 403 }) : undefined;
+      } });
+      const result = await fixture.adapter.ensureStorage(fixture.environment, 'documents', { region: 'sjc' });
+      expect(result).toMatchObject({ success: false, data: {
+        storageCreateRecovery: { state: 'identified', externalId: 'bucket-documents' },
+      } });
+      if (state === 'unknown-instance') {
+        expect(result.data?.pending).not.toBe(true);
+        expect(result.data?.verification).toBe('unknown');
+      }
+      expect(fixture.mutations.map(({ field }) => field)).toEqual(['environmentPatchCommit']);
+      expect(fixture.contractErrors).toEqual([]);
+    }
+  );
 
   it('preserves an instance that appears between planning and the scoped create patch', async () => {
     let reads = 0;

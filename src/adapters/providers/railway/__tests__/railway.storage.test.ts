@@ -192,7 +192,8 @@ describe('Railway storage buckets', () => {
       .mockResolvedValueOnce(bucketState({
         buckets: [{ id: 'bucket-1', name: 'uploads' }],
         config: { 'bucket-1': { region: 'sjc', isCreated: true, isDeleted: false } },
-      }));
+      }))
+      .mockResolvedValueOnce({ bucketInstanceDetails: { objectCount: 0, sizeBytes: 0 } });
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: typeof request } }).client = { request };
 
@@ -201,7 +202,7 @@ describe('Railway storage buckets', () => {
     expect(receipt).toMatchObject({ success: true, data: { externalId: 'bucket-1', region: 'sjc' } });
     expect(request.mock.calls[1]?.[1]).toEqual({ input: { projectId: 'rp', name: 'uploads' } });
     expect(request.mock.calls[3]?.[1]).toMatchObject({ environmentId: 're', patch: { buckets: { 'bucket-1': { region: 'sjc', isCreated: true, isDeleted: false } } } });
-    expect(request).toHaveBeenCalledTimes(5);
+    expect(request).toHaveBeenCalledTimes(6);
   });
 
   it('treats an omitted empty bucket map as a complete empty configuration', async () => {
@@ -216,7 +217,8 @@ describe('Railway storage buckets', () => {
       .mockResolvedValueOnce(bucketState({
         buckets: [{ id: 'bucket-1', name: 'uploads' }],
         config: { 'bucket-1': { region: 'sjc', isCreated: true, isDeleted: false } },
-      }));
+      }))
+      .mockResolvedValueOnce({ bucketInstanceDetails: { objectCount: 0, sizeBytes: 0 } });
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: typeof request } }).client = { request };
 
@@ -235,7 +237,8 @@ describe('Railway storage buckets', () => {
       .mockResolvedValueOnce(bucketState({
         buckets: [{ id: 'bucket-1', name: 'uploads' }],
         config: { 'bucket-1': { region: 'sjc', isCreated: true, isDeleted: false } },
-      }));
+      }))
+      .mockResolvedValueOnce({ bucketInstanceDetails: { objectCount: 0, sizeBytes: 0 } });
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: typeof request } }).client = { request };
 
@@ -256,7 +259,8 @@ describe('Railway storage buckets', () => {
         buckets: [{ id: 'bucket-1', name: 'uploads' }],
         config: { 'bucket-1': { region: 'sjc', isCreated: true, isDeleted: false } },
         unmergedChangesCount: null,
-      }));
+      }))
+      .mockResolvedValueOnce({ bucketInstanceDetails: { objectCount: 0, sizeBytes: 0 } });
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: typeof request } }).client = { request };
 

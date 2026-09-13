@@ -583,7 +583,7 @@ Creates, updates, and destroys must be retry-safe:
   local bindings.
 - Provider writes followed by a read must tolerate bounded eventual consistency
   and verify the exact expected identity or revision; exhausting the observation
-  window remains a blocked or failed action, never inferred success.
+  window remains pending, blocked, or failed, never inferred success.
 - Multi-resource destruction follows dependency order and stops on failed or
   unknown deletion. Do not delete dependent data, storage, networking, or
   credentials until the owning resource is confirmed absent.
@@ -1649,8 +1649,21 @@ recovery-clear action followed by the normal billable create. Apply must
 re-observe the exact provider scope immediately before clearing the marker and
 must preserve it if a matching bucket appears or observation becomes unknown.
 Known preflight failures must report that no mutation was attempted and must not
-create recovery state. Identified or mismatched provider ids still require
-explicit adoption or cleanup; absence recovery is never deletion authority.
+create recovery state. A retained exact creation identity that later becomes
+ready may be finalized by an explicit, non-billable plan action. Apply verifies
+the unchanged recovery marker, provider, name, id, region and complete instance
+scope again before recording the binding, without another provider mutation.
+Unknown, ambiguous, mismatched or incompletely scoped identities still require
+explicit resolution; absence recovery is never deletion authority.
+
+Railway bucket creation uses a bounded wait of roughly one minute of backoff.
+Read-back may omit optional `isCreated`/`isDeleted` patch flags: creation verifies
+the exact active configuration and readable instance instead of requiring those
+flags to echo the submitted patch. A still-unverified attachment retains its
+identity and returns pending with re-plan guidance. Shared storage apply must
+not describe that delay as failed execution, nor trust pending metadata when
+the recovery identity, scope or persistence is invalid. Other providers use the
+same recovery/finalization boundary; provider polling remains adapter-owned.
 
 ## Database Tasks And Seed Data
 

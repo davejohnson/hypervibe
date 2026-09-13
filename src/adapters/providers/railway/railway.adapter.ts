@@ -5673,12 +5673,14 @@ export class RailwayAdapter implements
   }
 
   private storageVerificationPolicy(): { attempts: number; delayMs: number } {
-    const configuredAttempts = Number(process.env.HYPERVIBE_RAILWAY_STORAGE_VERIFY_ATTEMPTS ?? 10);
+    // About one minute of bounded backoff, not the former ~14 seconds.
+    // Acknowledged bucket patches may still be provisioning during that window.
+    const configuredAttempts = Number(process.env.HYPERVIBE_RAILWAY_STORAGE_VERIFY_ATTEMPTS ?? 30);
     const configuredDelayMs = Number(process.env.HYPERVIBE_RAILWAY_STORAGE_VERIFY_DELAY_MS ?? 250);
     return {
       attempts: Number.isFinite(configuredAttempts) && configuredAttempts >= 1
-        ? Math.min(Math.floor(configuredAttempts), 20)
-        : 10,
+        ? Math.min(Math.floor(configuredAttempts), 60)
+        : 30,
       delayMs: Number.isFinite(configuredDelayMs) && configuredDelayMs >= 0
         ? configuredDelayMs
         : 250,
@@ -5925,7 +5927,7 @@ export class RailwayAdapter implements
         return failedCreateRecovery(
           priorRecovery,
           `Railway bucket "${name}" has retained create-recovery state`,
-          'Use hv_inspect to resolve the exact bucket identity, then explicitly adopt that bucket with hv_import. Hypervibe will not repeat bucketCreate.',
+          'Re-run hv_plan: it can finalize the retained exact identity once creation converges, without another bucketCreate. Unresolved or conflicting identities still require inspection and explicit resolution.',
           { mutationAttempted: false }
         );
       }
@@ -6085,9 +6087,13 @@ export class RailwayAdapter implements
         const instance = observed.environmentBuckets[exactBucket.id];
         if (observedBucket?.name === exactBucket.name
           && instance?.region === options.region
-          && instance.isCreated === true
-          && instance.isDeleted === false
+          && instance.isCreated !== false
+          && instance.isDeleted !== true
           && observed.unmergedChangesCount === 0) {
+          // Railway's official BucketInstance config omits unset patch flags.
+          // Prove the exact instance is readable, rather than requiring an echo
+          // of isCreated/isDeleted from the submitted patch.
+          await this.getBucketUsage(exactBucket.id, bindings.environmentId);
           converged = true;
           break;
         }
@@ -6099,9 +6105,9 @@ export class RailwayAdapter implements
             provider: 'railway', resourceName: name, providerScope,
             state: 'identified', externalId: exactBucket.id, returnedName: name,
           }),
-          `Railway acknowledged bucket "${name}" but its environment attachment did not converge`,
-          'The exact bucket region and active environment configuration could not be verified. Inspect and explicitly adopt the bucket before retrying.',
-          { mutationAttempted: true, created: true, patchSubmitted: true, verification: 'pending' }
+          `Railway bucket "${name}" is still awaiting environment attachment verification`,
+          'Re-run hv_plan after provisioning completes. Hypervibe will finalize the exact retained bucket identity without creating another bucket.',
+          { mutationAttempted: true, created: true, patchSubmitted: true, verification: 'pending', pending: true }
         );
       }
       return { success: true, message: `Created Railway bucket "${exactBucket.name}" in ${options.region}`, data: { externalId: exactBucket.id, region: options.region, created: true } };
@@ -6166,14 +6172,7 @@ export class RailwayAdapter implements
       patchSubmitted = true;
       await this.commitBucketPatch(bindings.environmentId, { [externalId]: { isDeleted: true } }, `Delete bucket ${bucket.name}`);
 
-      const configuredAttempts = Number(process.env.HYPERVIBE_RAILWAY_STORAGE_VERIFY_ATTEMPTS ?? 10);
-      const configuredDelayMs = Number(process.env.HYPERVIBE_RAILWAY_STORAGE_VERIFY_DELAY_MS ?? 250);
-      const attempts = Number.isFinite(configuredAttempts) && configuredAttempts >= 1
-        ? Math.min(Math.floor(configuredAttempts), 20)
-        : 10;
-      const delayMs = Number.isFinite(configuredDelayMs) && configuredDelayMs >= 0
-        ? configuredDelayMs
-        : 250;
+      const { attempts, delayMs } = this.storageVerificationPolicy();
       let deleted = false;
       for (let attempt = 0; attempt < attempts; attempt += 1) {
         const observed = await this.getBucketState(bindings.projectId, bindings.environmentId);

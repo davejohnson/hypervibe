@@ -22,6 +22,7 @@ const connection = (nodes: unknown[], more = false, cursor: string | null = null
 /** Synthetic provider state, executed by the official schema, not a recorded live lifecycle. */
 export async function railwayHttpFixture(options: {
   stagingExists?: boolean; projectExists?: boolean; pageSize?: number; dropCreateResponse?: boolean;
+  bucketDelayMs?: number; omitBucketFlags?: boolean;
   responseOverride?: (request: { query: string; variables: Record<string, any> }) => Response | undefined;
 } = {}) {
   let projectExists = options.projectExists !== false;
@@ -36,6 +37,18 @@ export async function railwayHttpFixture(options: {
   const mutations: Array<{ field: string; args: Record<string, any> }> = [];
   const requests: Array<{ query: string; variables: Record<string, any> }> = [];
   const contractErrors: string[] = [];
+  const pendingBuckets: Array<{ environmentId: string; bucketId: string; value: BucketConfig[string]; readyAt: number }> = [];
+
+  function completeBucketPatches() {
+    for (let index = pendingBuckets.length - 1; index >= 0; index--) {
+      const patch = pendingBuckets[index];
+      if (Date.now() < patch.readyAt) continue;
+      const environment = environments.get(patch.environmentId)!;
+      environment.config.buckets ??= {};
+      environment.config.buckets[patch.bucketId] = patch.value;
+      pendingBuckets.splice(index, 1);
+    }
+  }
 
   function addService(id: string, name: string, environmentId: string) {
     const service = { id, name, instances: new Map<string, Instance>() };
@@ -138,15 +151,22 @@ export async function railwayHttpFixture(options: {
       return bucket;
     },
     bucketInstanceDetails: ({ bucketId, environmentId }) => {
-      expect(environments.get(environmentId)?.config.buckets?.[bucketId]?.isDeleted).toBe(false);
+      const instance = environments.get(environmentId)?.config.buckets?.[bucketId];
+      expect(instance?.region).toBeTruthy();
+      expect(instance?.isDeleted).not.toBe(true);
       return { objectCount: environmentId === productionId ? 7 : 0, sizeBytes: environmentId === productionId ? 42 : 0 };
     },
     environmentPatchCommit: ({ environmentId, patch }) => {
       const environment = environments.get(environmentId)!;
       for (const [id, value] of Object.entries(patch.buckets as BucketConfig)) {
         expect(buckets.has(id)).toBe(true);
-        environment.config.buckets ??= {};
-        environment.config.buckets[id] = { ...environment.config.buckets[id], ...value };
+        // Synthetic asynchronous visibility. Railway's official BucketInstance
+        // has optional flags; committed config need not echo patch directives.
+        pendingBuckets.push({ environmentId, bucketId: id,
+          value: options.omitBucketFlags && value.isCreated === true
+            ? { region: value.region } : { ...environment.config.buckets?.[id], ...value },
+          readyAt: Date.now() + (options.bucketDelayMs ?? 0),
+        });
       }
       return 'bucket-deployment';
     },
@@ -168,6 +188,7 @@ export async function railwayHttpFixture(options: {
     expect(new Headers(init?.headers).get('authorization')).toBe('Bearer synthetic-contract-token');
     const request = JSON.parse(String(init?.body));
     requests.push(request);
+    completeBucketPatches();
     const override = options.responseOverride?.(request);
     if (override) return override;
     const document = parse(request.query);
