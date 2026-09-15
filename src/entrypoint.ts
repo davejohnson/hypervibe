@@ -1,12 +1,16 @@
 export interface EntrypointHandlers {
   runMcp(): Promise<void>;
   runCli(args: string[]): Promise<number>;
+  runInstall(args: string[]): Promise<number>;
 }
 
 export async function dispatchEntrypoint(
   args: string[],
   handlers: EntrypointHandlers
 ): Promise<number | undefined> {
+  if (args[0] === 'install') {
+    return handlers.runInstall(args.slice(1));
+  }
   if (args.length === 0 || args[0] === 'mcp') {
     await handlers.runMcp();
     return undefined;
