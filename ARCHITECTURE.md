@@ -140,6 +140,12 @@ MCP ─┘
 - MCP `structuredContent` and CLI `--json` expose the same redacted command envelope.
 - MCP resolves repository-backed project state from the client's declared file roots for each request, never from the long-running server process's launch directory. Multiple project identities, unavailable roots, and roots with unmatched repository identities fail closed instead of selecting unrelated single-project state.
 - The `hypervibe` no-argument entrypoint remains MCP-compatible. Human CLI commands use explicit arguments; `hypervibe mcp` and `hypervibe-mcp` are explicit MCP entrypoints.
+- `hypervibe install claude` is an explicit CLI-only bootstrap exception: it
+  registers this package with Claude Code through `claude mcp add` in user
+  scope. It runs before importing the infrastructure runtime, does not open
+  Hypervibe state or expose an MCP tool, and leaves config writing and existing
+  entry protection to Claude. Installing the client connection must not depend
+  on already having that connection or initialized infrastructure state.
 - A future HTTP adapter may use this boundary, but remote auth, locking, state ownership, and secret custody are separate product decisions. Do not introduce an unauthenticated remote interface.
 - `@hypervibe/hypervibe/hosted` is a library boundary, not an HTTP interface. Its versioned committed-spec inspector accepts bytes only with a provider-verified repository identity, exact full revision, and matching SHA-256. The trusted host owns account authorization, code-host installation tokens, exact-revision reads, pairing, and tenancy; the inspector owns the existing project schema, repository-claim consistency, secret-shaped-content rejection, and a deterministic import receipt.
 - Hosted inspection never reads a checkout, opens SQLite, observes infrastructure, plans, applies, or manufactures provider endpoints. It returns only declared environments, services, provider capabilities, and HTTPS endpoints that are explicit safe domains in desired state. A missing spec repository claim remains visible as unverified; a present mismatched claim fails closed.

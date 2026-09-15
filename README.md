@@ -146,18 +146,28 @@ codex mcp list
 
 ### 3. Install As Claude Code MCP
 
-Add to `~/.claude/settings.json`:
+With [Claude Code](https://code.claude.com/docs/en/setup) installed, run:
 
-```json
-{
-  "mcpServers": {
-    "hypervibe": {
-      "command": "npx",
-      "args": ["-y", "@hypervibe/hypervibe@latest"]
-    }
-  }
-}
+```bash
+npx -y @hypervibe/hypervibe@latest install claude
 ```
+
+This registers Hypervibe for your user account across projects. Claude Code
+writes its own configuration; no JSON editing or hosted account is needed.
+Restart Claude Code, then open `/mcp` to check the connection.
+
+The equivalent built-in command also works with Hypervibe releases that predate
+the installer:
+
+```bash
+claude mcp add --scope user --transport stdio hypervibe -- npx -y @hypervibe/hypervibe@latest mcp
+```
+
+An existing user-level server named `hypervibe` is left unchanged. Inspect it
+with `claude mcp get hypervibe`. If you intend to replace it, run
+`claude mcp remove --scope user hypervibe`, then rerun the installer. Local and
+project-scoped entries can take precedence over the user entry; `/mcp` shows the
+active connection. This command targets Claude Code, not Claude Desktop.
 
 ### 4. Connect Providers
 
