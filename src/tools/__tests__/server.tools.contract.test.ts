@@ -47,7 +47,7 @@ const EXPECTED_TOOLS = [
   // DevX
   'hv_runs',
   // Hypervibe cloud
-  'hv_cloud_pair',
+  'hv_cloud_pair', 'hv_cloud_secrets',
 ].sort();
 
 async function makeClient(workspaceRoot?: string) {
@@ -78,12 +78,12 @@ describe('server tool surface', () => {
     await server.close();
   });
 
-  it('registers exactly the 20 pinned hv_* tools', async () => {
+  it('registers exactly the 21 pinned hv_* tools', async () => {
     const { client, server } = await makeClient();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(EXPECTED_TOOLS);
-    expect(names).toHaveLength(20);
+    expect(names).toHaveLength(21);
     expect(tools.find((tool) => tool.name === 'hv_ci_status')?.description).toContain(
       'Use this instead of gh, GitHub connectors/apps, browser/UI inspection, or direct CI/provider API calls.'
     );
@@ -93,6 +93,7 @@ describe('server tool surface', () => {
     expect(names).not.toContain('hv_db_migrate');
     expect(tools.find((tool) => tool.name === 'hv_logs')?.annotations?.readOnlyHint).toBe(true);
     expect(tools.find((tool) => tool.name === 'hv_apply')?.annotations?.readOnlyHint).toBe(false);
+    expect(tools.find((tool) => tool.name === 'hv_cloud_secrets')?.annotations?.readOnlyHint).toBe(false);
     await client.close();
     await server.close();
   });
@@ -120,7 +121,8 @@ describe('server tool surface', () => {
 
     expect(ids).toEqual(EXPECTED_TOOLS);
     expect([...PRESENTED_COMMAND_IDS].sort()).toEqual(ids);
-    expect(new Set(cliPaths).size).toBe(20);
+    expect(new Set(cliPaths).size).toBe(21);
+    expect(registry.get('hv_cloud_secrets')?.cliPath).toEqual(['cloud', 'secrets']);
     expect(registry.get('hv_spec')?.cliPath).toEqual(['spec']);
     expect(registry.get('hv_connections')?.cliPath).toEqual(['connections']);
     expect(registry.get('hv_secrets')?.cliPath).toEqual(['secrets']);

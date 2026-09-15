@@ -53,6 +53,7 @@ const COMMAND_PRESENTATION = {
   hv_apply: { label: 'APPLY' },
   hv_connections: { label: 'CONNECTIONS' },
   hv_cloud_pair: { label: 'CLOUD PAIR' },
+  hv_cloud_secrets: { label: 'SECRET IMPORT' },
 } as const;
 
 export const PRESENTED_COMMAND_IDS = Object.freeze(Object.keys(COMMAND_PRESENTATION));

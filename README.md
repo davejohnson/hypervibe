@@ -113,6 +113,20 @@ uses the repositories selected in the Hypervibe GitHub App, and stores the
 one-time device and environment credentials only in the encrypted local
 connection store. Do not paste a GitHub token or choose an environment.
 
+For credentials supplied by someone else through Hypervibe, use the separate
+[one-time secret import](docs/cloud-secret-import.md):
+
+```bash
+hypervibe cloud secrets --request-id <request-uuid> --env staging
+# Approve the displayed comparison code in the browser, then:
+hypervibe cloud secrets --action receive --request-id <request-uuid> --env staging --confirm
+```
+
+This requires the companion hosted retrieval feature and an engine release
+containing this command. Reporting pairing alone does not grant secret access.
+The import fills the private `.env.staging`, never `.env.example`, and returns
+references for a fresh reviewed plan. It does not deploy.
+
 To run the current source checkout instead:
 
 ```bash
