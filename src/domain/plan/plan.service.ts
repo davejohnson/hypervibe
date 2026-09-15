@@ -2462,8 +2462,17 @@ export class PlanService {
     // CI rendering needs durable provider identities. Reconcile those in an
     // isolated apply, then re-plan against the resulting bindings.
     const managedCiEnabled = environmentUsesManagedCi(specResult.spec, environmentName);
+    // A fresh project has no destinations whose generated secrets can be
+    // observed yet. Bootstrap only its project identity; the project handler
+    // still verifies absence before creating it. Re-plan before authorizing
+    // environments, workloads or any secret writes.
+    const ciProjectBootstrapStage = managedCiEnabled
+      && !environmentForObserve
+      && projectAction?.type === 'create'
+      && !projectAction.metadata?.blockedReason
+      && delegatedSecrets.blockers.length > 0;
     const ciBindingPrerequisites = managedCiEnabled
-      ? actions.filter(isManagedCiBindingRoot)
+      ? ciProjectBootstrapStage ? [projectAction!] : actions.filter(isManagedCiBindingRoot)
       : [];
     const ciBindingStage = ciBindingPrerequisites.length > 0;
     const ciBindingServiceNames = new Set(
@@ -2508,7 +2517,7 @@ export class PlanService {
       action.type !== 'noop' && action.metadata?.workflowPublicationRequired !== true
     );
     const ciWorkflowPublicationStage = !ciBindingStage && ciWorkflowPublicationActions.length > 0;
-    if (delegatedSecrets.blockers.length > 0 && !ciWorkflowPublicationStage) {
+    if (delegatedSecrets.blockers.length > 0 && !ciWorkflowPublicationStage && !ciProjectBootstrapStage) {
       const detail = delegatedSecrets.blockers
         .map((blocker) => `${blocker.key}: ${blocker.reason}`)
         .join('; ');
@@ -2772,6 +2781,11 @@ export class PlanService {
           ...action,
           dependsOn: action.dependsOn?.filter((dependency) => retained.has(dependency)),
         }));
+      if (ciProjectBootstrapStage) {
+        ciDeploy.warnings.push(
+          'This plan creates only the hosting project. Generated secrets and workloads remain deferred until a new plan can observe their destinations.'
+        );
+      }
     } else if (ciWorkflowPublicationStageActive) {
       actions = ciWorkflowPublicationActions.map((action) => ({
         ...action,
@@ -2922,7 +2936,7 @@ export class PlanService {
       : ciBindingStageActive
         ? ciBindingInputRequired
         : secretInputRequired;
-    const planOverrides = ciWorkflowPublicationStageActive ? undefined : overrides;
+    const planOverrides = ciWorkflowPublicationStageActive || ciProjectBootstrapStage ? undefined : overrides;
     const persistedScope = ciBindingStageActive
       ? 'managed-ci-bindings' as const
       : ciWorkflowPublicationStageActive
