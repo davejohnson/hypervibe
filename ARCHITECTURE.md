@@ -166,11 +166,12 @@ keep provider control and execute the resulting plan; add a collaborator to a
 provider only when they truly need independent mutation authority.
 
 This access model does not require a hosted Hypervibe control plane, shared
-drift service, or secret relay. API-key transfer is initially an external human
+drift service, or secret relay. API-key transfer may remain an external human
 workflow: the key owner may supply it out of band for the infrastructure owner
 to store through a safe local reference, or both may use an existing shared
 secret manager such as 1Password. Hypervibe records only the delegated slot
-and value-free handoff metadata.
+and value-free handoff metadata. An optional hosted one-time handoff is described
+under delegated secrets below; reporting enrollment never grants secret access.
 
 ## Provider Boundary
 
@@ -785,6 +786,39 @@ keys, and cannot be retired through `removeEnvVars`; replacing a legacy
 encryption key requires an explicit credential rewrap workflow.
 
 ### Delegated secrets
+
+#### Optional hosted one-time import
+
+`hv_cloud_secrets` / `hypervibe cloud secrets` imports a single ready Hypervibe
+hosted credential request. It is local input preparation, not a provider write
+or deployment action. The owner approves the exact request and a SHA-256 device
+proof in the browser; the raw 256-bit proof stays in the encrypted local
+connection store. No existing reporting token gains secret-read permission.
+
+`start` returns a safe approval URL and comparison code. After browser approval,
+`receive` with explicit confirmation checks metadata against the GitHub origin,
+clean committed spec, exact HEAD, source digest, environment, and delegated key
+declarations. It preflights the private `.env.<environment>` and its temporary
+write path using the existing repository ignore/tracking boundary. Populated
+keys, non-regular files, or a mismatching checkout block before consumption.
+Blank placeholders may be filled; `.env.example` is never written with values.
+
+The browser grant lasts ten minutes and is bound to the approving membership.
+The hosted service rechecks current access and source, then shares a consuming
+transaction with CI: one retrieval total, not one per interface. The client
+records `consuming` before POST and never automatically repeats an ambiguous
+request. Valid received values are saved encrypted locally before atomic file
+replacement. Local recovery needs no second server request; a persisted file
+digest also reconciles a completed rename whose receipt could not be saved.
+Completion erases the proof/values from local import state, retaining a safe
+receipt. Received recovery state remains encrypted until completion; this is not
+a retained server vault or an automatic resynchronization service.
+
+Receipts expose key/ref entries, not a key-named values object, so the shared
+redactor keeps useful references without exemptions for secret-shaped names.
+Map these entries into `hv_plan secretRefs`, create a fresh plan, and obtain
+normal apply approval. Input receipt does not establish Google/Flow validity.
+See [the operator workflow](docs/cloud-secret-import.md) for recovery limits.
 
 Delegated secrets are lifecycle-managed slots, not ordinary environment variables and not provider connections:
 
