@@ -763,6 +763,13 @@ existing random secret requires exact action confirmation. Unknown or masked
 live state without a matching accepted binding blocks mutation. A mismatch
 between an accepted generation's hash and newly derived material means the
 local root key changed; block and restore the original key instead of rotating.
+For a first managed-CI deployment with no local environment or shared hosting
+binding, unknown generated-secret destinations must not prevent the initial
+project identity from being established. The existing managed-CI binding stage
+may contain only the project action, with no runtime overrides or secret
+writes. Its apply handler checks provider absence and refuses unbound existing
+projects or failed reads. A fresh plan observes the resulting binding before
+authorizing environment, workload, or generated-secret changes.
 For providers with a distinct environment resource, confirmed absence of the
 unbound target environment also proves its future service secret destinations
 are initially absent. The plan orders those secret actions after service

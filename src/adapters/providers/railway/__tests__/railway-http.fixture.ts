@@ -75,7 +75,10 @@ export async function railwayHttpFixture(options: {
   }
 
   const root: Record<string, (args: any) => unknown> = {
-    projects: () => connection(projectExists ? [{ id: projectId, name: 'contract-project' }] : []),
+    projects: () => connection(projectExists ? [{
+      id: projectId, name: 'contract-project',
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    }] : []),
     projectCreate: ({ input }) => {
       expect(input).toMatchObject({ name: 'contract-project', workspaceId: 'workspace-contract' });
       projectExists = true;
