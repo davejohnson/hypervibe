@@ -1,5 +1,10 @@
 # Retained Railway web-service volumes
 
+> Incomplete draft: the feature must cover all supported hosting providers.
+> This page describes only the initial Railway slice. See the
+> [cross-host design and provider audit](service-volumes-design.md) before
+> treating PR #218 as ready to merge or release.
+
 Declare one persistent filesystem mount on a web service:
 
 ```json
