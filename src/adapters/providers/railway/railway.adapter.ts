@@ -16,6 +16,7 @@ import type {
 } from '../../../domain/ports/provider.port.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../domain/entities/service.entity.js';
+import type { IServiceVolumes, ServiceVolumeTarget, ServiceVolumeObservation } from '../../../domain/ports/service-volume.port.js';
 import {
   createHostingServiceCreateRecovery,
   parseHostingBindings,
@@ -244,6 +245,95 @@ export class RailwayAdapter implements
   private client: GraphQLClient | null = null;
   private credentials: RailwayCredentials | null = null;
   private resolvedWorkspaceId: string | null | undefined;
+
+  readonly serviceVolumes: IServiceVolumes = {
+    observe: (target, externalId) => this.observeWebServiceVolume(target, externalId),
+    create: async (target) => {
+      const preflight = await this.observeWebServiceVolume(target);
+      if (preflight.state !== 'absent') {
+        return {
+          success: false,
+          mutationAttempted: false,
+          error: preflight.state === 'unknown' ? preflight.reason
+            : `Railway volume ${preflight.externalId} already exists; retain-only creation cannot adopt or replace it.`,
+        };
+      }
+      const result = await this.attachServiceVolume(target, {
+        requireAcknowledgedId: true, singleServiceVolume: true,
+      });
+      return {
+        success: result.success,
+        mutationAttempted: result.mutationAttempted,
+        ...(result.mutationAttempted && result.volumeId ? { externalId: result.volumeId } : {}),
+        ...(!result.success ? { error: result.error } : {}),
+      };
+    },
+  };
+
+  private async observeWebServiceVolume(
+    target: ServiceVolumeTarget,
+    externalId?: string
+  ): Promise<ServiceVolumeObservation> {
+    if (!this.client) return { state: 'unknown', reason: 'Not connected. Call connect() first.' };
+    if (['projectId', 'environmentId', 'serviceId', 'mountPath'].some((key) => {
+      const value = target[key as keyof ServiceVolumeTarget];
+      return typeof value !== 'string' || !value.trim();
+    })) return { state: 'unknown', reason: 'Railway service volumes require an exact project, environment, service and mount path.' };
+    try {
+      const query = gql`
+        query WebVolumeServiceTarget($projectId: String!, $environmentId: String!, $serviceId: String!) {
+          service(id: $serviceId) { id projectId deletedAt }
+          environment(id: $environmentId, projectId: $projectId) {
+            id projectId deletedAt config(decryptVariables: false)
+          }
+          serviceInstance(serviceId: $serviceId, environmentId: $environmentId) {
+            id serviceId environmentId deletedAt numReplicas
+          }
+        }
+      `;
+      const result = await this.client.request<unknown>(query, {
+        projectId: target.projectId, environmentId: target.environmentId, serviceId: target.serviceId,
+      });
+      if (!isRecord(result) || !isRecord(result.service) || !isRecord(result.environment)
+        || !isRecord(result.serviceInstance)
+        || result.service.id !== target.serviceId || result.service.projectId !== target.projectId
+        || result.environment.id !== target.environmentId || result.environment.projectId !== target.projectId
+        || typeof result.serviceInstance.id !== 'string' || !result.serviceInstance.id.trim()
+        || result.serviceInstance.serviceId !== target.serviceId
+        || result.serviceInstance.environmentId !== target.environmentId
+        || result.service.deletedAt !== null || result.environment.deletedAt !== null
+        || result.serviceInstance.deletedAt !== null) {
+        return { state: 'unknown', reason: 'Railway volume target does not have a verified active service in the exact project and environment.' };
+      }
+      const replicas = result.serviceInstance.numReplicas;
+      if (typeof replicas !== 'number' || !Number.isInteger(replicas) || replicas < 0 || replicas > 1) {
+        return { state: 'unknown', reason: 'Railway volumes require a verified service replica count of at most one.' };
+      }
+      const config = result.environment.config;
+      const serviceConfig = isRecord(config) && isRecord(config.services) ? config.services[target.serviceId] : undefined;
+      if (!isRecord(serviceConfig) || !isRecord(serviceConfig.deploy)) {
+        return { state: 'unknown', reason: 'Railway volume target has no complete deployment configuration for replica observation.' };
+      }
+      // EnvironmentConfig is an opaque GraphQL scalar. These nested shapes come
+      // from the pinned official CLI DeployConfig/RegionConfig, not the SDL.
+      const regions = serviceConfig.deploy.multiRegionConfig;
+      if (regions !== undefined) {
+        if (!isRecord(regions) || Object.entries(regions).some(([region, value]) => !region.trim()
+          || !isRecord(value) || typeof value.numReplicas !== 'number'
+          || !Number.isInteger(value.numReplicas) || value.numReplicas < 0)) {
+          return { state: 'unknown', reason: 'Railway multi-region replica configuration is incomplete or malformed.' };
+        }
+        const total = Object.values(regions).reduce((sum: number, value) => sum + (value as { numReplicas: number }).numReplicas, 0);
+        if (total > 1) return { state: 'unknown', reason: 'Railway volumes cannot be used with multiple replicas across regions.' };
+      }
+      const resolved = await this.resolveServiceVolume(target, externalId, { singleServiceVolume: true });
+      if (!resolved.success) return { state: 'unknown', reason: resolved.error };
+      return resolved.state === 'absent' ? { state: 'absent' }
+        : { state: 'present', externalId: resolved.volumeId, pendingDeletion: resolved.pendingDeletion };
+    } catch (error) {
+      return { state: 'unknown', reason: this.describeError(error) };
+    }
+  }
 
   async connect(credentials: unknown): Promise<void> {
     this.credentials = credentials as RailwayCredentials;
@@ -1440,7 +1530,8 @@ export class RailwayAdapter implements
   }
 
   private async attachServiceVolume(
-    target: RailwayVolumeTarget
+    target: RailwayVolumeTarget,
+    options: { requireAcknowledgedId?: boolean; singleServiceVolume?: boolean } = {}
   ): Promise<
     | { success: true; volumeId: string; mutationAttempted: true }
     | { success: false; error: string; volumeId?: string; mutationAttempted: boolean }
@@ -1453,7 +1544,7 @@ export class RailwayAdapter implements
       };
     }
 
-    const preflight = await this.resolveServiceVolume(target);
+    const preflight = await this.resolveServiceVolume(target, undefined, options);
     if (!preflight.success) {
       return {
         success: false,
@@ -1493,7 +1584,14 @@ export class RailwayAdapter implements
       mutationError = this.describeError(error);
     }
 
-    const recovered = await this.waitForCreatedServiceVolume(target, acknowledgedVolumeId);
+    // A same-target match after a lost response is not proof that this operation
+    // created it. The retain-only lifecycle keeps its pre-write recovery intent.
+    if (options.requireAcknowledgedId && !acknowledgedVolumeId) {
+      return { success: false, mutationAttempted: true,
+        error: `Railway volume creation has no acknowledged identity; retain recovery intent. ${mutationError ?? ''}`.trim() };
+    }
+
+    const recovered = await this.waitForCreatedServiceVolume(target, acknowledgedVolumeId, options);
     if (recovered.success && recovered.state === 'present') {
       return {
         success: true,
@@ -1511,7 +1609,9 @@ export class RailwayAdapter implements
         mutationError ? `volumeCreate: ${mutationError}` : undefined,
         `recovery: ${recoveryError}`,
       ].filter((value): value is string => Boolean(value)).join('; '),
-      ...(recovered.success
+      ...(options.requireAcknowledgedId
+        ? acknowledgedVolumeId ? { volumeId: acknowledgedVolumeId } : {}
+        : recovered.success
         ? acknowledgedVolumeId ? { volumeId: acknowledgedVolumeId } : {}
         : recovered.volumeId
           ? { volumeId: recovered.volumeId }
@@ -1524,7 +1624,8 @@ export class RailwayAdapter implements
 
   async resolveServiceVolume(
     target: RailwayVolumeTarget,
-    expectedVolumeId?: string
+    expectedVolumeId?: string,
+    options: { singleServiceVolume?: boolean } = {}
   ): Promise<RailwayVolumeResolution> {
     const invalidTargetField = (Object.entries(target) as Array<[
       keyof RailwayVolumeTarget,
@@ -1544,6 +1645,13 @@ export class RailwayAdapter implements
     try {
       const volumes = await this.listEnvironmentVolumeInstances(target);
       const live = volumes.filter((volume) => volume.deletedAt === null);
+      if (options.singleServiceVolume) {
+        const attached = live.filter((volume) => volume.serviceId === target.serviceId);
+        if (attached.length > 1 || attached.some((volume) => volume.mountPath !== target.mountPath)) {
+          return { success: false,
+            error: `Railway service ${target.serviceId} has conflicting volume attachments; retain-only volumes cannot move or replace them.` };
+        }
+      }
       const targetMatches = live.filter((volume) => (
         volume.projectId === target.projectId
         && volume.environmentId === target.environmentId
@@ -1659,7 +1767,8 @@ export class RailwayAdapter implements
             && (typeof edge.node.serviceId !== 'string' || edge.node.serviceId.trim().length === 0))
           || typeof edge.node.environmentId !== 'string' || edge.node.environmentId.trim().length === 0
           || typeof edge.node.mountPath !== 'string' || edge.node.mountPath.trim().length === 0
-          || (edge.node.deletedAt !== null && typeof edge.node.deletedAt !== 'string')
+          || (edge.node.deletedAt !== null && (typeof edge.node.deletedAt !== 'string'
+            || !edge.node.deletedAt.trim() || Number.isNaN(Date.parse(edge.node.deletedAt))))
           || typeof edge.node.isPendingDeletion !== 'boolean'
           || typeof edge.node.volume.id !== 'string' || edge.node.volume.id.trim().length === 0
           || typeof edge.node.volume.projectId !== 'string' || edge.node.volume.projectId.trim().length === 0) {
@@ -1713,7 +1822,8 @@ export class RailwayAdapter implements
 
   private async waitForCreatedServiceVolume(
     target: RailwayVolumeTarget,
-    acknowledgedVolumeId?: string
+    acknowledgedVolumeId?: string,
+    options: { singleServiceVolume?: boolean } = {}
   ): Promise<RailwayVolumeResolution> {
     const configuredAttempts = Number(process.env.HYPERVIBE_RAILWAY_CREATE_VERIFY_ATTEMPTS ?? 10);
     const configuredDelayMs = Number(process.env.HYPERVIBE_RAILWAY_CREATE_VERIFY_DELAY_MS ?? 250);
@@ -1726,7 +1836,7 @@ export class RailwayAdapter implements
     let lastError: string | undefined;
 
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const resolution = await this.resolveServiceVolume(target);
+      const resolution = await this.resolveServiceVolume(target, undefined, options);
       if (!resolution.success) {
         lastError = resolution.error;
       } else if (resolution.state === 'present' && !resolution.pendingDeletion) {
@@ -6976,7 +7086,8 @@ providerRegistry.register({
       },
     },
     lifecycle: {
-      hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'managed', maintenance: 'managed', teardownBoundary: 'environment' },
+      hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'managed', maintenance: 'managed', teardownBoundary: 'environment',
+        serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only' } },
       databaseEngines: ['postgres'],
       databaseConnectivity: { compatibleHostingProviders: ['railway'] },
       cacheEngines: ['redis'],

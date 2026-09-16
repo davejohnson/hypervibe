@@ -148,6 +148,7 @@ export interface VerifyResult {
 }
 
 export interface IProviderAdapter {
+  readonly serviceVolumes?: import('./service-volume.port.js').IServiceVolumes;
   readonly name: string;
 
   /** Platform capabilities - describes what features this provider supports */

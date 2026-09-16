@@ -12,6 +12,28 @@ import {
 } from '../repo-bindings-file.js';
 
 describe('repo bindings delegated metadata', () => {
+  it('exports exact value-free volume recovery even for a secret-shaped service name', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-volume-bindings-'));
+    execFileSync('git', ['init', '-q', root]);
+    execFileSync('git', ['-C', root, 'remote', 'add', 'origin', 'https://github.com/owner/app.git']);
+    const now = new Date();
+    const project: Project = { id: 'project', name: 'app', gitRemoteUrl: 'https://github.com/owner/app.git', defaultPlatform: 'railway', policies: {}, createdAt: now, updatedAt: now };
+    const serviceVolumes = { 'token-api': { provider: 'railway', state: 'creating', target: { projectId: 'rp', environmentId: 'staging', serviceId: 'service', mountPath: '/data' } } };
+    const environment: Environment = { id: 'env', projectId: project.id, name: 'staging', platformBindings: { serviceVolumes, apiToken: 'must-not-export' }, createdAt: now, updatedAt: now };
+    const disabled = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      const file = writeRepoBindingsForEnvironment(project, environment, root)!;
+      expect(file).toBeTruthy();
+      const raw = readFileSync(file, 'utf8');
+      expect(raw).not.toContain('must-not-export');
+      expect(readRepoBindingsFile(project.name, root)!.document.environments.staging.platformBindings.serviceVolumes).toEqual(serviceVolumes);
+    } finally {
+      if (disabled === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = disabled;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   it.each([
     ['unrelated remote', 'https://github.com/other/app.git', undefined, false],
     ['missing remote', undefined, undefined, false],

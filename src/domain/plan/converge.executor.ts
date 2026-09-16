@@ -17,7 +17,7 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
   id: z.string().min(1),
   type: z.enum(['create', 'update', 'replace', 'destroy', 'noop']),
   resource: z.object({
-    kind: z.enum(['project', 'environment', 'service', 'database', 'cache', 'storage', 'retained-resource', 'load-balancer', 'domain', 'email', 'messaging', 'ci', 'repo', 'ios', 'queue', 'secret', 'payment', 'maintenance']),
+    kind: z.enum(['project', 'environment', 'service', 'volume', 'database', 'cache', 'storage', 'retained-resource', 'load-balancer', 'domain', 'email', 'messaging', 'ci', 'repo', 'ios', 'queue', 'secret', 'payment', 'maintenance']),
     name: z.string().min(1),
     provider: z.string().min(1),
   }),
@@ -30,8 +30,8 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
   dependsOn: z.array(z.string().min(1)).optional(),
   metadata: z.record(z.unknown()).optional(),
 }).passthrough().superRefine((action, ctx) => {
-  const billableDataResource = ['database', 'cache', 'storage'].includes(action.resource.kind);
-  const destructiveDataResource = ['database', 'cache', 'storage'].includes(action.resource.kind)
+  const billableDataResource = ['database', 'cache', 'storage', 'volume'].includes(action.resource.kind);
+  const destructiveDataResource = ['database', 'cache', 'storage', 'volume'].includes(action.resource.kind)
     || (
       action.resource.kind === 'queue'
       && action.metadata?.operation === 'queueDestroy'
@@ -187,6 +187,7 @@ export const planRunDocumentSchema = z.object({
     'full',
     'retained-cleanup',
     'managed-ci-bindings',
+    'hosting-bindings',
     'managed-ci-publication',
   ]).optional(),
   environmentName: z.string().min(1),
@@ -247,7 +248,7 @@ export const planRunDocumentSchema = z.object({
     return;
   }
 
-  if (document.scope === 'managed-ci-bindings') {
+  if (document.scope === 'managed-ci-bindings' || document.scope === 'hosting-bindings') {
     const roots = document.actions.filter(isManagedCiBindingRoot);
     const retained = new Set(actionDependencyClosure(
       document.actions,
@@ -367,6 +368,9 @@ const DEFAULT_MAX_PLAN_AGE_MS = 24 * 60 * 60 * 1000;
  */
 export function fingerprintObservedState(observed: ObservedState): string {
   const essence = {
+    ...(observed.serviceVolumes && Object.keys(observed.serviceVolumes).length > 0 ? {
+      serviceVolumes: Object.fromEntries(Object.entries(observed.serviceVolumes).sort(([a], [b]) => a.localeCompare(b))),
+    } : {}),
     provider: observed.provider,
     projectExists: observed.projectExists,
     projectId: observed.projectId ?? null,

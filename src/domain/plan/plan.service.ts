@@ -1,4 +1,5 @@
 import path from 'path';
+import { observeServiceVolumes, planServiceVolumes, retainedVolumeHostingBlock, wireServiceVolumeActions } from '../services/service-volume.service.js';
 import { environmentResourceName } from '../services/resource-names.js';
 import { parseUnresolvedDatastoreMutation } from '../ports/database.port.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
@@ -134,7 +135,7 @@ export interface PlanOptions {
 
 export interface EnvironmentPlan {
   planRunId: string;
-  scope: 'full' | 'retained-cleanup' | 'managed-ci-bindings' | 'managed-ci-publication';
+  scope: 'full' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'managed-ci-publication';
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
   environmentName: string;
@@ -704,6 +705,11 @@ export class PlanService {
         }
       }
 
+      observed.serviceVolumes = await observeServiceVolumes({ environment, environmentSpec, volumes: adapter.serviceVolumes });
+      if (Object.values(observed.serviceVolumes).some((v) => v.observation.state === 'unknown')) {
+        observed.partial = true;
+        observed.warnings.push('Service-volume attachment observation is incomplete; volume actions are blocked.');
+      }
       return { observed, warnings };
     } catch (error) {
       const message = `Observation failed (${provider}): ${error instanceof Error ? error.message : String(error)}. Mutations that require proof of absence are blocked.`;
@@ -2290,6 +2296,9 @@ export class PlanService {
       }
     }
     const storage = planStorage({ environmentSpec, environment, observed });
+    const serviceVolumes = planServiceVolumes({ environmentSpec, environment, observed });
+    storage.warnings.push(...serviceVolumes.warnings);
+    actions.unshift(...serviceVolumes.actions);
     if (storage.actions.length > 0) {
       const ensureActions = storage.actions.filter((action) => action.metadata?.operation === 'storageEnsure');
       const followupActions = storage.actions.filter((action) => action.metadata?.operation !== 'storageEnsure');
@@ -2462,6 +2471,8 @@ export class PlanService {
     // CI rendering needs durable provider identities. Reconcile those in an
     // isolated apply, then re-plan against the resulting bindings.
     const managedCiEnabled = environmentUsesManagedCi(specResult.spec, environmentName);
+    const volumeIdentityStage = Object.entries(environmentSpec.services).some(([name, s]) => s.volume
+      && !((environment?.platformBindings.services as Record<string, { serviceId?: string }> | undefined)?.[name]?.serviceId));
     // A fresh project has no destinations whose generated secrets can be
     // observed yet. Bootstrap only its project identity; the project handler
     // still verifies absence before creating it. Re-plan before authorizing
@@ -2471,7 +2482,7 @@ export class PlanService {
       && projectAction?.type === 'create'
       && !projectAction.metadata?.blockedReason
       && delegatedSecrets.blockers.length > 0;
-    const ciBindingPrerequisites = managedCiEnabled
+    const ciBindingPrerequisites = managedCiEnabled || volumeIdentityStage
       ? ciProjectBootstrapStage ? [projectAction!] : actions.filter(isManagedCiBindingRoot)
       : [];
     const ciBindingStage = ciBindingPrerequisites.length > 0;
@@ -2497,7 +2508,9 @@ export class PlanService {
       ? {
           actions: [],
           warnings: [
-            'Managed CI reconciliation is deferred until provider identity changes converge. Apply this binding stage, then re-run hv_plan.',
+            volumeIdentityStage && !managedCiEnabled
+              ? 'Volume creation and application deployment are deferred until provider identities converge. Apply this identity-only stage, then re-run hv_plan.'
+              : 'Managed CI reconciliation is deferred until provider identity changes converge. Apply this binding stage, then re-run hv_plan.',
           ],
         }
       : await planManagedCiDeploy({
@@ -2762,6 +2775,15 @@ export class PlanService {
       );
     }
 
+    wireServiceVolumeActions(actions, serviceVolumes.actions);
+    for (const action of actions) {
+      const volumeBlock = retainedVolumeHostingBlock(environment, environmentSpec, action);
+      if (volumeBlock) {
+        action.verified = false;
+        action.reason = volumeBlock;
+        action.metadata = { ...action.metadata, blockedReason: 'retained_service_volumes' };
+      }
+    }
     const providerSafetyStageActive = maintenance.pending
       || dataMigration.pending
       || nativeDeploySources.actions.length > 0;
@@ -2807,6 +2829,7 @@ export class PlanService {
         if (action.type === 'destroy') return false;
         if (action.metadata?.operation === 'hostingEnvRemove') return false;
         if (action.resource.kind === 'project' || action.resource.kind === 'environment') return true;
+        if (action.resource.kind === 'volume') return keep.has(action.resource.name);
         if (action.resource.kind === 'database' || action.resource.kind === 'cache') {
           return action.type === 'create' || action.type === 'noop';
         }
@@ -2938,7 +2961,7 @@ export class PlanService {
         : secretInputRequired;
     const planOverrides = ciWorkflowPublicationStageActive || ciProjectBootstrapStage ? undefined : overrides;
     const persistedScope = ciBindingStageActive
-      ? 'managed-ci-bindings' as const
+      ? (volumeIdentityStage && !managedCiEnabled ? 'hosting-bindings' as const : 'managed-ci-bindings' as const)
       : ciWorkflowPublicationStageActive
         ? 'managed-ci-publication' as const
         : 'full' as const;

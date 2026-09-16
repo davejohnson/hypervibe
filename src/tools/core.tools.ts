@@ -15,6 +15,7 @@ import { planCache } from '../domain/services/cache-plan.service.js';
 import { planDatabaseResilience } from '../domain/services/database-resilience-plan.service.js';
 import { planQueues } from '../domain/services/queue-plan.service.js';
 import { planStorage } from '../domain/services/storage-plan.service.js';
+import { planServiceVolumes } from '../domain/services/service-volume.service.js';
 import { planDelegatedSecrets } from '../domain/services/delegated-secret.service.js';
 import { deriveHypervibeSecretValues } from '../domain/services/hypervibe-secret-value.js';
 import { withReceiptValidatedManagedSecretBindings } from '../domain/services/managed-secret-binding-receipts.js';
@@ -1132,6 +1133,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const queues = await planQueues({ project: projectForStatus, environmentSpec: envSpec, environment });
       const queueDrift = queues.actions.filter((action) => action.type !== 'noop');
       const storage = planStorage({ environmentSpec: envSpec, environment, observed });
+      const serviceVolumes = planServiceVolumes({ environmentSpec: envSpec, environment, observed });
+      storage.actions.push(...serviceVolumes.actions);
+      storage.warnings.push(...serviceVolumes.warnings);
       const storageDrift = storage.actions.filter((action) => action.type !== 'noop');
       const delegatedSecrets = planDelegatedSecrets({
         spec: specResult.spec,

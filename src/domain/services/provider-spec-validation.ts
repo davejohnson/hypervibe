@@ -9,7 +9,7 @@ import { devOpsProviderRegistry } from '../registry/devops.registry.js';
 
 export interface ProviderSpecIssue {
   environment: string;
-  field: 'hosting.provider' | 'services.workloadKind' | 'database.provider' | 'database.engine' | 'cache.provider' | 'cache.engine' | 'storage.provider' | 'queues' | 'loadBalancer.provider' | 'devops.code.provider' | 'devops.ci.provider';
+  field: 'hosting.provider' | 'services.workloadKind' | 'services.volume' | 'database.provider' | 'database.engine' | 'cache.provider' | 'cache.engine' | 'storage.provider' | 'queues' | 'loadBalancer.provider' | 'devops.code.provider' | 'devops.ci.provider';
   provider: string;
   service?: string;
   workloadKind?: WorkloadKind;
@@ -189,6 +189,18 @@ export function validateProjectSpecProviders(spec: ProjectSpec): ProviderSpecIss
           ?.lifecycle?.hosting?.workloadKinds ?? []
         : [];
       for (const [service, serviceSpec] of Object.entries(environmentSpec.services)) {
+        if (serviceSpec.volume && !providerRegistry.getMetadata(environmentSpec.hosting.provider)
+          ?.lifecycle?.hosting?.serviceVolumes?.workloadKinds.includes(serviceSpec.workloadKind)) {
+          issues.push({
+            environment, field: 'services.volume', provider: environmentSpec.hosting.provider,
+            service, capability: 'hosting', available: [],
+            configuration: {
+              path: `environments.${environment}.services.${service}.volume`,
+              message: `${environmentSpec.hosting.provider} does not support retained volumes for ${serviceSpec.workloadKind} workloads.`,
+              hint: 'Use a hosting provider and workload kind that declares serviceVolumes support, or remove volume intent.',
+            },
+          });
+        }
         if (providerRegistry.supportsWorkloadKind(
           environmentSpec.hosting.provider,
           serviceSpec.workloadKind

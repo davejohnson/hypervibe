@@ -1,5 +1,6 @@
 import { parseHostingBindings, parseHostingServiceCreateRecovery } from '../ports/hosting.port.js';
 import { providerRegistry } from '../registry/provider.registry.js';
+import { hasRetainedServiceVolumes } from './service-volume.service.js';
 
 type ProviderScope = Record<string, string>;
 
@@ -20,6 +21,7 @@ const RESERVED_PROVIDER_BINDINGS = new Set([
   'projectId',
   'environmentId',
   'services',
+  'serviceVolumes',
   'serviceCreateRecovery',
   'previousHosting',
   'maintenance',
@@ -103,6 +105,10 @@ export function prepareHostingBindingTransition(params: {
     || !sameScope(current.providerScope, target.providerScope)
   );
   const resetActiveScope = changed || params.target.created === true;
+  if ((resetActiveScope || (environmentId !== undefined && current.environmentId !== environmentId))
+    && hasRetainedServiceVolumes({ platformBindings: params.current })) {
+    return { ok: false, error: 'Retained service volumes block hosting scope changes; volume migration is not implemented.' };
+  }
   const patch: Record<string, unknown> = {
     ...providerBindings,
     provider,

@@ -857,10 +857,10 @@ export class CloudRunAdapter implements
           ? this.removeCloudSqlVolumeMounts(existingContainer?.volumeMounts)
           : existingContainer?.volumeMounts;
       const templateVolumes = cloudSql
-        ? this.mergeVolumes(this.serviceVolumes(cloudRunService), [cloudSql.volume])
+        ? this.mergeVolumes(this.cloudRunServiceVolumes(cloudRunService), [cloudSql.volume])
         : replaceManagedDatabaseVars
-          ? this.removeCloudSqlVolumes(this.serviceVolumes(cloudRunService))
-          : this.serviceVolumes(cloudRunService);
+          ? this.removeCloudSqlVolumes(this.cloudRunServiceVolumes(cloudRunService))
+          : this.cloudRunServiceVolumes(cloudRunService);
 
       const isWorker = workloadKind === 'worker';
       const desiredStartCommand = service.buildConfig.startCommand?.trim() || null;
@@ -975,7 +975,7 @@ export class CloudRunAdapter implements
           env,
           resources: containerSpec.resources,
           serviceAccount,
-          existingVolumes: this.serviceVolumes(cloudRunService),
+          existingVolumes: this.cloudRunServiceVolumes(cloudRunService),
           existingVolumeMounts: existingContainer?.volumeMounts,
           cloudSqlConnectionNames: cloudSqlNames,
           replaceManagedDatabaseVars,
@@ -1673,10 +1673,10 @@ export class CloudRunAdapter implements
           ? this.removeCloudSqlVolumeMounts(currentContainer.volumeMounts)
           : currentContainer.volumeMounts;
       const templateVolumes = cloudSql
-        ? this.mergeVolumes(this.serviceVolumes(currentService), [cloudSql.volume])
+        ? this.mergeVolumes(this.cloudRunServiceVolumes(currentService), [cloudSql.volume])
         : replaceManagedDatabaseVars
-          ? this.removeCloudSqlVolumes(this.serviceVolumes(currentService))
-          : this.serviceVolumes(currentService);
+          ? this.removeCloudSqlVolumes(this.cloudRunServiceVolumes(currentService))
+          : this.cloudRunServiceVolumes(currentService);
       const containerSpec = {
         ...(currentContainer.name ? { name: currentContainer.name } : {}),
         image: currentContainer.image,
@@ -2152,7 +2152,7 @@ export class CloudRunAdapter implements
         serviceAccount: sourceService?.template?.serviceAccount
           ?? sourceService?.template?.serviceAccountName
           ?? sourceService?.spec?.template?.spec?.serviceAccountName,
-        existingVolumes: this.serviceVolumes(sourceService),
+        existingVolumes: this.cloudRunServiceVolumes(sourceService),
         existingVolumeMounts: sourceContainer?.volumeMounts,
         cloudSqlConnectionNames: this.cloudSqlConnectionNamesFromEnvVars(sourceContainer?.env),
         ...(vpcAccess.apiValue !== undefined ? { vpcAccess: vpcAccess.apiValue } : {}),
@@ -5123,7 +5123,7 @@ export class CloudRunAdapter implements
       ?? job?.template?.template?.serviceAccountName;
   }
 
-  private serviceVolumes(service: CloudRunService | null): Array<Record<string, unknown>> | undefined {
+  private cloudRunServiceVolumes(service: CloudRunService | null): Array<Record<string, unknown>> | undefined {
     return service?.template?.volumes ?? service?.spec?.template?.spec?.volumes;
   }
 

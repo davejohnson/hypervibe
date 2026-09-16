@@ -182,6 +182,7 @@ export interface ObservedStorage {
 }
 
 export interface ObservedState {
+  serviceVolumes?: Record<string, import('./service-volume.port.js').ObservedServiceVolume>;
   provider: string;
   observedAt: string;
   projectExists: boolean;

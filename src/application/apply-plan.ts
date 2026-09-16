@@ -25,6 +25,7 @@ import { applyIosAction } from '../domain/services/appstore-plan.service.js';
 import { applyQueueAction } from '../domain/services/queue-plan.service.js';
 import { resolveQueueEnvVars } from '../domain/services/queue-env.js';
 import { applyStorageAction, resolveStorageServiceEnvVars } from '../domain/services/storage-plan.service.js';
+import { applyServiceVolumeAction, hasRetainedServiceVolumes, observeServiceVolumes, planServiceVolumes, retainedVolumeHostingBlock } from '../domain/services/service-volume.service.js';
 import {
   generatedSecretBindingEvidence,
   immutableSecretConflict,
@@ -788,7 +789,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const envName = loaded.document.environmentName;
   const planScope = loaded.document.scope ?? 'full';
   const retainedCleanupOnly = planScope === 'retained-cleanup';
-  const managedCiBindingsOnly = planScope === 'managed-ci-bindings';
+  const managedCiBindingsOnly = planScope === 'managed-ci-bindings' || planScope === 'hosting-bindings';
   const workflowPublicationOnly = planScope === 'managed-ci-publication';
   if (loaded.document.inputRequired?.length) {
     return {
@@ -1073,7 +1074,12 @@ export async function executePlanApply(ctx: CommandContext, params: {
     const existing = serviceBootstraps.get(serviceName);
     if (existing) return existing;
     const base = await buildDeployBootstrapParams();
-    const result = await executeBootstrap(scopeBootstrapParamsToService(base, serviceName));
+    const volumeIdentityOnly = managedCiBindingsOnly && (planScope === 'hosting-bindings'
+      || Object.values(envSpec.services).some((s) => s.volume)
+      || hasRetainedServiceVolumes(ctx.repos.environments.findByProjectAndName(project.id, envName)));
+    const result = await executeBootstrap({ ...scopeBootstrapParamsToService(base, serviceName),
+      ...(volumeIdentityOnly ? { provisionOnly: true } : {}),
+    });
     serviceBootstraps.set(serviceName, result);
     return result;
   };
@@ -1115,6 +1121,34 @@ export async function executePlanApply(ctx: CommandContext, params: {
       };
     }
     const capability = authority.capability;
+
+    const volumeEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+    const volumeSafetyBlock = retainedVolumeHostingBlock(volumeEnvironment, envSpec, action);
+    if (volumeSafetyBlock) return { success: false, status: 'blocked', message: volumeSafetyBlock };
+    if (capability === 'hosting.volume.mutate') {
+      const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject);
+      const volumes = (result.adapter as IProviderAdapter | undefined)?.serviceVolumes;
+      if (!result.success || result.adapter?.name !== envSpec.hosting.provider || !volumes || !volumeEnvironment) return { success: false, status: 'blocked', message: 'Volume adapter or bound environment unavailable.' };
+      return applyServiceVolumeAction({ environment: volumeEnvironment, environmentSpec: envSpec, action, volumes, confirmedActionIds,
+        save: (serviceVolumes) => {
+          if (!ctx.repos.environments.updatePlatformBindings(volumeEnvironment.id, { serviceVolumes })) throw new Error('Volume recovery state was not persisted.');
+        },
+      });
+    }
+    // Independently enforce attachment readiness even if a persisted action's
+    // dependency list is stripped. Empty managed-CI binding stages do not deploy.
+    const deployNeedsVolumes = !managedCiBindingsOnly && (
+      capability === 'hosting.service.converge' || capability === 'hosting.service.rollback'
+      || capability === 'github.ci.release' || capability === 'github.ci.rollback'
+      || capability === 'gitlab.ci.rollback' || capability === 'github.applied-spec-hash.sync'
+      || capability === 'ci.applied-spec-hash.sync'
+    );
+    if (deployNeedsVolumes && (volumeEnvironment?.platformBindings.serviceVolumes !== undefined || Object.values(envSpec.services).some((s) => s.volume))) {
+      const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject);
+      const liveVolumes = await observeServiceVolumes({ environment: volumeEnvironment, environmentSpec: envSpec, volumes: (result.adapter as IProviderAdapter | undefined)?.serviceVolumes });
+      const pendingVolume = planServiceVolumes({ environment: volumeEnvironment, environmentSpec: envSpec, observed: { serviceVolumes: liveVolumes } as ObservedState }).actions.find((a) => a.type !== 'noop');
+      if (pendingVolume) return { success: false, status: 'blocked', message: `Deployment requires verified retained volume attachment: ${pendingVolume.reason}` };
+    }
 
     if (
       capability === 'code.repository.create'

@@ -195,6 +195,8 @@ export interface ProviderMetadata {
     hosting?: {
       /** Workload kinds this adapter can reconcile through the complete hosting lifecycle. */
       workloadKinds: readonly WorkloadKind[];
+      /** Explicit, retain-only filesystem mounts; never implicit service provisioning. */
+      serviceVolumes?: { workloadKinds: readonly WorkloadKind[]; retention: 'retain-only' };
       /** Environment custom domains are either fully managed or explicitly unsupported. */
       customDomains: 'managed' | 'unsupported';
       /** Whether traffic DNS may be proxied or must remain directly resolvable. */

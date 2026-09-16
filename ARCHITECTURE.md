@@ -1658,6 +1658,18 @@ prove all background and direct-origin workloads are reversibly stopped.
 Generic planning must fail closed for unsupported providers; capability
 presence is never inferred from a provider name.
 
+Service filesystem mounts are separate from object storage. Optional hosting
+`serviceVolumes` capability metadata gates `services.<name>.volume.mountPath`;
+Railway currently supports web workloads only. Generic planning owns a distinct
+confirmed volume action, durable pre-write intent, acknowledged-ID recovery,
+attachment observation, status drift, and deployment dependencies. New manual
+services use an isolated `hosting-bindings` identity-only stage before volume
+planning; provider deployment remains deferred until a fresh attachment plan.
+V1 is retain-only: omission preserves bindings and data, ambiguous ownership
+blocks retries, and hosting teardown/replacement/rebinding is forbidden while
+volumes remain. There is no volume delete/adopt/move/resize authority. See
+`docs/service-volumes.md` for the contract and live-validation limitations.
+
 Object-storage lifecycle is implemented for Amazon S3, Azure Blob Storage,
 Google Cloud Storage, and Railway. Each adapter owns provider-native private
 resource creation, ownership metadata, live usage observation, runtime-secret

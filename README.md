@@ -26,7 +26,7 @@ Lifecycle maturity is reported by `hv_inspect {}` and `hv_connections {}`. Every
 - **Fly.io** *(ready for live conformance)* - Apps/Machines hosting and Managed Postgres with operation-scoped private WireGuard access
 - **Google Cloud** *(ready for live conformance)* - Cloud Run hosting, Cloud SQL Postgres, Memorystore Redis with Direct VPC egress, private Cloud Storage buckets, and Pub/Sub queues
 - **DigitalOcean** *(ready for live conformance)* - App Platform hosting, Managed PostgreSQL, and Managed Valkey
-- **Railway** *(ready for live conformance)* - App hosting, Postgres databases, Redis caches, private S3-compatible storage buckets, cron jobs, and postgres-backed queues
+- **Railway** *(ready for live conformance)* - App hosting, Postgres databases, Redis caches, private S3-compatible storage buckets, cron jobs, postgres-backed queues, and [retain-only web-service volumes](docs/service-volumes.md) (contract-tested; live validation pending)
 - **Supabase** *(ready for live conformance)* - Managed Postgres with direct or pooled connectivity
 - **Neon** *(ready for live conformance)* - Managed Postgres
 - **Vercel** *(ready for live conformance)* - Projects and Deployments hosting
