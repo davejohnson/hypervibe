@@ -87,6 +87,18 @@ tests do not expand the pinned-schema certification table above.
 
 ## Changing an integration
 
+Retained service-volume tests additionally exercise Fly, ECS Express/EFS,
+Azure Container Apps/classic Azure Files, and Cloud Run/Filestore through real
+clients with synthetic HTTP/SDK transport. Their fixtures cite official API
+documentation; unlike Railway, they do not execute a pinned provider schema.
+Shared SQLite lifecycle tests cover per-component intent, acknowledged identity,
+confirmation, delayed/unknown observations and mutation-free convergence. Fly
+also exercises app → disk → first Machine through the real plan/apply boundary.
+Generated GitHub and portable deployment scripts are executed to check mount
+preservation and reject provider-observed configuration loss. These checks do
+not prove live permissions, networking, filesystem I/O, regional availability,
+durability or billing. See [service volumes](../../docs/service-volumes.md).
+
 1. State the assumption, independent evidence and counterexample before changing
    runtime code. Reproduce it as a failing test through the real client/transport.
    A fixture copied from our types, implementation or submitted request is not

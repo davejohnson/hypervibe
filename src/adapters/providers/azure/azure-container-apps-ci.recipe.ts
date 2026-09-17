@@ -1,5 +1,6 @@
 import type { BranchDeployTarget, PortableCiDeployRecipe } from '../../../domain/ports/ci-deploy.port.js';
 import { azureRegistryName } from './azure-container-apps-ci.workflow.js';
+import { azureVolumeFingerprint } from './azure-volume-runtime.js';
 
 export const AZURE_CONTAINER_APPS_PORTABLE_RUNTIME_PATH = '.gitlab/hypervibe/azure-container-apps-deploy.mjs';
 
@@ -52,10 +53,12 @@ const exactImage = image.replace(/:[^/:]+$/, '') + '@' + digest;
 execFileSync(docker, ['logout', process.env.CI_REGISTRY], { stdio: 'ignore' });
 execFileSync(docker, ['logout', process.env.AZURE_REGISTRY_SERVER], { stdio: 'ignore' });
 const deployments = [];
+const volumeFingerprint = ${azureVolumeFingerprint.toString()};
 for (const appId of appIds) {
   const app = await arm('GET', appId);
   if (app?.id?.toLowerCase() !== appId.toLowerCase()) throw new Error('Azure returned a different Container App identity');
   const template = app.properties?.template;
+  const expectedVolumes = volumeFingerprint(template);
   const containers = [...(template?.containers || [])];
   if (containers.length !== 1) throw new Error('Hypervibe expects exactly one Container App container');
   const env = [...(containers[0].env || [])].filter((entry) => !['HYPERVIBE_DEPLOY_SHA', 'HYPERVIBE_IMAGE_DIGEST'].includes(entry.name));
@@ -71,7 +74,10 @@ for (const appId of appIds) {
     const active = observed?.properties?.template?.containers?.[0];
     const activeEnv = active?.env || [];
     const value = (name) => activeEnv.find((entry) => entry.name === name)?.value;
-    if (observed?.properties?.provisioningState === 'Succeeded' && observed.properties.latestReadyRevisionName === observed.properties.latestRevisionName && active?.image === exactImage && value('HYPERVIBE_DEPLOY_SHA') === sha && value('HYPERVIBE_IMAGE_DIGEST') === digest) { ready = observed; break; }
+    if (observed?.properties?.provisioningState === 'Succeeded' && observed.properties.latestReadyRevisionName === observed.properties.latestRevisionName && active?.image === exactImage && value('HYPERVIBE_DEPLOY_SHA') === sha && value('HYPERVIBE_IMAGE_DIGEST') === digest) {
+      if (volumeFingerprint(observed.properties.template) !== expectedVolumes) throw new Error('Azure volume mounts changed during release.');
+      ready = observed; break;
+    }
     if (attempt === 119) throw new Error('Azure Container App did not converge to exact image');
     await new Promise((resolve) => setTimeout(resolve, 5000));
   }

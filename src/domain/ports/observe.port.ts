@@ -61,6 +61,8 @@ export interface ObservedService {
   envVarHashes: Record<string, string>;
   /** 'empty' = the service exists but has never deployed (no source/code). */
   status: 'running' | 'failed' | 'empty' | 'unknown';
+  /** Provider confirms an owned namespace exists but its workload does not yet exist. */
+  identityOnly?: boolean;
   /**
    * Provider-native identity of the deployment or revision currently selected
    * for this service. This is used to prove that runtime configuration changes
@@ -182,6 +184,7 @@ export interface ObservedStorage {
 }
 
 export interface ObservedState {
+  serviceVolumes?: Record<string, import('./service-volume.port.js').ObservedServiceVolume>;
   provider: string;
   observedAt: string;
   projectExists: boolean;

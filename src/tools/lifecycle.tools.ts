@@ -6,6 +6,7 @@ import {
   removeServiceFromDesiredState,
 } from '../domain/services/spec.service.js';
 import { parseQueueBindings } from '../domain/services/queue-plan.service.js';
+import { hasRetainedServiceVolumes } from '../domain/services/service-volume.service.js';
 import type { CommandContext } from '../application/context.js';
 import { projectField, envField, confirmField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler } from '../application/results.js';
@@ -83,6 +84,14 @@ export function registerLifecycleTools(commands: CommandRegistrar, ctx: CommandC
       }
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const providerNote = 'Provider resources were not touched — destroy live infrastructure via hv_spec + hv_plan + hv_apply with exact confirmActions ids.';
+      const volumeOwners = ctx.repos.environments.findByProjectId(project.id).filter((e) =>
+        (scope !== 'environment' || !env || e.name === env) && hasRetainedServiceVolumes(e));
+      if (volumeOwners.length > 0) {
+        return commandError('VALIDATION', 'Retained service-volume identities or recovery state would be lost. Local deletion is blocked.', {
+          details: { environments: volumeOwners.map((e) => e.name) },
+          hint: 'Service volumes are retain-only. Hypervibe does not yet implement deletion or an ownership-transfer workflow; preserve their bindings.',
+        });
+      }
 
       if (scope === 'project') {
         const environments = ctx.repos.environments.findByProjectId(project.id);

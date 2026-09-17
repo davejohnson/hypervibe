@@ -6,6 +6,7 @@ import {
   parseFlyOrganizationBinding,
   parseFlyServiceBinding,
 } from './fly.binding.js';
+import { buildFlyMountIdentityRuntime } from './fly-mount-identity.js';
 
 export const FLY_PORTABLE_RUNTIME_PATH = '.gitlab/hypervibe/fly-deploy.mjs';
 
@@ -13,6 +14,8 @@ export function buildFlyPortableRuntime(): string {
   return `import { execFileSync } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 import { Buffer } from 'node:buffer';
+
+${buildFlyMountIdentityRuntime()}
 
 const required = ['FLY_API_TOKEN', 'FLY_ORGANIZATION_SLUG', 'FLY_SERVICE_BINDINGS_JSON', 'FLY_REGISTRY_APP', 'CI_REGISTRY', 'CI_REGISTRY_USER', 'CI_REGISTRY_PASSWORD', 'HYPERVIBE_REPOSITORY', 'HYPERVIBE_ENVIRONMENT', 'HYPERVIBE_PROGRAM_FINGERPRINT'];
 for (const key of required) if (!process.env[key]) throw new Error(key + ' is required');
@@ -77,6 +80,7 @@ for (const binding of bindings) {
   const exact = Array.isArray(machines) ? machines.filter((machine) => machine?.id === binding.machineId && machine?.config?.metadata?.hypervibe_managed === 'true') : [];
   if (!Array.isArray(machines) || machines.length !== 1 || exact.length !== 1) throw new Error('Fly.io App ' + binding.appName + ' does not contain only the exact reviewed Hypervibe Machine');
   const machine = exact[0];
+  const expectedMounts = flyMountIdentity(machine.config);
   if (!machine.id || !machine.instance_id || !machine.config) throw new Error('Fly.io Machine identity or configuration is incomplete');
   const config = { ...machine.config, image, metadata: { ...(machine.config.metadata || {}), hypervibe_git_sha: sha, hypervibe_repository: process.env.HYPERVIBE_REPOSITORY } };
   const updated = await fly('POST', '/v1/apps/' + encodeURIComponent(binding.appName) + '/machines/' + encodeURIComponent(machine.id), { config, current_version: machine.instance_id, skip_launch: false }, 'exact Machine update');
@@ -93,6 +97,7 @@ for (const binding of bindings) {
     await new Promise((resolve) => setTimeout(resolve, 5000));
   }
   const observedDigest = String(observed?.image_ref?.digest || '').toLowerCase();
+  if (flyMountIdentity(observed?.config) !== expectedMounts) throw new Error('Fly filesystem mount identity changed during deployment.');
   if (observed?.id !== machine.id || observed?.config?.metadata?.hypervibe_git_sha !== sha || observed?.config?.metadata?.hypervibe_repository !== process.env.HYPERVIBE_REPOSITORY || (observedDigest !== digest && observed?.config?.image !== image)) throw new Error('Fly.io Machine ' + machine.id + ' did not converge to the exact image digest');
   deployments.push({ appId: app.id, machineId: machine.id, image, digest });
 }

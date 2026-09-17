@@ -2,6 +2,7 @@ import type {
   BranchDeployRuntimeResource,
   BranchDeployTarget,
 } from '../../../domain/ports/ci-deploy.port.js';
+import { cloudRunFilesystemIdentity } from './cloudrun-volume-runtime.js';
 
 export const CLOUD_RUN_PROVIDER_COMMAND_IMAGE_ENTRYPOINT =
   'echo "Hypervibe applies the runtime command during Cloud Run release." >&2; exit 1';
@@ -40,7 +41,23 @@ export function cloudRunContainerBuildStartCommand(target: BranchDeployTarget): 
 
 /** Shared provider-API runtime used by GitHub and portable CI Cloud Run deploys. */
 export function buildCloudRunReleaseRuntime(): string {
-  return `function cloudRunReleaseReadiness(resource) {
+  return `${cloudRunFilesystemIdentity.toString()}
+function cloudRunFilesystemGuard(resource, kind) {
+  const template = kind === 'service' ? resource?.template : resource?.template?.template;
+  const fingerprint = cloudRunFilesystemIdentity(template);
+  if (fingerprint !== null && (typeof resource.uid !== 'string' || !resource.uid || typeof resource.etag !== 'string' || !resource.etag)) {
+    throw new Error('Cloud Run filesystem requires an observable UID and etag identity before update');
+  }
+  return { fingerprint, uid: resource?.uid, etag: resource?.etag };
+}
+function cloudRunVerifyFilesystem(resource, kind, expected) {
+  if (!expected || expected.fingerprint === null) return;
+  const template = kind === 'service' ? resource?.template : resource?.template?.template;
+  if (resource?.uid !== expected.uid || cloudRunFilesystemIdentity(template) !== expected.fingerprint) {
+    throw new Error('Cloud Run filesystem or resource identity changed during deployment');
+  }
+}
+function cloudRunReleaseReadiness(resource) {
   if (!resource) return { ready: false };
   const condition = resource.terminalCondition || (resource.conditions || []).find((entry) => entry.type === 'Ready');
   const state = condition?.state || condition?.status;
@@ -164,7 +181,7 @@ function cloudRunReleaseJobMismatch(job, expectedName, expectedTask) {
   if (actualContainer.resources?.cpuIdle !== undefined) return 'container resources.cpuIdle';
   if (!cloudRunReleaseSame(actualContainer.resources?.limits, expectedContainer.resources?.limits)) return 'container resource limits';
   if (!cloudRunReleaseSameList(actualTask.volumes, expectedTask.volumes)) return 'task volumes';
-  for (const field of ['serviceAccount', 'vpcAccess', 'maxRetries', 'timeout']) {
+  for (const field of ['serviceAccount', 'vpcAccess', 'executionEnvironment', 'maxRetries', 'timeout']) {
     if (!cloudRunReleaseSame(actualTask[field], expectedTask[field])) return 'task ' + field;
   }
   return null;
@@ -217,6 +234,7 @@ async function runCloudRunReleaseCommands(params) {
         ? { serviceAccount: sourceTemplate.serviceAccount || sourceTemplate.serviceAccountName }
         : {}),
       ...(sourceTemplate.vpcAccess ? { vpcAccess: sourceTemplate.vpcAccess } : {}),
+      ...(sourceTemplate.executionEnvironment ? { executionEnvironment: sourceTemplate.executionEnvironment } : {}),
       maxRetries: 1,
       timeout: '3600s',
     };
@@ -228,7 +246,11 @@ async function runCloudRunReleaseCommands(params) {
     if (observedResponse.status === 404) {
       throw new Error('Cloud Run reviewed release job ' + jobName + ' is missing; run Hypervibe plan and apply before CI deployment');
     }
-    await cloudRunReleaseResponse(observedResponse, 'Cloud Run release job lookup for ' + jobName);
+    const previousJob = await cloudRunReleaseResponse(observedResponse, 'Cloud Run release job lookup for ' + jobName);
+    const expectedJobName = 'projects/' + params.projectId + '/locations/' + params.region + '/jobs/' + jobName;
+    if (previousJob.name !== expectedJobName) throw new Error('Cloud Run release job lookup returned a different identity');
+    const filesystem = cloudRunFilesystemGuard({ ...previousJob, template: jobSpec.template }, 'job');
+    if (previousJob.etag) jobSpec.etag = previousJob.etag;
     const mutationResponse = await fetch(jobUrl, {
       method: 'PATCH', headers: params.headers, body: JSON.stringify(jobSpec),
     });
@@ -244,6 +266,7 @@ async function runCloudRunReleaseCommands(params) {
       readyJob = await params.getJson(jobUrl, { headers: params.authHeaders }, 'Cloud Run release job readiness for ' + jobName);
       const readiness = cloudRunReleaseReadiness(readyJob);
       if (readiness.ready) {
+        cloudRunVerifyFilesystem(readyJob, 'job', filesystem);
         const mismatch = cloudRunReleaseJobMismatch(
           readyJob,
           'projects/' + params.projectId + '/locations/' + params.region + '/jobs/' + jobName,

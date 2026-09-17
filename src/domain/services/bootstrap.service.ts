@@ -82,6 +82,8 @@ export async function executeBootstrap(params: {
   queueEnvVars?: Record<string, string>;
   envVarsByService?: Record<string, Record<string, string>>;
   ensureHostingProject?: boolean;
+  /** Internal reviewed hosting-identity stage: configure an empty service, never deploy code. */
+  provisionOnly?: boolean;
   runtime?: ProjectRuntime;
 }): Promise<{ success: boolean; summary: Record<string, unknown> }> {
   const tx = new InfraTransaction();
@@ -292,9 +294,12 @@ export async function executeBootstrap(params: {
   const orchestrator = new DeployOrchestrator();
   const deploySource = resolveGitDeploySource(project, params.environmentName, params.deploy);
   const deployTrigger = params.deploy?.trigger ?? 'ci';
-  const deferProviderDeployment = params.deploy?.strategy === 'branch'
+  if (params.provisionOnly && hostingAdapter.capabilities.supportsDeferredDeploy !== true) {
+    return { success: false, summary: { error: 'Hosting adapter cannot provision identities without deploying code.' } };
+  }
+  const deferProviderDeployment = params.provisionOnly === true || (params.deploy?.strategy === 'branch'
     && deployTrigger === 'ci'
-    && hostingAdapter.capabilities.supportsDeferredDeploy === true;
+    && hostingAdapter.capabilities.supportsDeferredDeploy === true);
   const sourceEnvVars = buildDeploySourceEnvVars(
     project,
     hostingAdapter,
@@ -316,6 +321,9 @@ export async function executeBootstrap(params: {
     ...(params.envVarsByService ? { envVarsByService: params.envVarsByService } : {}),
     ...(params.verifyHttpHealth ? { verifyHttpHealth: true } : {}),
     ...(deferProviderDeployment ? { deferProviderDeployment: true } : {}),
+    ...(params.provisionOnly && hostingAdapter.serviceVolumes?.staged?.runtimeMount
+      && workloads.every(service => !(environment.platformBindings.services as Record<string, { serviceId?: string }> | undefined)?.[service.name]?.serviceId)
+      ? { deferWorkload: true } : {}),
     ...(params.expectedSourceCommitSha ? { expectedSourceCommitSha: params.expectedSourceCommitSha } : {}),
     ensureProject: params.ensureHostingProject !== false,
     adapter: hostingAdapter,
@@ -366,6 +374,10 @@ export async function executeBootstrap(params: {
     },
   };
 
+  if (params.provisionOnly && deploy.success) {
+    return { success: true, summary: { ...summary, deploymentMode: 'provision', appDeploymentPending: true,
+      appDeployment: { status: 'pending_volume', reason: 'Service identity configured without code deployment. Re-plan to create and verify its retained volume before deploying.' } } };
+  }
   if (!deploy.success) {
     const cleanup = await tx.rollback();
     summary.rollback = cleanup;

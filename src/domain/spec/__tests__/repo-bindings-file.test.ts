@@ -5,13 +5,107 @@ import os from 'os';
 import path from 'path';
 import type { Environment } from '../../entities/environment.entity.js';
 import type { Project } from '../../entities/project.entity.js';
+import type { ServiceVolumeBinding, ServiceVolumeComponentBinding, ServiceVolumeTarget } from '../../ports/service-volume.port.js';
 import {
   mergeRepoPlatformBindings,
   readRepoBindingsFile,
   writeRepoBindingsForEnvironment,
 } from '../repo-bindings-file.js';
 
+describe('staged service-volume binding merge', () => {
+  const target = { projectId: 'project', environmentId: 'staging', serviceId: 'web', mountPath: '/data', instanceScope: { region: 'west' } };
+  const staged = (components: Record<string, ServiceVolumeComponentBinding>): ServiceVolumeBinding => ({ provider: 'test-host', target, state: 'staged', components });
+  const merge = (local: ServiceVolumeBinding, incoming: ServiceVolumeBinding) => mergeRepoPlatformBindings(
+    { serviceVolumes: { web: local } }, { serviceVolumes: { web: incoming } }
+  );
+
+  it('preserves omitted local components and never downgrades acknowledged recovery', () => {
+    const local = staged({ filesystem: { state: 'bound', externalId: 'fs-1' }, attachment: { state: 'identified', externalId: 'attachment-1' }, network: { state: 'creating' } });
+    const stale = staged({ filesystem: { state: 'creating' }, attachment: { state: 'creating' } });
+    expect(merge(local, stale)).toEqual({ serviceVolumes: { web: local } });
+    expect(mergeRepoPlatformBindings({ serviceVolumes: { web: local } }, { serviceVolumes: {} })).toEqual({ serviceVolumes: { web: local } });
+  });
+
+  it('advances individual components without dropping unrelated local recovery', () => {
+    const local = staged({ filesystem: { state: 'identified', externalId: 'fs-1' }, network: { state: 'creating' } });
+    const incoming = staged({ filesystem: { state: 'bound', externalId: 'fs-1' }, attachment: { state: 'identified', externalId: 'attachment-1' } });
+    expect(merge(local, incoming)).toEqual({ serviceVolumes: { web: staged({
+      filesystem: { state: 'bound', externalId: 'fs-1' }, network: { state: 'creating' }, attachment: { state: 'identified', externalId: 'attachment-1' },
+    }) } });
+  });
+
+  it('rejects conflicting acknowledged component IDs even when the incoming state is older', () => {
+    expect(() => merge(staged({ filesystem: { state: 'bound', externalId: 'fs-1' } }), staged({ filesystem: { state: 'identified', externalId: 'fs-2' } }))).toThrow(/identity conflicts/);
+  });
+
+  it.each([
+    { projectId: 'other' }, { environmentId: 'production' }, { serviceId: 'other' }, { mountPath: '/other' },
+    { instanceScope: { region: 'east' } }, { instanceScope: undefined }, { instanceScope: { region: 'west', accountId: 'account' } },
+  ] as Partial<ServiceVolumeTarget>[])('rejects target changes including scope additions and omissions: %j', (change) => {
+    const local = staged({ filesystem: { state: 'bound', externalId: 'fs-1' } });
+    expect(() => merge(local, { ...local, target: { ...target, ...change } })).toThrow(/identity conflicts/);
+  });
+
+  it('compares scope coordinates independent of object insertion order', () => {
+    const local = { ...staged({ filesystem: { state: 'bound', externalId: 'fs-1' } }), target: { ...target, instanceScope: { region: 'west', accountId: 'account' } } };
+    expect(merge(local, { ...local, target: { ...target, instanceScope: { accountId: 'account', region: 'west' } } })).toEqual({ serviceVolumes: { web: local } });
+  });
+
+  it('preserves native identity reused by distinct component resource kinds', () => {
+    const filesystem = { state: 'bound' as const, externalId: 'same-id' };
+    const policy = { state: 'identified' as const, externalId: 'same-id' };
+    expect(merge(staged({ filesystem }), staged({ policy }))).toEqual({ serviceVolumes: { web: staged({ filesystem, policy }) } });
+  });
+
+  it('rejects duplicate same-kind ownership introduced by merging separate service roots', () => {
+    const local = staged({ filesystem: { state: 'bound', externalId: 'same-id' } });
+    const incoming = { ...local, target: { ...target, serviceId: 'api' } };
+    expect(() => mergeRepoPlatformBindings({ serviceVolumes: { web: local } }, { serviceVolumes: { api: incoming } })).toThrow(/duplicate merged/);
+  });
+
+  it('preserves monotonic whole-volume recovery after adding staged merge support', () => {
+    const local: ServiceVolumeBinding = { provider: 'test-host', target, state: 'bound', externalId: 'fs-1' };
+    expect(merge(local, { provider: 'test-host', target, state: 'creating' })).toEqual({ serviceVolumes: { web: local } });
+    expect(() => merge(local, { ...local, state: 'identified', externalId: 'fs-2' })).toThrow(/identity conflicts/);
+  });
+
+  it('rejects provider changes and both directions of staged/whole-volume reinterpretation', () => {
+    const local = staged({ filesystem: { state: 'bound', externalId: 'fs-1' } });
+    const legacy: ServiceVolumeBinding = { provider: 'test-host', target, state: 'bound', externalId: 'fs-1' };
+    expect(() => merge(local, { ...local, provider: 'another-host' })).toThrow(/identity conflicts/);
+    expect(() => merge(local, legacy)).toThrow(/identity conflicts/);
+    expect(() => merge(legacy, local)).toThrow(/identity conflicts/);
+  });
+});
+
 describe('repo bindings delegated metadata', () => {
+  it.each(['whole-volume', 'staged'])('roundtrips exact value-free %s recovery even for a secret-shaped service name', (kind) => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-volume-bindings-'));
+    execFileSync('git', ['init', '-q', root]);
+    execFileSync('git', ['-C', root, 'remote', 'add', 'origin', 'https://github.com/owner/app.git']);
+    const now = new Date();
+    const project: Project = { id: 'project', name: 'app', gitRemoteUrl: 'https://github.com/owner/app.git', defaultPlatform: 'railway', policies: {}, createdAt: now, updatedAt: now };
+    const target = { projectId: 'rp', environmentId: 'staging', serviceId: 'service', mountPath: '/data', instanceScope: { region: 'west' } };
+    const serviceVolumes = { 'token-api': kind === 'staged'
+      ? { provider: 'test-host', target, state: 'staged', components: { filesystem: { state: 'bound', externalId: 'fs-1' }, attachment: { state: 'identified', externalId: 'attachment-1' }, network: { state: 'creating' } } }
+      : { provider: 'railway', state: 'creating', target } };
+    const environment: Environment = { id: 'env', projectId: project.id, name: 'staging', platformBindings: { serviceVolumes, apiToken: 'must-not-export' }, createdAt: now, updatedAt: now };
+    const disabled = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      const file = writeRepoBindingsForEnvironment(project, environment, root)!;
+      expect(file).toBeTruthy();
+      const raw = readFileSync(file, 'utf8');
+      expect(raw).not.toContain('must-not-export');
+      expect(readRepoBindingsFile(project.name, root)!.document.environments.staging.platformBindings.serviceVolumes).toEqual(serviceVolumes);
+      const imported = readRepoBindingsFile(project.name, root)!.document.environments.staging.platformBindings;
+      expect(mergeRepoPlatformBindings({}, imported).serviceVolumes).toEqual(serviceVolumes);
+    } finally {
+      if (disabled === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = disabled;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   it.each([
     ['unrelated remote', 'https://github.com/other/app.git', undefined, false],
     ['missing remote', undefined, undefined, false],

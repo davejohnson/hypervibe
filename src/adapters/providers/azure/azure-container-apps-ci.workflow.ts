@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { azureVolumeFingerprint } from './azure-volume-runtime.js';
 import type {
   BranchDeployStepResult,
   BranchDeployTarget,
@@ -132,6 +133,7 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
         with:
           script: |
             const management = 'https://management.azure.com';
+            const volumeFingerprint = ${azureVolumeFingerprint.toString().replace(/\n/g, '\n            ')};
             const apiVersion = '2026-01-01';
             const tokenResponse = await fetch(
               'https://login.microsoftonline.com/'
@@ -200,6 +202,7 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
                 throw new Error('Azure returned the wrong Container App identity for ' + appId);
               }
               const template = app.properties?.template;
+              const expectedVolumes = volumeFingerprint(template);
               const containers = [...(template?.containers || [])];
               if (containers.length !== 1) throw new Error('Hypervibe expects exactly one Container App container');
               const env = [...(containers[0].env || [])]
@@ -246,6 +249,7 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
                   && active?.image === exactImage
                   && markerValue('HYPERVIBE_DEPLOY_SHA') === sha
                   && markerValue('HYPERVIBE_IMAGE_DIGEST') === digest) {
+                  if (volumeFingerprint(observed.properties.template) !== expectedVolumes) throw new Error('Azure volume mounts changed during release.');
                   ready = observed;
                   break;
                 }

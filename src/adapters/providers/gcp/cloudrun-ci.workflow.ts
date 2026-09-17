@@ -356,7 +356,7 @@ ${buildDockerfileStep({ ...target, containerStartCommand: cloudRunContainerBuild
               throw new Error('Cloud Run ' + description + ' operation did not finish before timeout');
             }
 
-            async function waitReady(url, name, kind, expectedImage, runtimeResource) {
+            async function waitReady(url, name, kind, expectedImage, runtimeResource, filesystem) {
               let last;
               for (let attempt = 0; attempt < 120; attempt++) {
                 last = await googleJson(url, { headers: { Authorization: 'Bearer ' + token } }, 'Cloud Run ' + kind + ' readiness lookup for ' + name);
@@ -367,6 +367,7 @@ ${buildDockerfileStep({ ...target, containerStartCommand: cloudRunContainerBuild
                 if (state.ready && (!expectedImage || container.image === expectedImage)) {
                   const expectedName = 'projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/' + (kind === 'service' ? 'services/' : 'jobs/') + name;
                   if (last.name !== expectedName) throw new Error('Cloud Run ' + kind + ' ' + name + ' returned a different resource identity');
+                  cloudRunVerifyFilesystem(last, kind, filesystem);
                   const mismatch = cloudRunRuntimeMismatch(container, runtimeResource);
                   if (mismatch) throw new Error('Cloud Run ' + kind + ' ' + name + ' did not converge to the exact reviewed ' + mismatch);
                   return last;
@@ -417,6 +418,7 @@ ${releaseRuntime}
               const expectedName = 'projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/services/' + serviceName;
               if (current.name !== expectedName) throw new Error('Cloud Run service lookup returned a different resource identity');
               const runtimeResource = cloudRunRuntimeResource(runtimeResources, 'service', serviceName);
+              const filesystem = cloudRunFilesystemGuard(current, 'service');
               const template = current.template || {};
               const containers = Array.isArray(template.containers) && template.containers.length > 0 ? [...template.containers] : [primaryServiceContainer(current)];
               containers[0] = cloudRunContainerWithRuntime(containers[0], process.env.IMAGE_URI, runtimeResource);
@@ -429,10 +431,10 @@ ${releaseRuntime}
               const operation = await googleJson(url + '?updateMask=' + updateMask, {
                 method: 'PATCH',
                 headers,
-                body: JSON.stringify({ ...(annotations ? { annotations } : {}), template }),
+                body: JSON.stringify({ ...(annotations ? { annotations } : {}), ...(filesystem.etag ? { etag: filesystem.etag } : {}), template }),
               }, 'Cloud Run service deployment for ' + serviceName);
               await waitOperation(operation, 'service ' + serviceName + ' deployment');
-              await waitReady(url, serviceName, 'service', process.env.IMAGE_URI, runtimeResource);
+              await waitReady(url, serviceName, 'service', process.env.IMAGE_URI, runtimeResource, filesystem);
             }
 
             for (const jobName of jobNames) {
@@ -441,19 +443,20 @@ ${releaseRuntime}
               const expectedName = 'projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/jobs/' + jobName;
               if (current.name !== expectedName) throw new Error('Cloud Run job lookup returned a different resource identity');
               const runtimeResource = cloudRunRuntimeResource(runtimeResources, 'job', jobName);
+              const filesystem = cloudRunFilesystemGuard(current, 'job');
               const template = current.template || {};
               const taskTemplate = template.template || {};
               const containers = Array.isArray(taskTemplate.containers) && taskTemplate.containers.length > 0 ? [...taskTemplate.containers] : [primaryJobContainer(current)];
               containers[0] = cloudRunContainerWithRuntime(containers[0], process.env.IMAGE_URI, runtimeResource);
               taskTemplate.containers = containers;
               template.template = taskTemplate;
-              const operation = await googleJson(url, {
+              const operation = await googleJson(url + '?updateMask=template.template.containers', {
                 method: 'PATCH',
                 headers,
-                body: JSON.stringify({ template }),
+                body: JSON.stringify({ ...(filesystem.etag ? { etag: filesystem.etag } : {}), template }),
               }, 'Cloud Run job deployment for ' + jobName);
               await waitOperation(operation, 'job ' + jobName + ' deployment');
-              await waitReady(url, jobName, 'job', process.env.IMAGE_URI, runtimeResource);
+              await waitReady(url, jobName, 'job', process.env.IMAGE_URI, runtimeResource, filesystem);
             }
 `,
     requiredSecrets: CLOUDRUN_CI_REQUIRED_SECRETS,

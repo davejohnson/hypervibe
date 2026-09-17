@@ -195,6 +195,15 @@ export interface ProviderMetadata {
     hosting?: {
       /** Workload kinds this adapter can reconcile through the complete hosting lifecycle. */
       workloadKinds: readonly WorkloadKind[];
+      /** Explicit, retain-only filesystem mounts; never implicit service provisioning. */
+      serviceVolumes?: {
+        workloadKinds: readonly WorkloadKind[];
+        retention: 'retain-only';
+        /** Workload-create mounts bind storage before first workload creation, never by implicit replacement. */
+        attachmentTiming?: 'service-update' | 'workload-create';
+      };
+      /** Native product limitation, distinct from an unimplemented Hypervibe capability. */
+      serviceVolumesUnsupported?: { reason: string; documentationUrl: string };
       /** Environment custom domains are either fully managed or explicitly unsupported. */
       customDomains: 'managed' | 'unsupported';
       /** Whether traffic DNS may be proxied or must remain directly resolvable. */
@@ -462,6 +471,25 @@ export class ProviderRegistry {
         throw new Error(
           `Provider "${provider.metadata.name}" hosting workloadKinds must contain one or more unique supported workload kinds.`
         );
+      }
+      const volumes = hostingLifecycle.serviceVolumes;
+      const unsupportedVolumes = hostingLifecycle.serviceVolumesUnsupported;
+      if (volumes !== undefined && unsupportedVolumes !== undefined) {
+        throw new Error(`Provider "${provider.metadata.name}" serviceVolumes and serviceVolumesUnsupported are mutually exclusive.`);
+      }
+      if (volumes !== undefined && (!volumes || volumes.retention !== 'retain-only'
+        || (volumes.attachmentTiming !== undefined && !['service-update', 'workload-create'].includes(volumes.attachmentTiming))
+        || !Array.isArray(volumes.workloadKinds) || volumes.workloadKinds.length === 0
+        || new Set(volumes.workloadKinds).size !== volumes.workloadKinds.length
+        || volumes.workloadKinds.some((kind) => !workloadKinds.includes(kind)))) {
+        throw new Error(`Provider "${provider.metadata.name}" serviceVolumes must declare retain-only storage for unique implemented hosting workload kinds.`);
+      }
+      if (unsupportedVolumes !== undefined) {
+        const documentation = z.string().url().safeParse(unsupportedVolumes?.documentationUrl);
+        if (!unsupportedVolumes || typeof unsupportedVolumes.reason !== 'string' || !unsupportedVolumes.reason.trim()
+          || !documentation.success || new URL(documentation.data).protocol !== 'https:') {
+          throw new Error(`Provider "${provider.metadata.name}" serviceVolumesUnsupported must declare a non-empty reason and an HTTPS documentation URL.`);
+        }
       }
     }
     const connectivity = [

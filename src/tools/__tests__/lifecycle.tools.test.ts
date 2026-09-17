@@ -80,6 +80,38 @@ async function makeFullClient() {
 }
 
 describe('hv_destroy', () => {
+  it('reports retained volume drift in status even after volume intent is omitted', async () => {
+    const { SpecStore } = await import('../../domain/spec/spec.store.js');
+    const project = new ProjectRepository().create({ name: 'volume-status', defaultPlatform: 'railway' });
+    new SpecStore().replace(project, { version: 1, project: project.name, environments: { staging: { hosting: { provider: 'railway' }, services: { web: {} } } } });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: {
+      provider: 'railway', projectId: 'p', environmentId: 'e', services: { web: { serviceId: 's' } },
+      serviceVolumes: { web: { provider: 'railway', state: 'creating', target: { projectId: 'p', environmentId: 'e', serviceId: 's', mountPath: '/data' } } },
+    } });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: false, error: 'synthetic connection unavailable' });
+    const client = await makeFullClient();
+    try {
+      const result = await client.call('hv_status', { project: project.name, env: 'staging' });
+      expect(result.ok).toBe(true);
+      expect(result.data.inSync).toBe(false);
+      expect(result.data.drift).toContainEqual(expect.objectContaining({ id: 'volume:web', resource: expect.objectContaining({ kind: 'volume' }) }));
+    } finally { await client.close(); }
+  });
+  it('preserves retained volume recovery during project, environment and service deletion', async () => {
+    const project = new ProjectRepository().create({ name: 'retained-volume' });
+    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: { serviceVolumes: { web: { state: 'creating' } } } });
+    new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {} });
+    const client = await makeClient();
+    try {
+      for (const selector of [{ scope: 'project' }, { scope: 'environment', env: 'staging' }, { scope: 'service', name: 'web' }]) {
+        const result = await client.call('hv_destroy', { project: project.name, ...selector, confirm: true });
+        expect(result.ok).toBe(false);
+        expect(result.error.message).toContain('volume');
+      }
+      expect(new EnvironmentRepository().findById(environment.id)?.platformBindings.serviceVolumes).toEqual({ web: { state: 'creating' } });
+      expect(new ProjectRepository().findById(project.id)).not.toBeNull();
+    } finally { await client.close(); }
+  });
   it('rejects selectors for another destroy scope before confirmation or deletion', async () => {
     new ProjectRepository().create({ name: 'scope-safe-app' });
     const t = await makeClient();

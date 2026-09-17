@@ -53,6 +53,10 @@ const DATABASE_ENV_ALIAS_SOURCES = [
 export const databaseEnvAliasSourceSchema = z.enum(DATABASE_ENV_ALIAS_SOURCES);
 
 export const serviceSpecSchema = z.object({
+  /** Retained filesystem storage; not object/bucket storage. */
+  volume: z.object({
+    mountPath: z.string().regex(/^\/(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*)(?:\/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$/, 'Use a canonical absolute mount path, for example /data'),
+  }).strict().optional(),
   workloadKind: z.enum(['web', 'worker', 'cron'], {
     errorMap: () => ({ message: "workloadKind 'job' was removed; use 'worker' (always-on) or 'cron' (scheduled, requires cronSchedule). See README migration notes." }),
   }).default('web'),

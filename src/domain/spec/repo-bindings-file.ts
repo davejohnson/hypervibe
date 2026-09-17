@@ -6,6 +6,8 @@ import type { Project } from '../entities/project.entity.js';
 import { findRepoRoot, readRepoSpecFile, repositoryMatchesProjectIdentity, repoSpecEnabled } from './repo-spec-file.js';
 import { withStorageInstanceScopes } from '../services/storage-instance-identity.js';
 import { primaryWorkspaceDirectory } from '../../lib/workspace-context.js';
+import { parseServiceVolumeBindings } from '../services/service-volume.service.js';
+import type { ServiceVolumeComponentBinding } from '../ports/service-volume.port.js';
 
 // Bindings are the inverse of the spec's source-of-truth contract: the DB
 // column `environments.platform_bindings` is authoritative (it holds data the
@@ -74,6 +76,14 @@ function mergeSanitizedBindingObject(
   return merged;
 }
 
+function mergeVolumeRecovery<T extends ServiceVolumeComponentBinding>(previous: T, next: T, name: string): T {
+  if (previous.externalId !== undefined && next.externalId !== undefined && previous.externalId !== next.externalId) {
+    throw new Error(`Repository service-volume identity conflicts with retained local state for ${name}.`);
+  }
+  const rank = { creating: 0, identified: 1, bound: 2 };
+  return rank[next.state] >= rank[previous.state] ? next : previous;
+}
+
 /**
  * Overlay the sanitized repository export onto authoritative local bindings.
  * Top-level bindings absent from the export retain the historical merge
@@ -84,13 +94,49 @@ export function mergeRepoPlatformBindings(
   existing: Record<string, unknown>,
   repoBindings: Record<string, unknown>
 ): Record<string, unknown> {
+  const localVolumes = parseServiceVolumeBindings({ platformBindings: existing });
+  const incomingVolumes = parseServiceVolumeBindings({ platformBindings: repoBindings });
+  if (!localVolumes || !incomingVolumes) {
+    throw new Error('Malformed retained service-volume bindings; refusing to overwrite recovery state.');
+  }
   const merged: Record<string, unknown> = { ...existing, ...repoBindings };
   for (const [key, repoValue] of Object.entries(repoBindings)) {
+    if (key === 'serviceVolumes' && existing[key] !== undefined) {
+      const retained = { ...incomingVolumes, ...localVolumes };
+      for (const [name, next] of Object.entries(incomingVolumes)) {
+        const previous = localVolumes[name];
+        if (!previous) { retained[name] = next; continue; }
+        const previousTarget = previous.target;
+        const nextTarget = next.target;
+        if (previous.provider !== next.provider
+          || (['projectId', 'environmentId', 'serviceId', 'mountPath'] as const).some((field) => previousTarget[field] !== nextTarget[field])
+          || JSON.stringify(Object.entries(previousTarget.instanceScope ?? {}).sort()) !== JSON.stringify(Object.entries(nextTarget.instanceScope ?? {}).sort())
+          || (previous.state === 'staged') !== (next.state === 'staged')) {
+          throw new Error(`Repository service-volume identity conflicts with retained local state for ${name}.`);
+        }
+        if (previous.state === 'staged' && next.state === 'staged') {
+          const components = { ...next.components, ...previous.components };
+          for (const [key, component] of Object.entries(next.components)) {
+            components[key] = previous.components[key]
+              ? mergeVolumeRecovery(previous.components[key], component, `${name}/${key}`)
+              : component;
+          }
+          retained[name] = { ...previous, components };
+        } else if (previous.state !== 'staged' && next.state !== 'staged') {
+          retained[name] = mergeVolumeRecovery(previous, next, name);
+        }
+      }
+      merged[key] = retained;
+      continue;
+    }
     const existingRecord = asRecord(existing[key]);
     const repoRecord = asRecord(repoValue);
     if (existingRecord && repoRecord) {
       merged[key] = mergeSanitizedBindingObject(existingRecord, repoRecord);
     }
+  }
+  if (!parseServiceVolumeBindings({ platformBindings: merged })) {
+    throw new Error('Malformed or duplicate merged service-volume identity; refusing to overwrite recovery state.');
   }
   return merged;
 }
@@ -129,6 +175,18 @@ function presentStorageInstanceScopes(platformBindings: Record<string, unknown>)
   };
 }
 
+function sanitizePlatformBindings(raw: Record<string, unknown>): Record<string, unknown> {
+  const sanitized = sanitize(raw) as Record<string, unknown>;
+  if (raw.serviceVolumes !== undefined) {
+    const serviceVolumes = parseServiceVolumeBindings({ platformBindings: raw });
+    if (!serviceVolumes) throw new Error('Malformed retained service-volume bindings cannot be exported or imported safely.');
+    // Logical names can contain "token". Only this strictly value-free identity
+    // schema bypasses generic key redaction; arbitrary metadata never does.
+    sanitized.serviceVolumes = serviceVolumes;
+  }
+  return sanitized;
+}
+
 function parseDocument(raw: unknown, file: string, projectName?: string): RepoBindingsFile {
   const parsed = repoBindingsFileSchema.safeParse(raw);
   if (!parsed.success) {
@@ -151,7 +209,7 @@ function parseDocument(raw: unknown, file: string, projectName?: string): RepoBi
   const normalized: RepoBindingsFile['environments'] = {};
   for (const [envName, value] of Object.entries(parsed.data.environments)) {
     normalized[envName] = {
-      platformBindings: sanitize(value.platformBindings) as Record<string, unknown>,
+      platformBindings: sanitizePlatformBindings(value.platformBindings),
     };
   }
   return {
@@ -222,7 +280,7 @@ export function writeRepoBindingsForEnvironment(project: Project, environment: E
     : parseDocument(parseBindingsJson(raw, file), file, project.name);
 
   const platformBindings = presentStorageInstanceScopes(
-    sanitize(environment.platformBindings) as Record<string, unknown>
+    sanitizePlatformBindings(environment.platformBindings)
   );
   if (Object.keys(platformBindings).length === 0) {
     delete current.environments[environment.name];

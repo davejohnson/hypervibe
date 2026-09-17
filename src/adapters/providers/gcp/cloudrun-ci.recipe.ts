@@ -160,13 +160,14 @@ function ready(resource) {
   const state = condition?.state || condition?.status;
   return (state === 'CONDITION_SUCCEEDED' || state === 'True' || (!condition && resource?.uri)) && resource?.reconciling !== true;
 }
-async function waitReady(url, name, kind, expectedImage, runtimeResource) {
+async function waitReady(url, name, kind, expectedImage, runtimeResource, filesystem) {
   for (let attempt = 0; attempt < 120; attempt++) {
     const value = await json(url, { headers: auth }, 'Cloud Run ' + kind + ' observation');
     const container = kind === 'service' ? value?.template?.containers?.[0] : value?.template?.template?.containers?.[0];
     if (ready(value) && container?.image === expectedImage) {
       const expectedName = 'projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/' + (kind === 'service' ? 'services/' : 'jobs/') + name;
       if (value.name !== expectedName) throw new Error('Cloud Run returned a different ' + kind + ' identity');
+      cloudRunVerifyFilesystem(value, kind, filesystem);
       const mismatch = cloudRunRuntimeMismatch(container, runtimeResource);
       if (mismatch) throw new Error('Cloud Run ' + kind + ' ' + name + ' did not converge to the exact reviewed ' + mismatch);
       return value;
@@ -194,6 +195,7 @@ for (const name of services) {
   const current = await json(url, { headers: auth }, 'Cloud Run service lookup');
   if (current.name !== 'projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/services/' + name) throw new Error('Cloud Run returned a different service identity');
   const runtimeResource = cloudRunRuntimeResource(runtimeResources, 'service', name);
+  const filesystem = cloudRunFilesystemGuard(current, 'service');
   const template = { ...(current.template || {}) };
   const containers = Array.isArray(template.containers) && template.containers.length ? [...template.containers] : [{}];
   containers[0] = cloudRunContainerWithRuntime(containers[0], exactImage, runtimeResource);
@@ -201,8 +203,8 @@ for (const name of services) {
   const releaseHash = rollback ? undefined : releaseHashes.get(name);
   const annotations = releaseHash ? { ...(current.annotations || {}), [${JSON.stringify(CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION)}]: releaseHash } : current.annotations;
   const updateMask = releaseHash ? 'annotations,template.containers' : 'template.containers';
-  await waitOperation(await json(url + '?updateMask=' + updateMask, { method: 'PATCH', headers, body: JSON.stringify({ ...(annotations ? { annotations } : {}), template }) }, 'Cloud Run service update'), 'Cloud Run service update');
-  const observed = await waitReady(url, name, 'service', exactImage, runtimeResource);
+  await waitOperation(await json(url + '?updateMask=' + updateMask, { method: 'PATCH', headers, body: JSON.stringify({ ...(annotations ? { annotations } : {}), ...(filesystem.etag ? { etag: filesystem.etag } : {}), template }) }, 'Cloud Run service update'), 'Cloud Run service update');
+  const observed = await waitReady(url, name, 'service', exactImage, runtimeResource, filesystem);
   deployments.push({ kind: 'service', name, imageUri: exactImage, imageDigest: digest, uri: observed.uri || null });
 }
 for (const name of jobs) {
@@ -210,13 +212,14 @@ for (const name of jobs) {
   const current = await json(url, { headers: auth }, 'Cloud Run job lookup');
   if (current.name !== 'projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/jobs/' + name) throw new Error('Cloud Run returned a different job identity');
   const runtimeResource = cloudRunRuntimeResource(runtimeResources, 'job', name);
+  const filesystem = cloudRunFilesystemGuard(current, 'job');
   const template = { ...(current.template || {}) };
   const task = { ...(template.template || {}) };
   const containers = Array.isArray(task.containers) && task.containers.length ? [...task.containers] : [{}];
   containers[0] = cloudRunContainerWithRuntime(containers[0], exactImage, runtimeResource);
   task.containers = containers; template.template = task;
-  await waitOperation(await json(url + '?updateMask=template.template.containers', { method: 'PATCH', headers, body: JSON.stringify({ template }) }, 'Cloud Run job update'), 'Cloud Run job update');
-  await waitReady(url, name, 'job', exactImage, runtimeResource);
+  await waitOperation(await json(url + '?updateMask=template.template.containers', { method: 'PATCH', headers, body: JSON.stringify({ ...(filesystem.etag ? { etag: filesystem.etag } : {}), template }) }, 'Cloud Run job update'), 'Cloud Run job update');
+  await waitReady(url, name, 'job', exactImage, runtimeResource, filesystem);
   deployments.push({ kind: 'job', name, imageUri: exactImage, imageDigest: digest });
 }
 await writeFile('.hypervibe-release.json', JSON.stringify({ version: 1, provider: 'cloudrun', repository: process.env.HYPERVIBE_REPOSITORY, environment: process.env.HYPERVIBE_ENVIRONMENT, sha, programFingerprint: process.env.HYPERVIBE_PROGRAM_FINGERPRINT, providerResources, imageUri: exactImage, deployments }) + '\\n', { mode: 0o600 });

@@ -21,6 +21,7 @@ export interface FlyMachineConfig {
   init?: { cmd?: string[]; entrypoint?: string[]; exec?: string[] };
   guest?: { cpu_kind?: string; cpus?: number; memory_mb?: number };
   metadata?: Record<string, string>;
+  mounts?: Array<{ volume: string; path: string; [key: string]: unknown }>;
   restart?: Record<string, unknown>;
   services?: Array<{
     internal_port?: number;
@@ -49,6 +50,17 @@ export interface FlyMachine {
   config?: FlyMachineConfig;
   image_ref?: { registry?: string; repository?: string; tag?: string; digest?: string };
   checks?: Array<{ name?: string; status?: string; output?: string }>;
+}
+
+/** Native response fields; missing attachment/configuration is not absence. */
+export interface FlyVolume {
+  id: string;
+  name?: string;
+  state?: string;
+  size_gb?: number;
+  region?: string;
+  encrypted?: boolean;
+  attached_machine_id?: string | null;
 }
 
 export interface FlyIpAssignment {
@@ -269,6 +281,54 @@ export class FlyClient {
       throw new Error(`Fly.io returned an invalid Machine list for app ${appName}.`);
     }
     return response;
+  }
+
+  async listVolumes(appName: string): Promise<FlyVolume[]> {
+    const response = await this.request<FlyVolume[]>(
+      'GET', `/v1/apps/${encodeURIComponent(appName)}/volumes`
+    );
+    if (!Array.isArray(response) || response.some((volume) => (
+      !volume || typeof volume.id !== 'string' || !volume.id.trim()
+    ))) {
+      throw new Error(`Fly.io returned an invalid volume identity list for app ${appName}.`);
+    }
+    if (new Set(response.map((volume) => volume.id)).size !== response.length) {
+      throw new Error(`Fly.io returned duplicate volume identities for app ${appName}.`);
+    }
+    return response;
+  }
+
+  async getVolume(appName: string, volumeId: string): Promise<FlyVolume | null> {
+    try {
+      const volume = await this.request<FlyVolume>(
+        'GET', `/v1/apps/${encodeURIComponent(appName)}/volumes/${encodeURIComponent(volumeId)}`
+      );
+      if (!volume || volume.id !== volumeId) {
+        throw new Error(`Fly.io returned an unexpected volume identity instead of ${volumeId}.`);
+      }
+      return volume;
+    } catch (error) {
+      if (error instanceof FlyApiError && error.status === 404) return null;
+      throw error;
+    }
+  }
+
+  async createVolume(input: {
+    appName: string; name: string; region: string; sizeGb: number;
+  }): Promise<FlyVolume> {
+    if (!Number.isInteger(input.sizeGb) || input.sizeGb < 1 || input.sizeGb > 500) {
+      throw new Error('Fly.io volume capacity must be an integer from 1 to 500 GB.');
+    }
+    const volume = await this.request<FlyVolume>(
+      'POST', `/v1/apps/${encodeURIComponent(input.appName)}/volumes`,
+      { body: { name: input.name, region: input.region, size_gb: input.sizeGb, encrypted: true } }
+    );
+    // Return the acknowledgement immediately. Lifecycle orchestration persists
+    // this exact ID before independently observing readiness and attachment.
+    if (!volume || typeof volume.id !== 'string' || !volume.id.trim()) {
+      throw new Error('Fly.io acknowledged volume creation without a durable volume ID.');
+    }
+    return volume;
   }
 
   async getMachine(appName: string, machineId: string): Promise<FlyMachine | null> {

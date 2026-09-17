@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { parse } from 'yaml';
+import { Buffer } from 'node:buffer';
 import type { BranchDeployTarget } from '../../../../domain/ports/ci-deploy.port.js';
 import { providerRegistry } from '../../../../domain/registry/provider.registry.js';
 import { formatFlyOrganizationBinding, formatFlyServiceBinding } from '../fly.binding.js';
@@ -29,6 +31,63 @@ function target(): BranchDeployTarget {
 }
 
 describe('Fly.io exact-SHA workflow', () => {
+  it.each([
+    { kind: 'github', dropMount: false }, { kind: 'portable', dropMount: false },
+    { kind: 'github', dropMount: true }, { kind: 'portable', dropMount: true },
+  ])('verifies $kind image updates with provider mount loss=$dropMount', async ({ kind, dropMount }) => {
+    const deployTarget = target();
+    const sha = 'a'.repeat(40);
+    const digest = `sha256:${'b'.repeat(64)}`;
+    const image = `registry.fly.io/hv-web-app@${digest}`;
+    const mounts = [{ volume: 'vol_retained', path: '/data' }];
+    let machine = {
+      id: 'machine-1', instance_id: 'version-1', state: 'started', checks: [],
+      config: { image: 'old-image', mounts, metadata: { hypervibe_managed: 'true' } },
+    };
+    const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+      const path = new URL(url).pathname;
+      if (init.method === 'POST') {
+        expect(path).toBe('/v1/apps/hv-web-app/machines/machine-1');
+        const body = JSON.parse(String(init.body));
+        expect(body.config.mounts).toEqual(mounts);
+        expect(body.current_version).toBe('version-1');
+        machine = { ...machine, instance_id: 'version-2', config: body.config };
+        if (dropMount) machine.config.mounts = [];
+        return Response.json(machine);
+      }
+      if (path.endsWith('/machines')) return Response.json([machine]);
+      if (path.endsWith('/machines/machine-1')) return Response.json(machine);
+      if (path.endsWith('/hv-web-app')) return Response.json({ id: 'fly-app-1', name: 'hv-web-app', organization: { slug: 'hypervibe-test' } });
+      throw new Error(`Unexpected provider operation ${path}`);
+    });
+    const env = {
+      FLY_API_TOKEN: 'test-token', FLY_ORGANIZATION_SLUG: 'hypervibe-test',
+      FLY_SERVICE_BINDINGS_JSON: JSON.stringify(deployTarget.providerServiceIds),
+      FLY_REGISTRY_APP: 'hv-web-app', FLY_IMAGE_URI: image, DEPLOY_SHA: sha,
+      GITHUB_REPOSITORY: 'example/project', HYPERVIBE_REPOSITORY: 'example/project',
+      HYPERVIBE_ENVIRONMENT: 'production', HYPERVIBE_PROGRAM_FINGERPRINT: 'fingerprint',
+      CI_REGISTRY: 'registry.example', CI_REGISTRY_USER: 'user', CI_REGISTRY_PASSWORD: 'test-password',
+    };
+    const source = kind === 'portable'
+      ? buildFlyPortableRecipe(deployTarget).runtime.content.replace(/^import .*;\n/gm, '')
+      : (parse(buildFlyGitHubActionsSteps(deployTarget).steps) as Array<{ name?: string; with?: { script?: string } }>)
+          .find((step) => step.name === 'Deploy immutable digest to existing Fly.io Machines')!.with!.script!;
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+    const run = new AsyncFunction('process', 'fetch', 'Buffer', 'AbortSignal', 'readFile', 'writeFile', 'execFileSync', 'core', source);
+    const execution = run({ env }, fetchMock, Buffer, AbortSignal,
+      async (path: string) => path === '.hypervibe-deploy-sha' ? sha : 'registry.example/image:tag',
+      vi.fn(), (_path: string, args: string[]) => args[0] === 'image' ? JSON.stringify([image]) : '',
+      { info: vi.fn(), setOutput: vi.fn() });
+    if (dropMount) {
+      await expect(execution).rejects.toThrow(/mount|filesystem/i);
+      return;
+    }
+    await execution;
+    expect(fetchMock.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(1);
+    expect(machine.config.mounts).toEqual(mounts);
+    expect(machine.config.image).toBe(image);
+  });
+
   it('updates only existing exact App and Machine identities to an immutable digest', () => {
     const result = buildFlyGitHubActionsSteps(target());
 

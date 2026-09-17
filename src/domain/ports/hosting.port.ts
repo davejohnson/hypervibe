@@ -297,6 +297,7 @@ export function parseHostingBindings(
  * Hosting adapters handle deploying services to cloud platforms.
  */
 export interface IHostingAdapter {
+  readonly serviceVolumes?: import('./service-volume.port.js').IServiceVolumes;
   readonly name: string;
 
   /** Platform capabilities */

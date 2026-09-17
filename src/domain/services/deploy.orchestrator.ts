@@ -6,6 +6,7 @@ import type {
   HostingServiceDeleteOptions,
   HostingServiceDeleteScope,
   IProviderAdapter,
+  DeploymentMutationOptions,
 } from '../ports/provider.port.js';
 import {
   createHostingServiceCreateRecovery,
@@ -22,6 +23,7 @@ import { providerRegistry } from '../registry/provider.registry.js';
 import { InfraTransaction, type InfraTransactionRollbackResult } from './infra.transaction.js';
 import { snapshotEnvironmentBindings } from './local-state.transaction.js';
 import { prepareHostingBindingTransition } from './hosting-binding-transition.js';
+import { parseServiceVolumeBindings } from './service-volume.service.js';
 
 export interface DeployOptions {
   project: Project;
@@ -35,6 +37,8 @@ export interface DeployOptions {
    * code. Used when CI will deploy the exact commit after hv_apply succeeds.
    */
   deferProviderDeployment?: boolean;
+  /** App namespace only; mount-before-workload providers use this identity stage. */
+  deferWorkload?: boolean;
   /** Exact code revision authorized by the persisted plan for deferred bootstrap. */
   expectedSourceCommitSha?: string;
   /** Project creation is a separate reviewed plan action during hv_apply. */
@@ -551,17 +555,28 @@ export class DeployOrchestrator {
             ...(options.envVars ?? {}),
             ...(options.envVarsByService?.[service.name] ?? {}),
           };
-          const result = options.deferProviderDeployment
+          const mutationOptions: DeploymentMutationOptions = {
+            ...(options.deferProviderDeployment ? { deferDeployment: true } : {}),
+            ...(options.deferWorkload ? { deferWorkload: true } : {}),
+            ...(options.expectedSourceCommitSha ? { expectedSourceCommitSha: options.expectedSourceCommitSha } : {}),
+          };
+          const retainedVolumes = parseServiceVolumeBindings(environment);
+          if (!retainedVolumes) throw new Error('Malformed retained filesystem identity blocks deployment.');
+          const retainedVolume = Object.hasOwn(retainedVolumes, service.name) ? retainedVolumes[service.name] : undefined;
+          const driver = (options.adapter as IProviderAdapter).serviceVolumes?.staged;
+          if (retainedVolume?.state === 'staged' && !options.deferWorkload) {
+            if (Object.values(retainedVolume.components).some(c => c.state !== 'bound')) throw new Error('Retained filesystem components must converge before deploying a workload.');
+            if (driver?.runtimeMount) {
+              mutationOptions.serviceVolume = driver.runtimeMount(retainedVolume.target, retainedVolume.components);
+              if (!mutationOptions.serviceVolume) throw new Error('Exact acknowledged filesystem identity is required for workload creation.');
+            }
+          }
+          const result = Object.keys(mutationOptions).length
             ? await options.adapter.deploy(
               service,
               environment,
               serviceEnvVars,
-              {
-                deferDeployment: true,
-                ...(options.expectedSourceCommitSha
-                  ? { expectedSourceCommitSha: options.expectedSourceCommitSha }
-                  : {}),
-              }
+              mutationOptions
             )
             : await options.adapter.deploy(service, environment, serviceEnvVars);
 

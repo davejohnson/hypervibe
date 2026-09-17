@@ -7,6 +7,7 @@ import type { LocalSnapshot } from '../plan.types.js';
 import type { Service } from '../../entities/service.entity.js';
 import type { Component } from '../../entities/component.entity.js';
 import { bindingIdentityFingerprint } from '../../services/binding-identity.js';
+import { fingerprintObservedState, isManagedCiBindingRoot } from '../converge.executor.js';
 
 function spec(overrides: Record<string, unknown> = {}): EnvironmentSpec {
   return environmentSpecSchema.parse({
@@ -129,6 +130,14 @@ function localWithDomain(params: {
 }
 
 describe('diffEnvironment — in sync', () => {
+  it('distinguishes a bound namespace from its not-yet-created workload', () => {
+    const live = observed({ services: [observedWeb({ status: 'empty', identityOnly: true } as Partial<ObservedService>)] });
+    const result = diffEnvironment({ spec: spec(), envName: 'staging', observed: live, local: local() });
+    const action = result.actions.find(a => a.id === 'service:web')!;
+    expect(action).toMatchObject({ type: 'update', requiresConfirm: true, billable: true, metadata: { workloadCreateRequired: true } });
+    expect(isManagedCiBindingRoot(action)).toBe(true);
+    expect(fingerprintObservedState(live)).not.toBe(fingerprintObservedState(observed({ services: [observedWeb({ status: 'empty' })] })));
+  });
   it('returns noops when everything matches', () => {
     const result = diffEnvironment({ spec: spec(), envName: 'production', observed: observed(), local: local() });
     expect(result.actions.every((a) => a.type === 'noop')).toBe(true);

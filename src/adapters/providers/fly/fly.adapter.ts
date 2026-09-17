@@ -50,6 +50,8 @@ import {
   FLY_CI_REQUIRED_SECRETS,
 } from './fly-ci.workflow.js';
 import { buildFlyPortableRecipe } from './fly-ci.recipe.js';
+import { FlyServiceVolumes } from './fly-service-volume.js';
+import { flyMountIdentity } from './fly-mount-identity.js';
 
 const BOOTSTRAP_IMAGE = 'flyio/hellofly:latest';
 const DEFAULT_INTERNAL_PORT = 8080;
@@ -90,6 +92,10 @@ export class FlyAdapter implements IProviderAdapter {
   private credentials: FlyCredentials | null = null;
   private client: FlyClient | null = null;
   private region = 'iad';
+  readonly serviceVolumes = new FlyServiceVolumes(() => {
+    if (!this.client) throw new Error('Fly.io filesystem observation requires a verified connection.');
+    return this.client;
+  }, () => this.region);
 
   async connect(credentials: unknown): Promise<void> {
     this.credentials = FlyCredentialsSchema.parse(credentials);
@@ -217,7 +223,7 @@ export class FlyAdapter implements IProviderAdapter {
     service: Service,
     environment: Environment,
     envVars: Record<string, string>,
-    _options: DeploymentMutationOptions = {}
+    options: DeploymentMutationOptions = {}
   ): Promise<DeployResult> {
     if (!this.client || !this.credentials) {
       throw new Error('Not connected. Call connect() first.');
@@ -297,6 +303,26 @@ export class FlyAdapter implements IProviderAdapter {
         true,
         boundIdentity?.machineId
       );
+      if (options.deferWorkload) {
+        if (machine) throw new Error('Fly app-only bootstrap cannot replace an existing Machine.');
+        return {
+          serviceId: service.id, externalId: binding, status: 'configured',
+          receipt: {
+            success: true, message: `Prepared Fly app identity ${app.name}; disk and Machine require separate reviewed actions.`,
+            data: { serviceId: binding, createdService, deploymentDeferred: true, workloadDeferred: true, resourceType: 'app' },
+          },
+        };
+      }
+      const volume = options.serviceVolume;
+      if (volume) {
+        const stableServiceId = formatFlyServiceBinding({ organizationSlug: this.credentials.organizationSlug, appId: app.id, appName: app.name });
+        if (volume.target.serviceId !== stableServiceId || volume.target.projectId !== scope
+          || volume.target.environmentId !== parseHostingBindings(environment).environmentId
+          || volume.mountPath !== volume.target.mountPath || volume.target.instanceScope?.serviceName !== service.name) {
+          throw new Error('Fly filesystem attachment is outside the authorized workload scope.');
+        }
+        await this.serviceVolumes.assertReadyMount(volume.target, volume.externalId, machine);
+      }
       const runtimeVars = this.runtimeEnvVars(envVars);
       const secretVersion = Object.keys(runtimeVars).length > 0
         ? await this.client.updateSecrets(app.name, runtimeVars)
@@ -318,6 +344,7 @@ export class FlyAdapter implements IProviderAdapter {
         machine?.config?.image ?? BOOTSTRAP_IMAGE,
         machine?.config
       );
+      if (volume) config.mounts = [{ volume: volume.externalId, path: volume.mountPath }];
       let appliedMachine: FlyMachine;
       if (machine) {
         mutationAttempted = true;
@@ -347,7 +374,9 @@ export class FlyAdapter implements IProviderAdapter {
           `Fly.io acknowledged Machine ${appliedMachine.id}, but it was not observable afterward.`
         );
       }
+      if (flyMountIdentity(config) !== flyMountIdentity(observedMachine.config)) throw new Error('Fly filesystem mount identity changed during workload configuration.');
       this.assertMachineIdentity(observedMachine, service, environment);
+      if (volume) this.serviceVolumes.assertMachineMount(volume.target, volume.externalId, observedMachine);
       binding = formatFlyServiceBinding({
         organizationSlug: this.credentials.organizationSlug,
         appId: app.id,
@@ -454,6 +483,7 @@ export class FlyAdapter implements IProviderAdapter {
       if (!observed) {
         throw new Error(`Fly.io Machine ${updated.id} was not observable after secret sync.`);
       }
+      if (flyMountIdentity(resolved.machine.config) !== flyMountIdentity(observed.config)) throw new Error('Fly filesystem mount identity changed during secret sync.');
       if (
         resolved.machine.instance_id
         && (!observed.instance_id || observed.instance_id === resolved.machine.instance_id)
@@ -522,6 +552,7 @@ export class FlyAdapter implements IProviderAdapter {
       if (!observed) {
         throw new Error(`Fly.io Machine ${updated.id} was not observable after secret deletion.`);
       }
+      if (flyMountIdentity(resolved.machine.config) !== flyMountIdentity(observed.config)) throw new Error('Fly filesystem mount identity changed during secret deletion.');
       if (
         resolved.machine.instance_id
         && (!observed.instance_id || observed.instance_id === resolved.machine.instance_id)
@@ -906,6 +937,7 @@ export class FlyAdapter implements IProviderAdapter {
       );
     }
     const machine = owned[0];
+    if (binding.machineId && !machine) throw new Error('Bound Fly Machine is missing; automatic replacement is forbidden.');
     const metadata = machine?.config?.metadata ?? {};
     const secretNames = secrets.flatMap((secret) => secret.name ? [secret.name] : []).sort();
     const envVarHashes: Record<string, string> = {};
@@ -952,6 +984,7 @@ export class FlyAdapter implements IProviderAdapter {
         envVarKeys: secretNames,
         envVarHashes,
         status: machine ? this.observedRuntimeStatus(machine) : 'empty',
+        ...(!machine && !binding.machineId ? { identityOnly: true } : {}),
       },
       warnings: unknown.length > 0
         ? [`Fly.io secret values remain encrypted and Machine hash metadata is missing for ${logicalName}: ${unknown.join(', ')}.`]
@@ -1064,6 +1097,7 @@ export class FlyAdapter implements IProviderAdapter {
         `Fly.io app ${appName} contains ${machines.length} Machines, but ${owned.length} match the reviewed Hypervibe service identity. Hypervibe refused an ambiguous mutation.`
       );
     }
+    if (expectedMachineId && !owned[0]) throw new Error('Bound Fly Machine is missing; automatic replacement is forbidden.');
     return owned[0];
   }
 
@@ -1532,6 +1566,7 @@ providerRegistry.register({
     lifecycle: {
       hosting: {
         workloadKinds: ['web', 'worker'],
+        serviceVolumes: { workloadKinds: ['web', 'worker'], retention: 'retain-only', attachmentTiming: 'workload-create' },
         customDomains: 'managed',
         domainTrafficProxy: 'supported',
         maintenance: 'unsupported',

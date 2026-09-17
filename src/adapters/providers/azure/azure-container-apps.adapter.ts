@@ -35,6 +35,8 @@ import {
 } from './azure-container-apps-ci.workflow.js';
 import { buildAzureContainerAppsPortableRecipe } from './azure-container-apps-ci.recipe.js';
 import { AzureResourceManagerClient } from './azure-resource-manager.client.js';
+import { AzureServiceVolumes } from './azure-service-volumes.js';
+import { azureVolumeFingerprint } from './azure-volume-runtime.js';
 import {
   azureEnvironmentResourceGroupScope,
   legacyAzureEnvironmentResourceGroupScope,
@@ -101,6 +103,7 @@ type AzureProject = {
 
 export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMaintenanceAdapter {
   readonly name = 'azure-container-apps';
+  readonly serviceVolumes = new AzureServiceVolumes(() => this.connected().client);
 
   readonly capabilities: ProviderCapabilities = {
     supportedBuilders: ['dockerfile'],
@@ -320,6 +323,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
         createdService = true;
       }
       if (!app) throw new Error('Azure Container App reconciliation returned no resource.');
+      const expectedVolumes = azureVolumeFingerprint(app.properties?.template);
       this.assertAppEnvironment(app, project.environmentId);
       const principalId = app.identity?.principalId;
       if (!principalId) throw new Error(`Container App ${app.id} did not return its system-assigned identity.`);
@@ -334,6 +338,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       }));
       app = await this.waitForProvisioning(app.id, CONTAINER_APPS_API);
       app = await this.waitForContainerAppRevision(app.id, previousReadyRevision);
+      if (azureVolumeFingerprint(app.properties?.template) !== expectedVolumes) throw new Error('Azure volume mounts changed during runtime configuration.');
       const url = this.appUrl(app);
       return {
         serviceId: service.id,
@@ -384,6 +389,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
         ? app.properties.latestReadyRevisionName
         : undefined;
       const container = this.container(app);
+      const expectedVolumes = azureVolumeFingerprint(app.properties?.template);
       const secrets = await this.listAppSecrets(appId);
       const secretRefs = new Set(
         (container?.env ?? []).filter((item: any) => retired.has(item.name)).map((item: any) => item.secretRef).filter(Boolean)
@@ -404,7 +410,8 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
         },
       });
       await this.waitForProvisioning(appId, CONTAINER_APPS_API);
-      await this.waitForContainerAppRevision(appId, previousReadyRevision);
+      const ready = await this.waitForContainerAppRevision(appId, previousReadyRevision);
+      if (azureVolumeFingerprint(ready.properties?.template) !== expectedVolumes) throw new Error('Azure volume mounts changed during environment variable removal.');
       return { success: true, message: `Deleted ${keys.length} retired Azure environment variable${keys.length === 1 ? '' : 's'}.` };
     } catch (error) {
       return this.failedReceipt('Failed to delete Azure environment variables', this.formatError(error));
@@ -1387,7 +1394,7 @@ providerRegistry.register({
       },
     },
     lifecycle: {
-      hosting: { workloadKinds: ['web'], customDomains: 'managed', domainTrafficProxy: 'dns-only', maintenance: 'managed', teardownBoundary: 'project' },
+      hosting: { workloadKinds: ['web'], serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only' }, customDomains: 'managed', domainTrafficProxy: 'dns-only', maintenance: 'managed', teardownBoundary: 'project' },
     },
   },
   factory: async (credentials) => {

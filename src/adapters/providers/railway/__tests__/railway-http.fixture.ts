@@ -11,10 +11,12 @@ export const stagingId = 'environment-staging';
 
 type Instance = {
   id: string; serviceId: string; environmentId: string; deletedAt: string | null;
+  numReplicas: number | null;
   source: { image?: string }; domains: { serviceDomains: Array<{ domain: string }>; customDomains: [] };
 };
 type ProviderService = { id: string; name: string; instances: Map<string, Instance> };
 type BucketConfig = Record<string, { region: string; isCreated?: boolean; isDeleted?: boolean }>;
+type EnvironmentConfig = { buckets?: BucketConfig; services?: Record<string, { deploy?: unknown }> };
 const connection = (nodes: unknown[], more = false, cursor: string | null = null) => ({
   edges: nodes.map((node) => ({ node })), pageInfo: { hasNextPage: more, endCursor: cursor },
 });
@@ -23,16 +25,19 @@ const connection = (nodes: unknown[], more = false, cursor: string | null = null
 export async function railwayHttpFixture(options: {
   stagingExists?: boolean; projectExists?: boolean; pageSize?: number; dropCreateResponse?: boolean;
   bucketDelayMs?: number; omitBucketFlags?: boolean;
+  volumeDelayMs?: number; dropVolumeCreateResponse?: boolean; volumeCreateResponseId?: string;
   responseOverride?: (request: { query: string; variables: Record<string, any> }) => Response | undefined;
 } = {}) {
   let projectExists = options.projectExists !== false;
   const services = new Map<string, ProviderService>();
   const buckets = new Map([['bucket-documents', { id: 'bucket-documents', name: 'documents', projectId }]]);
-  const environments = new Map<string, { id: string; name: string; config: { buckets?: BucketConfig }; unmergedChangesCount?: number }>([
+  const environments = new Map<string, { id: string; name: string; config: EnvironmentConfig; unmergedChangesCount?: number }>([
     [productionId, { id: productionId, name: 'production', config: { buckets: { 'bucket-documents': { region: 'iad', isCreated: true, isDeleted: false } } } }],
   ]);
   if (options.stagingExists !== false) environments.set(stagingId, { id: stagingId, name: 'staging', config: {} });
   const volumes = new Map<string, Record<string, unknown>>();
+  const volumeReadyAt = new Map<string, number>();
+  let nextVolumeId = 0;
   const variables = new Map<string, Record<string, string>>();
   const mutations: Array<{ field: string; args: Record<string, any> }> = [];
   const requests: Array<{ query: string; variables: Record<string, any> }> = [];
@@ -53,17 +58,33 @@ export async function railwayHttpFixture(options: {
   function addService(id: string, name: string, environmentId: string) {
     const service = { id, name, instances: new Map<string, Instance>() };
     service.instances.set(environmentId, {
-      id: `instance-${id}-${environmentId}`, serviceId: id, environmentId, deletedAt: null,
+      id: `instance-${id}-${environmentId}`, serviceId: id, environmentId, deletedAt: null, numReplicas: 1,
       source: {}, domains: { serviceDomains: [], customDomains: [] },
     });
     services.set(id, service);
+    // Independently modeled from the pinned official CLI's EnvironmentConfig
+    // services map and optional DeployConfig fields, not a request echo.
+    const config = environments.get(environmentId)!.config;
+    config.services ??= {};
+    config.services[id] = { deploy: {} };
     return service;
   }
   for (const name of ['postgres-db', 'redis-db', 'web']) addService(`production-${name}`, name, productionId);
 
+  function addVolume(serviceId: string | null, environmentId: string, mountPath: string,
+    overrides: Record<string, unknown> = {}) {
+    const id = `volume-${++nextVolumeId}`;
+    const instance = {
+      id: `instance-${id}`, serviceId, environmentId, mountPath,
+      deletedAt: null, isPendingDeletion: false, volume: { id, projectId }, ...overrides,
+    };
+    volumes.set(id, instance);
+    return { id, instance };
+  }
+
   function serviceNode(service: ProviderService) {
     return {
-      id: service.id, name: service.name, projectId, repoTriggers: connection([]),
+      id: service.id, name: service.name, projectId, deletedAt: null, repoTriggers: connection([]),
       serviceInstances: ({ after }: { after?: string }) => {
         const instances = [...service.instances.values()];
         const start = after ? Number(after) : 0;
@@ -93,7 +114,17 @@ export async function railwayHttpFixture(options: {
       };
     },
     environment: ({ id }) => ({
-      ...environments.get(id), volumeInstances: connection([...volumes.values()].filter((v) => v.environmentId === id)),
+      ...environments.get(id), projectId, deletedAt: null,
+      volumeInstances: ({ after }: { after?: string }) => {
+        const visible = [...volumes.entries()]
+          .filter(([volumeId, volume]) => volume.environmentId === id
+            && Date.now() >= (volumeReadyAt.get(volumeId) ?? 0))
+          .map(([, volume]) => volume);
+        const start = after ? Number(after) : 0;
+        const end = start + (options.pageSize ?? 100);
+        return connection(visible.slice(start, end), end < visible.length,
+          end < visible.length ? String(end) : null);
+      },
     }),
     service: ({ id }) => services.has(id) ? serviceNode(services.get(id)!) : null,
     serviceInstance: ({ serviceId, environmentId }) => {
@@ -125,13 +156,11 @@ export async function railwayHttpFixture(options: {
       return true;
     },
     volumeCreate: ({ input }) => {
-      const id = `volume-${input.serviceId}`;
-      volumes.set(id, {
-        id: `instance-${id}`, serviceId: input.serviceId, environmentId: input.environmentId,
-        mountPath: input.mountPath, deletedAt: null, isPendingDeletion: false,
-        volume: { id, projectId },
-      });
-      return { id };
+      expect(input.projectId).toBe(projectId);
+      expect(services.get(input.serviceId)?.instances.has(input.environmentId)).toBe(true);
+      const { id } = addVolume(input.serviceId, input.environmentId, input.mountPath);
+      volumeReadyAt.set(id, Date.now() + (options.volumeDelayMs ?? 0));
+      return { id: options.volumeCreateResponseId ?? id };
     },
     serviceInstanceRedeploy: ({ serviceId, environmentId }) => {
       expect(services.get(serviceId)?.instances.has(environmentId)).toBe(true);
@@ -207,6 +236,9 @@ export async function railwayHttpFixture(options: {
     if (options.dropCreateResponse && request.query.includes('mutation CreateService')) {
       throw new TypeError('Synthetic connection reset after serviceCreate committed');
     }
+    if (options.dropVolumeCreateResponse && request.query.includes('mutation VolumeCreate')) {
+      throw new TypeError('Synthetic connection reset after volumeCreate committed');
+    }
     return Response.json(result);
   }));
   const adapter = new RailwayAdapter();
@@ -216,5 +248,6 @@ export async function railwayHttpFixture(options: {
     platformBindings: { projectId, ...(options.stagingExists !== false ? { environmentId: stagingId } : {}) },
     createdAt: new Date(), updatedAt: new Date(),
   };
-  return { adapter, environment, services, environments, buckets, mutations, requests, variables, contractErrors };
+  return { adapter, environment, services, environments, buckets, volumes, addService, addVolume,
+    mutations, requests, variables, contractErrors };
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import '../../../application/providers.js';
 import { projectSpecSchema } from '../../spec/spec.schema.js';
+import { providerRegistry } from '../../registry/provider.registry.js';
 import {
   firstProviderSpecValidationFailure,
   validateProjectSpecProviders,
@@ -92,6 +93,28 @@ function workloadSpec(provider: string, workloadKind: 'web' | 'worker' | 'cron')
 }
 
 describe('validateProjectSpecProviders', () => {
+  it('distinguishes native mount limitations from missing Hypervibe implementations across every host', () => {
+    const expected = {
+      railway: 'implemented', cloudrun: 'implemented', fly: 'implemented', ecs: 'implemented',
+      'azure-container-apps': 'implemented', digitalocean: 'unsupported', vercel: 'unsupported',
+    };
+    expect(providerRegistry.namesFor('hosting').sort()).toEqual(Object.keys(expected).sort());
+    for (const [provider, state] of Object.entries(expected)) {
+      const candidate = workloadSpec(provider, 'web');
+      candidate.environments.staging.services.processor.volume = { mountPath: '/data' };
+      const failure = firstProviderSpecValidationFailure(candidate);
+      if (state === 'implemented') {
+        expect(failure, provider).toBeUndefined();
+      } else {
+        expect(failure?.details.path).toBe('environments.staging.services.processor.volume');
+        expect(failure?.details.volumeSupport).toBe(state === 'unsupported' ? 'provider-unsupported' : 'not-implemented');
+        expect(failure?.message).toContain(state === 'unsupported' ? 'does not support persistent filesystem mounts' : 'Hypervibe has not implemented');
+        if (state === 'unsupported') expect(failure?.hint).toContain('https://');
+        else expect(failure?.hint).toContain('does not establish a native platform limitation');
+      }
+    }
+  });
+
   it('accepts installed primary and derived lifecycle adapters', () => {
     expect(validateProjectSpecProviders(spec('railway', 'railway'))).toEqual([]);
     expect(validateProjectSpecProviders(spec('cloudrun', 'cloudsql'))).toEqual([]);

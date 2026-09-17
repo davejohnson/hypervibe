@@ -82,6 +82,7 @@ import {
 } from '../services/managed-code-repository.contract.js';
 
 export type PlanMutationCapability =
+  | 'hosting.volume.mutate'
   | 'hosting.environment.ensure'
   | 'domain.registration.mutate'
   | 'github.ci.sync'
@@ -1384,5 +1385,11 @@ export function resolvePlanActionAuthority(
   ) {
     return authority(action, 'hosting.service.rollback');
   }
+  if (exactResource(action, 'volume')
+    && ((action.type === 'create' && action.metadata?.operation === 'serviceVolumeCreate')
+      || (action.type === 'update' && action.metadata?.operation === 'serviceVolumeFinalize')
+      || (['create', 'update'].includes(action.type) && action.metadata?.operation === 'serviceVolumeComponentApply' && metadataString(action, 'component'))
+      || (action.type === 'update' && action.metadata?.operation === 'serviceVolumeComponentFinalize' && metadataString(action, 'component'))))
+    return authority(action, 'hosting.volume.mutate');
   return null;
 }
