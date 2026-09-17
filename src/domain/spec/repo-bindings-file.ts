@@ -7,6 +7,7 @@ import { findRepoRoot, readRepoSpecFile, repositoryMatchesProjectIdentity, repoS
 import { withStorageInstanceScopes } from '../services/storage-instance-identity.js';
 import { primaryWorkspaceDirectory } from '../../lib/workspace-context.js';
 import { parseServiceVolumeBindings } from '../services/service-volume.service.js';
+import type { ServiceVolumeComponentBinding } from '../ports/service-volume.port.js';
 
 // Bindings are the inverse of the spec's source-of-truth contract: the DB
 // column `environments.platform_bindings` is authoritative (it holds data the
@@ -75,6 +76,14 @@ function mergeSanitizedBindingObject(
   return merged;
 }
 
+function mergeVolumeRecovery<T extends ServiceVolumeComponentBinding>(previous: T, next: T, name: string): T {
+  if (previous.externalId !== undefined && next.externalId !== undefined && previous.externalId !== next.externalId) {
+    throw new Error(`Repository service-volume identity conflicts with retained local state for ${name}.`);
+  }
+  const rank = { creating: 0, identified: 1, bound: 2 };
+  return rank[next.state] >= rank[previous.state] ? next : previous;
+}
+
 /**
  * Overlay the sanitized repository export onto authoritative local bindings.
  * Top-level bindings absent from the export retain the historical merge
@@ -85,30 +94,37 @@ export function mergeRepoPlatformBindings(
   existing: Record<string, unknown>,
   repoBindings: Record<string, unknown>
 ): Record<string, unknown> {
-  if (!parseServiceVolumeBindings({ platformBindings: existing })
-    || !parseServiceVolumeBindings({ platformBindings: repoBindings })) {
+  const localVolumes = parseServiceVolumeBindings({ platformBindings: existing });
+  const incomingVolumes = parseServiceVolumeBindings({ platformBindings: repoBindings });
+  if (!localVolumes || !incomingVolumes) {
     throw new Error('Malformed retained service-volume bindings; refusing to overwrite recovery state.');
   }
   const merged: Record<string, unknown> = { ...existing, ...repoBindings };
   for (const [key, repoValue] of Object.entries(repoBindings)) {
     if (key === 'serviceVolumes' && existing[key] !== undefined) {
-      const local = asRecord(existing[key]);
-      const incoming = asRecord(repoValue);
-      if (!local || !incoming) throw new Error('Malformed retained service-volume bindings; refusing to erase recovery state.');
-      const retained = { ...incoming, ...local };
-      for (const [name, value] of Object.entries(incoming)) {
-        const previous = asRecord(local[name]);
-        const next = asRecord(value);
-        if (!previous) { retained[name] = value; continue; }
-        const previousTarget = asRecord(previous.target);
-        const nextTarget = asRecord(next?.target);
-        if (!next || !previousTarget || !nextTarget || previous.provider !== next.provider
-          || ['projectId', 'environmentId', 'serviceId', 'mountPath'].some((field) => previousTarget[field] !== nextTarget[field])
-          || (previous.externalId !== undefined && next.externalId !== undefined && previous.externalId !== next.externalId)) {
+      const retained = { ...incomingVolumes, ...localVolumes };
+      for (const [name, next] of Object.entries(incomingVolumes)) {
+        const previous = localVolumes[name];
+        if (!previous) { retained[name] = next; continue; }
+        const previousTarget = previous.target;
+        const nextTarget = next.target;
+        if (previous.provider !== next.provider
+          || (['projectId', 'environmentId', 'serviceId', 'mountPath'] as const).some((field) => previousTarget[field] !== nextTarget[field])
+          || JSON.stringify(Object.entries(previousTarget.instanceScope ?? {}).sort()) !== JSON.stringify(Object.entries(nextTarget.instanceScope ?? {}).sort())
+          || (previous.state === 'staged') !== (next.state === 'staged')) {
           throw new Error(`Repository service-volume identity conflicts with retained local state for ${name}.`);
         }
-        const rank = ['creating', 'identified', 'bound'];
-        if (rank.indexOf(String(next.state)) >= rank.indexOf(String(previous.state))) retained[name] = next;
+        if (previous.state === 'staged' && next.state === 'staged') {
+          const components = { ...next.components, ...previous.components };
+          for (const [key, component] of Object.entries(next.components)) {
+            components[key] = previous.components[key]
+              ? mergeVolumeRecovery(previous.components[key], component, `${name}/${key}`)
+              : component;
+          }
+          retained[name] = { ...previous, components };
+        } else if (previous.state !== 'staged' && next.state !== 'staged') {
+          retained[name] = mergeVolumeRecovery(previous, next, name);
+        }
       }
       merged[key] = retained;
       continue;

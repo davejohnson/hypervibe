@@ -13,6 +13,7 @@ import {
   buildBranchDeployWorkflow,
   githubActionsServerProgramFingerprint,
   githubActionsWorkflowInputHash,
+  GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION,
   resolveBranchDeployTargets,
 } from '../github-ops.service.js';
 import { resolveReviewedBranchDeployTargets } from '../managed-ci-targets.js';
@@ -72,6 +73,12 @@ function reviewedTarget(
     }),
   };
 }
+
+it('requires a reviewed workflow migration for mount-safe generated runtimes', () => {
+  // Revision 3 workflows did not guard retained mounts / custom ECS definitions.
+  // They must not remain locked as current after installing this feature.
+  expect(GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION).toBe(4);
+});
 
 function executeDockerfileStep(workflowContent: string, directory: string): string {
   fs.writeFileSync(path.join(directory, 'package.json'), '{}');
@@ -881,7 +888,7 @@ describe('github tools', () => {
     );
     expect(cloudRunWorkflow.content).not.toContain("base + '?repositoryId='");
     expect(cloudRunWorkflow.content).toContain('await waitOperation(operation, \'service \' + serviceName + \' deployment\')');
-    expect(cloudRunWorkflow.content).toContain("await waitReady(url, serviceName, 'service', process.env.IMAGE_URI, runtimeResource)");
+    expect(cloudRunWorkflow.content).toContain("await waitReady(url, serviceName, 'service', process.env.IMAGE_URI, runtimeResource, filesystem)");
 
     const railwayWorkflow = buildBranchDeployWorkflow('railway', reviewedTarget('railway', {
       ...baseTarget,
@@ -1032,7 +1039,7 @@ describe('github tools', () => {
     )).not.toThrow();
     expect(workflow.content).toContain('/jobs/\' + encodeURIComponent(jobName)');
     expect(workflow.content).toContain('await waitOperation(operation, \'job \' + jobName + \' deployment\')');
-    expect(workflow.content).toContain("await waitReady(url, jobName, 'job', process.env.IMAGE_URI, runtimeResource)");
+    expect(workflow.content).toContain("await waitReady(url, jobName, 'job', process.env.IMAGE_URI, runtimeResource, filesystem)");
     expect(workflow.content).not.toContain("CLOUDRUN_SERVICE_NAMES: 'cloudapp-production-web,cloudapp-production-daily-schedule'");
   });
 

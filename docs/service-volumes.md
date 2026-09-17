@@ -1,9 +1,7 @@
-# Retained Railway web-service volumes
+# Retained service filesystems
 
-> Incomplete draft: the feature must cover all supported hosting providers.
-> This page describes only the initial Railway slice. See the
-> [cross-host design and provider audit](service-volumes-design.md) before
-> treating PR #218 as ready to merge or release.
+> Cross-host implementation in PR #218. Offline tests do not
+> certify live mounts or durability. See the [provider audit](service-volumes-design.md).
 
 Declare one persistent filesystem mount on a web service:
 
@@ -29,15 +27,22 @@ Use the normal `hv_spec` → `hv_plan` → `hv_apply` → `hv_status` workflow.
    an isolated `hosting-bindings` plan; managed CI uses its existing binding
    stage. Apply and re-plan. These stages configure empty services, not disks or
    application deployments.
-2. The next plan contains `volume:<service>`, including the exact project,
-   environment, service and mount path. Creating the disk is billable and
-   data-bearing; explicitly confirm that action ID with `confirmActions`.
+2. A `service-volumes` plan contains `volume:<service>` or individual
+   `volume:<service>:<component>` actions, including exact scope, mount path,
+   capacity/cost notes and dependencies. Confirm the exact action IDs with
+   `confirmActions`. One action never hides another resource's creation.
+   Apply the currently ready components and re-plan before their dependents.
 3. Hypervibe persists create intent before the provider mutation, records the
    acknowledged disk ID, and independently observes that exact attachment before
    recording success. Service deployment and the applied-contract marker depend
    on verified attachment. An unchanged plan performs no disk mutation.
 4. Deploy the application, then verify its actual mounted path, permissions,
    read/write behavior, and persistence across redeployment separately.
+
+Fly has an additional ordering constraint: bind an empty app namespace, create
+the disk, then create its first Machine using the acknowledged disk ID. Only
+then can managed CI publish a workflow targeting that Machine. Adding a disk
+to an existing diskless Machine is blocked; no implicit replacement is allowed.
 
 ## Retention and recovery
 
@@ -58,12 +63,47 @@ confirmed `serviceVolumeFinalize` action for that exact identity, without a
 second provider write. Missing or pending-deletion bound disks never cause
 automatic replacement with empty storage. Preserve all recovery bindings.
 
-No delete, detach, adoption, resizing, capacity selection, backups, migration,
-shared worker mounts, or cron volumes are implemented in this slice. Automated
+Component lifecycles retain each write intent and acknowledged resource ID
+independently. A created account/filesystem is not proof of an attached, ready
+workload. Repository merges preserve omitted component recovery and never
+downgrade it. Removing volume intent blocks unfinished creation, rather than
+continuing to create now-unwanted resources.
+
+No delete, detach, adoption, resizing, user-selected capacity, backups, migration,
+cross-service shared mounts, or cron volumes are implemented. Automated
 recovery of an unacknowledged create remains a follow-up requiring explicit
 ownership evidence, not manual removal of the marker and blind retry.
 
 ## Provider constraints and evidence
+
+| Host | Filesystem path and initial constraints |
+| --- | --- |
+| Railway | Native volume; web only, known single-instance configuration. Capacity follows account defaults. |
+| Fly | Encrypted 1 GB native volume; web/worker, one Machine, attached at Machine creation; no replication. |
+| Azure Container Apps | Dedicated Standard_LRS StorageV2 account, classic SMB share with 5 GiB quota, environment registration and app attachment; web only. |
+| ECS Express | Encrypted regional EFS, access point, dedicated network permissions and task-definition attachment; web only; metered storage/throughput/transfer. |
+| Cloud Run | Dedicated VPC/subnet and BASIC_HDD Filestore, **1024 GiB minimum provisioned capacity**, then NFS attachment; web/worker. |
+| DigitalOcean App Platform | Rejected explicitly: this hosting product has no persistent mount support. |
+| Vercel Functions | Rejected explicitly: sandbox Drives are not mounts for the Functions hosting product. |
+
+Cloud Run's selected `<region>-a` zone must be independently observed as UP in
+the configured region before Filestore creation. Conflicting existing VPC/cache
+placement blocks rather than silently moving the workload. Cache removal must
+not remove networking still used by the filesystem. NFS on Cloud Run has no
+locking support; application UID/share permissions require separate validation.
+The provisioned-capacity cost is not equivalent to a small local disk. See
+[NFS mounts](https://docs.cloud.google.com/run/docs/configuring/services/nfs-volume-mounts)
+and [Filestore tiers](https://docs.cloud.google.com/filestore/docs/service-tiers).
+
+Azure account keys stay inside the provider boundary when registering the share;
+they are never binding fields. ECS retains the workload identity and uses a
+custom task definition rather than mixing it with Express `primaryContainer`
+inputs. Non-idempotent task registration uses one SDK attempt; an ambiguous
+response retains recovery intent. EFS denies insecure/wrong-access-point/root
+access but does not claim exclusivity against every other same-account IAM
+grant. A prepared task revision blocks attachment if the runtime changed in
+the meantime. Azure refreshes the app template before attachment, but does not
+claim atomic optimistic concurrency. Neither provider substitutes a bucket.
 
 Railway documents one volume per service, no replicas, and redeployment downtime
 for volume-backed services. Default capacity depends on the account plan; this
@@ -87,6 +127,8 @@ compatibility, mounted filesystems, actual billing, or durability. Ordinary
 `npm test` includes the regressions; the checked-in acceptance workflow runs it
 and typecheck on PRs. Branch-protection settings are not asserted by these tests.
 
-The existing CI deployment contract includes volume intent, but later direct CI
-dispatches do not freshly observe disks. Run `hv_status`/`hv_plan` after external
-provider changes. No live resources were created to validate this feature.
+The CI deployment contract includes volume intent. Generated deployments preserve
+existing mount configuration; this is not filesystem I/O or backup verification.
+Run `hv_status`/`hv_plan` after external provider changes. No live resources were
+created to validate this feature. Whole-project acceptance results are recorded
+in the PR; do not infer them from individual provider tests.

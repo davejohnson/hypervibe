@@ -16,6 +16,9 @@ import { buildCloudRunGitHubActionsSteps, CLOUDRUN_CI_REQUIRED_SECRETS } from '.
 import { buildCloudRunPortableRecipe } from './cloudrun-ci.recipe.js';
 import { parseHostingBindings, type GetLogsOptions, type LogEntry } from '../../../domain/ports/hosting.port.js';
 import * as pubsub from './pubsub.api.js';
+import { CloudRunServiceVolumes } from './cloudrun-service-volume.js';
+import { cloudRunFilesystemIdentity } from './cloudrun-volume-runtime.js';
+import { parseServiceVolumeBindings } from '../../../domain/services/service-volume.service.js';
 import { pubsubQueueResourceIds } from '../../../domain/services/queue-env.js';
 import { hashEnvValue, type ObservedService, type ObservedState } from '../../../domain/ports/observe.port.js';
 import { generatedContainerDockerfile } from '../../../domain/services/generated-container.js';
@@ -479,6 +482,10 @@ export class CloudRunAdapter implements
   private serviceAccountCreds: ServiceAccountCredentials | null = null;
   private accessToken: string | null = null;
   private tokenExpiry: Date | null = null;
+  readonly serviceVolumes = new CloudRunServiceVolumes(() => {
+    if (!this.credentials) throw new Error('Cloud Run filesystem requires a verified connection.');
+    return { projectId: this.credentials.projectId, region: this.credentials.region };
+  }, () => this.getAccessToken());
 
   async connect(credentials: unknown): Promise<void> {
     const parsed = CloudRunCredentialsSchema.parse(credentials);
@@ -1079,6 +1086,7 @@ export class CloudRunAdapter implements
           : undefined
       );
       this.assertVpcAccess(serviceInfo, vpcAccess, `Cloud Run service ${serviceName}`);
+      this.assertPreservedFilesystem(cloudRunService, serviceInfo);
       const url = serviceInfo?.uri;
       const publicAccess = this.shouldAllowUnauthenticated(service);
       const publicInvokerBindingUpdated = publicAccess
@@ -1730,6 +1738,7 @@ export class CloudRunAdapter implements
       );
       const updatedService = await this.waitForCloudRunServiceReady(serviceName, token);
       this.assertVpcAccess(updatedService, vpcAccess, `Cloud Run service ${serviceName}`);
+      this.assertPreservedFilesystem(currentService, updatedService);
       const updatedEnv = new Map(
         (this.primaryContainer(updatedService)?.env ?? [])
           .filter((entry): entry is { name: string; value?: string } => typeof entry.name === 'string')
@@ -1945,6 +1954,7 @@ export class CloudRunAdapter implements
       );
       const updatedService = await this.waitForCloudRunServiceReady(serviceName, token);
       this.assertVpcAccess(updatedService, vpcAccess, `Cloud Run service ${serviceName}`);
+      this.assertPreservedFilesystem(currentService, updatedService);
       const remainingKeys = new Set(
         (this.primaryContainer(updatedService)?.env ?? [])
           .map((entry) => entry.name)
@@ -5127,6 +5137,12 @@ export class CloudRunAdapter implements
     return service?.template?.volumes ?? service?.spec?.template?.spec?.volumes;
   }
 
+  private assertPreservedFilesystem(before: CloudRunService | null, after: CloudRunService | null): void {
+    const expected = cloudRunFilesystemIdentity(before?.template ?? before?.spec?.template?.spec);
+    const observed = cloudRunFilesystemIdentity(after?.template ?? after?.spec?.template?.spec);
+    if (expected !== null && expected !== observed) throw new Error('Cloud Run filesystem mount or network identity changed during runtime configuration.');
+  }
+
   private serviceVpcAccess(service: CloudRunService | null): CloudRunVpcAccess | undefined {
     return service?.template?.vpcAccess ?? service?.spec?.template?.spec?.vpcAccess;
   }
@@ -5175,6 +5191,19 @@ export class CloudRunAdapter implements
     token: string
   ): Promise<ResolvedCloudRunVpcAccess> {
     const bindings = environment.platformBindings as Record<string, unknown>;
+    const retainedVolumes = parseServiceVolumeBindings(environment);
+    if (!retainedVolumes) throw new Error('Malformed retained filesystem bindings prevent network changes.');
+    const currentNetwork = this.normalizedVpcAccess(current);
+    const filesystemUsesCurrentNetwork = Object.values(retainedVolumes).some((volume) => {
+      if (volume.provider !== 'cloudrun' || volume.state !== 'staged' || !volume.components.attachment?.externalId) return false;
+      const scope = volume.target.instanceScope;
+      if (!scope || scope.projectId !== this.credentials!.projectId || scope.region !== this.credentials!.region) throw new Error('Retained filesystem network scope differs from the current cloud connection.');
+      return currentNetwork?.network === `projects/${scope.projectId}/global/networks/${scope.network}`
+        && currentNetwork.subnetwork === `projects/${scope.projectId}/regions/${scope.region}/subnetworks/${scope.subnetwork}`;
+    });
+    if (filesystemUsesCurrentNetwork && bindings.cacheNetwork === null) {
+      return { managed: false, desired: currentNetwork, ...(current ? { apiValue: current } : {}) };
+    }
     if (!Object.prototype.hasOwnProperty.call(bindings, 'cacheNetwork')) {
       return {
         managed: false,
@@ -5207,6 +5236,9 @@ export class CloudRunAdapter implements
       subnetwork: this.normalizeCloudRunSubnetwork(binding.subnetwork),
       egress: 'PRIVATE_RANGES_ONLY',
     };
+    if (filesystemUsesCurrentNetwork && (desired.network !== currentNetwork?.network || desired.subnetwork !== currentNetwork?.subnetwork)) {
+      throw new Error('Cache networking cannot replace a VPC retained by a filesystem consumer.');
+    }
     await this.verifyVpcResources(desired, token);
     return {
       managed: true,
@@ -6244,6 +6276,7 @@ providerRegistry.register({
     lifecycle: {
       hosting: {
         workloadKinds: ['web', 'worker', 'cron'],
+        serviceVolumes: { workloadKinds: ['web', 'worker'], retention: 'retain-only', attachmentTiming: 'service-update' },
         customDomains: 'managed',
         domainTrafficProxy: 'dns-only',
         maintenance: 'managed',

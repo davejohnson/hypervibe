@@ -55,6 +55,33 @@ async function apply(volumes: IServiceVolumes, action: PlanAction, save?: (value
 }
 
 describe('retained volume lifecycle: real SQLite and schema-executed Railway HTTP', () => {
+  it('blocks a retained whole volume explicitly reported not ready', async () => {
+    const f = await setup();
+    await apply(f.adapter.serviceVolumes, (await plan(f.adapter.serviceVolumes))[0]);
+    const observe = f.adapter.serviceVolumes.observe.bind(f.adapter.serviceVolumes);
+    vi.spyOn(f.adapter.serviceVolumes, 'observe').mockImplementation(async (...args) => {
+      const actual = await observe(...args);
+      return actual.state === 'present' ? { ...actual, ready: false } : actual;
+    });
+    const [action] = await plan(f.adapter.serviceVolumes);
+    expect(action.verified).toBe(false);
+    expect(action.metadata?.blockedReason).toBeDefined();
+    expect(f.mutations).toHaveLength(1);
+  });
+
+  it('retains acknowledged whole-volume identity without binding a not-ready observation', async () => {
+    const f = await setup();
+    const observe = f.adapter.serviceVolumes.observe.bind(f.adapter.serviceVolumes);
+    vi.spyOn(f.adapter.serviceVolumes, 'observe').mockImplementation(async (...args) => {
+      const actual = await observe(...args);
+      return actual.state === 'present' ? { ...actual, ready: false } : actual;
+    });
+    const result = await apply(f.adapter.serviceVolumes, (await plan(f.adapter.serviceVolumes))[0]);
+    expect(result.success).toBe(false);
+    expect(repo.findById(environment.id)!.platformBindings.serviceVolumes).toMatchObject({ web: { state: 'identified', externalId: expect.any(String) } });
+    expect(f.mutations).toHaveLength(1);
+  });
+
   it('does not mistake Object prototype names for retained service bindings', async () => {
     const f = await setup();
     const environmentSpec = environmentSpecSchema.parse({ ...spec, services: { constructor: { volume: { mountPath: '/data' } } } });
@@ -162,7 +189,7 @@ describe('retained volume lifecycle: real SQLite and schema-executed Railway HTT
     expect(action.dependsOn).toEqual(['volume:web']);
   });
 
-  it.each([['railway', 'worker'], ['railway', 'cron'], ['cloudrun', 'web']])('rejects unsupported %s/%s before provisioning', (provider, workloadKind) => {
+  it.each([['railway', 'worker'], ['railway', 'cron'], ['digitalocean', 'web'], ['vercel', 'web']])('rejects unsupported %s/%s before provisioning', (provider, workloadKind) => {
     const parsed = projectSpecSchema.parse({ version: 1, project: 'volumes', environments: { staging: { hosting: { provider }, services: { web: { volume: { mountPath: '/data' }, workloadKind, startCommand: 'run', cronSchedule: '* * * * *' } } } } });
     expect(validateProjectSpecProviders(parsed).some((i) => i.field === 'services.volume' || i.field === 'hosting.provider')).toBe(true);
   });
@@ -195,6 +222,8 @@ describe('retained volume lifecycle: real SQLite and schema-executed Railway HTT
     const next = await new PlanService().plan(project, 'staging', { includeEnvFile: false });
     expect(next).not.toHaveProperty('error');
     if ('error' in next) return;
+    expect(next.scope).toBe('service-volumes');
+    expect(next.actions.every(a => a.resource.kind === 'volume')).toBe(true);
     expect(next.actions.find((a) => a.resource.kind === 'volume')).toMatchObject({ type: 'create', verified: true });
   });
 });

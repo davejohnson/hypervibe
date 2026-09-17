@@ -17,6 +17,7 @@ export interface ProviderSpecIssue {
   capability: ProviderLifecycleCapability | 'code-host' | 'ci';
   status?: ProviderImplementationStatus;
   reason?: string;
+  volumeSupport?: 'provider-unsupported' | 'not-implemented' | 'workload-unsupported';
   /** Present when a lifecycle exists but its network contract cannot serve the selected host. */
   incompatibleHostingProvider?: string;
   /** Provider-owned declarative constraint that failed after structural spec parsing. */
@@ -189,15 +190,24 @@ export function validateProjectSpecProviders(spec: ProjectSpec): ProviderSpecIss
           ?.lifecycle?.hosting?.workloadKinds ?? []
         : [];
       for (const [service, serviceSpec] of Object.entries(environmentSpec.services)) {
-        if (serviceSpec.volume && !providerRegistry.getMetadata(environmentSpec.hosting.provider)
-          ?.lifecycle?.hosting?.serviceVolumes?.workloadKinds.includes(serviceSpec.workloadKind)) {
+        const hosting = providerRegistry.getMetadata(environmentSpec.hosting.provider)?.lifecycle?.hosting;
+        if (serviceSpec.volume && !hosting?.serviceVolumes?.workloadKinds.includes(serviceSpec.workloadKind)) {
+          const nativeLimitation = hosting?.serviceVolumesUnsupported;
+          const volumeSupport = nativeLimitation ? 'provider-unsupported' : hosting?.serviceVolumes ? 'workload-unsupported' : 'not-implemented';
           issues.push({
             environment, field: 'services.volume', provider: environmentSpec.hosting.provider,
-            service, capability: 'hosting', available: [],
+            service, capability: 'hosting', available: [], volumeSupport,
+            ...(nativeLimitation ? { reason: nativeLimitation.reason } : {}),
             configuration: {
               path: `environments.${environment}.services.${service}.volume`,
-              message: `${environmentSpec.hosting.provider} does not support retained volumes for ${serviceSpec.workloadKind} workloads.`,
-              hint: 'Use a hosting provider and workload kind that declares serviceVolumes support, or remove volume intent.',
+              message: nativeLimitation
+                ? nativeLimitation.reason
+                : hosting?.serviceVolumes
+                  ? `Hypervibe does not implement retained volumes for ${serviceSpec.workloadKind} workloads on ${environmentSpec.hosting.provider}.`
+                  : `Hypervibe has not implemented retained filesystem mounts for ${environmentSpec.hosting.provider}.`,
+              hint: nativeLimitation
+                ? `See ${nativeLimitation.documentationUrl}. Choose a hosting provider with an implemented filesystem-mount lifecycle, or adapt the application to external storage before removing volume intent. Object storage is not a filesystem mount.`
+                : 'This Hypervibe capability gap does not establish a native platform limitation. Choose an implemented provider/workload combination or complete its mount lifecycle; do not substitute ephemeral storage for a persistent mount.',
             },
           });
         }
@@ -430,6 +440,7 @@ export function firstProviderSpecValidationFailure(
           ? `environments.${issue.environment}.services.${issue.service}.workloadKind`
         : `environments.${issue.environment}.${issue.field}`,
       capability: issue.capability,
+      ...(issue.volumeSupport ? { volumeSupport: issue.volumeSupport } : {}),
       ...(issue.status ? { maturityStatus: issue.status } : {}),
       ...(issue.reason && issue.status ? { maturityReason: issue.reason } : {}),
       ...(issue.reason && !issue.status ? { reason: issue.reason } : {}),

@@ -1137,7 +1137,12 @@ export async function executePlanApply(ctx: CommandContext, params: {
     }
     // Independently enforce attachment readiness even if a persisted action's
     // dependency list is stripped. Empty managed-CI binding stages do not deploy.
-    const deployNeedsVolumes = !managedCiBindingsOnly && (
+    const createsDeferredWorkload = capability === 'hosting.service.converge'
+      && observed?.services.some(service => service.name === action.resource.name && service.identityOnly === true);
+    if (createsDeferredWorkload && (action.requiresConfirm !== true || action.billable !== true || !confirmedActionIds.has(action.id))) {
+      return { success: false, status: 'blocked', message: 'Creating the first workload in a bound app requires the persisted billable confirmation and exact confirmed action ID.' };
+    }
+    const deployNeedsVolumes = (!managedCiBindingsOnly || createsDeferredWorkload) && (
       capability === 'hosting.service.converge' || capability === 'hosting.service.rollback'
       || capability === 'github.ci.release' || capability === 'github.ci.rollback'
       || capability === 'gitlab.ci.rollback' || capability === 'github.applied-spec-hash.sync'

@@ -321,6 +321,9 @@ export async function executeBootstrap(params: {
     ...(params.envVarsByService ? { envVarsByService: params.envVarsByService } : {}),
     ...(params.verifyHttpHealth ? { verifyHttpHealth: true } : {}),
     ...(deferProviderDeployment ? { deferProviderDeployment: true } : {}),
+    ...(params.provisionOnly && hostingAdapter.serviceVolumes?.staged?.runtimeMount
+      && workloads.every(service => !(environment.platformBindings.services as Record<string, { serviceId?: string }> | undefined)?.[service.name]?.serviceId)
+      ? { deferWorkload: true } : {}),
     ...(params.expectedSourceCommitSha ? { expectedSourceCommitSha: params.expectedSourceCommitSha } : {}),
     ensureProject: params.ensureHostingProject !== false,
     adapter: hostingAdapter,

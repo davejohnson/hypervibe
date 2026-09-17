@@ -576,6 +576,7 @@ export function diffEnvironment(input: {
           ...(failedDeployment
             ? { metadata: { observedStatus: live.status, externalId: live.externalId } }
             : {}),
+          ...(live.identityOnly === true ? { requiresConfirm: true, billable: true, metadata: { workloadCreateRequired: true, externalId: live.externalId } } : {}),
         });
       } else {
         actions.push({ id, type: 'noop', resource, verified: true, reason: 'In sync' });

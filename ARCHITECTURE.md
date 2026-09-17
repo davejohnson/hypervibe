@@ -1660,11 +1660,19 @@ presence is never inferred from a provider name.
 
 Service filesystem mounts are separate from object storage. Optional hosting
 `serviceVolumes` capability metadata gates `services.<name>.volume.mountPath`;
-Railway currently supports web workloads only. Generic planning owns a distinct
-confirmed volume action, durable pre-write intent, acknowledged-ID recovery,
-attachment observation, status drift, and deployment dependencies. New manual
-services use an isolated `hosting-bindings` identity-only stage before volume
-planning; provider deployment remains deferred until a fresh attachment plan.
+native product limitations use explicit `serviceVolumesUnsupported` metadata,
+distinct from an unimplemented adapter. Generic planning owns confirmed volume
+actions, durable pre-write intent, acknowledged-ID recovery, attachment
+observation, status drift, and deployment dependencies. Provider-owned component
+graphs separate filesystem, networking/IAM, registration and attachment writes.
+Each component has its own receipt; `service-volumes` plans authorize only the
+currently ready frontier and require re-planning before dependent infrastructure.
+New manual services use an isolated `hosting-bindings` identity-only stage.
+Providers that mount at workload creation bind an app namespace first, then
+backing storage, then the workload. `identityOnly` observation distinguishes
+that app namespace from an empty but already-created workload. Generated CI
+publication waits for complete workload identities. Native scope coordinates
+are explicitly allowlisted, non-secret and immutable in retained bindings.
 V1 is retain-only: omission preserves bindings and data, ambiguous ownership
 blocks retries, and hosting teardown/replacement/rebinding is forbidden while
 volumes remain. There is no volume delete/adopt/move/resize authority. See

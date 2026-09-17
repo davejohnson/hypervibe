@@ -1,11 +1,11 @@
-# Cross-host persistent filesystem design — incomplete implementation
+# Cross-host persistent filesystem design — original audit
 
-PR #218 is a draft. Its Railway implementation is not completion of the requested
-cross-host feature. This document records the September 16, 2026 provider audit
+The initial Railway slice was not completion of the requested cross-host
+feature. This document records the September 16, 2026 pre-implementation audit
 before replacing the Railway-shaped shared contract. No resources were created
 and no hosted compatibility or filesystem durability was verified by this audit.
 
-## Every currently registered hosting provider
+## Every registered hosting provider at the original audit
 
 | Hypervibe host | Documented persistent filesystem path | Current feature implementation |
 | --- | --- | --- |
@@ -89,10 +89,12 @@ observed failures through real serialized provider transports before fixes.
    retention, and both dependency orderings. Explicitly test rejection for
    actual host limitations. Keep registry, matrix, docs and evidence aligned.
 
-## Scope decision still requested
+## Approved scope
 
-Recommended: implement persistent mounts for the five hosts with documented
-paths and explicitly reject volume-dependent deployment on App Platform and
-Vercel Functions. Adding different hosting products to cover those vendors is
-a separate expansion requiring the user's direction. The existing PR remains
-draft; neither the audit nor unsupported declarations complete the feature.
+The user approved persistent mounts for the five hosts with documented paths
+and explicit rejection on App Platform and Vercel Functions. Do not add alternate
+hosting products. This audit table records the pre-implementation findings;
+current implementation constraints and evidence are in `service-volumes.md`.
+PR #218 now contains all five native paths and explicit rejection for the two
+unsupported hosting products. None has been promoted to live-verified by the
+offline implementation or tests.

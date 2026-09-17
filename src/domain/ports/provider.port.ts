@@ -17,6 +17,14 @@ export interface DeploymentMutationOptions {
    * against the currently deployed image.
    */
   deferDeployment?: boolean;
+  /** Reviewed identity-only stage: create an app namespace, not its workload. */
+  deferWorkload?: boolean;
+  /** Exact acknowledged filesystem, provisioned by a separate volume action. */
+  serviceVolume?: {
+    externalId: string;
+    mountPath: string;
+    target: import('./service-volume.port.js').ServiceVolumeTarget;
+  };
 
   /** Exact commit authorized for a provider-built first managed-CI release. */
   expectedSourceCommitSha?: string;

@@ -1791,7 +1791,13 @@ providerRegistry.register({
       },
     },
     lifecycle: {
-      hosting: { workloadKinds: ['web'], customDomains: 'managed', maintenance: 'managed', teardownBoundary: 'services' },
+      hosting: {
+        workloadKinds: ['web'], customDomains: 'managed', maintenance: 'managed', teardownBoundary: 'services',
+        serviceVolumesUnsupported: {
+          reason: 'Vercel Functions does not support persistent filesystem mounts; its writable /tmp space is temporary scratch storage.',
+          documentationUrl: 'https://vercel.com/docs/functions/runtimes#file-system-support',
+        },
+      },
     },
     orchestration: {
       project: { shareAcrossEnvironments: true },

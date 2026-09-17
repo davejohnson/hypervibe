@@ -1,4 +1,8 @@
 import { createHash } from 'node:crypto';
+import { EFSClient } from '@aws-sdk/client-efs';
+import { EcsServiceVolumes } from './ecs-service-volumes.js';
+import { ecsTaskDefinitionWriter } from './ecs-task-definition-writer.js';
+import { ecsTaskDefinitionInput, ecsVolumeFingerprint } from './ecs-volume-runtime.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
 import {
   ACMClient,
@@ -35,13 +39,17 @@ import {
   DeleteExpressGatewayServiceCommand,
   DescribeClustersCommand,
   DescribeExpressGatewayServiceCommand,
+  DescribeTaskDefinitionCommand,
   DescribeServicesCommand,
   ECSClient,
   ListClustersCommand,
   ListServicesCommand,
   UpdateExpressGatewayServiceCommand,
+  RegisterTaskDefinitionCommand,
   type ECSExpressGatewayService,
   type ExpressGatewayServiceConfiguration,
+  type TaskDefinition,
+  type UpdateExpressGatewayServiceRequest,
   type KeyValuePair,
 } from '@aws-sdk/client-ecs';
 import {
@@ -145,6 +153,7 @@ const EcsRegionSchema = z.string().trim().regex(/^[a-z]{2}(?:-gov)?-[a-z]+-\d$/,
 type ConnectedEcsExpressCredentials = EcsExpressCredentials & { region: string };
 
 type AwsClients = {
+  efs: EFSClient;
   acm: ACMClient;
   ec2: EC2Client;
   ecr: ECRClient;
@@ -181,6 +190,7 @@ type ExpressRouting = {
 
 export class EcsExpressAdapter implements IProviderAdapter {
   readonly name = 'ecs';
+  readonly serviceVolumes = new EcsServiceVolumes(() => ({ clients: this.connected().clients, region: this.connected().credentials.region }), () => this.resolveAccountId());
 
   readonly capabilities: ProviderCapabilities = {
     supportedBuilders: ['dockerfile'],
@@ -229,6 +239,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
       },
     };
     this.clients = {
+      efs: new EFSClient(config),
       acm: new ACMClient(config),
       ec2: new EC2Client(config),
       ecr: new ECRClient(config),
@@ -419,12 +430,17 @@ export class EcsExpressAdapter implements IProviderAdapter {
         this.assertExpressScope(express, clusterArn, binding, environment.id);
         attemptedServiceId = binding;
         const config = this.currentConfiguration(express);
-        if (!config?.primaryContainer?.image) {
+        const runtime = await this.runtimeConfiguration(config, binding);
+        if (!config || !runtime.container?.image) {
           throw new Error(`ECS Express service ${binding} has no observable active container configuration.`);
         }
-        const usingBootstrap = config.primaryContainer.image === BOOTSTRAP_IMAGE;
-        const output = await this.connected().clients.ecs.send(
-          new UpdateExpressGatewayServiceCommand({
+        const usingBootstrap = runtime.container.image === BOOTSTRAP_IMAGE;
+        const { output, taskDefinitionArn } = await this.updateRuntimeConfiguration(binding, config, {
+          environment: environmentValues,
+          ...(usingBootstrap || !service.buildConfig.startCommand
+            ? { command: usingBootstrap ? BOOTSTRAP_COMMAND : undefined }
+            : { command: ['sh', '-lc', service.buildConfig.startCommand] }),
+        }, {
             serviceArn: binding,
             executionRoleArn: resources.executionRoleArn,
             cpu: config.cpu ?? '256',
@@ -432,23 +448,14 @@ export class EcsExpressAdapter implements IProviderAdapter {
             healthCheckPath: usingBootstrap
               ? '/'
               : service.buildConfig.healthCheckPath ?? '/',
-            primaryContainer: {
-              ...config.primaryContainer,
-              image: config.primaryContainer.image,
-              containerPort: config.primaryContainer.containerPort ?? 8080,
-              environment: environmentValues,
-              ...(usingBootstrap || !service.buildConfig.startCommand
-                ? { command: usingBootstrap ? BOOTSTRAP_COMMAND : undefined }
-                : { command: ['sh', '-lc', service.buildConfig.startCommand] }),
-            },
             networkConfiguration: this.expressNetworkConfiguration(workloadNetwork),
             scalingTarget: config.scalingTarget,
-          })
-        );
+          });
         express = await this.waitForExpress(
           binding,
-          config.primaryContainer.image,
-          existing.currentDeployment
+          runtime.container.image,
+          existing.currentDeployment,
+          taskDefinitionArn
         );
         if (output.service?.serviceArn !== binding) {
           throw new Error(`AWS update response did not preserve bound service ${binding}.`);
@@ -511,7 +518,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
             resourceType: 'web',
             createdService,
             deploymentDeferred: true,
-            pendingImage: this.currentConfiguration(express)?.primaryContainer?.image === BOOTSTRAP_IMAGE,
+            pendingImage: (await this.runtimeConfiguration(this.currentConfiguration(express), serviceArn)).container.image === BOOTSTRAP_IMAGE,
             ...(url ? { url } : {}),
           },
         },
@@ -554,24 +561,25 @@ export class EcsExpressAdapter implements IProviderAdapter {
       }
       this.assertExpressScope(express, bindings.projectId, serviceArn, environment.id);
       const config = this.currentConfiguration(express);
-      if (!config?.primaryContainer?.image) throw new Error('ECS Express returned no active container configuration.');
+      const runtime = await this.runtimeConfiguration(config, serviceArn);
+      if (!config || !runtime.container?.image) throw new Error('ECS Express returned no active container configuration.');
       const retired = new Set(keys);
-      const environmentValues = (config.primaryContainer.environment ?? [])
-        .filter((item) => item.name && !retired.has(item.name));
-      await this.connected().clients.ecs.send(new UpdateExpressGatewayServiceCommand({
+      const environmentValues = (runtime.container.environment ?? [])
+        .filter((item: { name?: string }) => item.name && !retired.has(item.name));
+      const { taskDefinitionArn } = await this.updateRuntimeConfiguration(serviceArn, config, { environment: environmentValues }, {
         serviceArn,
         executionRoleArn: config.executionRoleArn,
         cpu: config.cpu,
         memory: config.memory,
         healthCheckPath: config.healthCheckPath,
-        primaryContainer: { ...config.primaryContainer, environment: environmentValues },
         networkConfiguration: this.expressNetworkConfiguration(workloadNetwork),
         scalingTarget: config.scalingTarget,
-      }));
+      });
       await this.waitForExpress(
         serviceArn,
-        config.primaryContainer.image,
-        express.currentDeployment
+        runtime.container.image,
+        express.currentDeployment,
+        taskDefinitionArn
       );
       return {
         success: true,
@@ -816,7 +824,8 @@ export class EcsExpressAdapter implements IProviderAdapter {
       if (!express) continue;
       this.assertExpressScope(express, bindings.projectId, binding.serviceId, environment.id);
       const config = this.currentConfiguration(express);
-      const environmentValues = config?.primaryContainer?.environment ?? [];
+      const runtime = await this.runtimeConfiguration(config, binding.serviceId);
+      const environmentValues: KeyValuePair[] = runtime.container.environment ?? [];
       const values = Object.fromEntries(
         environmentValues
           .filter((item): item is { name: string; value: string } => Boolean(item.name) && typeof item.value === 'string')
@@ -844,7 +853,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
         envVarKeys: visible.map(([key]) => key).sort(),
         envVarHashes: Object.fromEntries(visible.map(([key, value]) => [key, hashEnvValue(value)])),
         status: express.status?.statusCode === 'ACTIVE'
-          ? (config?.primaryContainer?.image === BOOTSTRAP_IMAGE ? 'empty' : 'running')
+          ? (runtime.container.image === BOOTSTRAP_IMAGE ? 'empty' : 'running')
           : express.status?.statusCode === 'INACTIVE' ? 'failed' : 'unknown',
       });
     }
@@ -1482,6 +1491,40 @@ export class EcsExpressAdapter implements IProviderAdapter {
     )[0];
   }
 
+  private async runtimeConfiguration(config: ExpressGatewayServiceConfiguration | undefined, serviceArn: string): Promise<{ container: any; task?: TaskDefinition; tags?: Array<{ key?: string; value?: string }> }> {
+    if (!config?.taskDefinitionArn) {
+      if (!config?.primaryContainer?.image) throw new Error('ECS runtime configuration is not observable.');
+      return { container: config.primaryContainer };
+    }
+    const arn = config.taskDefinitionArn;
+    if (!arn.startsWith(serviceArn.split(':service/')[0] + ':task-definition/') || !/:\d+$/.test(arn)) throw new Error('ECS task definition is outside the bound account or region.');
+    const result = await this.connected().clients.ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: arn, include: ['TAGS'] }));
+    const task = result.taskDefinition;
+    if (task?.taskDefinitionArn !== arn || task.status !== 'ACTIVE') throw new Error('ECS exact task definition could not be verified.');
+    ecsTaskDefinitionInput(task, {});
+    return { container: task.containerDefinitions!.find((container) => container.name === 'Main')!, task, tags: result.tags };
+  }
+
+  private async updateRuntimeConfiguration(serviceArn: string, config: ExpressGatewayServiceConfiguration, patch: Record<string, unknown>, changes: UpdateExpressGatewayServiceRequest) {
+    const current = await this.runtimeConfiguration(config, serviceArn);
+    if (!current.task) return { output: await this.connected().clients.ecs.send(new UpdateExpressGatewayServiceCommand({ ...changes, primaryContainer: { ...current.container, ...patch } })), taskDefinitionArn: undefined };
+    const input = { ...ecsTaskDefinitionInput(current.task, patch), ...(current.tags ? { tags: current.tags } : {}) };
+    const registered = await ecsTaskDefinitionWriter(this.connected().clients.ecs).send(new RegisterTaskDefinitionCommand(input));
+    const arn = registered.taskDefinition?.taskDefinitionArn;
+    const prefix = current.task.taskDefinitionArn!.replace(/:\d+$/, ':');
+    if (!arn?.startsWith(prefix) || !/^\d+$/.test(arn.slice(prefix.length))) throw new Error('ECS did not acknowledge a revision of the bound task-definition family.');
+    const observed = await this.runtimeConfiguration({ taskDefinitionArn: arn }, serviceArn);
+    if (ecsVolumeFingerprint(observed.task) !== ecsVolumeFingerprint(current.task)) throw new Error('ECS task revision changed retained volume mounts or runtime identity.');
+    const preserves = (expected: any, value: any): boolean => Array.isArray(expected)
+      ? Array.isArray(value) && expected.length === value.length && expected.every((entry, i) => preserves(entry, value[i]))
+      : expected && typeof expected === 'object'
+        ? Boolean(value) && Object.entries(expected).every(([key, entry]) => entry === undefined || preserves(entry, value[key]))
+        : expected === value;
+    if (!preserves(input, { ...ecsTaskDefinitionInput(observed.task, {}), ...(observed.tags ? { tags: observed.tags } : {}) })) throw new Error('ECS task revision did not preserve reviewed runtime configuration.');
+    const { primaryContainer: _primary, executionRoleArn: _execution, taskRoleArn: _role, cpu: _cpu, memory: _memory, ...compatible } = changes;
+    return { output: await this.connected().clients.ecs.send(new UpdateExpressGatewayServiceCommand({ ...compatible, taskDefinitionArn: arn })), taskDefinitionArn: arn };
+  }
+
   private expressUrl(service: ECSExpressGatewayService): string | undefined {
     const endpoint = this.currentConfiguration(service)?.ingressPaths?.find(
       (path) => path.accessType === 'PUBLIC'
@@ -1493,15 +1536,18 @@ export class EcsExpressAdapter implements IProviderAdapter {
   private async waitForExpress(
     serviceArn: string,
     image?: string,
-    previousDeployment?: string
+    previousDeployment?: string,
+    taskDefinitionArn?: string
   ): Promise<ECSExpressGatewayService> {
     const attempts = this.attempts('HYPERVIBE_ECS_EXPRESS_WAIT_ATTEMPTS', 120);
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       const service = await this.getExpressService(serviceArn);
       if (!service) throw new Error(`ECS Express service ${serviceArn} disappeared during reconciliation.`);
       const config = this.currentConfiguration(service);
+      const runtime = await this.runtimeConfiguration(config, serviceArn);
       if (service.status?.statusCode === 'ACTIVE'
-        && (!image || config?.primaryContainer?.image === image)
+        && (!image || runtime.container.image === image)
+        && (!taskDefinitionArn || config?.taskDefinitionArn === taskDefinitionArn)
         && (!previousDeployment || (
           Boolean(service.currentDeployment)
           && service.currentDeployment !== previousDeployment
@@ -1959,6 +2005,7 @@ providerRegistry.register({
     lifecycle: {
       hosting: {
         workloadKinds: ['web'],
+        serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only' },
         customDomains: 'managed',
         domainTrafficProxy: 'dns-only',
         maintenance: 'unsupported',

@@ -135,7 +135,7 @@ export interface PlanOptions {
 
 export interface EnvironmentPlan {
   planRunId: string;
-  scope: 'full' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'managed-ci-publication';
+  scope: 'full' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'managed-ci-publication';
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
   environmentName: string;
@@ -2471,8 +2471,11 @@ export class PlanService {
     // CI rendering needs durable provider identities. Reconcile those in an
     // isolated apply, then re-plan against the resulting bindings.
     const managedCiEnabled = environmentUsesManagedCi(specResult.spec, environmentName);
+    const pendingVolumes = serviceVolumes.actions.some(action => action.type !== 'noop');
+    const identityOnlyWorkloads = observed?.services.filter(service => service.identityOnly === true) ?? [];
     const volumeIdentityStage = Object.entries(environmentSpec.services).some(([name, s]) => s.volume
-      && !((environment?.platformBindings.services as Record<string, { serviceId?: string }> | undefined)?.[name]?.serviceId));
+      && (!((environment?.platformBindings.services as Record<string, { serviceId?: string }> | undefined)?.[name]?.serviceId)
+        || (!pendingVolumes && identityOnlyWorkloads.some(service => service.name === name))));
     // A fresh project has no destinations whose generated secrets can be
     // observed yet. Bootstrap only its project identity; the project handler
     // still verifies absence before creating it. Re-plan before authorizing
@@ -2483,7 +2486,8 @@ export class PlanService {
       && !projectAction.metadata?.blockedReason
       && delegatedSecrets.blockers.length > 0;
     const ciBindingPrerequisites = managedCiEnabled || volumeIdentityStage
-      ? ciProjectBootstrapStage ? [projectAction!] : actions.filter(isManagedCiBindingRoot)
+      ? ciProjectBootstrapStage ? [projectAction!] : actions.filter(action => isManagedCiBindingRoot(action)
+        && !(pendingVolumes && action.metadata?.workloadCreateRequired === true))
       : [];
     const ciBindingStage = ciBindingPrerequisites.length > 0;
     const ciBindingServiceNames = new Set(
@@ -2504,7 +2508,7 @@ export class PlanService {
       && action.billable === true
       && action.metadata?.operation === undefined
     );
-    const ciDeploy: Awaited<ReturnType<typeof planManagedCiDeploy>> = ciBindingStage
+    const ciDeploy: Awaited<ReturnType<typeof planManagedCiDeploy>> = ciBindingStage || (pendingVolumes && identityOnlyWorkloads.length > 0)
       ? {
           actions: [],
           warnings: [
@@ -2789,6 +2793,8 @@ export class PlanService {
       || nativeDeploySources.actions.length > 0;
     const ciBindingStageActive = ciBindingStage && !providerSafetyStageActive;
     const ciWorkflowPublicationStageActive = ciWorkflowPublicationStage && !providerSafetyStageActive;
+    const volumeStageActive = !providerSafetyStageActive && !ciBindingStageActive && !ciWorkflowPublicationStageActive
+      && serviceVolumes.actions.some(action => action.type !== 'noop');
     if (ciBindingStageActive) {
       const closure = actionDependencyClosure(
         actions,
@@ -2816,6 +2822,9 @@ export class PlanService {
       ciDeploy.warnings.push(
         'This plan is limited to managed CI workflow publication. Merge and re-observe the reviewed files, then re-run hv_plan for provider reconciliation.'
       );
+    } else if (volumeStageActive) {
+      actions = serviceVolumes.actions;
+      storage.warnings.push('This plan is limited to the current filesystem component stage. Apply and re-plan to review dependent resources and deployment; no application code is deployed by this stage.');
     }
 
     const filterWarnings: string[] = [];
@@ -2943,7 +2952,7 @@ export class PlanService {
           : {}),
       }
       : undefined;
-    const isolatedCiStage = ciBindingStageActive || ciWorkflowPublicationStageActive;
+    const isolatedCiStage = ciBindingStageActive || ciWorkflowPublicationStageActive || volumeStageActive;
     const ciSelection = resolveDevOpsSelection(specResult.spec)?.ci;
     const ciConnectionProvider = ciSelection
       ? devOpsProviderRegistry.ciProvider(ciSelection.provider)?.connectionProvider
@@ -2954,17 +2963,17 @@ export class PlanService {
     const planBlocked = isolatedCiStage
       ? this.providerPreflight(isolatedProviders)
       : blocked;
-    const planInputRequired = ciWorkflowPublicationStageActive
+    const planInputRequired = ciWorkflowPublicationStageActive || volumeStageActive
       ? []
       : ciBindingStageActive
         ? ciBindingInputRequired
         : secretInputRequired;
-    const planOverrides = ciWorkflowPublicationStageActive || ciProjectBootstrapStage ? undefined : overrides;
+    const planOverrides = ciWorkflowPublicationStageActive || ciProjectBootstrapStage || volumeStageActive ? undefined : overrides;
     const persistedScope = ciBindingStageActive
       ? (volumeIdentityStage && !managedCiEnabled ? 'hosting-bindings' as const : 'managed-ci-bindings' as const)
       : ciWorkflowPublicationStageActive
         ? 'managed-ci-publication' as const
-        : 'full' as const;
+        : volumeStageActive ? 'service-volumes' as const : 'full' as const;
     const actionKinds = new Set(actions.map((action) => action.resource.kind));
     const integrationFingerprints = ciWorkflowPublicationStageActive ? {} : {
       ...((!ciBindingStageActive || actionKinds.has('payment')) && stripeSync.fingerprint

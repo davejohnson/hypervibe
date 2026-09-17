@@ -371,4 +371,31 @@ describe('Cloud Run generated release runtime', () => {
     })).rejects.toThrow('configuration returned a different operation identity');
     expect(waitOperation).not.toHaveBeenCalled();
   });
+
+  it.each(['preserve', 'mount', 'uid'])('retains NFS release-job identity and refuses changed %s before execution', async (fault) => {
+    const task = { containers: [{ image: 'old', volumeMounts: [{ name: 'data', mountPath: '/data' }] }], volumes: [{ name: 'data', nfs: { server: '10.0.0.2', path: '/data' } }], executionEnvironment: 'EXECUTION_ENVIRONMENT_GEN2', serviceAccount: 'runtime@example.test', vpcAccess: { networkInterfaces: [{ network: 'private', subnetwork: 'private' }] } };
+    let updated: any;
+    let runs = 0;
+    const fetchImpl = vi.fn(async (_input: unknown, init?: RequestInit) => {
+      if (init?.method === 'PATCH') { updated = JSON.parse(String(init.body)); return Response.json({ name: configureOperationName, done: true }); }
+      return Response.json({ ...readyJob(), uid: 'job-uid', etag: 'job-etag' });
+    }) as unknown as typeof fetch;
+    const loaded = await runtime(fetchImpl);
+    const operation = loaded.runCloudRunReleaseCommands({ releases: [release()], imageUri: 'candidate@sha256:' + 'b'.repeat(64), projectId, region, headers: {}, authHeaders: {},
+      getJson: async (url: string) => {
+        if (url === serviceUrl) return { name: `projects/${projectId}/locations/${region}/services/${serviceName}`, template: task };
+        if (url === jobUrl) {
+          const result = { ...readyJob(), uid: fault === 'uid' ? 'replacement-uid' : 'job-uid', ...structuredClone(updated) };
+          if (fault === 'mount') result.template.template.containers[0].volumeMounts = [];
+          return result;
+        }
+        if (url.endsWith(':run')) { runs++; return { name: runOperationName }; }
+        throw new Error('Unexpected read');
+      }, waitOperation: async (value: any) => value.name === runOperationName ? { response: { name: executionName, completionStatus: 'EXECUTION_SUCCEEDED' } } : value,
+    });
+    if (fault === 'preserve') { await operation; expect(runs).toBe(1); }
+    else { await expect(operation).rejects.toThrow(); expect(runs).toBe(0); }
+    expect(updated.etag).toBe('job-etag');
+    expect(updated.template.template.executionEnvironment).toBe(task.executionEnvironment);
+  });
 });

@@ -1387,7 +1387,9 @@ export function resolvePlanActionAuthority(
   }
   if (exactResource(action, 'volume')
     && ((action.type === 'create' && action.metadata?.operation === 'serviceVolumeCreate')
-      || (action.type === 'update' && action.metadata?.operation === 'serviceVolumeFinalize')))
+      || (action.type === 'update' && action.metadata?.operation === 'serviceVolumeFinalize')
+      || (['create', 'update'].includes(action.type) && action.metadata?.operation === 'serviceVolumeComponentApply' && metadataString(action, 'component'))
+      || (action.type === 'update' && action.metadata?.operation === 'serviceVolumeComponentFinalize' && metadataString(action, 'component'))))
     return authority(action, 'hosting.volume.mutate');
   return null;
 }

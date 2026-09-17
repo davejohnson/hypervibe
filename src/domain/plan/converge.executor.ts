@@ -160,7 +160,7 @@ export function isManagedCiBindingRoot(action: PlanAction): boolean {
     && action.type !== 'destroy'
     && (
       (action.resource.kind === 'project' || action.resource.kind === 'environment')
-      || (action.resource.kind === 'service' && (action.type === 'create' || action.type === 'replace'))
+      || (action.resource.kind === 'service' && (action.type === 'create' || action.type === 'replace' || action.metadata?.workloadCreateRequired === true))
     );
 }
 
@@ -188,6 +188,7 @@ export const planRunDocumentSchema = z.object({
     'retained-cleanup',
     'managed-ci-bindings',
     'hosting-bindings',
+    'service-volumes',
     'managed-ci-publication',
   ]).optional(),
   environmentName: z.string().min(1),
@@ -248,6 +249,12 @@ export const planRunDocumentSchema = z.object({
     return;
   }
 
+  if (document.scope === 'service-volumes') {
+    if (!document.actions.length || document.actions.some(action => action.resource.kind !== 'volume') || document.overrides || document.inputRequired?.length) {
+      ctx.addIssue({ code: 'custom', message: 'service-volumes plan must contain only filesystem actions and no runtime secret inputs.' });
+    }
+    return;
+  }
   if (document.scope === 'managed-ci-bindings' || document.scope === 'hosting-bindings') {
     const roots = document.actions.filter(isManagedCiBindingRoot);
     const retained = new Set(actionDependencyClosure(
@@ -381,6 +388,7 @@ export function fingerprintObservedState(observed: ObservedState): string {
         name: s.name,
         externalId: s.externalId,
         status: s.status,
+        ...(s.identityOnly !== undefined ? { identityOnly: s.identityOnly } : {}),
         url: s.url ?? null,
         workloadKind: s.workloadKind,
         customDomains: [...s.customDomains].sort(),

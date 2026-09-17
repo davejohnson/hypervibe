@@ -5,13 +5,22 @@ import type { ObservedState } from '../ports/observe.port.js';
 import type { IServiceVolumes, ObservedServiceVolume, ServiceVolumeBinding, ServiceVolumeObservation, ServiceVolumeTarget } from '../ports/service-volume.port.js';
 import type { EnvironmentSpec } from '../spec/spec.schema.js';
 import { providerRegistry } from '../registry/provider.registry.js';
+import { applyVolumeComponent, observeVolumeComponents, planVolumeComponents } from './service-volume-components.js';
 
 export const SERVICE_VOLUME_OPERATIONS = { create: 'serviceVolumeCreate', finalize: 'serviceVolumeFinalize' } as const;
-const targetSchema = z.object({ projectId: z.string().min(1), environmentId: z.string().min(1), serviceId: z.string().min(1), mountPath: z.string().min(1) }).strict();
-const bindingSchema = z.object({
+// Repository exports restore these identity coordinates without generic key
+// redaction. New coordinates require explicit review; credential slots never fit.
+const scopeKeys = new Set(['account', 'accountId', 'projectId', 'projectNumber', 'subscriptionId', 'resourceGroup', 'location', 'region', 'zone', 'serviceName', 'sizeGb', 'capacityGb', 'tier', 'network', 'subnetwork', 'instanceName', 'shareName', 'vpcId', 'workloadSecurityGroupId', 'subnets', 'taskRoleArn', 'taskRoleOwned']);
+const instanceScopeSchema = z.record(z.string().min(1).max(8192).refine(v => !/[\r\n]/.test(v) && !/https?:\/\/[^/]*@/i.test(v)))
+  .refine(scope => Object.keys(scope).length > 0 && Object.keys(scope).every(key => scopeKeys.has(key)));
+const targetSchema = z.object({ projectId: z.string().min(1), environmentId: z.string().min(1), serviceId: z.string().min(1), mountPath: z.string().min(1), instanceScope: instanceScopeSchema.optional() }).strict();
+const componentBindingSchema = z.object({ state: z.enum(['creating', 'identified', 'bound']), externalId: z.string().min(1).optional() }).strict()
+  .refine((v) => v.state === 'creating' ? v.externalId === undefined : Boolean(v.externalId));
+const legacyBindingSchema = z.object({
   provider: z.string().min(1), target: targetSchema,
   state: z.enum(['creating', 'identified', 'bound']), externalId: z.string().min(1).optional(),
 }).strict().refine((v) => v.state === 'creating' ? v.externalId === undefined : Boolean(v.externalId));
+const bindingSchema = z.union([legacyBindingSchema, z.object({ provider: z.string().min(1), target: targetSchema, state: z.literal('staged'), components: z.record(componentBindingSchema) }).strict()]);
 const bindingsSchema = z.record(bindingSchema);
 type VolumeEnvironment = Pick<Environment, 'platformBindings'> | null;
 
@@ -25,7 +34,8 @@ export function parseServiceVolumeBindings(environment: VolumeEnvironment): Reco
   // A null/corrupt marker must not become proof that no retained disk exists.
   if (environment?.platformBindings.serviceVolumes === null) return null;
   if (!parsed.success) return null;
-  const ids = Object.values(parsed.data).flatMap((b) => b.externalId ? [`${b.provider}:${b.target.projectId}:${b.externalId}`] : []);
+  const ids = Object.values(parsed.data).flatMap((b) => (b.state === 'staged' ? Object.entries(b.components) : [['filesystem', b] as const]).flatMap(([key, c]) => c.externalId
+    ? [JSON.stringify([b.provider, b.target.projectId, b.target.environmentId, key, c.externalId])] : []));
   if (new Set(ids).size !== ids.length) return null;
   return parsed.data;
 }
@@ -39,7 +49,8 @@ function targetFor(environment: VolumeEnvironment, name: string, mountPath: stri
 }
 
 function sameTarget(a: ServiceVolumeTarget | undefined, b: ServiceVolumeTarget | undefined): boolean {
-  return Boolean(a && b && a.projectId === b.projectId && a.environmentId === b.environmentId && a.serviceId === b.serviceId && a.mountPath === b.mountPath);
+  return Boolean(a && b && a.projectId === b.projectId && a.environmentId === b.environmentId && a.serviceId === b.serviceId && a.mountPath === b.mountPath
+    && JSON.stringify(Object.entries(a.instanceScope ?? {}).sort()) === JSON.stringify(Object.entries(b.instanceScope ?? {}).sort()));
 }
 
 export async function observeServiceVolumes(params: {
@@ -54,7 +65,13 @@ export async function observeServiceVolumes(params: {
   for (const name of [...names].sort()) {
     const binding = Object.hasOwn(retained, name) ? retained[name] : undefined;
     const desired = environmentSpec.services[name]?.volume;
-    const target = targetFor(environment, name, desired?.mountPath ?? binding?.target.mountPath ?? '');
+    const mountPath = desired?.mountPath ?? binding?.target.mountPath ?? '';
+    let target: ServiceVolumeTarget | undefined;
+    try {
+      const candidate = volumes?.staged ? await volumes.staged.resolveTarget({ environment, environmentSpec, serviceName: name, mountPath }) : targetFor(environment, name, mountPath);
+      const parsed = targetSchema.safeParse(candidate);
+      target = parsed.success ? parsed.data : undefined;
+    } catch { /* Unknown scope never authorizes resource creation. */ }
     const item: ObservedServiceVolume = { provider, target, binding, observation: { state: 'unknown', reason: 'Hosting project, environment and service must be bound first; apply the identity stage and re-plan.' } };
     result[name] = item;
     if (!target) continue;
@@ -71,7 +88,15 @@ export async function observeServiceVolumes(params: {
       item.observation = { state: 'unknown', reason: 'Hosting adapter does not support service-volume observation.' };
       continue;
     }
-    try { item.observation = await volumes.observe(target, binding?.externalId); }
+    try {
+      if (volumes.staged) {
+        item.components = await observeVolumeComponents(volumes.staged, target, binding);
+        const pending = planVolumeComponents(name, item).some(a => a.type !== 'noop');
+        item.observation = pending ? { state: 'unknown', reason: 'Filesystem component lifecycle is incomplete; review its individual actions.' }
+          : { state: 'present', externalId: target.serviceId, pendingDeletion: false };
+      } else if (binding?.state === 'staged') item.observation = { state: 'unknown', reason: 'Staged volume driver missing; retained components cannot be reinterpreted.' };
+      else item.observation = await volumes.observe(target, binding?.externalId);
+    }
     catch { item.observation = { state: 'unknown', reason: 'Service-volume observation failed; retained identity is preserved.' }; }
   }
   return result;
@@ -95,10 +120,16 @@ export function planServiceVolumes(params: {
     let operation: string = SERVICE_VOLUME_OPERATIONS.create;
     let reason = 'Create a retained filesystem volume at the reviewed mount path.';
     if (!desired && binding) warnings.push(`Volume ${name} is retained (and may remain billable) despite omitted intent. Hypervibe does not delete, detach, adopt or move service volumes.`);
+    if (retained && live?.target && live.components) {
+      actions.push(...planVolumeComponents(name, live).map(action => !desired && action.type !== 'noop'
+        ? { ...action, verified: false, reason: 'Volume intent was removed. Retain existing resources; restore intent before continuing an incomplete filesystem lifecycle.', metadata: { ...action.metadata, blockedReason: 'retained_volume_intent_missing' } }
+        : action));
+      continue;
+    }
     if (!retained) blocked = 'Malformed or duplicate retained volume bindings.';
     else if (!live?.target || !observation || observation.state === 'unknown') blocked = observation?.state === 'unknown' ? observation.reason : 'Volume observation is unavailable; bind the service and re-plan.';
     else if (binding?.state === 'creating') blocked = 'An earlier create has an unresolved outcome without an acknowledged ID. Investigate the exact provider resource; automatic retry/adoption is forbidden.';
-    else if (observation.state === 'present' && observation.pendingDeletion) blocked = 'The volume is pending deletion; attachment is not converged.';
+    else if (observation.state === 'present' && (observation.pendingDeletion || observation.ready === false)) blocked = 'The volume is not ready or pending deletion; attachment is not converged.';
     else if (binding) {
       if (observation.state !== 'present' || observation.externalId !== binding.externalId || !sameTarget(live.target, binding.target)) blocked = 'The exact retained volume is missing or changed; automatic replacement with an empty disk is forbidden.';
       else if (binding.state === 'identified') { operation = SERVICE_VOLUME_OPERATIONS.finalize; reason = 'Finalize the acknowledged volume ID after fresh exact attachment observation; no provider write.'; }
@@ -157,13 +188,17 @@ export async function applyServiceVolumeAction(params: {
   const expected = planServiceVolumes({ environment, environmentSpec, observed: { serviceVolumes: live } as ObservedState }).actions.find((a) => a.id === action.id);
   if (!expected || expected.metadata?.blockedReason || expected.type !== action.type || expected.resource.name !== action.resource.name
     || expected.metadata?.operation !== action.metadata?.operation || expected.metadata?.externalId !== action.metadata?.externalId
+    || expected.metadata?.component !== action.metadata?.component || expected.billable !== action.billable || expected.dataBearing !== action.dataBearing
     || !sameTarget(expected.metadata?.target as ServiceVolumeTarget, action.metadata?.target as ServiceVolumeTarget)
-    || (action.type === 'create' && (action.billable !== true || action.dataBearing !== true))) return block(expected?.reason ?? 'Volume action no longer matches fresh desired and observed state.');
+    || (action.type === 'create' && !volumes.staged && action.billable !== true)) return block(expected?.reason ?? 'Volume action no longer matches fresh desired and observed state.');
   const retained = bindings(environment)!;
   const name = action.resource.name;
   const target = expected.metadata!.target as ServiceVolumeTarget;
+  if (volumes.staged) return applyVolumeComponent({ driver: volumes.staged, action: expected, retained, save });
   if (action.metadata?.operation === SERVICE_VOLUME_OPERATIONS.finalize) {
-    save({ ...retained, [name]: { ...retained[name], state: 'bound' } });
+    const previous = retained[name];
+    if (!previous || previous.state === 'staged') return block('Cannot finalize a different retained volume lifecycle.');
+    save({ ...retained, [name]: { ...previous, state: 'bound' } });
     return { success: true, message: 'Exact acknowledged volume attachment finalized; no provider mutation.' };
   }
   const intent: ServiceVolumeBinding = { provider: action.resource.provider, target, state: 'creating' };
@@ -177,11 +212,11 @@ export async function applyServiceVolumeAction(params: {
     let verification: ServiceVolumeObservation;
     try { verification = await volumes.observe(target, receipt.externalId); }
     catch { return block('Acknowledged volume ID retained; attachment observation failed. Re-plan for exact recovery.'); }
-    if (verification.state === 'present' && verification.externalId === receipt.externalId && !verification.pendingDeletion) {
+    if (verification.state === 'present' && verification.externalId === receipt.externalId && !verification.pendingDeletion && verification.ready !== false) {
       save({ ...retained, [name]: { ...identified, state: 'bound' } });
       return { success: true, message: 'Exact volume attachment verified. Application mount and durability still require deployment checks.' };
     }
-  } else if (!receipt.mutationAttempted) {
+  } else if (receipt.mutationAttempted === false) {
     save(retained);
   }
   return block('Volume attachment was not verified. Any uncertain create intent or acknowledged ID is retained; re-plan before continuing.');

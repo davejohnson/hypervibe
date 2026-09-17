@@ -11,6 +11,7 @@ import {
   parseFlyOrganizationBinding,
   parseFlyServiceBinding,
 } from './fly.binding.js';
+import { buildFlyMountIdentityRuntime } from './fly-mount-identity.js';
 
 export const FLY_CI_REQUIRED_SECRETS = ['FLY_API_TOKEN'];
 
@@ -123,6 +124,7 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
         with:
           script: |
             const endpoint = 'https://api.machines.dev';
+${buildFlyMountIdentityRuntime().split('\n').map(line => `            ${line}`).join('\n')}
             const token = (process.env.FLY_API_TOKEN || '').trim();
             const organization = (process.env.FLY_ORGANIZATION_SLUG || '').trim();
             const registryApp = (process.env.FLY_REGISTRY_APP || '').trim();
@@ -239,6 +241,7 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
                 );
               }
               const machine = exact[0];
+              const expectedMounts = flyMountIdentity(machine.config);
               if (!machine.id || !machine.instance_id || !machine.config) {
                 throw new Error('Fly.io Machine identity or configuration is incomplete');
               }
@@ -294,6 +297,7 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
                 await new Promise((resolve) => setTimeout(resolve, 5000));
               }
               const observedDigest = String(observed?.image_ref?.digest || '').toLowerCase();
+              if (flyMountIdentity(observed?.config) !== expectedMounts) throw new Error('Fly filesystem mount identity changed during deployment.');
               if (
                 observed?.id !== machine.id
                 || observed?.config?.metadata?.hypervibe_git_sha !== sha
