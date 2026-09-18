@@ -448,6 +448,9 @@ describe('hv_spec', () => {
     }
   });
 
+  // This exercises local Git, filesystem permission checks, and multiple MCP
+  // requests. Under the full serial suite it can exceed the global 10-second
+  // unit-test budget without a product failure; retain a finite local deadline.
   it('keeps delegated base values out of the environment scaffold while syncing explicit deploy inputs', async () => {
     const oldCwd = process.cwd();
     const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
@@ -626,7 +629,7 @@ describe('hv_spec', () => {
       else process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable;
       rmSync(repoDir, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it('keeps hv_spec and hv_plan from writing local-project env slots into a checkout with a conflicting repo spec', async () => {
     const oldCwd = process.cwd();
