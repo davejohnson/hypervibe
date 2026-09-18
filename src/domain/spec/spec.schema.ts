@@ -986,6 +986,7 @@ export const iosSpecSchema = z.object({
   const buildSecretNames = new Set(ios.release?.build.requiredSecrets ?? []);
   const reservedSecretNames = [
     ...appStoreReleaseSecretNames,
+    'HYPERVIBE_BUILD_NUMBER',
     ...(ios.release?.signing.provider === 'match' ? matchSigningSecretNames : []),
   ];
   for (const name of reservedSecretNames) {

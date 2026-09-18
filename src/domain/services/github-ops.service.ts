@@ -10,7 +10,7 @@ import { projectSpecSchema, type IosSpec } from '../spec/spec.schema.js';
 import { effectiveRuntimeInstallCommand, type ProjectRuntime } from '../spec/project-runtime.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
-import { buildIosReleaseWorkflow } from './ios-release-workflow.service.js';
+import { buildIosReleaseWorkflow, IOS_RELEASE_WORKFLOW_RENDERER_REVISION } from './ios-release-workflow.service.js';
 import { resolveReviewedBranchDeployTargets } from './managed-ci-targets.js';
 import {
   MANAGED_CI_DEPLOYMENT_CONTRACT_RUNTIME_SOURCE,
@@ -79,7 +79,11 @@ export function githubActionsWorkflowInputHash(params: {
   delete target.programFingerprint;
   delete target.deploymentContractFingerprint;
   const ios = params.ios?.release
-    ? { bundleId: params.ios.bundleId, release: params.ios.release }
+    ? {
+        rendererRevision: IOS_RELEASE_WORKFLOW_RENDERER_REVISION,
+        bundleId: params.ios.bundleId,
+        release: params.ios.release,
+      }
     : undefined;
   return canonicalJsonSha256({
     version: 1,

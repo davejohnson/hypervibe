@@ -2,6 +2,20 @@ import { describe, expect, it } from 'vitest';
 import { iosSpecSchema, environmentSpecSchema } from '../spec.schema.js';
 
 describe('iosSpecSchema', () => {
+  it('reserves the managed build-number handoff against project secret overrides', () => {
+    const result = iosSpecSchema.safeParse({
+      bundleId: 'com.example.app',
+      testflight: { groups: { beta: {} } },
+      release: {
+        services: ['web'],
+        build: { command: 'make ipa', ipaPath: 'Example.ipa', requiredSecrets: ['HYPERVIBE_BUILD_NUMBER'] },
+        testflight: { groups: ['beta'] },
+      },
+    });
+    expect(result.success).toBe(false);
+    expect(result.success ? '' : result.error.message).toContain('HYPERVIBE_BUILD_NUMBER is reserved');
+  });
+
   it('applies defaults', () => {
     const ios = iosSpecSchema.parse({ bundleId: 'com.example.app' });
     expect(ios.platform).toBe('IOS');
