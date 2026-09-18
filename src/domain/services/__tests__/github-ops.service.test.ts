@@ -1291,21 +1291,43 @@ describe('github tools', () => {
     expect(releaseWorkflow).toContain('Verify release IPA identity');
     expect(releaseWorkflow).toContain('hypervibe-ios-build-development-${{ needs.prepare.outputs.sha }}');
     const releaseSha = 'a'.repeat(40);
-    const imageUri = `ghcr.io/owner/repo@sha256:${'b'.repeat(64)}`;
-    const evidence = {
-      version: MANAGED_CI_RELEASE_EVIDENCE_VERSION,
-      provider: 'railway',
-      environment: 'development',
-      deploymentContractFingerprint: 'b'.repeat(64),
-      source: { repository: 'owner/repo', sha: releaseSha },
-      target: {
-        scope: target.releaseTarget!.scope,
-        bindingsFingerprint: target.releaseTarget!.bindingsFingerprint,
-        resources: target.releaseTarget!.resources.map((resource) => ({ ...resource, imageUri })),
+    // Use the emitted producer rather than a hand-shaped artifact. This image
+    // name deliberately contains "s", which exposed that the generated iOS
+    // consumer had interpreted an over-escaped whitespace matcher differently.
+    const imageUri = `ghcr.io/owner/invoice-express@sha256:${'b'.repeat(64)}`;
+    let producedEvidence = '';
+    const validator = installReleaseEvidenceValidator(workflow.content, tempDir);
+    const writeServerEvidence = new AsyncFunction(
+      'require',
+      'process',
+      'core',
+      extractGitHubScript(workflow.content, 'Write server release evidence')
+    );
+    await expect(writeServerEvidence(
+      releaseEvidenceValidatorRequire(validator, {
+        writeFileSync: (_filename, content) => { producedEvidence = String(content); },
+      }),
+      {
+        env: {
+          HYPERVIBE_RELEASE_VALIDATOR_PATH: validator.validatorPath,
+          HYPERVIBE_RELEASE_VALIDATOR_SHA256: validator.validatorSha256,
+          HYPERVIBE_RELEASE_SHA: releaseSha,
+          HYPERVIBE_RELEASE_PROVIDER: 'railway',
+          HYPERVIBE_RELEASE_ENVIRONMENT: 'development',
+          HYPERVIBE_RELEASE_SERVICES: JSON.stringify(target.serviceNames),
+          HYPERVIBE_RELEASE_TARGET_SCOPE: JSON.stringify(target.releaseTarget!.scope),
+          HYPERVIBE_RELEASE_RESOURCES: JSON.stringify(target.releaseTarget!.resources),
+          HYPERVIBE_RELEASE_BINDINGS_FINGERPRINT: target.releaseTarget!.bindingsFingerprint,
+          HYPERVIBE_RELEASE_PROGRAM_FINGERPRINT: target.programFingerprint!,
+          HYPERVIBE_RELEASE_DEPLOYMENT_CONTRACT_FINGERPRINT: 'b'.repeat(64),
+          HYPERVIBE_RELEASE_REQUIRES_IMMUTABLE_IMAGE: 'true',
+          HYPERVIBE_RELEASE_IMAGE_URI: imageUri,
+          GITHUB_REPOSITORY: 'owner/repo',
+        },
       },
-      programFingerprint: target.programFingerprint!,
-      verifiedAt: '2026-09-11T00:00:00.000Z',
-    };
+      {}
+    )).resolves.toBeUndefined();
+    const evidence = JSON.parse(producedEvidence);
     const releaseDocument = parseDocument(releaseWorkflow, { uniqueKeys: true });
     expect(releaseDocument.errors).toEqual([]);
     const parsedRelease = releaseDocument.toJS() as {
@@ -1447,7 +1469,7 @@ describe('github tools', () => {
         ...evidence,
         target: {
           ...evidence.target,
-          resources: evidence.target.resources.map((resource, index) => (
+          resources: evidence.target.resources.map((resource: Record<string, unknown>, index: number) => (
             index === 0 ? { ...resource, providerResourceId: 'other-service' } : resource
           )),
         },
