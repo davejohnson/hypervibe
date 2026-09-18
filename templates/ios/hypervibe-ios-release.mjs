@@ -2,14 +2,16 @@
 
 import { createPrivateKey, sign } from "node:crypto";
 import { spawn } from "node:child_process";
-import { access, chmod, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
-import { constants as fsConstants } from "node:fs";
+import { access, appendFile, chmod, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { constants as fsConstants, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const PROCESSING_TIMEOUT_MS = 30 * 60 * 1000;
 const PROCESSING_INTERVAL_MS = 30 * 1000;
+const APP_STORE_ORIGIN = "https://api.appstoreconnect.apple.com";
+const BUILD_LIST_PAGE_LIMIT = 100;
 
 function required(env, name) {
   const value = env[name]?.trim();
@@ -46,11 +48,21 @@ function parseGroups(raw) {
   return groups;
 }
 
-export function parseReleaseConfig(env = process.env, cwd = process.cwd()) {
+function parseAppStoreConfig(env) {
   const keyId = required(env, "APP_STORE_CONNECT_KEY_ID");
   if (!/^[A-Za-z0-9]+$/.test(keyId)) {
     throw new Error("APP_STORE_CONNECT_KEY_ID contains unsupported characters");
   }
+  return {
+    keyId,
+    issuerId: required(env, "APP_STORE_CONNECT_ISSUER_ID"),
+    privateKey: required(env, "APP_STORE_CONNECT_PRIVATE_KEY").replace(/\\n/g, "\n"),
+    bundleId: required(env, "HYPERVIBE_BUNDLE_ID"),
+  };
+}
+
+export function parseReleaseConfig(env = process.env, cwd = process.cwd()) {
+  const appStore = parseAppStoreConfig(env);
   const releaseSha = required(env, "HYPERVIBE_RELEASE_SHA");
   if (!/^[0-9a-f]{40}$/i.test(releaseSha)) {
     throw new Error("HYPERVIBE_RELEASE_SHA must be a full 40-character Git SHA");
@@ -65,10 +77,7 @@ export function parseReleaseConfig(env = process.env, cwd = process.cwd()) {
   }
 
   return {
-    keyId,
-    issuerId: required(env, "APP_STORE_CONNECT_ISSUER_ID"),
-    privateKey: required(env, "APP_STORE_CONNECT_PRIVATE_KEY").replace(/\\n/g, "\n"),
-    bundleId: required(env, "HYPERVIBE_BUNDLE_ID"),
+    ...appStore,
     ipaPath,
     buildNumber: required(env, "HYPERVIBE_BUILD_NUMBER"),
     marketingVersion: required(env, "HYPERVIBE_MARKETING_VERSION"),
@@ -149,8 +158,9 @@ function appStoreToken(config) {
 
 async function appStoreRequest(config, requestPath, options = {}) {
   const { allowNotFound = false, ...requestOptions } = options;
-  const response = await fetch(`https://api.appstoreconnect.apple.com/v1${requestPath}`, {
+  const response = await fetch(`${APP_STORE_ORIGIN}/v1${requestPath}`, {
     ...requestOptions,
+    redirect: "error",
     headers: {
       Authorization: `Bearer ${appStoreToken(config)}`,
       "Content-Type": "application/json",
@@ -178,6 +188,61 @@ async function findApp(config) {
     );
   }
   return response.data[0];
+}
+
+export async function allocateBuildNumber(env = process.env) {
+  const config = parseAppStoreConfig(env);
+  const app = await findApp(config);
+  let next = `${APP_STORE_ORIGIN}/v1/builds?filter[app]=${encodeURIComponent(app.id)}&limit=200`;
+  let maximum = 0;
+  const visited = new Set();
+  while (next) {
+    if (typeof next !== "string") throw new Error("Invalid App Store build pagination next link");
+    const url = new URL(next, APP_STORE_ORIGIN);
+    if (
+      url.origin !== APP_STORE_ORIGIN || url.pathname !== "/v1/builds"
+      || url.username || url.password || url.hash
+      || url.searchParams.getAll("filter[app]").length !== 1
+      || url.searchParams.get("filter[app]") !== app.id
+      || [...url.searchParams.keys()].some((key) => !["filter[app]", "limit", "cursor"].includes(key))
+      || url.searchParams.getAll("limit").length > 1
+      || (url.searchParams.has("limit") && !/^(?:[1-9][0-9]?|1[0-9]{2}|200)$/.test(url.searchParams.get("limit")))
+      || url.searchParams.getAll("cursor").length > 1
+    ) {
+      throw new Error("Unsafe App Store build pagination next link");
+    }
+    url.searchParams.sort();
+    if (visited.has(url.href) || visited.size >= BUILD_LIST_PAGE_LIMIT) {
+      throw new Error("Repeated or excessive App Store build pagination");
+    }
+    visited.add(url.href);
+    const response = await appStoreRequest(config, `/builds${url.search}`);
+    if (
+      !Array.isArray(response?.data) || response.data.length > 200
+      || !response.links || typeof response.links !== "object" || Array.isArray(response.links)
+    ) {
+      throw new Error("Incomplete App Store build listing");
+    }
+    for (const build of response.data) {
+      const version = build?.attributes?.version;
+      if (
+        build?.type !== "builds" || typeof build.id !== "string" || !build.id
+        || typeof version !== "string" || !/^[0-9]+(?:\.[0-9]+){0,2}$/.test(version)
+      ) {
+        throw new Error("Unsupported App Store build number/version in listing");
+      }
+      const major = Number(version.split(".")[0]);
+      if (major >= 9999) {
+        throw new Error("App Store build number is unsupported or exhausted (managed range: 1..9999)");
+      }
+      maximum = Math.max(maximum, major);
+    }
+    next = response.links.next;
+    if (next !== undefined && next !== null && (typeof next !== "string" || !next)) {
+      throw new Error("Invalid App Store build pagination next link");
+    }
+  }
+  return String(maximum + 1);
 }
 
 async function findBuild(config, appId) {
@@ -208,13 +273,13 @@ async function findBuild(config, appId) {
   return build;
 }
 
-async function uploadIfNeeded(config, appId) {
+async function uploadBuild(config, appId) {
   const existing = await findBuild(config, appId);
   if (existing) {
-    console.log(
-      `App Store Connect build ${config.buildNumber} already exists; resuming the gated release.`
+    throw new Error(
+      `App Store Connect build ${config.buildNumber} already exists; its source and IPA provenance cannot be verified. `
+      + "Rebuild with a new build number. Automatic resume of an existing upload is not supported."
     );
-    return existing;
   }
 
   const keyDirectory = path.join(homedir(), ".appstoreconnect", "private_keys");
@@ -248,20 +313,16 @@ async function uploadIfNeeded(config, appId) {
   } finally {
     if (createdKey) await unlink(keyPath).catch(() => {});
   }
-
-  return null;
 }
 
-async function waitForProcessedBuild(config, appId, initialBuild = null) {
-  let build = initialBuild;
+async function waitForProcessedBuild(config, appId) {
   const deadline = Date.now() + PROCESSING_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    build = build || await findBuild(config, appId);
+    const build = await findBuild(config, appId);
     if (build?.attributes.processingState === "VALID") return build;
     if (build?.attributes.processingState === "FAILED") {
       throw new Error(`App Store Connect processing failed for build ${config.buildNumber}`);
     }
-    build = null;
     await new Promise((resolve) => setTimeout(resolve, PROCESSING_INTERVAL_MS));
   }
   throw new Error(
@@ -370,7 +431,7 @@ async function submitBetaReview(config, build) {
   });
 }
 
-export function buildReleaseManifest(config, serverEvidence, app, build, releasedAt) {
+function validateServerEvidence(config, serverEvidence) {
   const resources = serverEvidence?.target?.resources;
   const services = Array.isArray(resources)
     ? resources.map((resource) => resource?.logicalName)
@@ -388,6 +449,11 @@ export function buildReleaseManifest(config, serverEvidence, app, build, release
   ) {
     throw new Error("Server release evidence no longer matches the gated mobile release");
   }
+  return services;
+}
+
+export function buildReleaseManifest(config, serverEvidence, app, build, releasedAt) {
+  const services = validateServerEvidence(config, serverEvidence);
   return {
     version: 1,
     environment: config.environment,
@@ -413,16 +479,17 @@ export function buildReleaseManifest(config, serverEvidence, app, build, release
 export async function main() {
   const config = parseReleaseConfig();
   await access(config.ipaPath, fsConstants.R_OK);
+  const serverEvidence = JSON.parse(
+    await readFile(config.serverEvidencePath, "utf8")
+  );
+  validateServerEvidence(config, serverEvidence);
   const app = await findApp(config);
-  const existingBuild = await uploadIfNeeded(config, app.id);
-  const build = await waitForProcessedBuild(config, app.id, existingBuild);
+  await uploadBuild(config, app.id);
+  const build = await waitForProcessedBuild(config, app.id);
   await setCompliance(config, build);
   await distributeToGroups(config, app.id, build);
   await submitBetaReview(config, build);
 
-  const serverEvidence = JSON.parse(
-    await readFile(config.serverEvidencePath, "utf8")
-  );
   const manifest = buildReleaseManifest(
     config,
     serverEvidence,
@@ -437,8 +504,15 @@ export async function main() {
   );
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch((error) => {
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
+  const command = process.argv[2] === "--allocate-build-number"
+    ? async () => {
+      const outputPath = required(process.env, "GITHUB_OUTPUT");
+      const buildNumber = await allocateBuildNumber();
+      await appendFile(outputPath, `build_number=${buildNumber}\n`, "utf8");
+    }
+    : main;
+  command().catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });

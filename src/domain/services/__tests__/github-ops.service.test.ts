@@ -13,6 +13,7 @@ import {
   buildBranchDeployWorkflow,
   githubActionsServerProgramFingerprint,
   githubActionsWorkflowInputHash,
+  GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION,
   resolveBranchDeployTargets,
 } from '../github-ops.service.js';
 import { resolveReviewedBranchDeployTargets } from '../managed-ci-targets.js';
@@ -22,6 +23,7 @@ import { managedCiReleaseTarget } from '../managed-ci-targets.js';
 import { cloudRunContainerBuildStartCommand } from '../../../adapters/providers/gcp/cloudrun-ci.release-runtime.js';
 import type { BranchDeployTarget } from '../../ports/ci-deploy.port.js';
 import { MANAGED_CI_RELEASE_EVIDENCE_VERSION } from '../managed-ci-evidence.js';
+import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
 import {
   extractGitHubScript,
   extractWorkflowShell,
@@ -1131,6 +1133,34 @@ describe('github tools', () => {
     expect(pythonDockerfile).not.toContain('FROM node:20-slim');
   });
 
+  it('requires review of the iOS provenance repair without migrating server-only workflows', () => {
+    const target: BranchDeployTarget = {
+      environmentName: 'production', kind: 'production', branch: 'main',
+      autoDeployOnPush: false, serviceNames: ['web'], providerServiceIds: ['web-1'],
+    };
+    const migration = { includeStep: false };
+    const ios = {
+      bundleId: 'com.example.app', platform: 'IOS' as const, capabilities: [],
+      release: {
+        services: ['web'], trigger: 'manual' as const,
+        build: { workingDirectory: '.', command: 'build-ios', ipaPath: 'app.ipa', requiredSecrets: [] },
+        signing: { provider: 'project' as const },
+        testflight: { groups: ['Pilot'], usesNonExemptEncryption: false, submitForBetaReview: false },
+      },
+    };
+    // The previously accepted semantic contract had no iOS renderer revision.
+    // Keeping that hash would silently retain the unsafe embedded runtime.
+    const previousContract = {
+      version: 1, rendererRevision: GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION,
+      provider: 'railway', target, migration,
+    };
+    const input = { provider: 'railway', target, migration };
+    expect(githubActionsWorkflowInputHash(input)).toBe(canonicalJsonSha256(previousContract));
+    expect(githubActionsWorkflowInputHash({ ...input, ios })).not.toBe(canonicalJsonSha256({
+      ...previousContract, ios: { bundleId: ios.bundleId, release: ios.release },
+    }));
+  });
+
   it('emits server evidence and a gated iOS release workflow with separate provenance', async () => {
     const target: BranchDeployTarget = {
       environmentName: 'development',
@@ -1240,7 +1270,7 @@ describe('github tools', () => {
     expect(releaseWorkflow).not.toContain('HYPERVIBE_RELEASE_SCRIPT');
     expect(releaseWorkflow).not.toContain('xcrun altool --upload-app');
     const releaseJobStart = releaseWorkflow.indexOf('\n  release:\n');
-    const buildJob = releaseWorkflow.slice(0, releaseJobStart);
+    const buildJob = releaseWorkflow.slice(releaseWorkflow.indexOf('\n  build:\n'), releaseJobStart);
     const releaseJob = releaseWorkflow.slice(releaseJobStart);
     expect(buildJob).not.toContain('APP_STORE_CONNECT_PRIVATE_KEY');
     expect(releaseJob).toContain('APP_STORE_CONNECT_PRIVATE_KEY:');
@@ -1253,7 +1283,7 @@ describe('github tools', () => {
     expect(buildCommand).not.toContain('MATCH_PASSWORD');
     expect(buildCommand).not.toContain('MATCH_GIT_BASIC_AUTHORIZATION');
     expect(releaseWorkflow).toContain('Verify release IPA identity');
-    expect(releaseWorkflow).toContain('hypervibe-ios-build-development-${{ steps.gate.outputs.sha }}');
+    expect(releaseWorkflow).toContain('hypervibe-ios-build-development-${{ needs.prepare.outputs.sha }}');
     const releaseSha = 'a'.repeat(40);
     const imageUri = `ghcr.io/owner/repo@sha256:${'b'.repeat(64)}`;
     const evidence = {
@@ -1273,12 +1303,12 @@ describe('github tools', () => {
     const releaseDocument = parseDocument(releaseWorkflow, { uniqueKeys: true });
     expect(releaseDocument.errors).toEqual([]);
     const parsedRelease = releaseDocument.toJS() as {
-      jobs: { build: { env: Record<string, unknown>; steps: Array<{ name?: string; env?: Record<string, unknown> }> } };
+      jobs: { prepare: { env: Record<string, unknown>; steps: Array<{ name?: string; env?: Record<string, unknown> }> } };
     };
-    const gateSteps = parsedRelease.jobs.build.steps.filter((step) => step.name === 'Verify server release gate');
+    const gateSteps = parsedRelease.jobs.prepare.steps.filter((step) => step.name === 'Verify server release gate');
     expect(gateSteps).toHaveLength(1);
     const emittedGateEnvironment = {
-      ...parsedRelease.jobs.build.env,
+      ...parsedRelease.jobs.prepare.env,
       ...gateSteps[0]!.env,
     };
     const expectedServerRelease = JSON.parse(String(

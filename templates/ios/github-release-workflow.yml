@@ -21,25 +21,25 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  prepare:
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
-    runs-on: macos-26
-    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: @@ENVIRONMENT@@
     outputs:
       sha: ${{ steps.gate.outputs.sha }}
       server_artifact_id: ${{ steps.provenance.outputs.artifact_id }}
       server_run_id: ${{ steps.provenance.outputs.server_run_id }}
-      marketing_version: ${{ steps.ipa.outputs.version }}
-      build_number: ${{ steps.ipa.outputs.build }}
-      ipa_sha256: ${{ steps.ipa.outputs.sha256 }}
+      build_number: ${{ steps.number.outputs.build_number }}
     env:
       HYPERVIBE_ENVIRONMENT: @@ENVIRONMENT_JSON@@
       HYPERVIBE_BUNDLE_ID: @@BUNDLE_ID_JSON@@
-      HYPERVIBE_WORKING_DIRECTORY: @@WORKING_DIRECTORY_JSON@@
-      HYPERVIBE_IPA_PATH: @@IPA_PATH_JSON@@
-      HYPERVIBE_EXPECTED_SERVER_RELEASE: @@EXPECTED_SERVER_RELEASE_JSON@@@@MANAGED_SIGNING_JOB_ENV@@
+      HYPERVIBE_EXPECTED_SERVER_RELEASE: @@EXPECTED_SERVER_RELEASE_JSON@@
     steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '@@MANAGED_NODE_VERSION@@'
+          check-latest: true
       - name: Resolve release provenance
         id: provenance
         uses: actions/github-script@v9
@@ -108,9 +108,47 @@ jobs:
           HYPERVIBE_REQUESTED_SHA: ${{ steps.provenance.outputs.sha }}
         run: |
           node -e 'const fs=require("fs"); const evidence=JSON.parse(fs.readFileSync(process.env.HYPERVIBE_SERVER_EVIDENCE_PATH,"utf8")); const expected=JSON.parse(process.env.HYPERVIBE_EXPECTED_SERVER_RELEASE); const exact=(value,keys)=>value&&typeof value==="object"&&!Array.isArray(value)&&JSON.stringify(Object.keys(value).sort())===JSON.stringify([...keys].sort()); const canonical=(value)=>Array.isArray(value)?value.map(canonical):value&&typeof value==="object"?Object.fromEntries(Object.entries(value).sort(([a],[b])=>a.localeCompare(b)).map(([key,child])=>[key,canonical(child)])):value; const same=(left,right)=>JSON.stringify(canonical(left))===JSON.stringify(canonical(right)); if(!exact(evidence,["version","provider","environment","deploymentContractFingerprint","source","target","programFingerprint","verifiedAt"])||evidence.version!==Number(process.env.HYPERVIBE_SERVER_EVIDENCE_VERSION)||evidence.provider!==expected.provider||evidence.environment!==process.env.HYPERVIBE_ENVIRONMENT||evidence.programFingerprint!==expected.programFingerprint||!/^[0-9a-f]{64}$/.test(evidence.deploymentContractFingerprint)||typeof evidence.verifiedAt!=="string"||Number.isNaN(Date.parse(evidence.verifiedAt))) throw new Error("server evidence contract mismatch"); if(!exact(evidence.source,["repository","sha"])||evidence.source.repository!==process.env.GITHUB_REPOSITORY||!/^[0-9a-f]{40}$/i.test(evidence.source.sha)) throw new Error("server evidence repository/SHA mismatch"); if(process.env.HYPERVIBE_REQUESTED_SHA&&evidence.source.sha!==process.env.HYPERVIBE_REQUESTED_SHA) throw new Error("server evidence does not match requested SHA"); if(!exact(evidence.target,["scope","bindingsFingerprint","resources"])||!/^[0-9a-f]{64}$/.test(evidence.target.bindingsFingerprint)||!Array.isArray(evidence.target.resources)||evidence.target.resources.length===0) throw new Error("server evidence target mismatch"); const resources=evidence.target.resources; for(const resource of resources) if(!exact(resource,["logicalName","workloadKind","providerResourceType","providerResourceId","imageUri"])||typeof resource.logicalName!=="string"||!resource.logicalName||typeof resource.providerResourceId!=="string"||!resource.providerResourceId||!(["web","worker","cron"].includes(resource.workloadKind))||!(["service","job"].includes(resource.providerResourceType))||(resource.providerResourceType==="job"&&resource.workloadKind!=="cron")||(resource.imageUri!==null&&!/^[^\\s@]+@sha256:[0-9a-f]{64}$/.test(resource.imageUri))) throw new Error("server evidence resource mismatch"); const identities=resources.map(({imageUri,...identity})=>identity); if(evidence.target.bindingsFingerprint!==expected.target.bindingsFingerprint||!same(evidence.target.scope,expected.target.scope)||!same(identities,expected.target.resources)) throw new Error("server evidence does not match the exact reviewed deployment target"); fs.appendFileSync(process.env.GITHUB_OUTPUT, "sha="+evidence.source.sha+"\n");'
+      - name: Materialize Hypervibe release runtime
+        shell: bash
+        env:
+          HYPERVIBE_MANAGED_RUNTIME_BASE64: @@RUNTIME_BASE64@@
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const runtimePath = path.join(process.env.RUNNER_TEMP, 'hypervibe-ios-release.mjs');
+          fs.writeFileSync(runtimePath, Buffer.from(process.env.HYPERVIBE_MANAGED_RUNTIME_BASE64, 'base64'), { mode: 0o700 });
+          fs.appendFileSync(process.env.GITHUB_ENV, 'HYPERVIBE_MANAGED_RELEASE_RUNTIME=' + runtimePath + '\n');
+          NODE
+      - name: Allocate managed build number
+        id: number
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: node "$HYPERVIBE_MANAGED_RELEASE_RUNTIME" --allocate-build-number
+  build:
+    needs: prepare
+    runs-on: macos-26
+    timeout-minutes: 60
+    environment: @@ENVIRONMENT@@
+    outputs:
+      sha: ${{ needs.prepare.outputs.sha }}
+      server_artifact_id: ${{ needs.prepare.outputs.server_artifact_id }}
+      server_run_id: ${{ needs.prepare.outputs.server_run_id }}
+      marketing_version: ${{ steps.ipa.outputs.version }}
+      build_number: ${{ needs.prepare.outputs.build_number }}
+      ipa_sha256: ${{ steps.ipa.outputs.sha256 }}
+    env:
+      HYPERVIBE_ENVIRONMENT: @@ENVIRONMENT_JSON@@
+      HYPERVIBE_BUNDLE_ID: @@BUNDLE_ID_JSON@@
+      HYPERVIBE_WORKING_DIRECTORY: @@WORKING_DIRECTORY_JSON@@
+      HYPERVIBE_IPA_PATH: @@IPA_PATH_JSON@@
+      HYPERVIBE_BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}@@MANAGED_SIGNING_JOB_ENV@@
+    steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ steps.gate.outputs.sha }}
+          ref: ${{ needs.prepare.outputs.sha }}
           persist-credentials: false
 @@PROJECT_RUNTIME_SETUP@@
       - uses: ruby/setup-ruby@v1
@@ -126,6 +164,8 @@ jobs:
       - name: Validate IPA identity
         id: ipa
         shell: bash
+        env:
+          HYPERVIBE_BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
         run: |
           python3 - <<'PY'
           import hashlib, os, pathlib, plistlib, stat, zipfile
@@ -149,6 +189,8 @@ jobs:
           build = str(info.get("CFBundleVersion", ""))
           if not version or not build:
               raise SystemExit("IPA is missing marketing version or build number")
+          if build != os.environ["HYPERVIBE_BUILD_NUMBER"]:
+              raise SystemExit("IPA build number does not match the Hypervibe-managed build number")
           digest = hashlib.sha256(ipa.read_bytes()).hexdigest()
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write("path=" + str(ipa) + "\n")
@@ -159,10 +201,11 @@ jobs:
       - name: Upload validated iOS build
         uses: actions/upload-artifact@v7
         with:
-          name: hypervibe-ios-build-@@SAFE_ENVIRONMENT@@-${{ steps.gate.outputs.sha }}
+          name: hypervibe-ios-build-@@SAFE_ENVIRONMENT@@-${{ needs.prepare.outputs.sha }}
           path: ${{ steps.ipa.outputs.path }}
           if-no-files-found: error
           retention-days: 1
+          overwrite: true
 @@MANAGED_SIGNING_CLEANUP@@
   release:
     needs: build
@@ -233,12 +276,14 @@ jobs:
           run-id: ${{ needs.build.outputs.server_run_id }}
       - name: Materialize Hypervibe release runtime
         shell: bash
+        env:
+          HYPERVIBE_MANAGED_RUNTIME_BASE64: @@RUNTIME_BASE64@@
         run: |
           node - <<'NODE'
           const fs = require('fs');
           const path = require('path');
           const runtimePath = path.join(process.env.RUNNER_TEMP, 'hypervibe-ios-release.mjs');
-          fs.writeFileSync(runtimePath, Buffer.from('@@RUNTIME_BASE64@@', 'base64'), { mode: 0o700 });
+          fs.writeFileSync(runtimePath, Buffer.from(process.env.HYPERVIBE_MANAGED_RUNTIME_BASE64, 'base64'), { mode: 0o700 });
           fs.appendFileSync(process.env.GITHUB_ENV, 'HYPERVIBE_MANAGED_RELEASE_RUNTIME=' + runtimePath + '\n');
           NODE
       - name: Run Hypervibe-managed TestFlight release
@@ -257,3 +302,4 @@ jobs:
           path: hypervibe-ios-release.json
           if-no-files-found: error
           retention-days: 90
+          overwrite: true

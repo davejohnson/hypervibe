@@ -1204,19 +1204,53 @@ TestFlight upload, or TestFlight distribution commands.
 - A successful server deploy writes an artifact whose name and JSON body carry
   the environment, repository, exact full Git SHA, and deployed service set.
   The artifact is emitted only after provider deployment steps succeed.
-- The macOS iOS workflow shares the server deploy concurrency key and uses two
-  isolated jobs. The build job consumes a specific successful server run,
-  validates its evidence, checks out that exact SHA, prepares signing, invokes
-  the app-defined build command, validates the IPA identity, and uploads a
-  short-lived artifact. A fresh release job receives App Store credentials,
+- The iOS workflow shares the server deploy concurrency key and uses three
+  isolated jobs. A checkout-free preparation job validates a specific successful
+  server run and its evidence, then uses the managed runtime with App Store
+  credentials to select a new build number. The macOS build job checks out that
+  exact SHA, prepares signing, invokes the app-defined build command with
+  `HYPERVIBE_BUILD_NUMBER`, validates the IPA identity including that exact
+  `CFBundleVersion`, and uploads a short-lived artifact. Both validation and the
+  release handoff pin the number to preparation-job outputs, not mutable build
+  environment/output values. A fresh release job receives App Store credentials,
   downloads and revalidates the IPA and server evidence, then runs the managed
   release runtime. It never checks out or executes project code. This job
   boundary prevents an arbitrary build command from modifying the submission
   runtime or inheriting App Store Connect credentials.
+  Whole-run retries replace only their own run/SHA-named artifacts; consumers
+  continue to revalidate the IPA hash and identity on the isolated release runner.
+  Materializers decode step-local Base64 data so runtime growth cannot breach
+  GitHub's 21,000-character `run` script limit; acceptance tests execute the
+  emitted materializer and enforce that limit.
 - The iOS artifact records separate `mobile.repository`/`mobile.sha` and
   `server.repository`/`server.sha` fields. V1 is monorepo-first and therefore
   requires those repositories and SHAs to match at the workflow gate, while the
   evidence shape leaves a future explicit multi-repo policy possible.
+- The managed release runtime validates server evidence before contacting Apple.
+  An existing App Store Connect build with the same version/build number is
+  not proof that it contains the newly gated source or IPA. Until there is a
+  trusted original-upload identity contract, the runtime rejects that collision
+  before compliance, distribution, review submission, or success evidence. This
+  also blocks retries after an upload whose outcome was ambiguous; do not infer
+  ownership from the build number or upload date. Retry the whole workflow to
+  select a fresh number and rebuild; release-only retries cannot resume uploads.
+- `allocateBuildNumber` in the managed runtime owns number selection: read every
+  page of the app's builds, including expired/failed/processing builds and other
+  marketing versions, and choose one above the largest numeric major component.
+  An empty successful listing starts at 1. Managed output is conservatively
+  limited to integer build numbers 1..9999; malformed/unknown/incomplete evidence,
+  unsafe or excessive pagination, and exhaustion stop before building. Selection
+  is not an atomic Apple reservation: another uploader or an as-yet-invisible
+  upload can race it. The collision/upload guards must fail closed, never reuse
+  an earlier upload. The project build command consumes the number without App
+  Store credentials; projects must implement this handoff before publishing the
+  updated workflow. Do not silently fall back to a fixed project build number.
+- `IOS_RELEASE_WORKFLOW_RENDERER_REVISION` versions intentional iOS migrations
+  in the shared workflow input hash. Updating the iOS runtime must advance this
+  contract so plan/apply proposes a reviewed workflow update without migrating
+  server-only projects. HTTP-boundary runtime and emitted-runtime regressions,
+  plus the workflow-lock test, emitted allocation command, and real IPA-plist
+  validation regressions run in ordinary `npm test` acceptance.
 - `hv_ci_status` is the read-only path for workflows, runs, logs, and release
   artifact provenance. `hv_appstore_submit` requires successful managed server
   and iOS evidence artifacts for the same SHA before final review submission.
