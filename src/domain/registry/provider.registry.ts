@@ -163,6 +163,8 @@ export interface ProviderMetadata {
   setupHelpUrl?: string;
   credentials?: {
     defaultScalarKey?: string;
+    /** Exact hosted monitoring credential role compatible with a saved local connection. */
+    hostedMonitoring?: { credentialKind: string; credentialKey: string; scope: 'project' };
     /** Credential values supplied by an opinionated Hypervibe workflow, not user-facing forms. */
     agentManagedKeys?: string[];
     /** The adapter can authenticate through the provider's native local CLI/default chain. */

@@ -1945,6 +1945,7 @@ providerRegistry.register({
     setupHelpUrl: CLOUDFLARE_USER_TOKEN_URL,
     credentials: {
       defaultScalarKey: 'apiToken',
+      hostedMonitoring: { credentialKind: 'cloudflare-api-token', credentialKey: 'apiToken', scope: 'project' },
       localEnvInputs: [
         {
           envKey: 'CLOUDFLARE_API_TOKEN',

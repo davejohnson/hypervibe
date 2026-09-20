@@ -626,6 +626,16 @@ consume.
 
 Secrets never cross output boundaries. Secret values may be accepted through `credentialsRef`, encrypted into plans, or stored as verified connections, but they must not be printed in tool output, committed specs, warnings, logs, receipts, or test snapshots.
 
+`hv_cloud_connections` / `hypervibe cloud connections` is an explicit hosted
+provider-access handoff, not infrastructure deployment. Its separate browser
+purpose issues revocable, expiring project access without expanding reporting
+tokens. A ten-minute preview binds origin, repository, exact destinations and
+private credential inputs before confirmed upload. Reuse requires the provider's
+declared monitoring credential kind; environment-scoped access never fans out
+across environments. Saved global credentials require explicit selection.
+The server owns validation, encrypted storage, tenant authorization and safe
+reuse of existing hosted connections. Receipts expose outcomes, never values.
+
 Stripe Projects is supported only as a narrow local credential source. A
 `stripe-projects://<environment>/<provider>/<service>` reference must match the
 currently active environment. Hypervibe may invoke only the read-only,

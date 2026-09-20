@@ -240,6 +240,14 @@ Claude: Resolves the value locally, encrypts it into the reviewed plan, and inje
 
 Secret references use the format: `provider://path[#key][@version]`
 
+Provider access can also be shared privately with the hosted app through
+`hv_cloud_connections` / `hypervibe cloud connections`: `start` and `status`
+approve this device, `preview` shows exact destinations, and `connect` requires
+that `previewId` plus `confirm=true`. Use a verified saved connection or a
+private `credentialsRef`; deployment credentials are reused only when their
+credential role matches monitoring. Existing hosted connections are preserved.
+`revoke` removes this device's upload access. Reporting pairing remains separate.
+
 ## Architecture
 
 ```
