@@ -365,6 +365,57 @@ export class SendGridAdapter {
     return result.results;
   }
 
+  /** Read-only authorization evidence for the exact account used to send mail. */
+  async checkSenderIdentities(addresses: string[]): Promise<Array<'verified-domain' | 'verified-sender' | 'unverified' | 'unknown'>> {
+    const domains = async () => {
+      const items: Array<{ domain: string; valid: boolean }> = [];
+      const ids = new Set<number>();
+      for (let offset = 0; offset <= 3000; offset += 100) {
+        const page = await this.request<unknown>('GET', `/whitelabel/domains?limit=100&offset=${offset}`);
+        if (!Array.isArray(page)) throw new Error('Incomplete domain observation');
+        for (const item of page) {
+          if (!item || !Number.isSafeInteger(item.id) || ids.has(item.id)
+            || typeof item.domain !== 'string' || typeof item.valid !== 'boolean') throw new Error('Incomplete domain observation');
+          ids.add(item.id);
+          items.push(item);
+        }
+        if (page.length < 100) return items;
+      }
+      throw new Error('Domain observation exceeded its read limit');
+    };
+    const senders = async () => {
+      const items: Array<{ from_email: string; verified: boolean }> = [];
+      const ids = new Set<number>();
+      let lastSeen = -1;
+      for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
+        const page = await this.request<{ results?: unknown }>('GET', `/verified_senders?limit=100${lastSeen >= 0 ? `&lastSeenID=${lastSeen}` : ''}`);
+        if (!Array.isArray(page?.results)) throw new Error('Incomplete sender observation');
+        for (const item of page.results) {
+          if (!item || !Number.isSafeInteger(item.id) || item.id <= lastSeen || ids.has(item.id)
+            || typeof item.from_email !== 'string' || typeof item.verified !== 'boolean') throw new Error('Incomplete sender observation');
+          ids.add(item.id);
+          items.push(item);
+        }
+        if (page.results.length < 100) return items;
+        lastSeen = Math.max(...page.results.map(item => item.id));
+      }
+      throw new Error('Sender observation exceeded its read limit');
+    };
+    const [domainResult, senderResult] = await Promise.allSettled([domains(), senders()]);
+    return addresses.map(address => {
+      const normalized = address.toLowerCase();
+      const domain = normalized.split('@')[1];
+      const domainMatches = domainResult.status === 'fulfilled'
+        ? domainResult.value.filter(item => item.domain.toLowerCase() === domain) : [];
+      const senderMatches = senderResult.status === 'fulfilled'
+        ? senderResult.value.filter(item => item.from_email.toLowerCase() === normalized) : [];
+      if (domainMatches.length > 1 || senderMatches.length > 1) return 'unknown';
+      if (domainMatches[0]?.valid === true) return 'verified-domain';
+      if (senderMatches[0]?.verified === true) return 'verified-sender';
+      return domainResult.status === 'fulfilled' && senderResult.status === 'fulfilled' ? 'unverified' : 'unknown';
+    });
+  }
+
   async createVerifiedSender(input: CreateSendGridVerifiedSenderInput): Promise<SendGridVerifiedSender> {
     const body: Record<string, unknown> = {
       nickname: input.nickname,

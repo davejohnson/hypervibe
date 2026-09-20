@@ -899,6 +899,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         {
           planId: result.planRunId,
           scope: result.scope,
+          ...(result.emailSenderReadiness ? { emailSenderReadiness: result.emailSenderReadiness } : {}),
           environment: result.environmentName,
           ...(plannedEnvironmentSpec && managedDatabaseContract(plannedEnvironmentSpec)
             ? { managedDatabase: managedDatabaseContract(plannedEnvironmentSpec) }
@@ -1245,6 +1246,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             }
             : {}),
           inSync: !observationIncomplete && !hasConfigurationDrift && !restartRequired,
+          ...(email.senderReadiness ? { emailSenderReadiness: email.senderReadiness } : {}),
           restartRequired,
           runtimeConfiguration: {
             status: restartRequired ? 'restart_required' : 'current',

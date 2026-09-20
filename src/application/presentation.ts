@@ -238,7 +238,9 @@ function planPresentation(data: DataRecord): CommandPresentation {
   const noop = numberValue(data.noopActionCount) ?? 0;
   const confirmations = actions.filter((value) => record(value)?.requiresConfirm === true).length;
   const isBlocked = blocked.length > 0 || inputRequired.length > 0 || connectBeforeApply;
-  const title = isBlocked ? 'PLAN BLOCKED' : pending === 0 ? 'IN SYNC' : 'PLAN READY';
+  const email = record(data.emailSenderReadiness);
+  const emailNotReady = Boolean(email && email.status !== 'verified');
+  const title = isBlocked ? 'PLAN BLOCKED' : emailNotReady ? 'EMAIL NOT READY' : pending === 0 ? 'IN SYNC' : 'PLAN READY';
   const stats = [
     plural(pending, 'change'),
     noop > 0 ? `${noop} already in sync` : undefined,
@@ -264,8 +266,8 @@ function planPresentation(data: DataRecord): CommandPresentation {
   ]));
   if (details.length > 0) sections.push({ title: '📎  DETAILS', lines: details });
   return {
-    tone: isBlocked ? 'warning' : pending === 0 ? 'success' : 'info',
-    icon: isBlocked ? '🚧' : pending === 0 ? '✅' : '📋',
+    tone: isBlocked || emailNotReady ? 'warning' : pending === 0 ? 'success' : 'info',
+    icon: isBlocked ? '🚧' : emailNotReady ? '⚠️' : pending === 0 ? '✅' : '📋',
     title,
     ...(context ? { context } : {}),
     summary: pending === 0 ? 'No infrastructure changes.' : stats,
@@ -284,11 +286,13 @@ function statusPresentation(data: DataRecord): CommandPresentation {
   const rolloutServices = arrayValue(runtimeConfiguration?.services);
   const verified = data.verified === true;
   const isBlocked = blocked.length > 0;
+  const email = record(data.emailSenderReadiness);
+  const emailNotReady = Boolean(email && email.status !== 'verified');
   const title = isBlocked
     ? 'STATUS BLOCKED'
     : restartRequired
       ? 'RESTART REQUIRED'
-      : inSync
+      : emailNotReady ? 'EMAIL NOT READY' : inSync
         ? 'IN SYNC'
         : drift.length > 0
           ? 'DRIFT DETECTED'
@@ -315,8 +319,8 @@ function statusPresentation(data: DataRecord): CommandPresentation {
   ]));
   if (details.length > 0) sections.push({ title: '📎  DETAILS', lines: details });
   return {
-    tone: isBlocked ? 'warning' : inSync && !restartRequired ? 'success' : 'warning',
-    icon: isBlocked ? '🚧' : inSync && !restartRequired ? '✅' : restartRequired ? '♻️' : '⚠️',
+    tone: isBlocked || emailNotReady ? 'warning' : inSync && !restartRequired ? 'success' : 'warning',
+    icon: isBlocked ? '🚧' : restartRequired ? '♻️' : emailNotReady ? '⚠️' : inSync ? '✅' : '⚠️',
     title,
     context: [
       stringValue(data.environment),

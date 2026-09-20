@@ -102,6 +102,7 @@ import {
   stripeManagedEnvKeys,
 } from '../services/stripe-env.service.js';
 import { planEmail } from '../services/email-plan.service.js';
+import { inspectEmailSenderReadiness, type EmailSenderReadiness } from '../services/email-sender-readiness.service.js';
 import { planTwilioMessaging } from '../services/twilio-messaging.service.js';
 import {
   isProviderNativeDeploySourceAction,
@@ -134,6 +135,7 @@ export interface PlanOptions {
 }
 
 export interface EnvironmentPlan {
+  emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
   scope: 'full' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'managed-ci-publication';
   specRevision: number;
@@ -2258,13 +2260,17 @@ export class PlanService {
       });
     }
     const email = serviceFilter
-      ? { actions: [], warnings: [], fingerprint: undefined }
+      ? await (async () => {
+        const senderReadiness = await inspectEmailSenderReadiness({ project: projectForPlan, environmentSpec, observed, runtimeValues: specForDiff.envVars });
+        return { actions: [], warnings: senderReadiness?.guidance ? [senderReadiness.guidance] : [], fingerprint: undefined, senderReadiness };
+      })()
       : await planEmail({
         project: projectForPlan,
         environmentName,
         environmentSpec,
         environment,
         observed,
+        runtimeValues: specForDiff.envVars,
         serviceDependencies: [
           ...actions
             .filter((action) => action.resource.kind === 'service' && action.type !== 'noop' && action.type !== 'destroy')
@@ -3029,6 +3035,7 @@ export class PlanService {
     return {
       planRunId: run.id,
       scope: persistedScope,
+      ...(email.senderReadiness ? { emailSenderReadiness: email.senderReadiness } : {}),
       specRevision: specResult.revision,
       specSource: specResult.source ?? { kind: 'local' },
       environmentName,
