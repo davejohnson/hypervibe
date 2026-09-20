@@ -1108,6 +1108,13 @@ its provider URL is derived from that service's durable hosting binding. Alias
 local parts are application routing intent because SendGrid delivers all mail
 for one parse hostname to one endpoint.
 
+Read-only plan/status sender readiness also detects existing SendGrid env
+configuration. Both From and Reply-To require exact-domain or individual sender
+verification in the application's account; Reply-To verification is Hypervibe
+policy. Read failures remain unknown. This report is separate from infrastructure
+convergence and never creates identities or sends verification emails. See
+[sender readiness](docs/email-sender-readiness.md) for detection and evidence limits.
+
 Email reconciliation uses separate action authorities for hosting runtime
 variables, SendGrid sender/domain authorization, Cloudflare DNS records,
 SendGrid inbound parsing and delivery events, Cloudflare mailbox forwarding,

@@ -29,6 +29,7 @@ import {
   routingRuleForAddress,
 } from './email-routing.service.js';
 import { serviceBindingFor } from './spec.service.js';
+import { inspectEmailSenderReadiness, type EmailSenderReadiness } from './email-sender-readiness.service.js';
 
 export const EMAIL_OPERATIONS = {
   runtimeSync: 'emailRuntimeSync',
@@ -66,6 +67,7 @@ export interface SendGridInboundParseRoute {
 }
 
 export interface EmailIntegrationState {
+  senderReadiness?: EmailSenderReadiness;
   runtimeKey: { status: 'known'; hash: string } | UnknownObservation;
   domainAuthentications: EmailObservation<SendGridDomainAuthentication>;
   verifiedSenders: EmailObservation<SendGridVerifiedSender>;
@@ -80,6 +82,7 @@ export interface EmailIntegrationState {
 }
 
 export interface EmailPlanResult {
+  senderReadiness?: EmailSenderReadiness;
   actions: PlanAction[];
   warnings: string[];
   fingerprint?: string;
@@ -212,6 +215,8 @@ export function emailIntegrationFingerprint(state: EmailIntegrationState): strin
 export async function resolveEmailIntegrationState(params: {
   project: Project;
   environmentSpec: EnvironmentSpec;
+  observed?: ObservedState | null;
+  runtimeValues?: Record<string, string>;
 }): Promise<EmailIntegrationState> {
   const { project, environmentSpec } = params;
   const wantsDomain = Boolean(environmentSpec.domain);
@@ -358,6 +363,7 @@ export async function resolveEmailIntegrationState(params: {
   }
 
   return {
+    senderReadiness: await inspectEmailSenderReadiness({ ...params, observed: params.observed ?? null }),
     runtimeKey,
     domainAuthentications,
     verifiedSenders,
@@ -894,12 +900,16 @@ export async function planEmail(params: {
   domainDependencies?: string[];
   /** Provider observation already resolved by the caller; primarily useful for deterministic contract tests. */
   integrationState?: EmailIntegrationState;
+  /** Resolved private deploy inputs, used only for read-only sender checks. */
+  runtimeValues?: Record<string, string>;
 }): Promise<EmailPlanResult> {
-  const { project, environmentName, environmentSpec, environment, observed } = params;
-  if (!environmentSpec.email.enabled) return { actions: [], warnings: [] };
-
-  const state = params.integrationState
-    ?? await resolveEmailIntegrationState({ project, environmentSpec });
+  const { environmentName, environmentSpec, environment, observed } = params;
+  const state = environmentSpec.email.enabled
+    ? params.integrationState ?? await resolveEmailIntegrationState(params)
+    : undefined;
+  const senderReadiness = state ? state.senderReadiness : await inspectEmailSenderReadiness(params);
+  const senderWarnings = senderReadiness?.guidance ? [senderReadiness.guidance] : [];
+  if (!state) return { actions: [], warnings: senderWarnings, ...(senderReadiness ? { senderReadiness } : {}) };
   const actions: PlanAction[] = [];
   const bindings = emailBindings(environment);
   const serviceNames = Object.keys(environmentSpec.services).sort();
@@ -1267,7 +1277,8 @@ export async function planEmail(params: {
 
   return {
     actions,
-    warnings: state.warnings,
+    warnings: [...state.warnings, ...senderWarnings],
+    ...(senderReadiness ? { senderReadiness } : {}),
     fingerprint: emailIntegrationFingerprint(state),
   };
 }

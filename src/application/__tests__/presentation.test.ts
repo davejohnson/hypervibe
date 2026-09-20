@@ -3,6 +3,14 @@ import { formatCommandResult, PRESENTED_COMMAND_IDS } from '../presentation.js';
 import { commandError, commandSuccess } from '../results.js';
 
 describe('command presentation', () => {
+  it.each(['hv_plan', 'hv_status'])('surfaces unverified email even when infrastructure is in sync: %s', command => {
+    const output = formatCommandResult(command, commandSuccess({
+      environment: 'staging', inSync: true, verified: true, actions: [], drift: [],
+      emailSenderReadiness: { status: 'unverified', senders: [{ key: 'EMAIL_FROM', status: 'verified' }], replyTo: [{ key: 'EMAIL_REPLY_TO', status: 'unverified' }] },
+    }));
+    expect(output).toContain('EMAIL NOT READY');
+    expect(output).not.toContain('HYPERVIBE · IN SYNC');
+  });
   it('renders a plan as a compact review without changing its envelope', () => {
     const envelope = commandSuccess({
       planId: 'plan-1234567890-abcdef',
