@@ -54,6 +54,7 @@ const COMMAND_PRESENTATION = {
   hv_connections: { label: 'CONNECTIONS' },
   hv_cloud_pair: { label: 'CLOUD PAIR' },
   hv_cloud_secrets: { label: 'SECRET IMPORT' },
+  hv_cloud_connections: { label: 'CLOUD CONNECTIONS' },
 } as const;
 
 export const PRESENTED_COMMAND_IDS = Object.freeze(Object.keys(COMMAND_PRESENTATION));

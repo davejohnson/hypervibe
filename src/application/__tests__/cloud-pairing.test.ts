@@ -9,6 +9,19 @@ afterEach(() => {
 });
 
 describe('Hypervibe cloud pairing client', () => {
+  it('requests separate provider-connection authority without expanding reporting grants', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      deviceCode: 'A'.repeat(43), expiresAt: '2026-09-20T12:10:00.000Z',
+      intervalSeconds: 2, repository: 'northstar/launchpad', userCode: '2345-6789',
+      verificationUrl: 'https://hypervibe.dev/pair?code=2345-6789',
+      purpose: 'provider-connections',
+    }), { status: 201 }));
+    await createHypervibeCloudPairingClient({ fetchImpl, purpose: 'provider-connections' }).start('northstar/launchpad');
+    expect(JSON.parse(fetchImpl.mock.calls[0]![1]!.body as string)).toEqual({
+      repositoryFullName: 'northstar/launchpad', purpose: 'provider-connections',
+    });
+  });
+
   it('uses the exact repository and accepts a bounded same-origin pairing response', async () => {
     const deviceCode = 'A'.repeat(43);
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({

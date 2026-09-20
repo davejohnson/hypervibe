@@ -427,6 +427,7 @@ describe('command presentation', () => {
       'hv_appstore_submit',
       'hv_ci_status',
       'hv_ci_trigger',
+      'hv_cloud_connections',
       'hv_cloud_pair',
       'hv_cloud_secrets',
       'hv_connections',

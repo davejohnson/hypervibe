@@ -1,10 +1,10 @@
 import { z } from 'zod';
 import { HvError } from './results.js';
+import { createCloudJsonClient } from './cloud-http.js';
 
 export const DEFAULT_HYPERVIBE_CLOUD_BASE_URL = 'https://hypervibe.dev';
 export const HYPERVIBE_CLOUD_CONNECTION_PROVIDER = 'hypervibe-cloud';
 
-const MAX_RESPONSE_BYTES = 64 * 1024;
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 const environmentSchema = z.object({
@@ -20,6 +20,7 @@ const pairingStartSchema = z.object({
   repository: z.string().min(3),
   userCode: z.string().regex(/^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$/),
   verificationUrl: z.string().url(),
+  purpose: z.literal('provider-connections').optional(),
 }).strict();
 
 const pairingPendingSchema = z.object({
@@ -34,10 +35,12 @@ const pairingCompleteSchema = z.object({
   credentials: z.array(z.object({
     environment: environmentSchema,
     token: z.string().regex(/^hvc_[0-9a-f-]{36}_[A-Za-z0-9_-]{43}$/),
+    expiresAt: z.string().datetime().optional(),
   }).strict()),
   project: z.object({ id: z.string().min(1), name: z.string().min(1) }).strict(),
   skipped: z.number().int().min(0),
   status: z.literal('completed'),
+  purpose: z.literal('provider-connections').optional(),
 }).strict().superRefine((value, context) => {
   if (value.applied !== value.credentials.length) {
     context.addIssue({
@@ -54,10 +57,6 @@ const pairingCompleteSchema = z.object({
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'environment keys must be unique' });
   }
 });
-
-const errorSchema = z.object({
-  error: z.object({ message: z.string().min(1).max(500) }).passthrough(),
-}).passthrough();
 
 export type HypervibeCloudPairingStart = z.infer<typeof pairingStartSchema>;
 export type HypervibeCloudPairingExchange =
@@ -123,24 +122,6 @@ export function normalizeHypervibeCloudBaseUrl(
   return url.origin;
 }
 
-function safeProviderMessage(body: unknown): string | null {
-  const parsed = errorSchema.safeParse(body);
-  if (!parsed.success) return null;
-  return parsed.data.error.message.replace(/[\r\n\t]+/g, ' ').slice(0, 240);
-}
-
-async function parseBoundedJson(response: Response): Promise<unknown> {
-  const text = await response.text();
-  if (Buffer.byteLength(text, 'utf8') > MAX_RESPONSE_BYTES) {
-    throw new HvError('PROVIDER_ERROR', 'Hypervibe cloud returned an oversized pairing response.');
-  }
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    throw new HvError('PROVIDER_ERROR', 'Hypervibe cloud returned an invalid pairing response.');
-  }
-}
-
 export interface HypervibeCloudPairingClient {
   start(repository: string): Promise<HypervibeCloudPairingStart>;
   exchange(deviceCode: string): Promise<HypervibeCloudPairingExchange>;
@@ -150,68 +131,37 @@ export function createHypervibeCloudPairingClient(options: {
   baseUrl?: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  purpose?: 'provider-connections';
 } = {}): HypervibeCloudPairingClient {
   const baseUrl = normalizeHypervibeCloudBaseUrl(options.baseUrl);
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-  async function request(path: string, body: Record<string, string>): Promise<unknown> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    let response: Response;
-    try {
-      response = await fetchImpl(new URL(path, baseUrl), {
-        method: 'POST',
-        headers: {
-          accept: 'application/json',
-          'content-type': 'application/json',
-          'user-agent': 'hypervibe-cli',
-        },
-        body: JSON.stringify(body),
-        redirect: 'error',
-        signal: controller.signal,
-      });
-    } catch {
-      throw new HvError('PROVIDER_ERROR', 'Could not reach Hypervibe cloud.', {
-        hint: 'Check your network connection and retry the pairing command.',
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
-
-    const payload = await parseBoundedJson(response);
-    if (!response.ok) {
-      const message = safeProviderMessage(payload);
-      throw new HvError(
-        response.status >= 400 && response.status < 500 ? 'VALIDATION' : 'PROVIDER_ERROR',
-        message ? `Hypervibe cloud: ${message}` : 'Hypervibe cloud rejected the pairing request.'
-      );
-    }
-    return payload;
-  }
+  const request = createCloudJsonClient(baseUrl, fetchImpl, timeoutMs);
 
   return {
     async start(repository) {
-      const payload = await request('/api/v1/pairings', {
-        repositoryFullName: repository,
-      });
+      const payload = await request('/api/v1/pairings', { body: {
+        repositoryFullName: repository, ...(options.purpose ? { purpose: options.purpose } : {}),
+      } });
       const parsed = pairingStartSchema.safeParse(payload);
-      if (!parsed.success || parsed.data.repository.toLowerCase() !== repository.toLowerCase()) {
+      if (!parsed.success || parsed.data.repository.toLowerCase() !== repository.toLowerCase() || parsed.data.purpose !== options.purpose) {
         throw new HvError('PROVIDER_ERROR', 'Hypervibe cloud returned an invalid pairing response.');
       }
       const verificationUrl = new URL(parsed.data.verificationUrl);
-      if (verificationUrl.origin !== baseUrl || verificationUrl.pathname !== '/pair') {
+      if (verificationUrl.origin !== baseUrl || verificationUrl.pathname !== '/pair' || verificationUrl.username || verificationUrl.password || verificationUrl.hash || verificationUrl.searchParams.get('code') !== parsed.data.userCode) {
         throw new HvError('PROVIDER_ERROR', 'Hypervibe cloud returned an unsafe pairing URL.');
       }
       return parsed.data;
     },
 
     async exchange(deviceCode) {
-      const payload = await request('/api/v1/pairing-exchanges', { deviceCode });
+      const payload = await request('/api/v1/pairing-exchanges', { body: { deviceCode } });
       const pending = pairingPendingSchema.safeParse(payload);
       if (pending.success) return pending.data;
       const completed = pairingCompleteSchema.safeParse(payload);
-      if (completed.success) return completed.data;
+      if (completed.success && completed.data.purpose === options.purpose
+        && (!options.purpose || (completed.data.credentials.length === 1 && completed.data.credentials[0]?.expiresAt))) return completed.data;
       throw new HvError('PROVIDER_ERROR', 'Hypervibe cloud returned an invalid pairing response.');
     },
   };
