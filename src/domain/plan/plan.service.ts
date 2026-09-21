@@ -103,6 +103,7 @@ import {
 } from '../services/stripe-env.service.js';
 import { planEmail } from '../services/email-plan.service.js';
 import { inspectDomainSecurity, type DomainSecurityReadiness } from '../services/domain-security.service.js';
+import { reservedRuntimeEnvError } from '../services/runtime-env-policy.js';
 import { inspectEmailSenderReadiness, type EmailSenderReadiness } from '../services/email-sender-readiness.service.js';
 import { planTwilioMessaging } from '../services/twilio-messaging.service.js';
 import {
@@ -1550,6 +1551,8 @@ export class PlanService {
     environmentName: string,
     options?: PlanOptions
   ): Promise<EnvironmentPlan | { error: string }> {
+    const reservedError = reservedRuntimeEnvError(options?.envVarOverrides);
+    if (reservedError) return { error: reservedError };
     const specResult = this.specStore.get(project);
     if (!specResult) {
       return { error: `Project "${project.name}" has no spec. Set one with hv_spec.` };

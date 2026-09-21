@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { parse as parseDomain } from 'tldts';
+import { isReservedRuntimeEnvKey, RESERVED_RUNTIME_ENV_ERROR } from '../services/runtime-env-policy.js';
 
 /**
  * The canonical desired-state document ("spec") for a project — the single
@@ -13,6 +14,9 @@ import { parse as parseDomain } from 'tldts';
 const environmentVariableNameSchema = z.string().regex(
   /^[A-Za-z_][A-Za-z0-9_]*$/,
   'environment variable names must start with a letter or underscore and contain only letters, numbers, and underscores'
+);
+const applicationEnvVarNameSchema = environmentVariableNameSchema.refine(
+  key => !isReservedRuntimeEnvKey(key), RESERVED_RUNTIME_ENV_ERROR
 );
 
 /**
@@ -72,7 +76,7 @@ export const serviceSpecSchema = z.object({
    * inside the encrypted plan/provider boundary.
    */
   databaseEnvAliases: z.record(
-    environmentVariableNameSchema,
+    applicationEnvVarNameSchema,
     databaseEnvAliasSourceSchema
   ).optional(),
 }).strict().superRefine((service, ctx) => {
@@ -1102,7 +1106,7 @@ export const stripeCatalogPriceSpecSchema = z.object({
     .default('usd'),
   interval: z.enum(['month', 'year']),
   /** Hosting variable receiving this environment's provider price id. */
-  envVar: runtimeEnvVarNameSchema,
+  envVar: applicationEnvVarNameSchema,
 }).strict();
 
 export const stripeCatalogProductSpecSchema = z.object({
@@ -1176,7 +1180,7 @@ export const stripeWebhookSpecSchema = z.object({
   /** Exactly one service receives this endpoint's signing value. */
   service: z.string().min(1),
   /** Hosting variable that receives the signing value returned at endpoint creation. */
-  envVar: runtimeEnvVarNameSchema.default('STRIPE_WEBHOOK_SECRET'),
+  envVar: applicationEnvVarNameSchema.default('STRIPE_WEBHOOK_SECRET'),
   /** Stripe events delivered to this endpoint. */
   events: z.array(z.string().min(1)).min(1).default([...STRIPE_DEFAULT_WEBHOOK_EVENTS]),
 }).strict().superRefine((webhook, ctx) => {
@@ -1206,8 +1210,8 @@ export const stripeEnvironmentSyncSpecSchema = z.object({
    * scoped Stripe connection and never enter the committed spec or plan.
    */
   credentials: z.object({
-    secretKeyEnvVar: runtimeEnvVarNameSchema.default('STRIPE_SECRET_KEY'),
-    publishableKeyEnvVar: runtimeEnvVarNameSchema.optional(),
+    secretKeyEnvVar: applicationEnvVarNameSchema.default('STRIPE_SECRET_KEY'),
+    publishableKeyEnvVar: applicationEnvVarNameSchema.optional(),
   }).strict().optional(),
   /** Hypervibe-owned SaaS product and recurring-price catalog for this environment. */
   catalog: stripeCatalogSpecSchema.optional(),
@@ -1215,7 +1219,7 @@ export const stripeEnvironmentSyncSpecSchema = z.object({
    * Removed compatibility field. It remains in the parser only so old specs
    * receive an actionable migration error instead of an unknown-key message.
    */
-  prices: z.record(runtimeEnvVarNameSchema, stripePriceEnvBindingSpecSchema).optional(),
+  prices: z.record(applicationEnvVarNameSchema, stripePriceEnvBindingSpecSchema).optional(),
   /**
    * Named Stripe webhook endpoints. Hypervibe owns each endpoint lifecycle,
    * projects its creation-only signing value to one service, and records only
@@ -1453,7 +1457,7 @@ export const environmentSpecSchema = z.object({
   domainRegistration: domainRegistrationSpecSchema.optional(),
   email: emailSpecSchema.default({ enabled: false }),
   messaging: twilioMessagingSpecSchema.optional(),
-  envVars: z.record(z.string()).default({}),
+  envVars: z.record(applicationEnvVarNameSchema, z.string()).default({}),
   /** Explicitly documents that a shared runtime key does not apply here. */
   envVarExceptions: z.array(
     z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'exception keys must be valid environment variable names')
@@ -2294,6 +2298,9 @@ export const projectSpecSchema = z.object({
     });
   }
   for (const [key, secret] of Object.entries(spec.secrets)) {
+    if (isReservedRuntimeEnvKey(key) && secret.environments.length > 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: RESERVED_RUNTIME_ENV_ERROR, path: ['secrets', key, 'environments'] });
+    }
     const secretKind = secret.ownership === 'delegated'
       ? 'delegated secret'
       : 'Hypervibe-owned secret';

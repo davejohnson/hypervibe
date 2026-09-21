@@ -23,6 +23,14 @@ import {
 } from '../hosting-env.service.js';
 
 describe('hosting env var tools', () => {
+  it('blocks reserved credentials before resolving a hosting adapter', async () => {
+    const { project, environment, service } = await setupCloudRunProject();
+    const lookup = vi.spyOn(adapterFactory, 'getProviderAdapter');
+    const result = await syncHostingEnvVars({ project, environment, service, vars: { APP_NAME: 'app', HYPERVIBE_CUSTOM_SECRET: 'private-value' } });
+    expect(result.success).toBe(false);
+    expect(lookup).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain('private-value');
+  });
   let tempDir: string;
 
   beforeEach(() => {

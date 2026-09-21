@@ -60,6 +60,16 @@ project's hosting provider before plan/apply can mutate infrastructure.
 
 ## Project Runtime Desired State
 
+`HYPERVIBE_` is reserved for orchestration inputs. Dotenv loading always skips
+that prefix; explicit application env values, runtime secret destinations,
+database aliases, and payment env mappings reject it. Planning, bootstrap, and
+hosting env synchronization enforce the same boundary before provider access.
+CI-only secrets remain permitted. Provider-generated non-secret deployment
+markers and separately derived build-source inputs are not user runtime env;
+source credentials must remain excluded from provider runtime serialization.
+Existing hosted keys are not silently deleted; cleanup uses reviewed
+`removeEnvVars` actions.
+
 The top-level `runtime` field declares the project runtime used by
 Hypervibe-generated build and automation paths. It is a typed contract such as
 `{ "kind": "node", "version": "24", "installCommand": "npm install --global npm@11.19.0 && npm ci", "buildCommand": "npm run build" }`

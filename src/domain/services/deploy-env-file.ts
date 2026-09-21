@@ -4,6 +4,7 @@ import { parseEnvFile } from '../../utils/env-parser.js';
 import { findRepoRoot } from '../spec/repo-spec-file.js';
 import { ensureRepoEnvFilesIgnored } from '../spec/repo-env-file.js';
 import { primaryWorkspaceDirectory } from '../../lib/workspace-context.js';
+import { isReservedRuntimeEnvKey } from './runtime-env-policy.js';
 
 export interface DeployEnvFileResult {
   path: string;
@@ -85,7 +86,6 @@ const PROVIDER_ONLY_EXACT_KEYS = new Set([
 ]);
 
 const PROVIDER_ONLY_PREFIXES = [
-  'HYPERVIBE_',
   'RAILWAY_',
 ];
 
@@ -130,7 +130,7 @@ function isValidEnvKey(key: string): boolean {
 }
 
 export function isProviderOnlyDeployEnvKey(key: string): boolean {
-  return PROVIDER_ONLY_EXACT_KEYS.has(key)
+  return isReservedRuntimeEnvKey(key) || PROVIDER_ONLY_EXACT_KEYS.has(key)
     || PROVIDER_ONLY_PREFIXES.some((prefix) => key.startsWith(prefix));
 }
 

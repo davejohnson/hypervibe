@@ -63,6 +63,16 @@ async function applyInfra(args: {
 }
 
 describe('infra_apply multi-service convergence', () => {
+  it.each(['global', 'service', 'queue'])('blocks reserved %s inputs before legacy bootstrap can mutate anything', async source => {
+    const vars = { HYPERVIBE_CUSTOM_SECRET: 'private-value' };
+    const lookup = vi.spyOn(adapterFactory, 'getProviderAdapter');
+    const result = await executeBootstrap({ projectName: 'uninitialized-project', environmentName: 'production', services: ['web'],
+      ...(source === 'global' ? { envVars: vars } : source === 'service' ? { envVarsByService: { web: vars } } : { queueEnvVars: vars }),
+    });
+    expect(result).toMatchObject({ success: false, summary: { error: expect.stringContaining('HYPERVIBE_') } });
+    expect(lookup).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain('private-value');
+  });
   let tempDir: string;
 
   beforeEach(() => {
