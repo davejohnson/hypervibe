@@ -66,6 +66,7 @@ import {
 } from '../domain/spec/repository-runtime.js';
 import { planStripeEnvironmentSync } from '../domain/services/stripe-env.service.js';
 import { planEmail } from '../domain/services/email-plan.service.js';
+import { inspectDomainSecurity } from '../domain/services/domain-security.service.js';
 import { planTwilioMessaging } from '../domain/services/twilio-messaging.service.js';
 import { firstProviderSpecValidationFailure } from '../domain/services/provider-spec-validation.js';
 import { buildManagedDatabaseEnvVars } from '../domain/services/database-env.js';
@@ -898,6 +899,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       return commandSuccess(
         {
           planId: result.planRunId,
+          ...(result.domainSecurity ? { domainSecurity: result.domainSecurity } : {}),
           scope: result.scope,
           ...(result.emailSenderReadiness ? { emailSenderReadiness: result.emailSenderReadiness } : {}),
           environment: result.environmentName,
@@ -1154,6 +1156,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         observed,
       });
       const stripeDrift = stripeSync.actions.filter((action) => action.type !== 'noop');
+      const domainSecurity = await inspectDomainSecurity(envSpec.domain);
       const email = await planEmail({
         project: projectForStatus,
         environmentName: envName,
@@ -1246,6 +1249,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             }
             : {}),
           inSync: !observationIncomplete && !hasConfigurationDrift && !restartRequired,
+          ...(domainSecurity ? { domainSecurity } : {}),
           ...(email.senderReadiness ? { emailSenderReadiness: email.senderReadiness } : {}),
           restartRequired,
           runtimeConfiguration: {

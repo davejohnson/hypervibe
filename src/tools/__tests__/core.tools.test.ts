@@ -16,6 +16,7 @@ import { ComponentRepository } from '../../adapters/db/repositories/component.re
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
+import { PublicDnsClient } from '../../adapters/dns/public-dns.client.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import { AppStoreConnectAdapter } from '../../adapters/providers/appstoreconnect/appstoreconnect.adapter.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
@@ -38,6 +39,7 @@ import { deriveHypervibeSecretValues } from '../../domain/services/hypervibe-sec
 let tempDir: string;
 
 beforeEach(() => {
+  vi.spyOn(PublicDnsClient.prototype, 'query').mockResolvedValue({ status: 'unknown' });
   SqliteAdapter.resetInstance();
   tempDir = mkdtempSync(path.join(tmpdir(), 'hypervibe-core-tools-'));
   SqliteAdapter.getInstance(path.join(tempDir, 'test.db')).migrate();
@@ -3245,6 +3247,9 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
     const status = await t.call('hv_status', { project: 'domain-status-missing-connection-app', env: 'production' });
     expect(status.ok).toBe(true);
+    expect(status.data.domainSecurity).toMatchObject({
+      status: 'unknown', dnssec: 'unknown', caa: { status: 'unknown' },
+    });
     expect(status.data.blocked).toContainEqual(expect.objectContaining({
       provider: 'cloudflare',
       scope: 'hlspropertycare.com',

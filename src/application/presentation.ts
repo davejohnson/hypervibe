@@ -242,7 +242,9 @@ function planPresentation(data: DataRecord): CommandPresentation {
   const email = record(data.emailSenderReadiness);
   const dns = record(email?.dns);
   const emailNotReady = Boolean(email && (email.status !== 'verified' || (dns && dns.status !== 'configured')));
-  const title = isBlocked ? 'PLAN BLOCKED' : emailNotReady ? 'EMAIL NOT READY' : pending === 0 ? 'IN SYNC' : 'PLAN READY';
+  const domainSecurity = record(data.domainSecurity);
+  const domainNeedsReview = Boolean(domainSecurity && domainSecurity.status !== 'observed');
+  const title = isBlocked ? 'PLAN BLOCKED' : emailNotReady ? 'EMAIL NOT READY' : domainNeedsReview ? 'DOMAIN SECURITY NEEDS REVIEW' : pending === 0 ? 'IN SYNC' : 'PLAN READY';
   const stats = [
     plural(pending, 'change'),
     noop > 0 ? `${noop} already in sync` : undefined,
@@ -268,8 +270,8 @@ function planPresentation(data: DataRecord): CommandPresentation {
   ]));
   if (details.length > 0) sections.push({ title: '📎  DETAILS', lines: details });
   return {
-    tone: isBlocked || emailNotReady ? 'warning' : pending === 0 ? 'success' : 'info',
-    icon: isBlocked ? '🚧' : emailNotReady ? '⚠️' : pending === 0 ? '✅' : '📋',
+    tone: isBlocked || emailNotReady || domainNeedsReview ? 'warning' : pending === 0 ? 'success' : 'info',
+    icon: isBlocked ? '🚧' : emailNotReady || domainNeedsReview ? '⚠️' : pending === 0 ? '✅' : '📋',
     title,
     ...(context ? { context } : {}),
     summary: pending === 0 ? 'No infrastructure changes.' : stats,
@@ -291,11 +293,13 @@ function statusPresentation(data: DataRecord): CommandPresentation {
   const email = record(data.emailSenderReadiness);
   const dns = record(email?.dns);
   const emailNotReady = Boolean(email && (email.status !== 'verified' || (dns && dns.status !== 'configured')));
+  const domainSecurity = record(data.domainSecurity);
+  const domainNeedsReview = Boolean(domainSecurity && domainSecurity.status !== 'observed');
   const title = isBlocked
     ? 'STATUS BLOCKED'
     : restartRequired
       ? 'RESTART REQUIRED'
-      : emailNotReady ? 'EMAIL NOT READY' : inSync
+      : emailNotReady ? 'EMAIL NOT READY' : domainNeedsReview ? 'DOMAIN SECURITY NEEDS REVIEW' : inSync
         ? 'IN SYNC'
         : drift.length > 0
           ? 'DRIFT DETECTED'
@@ -322,8 +326,8 @@ function statusPresentation(data: DataRecord): CommandPresentation {
   ]));
   if (details.length > 0) sections.push({ title: '📎  DETAILS', lines: details });
   return {
-    tone: isBlocked || emailNotReady ? 'warning' : inSync && !restartRequired ? 'success' : 'warning',
-    icon: isBlocked ? '🚧' : restartRequired ? '♻️' : emailNotReady ? '⚠️' : inSync ? '✅' : '⚠️',
+    tone: isBlocked || emailNotReady || domainNeedsReview ? 'warning' : inSync && !restartRequired ? 'success' : 'warning',
+    icon: isBlocked ? '🚧' : restartRequired ? '♻️' : emailNotReady || domainNeedsReview ? '⚠️' : inSync ? '✅' : '⚠️',
     title,
     context: [
       stringValue(data.environment),
