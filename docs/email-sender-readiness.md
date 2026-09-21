@@ -34,6 +34,47 @@ Infrastructure `inSync` is separate from email readiness; human plan/status outp
 highlights `EMAIL NOT READY`. Checks do not send invitations, create identities,
 or change DNS. Configuration changes remain in reviewed spec/plan/apply actions.
 
+### DNS readiness
+
+`emailSenderReadiness.dns` separates current DNS publication from SendGrid's
+account authorization status. A previously verified identity can still have
+missing or changed DNS records. Human plan/status highlights `EMAIL NOT READY`
+when DNS needs attention or its observation is unknown.
+
+For SendGrid automated security, the check compares the provider's exact SPF
+delegation and both DKIM CNAMEs against the system resolver's current view.
+It does not add an apex SPF record or guess DKIM selectors. Manual-security
+records and missing provider evidence remain unknown.
+
+DMARC checks the From domain, falling back to its organizational domain only
+after a successful empty or confirmed absent exact-domain lookup. It joins TXT
+chunks, rejects duplicate policies and malformed core tags, applies inherited
+`sp`, and distinguishes monitoring (`p=none`), partial enforcement (`pct<100`),
+and configured enforcement. This is a conservative configuration check, not a
+complete mail-receiver implementation or validation of report-destination URIs.
+Reply-To still requires identity verification under Hypervibe policy, but does
+not become a DMARC sending domain merely because replies go there.
+
+DNS absence differs from timeout, refusal, and server failure. Reads have a
+two-second per-query timeout and one try; each observation checks up to eight
+From entries and reports any unchecked remainder. Queries are cached only
+within that observation. Split DNS, resolver caches, propagation, message
+alignment, delegated SPF contents, DKIM signing keys, and actual delivery need
+additional evidence; a signed test message is still necessary.
+
+Existing reviewed email actions can repair managed SendGrid delegation records.
+DMARC policy changes are not yet modeled: this check preserves existing policy
+and asks for review of every legitimate sender before strengthening it. It
+never sends mail or rewrites records automatically.
+
+The DNS regression reproduces an authorized SendGrid sender with absent DNS:
+the test failed before the DNS report existed, then passed through the shared
+planner, real SendGrid HTTP serialization, and mocked DNS transport. Fixtures
+are reconstructed, not live recordings. Provider shape comes from Twilio's
+[domain authentication contract](https://www.twilio.com/docs/sendgrid/api-reference/domain-authentication/authenticate-a-domain).
+Policy discovery and semantics are based on
+[RFC 7489 sections 6.3 and 6.6.3](https://www.rfc-editor.org/rfc/rfc7489.html).
+
 ## Evidence
 
 Official Twilio documentation reviewed 2026-09-18:

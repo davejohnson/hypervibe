@@ -1125,6 +1125,14 @@ policy. Read failures remain unknown. This report is separate from infrastructur
 convergence and never creates identities or sends verification emails. See
 [sender readiness](docs/email-sender-readiness.md) for detection and evidence limits.
 
+Sender readiness also reports current DNS publication separately from account
+authorization. Automated SendGrid SPF/DKIM delegations use the exact provider
+record names and targets; DMARC discovery uses the From domain and organizational
+fallback. Unknown DNS reads never prove absence. Monitoring-only or partial
+DMARC policy is visible, not silently strengthened. Existing email actions may
+repair managed delegation records; DMARC policy mutation is not implemented.
+DNS publication does not prove message alignment, authentication, or delivery.
+
 Email reconciliation uses separate action authorities for hosting runtime
 variables, SendGrid sender/domain authorization, Cloudflare DNS records,
 SendGrid inbound parsing and delivery events, Cloudflare mailbox forwarding,

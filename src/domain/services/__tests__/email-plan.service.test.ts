@@ -1,6 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { Resolver } from 'node:dns/promises';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
 import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
@@ -438,6 +439,10 @@ describe('email provider scope resolution', () => {
   });
 
   it('observes a staging email domain through its parent-zone Cloudflare connection', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async url => new Response(JSON.stringify(
+      String(url).includes('whitelabel') ? [] : { results: [] }
+    ), { headers: { 'Content-Type': 'application/json' } }));
+    vi.spyOn(Resolver.prototype, 'resolveTxt').mockRejectedValue(Object.assign(new Error('synthetic absence'), { code: 'ENODATA' }));
     vi.spyOn(SendGridAdapter.prototype, 'listDomainAuthentications').mockResolvedValue([]);
     vi.spyOn(SendGridAdapter.prototype, 'listInboundParseWebhooks').mockResolvedValue([]);
     const findZone = vi.spyOn(CloudflareAdapter.prototype, 'findZoneByName')

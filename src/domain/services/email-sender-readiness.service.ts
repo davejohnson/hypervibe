@@ -7,6 +7,7 @@ import type { Project } from '../entities/project.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
 import type { EnvironmentSpec } from '../spec/spec.schema.js';
 import { getProjectScopeHints } from './project-scope.js';
+import { inspectEmailDnsReadiness, type EmailDnsReadiness } from './email-dns-readiness.service.js';
 
 type SenderStatus = 'verified' | 'unverified' | 'unknown';
 export interface EmailSenderReadiness {
@@ -15,6 +16,7 @@ export interface EmailSenderReadiness {
   senders: Array<{ key: string; status: SenderStatus; method?: 'domain' | 'single-sender' }>;
   replyTo: Array<{ key: string; status: SenderStatus; method?: 'domain' | 'single-sender' }>;
   guidance?: string;
+  dns?: EmailDnsReadiness;
 }
 
 // These identify configuration roles, never all variables containing an email.
@@ -76,9 +78,12 @@ export async function inspectEmailSenderReadiness(params: {
     adapter.connect({ apiKey });
     const all = [...from, ...replies];
     const readable = all.flatMap((item, index) => address(item.value) ? [{ index, address: address(item.value)! }] : []);
-    const checks = readable.length ? await adapter.checkSenderIdentities(readable.map(item => item.address)) : [];
+    const checks = readable.length ? await adapter.inspectSenderIdentities(readable.map(item => item.address)) : [];
+    const sending = readable.flatMap((item, index) => item.index < from.length
+      ? [{ key: all[item.index].key, address: item.address, evidence: checks[index] }] : []);
+    if (sending.length) result.dns = await inspectEmailDnsReadiness(sending);
     readable.forEach((item, index) => {
-      const check = checks[index];
+      const check = checks[index].status;
       const entry: EmailSenderReadiness['senders'][number] = { key: all[item.index].key,
         status: check === 'verified-domain' || check === 'verified-sender' ? 'verified' : check,
         ...(check === 'verified-domain' ? { method: 'domain' as const } : check === 'verified-sender' ? { method: 'single-sender' as const } : {}),
@@ -92,5 +97,8 @@ export async function inspectEmailSenderReadiness(params: {
   if (result.status !== 'verified') result.guidance = !apiKey
     ? 'Sender verification needs the application’s exact SendGrid credential through its private deploy inputs, or a verified connection whose key matches the observed runtime. Do not paste the key into chat.'
     : 'Hypervibe requires both From and Reply-To to match an exact authenticated domain or verified single sender in the application’s SendGrid account. Unknown means values or read permissions were insufficient; it is not verification. Configure sender authorization through reviewed email desired state before treating app email as ready.';
+  if (result.dns && result.dns.status !== 'configured') {
+    result.guidance = [result.guidance, result.dns.guidance].filter(Boolean).join(' ');
+  }
   return result;
 }
