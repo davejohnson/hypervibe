@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Resolver } from 'node:dns/promises';
 import { environmentSpecSchema } from '../../spec/spec.schema.js';
 import { planEmail } from '../email-plan.service.js';
 import { inspectEmailSenderReadiness } from '../email-sender-readiness.service.js';
@@ -8,6 +9,10 @@ const project = { id: 'sender-check', name: 'sender-check', defaultPlatform: 'ra
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
 afterEach(() => vi.restoreAllMocks());
+beforeEach(() => {
+  vi.spyOn(Resolver.prototype, 'resolveTxt').mockRejectedValue(Object.assign(new Error('synthetic absence'), { code: 'ENODATA' }));
+  vi.spyOn(Resolver.prototype, 'resolveCname').mockRejectedValue(Object.assign(new Error('synthetic absence'), { code: 'ENODATA' }));
+});
 
 // Reconstructed from Twilio's documented response shapes, not live recordings:
 // https://www.twilio.com/docs/sendgrid/api-reference/sender-verification/get-all-verified-senders

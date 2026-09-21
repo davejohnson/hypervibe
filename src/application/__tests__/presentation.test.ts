@@ -3,6 +3,12 @@ import { formatCommandResult, PRESENTED_COMMAND_IDS } from '../presentation.js';
 import { commandError, commandSuccess } from '../results.js';
 
 describe('command presentation', () => {
+  it.each(['hv_plan', 'hv_status'])('surfaces DNS readiness separately from verified senders: %s', command => {
+    const output = formatCommandResult(command, commandSuccess({ inSync: true, verified: true, actions: [], drift: [],
+      emailSenderReadiness: { status: 'verified', dns: { status: 'needs_attention' } },
+    }));
+    expect(output).toContain('EMAIL NOT READY');
+  });
   it.each(['hv_plan', 'hv_status'])('surfaces unverified email even when infrastructure is in sync: %s', command => {
     const output = formatCommandResult(command, commandSuccess({
       environment: 'staging', inSync: true, verified: true, actions: [], drift: [],

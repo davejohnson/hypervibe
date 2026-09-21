@@ -3,6 +3,12 @@ import { providerRegistry } from '../../../domain/registry/provider.registry.js'
 
 const SENDGRID_API_URL = 'https://api.sendgrid.com/v3';
 
+export interface SendGridSenderIdentityEvidence {
+  status: 'verified-domain' | 'verified-sender' | 'unverified' | 'unknown';
+  automaticSecurity?: boolean;
+  dns?: unknown;
+}
+
 export interface SendGridDomainAuthentication {
   id: number;
   domain: string;
@@ -367,8 +373,12 @@ export class SendGridAdapter {
 
   /** Read-only authorization evidence for the exact account used to send mail. */
   async checkSenderIdentities(addresses: string[]): Promise<Array<'verified-domain' | 'verified-sender' | 'unverified' | 'unknown'>> {
+    return (await this.inspectSenderIdentities(addresses)).map(item => item.status);
+  }
+
+  async inspectSenderIdentities(addresses: string[]): Promise<SendGridSenderIdentityEvidence[]> {
     const domains = async () => {
-      const items: Array<{ domain: string; valid: boolean }> = [];
+      const items: Array<{ domain: string; valid: boolean; automatic_security?: boolean; dns?: unknown }> = [];
       const ids = new Set<number>();
       for (let offset = 0; offset <= 3000; offset += 100) {
         const page = await this.request<unknown>('GET', `/whitelabel/domains?limit=100&offset=${offset}`);
@@ -409,10 +419,11 @@ export class SendGridAdapter {
         ? domainResult.value.filter(item => item.domain.toLowerCase() === domain) : [];
       const senderMatches = senderResult.status === 'fulfilled'
         ? senderResult.value.filter(item => item.from_email.toLowerCase() === normalized) : [];
-      if (domainMatches.length > 1 || senderMatches.length > 1) return 'unknown';
-      if (domainMatches[0]?.valid === true) return 'verified-domain';
-      if (senderMatches[0]?.verified === true) return 'verified-sender';
-      return domainResult.status === 'fulfilled' && senderResult.status === 'fulfilled' ? 'unverified' : 'unknown';
+      if (domainMatches.length > 1 || senderMatches.length > 1) return { status: 'unknown' };
+      const status = domainMatches[0]?.valid === true ? 'verified-domain'
+        : senderMatches[0]?.verified === true ? 'verified-sender'
+        : domainResult.status === 'fulfilled' && senderResult.status === 'fulfilled' ? 'unverified' : 'unknown';
+      return { status, automaticSecurity: domainMatches[0]?.automatic_security, dns: domainMatches[0]?.dns };
     });
   }
 

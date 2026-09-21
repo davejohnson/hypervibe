@@ -240,7 +240,8 @@ function planPresentation(data: DataRecord): CommandPresentation {
   const confirmations = actions.filter((value) => record(value)?.requiresConfirm === true).length;
   const isBlocked = blocked.length > 0 || inputRequired.length > 0 || connectBeforeApply;
   const email = record(data.emailSenderReadiness);
-  const emailNotReady = Boolean(email && email.status !== 'verified');
+  const dns = record(email?.dns);
+  const emailNotReady = Boolean(email && (email.status !== 'verified' || (dns && dns.status !== 'configured')));
   const title = isBlocked ? 'PLAN BLOCKED' : emailNotReady ? 'EMAIL NOT READY' : pending === 0 ? 'IN SYNC' : 'PLAN READY';
   const stats = [
     plural(pending, 'change'),
@@ -288,7 +289,8 @@ function statusPresentation(data: DataRecord): CommandPresentation {
   const verified = data.verified === true;
   const isBlocked = blocked.length > 0;
   const email = record(data.emailSenderReadiness);
-  const emailNotReady = Boolean(email && email.status !== 'verified');
+  const dns = record(email?.dns);
+  const emailNotReady = Boolean(email && (email.status !== 'verified' || (dns && dns.status !== 'configured')));
   const title = isBlocked
     ? 'STATUS BLOCKED'
     : restartRequired
