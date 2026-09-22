@@ -102,6 +102,7 @@ import {
   stripeManagedEnvKeys,
 } from '../services/stripe-env.service.js';
 import { planEmail } from '../services/email-plan.service.js';
+import { inspectDomainSecurity, type DomainSecurityReadiness } from '../services/domain-security.service.js';
 import { inspectEmailSenderReadiness, type EmailSenderReadiness } from '../services/email-sender-readiness.service.js';
 import { planTwilioMessaging } from '../services/twilio-messaging.service.js';
 import {
@@ -135,6 +136,7 @@ export interface PlanOptions {
 }
 
 export interface EnvironmentPlan {
+  domainSecurity?: DomainSecurityReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
   scope: 'full' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'managed-ci-publication';
@@ -2259,6 +2261,7 @@ export class PlanService {
         reason: `Environment "${environmentName}" is not tracked locally`,
       });
     }
+    const domainSecurity = await inspectDomainSecurity(environmentSpec.domain);
     const email = serviceFilter
       ? await (async () => {
         const senderReadiness = await inspectEmailSenderReadiness({ project: projectForPlan, environmentSpec, observed, runtimeValues: specForDiff.envVars });
@@ -3035,6 +3038,7 @@ export class PlanService {
     return {
       planRunId: run.id,
       scope: persistedScope,
+      ...(domainSecurity ? { domainSecurity } : {}),
       ...(email.senderReadiness ? { emailSenderReadiness: email.senderReadiness } : {}),
       specRevision: specResult.revision,
       specSource: specResult.source ?? { kind: 'local' },

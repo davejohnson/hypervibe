@@ -22,6 +22,7 @@ import { SpecStore } from '../../spec/spec.store.js';
 import { environmentSpecSchema } from '../../spec/spec.schema.js';
 import { adapterFactory } from '../../services/adapter.factory.js';
 import { PlanService } from '../plan.service.js';
+import { PublicDnsClient } from '../../../adapters/dns/public-dns.client.js';
 import { ConvergeExecutor, orderActions } from '../converge.executor.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { GitHubAdapter } from '../../../adapters/providers/github/github.adapter.js';
@@ -187,6 +188,7 @@ function seedAcceptedRailwayCiProject(params: {
 }
 
 beforeEach(() => {
+  vi.spyOn(PublicDnsClient.prototype, 'query').mockResolvedValue({ status: 'unknown' });
   SqliteAdapter.resetInstance();
   const dir = mkdtempSync(path.join(tmpdir(), 'hypervibe-plan-'));
   SqliteAdapter.getInstance(path.join(dir, 'test.db')).migrate();
@@ -439,6 +441,21 @@ describe('PlanService.plan', () => {
     expect(bare.defaultPlatform).toBe('unconfigured');
     const result = await new PlanService().plan(bare, 'staging');
     expect(result).toMatchObject({ error: expect.stringContaining('hv_spec') });
+  });
+
+  it('reports unknown DNSSEC rather than treating SERVFAIL as an unsigned healthy domain', async () => {
+    vi.mocked(PublicDnsClient.prototype.query).mockRestore();
+    new SpecStore().replace(project, { version: 1, project: project.name, environments: { staging: {
+      hosting: { provider: 'railway' }, services: { web: {} }, domain: 'example.com',
+    } } });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = new URL(String(input));
+      return new Response(JSON.stringify({ Status: 2, TC: false, AD: false, CD: false,
+        Question: [{ name: `${url.searchParams.get('name')}.`, type: Number(url.searchParams.get('type')) }],
+      }));
+    });
+    const result = await new PlanService().plan(project, 'staging');
+    expect(result).toMatchObject({ domainSecurity: { dnssec: 'unknown', caa: { status: 'unknown' } } });
   });
 
   it('errors when the environment is not in the spec', async () => {

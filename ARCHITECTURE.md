@@ -244,6 +244,13 @@ Environments store provider bindings in `platformBindings` using generic keys on
 
 Provider-specific legacy binding names such as `railwayProjectId` and `railwayEnvironmentId` were migrated away in SQLite migration 7.
 
+Declared custom domains also receive read-only public DNSSEC and CAA readiness
+in ordinary plan/status results. Resolver failures remain unknown; provider-side
+DNSSEC enablement is not validation evidence, and CAA issuer compatibility is not
+inferred from a hosting provider name. These observations do not authorize DNS,
+registrar, or certificate mutations. See [domain security readiness](docs/domain-security-readiness.md)
+for the evidence boundary and public resolver disclosure.
+
 Custom-domain traffic proxying is explicit desired state through the optional
 `environment.domainProxy` boolean (default `true`). Verification records always
 remain unproxied. A successful DNS write records the domain name and effective
