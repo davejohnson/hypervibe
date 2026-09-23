@@ -12,3 +12,13 @@ export {
   type CommittedSpecInspectionReceiptV1,
   type DeclaredProviderCapabilityV1,
 } from './application/hosted/committed-spec-inspection.js';
+export {
+  COMMITTED_BINDINGS_PATH, HostedInspectionError, inspectCommittedBindingsV1,
+  type CommittedBindingsInspectionInputV1, type CommittedBindingsInspectionReceiptV1,
+  type HostedEnvironmentBindingsV1,
+} from './application/hosted/committed-bindings-inspection.js';
+export {
+  inspectHostedEnvironmentV1,
+  type HostedEnvironmentInspectionInputV1, type HostedEnvironmentInspectionReceiptV1,
+  type HostedResourceInspectionV1, type HostedResourceFieldV1, type HostedResourceStatusV1,
+} from './application/hosted/environment-inspection.js';

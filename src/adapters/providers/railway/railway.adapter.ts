@@ -28,7 +28,8 @@ import {
   parseStorageCreateRecovery,
   type StorageCreateRecovery,
 } from '../../../domain/ports/storage.port.js';
-import { githubPackagePullCredentials } from '../github/package-pull.js';
+import { HostedObservationError } from '../../../domain/ports/hosted-observation.port.js';
+import { observeRailwayHosted } from './railway-hosted-observation.js';
 import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
 import { hashEnvValue } from '../../../domain/ports/observe.port.js';
 import type { ObservedCache, ObservedDatabase, ObservedService, ObservedState, ObservedStorage } from '../../../domain/ports/observe.port.js';
@@ -342,6 +343,21 @@ export class RailwayAdapter implements
       headers: {
         Authorization: `Bearer ${this.credentials.apiToken}`,
       },
+    });
+  }
+
+  /** Only the hosted capability supplies the bounded, query-only transport. */
+  async connectForObservation(
+    credentials: RailwayCredentials | { projectToken: string },
+    transport: typeof fetch
+  ): Promise<void> {
+    this.credentials = 'apiToken' in credentials ? credentials : null;
+    this.resolvedWorkspaceId = undefined;
+    this.client = new GraphQLClient(RAILWAY_API_URL, {
+      headers: 'projectToken' in credentials
+        ? { 'Project-Access-Token': credentials.projectToken }
+        : { Authorization: `Bearer ${credentials.apiToken}` },
+      fetch: transport,
     });
   }
 
@@ -3843,7 +3859,8 @@ export class RailwayAdapter implements
     }
 
     const runTask = async (): Promise<JobResult> => {
-      const pull = image.startsWith('ghcr.io/') ? githubPackagePullCredentials() : null;
+      const pull = image.startsWith('ghcr.io/')
+        ? (await import('../github/package-pull.js')).githubPackagePullCredentials() : null;
       // The sentinel is the exit-code source of truth: Railway deployment
       // statuses have no run-to-completion value for a NEVER-restart service.
       const startCommand = buildTaskStartCommand(command);
@@ -4228,19 +4245,20 @@ export class RailwayAdapter implements
     return all;
   }
 
-  async getProjectDetails(projectId: string): Promise<RailwayProjectDetails | null> {
+  async getProjectDetails(projectId: string, maxResources?: number): Promise<RailwayProjectDetails | null> {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
     }
 
     try {
       const query = gql`
-        query GetProjectDetails($id: String!) {
+        query GetProjectDetails($id: String!, $limit: Int, $bounded: Boolean! = false) {
           project(id: $id) {
             id
             name
             description
-            environments {
+            environments(first: $limit) {
+              pageInfo @include(if: $bounded) { hasNextPage }
               edges {
                 node {
                   id
@@ -4249,16 +4267,19 @@ export class RailwayAdapter implements
                 }
               }
             }
-            buckets {
+            buckets(first: $limit) {
+              pageInfo @include(if: $bounded) { hasNextPage }
               edges { node { id name } }
             }
-            services {
+            services(first: $limit) {
+              pageInfo @include(if: $bounded) { hasNextPage }
               edges {
                 node {
                   id
                   name
                   icon
-                  repoTriggers {
+                  repoTriggers(first: $limit) {
+                    pageInfo @include(if: $bounded) { hasNextPage }
                     edges {
                       node {
                         repository
@@ -4266,7 +4287,8 @@ export class RailwayAdapter implements
                       }
                     }
                   }
-                  serviceInstances {
+                  serviceInstances(first: $limit) {
+                    pageInfo @include(if: $bounded) { hasNextPage }
                     edges {
                       node {
                         environmentId
@@ -4312,7 +4334,8 @@ export class RailwayAdapter implements
                 }
               }
             }
-            plugins {
+            plugins(first: $limit) {
+              pageInfo @include(if: $bounded) { hasNextPage }
               edges {
                 node {
                   id
@@ -4324,11 +4347,36 @@ export class RailwayAdapter implements
         }
       `;
 
-      const result = await this.client.request<unknown>(query, { id: projectId });
+      const result = await this.client.request<unknown>(query, {
+        id: projectId,
+        ...(maxResources === undefined ? {} : { limit: maxResources + 1, bounded: true }),
+      });
       if (!isRecord(result) || !('project' in result)) {
         throw new Error(`Railway returned an invalid project-details response for ${projectId}.`);
       }
       if (result.project === null) return null;
+      if (maxResources !== undefined && isRecord(result.project)) {
+        const project = result.project;
+        const inventories = ['environments', 'buckets', 'services', 'plugins']
+          .map((key) => project[key]);
+        const serviceInventory = project.services;
+        if (isRecord(serviceInventory) && Array.isArray(serviceInventory.edges)) {
+          for (const edge of serviceInventory.edges) {
+            if (isRecord(edge) && isRecord(edge.node)) {
+              inventories.push(edge.node.serviceInstances, edge.node.repoTriggers);
+            }
+          }
+        }
+        for (const inventory of inventories) {
+          if (!isRecord(inventory) || !isRecord(inventory.pageInfo)
+            || typeof inventory.pageInfo.hasNextPage !== 'boolean' || !Array.isArray(inventory.edges)) {
+            throw new HostedObservationError('provider_error');
+          }
+          if (inventory.pageInfo.hasNextPage || inventory.edges.length > maxResources) {
+            throw new HostedObservationError('budget_exhausted');
+          }
+        }
+      }
       return this.validateProjectDetails(result.project, projectId);
     } catch (error) {
       if (this.isProviderConfirmedNotFound(error, 'project')) {
@@ -6324,7 +6372,10 @@ export class RailwayAdapter implements
    * Read back the live state of an environment for spec → observe → diff reconciliation.
    * Never includes raw env var values — only key names and sha256 hashes.
    */
-  async observe(environment: Environment): Promise<ObservedState> {
+  async observe(environment: Environment, options?: {
+    strictScope: { projectId: string; environmentId: string };
+    maxResources: number;
+  }): Promise<ObservedState> {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
     }
@@ -6339,6 +6390,10 @@ export class RailwayAdapter implements
       services?: Record<string, { serviceId?: string; workloadKind?: string; source?: { repo?: string; branch?: string } }>;
     };
     const projectId = bindings.projectId;
+    if (options && (!projectId || projectId !== options.strictScope.projectId
+      || bindings.environmentId !== options.strictScope.environmentId)) {
+      throw new HostedObservationError('scope_mismatch');
+    }
     if (!projectId) {
       return {
         provider: 'railway',
@@ -6361,8 +6416,9 @@ export class RailwayAdapter implements
       };
     }
 
-    const details = await this.getProjectDetails(projectId);
+    const details = await this.getProjectDetails(projectId, options?.maxResources);
     if (!details) {
+      if (options) throw new HostedObservationError('scope_mismatch');
       return {
         provider: 'railway',
         observedAt,
@@ -6387,6 +6443,16 @@ export class RailwayAdapter implements
 
     const projectEnvironments = (details.environments?.edges ?? []).map((e) => e.node);
     let environmentId = bindings.environmentId;
+    if (options) {
+      const exactEnvironments = projectEnvironments.filter((env) => env.id === environmentId);
+      if (exactEnvironments.length !== 1) {
+        throw new HostedObservationError(exactEnvironments.length === 0 ? 'scope_mismatch' : 'provider_error');
+      }
+      // Budget the whole returned inventory before any per-resource reads begin.
+      const resources = (details.services?.edges.length ?? 0)
+        + (details.buckets?.edges.length ?? 0) + (details.plugins?.edges.length ?? 0);
+      if (resources > options.maxResources) throw new HostedObservationError('budget_exhausted');
+    }
     if (!environmentId || !projectEnvironments.some((env) => env.id === environmentId)) {
       environmentId = projectEnvironments.find(
         (env) => env.name.toLowerCase() === environment.name.toLowerCase()
@@ -7057,6 +7123,7 @@ export interface RailwayProjectDetails {
 
 // Self-register with provider registry
 providerRegistry.register({
+  hostedObservation: { observe: observeRailwayHosted },
   metadata: {
     name: 'railway',
     displayName: 'Railway',

@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import path from 'path';
-import { z } from 'zod';
+import { repoBindingsFileSchema } from './repo-bindings.schema.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
 import { findRepoRoot, readRepoSpecFile, repositoryMatchesProjectIdentity, repoSpecEnabled } from './repo-spec-file.js';
@@ -31,16 +31,6 @@ const LOCAL_ONLY_BINDING_KEYS = new Set([
   'delegatedEnvBindings',
   'delegatedActionsBindings',
 ]);
-const repoBindingsFileSchema = z.object({
-  version: z.literal(1),
-  project: z.string().trim().min(1),
-  environments: z.record(
-    z.string().min(1),
-    z.object({
-      platformBindings: z.record(z.unknown()),
-    }).strict()
-  ),
-}).strict();
 
 function bindingsPath(root: string): string {
   return path.join(root, HYPERVIBE_DIR, BINDINGS_FILE);
