@@ -17,6 +17,7 @@ import {
   workloadKindForServiceName,
 } from './spec.service.js';
 import { buildDeploySourceEnvVars, resolveGitDeploySource } from './deploy-source.js';
+import { reservedRuntimeEnvError } from './runtime-env-policy.js';
 
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
@@ -86,6 +87,8 @@ export async function executeBootstrap(params: {
   provisionOnly?: boolean;
   runtime?: ProjectRuntime;
 }): Promise<{ success: boolean; summary: Record<string, unknown> }> {
+  const reservedError = reservedRuntimeEnvError(params.envVars, params.queueEnvVars, ...Object.values(params.envVarsByService ?? {}));
+  if (reservedError) return { success: false, summary: { blocked: true, error: reservedError } };
   const tx = new InfraTransaction();
   const project = resolveProject({ projectName: params.projectName });
   if (!project) {

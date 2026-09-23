@@ -610,7 +610,7 @@ provider:
         "enabled": false
       },
       "envVars": {
-        "HYPERVIBE_CONFORMANCE_REVISION": "create"
+        "CONFORMANCE_APP_REVISION": "create"
       },
       "deploy": {
         "strategy": "branch",

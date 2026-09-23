@@ -42,6 +42,19 @@ function isIgnored(root: string, file: string): boolean {
 }
 
 describe('deploy-env-file', () => {
+  it.each(['runtime', 'all', 'explicit'] as const)('never includes HYPERVIBE_ credentials in %s mode, even when explicitly selected', mode => {
+    const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-reserved-env-'));
+    try {
+      const envPath = path.join(root, 'private.env');
+      writeFileSync(envPath, 'HYPERVIBE_CUSTOM_SECRET=private-value\nAPP_SECRET=application-value\n', { mode: 0o600 });
+      const result = loadDeployEnvFile({ envFile: envPath, mode, includeKeys: ['HYPERVIBE_CUSTOM_SECRET', 'APP_SECRET'] });
+      expect(result?.vars).toEqual({ APP_SECRET: 'application-value' });
+      expect(result?.skippedKeys).toContain('HYPERVIBE_CUSTOM_SECRET');
+      expect(JSON.stringify(result)).not.toContain('private-value');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   it('loads repo .env by default and skips provider credentials', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-deploy-env-'));
     initRepo(root);

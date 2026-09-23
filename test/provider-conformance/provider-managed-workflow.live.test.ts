@@ -243,7 +243,7 @@ function fixtureSpec(params: {
         envVars: params.includeService === false
           ? {}
           : {
-              HYPERVIBE_CONFORMANCE_REVISION: params.revision ?? 'create',
+              CONFORMANCE_APP_REVISION: params.revision ?? 'create',
             },
         deploy: {
           strategy: 'branch',

@@ -7,6 +7,7 @@ import { isProviderEnvironmentVariablesAdapter } from '../ports/provider-env-var
 import { providerRegistry } from '../registry/provider.registry.js';
 import { redactExactValues } from '../../utils/redact-exact-values.js';
 import { adapterFactory } from './adapter.factory.js';
+import { reservedRuntimeEnvError } from './runtime-env-policy.js';
 
 export const HOSTING_ENV_REMOVE_OPERATION = 'hostingEnvRemove';
 
@@ -46,6 +47,8 @@ export async function syncHostingEnvVars(params: {
   /** Keep exact-SHA CI as the next code release boundary when supported. */
   deferDeployment?: boolean;
 }): Promise<Receipt & { provider?: string }> {
+  const reservedError = reservedRuntimeEnvError(params.vars);
+  if (reservedError) return { success: false, message: reservedError, error: reservedError };
   const provider = hostingProviderForEnvironment(params.project, params.environment);
   const displayName = providerDisplayName(provider);
 

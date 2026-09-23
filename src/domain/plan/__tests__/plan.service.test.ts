@@ -458,6 +458,14 @@ describe('PlanService.plan', () => {
     expect(result).toMatchObject({ domainSecurity: { dnssec: 'unknown', caa: { status: 'unknown' } } });
   });
 
+  it('rejects reserved one-off env values before provider observation', async () => {
+    const lookup = vi.spyOn(adapterFactory, 'getProviderAdapter');
+    const result = await new PlanService().plan(project, 'staging', { envVarOverrides: { HYPERVIBE_CUSTOM_SECRET: 'private-value' } });
+    expect(result).toMatchObject({ error: expect.stringContaining('HYPERVIBE_') });
+    expect(lookup).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain('private-value');
+  });
+
   it('errors when the environment is not in the spec', async () => {
     const result = await new PlanService().plan(project, 'production');
     expect(result).toMatchObject({ error: expect.stringContaining('production') });
