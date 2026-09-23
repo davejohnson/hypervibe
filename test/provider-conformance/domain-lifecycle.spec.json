@@ -25,7 +25,7 @@
         "enabled": false
       },
       "envVars": {
-        "HYPERVIBE_CONFORMANCE_REVISION": "railway-v1"
+        "CONFORMANCE_APP_REVISION": "railway-v1"
       },
       "deploy": {
         "strategy": "manual"
@@ -49,7 +49,7 @@
         "enabled": false
       },
       "envVars": {
-        "HYPERVIBE_CONFORMANCE_REVISION": "cloudrun-v1"
+        "CONFORMANCE_APP_REVISION": "cloudrun-v1"
       },
       "deploy": {
         "strategy": "manual"
@@ -73,7 +73,7 @@
         "enabled": false
       },
       "envVars": {
-        "HYPERVIBE_CONFORMANCE_REVISION": "ecs-v1"
+        "CONFORMANCE_APP_REVISION": "ecs-v1"
       },
       "deploy": {
         "strategy": "manual"
@@ -97,7 +97,7 @@
         "enabled": false
       },
       "envVars": {
-        "HYPERVIBE_CONFORMANCE_REVISION": "azure-v1"
+        "CONFORMANCE_APP_REVISION": "azure-v1"
       },
       "deploy": {
         "strategy": "manual"
@@ -121,7 +121,7 @@
         "enabled": false
       },
       "envVars": {
-        "HYPERVIBE_CONFORMANCE_REVISION": "digitalocean-v1"
+        "CONFORMANCE_APP_REVISION": "digitalocean-v1"
       },
       "deploy": {
         "strategy": "manual"
@@ -144,7 +144,7 @@
         "enabled": false
       },
       "envVars": {
-        "HYPERVIBE_CONFORMANCE_REVISION": "vercel-v1"
+        "CONFORMANCE_APP_REVISION": "vercel-v1"
       },
       "deploy": {
         "strategy": "manual"
@@ -168,7 +168,7 @@
         "enabled": false
       },
       "envVars": {
-        "HYPERVIBE_CONFORMANCE_REVISION": "fly-v1"
+        "CONFORMANCE_APP_REVISION": "fly-v1"
       },
       "deploy": {
         "strategy": "manual"

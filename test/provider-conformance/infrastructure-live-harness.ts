@@ -122,7 +122,7 @@ export function buildLoadBalancerLiveSpec(params: {
           : {}),
         email: { enabled: false },
         envVars: params.services
-          ? { HYPERVIBE_CONFORMANCE_REVISION: 'live' }
+          ? { CONFORMANCE_APP_REVISION: 'live' }
           : {},
         deploy: { strategy: 'manual' },
       },

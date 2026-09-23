@@ -32,3 +32,15 @@ credential was leaked to a live provider, nor audit or clean existing hosting
 variables. They run under ordinary `npm test`; the committed acceptance workflow
 runs that command and typechecking, and desired repository policy requires its
 check. Live branch-protection enforcement was not inspected.
+
+## Acceptance fixture correction
+
+The first PR acceptance run exposed two omitted conformance-fixture cases:
+`infrastructure-live-harness.test.ts` and `provider-matrix.test.ts` rejected the
+application variable `HYPERVIBE_CONFORMANCE_REVISION`. This falsified the
+assumption that the checked-in live-fixture inputs already respected the new
+namespace policy. Both failures were reproduced locally before the correction.
+All fixture producers, the consuming fixture server, and the documented example
+now use `CONFORMANCE_APP_REVISION`. The two suites then passed (32 tests).
+The reserved namespace restriction remains intact. This validates local fixture
+compatibility, not a live deployment of the renamed fixture variable.
