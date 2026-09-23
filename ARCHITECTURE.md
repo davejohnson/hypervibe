@@ -112,7 +112,7 @@ it is not the runtime used to execute Hypervibe itself.
 ## Code Map
 
 - `src/application/`: the transport-neutral command registry, command context, result envelope, provider bootstrap, and shared orchestration entrypoint.
-- `src/application/hosted/`: side-effect-free inspection contracts for a trusted hosting process. They validate exact source bytes and return bounded, value-free receipts without opening local state or contacting providers.
+- `src/application/hosted/`: library inspection contracts for a trusted hosting process. Source inspection validates exact bytes without provider access; infrastructure inspection uses injected credentials and bounded, provider-owned reads. Neither opens local state or creates a plan.
 - `src/interfaces/mcp/`: the MCP registration/response adapter. It exposes the canonical `hv_*` ids without owning command behavior.
 - `src/interfaces/cli/`: the human and JSON CLI adapter. It parses friendly command paths into the same registry used by MCP.
 - `src/tools/`: transport-neutral command group declarations retained under their historical filenames while they are moved incrementally; they must not import MCP.
@@ -148,7 +148,8 @@ MCP ─┘
   on already having that connection or initialized infrastructure state.
 - A future HTTP adapter may use this boundary, but remote auth, locking, state ownership, and secret custody are separate product decisions. Do not introduce an unauthenticated remote interface.
 - `@hypervibe/hypervibe/hosted` is a library boundary, not an HTTP interface. Its versioned committed-spec inspector accepts bytes only with a provider-verified repository identity, exact full revision, and matching SHA-256. The trusted host owns account authorization, code-host installation tokens, exact-revision reads, pairing, and tenancy; the inspector owns the existing project schema, repository-claim consistency, secret-shaped-content rejection, and a deterministic import receipt.
-- Hosted inspection never reads a checkout, opens SQLite, observes infrastructure, plans, applies, or manufactures provider endpoints. It returns only declared environments, services, provider capabilities, and HTTPS endpoints that are explicit safe domains in desired state. A missing spec repository claim remains visible as unverified; a present mismatched claim fails closed.
+- Committed-spec inspection never reads a checkout, opens SQLite, observes infrastructure, plans, applies, or manufactures provider endpoints. It returns only declared environments, services, provider capabilities, and HTTPS endpoints that are explicit safe domains in desired state. A missing spec repository claim remains visible as unverified; a present mismatched claim fails closed.
+- `inspectHostedEnvironmentV1` separately compares committed desired state with current provider configuration. The host supplies exact spec/binding bytes from one verified repository revision and independently authorizes the connection's project/environment scope. Missing bindings remain unknown; observation never adopts resources or substitutes same-name identities. Registered provider capabilities own credential shape, exact-scope verification, query-only transport, finite request/resource/body budgets, cancellation and deadlines. The initial capability covers Railway hosting configuration; other declarations are explicitly unsupported. Field values use presence markers, never commands, environment values or hashes. Matching applies only to listed fields, not runtime health, release readiness, managed-secret values, or whole-environment convergence. See [hosted infrastructure observation](docs/hosted-infrastructure-observation.md).
 
 
 ## Repository Collaboration

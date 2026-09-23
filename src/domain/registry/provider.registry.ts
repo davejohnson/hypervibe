@@ -6,6 +6,7 @@ import type { Environment } from '../entities/environment.entity.js';
 import type { Component } from '../entities/component.entity.js';
 import type { WorkloadKind } from '../entities/service.entity.js';
 import type { Receipt } from '../ports/provider.port.js';
+import type { HostedObservationCapability } from '../ports/hosted-observation.port.js';
 
 export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'messaging' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
 export type ProviderLifecycleCapability =
@@ -319,6 +320,8 @@ export interface RegisteredProvider {
   ensureDependencies?: () => Promise<{ installed: string[]; errors: string[] }>;
   /** Optional provider-owned raw forensic reads used by hv_inspect. */
   inspection?: ProviderInspectionCapability;
+  /** Bounded, exact-scope observation without local CLI state or provider mutations. */
+  hostedObservation?: HostedObservationCapability;
   /** Provider-owned deletion driver for explicitly retained non-lifecycle resources. */
   retainedCleanup?: ProviderRetainedCleanupCapability;
   /** Provider-owned projection from database bindings to workload runtime variables. */

@@ -307,7 +307,7 @@ function safeDocumentPath(path: Array<string | number>): string {
     .slice(0, 512);
 }
 
-function requireSafeReceiptLabel(value: string, path: string): string {
+export function requireSafeReceiptLabel(value: string, path: string): string {
   if (
     value.length > 255
     || value.trim() !== value
@@ -504,16 +504,21 @@ function environmentReceipt(
  * provider. The hosting service owns repository authentication and exact-SHA
  * reads; this boundary owns schema, identity, secret, and receipt validation.
  */
-export function inspectCommittedProjectSpecV1(
-  input: CommittedSpecInspectionInputV1
-): CommittedSpecInspectionReceiptV1 {
+/** Shared exact-source validation; callers still own their document schema. */
+export function readCommittedJsonSourceV1(input: CommittedSpecInspectionInputV1) {
   const source = validateInput(input);
   const actualSha256 = createHash('sha256').update(input.content).digest('hex');
   if (actualSha256 !== source.expectedSha256) {
-    inspectionError('DIGEST_MISMATCH', 'Committed spec bytes do not match the supplied SHA-256 digest.');
+    inspectionError('DIGEST_MISMATCH', 'Committed source bytes do not match the supplied SHA-256 digest.');
   }
+  return { source, actualSha256, document: decodeJsonSource(input.content) };
+}
 
-  const document = decodeJsonSource(input.content);
+/** Internal parsed desired state; only the value-free receipt is publicly exported. */
+export function parseCommittedProjectSpecV1(
+  input: CommittedSpecInspectionInputV1
+): { spec: ProjectSpec; receipt: CommittedSpecInspectionReceiptV1 } {
+  const { source, actualSha256, document } = readCommittedJsonSourceV1(input);
   const parsed = projectSpecSchema.safeParse(document);
   if (!parsed.success) {
     inspectionError('INVALID_SPEC', 'Committed spec does not match the Hypervibe project schema.', {
@@ -533,7 +538,7 @@ export function inspectCommittedProjectSpecV1(
   }
 
   const remoteIdentityVerified = verifyRepositoryClaims(parsed.data, source);
-  return {
+  return { spec: parsed.data, receipt: {
     schemaVersion: 1,
     status: 'accepted',
     source: {
@@ -556,5 +561,9 @@ export function inspectCommittedProjectSpecV1(
     environments: Object.entries(parsed.data.environments)
       .map(([name, environment]) => environmentReceipt(name, environment))
       .sort((a, b) => a.name.localeCompare(b.name)),
-  };
+  } };
+}
+
+export function inspectCommittedProjectSpecV1(input: CommittedSpecInspectionInputV1): CommittedSpecInspectionReceiptV1 {
+  return parseCommittedProjectSpecV1(input).receipt;
 }

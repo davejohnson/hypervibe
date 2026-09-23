@@ -20,9 +20,15 @@ type EnvironmentConfig = { buckets?: BucketConfig; services?: Record<string, { d
 const connection = (nodes: unknown[], more = false, cursor: string | null = null) => ({
   edges: nodes.map((node) => ({ node })), pageInfo: { hasNextPage: more, endCursor: cursor },
 });
+const limitedConnection = (nodes: unknown[], { first }: { first?: number }) => {
+  const count = first ?? nodes.length;
+  return connection(nodes.slice(0, count), nodes.length > count, nodes.length > count ? String(count) : null);
+};
 
 /** Synthetic provider state, executed by the official schema, not a recorded live lifecycle. */
 export async function railwayHttpFixture(options: {
+  projectTokenScope?: { projectId: string; environmentId: string };
+  environmentProjectId?: string;
   stagingExists?: boolean; projectExists?: boolean; pageSize?: number; dropCreateResponse?: boolean;
   bucketDelayMs?: number; omitBucketFlags?: boolean;
   volumeDelayMs?: number; dropVolumeCreateResponse?: boolean; volumeCreateResponseId?: string;
@@ -85,10 +91,10 @@ export async function railwayHttpFixture(options: {
   function serviceNode(service: ProviderService) {
     return {
       id: service.id, name: service.name, projectId, deletedAt: null, repoTriggers: connection([]),
-      serviceInstances: ({ after }: { after?: string }) => {
+      serviceInstances: ({ after, first }: { after?: string; first?: number }) => {
         const instances = [...service.instances.values()];
         const start = after ? Number(after) : 0;
-        const end = start + (options.pageSize ?? 100);
+        const end = start + Math.min(first ?? 100, options.pageSize ?? 100);
         const more = end < instances.length;
         return connection(instances.slice(start, end), more, more ? String(end) : null);
       },
@@ -96,6 +102,8 @@ export async function railwayHttpFixture(options: {
   }
 
   const root: Record<string, (args: any) => unknown> = {
+    // ProjectToken.projectId/environmentId are non-null identities in the pinned SDL.
+    projectToken: () => options.projectTokenScope,
     projects: () => connection(projectExists ? [{
       id: projectId, name: 'contract-project',
       createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
@@ -109,12 +117,14 @@ export async function railwayHttpFixture(options: {
       expect(id).toBe(projectId);
       expect(projectExists).toBe(true);
       return {
-        id: projectId, name: 'contract-project', environments: connection([...environments.values()].map((env) => ({ unmergedChangesCount: 0, ...env }))),
-        services: connection([...services.values()].map(serviceNode)), buckets: connection([...buckets.values()]), plugins: connection([]),
+        id: projectId, name: 'contract-project',
+        environments: (args: { first?: number }) => limitedConnection([...environments.values()].map((env) => ({ unmergedChangesCount: 0, ...env })), args),
+        services: (args: { first?: number }) => limitedConnection([...services.values()].map(serviceNode), args),
+        buckets: (args: { first?: number }) => limitedConnection([...buckets.values()], args), plugins: connection([]),
       };
     },
     environment: ({ id }) => ({
-      ...environments.get(id), projectId, deletedAt: null,
+      ...environments.get(id), projectId: options.environmentProjectId ?? projectId, deletedAt: null,
       volumeInstances: ({ after }: { after?: string }) => {
         const visible = [...volumes.entries()]
           .filter(([volumeId, volume]) => volume.environmentId === id
@@ -217,7 +227,14 @@ export async function railwayHttpFixture(options: {
   vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
     expect(new URL(String(url)).pathname).toBe('/graphql/v2');
     expect(init?.method).toBe('POST');
-    expect(new Headers(init?.headers).get('authorization')).toBe('Bearer synthetic-contract-token');
+    const headers = new Headers(init?.headers);
+    if (options.projectTokenScope) {
+      // Official Railway API authentication uses a distinct project-token header.
+      expect(headers.get('project-access-token')).toBe('synthetic-project-token');
+      expect(headers.has('authorization')).toBe(false);
+    } else {
+      expect(headers.get('authorization')).toBe('Bearer synthetic-contract-token');
+    }
     const request = JSON.parse(String(init?.body));
     requests.push(request);
     completeBucketPatches();
