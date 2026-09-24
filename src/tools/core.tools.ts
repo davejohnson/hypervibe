@@ -67,6 +67,7 @@ import {
 import { planStripeEnvironmentSync } from '../domain/services/stripe-env.service.js';
 import { planEmail } from '../domain/services/email-plan.service.js';
 import { inspectDomainSecurity } from '../domain/services/domain-security.service.js';
+import { inspectWebhookReadiness } from '../domain/services/webhook-readiness.service.js';
 import { planTwilioMessaging } from '../domain/services/twilio-messaging.service.js';
 import { firstProviderSpecValidationFailure } from '../domain/services/provider-spec-validation.js';
 import { buildManagedDatabaseEnvVars } from '../domain/services/database-env.js';
@@ -900,6 +901,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         {
           planId: result.planRunId,
           ...(result.domainSecurity ? { domainSecurity: result.domainSecurity } : {}),
+          ...(result.webhookReadiness ? { webhookReadiness: result.webhookReadiness } : {}),
           scope: result.scope,
           ...(result.emailSenderReadiness ? { emailSenderReadiness: result.emailSenderReadiness } : {}),
           environment: result.environmentName,
@@ -1156,6 +1158,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         observed,
       });
       const stripeDrift = stripeSync.actions.filter((action) => action.type !== 'noop');
+      const webhookReadiness = inspectWebhookReadiness({ environmentSpec: envSpec, environment, observed });
       const domainSecurity = await inspectDomainSecurity(envSpec.domain);
       const email = await planEmail({
         project: projectForStatus,
@@ -1250,6 +1253,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             : {}),
           inSync: !observationIncomplete && !hasConfigurationDrift && !restartRequired,
           ...(domainSecurity ? { domainSecurity } : {}),
+          ...(webhookReadiness ? { webhookReadiness } : {}),
           ...(email.senderReadiness ? { emailSenderReadiness: email.senderReadiness } : {}),
           restartRequired,
           runtimeConfiguration: {

@@ -103,6 +103,7 @@ import {
 } from '../services/stripe-env.service.js';
 import { planEmail } from '../services/email-plan.service.js';
 import { inspectDomainSecurity, type DomainSecurityReadiness } from '../services/domain-security.service.js';
+import { inspectWebhookReadiness, type WebhookReadiness } from '../services/webhook-readiness.service.js';
 import { reservedRuntimeEnvError } from '../services/runtime-env-policy.js';
 import { inspectEmailSenderReadiness, type EmailSenderReadiness } from '../services/email-sender-readiness.service.js';
 import { planTwilioMessaging } from '../services/twilio-messaging.service.js';
@@ -138,6 +139,7 @@ export interface PlanOptions {
 
 export interface EnvironmentPlan {
   domainSecurity?: DomainSecurityReadiness;
+  webhookReadiness?: WebhookReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
   scope: 'full' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'managed-ci-publication';
@@ -2264,6 +2266,7 @@ export class PlanService {
         reason: `Environment "${environmentName}" is not tracked locally`,
       });
     }
+    const webhookReadiness = inspectWebhookReadiness({ environmentSpec, environment, observed, runtimeValues: specForDiff.envVars });
     const domainSecurity = await inspectDomainSecurity(environmentSpec.domain);
     const email = serviceFilter
       ? await (async () => {
@@ -3042,6 +3045,7 @@ export class PlanService {
       planRunId: run.id,
       scope: persistedScope,
       ...(domainSecurity ? { domainSecurity } : {}),
+      ...(webhookReadiness ? { webhookReadiness } : {}),
       ...(email.senderReadiness ? { emailSenderReadiness: email.senderReadiness } : {}),
       specRevision: specResult.revision,
       specSource: specResult.source ?? { kind: 'local' },

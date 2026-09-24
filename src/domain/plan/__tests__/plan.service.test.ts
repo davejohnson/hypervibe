@@ -458,6 +458,17 @@ describe('PlanService.plan', () => {
     expect(result).toMatchObject({ domainSecurity: { dnssec: 'unknown', caa: { status: 'unknown' } } });
   });
 
+  it('reports insecure env-configured webhooks without exposing their URL or signing value', async () => {
+    new SpecStore().replace(project, { version: 1, project: project.name, environments: { staging: {
+      hosting: { provider: 'railway' }, services: { web: {} },
+      envVars: { STRIPE_WEBHOOK_URL: 'http://private-user:private-password@example.com/private-path', STRIPE_WEBHOOK_SECRET: 'private-signing-value' },
+    } } });
+    const result = await new PlanService().plan(project, 'staging');
+    expect(result).toMatchObject({ webhookReadiness: { status: 'needs_attention', applicationVerification: 'not_verified' } });
+    const report = JSON.stringify((result as any).webhookReadiness);
+    for (const value of ['private-user', 'private-password', 'private-path', 'private-signing-value']) expect(report).not.toContain(value);
+  });
+
   it('rejects reserved one-off env values before provider observation', async () => {
     const lookup = vi.spyOn(adapterFactory, 'getProviderAdapter');
     const result = await new PlanService().plan(project, 'staging', { envVarOverrides: { HYPERVIBE_CUSTOM_SECRET: 'private-value' } });
