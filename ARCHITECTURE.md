@@ -1058,6 +1058,16 @@ authority. Agents should explain potentially intentional differences before
 claiming staging validates production; changing resources still requires the
 normal reviewed spec/plan/apply flow.
 
+## Webhook Readiness
+
+Read-only plan/status webhook readiness summarizes HTTPS URL configuration and
+verification-material wiring for declared Stripe, Twilio, and SendGrid callbacks,
+plus conventional Stripe webhook env settings. Desired inputs and observed
+hosting presence are distinct evidence; neither proves application signature
+verification or provider endpoint identity. Unknown observations stay unknown,
+and SendGrid public-key configuration remains explicitly unmanaged. The report
+adds no mutation authority. See [webhook readiness](docs/webhook-readiness.md).
+
 ## Stripe Desired State
 
 Stripe sandboxes are isolated environments with their own API keys and object

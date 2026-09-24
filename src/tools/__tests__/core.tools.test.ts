@@ -3198,6 +3198,34 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
+  it('reports webhook readiness through both shared plan and status commands', async () => {
+    const t = await makeClient();
+    try {
+      const saved = await t.call('hv_spec', { spec: { project: 'webhook-readiness-app', environments: { production: {
+        hosting: { provider: 'railway' }, services: { web: {} },
+        envVars: { STRIPE_WEBHOOK_URL: 'http://example.com/private-hook', STRIPE_WEBHOOK_SECRET: 'private-signer' },
+      } } } });
+      expect(saved.ok).toBe(true);
+      verifyRailwayConnection();
+      const project = new ProjectRepository().findByName('webhook-readiness-app')!;
+      new EnvironmentRepository().create({ projectId: project.id, name: 'production', platformBindings: {
+        provider: 'railway', projectId: 'rp-1', environmentId: 're-1', services: { web: { serviceId: 's-1' } },
+      } });
+      mockObserved({ provider: 'railway', observedAt: new Date().toISOString(), projectExists: true, projectId: 'rp-1', environmentId: 're-1',
+        services: [{ name: 'web', externalId: 's-1', workloadKind: 'web', customDomains: [], config: {}, envVarKeys: [], envVarHashes: {}, status: 'running' }],
+        databases: [], partial: false, warnings: [],
+      });
+      for (const command of ['hv_plan', 'hv_status']) {
+        const result = await t.call(command, { project: project.name, env: 'production' });
+        expect(result.ok).toBe(true);
+        expect(result.data.webhookReadiness).toMatchObject({ status: 'needs_attention', applicationVerification: 'not_verified' });
+        const report = JSON.stringify(result.data.webhookReadiness);
+        expect(report).not.toContain('private-hook');
+        expect(report).not.toContain('private-signer');
+      }
+    } finally { await t.close(); }
+  });
+
   it('tells agents to connect Cloudflare before planning domain DNS drift', async () => {
     const t = await makeClient();
     await t.call('hv_spec', {

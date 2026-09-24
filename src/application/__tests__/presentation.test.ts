@@ -3,6 +3,12 @@ import { formatCommandResult, PRESENTED_COMMAND_IDS } from '../presentation.js';
 import { commandError, commandSuccess } from '../results.js';
 
 describe('command presentation', () => {
+  it.each(['hv_plan', 'hv_status'])('surfaces webhook uncertainty even when infrastructure is in sync: %s', command => {
+    const output = formatCommandResult(command, commandSuccess({ inSync: true, verified: true, actions: [], drift: [], webhookReadiness: { status: 'unknown' } }));
+    expect(output).toContain('WEBHOOKS NEED REVIEW');
+    expect(output).not.toContain('HYPERVIBE · IN SYNC');
+  });
+
   it.each(['hv_plan', 'hv_status'])('surfaces domain security uncertainty even when infrastructure is in sync: %s', command => {
     const output = formatCommandResult(command, commandSuccess({ inSync: true, verified: true, actions: [], drift: [], domainSecurity: { status: 'unknown' } }));
     expect(output).toContain('DOMAIN SECURITY NEEDS REVIEW');
