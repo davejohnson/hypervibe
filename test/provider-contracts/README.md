@@ -20,6 +20,7 @@ API definitions.
 | Railway | Full schema from official CLI commit `f60f3a77b980c47f1136909fbd9a443e29a2b95f` | Static adapter query validation; real `graphql-request` serialization, GraphQL input coercion and response execution; project/environment creation; unsuffixed staging web/PostgreSQL/Redis beside production; isolated second-environment bucket creation through shared plan/apply, scoped deletion and noop replan; variables, domains, volumes, delete/retry, pagination, unknown reads and uncertain writes |
 | Supabase v1 | Official OpenAPI commit `26585dd4a4d6db8910a595214c9f6e8fdd206768` | Organization response and project-create request validation through the adapter's HTTP transport; ID/slug distinction; negative project-response fixture validation |
 | Neon v2 | Official release OpenAPI snapshot, content hash in `source.json` | Real serialized project-create body/query validation; organization scope; negative input validation |
+| SendGrid v3 webhooks | Official OpenAPI commit `fb95a935c87b79f7f982ac34bd37adab1f697dbc` (selected operations) | Exact-ID settings reads, signing PATCH serialization, unique URL discovery, optional/null fields, and negative payload validation; shared signing/key lifecycle uses reconstructed transport and synthetic hosting observations |
 
 Railway SDL is the complete lexicographically sorted official introspection
 schema rendered without descriptions. No fields, arguments, defaults, types,

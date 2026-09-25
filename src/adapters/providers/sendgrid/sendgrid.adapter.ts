@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { createPublicKey } from 'node:crypto';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 
 const SENDGRID_API_URL = 'https://api.sendgrid.com/v3';
@@ -46,6 +47,8 @@ export interface SendGridValidationResult {
 }
 
 export interface SendGridEventWebhookSettings {
+  id?: string;
+  public_key?: string;
   enabled: boolean;
   url: string;
   group_resubscribe: boolean;
@@ -448,16 +451,64 @@ export class SendGridAdapter {
 
   // Event Webhook Management
 
-  async getEventWebhookSettings(): Promise<SendGridEventWebhookSettings> {
-    return this.request<SendGridEventWebhookSettings>('GET', '/user/webhooks/event/settings');
+  async getEventWebhookSettings(id?: string): Promise<SendGridEventWebhookSettings> {
+    return this.request<SendGridEventWebhookSettings>('GET', `/user/webhooks/event/settings${id ? '/' + encodeURIComponent(id) : ''}`);
+  }
+
+  /** Unbound legacy targets are candidates, never an implicit oldest-webhook selection. */
+  async resolveEventWebhookSigning(url: string, boundId?: string): Promise<Awaited<ReturnType<SendGridAdapter['getEventWebhookSigning']>>> {
+    try {
+      let id = boundId;
+      if (!id) {
+        const response = await this.request<unknown>('GET', '/user/webhooks/event/settings/all');
+        // Optional fields in the provider schema still need evidence before we can select a target.
+        const list = z.object({ webhooks: z.array(z.object({ id: z.string().min(1), url: z.string().url() })) }).parse(response);
+        const matches = list.webhooks.filter(item => item.url === url);
+        if (matches.length !== 1) throw new Error();
+        id = matches[0].id;
+      }
+      const result = await this.getEventWebhookSigning(id);
+      if (result.url !== url) throw new Error();
+      return result;
+    } catch {
+      throw new Error('SendGrid signing target is unavailable or ambiguous. Restore the exact endpoint or resolve duplicate delivery URLs before re-planning.');
+    }
+  }
+
+  /** Exact-ID reads only. Omitted optional public_key means signing is disabled. */
+  async getEventWebhookSigning(id: string): Promise<{ id: string; url: string; enabled: boolean; signing: boolean; publicKey?: string }> {
+    try {
+      if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error();
+      const response = await this.request<unknown>('GET', `/user/webhooks/event/settings/${encodeURIComponent(id)}`);
+      const data = z.object({ id: z.string().optional(), url: z.string().url(), enabled: z.boolean(), public_key: z.string().optional() }).parse(response);
+      if (data.id !== undefined && data.id !== id) throw new Error();
+      if (data.public_key) {
+        const key = createPublicKey({ key: Buffer.from(data.public_key, 'base64'), format: 'der', type: 'spki' });
+        if (key.asymmetricKeyType !== 'ec' || key.asymmetricKeyDetails?.namedCurve !== 'prime256v1') throw new Error();
+      }
+      return { id, url: data.url, enabled: data.enabled, signing: Boolean(data.public_key), ...(data.public_key ? { publicKey: data.public_key } : {}) };
+    } catch {
+      throw new Error('SendGrid webhook signing observation is unavailable or invalid. Check the exact endpoint and API-key read permissions.');
+    }
+  }
+
+  async setEventWebhookSigning(id: string, enabled: boolean): Promise<void> {
+    try {
+      if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error();
+      await this.request('PATCH', `/user/webhooks/event/settings/signed/${encodeURIComponent(id)}`, { enabled });
+    } catch {
+      // Writes may be acknowledged ambiguously. Re-observe before any retry.
+      throw new Error('SendGrid webhook signing write was not confirmed. Re-plan to observe its state; check API-key signing permissions.');
+    }
   }
 
   async updateEventWebhookSettings(
-    settings: Partial<SendGridEventWebhookSettings>
+    settings: Partial<SendGridEventWebhookSettings>,
+    id?: string
   ): Promise<SendGridEventWebhookSettings> {
     return this.request<SendGridEventWebhookSettings>(
       'PATCH',
-      '/user/webhooks/event/settings',
+      `/user/webhooks/event/settings${id ? '/' + encodeURIComponent(id) : ''}`,
       settings as Record<string, unknown>
     );
   }

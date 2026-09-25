@@ -1,0 +1,11 @@
+{
+  "sourceUrl": "https://github.com/twilio/sendgrid-oai/blob/fb95a935c87b79f7f982ac34bd37adab1f697dbc/spec/json/tsg_webhooks_v3.json",
+  "upstreamRevision": "fb95a935c87b79f7f982ac34bd37adab1f697dbc",
+  "sourceSha256": "001940911ae832cdd8dc0039567f7785355b261a9c3cca8accbc1d1b33539fb3",
+  "schemaFile": "openapi.json",
+  "schemaSha256": "2c56438ce36ad06637280b24c54fb8c5e50216a1920f70728258eb87449aaec9",
+  "apiVersion": "v3",
+  "extraction": "Exact GET all, GET/PATCH exact-ID settings, PATCH exact-ID signing operations and transitive component references; field constraints unchanged.",
+  "consultedAt": "2026-09-24",
+  "evidence": "Reconstructed transport fixtures; not recorded traffic or live compatibility."
+}

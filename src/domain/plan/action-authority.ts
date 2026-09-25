@@ -1,3 +1,4 @@
+import { EMAIL_SIGNING_OPERATIONS } from '../services/email-signing.service.js';
 import type { PlanAction, PlanResourceKind } from './plan.types.js';
 import { HOSTING_ENVIRONMENT_ENSURE_OPERATION } from './plan.service.js';
 import {
@@ -1313,6 +1314,10 @@ export function resolvePlanActionAuthority(
     && action.id === 'email:sendgrid:delivery-events'
     && hasType(action, 'update', 'replace')
   ) return authority(action, 'email.delivery-events.mutate');
+  if (action.resource.kind === 'email' && action.type === 'update' && (
+    action.metadata?.operation === EMAIL_SIGNING_OPERATIONS.signing && action.id === 'email:sendgrid:delivery-signing' && action.resource.provider === 'sendgrid' && action.resource.name === 'delivery-signing'
+    || action.metadata?.operation === EMAIL_SIGNING_OPERATIONS.key && action.id === 'email:sendgrid:delivery-key' && action.resource.name === 'delivery-key'
+  )) return authority(action, 'email.delivery-events.mutate');
   if (action.resource.provider === 'cloudflare') {
     const forwardingOperation = action.metadata?.operation;
     const forwardingTypeIsValid =

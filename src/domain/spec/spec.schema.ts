@@ -1348,7 +1348,11 @@ export const SENDGRID_DELIVERY_EVENTS = [
   'unsubscribe',
 ] as const;
 
+export const SENDGRID_EVENT_PUBLIC_KEY = 'SENDGRID_EVENT_WEBHOOK_PUBLIC_KEY';
+
 export const emailDeliveryEventsSpecSchema = z.object({
+  /** Omitted preserves unmanaged signing; false explicitly disables signing. */
+  signatureVerification: z.boolean().optional(),
   service: z.string().min(1),
   path: z.string()
     .regex(/^\/(?!\/)[^?#\s]*$/, 'delivery-event paths must begin with one slash and cannot contain a query or fragment')
@@ -1394,6 +1398,7 @@ export const emailSpecSchema = z.object({
 });
 
 export const EMAIL_MANAGED_ENV_KEYS = [
+  SENDGRID_EVENT_PUBLIC_KEY,
   'SENDGRID_API_KEY',
   'SENDGRID_FROM_EMAIL',
   'SENDGRID_FROM_NAME',
