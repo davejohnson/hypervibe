@@ -22,3 +22,8 @@ export {
   type HostedEnvironmentInspectionInputV1, type HostedEnvironmentInspectionReceiptV1,
   type HostedResourceInspectionV1, type HostedResourceFieldV1, type HostedResourceStatusV1,
 } from './application/hosted/environment-inspection.js';
+export {
+  inspectCommittedProjectMonitoringV1,
+  type CommittedProjectMonitoringInputV1, type CommittedProjectMonitoringReceiptV1, type CommittedMonitoringEndpointV1,
+} from './application/hosted/committed-project-monitoring.js';
+export { MAX_PUBLIC_ENDPOINTS, type HostedPublicEndpointV1 } from './application/hosted/public-endpoints.js';

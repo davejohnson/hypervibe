@@ -5,12 +5,13 @@ import { withMigrationReleaseCommand } from '../../domain/spec/spec-bootstrap.js
 import { redactExactValues } from '../../utils/redact-exact-values.js';
 import type { ObservedService, ObservedState } from '../../domain/ports/observe.port.js';
 import type { EnvironmentSpec, ServiceSpec } from '../../domain/spec/spec.schema.js';
+import { customDomainOrigin, endpointProjection, MAX_PUBLIC_ENDPOINTS, publicOrigin, type HostedPublicEndpointV1 } from './public-endpoints.js';
 import {
   parseCommittedProjectSpecV1,
   type CommittedSpecInspectionInputV1, type CommittedSpecInspectionReceiptV1,
 } from './committed-spec-inspection.js';
 import {
-  HostedInspectionError, inspectCommittedBindingsV1,
+  HostedInspectionError, inspectCommittedBindingsV1, sameCommittedSource,
   type CommittedBindingsInspectionInputV1, type CommittedBindingsInspectionReceiptV1,
   type HostedEnvironmentBindingsV1,
 } from './committed-bindings-inspection.js';
@@ -72,6 +73,8 @@ export interface HostedEnvironmentInspectionReceiptV1 {
     requests: number;
   };
   resources: HostedResourceInspectionV1[];
+  publicEndpoints: HostedPublicEndpointV1[];
+  publicEndpointsTruncated?: boolean;
 }
 
 const limitsSchema = z.object({
@@ -119,14 +122,6 @@ function declaredResources(spec: EnvironmentSpec, environment: string, hasRuntim
   return resources;
 }
 
-function sameSource(spec: CommittedSpecInspectionInputV1, bindings: CommittedBindingsInspectionInputV1): boolean {
-  return spec.provider === bindings.provider
-    && spec.revision.toLowerCase() === bindings.revision.toLowerCase()
-    && spec.repository.id === bindings.repository.id
-    && spec.repository.path === bindings.repository.path
-    && spec.repository.remoteIdentity === bindings.repository.remoteIdentity;
-}
-
 function markUnknown(resources: HostedResourceInspectionV1[], reason: string): void {
   for (const row of resources) {
     if (row.status !== 'unsupported') {
@@ -172,7 +167,10 @@ function compareHosting(input: {
   // Bound work before pure comparison, as well as before provider reads. Any
   // omitted desired fields remain explicit incomplete coverage.
   const services = Object.fromEntries(resources.filter(row => row.kind === 'service')
-    .map(row => [row.name, input.spec.services[row.name]]));
+    .map(row => {
+      const service = input.spec.services[row.name];
+      return [row.name, { ...service, public: service.public ?? service.workloadKind === 'web' }];
+    }));
   const envVars = Object.fromEntries(Object.entries(input.spec.envVars).slice(0, MAX_ENV_FIELDS));
   const removeEnvVars = (input.spec.removeEnvVars ?? []).slice(0, MAX_ENV_FIELDS - Object.keys(envVars).length);
   const spec = withMigrationReleaseCommand({ ...input.spec, services, envVars, removeEnvVars });
@@ -257,7 +255,7 @@ export async function inspectHostedEnvironmentV1(
   const environment = Object.hasOwn(spec.environments, input.environment) ? spec.environments[input.environment] : undefined;
   if (!environment) throw new HostedInspectionError('INVALID_INPUT', 'The committed spec does not declare this environment.');
   const bound = input.bindings ? inspectCommittedBindingsV1(input.bindings) : undefined;
-  if (bound && (!sameSource(input.source, input.bindings!) || bound.project !== spec.project)) {
+  if (bound && (!sameCommittedSource(input.source, input.bindings!) || bound.project !== spec.project)) {
     throw new HostedInspectionError('SOURCE_MISMATCH', 'Committed bindings and desired state must identify the same repository, revision and project.');
   }
   const bindings = bound?.environments[input.environment];
@@ -273,7 +271,7 @@ export async function inspectHostedEnvironmentV1(
     coverage: { scope: 'hosting-configuration', status: 'unknown', supportedResourceKinds: [],
       unsupportedCapabilities: [...OUTSIDE_SCOPE, ...new Set(allResources.filter(row => row.status === 'unsupported').map(row => row.kind))],
       checkedResources: 0, totalDeclaredResources: allResources.length,
-      omittedResources: Math.max(0, allResources.length - resources.length), requests: 0 }, resources,
+      omittedResources: Math.max(0, allResources.length - resources.length), requests: 0 }, resources, publicEndpoints: [],
   };
   await import('./providers.js');
   const capability = providerRegistry.get(provider)?.hostedObservation;
@@ -302,6 +300,22 @@ export async function inspectHostedEnvironmentV1(
     } else {
       report.coverage.omittedResources += compareHosting({ spec: environment, environment: input.environment, bindings,
         observed: result.observed, resources, maxResources: limits.maxResources });
+      const endpoints = endpointProjection<HostedPublicEndpointV1>();
+      for (const row of resources) {
+        if (row.kind !== 'service' || !row.desired.exists || row.current.exists !== true) continue;
+        const declared = environment.services[row.name];
+        if (!declared || declared.workloadKind !== 'web' || declared.public === false) continue;
+        const live = result.observed.services.find(service => service.externalId === bindings.services[row.name]?.serviceId);
+        if (!live || live.workloadKind !== 'web' || live.config.public !== true) continue;
+        for (const domain of live.customDomains.slice(0, MAX_PUBLIC_ENDPOINTS)) {
+          const url = customDomainOrigin(domain);
+          if (url) endpoints.add({ url, services: [row.name], kind: 'custom' });
+        }
+        if (live.customDomains.length > MAX_PUBLIC_ENDPOINTS) report.publicEndpointsTruncated = true;
+        const url = publicOrigin(live.url);
+        if (url) endpoints.add({ url, services: [row.name], kind: 'provider' });
+      }
+      Object.assign(report, endpoints.result());
       // Acquisition time comes from the injected host clock. Provider event or
       // deployment timestamps are not evidence that a new observation succeeded.
       report.observedAt = now().toISOString();
