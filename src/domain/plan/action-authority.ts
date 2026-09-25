@@ -1,3 +1,4 @@
+import { INBOUND_SIGNING_KEY_OPERATION } from '../services/email-inbound-signing.service.js';
 import { EMAIL_SIGNING_OPERATIONS } from '../services/email-signing.service.js';
 import type { PlanAction, PlanResourceKind } from './plan.types.js';
 import { HOSTING_ENVIRONMENT_ENSURE_OPERATION } from './plan.service.js';
@@ -1314,6 +1315,8 @@ export function resolvePlanActionAuthority(
     && action.id === 'email:sendgrid:delivery-events'
     && hasType(action, 'update', 'replace')
   ) return authority(action, 'email.delivery-events.mutate');
+  if (action.resource.kind === 'email' && action.type === 'update' && action.id === 'email:sendgrid:inbound-key'
+    && action.resource.name === 'inbound-key' && action.metadata?.operation === INBOUND_SIGNING_KEY_OPERATION) return authority(action, 'email.inbound.mutate');
   if (action.resource.kind === 'email' && action.type === 'update' && (
     action.metadata?.operation === EMAIL_SIGNING_OPERATIONS.signing && action.id === 'email:sendgrid:delivery-signing' && action.resource.provider === 'sendgrid' && action.resource.name === 'delivery-signing'
     || action.metadata?.operation === EMAIL_SIGNING_OPERATIONS.key && action.id === 'email:sendgrid:delivery-key' && action.resource.name === 'delivery-key'

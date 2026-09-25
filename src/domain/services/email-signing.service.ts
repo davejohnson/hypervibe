@@ -30,7 +30,7 @@ export function eventSigningUrl(environment: Environment | null, spec: Environme
   const base = environment && target ? serviceBindingFor(environment, target.service)?.url : undefined;
   try { const url = new URL(target!.path, String(base)); return url.protocol === 'https:' && !url.username && !url.password ? url.toString() : undefined; } catch { return undefined; }
 }
-function runtimeKey(observed: ObservedState | null, service: string, environment: Environment | null): { known: boolean; present?: boolean; hash?: string } {
+export function runtimeKey(observed: ObservedState | null, service: string, environment: Environment | null, key: string = SENDGRID_EVENT_PUBLIC_KEY): { known: boolean; present?: boolean; hash?: string } {
   if (!observed || observed.partial || observed.completeness?.services === 'unknown') return { known: false };
   const matches = observed.services.filter(item => item.name === service);
   if (matches.length !== 1) return { known: false };
@@ -40,8 +40,8 @@ function runtimeKey(observed: ObservedState | null, service: string, environment
   if (!expectedId || item.externalId !== expectedId || observed.provider !== binding.provider
     || observed.projectId && binding.projectId && observed.projectId !== binding.projectId
     || observed.environmentId && binding.environmentId && observed.environmentId !== binding.environmentId) return { known: false };
-  const present = item.envVarKeys.includes(SENDGRID_EVENT_PUBLIC_KEY);
-  const hash = item.envVarHashes[SENDGRID_EVENT_PUBLIC_KEY];
+  const present = item.envVarKeys.includes(key);
+  const hash = item.envVarHashes[key];
   return { known: !present || typeof hash === 'string' && /^[a-f0-9]{64}$/i.test(hash), present, hash };
 }
 export function planEventSigning(params: { spec: EnvironmentSpec; environment: Environment | null; observed: ObservedState | null; state?: EventSigningState; deliveryReady: boolean }): { actions: PlanAction[]; readiness?: EventSigningReadiness } {
@@ -88,7 +88,7 @@ export function planEventSigning(params: { spec: EnvironmentSpec; environment: E
   return { actions, readiness };
 }
 
-async function observeHosting(project: Project, environment: Environment, spec: EnvironmentSpec): Promise<ObservedState | null> {
+export async function observeHosting(project: Project, environment: Environment, spec: EnvironmentSpec): Promise<ObservedState | null> {
   const resolved = await adapterFactory.getProviderAdapter(spec.hosting.provider, project);
   const adapter = resolved.adapter as unknown as Partial<IObservableHosting> & { configureTarget?: (target: { region?: string }) => Promise<void> };
   if (!resolved.success || !adapter || typeof adapter.observe !== 'function') return null;

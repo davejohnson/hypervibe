@@ -64,11 +64,57 @@ export interface SendGridEventWebhookSettings {
   dropped: boolean;
 }
 
+/** Internal provider evidence; never return public keys through a command result. */
+export interface SendGridInboundParseWebhook {
+  hostname: string;
+  url: string;
+  spam_check: boolean;
+  send_raw: boolean;
+  /** Omission is unknown association evidence, not confirmation of no policy. */
+  security_policy?: string;
+}
+
+export interface SendGridInboundSecurityPolicy {
+  id: string;
+  name: string;
+  publicKey: string;
+  hasOAuth: boolean;
+}
+
+const sendGridPolicyId = z.string().regex(/^[a-zA-Z0-9_-]+$/);
+const sendGridParseHostname = z.string().max(253).regex(/^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/);
+const sendGridParseSettings = z.object({
+  hostname: sendGridParseHostname,
+  url: z.string().url(),
+  spam_check: z.boolean(),
+  send_raw: z.boolean(),
+  security_policy: sendGridPolicyId.optional(),
+});
+
+function readInboundSecurityPolicy(value: unknown): SendGridInboundSecurityPolicy {
+  const data = z.object({
+    id: sendGridPolicyId,
+    name: z.string().min(1),
+    signature: z.object({ public_key: z.string().min(1).max(2048) }),
+    oauth: z.object({ client_id: z.string().min(1), token_url: z.string().url(), scopes: z.array(z.string()).optional() }).optional(),
+  }).parse(value);
+  const publicKey = data.signature.public_key;
+  const bytes = Buffer.from(publicKey, 'base64');
+  if (bytes.toString('base64') !== publicKey) throw new Error();
+  const key = createPublicKey({ key: bytes, format: 'der', type: 'spki' });
+  if (key.asymmetricKeyType !== 'ec' || key.asymmetricKeyDetails?.namedCurve !== 'prime256v1'
+    || !key.export({ format: 'der', type: 'spki' }).equals(bytes)) throw new Error();
+  // OAuth configuration may contain provider echoes. Only the presence bit crosses this boundary.
+  return { id: data.id, name: data.name, publicKey, hasOAuth: data.oauth !== undefined };
+}
+
 export const SENDGRID_SCOPE_REQUIREMENTS = {
   mailSend: ['mail.send'],
   domainAuthentication: ['whitelabel.read', 'whitelabel.create', 'whitelabel.update'],
   senderVerification: ['user.email.read', 'user.email.create', 'user.email.update'],
   eventWebhook: ['user.webhooks.event.settings.read', 'user.webhooks.event.settings.update'],
+  inboundParseRead: ['user.webhooks.parse.settings.read'],
+  inboundParseUpdate: ['user.webhooks.parse.settings.read', 'user.webhooks.parse.settings.update'],
   inboundParse: [
     'user.webhooks.parse.settings.read',
     'user.webhooks.parse.settings.create',
@@ -147,7 +193,7 @@ function hasSendGridScope(scopeSet: Set<string>, requiredScope: string): boolean
   return false;
 }
 
-function missingSendGridScopes(scopes: string[], requiredScopes: readonly string[]): string[] {
+export function missingSendGridScopes(scopes: string[], requiredScopes: readonly string[]): string[] {
   const scopeSet = new Set(scopes);
   return requiredScopes.filter((scope) => !hasSendGridScope(scopeSet, scope));
 }
@@ -159,6 +205,8 @@ export function assessSendGridScopes(scopes: string[]): SendGridPermissionAudit 
     senderVerification: missingSendGridScopes(scopes, SENDGRID_SCOPE_REQUIREMENTS.senderVerification),
     eventWebhook: missingSendGridScopes(scopes, SENDGRID_SCOPE_REQUIREMENTS.eventWebhook),
     inboundParse: missingSendGridScopes(scopes, SENDGRID_SCOPE_REQUIREMENTS.inboundParse),
+    inboundParseRead: missingSendGridScopes(scopes, SENDGRID_SCOPE_REQUIREMENTS.inboundParseRead),
+    inboundParseUpdate: missingSendGridScopes(scopes, SENDGRID_SCOPE_REQUIREMENTS.inboundParseUpdate),
   };
 
   const hasMailSend = missingScopes.mailSend.length === 0;
@@ -515,8 +563,49 @@ export class SendGridAdapter {
 
   // Inbound Parse Webhook (for receiving emails)
 
-  async listInboundParseWebhooks(): Promise<Array<{ hostname: string; url: string; spam_check: boolean; send_raw: boolean }>> {
-    const result = await this.request<{ result: Array<{ hostname: string; url: string; spam_check: boolean; send_raw: boolean }> }>(
+  async getInboundParseWebhook(hostname: string): Promise<SendGridInboundParseWebhook> {
+    try {
+      sendGridParseHostname.parse(hostname);
+      const response = await this.request<unknown>('GET', `/user/webhooks/parse/settings/${encodeURIComponent(hostname)}`);
+      const data = sendGridParseSettings.parse(response);
+      if (data.hostname.toLowerCase() !== hostname.toLowerCase()) throw new Error();
+      return data;
+    } catch {
+      throw new Error('SendGrid Inbound Parse observation is unavailable or invalid. Check the exact hostname and API-key read permissions.');
+    }
+  }
+
+  async getInboundParseSecurityPolicy(id: string): Promise<SendGridInboundSecurityPolicy> {
+    try {
+      sendGridPolicyId.parse(id);
+      const response = await this.request<unknown>('GET', `/user/webhooks/security/policies/${encodeURIComponent(id)}`);
+      const policy = readInboundSecurityPolicy(z.object({ policy: z.unknown() }).parse(response).policy);
+      if (policy.id !== id) throw new Error();
+      return policy;
+    } catch {
+      throw new Error('SendGrid Inbound Parse security-policy observation is unavailable or invalid. Check the exact policy and API-key read permissions.');
+    }
+  }
+
+  async attachInboundParseSecurityPolicy(
+    hostname: string,
+    policyId: string,
+    current: Pick<SendGridInboundParseWebhook, 'url' | 'spam_check' | 'send_raw'>,
+  ): Promise<void> {
+    try {
+      sendGridParseHostname.parse(hostname);
+      sendGridPolicyId.parse(policyId);
+      const route = sendGridParseSettings.omit({ hostname: true, security_policy: true }).parse(current);
+      // The official guide supplies the complete route settings when associating a
+      // policy. Null/empty detach and omitted-field preservation are undocumented.
+      await this.request('PATCH', `/user/webhooks/parse/settings/${encodeURIComponent(hostname)}`, { ...route, security_policy: policyId });
+    } catch {
+      throw new Error('SendGrid Inbound Parse security-policy association write was not confirmed. Re-plan to observe the exact hostname before retrying.');
+    }
+  }
+
+  async listInboundParseWebhooks(): Promise<SendGridInboundParseWebhook[]> {
+    const result = await this.request<{ result: SendGridInboundParseWebhook[] }>(
       'GET',
       '/user/webhooks/parse/settings'
     );
