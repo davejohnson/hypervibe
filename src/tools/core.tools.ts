@@ -1158,7 +1158,6 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         observed,
       });
       const stripeDrift = stripeSync.actions.filter((action) => action.type !== 'noop');
-      const webhookReadiness = inspectWebhookReadiness({ environmentSpec: envSpec, environment, observed });
       const domainSecurity = await inspectDomainSecurity(envSpec.domain);
       const email = await planEmail({
         project: projectForStatus,
@@ -1167,6 +1166,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         environment,
         observed,
       });
+      const webhookReadiness = inspectWebhookReadiness({ environmentSpec: envSpec, environment, observed, eventSigningReadiness: email.eventSigningReadiness });
       const emailDrift = email.actions.filter((action) => action.type !== 'noop');
       const messaging = await planTwilioMessaging({
         project: projectForStatus,

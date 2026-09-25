@@ -8,7 +8,8 @@ names and other integrations are not inferred. Bootstrap/cleanup plans returning
 before integration planning omit this report.
 
 The report checks URL configuration and verification-material wiring without
-making requests. It never returns URLs, secret values, or their hashes. There
+probing application endpoints. Managed SendGrid signing additionally uses the
+email lifecycle’s read-only provider observations. It never returns URLs, secret values, or their hashes. There
 are no endpoint probes, test events, credential rotations, or provider writes.
 Infrastructure changes still use reviewed spec/plan/apply actions.
 
@@ -29,9 +30,10 @@ Infrastructure changes still use reviewed spec/plan/apply actions.
   for endpoint ownership, binding hashes, installation, and rotation.
 - Twilio's existing messaging contract projects `TWILIO_AUTH_TOKEN`; its API-key
   secret is not interchangeable. Alternative Twilio signing schemes are not assessed.
-- SendGrid uses public-key signature verification. Hypervibe does not yet manage
-  that configuration, so its signing-material assessment is `not_managed` and
-  readiness stays unknown. SendGrid API-key presence cannot certify signing.
+- SendGrid uses public-key signature verification. Delivery events can opt into
+  [managed signing](sendgrid-webhook-signing.md), which compares provider signing
+  and the exact receiving service’s public-key hash. Without that intent, and for
+  Inbound Parse, signing material remains `not_managed` and readiness unknown. SendGrid API-key presence cannot certify signing.
 
 `needs_attention` means an insecure URL or known missing input. `unknown` means
 incomplete evidence or unmanaged verification setup. `configured` only means the

@@ -1179,6 +1179,18 @@ Cloudflare forwarding destinations, routing DNS, aliases, and the catch-all are
 explicit actions with destination-verification dependencies; provider-global
 destination addresses are never deleted implicitly.
 
+Delivery-event `signatureVerification` is optional declarative intent: true
+converges exact-endpoint signing, false explicitly disables it. Both require
+exact action confirmation. Signing and publication of the observed public key
+are separate reviewed plan stages. The receiving service alone gets
+`SENDGRID_EVENT_WEBHOOK_PUBLIC_KEY`; ordinary runtime actions do not own it.
+Endpoint and hosting identities plus key hashes are durably bound. Unknown reads
+block; noops never mutate; ambiguous writes are re-observed before retries.
+Disable signing and remove the owned key before removing managed intent or
+moving the target. Plan/status distinguish provider signing and key wiring from
+unverified application signature handling. Inbound Parse security remains
+separate and unmanaged. See [delivery-event signing](docs/sendgrid-webhook-signing.md).
+
 A SendGrid-backed CI email journey reuses this lifecycle rather than adding a
 Hypervibe-hosted inbox. The desired state declares a dedicated staging Inbound
 Parse hostname and may intentionally use `aliases: []`; dynamic local parts for

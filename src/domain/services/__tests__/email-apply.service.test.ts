@@ -551,7 +551,7 @@ describe('declarative email apply', () => {
       bounce: true,
       delivered: true,
       click: false,
-    }));
+    }), undefined);
   });
 
   it('creates a forwarding destination through a parent-zone Cloudflare connection and stops pending verification', async () => {

@@ -921,6 +921,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   if (shouldRefreshIntegration(envSpec.email.enabled, loaded.document.integrationFingerprints?.email)) {
     const emailState = await resolveEmailIntegrationState({
       project: projectForPreflight,
+      environment,
       environmentSpec: envSpec,
     });
     freshIntegrationFingerprints = {
@@ -1988,6 +1989,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
         environmentName: envName,
         environmentSpec: envSpec,
         action,
+        confirmedActionIds,
       });
     }
     if (

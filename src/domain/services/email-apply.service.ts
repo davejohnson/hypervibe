@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { applyEventSigning, EMAIL_SIGNING_OPERATIONS } from './email-signing.service.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
@@ -723,7 +724,10 @@ async function applyDeliveryEvents(params: {
       error: `Missing SendGrid scope(s): ${permissions.missingScopes.eventWebhook.join(', ')}`,
     };
   }
-  const live = await sendgrid.adapter.getEventWebhookSettings();
+  const endpointId = stringValue(asRecord(currentEmailBindings(params.environment).eventSigning), 'endpointId')
+    ?? stringValue(asRecord(currentEmailBindings(params.environment).deliveryEvents), 'endpointId');
+  const live = await sendgrid.adapter.getEventWebhookSettings(endpointId);
+  if (endpointId && live.id !== undefined && live.id !== endpointId) return staleAction('Delivery-event endpoint identity changed.');
   const operation = stringValue(metadata, 'operation');
   if (operation === EMAIL_OPERATIONS.deliveryEventsAdopt) {
     if (!eventSettingsMatch(live, expectedUrl, desired.events)) {
@@ -733,13 +737,14 @@ async function applyDeliveryEvents(params: {
     const settings = Object.fromEntries(
       SENDGRID_DELIVERY_EVENTS.map((event) => [event, desired.events.includes(event)])
     );
-    await sendgrid.adapter.updateEventWebhookSettings({ enabled: true, url: expectedUrl, ...settings });
+    await sendgrid.adapter.updateEventWebhookSettings({ enabled: true, url: expectedUrl, ...settings }, endpointId);
   }
-  const verified = await sendgrid.adapter.getEventWebhookSettings();
-  if (!eventSettingsMatch(verified, expectedUrl, desired.events)) {
+  const verified = await sendgrid.adapter.getEventWebhookSettings(endpointId);
+  if (endpointId && verified.id !== undefined && verified.id !== endpointId || !eventSettingsMatch(verified, expectedUrl, desired.events)) {
     return { success: false, message: 'SendGrid did not verify the delivery-event webhook', error: 'Provider read-back differs from the reviewed settings.' };
   }
   updateEmailBinding(params.environment, 'deliveryEvents', {
+    ...((endpointId ?? verified.id) ? { endpointId: endpointId ?? verified.id } : {}),
     configHash: expectedHash,
     url: expectedUrl,
     service: desired.service,
@@ -1035,6 +1040,7 @@ export async function applyEmailAction(params: {
   environmentName: string;
   environmentSpec: EnvironmentSpec;
   action: PlanAction;
+  confirmedActionIds?: ReadonlySet<string>;
 }): Promise<ActionResult> {
   const environment = environmentRepo.findByProjectAndName(params.project.id, params.environmentName);
   if (!environment) {
@@ -1042,6 +1048,12 @@ export async function applyEmailAction(params: {
   }
   if (!params.environmentSpec.email.enabled) return staleAction('Email is no longer enabled.');
   const operation = stringValue(asRecord(params.action.metadata), 'operation');
+  if (operation === EMAIL_SIGNING_OPERATIONS.signing || operation === EMAIL_SIGNING_OPERATIONS.key) {
+    if (params.action.type === 'noop') return { success: true, message: 'No signing mutation requested' };
+    const sendgrid = verifiedSendGridAdapter(params.project, params.environmentSpec);
+    if ('error' in sendgrid) return { success: false, status: 'blocked', message: sendgrid.error };
+    return applyEventSigning({ ...params, environment, spec: params.environmentSpec, adapter: sendgrid.adapter });
+  }
   switch (operation) {
     case EMAIL_OPERATIONS.runtimeSync:
       return applyRuntime({ ...params, environment });

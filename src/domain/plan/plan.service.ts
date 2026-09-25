@@ -2266,7 +2266,6 @@ export class PlanService {
         reason: `Environment "${environmentName}" is not tracked locally`,
       });
     }
-    const webhookReadiness = inspectWebhookReadiness({ environmentSpec, environment, observed, runtimeValues: specForDiff.envVars });
     const domainSecurity = await inspectDomainSecurity(environmentSpec.domain);
     const email = serviceFilter
       ? await (async () => {
@@ -2287,6 +2286,7 @@ export class PlanService {
         ],
         domainDependencies: domainRegistration.action ? [domainRegistration.action.id] : [],
       });
+    const webhookReadiness = inspectWebhookReadiness({ environmentSpec, environment, observed, runtimeValues: specForDiff.envVars, eventSigningReadiness: 'eventSigningReadiness' in email ? email.eventSigningReadiness : undefined });
     actions.push(...email.actions);
     const messaging = serviceFilter
       ? { actions: [], warnings: [], fingerprint: undefined }

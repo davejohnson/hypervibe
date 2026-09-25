@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { eventSigningUrl, planEventSigning, signingBinding, type EventSigningState, type EventSigningReadiness } from './email-signing.service.js';
 import type {
   SendGridDomainAuthentication,
   SendGridEventWebhookSettings,
@@ -67,6 +68,7 @@ export interface SendGridInboundParseRoute {
 }
 
 export interface EmailIntegrationState {
+  eventSigning?: EventSigningState;
   senderReadiness?: EmailSenderReadiness;
   runtimeKey: { status: 'known'; hash: string } | UnknownObservation;
   domainAuthentications: EmailObservation<SendGridDomainAuthentication>;
@@ -82,6 +84,7 @@ export interface EmailIntegrationState {
 }
 
 export interface EmailPlanResult {
+  eventSigningReadiness?: EventSigningReadiness;
   senderReadiness?: EmailSenderReadiness;
   actions: PlanAction[];
   warnings: string[];
@@ -160,6 +163,7 @@ export function emailIntegrationFingerprint(state: EmailIntegrationState): strin
 
   return emailConfigHash({
     runtimeKey: state.runtimeKey,
+    eventSigning: state.eventSigning?.status === 'known' ? { ...state.eventSigning.value, publicKey: state.eventSigning.value.publicKey ? emailConfigHash(state.eventSigning.value.publicKey) : null } : state.eventSigning,
     domainAuthentications: normalize(state.domainAuthentications, normalizedDomainAuth),
     verifiedSenders: normalize(state.verifiedSenders, (sender) => ({
       id: sender.id ?? null,
@@ -214,6 +218,7 @@ export function emailIntegrationFingerprint(state: EmailIntegrationState): strin
 
 export async function resolveEmailIntegrationState(params: {
   project: Project;
+  environment?: Environment | null;
   environmentSpec: EnvironmentSpec;
   observed?: ObservedState | null;
   runtimeValues?: Record<string, string>;
@@ -231,6 +236,7 @@ export async function resolveEmailIntegrationState(params: {
   let verifiedSenders: EmailIntegrationState['verifiedSenders'] = known();
   let inboundRoutes: EmailIntegrationState['inboundRoutes'] = known();
   let dnsRecords: EmailIntegrationState['dnsRecords'] = known();
+  let eventSigning: EventSigningState | undefined;
   let deliveryEvents: EmailIntegrationState['deliveryEvents'] = unknown('Delivery-event observation was not requested');
   let forwardingSettings: EmailIntegrationState['forwardingSettings'] = unknown('Email-forwarding observation was not requested');
   let forwardingDestinations: EmailIntegrationState['forwardingDestinations'] = known();
@@ -275,7 +281,15 @@ export async function resolveEmailIntegrationState(params: {
     }
     if (wantsDeliveryEvents) {
       try {
-        deliveryEvents = knownValue(await sendgrid.adapter.getEventWebhookSettings());
+        const recordedId = signingBinding(params.environment ?? null).endpointId ?? asRecord(emailBindings(params.environment ?? null).deliveryEvents)?.endpointId;
+        deliveryEvents = knownValue(await sendgrid.adapter.getEventWebhookSettings(typeof recordedId === 'string' ? recordedId : undefined));
+        if (environmentSpec.email.deliveryEvents?.signatureVerification !== undefined || Object.keys(signingBinding(params.environment ?? null)).length) {
+          eventSigning = { status: 'unknown' };
+          const url = eventSigningUrl(params.environment ?? null, environmentSpec);
+          if (url) {
+            try { eventSigning = { status: 'known', value: await sendgrid.adapter.resolveEventWebhookSigning(url, typeof recordedId === 'string' ? recordedId : undefined) }; } catch { /* unknown remains unknown */ }
+          }
+        }
       } catch (error) {
         deliveryEvents = unknown(error instanceof Error ? error.message : String(error));
       }
@@ -364,6 +378,7 @@ export async function resolveEmailIntegrationState(params: {
 
   return {
     senderReadiness: await inspectEmailSenderReadiness({ ...params, observed: params.observed ?? null }),
+    ...(eventSigning ? { eventSigning } : {}),
     runtimeKey,
     domainAuthentications,
     verifiedSenders,
@@ -909,7 +924,10 @@ export async function planEmail(params: {
     : undefined;
   const senderReadiness = state ? state.senderReadiness : await inspectEmailSenderReadiness(params);
   const senderWarnings = senderReadiness?.guidance ? [senderReadiness.guidance] : [];
-  if (!state) return { actions: [], warnings: senderWarnings, ...(senderReadiness ? { senderReadiness } : {}) };
+  if (!state) {
+    const signing = planEventSigning({ spec: environmentSpec, environment, observed, deliveryReady: false });
+    return { actions: signing.actions, warnings: senderWarnings, ...(signing.readiness ? { eventSigningReadiness: signing.readiness } : {}), ...(senderReadiness ? { senderReadiness } : {}) };
+  }
   const actions: PlanAction[] = [];
   const bindings = emailBindings(environment);
   const serviceNames = Object.keys(environmentSpec.services).sort();
@@ -1228,13 +1246,12 @@ export async function planEmail(params: {
     actions.push(inboundAction);
   }
 
-  actions.push(...planDeliveryEvents({
-    environmentSpec,
-    environment,
-    state,
-    bindings,
-    serviceDependencies: params.serviceDependencies,
-  }));
+  const deliveryActions = planDeliveryEvents({ environmentSpec, environment, state, bindings, serviceDependencies: params.serviceDependencies });
+  actions.push(...deliveryActions);
+  const eventSigning = planEventSigning({ spec: environmentSpec, environment, observed, state: state.eventSigning,
+    deliveryReady: deliveryActions.length === 1 && deliveryActions[0].type === 'noop' && deliveryActions[0].verified === true });
+  // Endpoint configuration is its own plan stage; its new identity must be observed before signing is authorized.
+  if (!deliveryActions.some(action => action.type !== 'noop' && !action.metadata?.blockedReason)) actions.push(...eventSigning.actions);
   actions.push(...planForwarding({ environmentSpec, state, bindings }));
 
   if (environmentSpec.domain) {
@@ -1279,6 +1296,7 @@ export async function planEmail(params: {
     actions,
     warnings: [...state.warnings, ...senderWarnings],
     ...(senderReadiness ? { senderReadiness } : {}),
+    ...(eventSigning.readiness ? { eventSigningReadiness: eventSigning.readiness } : {}),
     fingerprint: emailIntegrationFingerprint(state),
   };
 }
