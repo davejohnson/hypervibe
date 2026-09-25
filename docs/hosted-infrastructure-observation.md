@@ -1,7 +1,7 @@
 # Hosted infrastructure observation
 
-`@hypervibe/hypervibe/hosted` exports `inspectHostedEnvironmentV1` and
-`inspectCommittedBindingsV1`. Importing the subpath performs no local state,
+`@hypervibe/hypervibe/hosted` exports `inspectHostedEnvironmentV1`,
+`inspectCommittedBindingsV1`, and `inspectCommittedProjectMonitoringV1`. Importing the subpath performs no local state,
 network, credential-store or CLI work. Calling environment inspection performs
 only bounded provider reads. It never constructs command context, stores plans,
 invokes apply, adopts resources, or opens SQLite.
@@ -39,11 +39,24 @@ produce unknown coverage and no provider calls. Invalid or mismatched source
 fails validation instead of silently using older local state.
 
 `inspectCommittedBindingsV1` validates the shared repository binding envelope
-in memory and projects only provider/project/environment/service identities.
-It discards other binding values. Its receipt includes exact source provenance
+in memory and projects provider/project/environment/service identities plus safe public
+service URLs and custom domains. It discards other binding values. Its receipt includes exact source provenance
 and `environments[name].services[logicalName].serviceId`. It does not verify
 live existence or authorize access. Environment observation consumes the source
 bytes itself, so callers need not persist a second parsed binding record.
+
+`inspectCommittedProjectMonitoringV1({schemaVersion: 1, source, bindings?})`
+returns the spec receipt with `bindingSource` and per-environment public endpoints
+labelled `{url, services, kind: 'custom' | 'provider', source: 'spec' | 'binding'}`.
+Each declared public web service uses its explicit spec endpoint first, otherwise
+its exact committed custom domains, then its provider URL. Names never supply a
+fallback. Missing bindings remain optional; mismatched source identity is rejected.
+Environment observation separately returns `publicEndpoints` from current, exact
+bound public services, with `{url, services, kind}`. These origins establish neither
+website health nor DNS ownership and never authorize adoption or DNS changes.
+Projection accepts HTTPS public DNS origins only, omits unsafe/secret-shaped values,
+and caps each environment at 100 endpoints (`publicEndpointsTruncated` flags omissions).
+The host must still enforce DNS/redirect safety when checking a URL.
 
 ## Report semantics
 

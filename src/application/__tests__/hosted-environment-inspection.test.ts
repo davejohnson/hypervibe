@@ -34,6 +34,49 @@ function input() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('hosted desired/current inspection v1', () => {
+  it.each([undefined, false])('respects the shared web public default without overriding explicit false (%s)', async (isPublic) => {
+    const fixture = await railwayHttpFixture();
+    const service = fixture.addService('staging-web', 'web', stagingId);
+    service.instances.get(stagingId)!.domains.serviceDomains.push({ domain: 'web.up.railway.app' });
+    fixture.variables.set(`staging-web/${stagingId}`, { FEATURE: 'private-feature-value' });
+    const request = input();
+    request.source = spec({ web: { workloadKind: 'web', ...(isPublic === undefined ? {} : { public: isPublic }) } });
+    const report = await inspectHostedEnvironmentV1(request, { now });
+    expect(report.publicEndpoints).toEqual(isPublic === false ? [] : [
+      { url: 'https://web.up.railway.app/', services: ['web'], kind: 'provider' },
+    ]);
+    if (isPublic === undefined) expect(report.resources.find(row => row.id === 'service:web')?.fields)
+      .toContainEqual({ field: 'public', status: 'matching', desired: true, current: true });
+    expect(fixture.contractErrors).toEqual([]);
+    expect(fixture.mutations).toEqual([]);
+  });
+
+  it('retains current public service domains from exact scoped provider reads without DNS adoption', async () => {
+    const fixture = await railwayHttpFixture();
+    const service = fixture.addService('staging-web', 'web', stagingId);
+    Object.assign(service.instances.get(stagingId)!, { startCommand: 'node server.js', domains: {
+      serviceDomains: [{ domain: 'app-staging.up.railway.app' }],
+      customDomains: [{ id: 'custom-stage', domain: 'staging.invoiceperfect.com',
+        status: { verified: true, certificateStatus: 'CERTIFICATE_STATUS_TYPE_VALID', dnsRecords: [] } }],
+    } });
+    const production = fixture.addService('production-web', 'web', productionId);
+    Object.assign(production.instances.get(productionId)!.domains, { serviceDomains: [{ domain: 'production.up.railway.app' }] });
+    fixture.variables.set(`staging-web/${stagingId}`, { FEATURE: 'private-feature-value' });
+    const request = input();
+    request.source = spec({ web: { workloadKind: 'web', public: true, startCommand: 'node server.js' } });
+    const report = await inspectHostedEnvironmentV1(request, { now });
+    expect(fixture.contractErrors).toEqual([]);
+    expect(report.resources.find(row => row.id === 'service:web')).toMatchObject({ current: { exists: true } });
+    expect(report.publicEndpoints).toEqual([
+      { url: 'https://staging.invoiceperfect.com/', services: ['web'], kind: 'custom' },
+      { url: 'https://app-staging.up.railway.app/', services: ['web'], kind: 'provider' },
+    ]);
+    expect(report.observedAt).not.toBeNull();
+    expect(fixture.contractErrors).toEqual([]);
+    expect(fixture.mutations).toEqual([]);
+    expect(JSON.stringify(report)).not.toContain('https://production.up.railway.app');
+  });
+
   it.each(['domains', 'details', 'null-instance', 'omitted-startCommand'])('does not match private configuration when a selected response field is missing (%s)', async (missing) => {
     const fixture = await railwayHttpFixture();
     const service = fixture.addService('staging-web', 'web', stagingId);
@@ -64,6 +107,7 @@ describe('hosted desired/current inspection v1', () => {
     const report = await inspectHostedEnvironmentV1(input(), { now });
     expect(report.resources.find(resource => resource.id === 'service:web')?.status).toBe('unknown');
     expect(report.coverage.status).not.toBe('complete');
+    expect(report.publicEndpoints).toEqual([]);
     expect(fixture.contractErrors).toEqual([]);
     expect(fixture.mutations).toEqual([]);
   });
