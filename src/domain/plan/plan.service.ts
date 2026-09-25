@@ -2286,7 +2286,7 @@ export class PlanService {
         ],
         domainDependencies: domainRegistration.action ? [domainRegistration.action.id] : [],
       });
-    const webhookReadiness = inspectWebhookReadiness({ environmentSpec, environment, observed, runtimeValues: specForDiff.envVars, eventSigningReadiness: 'eventSigningReadiness' in email ? email.eventSigningReadiness : undefined });
+    const webhookReadiness = inspectWebhookReadiness({ environmentSpec, environment, observed, runtimeValues: specForDiff.envVars, eventSigningReadiness: 'eventSigningReadiness' in email ? email.eventSigningReadiness : undefined, inboundSigningReadiness: 'inboundSigningReadiness' in email ? email.inboundSigningReadiness : undefined });
     actions.push(...email.actions);
     const messaging = serviceFilter
       ? { actions: [], warnings: [], fingerprint: undefined }

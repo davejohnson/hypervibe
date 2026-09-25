@@ -1166,7 +1166,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         environment,
         observed,
       });
-      const webhookReadiness = inspectWebhookReadiness({ environmentSpec: envSpec, environment, observed, eventSigningReadiness: email.eventSigningReadiness });
+      const webhookReadiness = inspectWebhookReadiness({ environmentSpec: envSpec, environment, observed, eventSigningReadiness: email.eventSigningReadiness, inboundSigningReadiness: email.inboundSigningReadiness });
       const emailDrift = email.actions.filter((action) => action.type !== 'noop');
       const messaging = await planTwilioMessaging({
         project: projectForStatus,

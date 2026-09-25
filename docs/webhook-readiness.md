@@ -32,8 +32,13 @@ Infrastructure changes still use reviewed spec/plan/apply actions.
   secret is not interchangeable. Alternative Twilio signing schemes are not assessed.
 - SendGrid uses public-key signature verification. Delivery events can opt into
   [managed signing](sendgrid-webhook-signing.md), which compares provider signing
-  and the exact receiving service’s public-key hash. Without that intent, and for
-  Inbound Parse, signing material remains `not_managed` and readiness unknown. SendGrid API-key presence cannot certify signing.
+  and the exact receiving service’s public-key hash. [Inbound Parse signing](sendgrid-inbound-signing.md)
+  can adopt an already attached, positively observed signed policy and compare
+  its public key with the exact receiving service. Missing association or
+  signature evidence remains unknown; the official contract does not establish
+  that an omitted field means unsigned. Policy creation and removal remain
+  unsupported. Without explicit signing intent, material remains `not_managed`
+  and readiness unknown. SendGrid API-key presence cannot certify signing.
 
 `needs_attention` means an insecure URL or known missing input. `unknown` means
 incomplete evidence or unmanaged verification setup. `configured` only means the
@@ -57,6 +62,11 @@ contracts, consulted 2026-09-23:
 - [SendGrid event webhook security](https://www.twilio.com/docs/sendgrid/for-developers/tracking-events/getting-started-event-webhook-security-features)
   describes public-key verification; the existing email lifecycle documents its
   application-owned verification boundary.
+- [SendGrid Inbound Parse security](https://www.twilio.com/docs/sendgrid/for-developers/parsing-email/securing-your-parse-webhooks),
+  additionally consulted 2026-09-24, documents attached policy IDs, public keys,
+  and validation over the original multipart request body. The
+  [Inbound Parse evidence record](sendgrid-inbound-signing.md#evidence-and-regression-coverage)
+  describes the separate gaps in unsigned observation and detach semantics.
 
 The challenged assumption was that infrastructure convergence suffices for an
 unqualified readiness headline. An env-configured HTTP Stripe webhook falsifies
