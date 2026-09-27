@@ -1,3 +1,4 @@
+import { planApiPolicy } from '../domain/services/api-policy.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
@@ -1001,6 +1002,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       }
 
       const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+      const apiPolicy = planApiPolicy(envName, environment?.platformBindings.apiPolicy, envSpec.api);
       const projectForStatus = projectWithSpecGitRemoteUrl(project, specResult.spec);
       const { observed, warnings } = await planService.observeEnvironment(projectForStatus, environment, envSpec);
       const local = planService.buildLocalSnapshot(projectForStatus, environment);
@@ -1186,7 +1188,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         observed,
       });
       const restartRequired = restartRequirements.length > 0;
-      const hasConfigurationDrift = maintenanceDrift.length > 0
+      const hasConfigurationDrift = Boolean(apiPolicy.action || apiPolicy.error)
+        || maintenanceDrift.length > 0
         || nativeDeploySourceDrift.length > 0
         || drift.length > 0
         || cacheDrift.length > 0
@@ -1252,6 +1255,15 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             }
             : {}),
           inSync: !observationIncomplete && !hasConfigurationDrift && !restartRequired,
+          ...((envSpec.api || environment?.platformBindings.apiPolicy !== undefined) ? {
+            apiReleasePolicy: {
+              status: apiPolicy.error ? 'blocked' : apiPolicy.action ? 'drift' : 'configured',
+              ...(apiPolicy.error ? { reason: apiPolicy.error } : {}),
+              ...(apiPolicy.action ? { action: apiPolicy.action } : {}),
+              versions: Object.fromEntries(Object.entries(envSpec.api?.versions ?? {}).map(([name, value]) => [name, { path: value.path, status: value.status }])),
+              applicationBehavior: 'Verified only by the declared compatibility tests during managed releases.',
+            },
+          } : {}),
           ...(domainSecurity ? { domainSecurity } : {}),
           ...(webhookReadiness ? { webhookReadiness } : {}),
           ...(email.senderReadiness ? { emailSenderReadiness: email.senderReadiness } : {}),
@@ -1270,8 +1282,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
                 },
               }
             : {}),
-          summary: summarizeActions([...maintenance.actions, ...nativeDeploySources.actions, ...diff.actions, ...cache.actions, ...databaseResilience.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...email.actions, ...messaging.actions]),
-          drift: [...maintenanceDrift, ...nativeDeploySourceDrift, ...drift, ...cacheDrift, ...databaseResilienceDrift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift, ...messagingDrift],
+          summary: summarizeActions([...(apiPolicy.action ? [apiPolicy.action] : []), ...maintenance.actions, ...nativeDeploySources.actions, ...diff.actions, ...cache.actions, ...databaseResilience.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...email.actions, ...messaging.actions]),
+          drift: [...(apiPolicy.action ? [apiPolicy.action] : []), ...maintenanceDrift, ...nativeDeploySourceDrift, ...drift, ...cacheDrift, ...databaseResilienceDrift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift, ...messagingDrift],
           unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged],
           ...(envSpec.database?.resilience
             ? {

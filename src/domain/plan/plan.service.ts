@@ -1,3 +1,4 @@
+import { planApiPolicy } from '../services/api-policy.js';
 import path from 'path';
 import { observeServiceVolumes, planServiceVolumes, retainedVolumeHostingBlock, wireServiceVolumeActions } from '../services/service-volume.service.js';
 import { environmentResourceName } from '../services/resource-names.js';
@@ -142,7 +143,7 @@ export interface EnvironmentPlan {
   webhookReadiness?: WebhookReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
-  scope: 'full' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'managed-ci-publication';
+  scope: 'full' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'managed-ci-publication' | 'api-policy';
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
   environmentName: string;
@@ -1661,6 +1662,23 @@ export class PlanService {
     }
     if (scope === 'retained-cleanup') {
       return this.planRetainedHostingCleanup(project, environmentName, specResult, environmentSpec);
+    }
+    const policyEnvironment = this.envRepo.findByProjectAndName(project.id, environmentName);
+    const apiPolicy = planApiPolicy(environmentName, policyEnvironment?.platformBindings.apiPolicy, environmentSpec.api);
+    if (apiPolicy.error) return { error: apiPolicy.error };
+    if (apiPolicy.action) {
+      if (options?.serviceFilter?.length || Object.keys(options?.envVarOverrides ?? {}).length || options?.envFile || Object.keys(options?.secretRefs ?? {}).length) {
+        return { error: 'API policy is an isolated plan stage; remove deploy overrides and re-run hv_plan.' };
+      }
+      const actions = [apiPolicy.action];
+      const warnings = ['API routes and compatibility tests remain application-owned. Recording this policy does not deploy code or retire a route.'];
+      const document: PlanRunDocument = { kind: 'hv_plan', scope: 'api-policy', environmentName, specRevision: specResult.revision,
+        observedFingerprint: null, actions, unmanaged: [], warnings };
+      const record = policyEnvironment ?? this.envRepo.create({ projectId: project.id, name: environmentName });
+      const run = this.runRepo.create({ projectId: project.id, environmentId: record.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
+      this.runRepo.updateStatus(run.id, 'succeeded');
+      return { planRunId: run.id, scope: 'api-policy', specRevision: specResult.revision, specSource: specResult.source ?? { kind: 'local' },
+        environmentName, verified: false, observed: null, actions, unmanaged: [], warnings, inputRequired: [], blocked: [] };
     }
     const sourceCommitSha = environmentSpec.deploy?.strategy === 'branch'
       && environmentSpec.deploy.trigger !== 'native'

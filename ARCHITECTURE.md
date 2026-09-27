@@ -1269,8 +1269,12 @@ TestFlight upload, or TestFlight distribution commands.
 - A successful server deploy writes an artifact whose name and JSON body carry
   the environment, repository, exact full Git SHA, and deployed service set.
   The artifact is emitted only after provider deployment steps succeed.
-- The iOS workflow shares the server deploy concurrency key and uses three
-  isolated jobs. A checkout-free preparation job validates a specific successful
+- The iOS workflow uses an app-scoped concurrency key independent of server
+  deployments. An environment-free eligibility job validates the exact deployed
+  source and skips protected jobs when complete evidence proves mobile inputs
+  unchanged since the last successful beta. Unknown relevance builds; invalid
+  provenance blocks before approval or Apple access. Three isolated protected
+  jobs follow. A checkout-free preparation job validates a specific successful
   server run and its evidence, then uses the managed runtime with App Store
   credentials to select a new build number. The macOS build job checks out that
   exact SHA, prepares signing, invokes the app-defined build command with
@@ -1318,10 +1322,41 @@ TestFlight upload, or TestFlight distribution commands.
   validation regressions run in ordinary `npm test` acceptance.
 - `hv_ci_status` is the read-only path for workflows, runs, logs, and release
   artifact provenance. `hv_appstore_submit` requires successful managed server
-  and iOS evidence artifacts for the same SHA before final review submission.
+  and iOS artifact bodies, immutable source contracts, and the exact attached
+  Apple build before confirmed review submission. Cross-commit reuse requires
+  an unchanged supported API contract and verified API companion evidence;
+  mobile and server SHAs are always recorded truthfully.
 - Xcode projects, schemes, entitlements, build/test commands, artifact paths,
   App Store metadata/screenshots, and local device operations remain
   project-owned. Hypervibe owns the release envelope around the resulting IPA.
+
+## API Compatibility And Mobile Promotion
+
+An optional environment `api` declaration binds a version ledger to an existing
+web service and a project-owned compatibility command. The first implementation
+requires GitHub Actions. An isolated local `api-policy` plan stage retains version
+paths/statuses in repository bindings; omission cannot erase support. Retirement
+requires a reason, durable tombstone and exact action-ID confirmation recomputed
+from fresh bindings. Policy acceptance performs no provider mutation. Following
+workflow reconciliation is separately reviewed through the ordinary lifecycle.
+
+Generated API gates execute before migrations/provider writes, against frozen
+contract snapshots from a verified earlier release. Passing project tests is
+bounded evidence, not a universal semantic compatibility proof. Every successful
+API release publishes a versioned companion bound to exact server evidence.
+Unknown or missing baseline evidence blocks unless complete history proves a
+first managed release; no automatic version expiry exists.
+API handlers, auth/data compatibility and installed-client update behavior remain
+application-owned. Adding v2 does not retire v1. Existing unenrolled releases and
+API-protected rollback remain blocked where compatible baseline proof is absent.
+
+`ios.release.build.inputs` declares literal relevant paths with conservative
+shared build inputs. Semantic mobile config and exact executed source are checked
+before paid/protected jobs. `ios.release.promoteFrom` selects an already-tested
+beta for explicit production submission, preserving its immutable Apple build ID
+and source configuration. Same-named environment secrets do not establish backend
+configuration equivalence. See [API and mobile releases](docs/api-mobile-releases.md)
+for declaration examples, command inputs, evidence boundaries and limitations.
 
 ## CI And Push Deploys
 

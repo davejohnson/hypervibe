@@ -1,3 +1,4 @@
+import { API_POLICY_OPERATION } from '../services/api-policy.js';
 import { createHash } from 'crypto';
 import { z } from 'zod';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
@@ -185,6 +186,7 @@ export const planRunDocumentSchema = z.object({
   /** Omitted by plans created before scoped planning; those remain full plans. */
   scope: z.enum([
     'full',
+    'api-policy',
     'retained-cleanup',
     'managed-ci-bindings',
     'hosting-bindings',
@@ -213,6 +215,16 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'api-policy' && (document.actions.length !== 1
+    || document.actions[0].metadata?.operation !== API_POLICY_OPERATION
+    || document.actions[0].resource.provider !== 'hypervibe'
+    || document.actions[0].resource.name !== `api-policy:${document.environmentName}`
+    || document.actions[0].type !== 'update' || document.actions[0].resource.kind !== 'ci'
+    || document.overrides || document.integrationFingerprints || document.observedFingerprint !== null
+    || document.lockEnvironmentIds || document.inputRequired?.length)) {
+    ctx.addIssue({ code: 'custom', message: 'API policy acceptance must be isolated from provider and deploy actions.' });
+  }
+
   if (document.scope === 'managed-ci-publication') {
     const invalidAction = document.actions.find((action) =>
       action.metadata?.workflowPublicationRequired !== true

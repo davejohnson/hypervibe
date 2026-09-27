@@ -1,3 +1,4 @@
+import { applyApiPolicy, planApiPolicy } from '../domain/services/api-policy.js';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { environmentResourceName } from '../domain/services/resource-names.js';
 import {
@@ -831,6 +832,21 @@ export async function executePlanApply(ctx: CommandContext, params: {
     ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
     : project;
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (planScope === 'api-policy') {
+    if (!environment) return { kind: 'env_missing', envName };
+    if (loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) return { kind: 'blocked', applyBlocked: [{ provider: 'hypervibe', reason: 'The reviewed API policy plan belongs to a different project or environment.' }] };
+    const result = await executor.execute({ planRunId: planId, confirmActions: params.confirmActions, currentSpecRevision: params.specRevision,
+      handler: async action => {
+        const current = ctx.repos.environments.findByProjectAndName(project.id, envName);
+        if (!current || resolvePlanActionAuthority(action)?.capability !== 'api.policy.accept') return { success: false, status: 'blocked', message: 'API policy identity changed; run hv_plan again.' };
+        return applyApiPolicy(envName, current.platformBindings.apiPolicy, envSpec.api, action, new Set(params.confirmActions),
+          apiPolicy => { ctx.repos.environments.updatePlatformBindings(current.id, { apiPolicy }); });
+      },
+    });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [] };
+  }
+  const apiPolicyState = planApiPolicy(envName, environment?.platformBindings.apiPolicy, envSpec.api);
+  if (apiPolicyState.error || apiPolicyState.action) return { kind: 'blocked', applyBlocked: [{ provider: 'hypervibe', reason: apiPolicyState.error ?? 'API policy changed; run hv_plan and accept the isolated policy stage first.' }] };
   const migrationActions = loaded.document.actions.filter((action) =>
     action.type === 'update'
     && (

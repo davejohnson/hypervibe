@@ -882,6 +882,44 @@ const repositoryRelativePathSchema = z.string().min(1).refine(
   'must be a repository-relative path without parent-directory traversal'
 );
 
+/** Literal tracked inputs, never shell globs or paths outside the repository. */
+const releaseInputPathSchema = repositoryRelativePathSchema.refine(
+  (value) => value === '.' || (/^[A-Za-z0-9_.@/-]+$/.test(value)
+    && !value.split('/').some((part) => part === '' || part === '.' || part === '..')),
+  'must be a literal repository-relative file or directory, without globs'
+);
+const releaseCommandSchema = z.string().trim().min(1).refine(
+  value => !value.includes('${{'), 'release command cannot contain GitHub expression interpolation'
+);
+
+export const apiReleaseSpecSchema = z.object({
+  service: z.string().min(1),
+  versions: z.record(z.string().regex(/^v[1-9][0-9]*$/), z.object({
+    path: z.string().regex(/^\/v[1-9][0-9]*$/, 'API routes must use an explicit major version such as /v1'),
+    contract: releaseInputPathSchema.refine(value => value.endsWith('.json'), 'API contracts must be self-contained JSON files'),
+    status: z.enum(['supported', 'deprecated', 'retired']).default('supported'),
+    retirement: z.object({ id: z.string().trim().min(1).max(100), reason: z.string().trim().min(1).max(500) }).strict().optional(),
+  }).strict()).refine(value => Object.keys(value).length > 0 && Object.keys(value).length <= 32, 'declare between 1 and 32 API versions'),
+  consumers: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), z.object({
+    versions: z.array(z.string().regex(/^v[1-9][0-9]*$/)).min(1),
+  }).strict()).default({}),
+  compatibility: z.object({
+    command: releaseCommandSchema,
+    workingDirectory: releaseInputPathSchema.default('.'),
+    installCommand: releaseCommandSchema.optional(),
+  }).strict(),
+}).strict().superRefine((api, ctx) => {
+  for (const [name, version] of Object.entries(api.versions)) {
+    if (version.path !== '/' + name) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'API path must match its version name', path: ['versions', name, 'path'] });
+    if ((version.status === 'retired') !== Boolean(version.retirement)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Only retired API versions require an explicit retirement id and reason', path: ['versions', name, 'retirement'] });
+  }
+  for (const [name, consumer] of Object.entries(api.consumers)) {
+    for (const version of consumer.versions) {
+      if (!api.versions[version] || api.versions[version].status === 'retired') ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'API consumers must name supported or deprecated versions', path: ['consumers', name, 'versions'] });
+    }
+  }
+});
+
 export const iosReleaseSigningSpecSchema = z.discriminatedUnion('provider', [
   z.object({
     /** The project build command owns signing and explicitly names any secrets it needs. */
@@ -913,8 +951,12 @@ export const iosReleaseSpecSchema = z.object({
   /** Server services whose successful deployment evidence gates this mobile release. */
   services: z.array(z.string().min(1)).min(1),
   trigger: z.enum(['manual', 'after-server-deploy']).default('after-server-deploy'),
+  /** Promote an already tested binary from this environment; never rebuild it for submission. */
+  promoteFrom: z.string().min(1).optional(),
+  apiVersion: z.string().regex(/^v[1-9][0-9]*$/).optional(),
   build: z.object({
     workingDirectory: repositoryRelativePathSchema.default('.'),
+    inputs: z.array(releaseInputPathSchema).min(1).optional(),
     command: z.string().min(1).refine(
       (value) => !value.includes('${{'),
       'build command cannot contain GitHub expression interpolation'
@@ -1478,6 +1520,7 @@ export const environmentSpecSchema = z.object({
   deploy: deploySpecSchema.optional(),
   migrations: migrationsSpecSchema.optional(),
   ios: iosSpecSchema.optional(),
+  api: apiReleaseSpecSchema.optional(),
   queues: z.record(
     z.string().regex(/^[a-z][a-z0-9-]{0,60}$/, 'queue names: lowercase alphanumeric and dashes, starting with a letter'),
     queueSpecSchema
@@ -1749,6 +1792,14 @@ export const environmentSpecSchema = z.object({
         });
       }
     }
+  }
+  if (environment.api) {
+    if (environment.services[environment.api.service]?.workloadKind !== 'web') ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'api.service must name a declared web service', path: ['api', 'service'] });
+    if (environment.deploy?.strategy !== 'branch' || environment.deploy.trigger === 'native') ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'API release protection requires managed branch CI', path: ['api'] });
+    const apiVersion = environment.ios?.release?.apiVersion;
+    if (environment.ios?.release && (!apiVersion || !environment.api.versions[apiVersion] || environment.api.versions[apiVersion].status === 'retired')) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'iOS releases must declare a supported apiVersion when API protection is enabled', path: ['ios', 'release', 'apiVersion'] });
+  } else if (environment.ios?.release?.apiVersion) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'ios.release.apiVersion requires an API policy', path: ['ios', 'release', 'apiVersion'] });
   }
   if (environment.ios?.release) {
     for (const [index, serviceName] of environment.ios.release.services.entries()) {
@@ -2046,6 +2097,25 @@ export const projectSpecSchema = z.object({
   ).default({}),
   environments: z.record(z.string().min(1), environmentSpecSchema),
 }).strict().superRefine((spec, ctx) => {
+  for (const [environmentName, environment] of Object.entries(spec.environments)) {
+    if (environment.api) {
+      const githubActions = spec.devops
+        ? spec.devops.code.provider === 'github' && spec.devops.ci?.provider === 'github-actions'
+        : Boolean(spec.github?.repository || /github\.com[:/]/.test(spec.gitRemoteUrl ?? ''));
+      if (!githubActions) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'API release protection currently requires GitHub Actions; other release paths cannot verify its evidence', path: ['environments', environmentName, 'api'] });
+      if (!spec.runtime) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'API compatibility checks require an explicit project runtime', path: ['runtime'] });
+    }
+    const release = environment.ios?.release;
+    if (!release?.promoteFrom) continue;
+    const source = spec.environments[release.promoteFrom]?.ios;
+    const issue = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message, path: ['environments', environmentName, 'ios', 'release', 'promoteFrom'] });
+    if (release.promoteFrom === environmentName || !source?.release || source.release.promoteFrom) issue('iOS promotion must name a different beta-building environment, without promotion chains');
+    if (release.trigger !== 'manual') issue('iOS promotion targets require trigger="manual"');
+    if (source && (source.bundleId !== environment.ios!.bundleId || source.platform !== environment.ios!.platform)) issue('iOS promotion requires the same bundle ID and platform');
+    if (source?.release && (JSON.stringify(source.release.build) !== JSON.stringify(release.build)
+      || JSON.stringify(source.release.signing) !== JSON.stringify(release.signing)
+      || source.release.apiVersion !== release.apiVersion)) issue('iOS promotion requires identical build, signing, and API version settings for the tested binary');
+  }
   const promotionIssuePath = (environmentName: string): Array<string | number> => (
     ['environments', environmentName, 'deploy', 'promoteFrom']
   );
@@ -2482,3 +2552,5 @@ export type GitHubSpec = z.infer<typeof githubSpecSchema>;
 export type DevOpsSpec = z.infer<typeof devopsSpecSchema>;
 export type EnvironmentSpec = z.infer<typeof environmentSpecSchema>;
 export type ProjectSpec = z.infer<typeof projectSpecSchema>;
+
+export type ApiReleaseSpec = z.infer<typeof apiReleaseSpecSchema>;

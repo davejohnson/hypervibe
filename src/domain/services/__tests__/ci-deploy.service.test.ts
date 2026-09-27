@@ -673,6 +673,28 @@ describe('ci-deploy.service', () => {
       expect(GitHubAdapter.prototype.listEnvironmentSecrets).not.toHaveBeenCalled();
     });
 
+    it('does not require beta workflows or Apple/build credentials for a promotion-only target', async () => {
+      const { project, envRepo, environmentId } = seedProjectWithSpec();
+      seedVerifiedConnections();
+      const environmentSpec = environmentSpecSchema.parse({...IOS_ENVIRONMENT_SPEC,
+        ios: {...IOS_ENVIRONMENT_SPEC.ios, release: {...IOS_ENVIRONMENT_SPEC.ios!.release, trigger: 'manual', promoteFrom: 'staging'}}});
+      new SpecStore().replace(project, {version: 1, project: project.name,
+        environments: {production: environmentSpec, staging: IOS_ENVIRONMENT_SPEC}});
+      const {targets, migration} = resolveBranchDeployTargets(project);
+      const target = targets.find(value => value.environmentName === 'production')!;
+      const workflow = buildBranchDeployWorkflow('railway', target, migration, environmentSpec.ios);
+      expect(workflow.companionFiles ?? []).toEqual([]);
+      expect(workflow.requiredSecrets).not.toContain('APP_STORE_CONNECT_PRIVATE_KEY');
+      expect(workflow.requiredSecrets).not.toContain('MATCH_PASSWORD');
+      acceptWorkflow(project, envRepo, environmentId, workflow, {binding: {...syncedBinding(project, workflow.content),
+        managedPaths: [workflow.path], inputHash: githubActionsWorkflowInputHash({provider: 'railway', target, migration, ios: environmentSpec.ios})}});
+      mockVerifiedGitHub();
+      const result = await planGitHubActionsDeploy({project, environmentName: 'production', environmentSpec,
+        environment: envRepo.findById(environmentId)});
+      expect(result.action?.type).toBe('noop');
+      expect(result.warnings.join(' ')).not.toMatch(/App Store|MATCH_PASSWORD|APP_STORE/);
+    });
+
     it('plans managed iOS companion files before resolving environment secrets', async () => {
       const { project, envRepo, environmentId } = seedProjectWithSpec();
       seedVerifiedConnections();
@@ -1887,6 +1909,7 @@ describe('ci-deploy.service', () => {
     it.each([
       ['recorded path', 'recorded'],
       ['legacy iOS credentials', 'legacy'],
+      ['promotion target', 'promotion'],
     ] as const)('deletes a previously bound iOS companion workflow with %s when iOS release is disabled', async (
       _case,
       bindingKind
@@ -1920,7 +1943,7 @@ describe('ci-deploy.service', () => {
                 migration: oldTargets.migration,
                 ios: iosEnvironmentSpec.ios,
               }),
-              ...(bindingKind === 'recorded'
+              ...(bindingKind !== 'legacy'
                 ? { managedPaths: oldFiles.map((file) => file.path) }
                 : { syncedEnvironmentSecrets: [...IOS_RELEASE_REQUIRED_SECRETS] }),
             },
@@ -1928,13 +1951,16 @@ describe('ci-deploy.service', () => {
         },
       });
 
-      const environmentSpec = environmentSpecSchema.parse(CI_ENVIRONMENT_SPEC);
+      const environmentSpec = bindingKind === 'promotion'
+        ? environmentSpecSchema.parse({...iosEnvironmentSpec, ios: {...iosEnvironmentSpec.ios, release: {...iosEnvironmentSpec.ios!.release, trigger: 'manual', promoteFrom: 'staging'}}})
+        : environmentSpecSchema.parse(CI_ENVIRONMENT_SPEC);
       new SpecStore().replace(project, {
         version: 1,
         project: project.name,
-        environments: { production: environmentSpec },
+        environments: { production: environmentSpec, ...(bindingKind === 'promotion' ? {staging: iosEnvironmentSpec} : {}) },
       });
-      const currentWorkflow = expectedWorkflow(project);
+      const next = resolveBranchDeployTargets(project);
+      const currentWorkflow = buildBranchDeployWorkflow('railway', next.targets.find(value => value.environmentName === 'production')!, next.migration, environmentSpec.ios);
       const currentFiles = new Map(workflowFiles(currentWorkflow).map((file) => [file.path, file.content]));
       const retiredContent = oldWorkflow.companionFiles![0]!.content;
       vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockImplementation(

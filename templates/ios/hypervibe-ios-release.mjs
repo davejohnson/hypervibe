@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createPrivateKey, sign } from "node:crypto";
+import { createHash, createPrivateKey, sign } from "node:crypto";
 import { spawn } from "node:child_process";
 import { access, appendFile, chmod, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants, realpathSync } from "node:fs";
@@ -76,8 +76,22 @@ export function parseReleaseConfig(env = process.env, cwd = process.cwd()) {
     throw new Error("HYPERVIBE_SERVER_EVIDENCE_VERSION must be a positive integer");
   }
 
+  const serverRunId = required(env, "HYPERVIBE_SERVER_RUN_ID");
+  if (!/^[1-9][0-9]*$/.test(serverRunId) || !Number.isSafeInteger(Number(serverRunId))) {
+    throw new Error("HYPERVIBE_SERVER_RUN_ID must identify the original server workflow run");
+  }
+  const iosEvidenceVersion = Number(required(env, "HYPERVIBE_IOS_EVIDENCE_VERSION"));
+  if (!Number.isSafeInteger(iosEvidenceVersion) || iosEvidenceVersion <= 0) {
+    throw new Error("HYPERVIBE_IOS_EVIDENCE_VERSION must be a positive integer");
+  }
+  const buildContractFingerprint = required(env, "HYPERVIBE_IOS_BUILD_CONTRACT_FINGERPRINT");
+  const ipaSha256 = required(env, "HYPERVIBE_EXPECTED_IPA_SHA256");
+  if (![buildContractFingerprint, ipaSha256].every(value => /^[0-9a-f]{64}$/.test(value))) {
+    throw new Error("Mobile build fingerprint and IPA SHA-256 must be full SHA-256 values");
+  }
   return {
     ...appStore,
+    iosEvidenceVersion, buildContractFingerprint, ipaSha256, serverRunId,
     ipaPath,
     buildNumber: required(env, "HYPERVIBE_BUILD_NUMBER"),
     marketingVersion: required(env, "HYPERVIBE_MARKETING_VERSION"),
@@ -454,19 +468,24 @@ function validateServerEvidence(config, serverEvidence) {
 
 export function buildReleaseManifest(config, serverEvidence, app, build, releasedAt) {
   const services = validateServerEvidence(config, serverEvidence);
+  if (!/^[0-9a-f]{64}$/.test(config.serverEvidenceSha256 || '')) {
+    throw new Error("The exact original server evidence digest is required for mobile provenance");
+  }
   return {
-    version: 1,
+    version: config.iosEvidenceVersion,
     environment: config.environment,
     mobile: {
       repository: config.repository,
       sha: config.releaseSha,
+      buildContractFingerprint: config.buildContractFingerprint,
     },
-    server: serverEvidence.source,
+    server: {...serverEvidence.source, workflowRunId: config.serverRunId, evidenceSha256: config.serverEvidenceSha256},
     services,
     app: {
       bundleId: config.bundleId,
       appId: app.id,
       buildId: build.id,
+      ipaSha256: config.ipaSha256,
       marketingVersion: config.marketingVersion,
       buildNumber: config.buildNumber,
       testflightGroups: config.groups,
@@ -479,9 +498,9 @@ export function buildReleaseManifest(config, serverEvidence, app, build, release
 export async function main() {
   const config = parseReleaseConfig();
   await access(config.ipaPath, fsConstants.R_OK);
-  const serverEvidence = JSON.parse(
-    await readFile(config.serverEvidencePath, "utf8")
-  );
+  const serverEvidenceBytes = await readFile(config.serverEvidencePath);
+  const serverEvidence = JSON.parse(serverEvidenceBytes.toString("utf8"));
+  config.serverEvidenceSha256 = createHash("sha256").update(serverEvidenceBytes).digest("hex");
   validateServerEvidence(config, serverEvidence);
   const app = await findApp(config);
   await uploadBuild(config, app.id);

@@ -3,6 +3,12 @@ import { formatCommandResult, PRESENTED_COMMAND_IDS } from '../presentation.js';
 import { commandError, commandSuccess } from '../results.js';
 
 describe('command presentation', () => {
+  it('surfaces pending or blocked API policy even when provider resources have no drift', () => {
+    const output = formatCommandResult('hv_status', commandSuccess({ inSync: false, verified: true, drift: [], apiReleasePolicy: { status: 'drift' } }));
+    expect(output).toContain('API POLICY NEEDS REVIEW');
+    expect(formatCommandResult('hv_status', commandSuccess({ inSync: false, verified: true, drift: [], apiReleasePolicy: { status: 'blocked', reason: 'Retain v1' } }))).toContain('STATUS BLOCKED');
+  });
+
   it.each(['hv_plan', 'hv_status'])('surfaces webhook uncertainty even when infrastructure is in sync: %s', command => {
     const output = formatCommandResult(command, commandSuccess({ inSync: true, verified: true, actions: [], drift: [], webhookReadiness: { status: 'unknown' } }));
     expect(output).toContain('WEBHOOKS NEED REVIEW');

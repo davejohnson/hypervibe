@@ -291,7 +291,9 @@ function statusPresentation(data: DataRecord): CommandPresentation {
   const runtimeConfiguration = record(data.runtimeConfiguration);
   const rolloutServices = arrayValue(runtimeConfiguration?.services);
   const verified = data.verified === true;
-  const isBlocked = blocked.length > 0;
+  const apiPolicy = record(data.apiReleasePolicy);
+  const apiNeedsReview = Boolean(apiPolicy && apiPolicy.status !== 'configured');
+  const isBlocked = blocked.length > 0 || apiPolicy?.status === 'blocked';
   const email = record(data.emailSenderReadiness);
   const dns = record(email?.dns);
   const emailNotReady = Boolean(email && (email.status !== 'verified' || (dns && dns.status !== 'configured')));
@@ -303,7 +305,7 @@ function statusPresentation(data: DataRecord): CommandPresentation {
     ? 'STATUS BLOCKED'
     : restartRequired
       ? 'RESTART REQUIRED'
-      : emailNotReady ? 'EMAIL NOT READY' : domainNeedsReview ? 'DOMAIN SECURITY NEEDS REVIEW' : webhooksNeedReview ? 'WEBHOOKS NEED REVIEW' : inSync
+      : apiNeedsReview ? 'API POLICY NEEDS REVIEW' : emailNotReady ? 'EMAIL NOT READY' : domainNeedsReview ? 'DOMAIN SECURITY NEEDS REVIEW' : webhooksNeedReview ? 'WEBHOOKS NEED REVIEW' : inSync
         ? 'IN SYNC'
         : drift.length > 0
           ? 'DRIFT DETECTED'
@@ -316,6 +318,7 @@ function statusPresentation(data: DataRecord): CommandPresentation {
     verified ? 'provider verified' : 'verification incomplete',
   ].filter(Boolean).join(' · ');
   const sections: PresentationSection[] = [];
+  if (apiPolicy) sections.push({ title: 'API RELEASE POLICY', lines: formatCommandDataLines({ apiReleasePolicy: apiPolicy }) });
   if (drift.length > 0) sections.push({ title: '🛠️  DRIFT', lines: actionRows(drift) });
   if (blocked.length > 0) {
     sections.push({ title: '🚧  BLOCKED', lines: formatCommandDataLines({ blocked }) });

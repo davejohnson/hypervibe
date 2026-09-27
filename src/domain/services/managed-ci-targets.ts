@@ -308,6 +308,7 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
       }));
     const target: BranchDeployTarget = {
       environmentName,
+      ...(environment.api ? { api: environment.api } : {}),
       kind,
       branch,
       autoDeployOnPush,
