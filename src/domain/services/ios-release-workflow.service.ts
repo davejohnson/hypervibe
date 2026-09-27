@@ -1,15 +1,18 @@
 import { readFileSync } from 'fs';
+import { createHash } from 'node:crypto';
+import { IOS_RELEASE_EVIDENCE_VERSION, iosBuildContractFingerprint, iosReleaseBuildInputs, iosBuildContractRuntimeBase64 } from './ios-release-evidence.js';
 import type { BranchDeployTarget } from '../ports/ci-deploy.port.js';
 import type { IosSpec } from '../spec/spec.schema.js';
 import { getManagedIosReleaseRuntimeBase64 } from './ios-release-template.service.js';
 import { HYPERVIBE_MANAGED_NODE_VERSION } from './managed-runtime.js';
 import {
   MANAGED_CI_RELEASE_EVIDENCE_VERSION,
+  MANAGED_CI_DEPLOYMENT_CONTRACT_RUNTIME_SOURCE,
   managedCiReleaseArtifactPrefix,
 } from './managed-ci-evidence.js';
 
 // Bump for intentional migrations of the generated iOS release contract.
-export const IOS_RELEASE_WORKFLOW_RENDERER_REVISION = 1;
+export const IOS_RELEASE_WORKFLOW_RENDERER_REVISION = 2;
 
 export const IOS_RELEASE_REQUIRED_SECRETS = [
   'APP_STORE_CONNECT_KEY_ID',
@@ -89,7 +92,7 @@ export function buildIosReleaseWorkflow(params: {
   ios: IosSpec;
 }): { files: Array<{ path: string; content: string }>; requiredSecrets: string[] } | null {
   const release = params.ios.release;
-  if (!release) return null;
+  if (!release || release.promoteFrom) return null;
 
   const releaseTarget = params.target.releaseTarget;
   if (!releaseTarget || !/^[0-9a-f]{64}$/.test(params.target.programFingerprint ?? '')) {
@@ -124,6 +127,13 @@ export function buildIosReleaseWorkflow(params: {
 
   const content = renderTemplate(readFileSync(workflowTemplateUrl, 'utf8'), {
     ENVIRONMENT: environmentName,
+    SERVER_CONTRACT_RUNTIME_JSON: JSON.stringify(Buffer.from(MANAGED_CI_DEPLOYMENT_CONTRACT_RUNTIME_SOURCE).toString('base64')),
+    IOS_BUILD_CONTRACT_RUNTIME_JSON: JSON.stringify(iosBuildContractRuntimeBase64()),
+    IOS_EVIDENCE_VERSION: String(IOS_RELEASE_EVIDENCE_VERSION),
+    IOS_BUILD_FINGERPRINT_JSON: JSON.stringify(iosBuildContractFingerprint(params.ios, params.target.runtime)),
+    IOS_INPUT_PATHS_JSON: JSON.stringify(JSON.stringify([...iosReleaseBuildInputs(params.ios), workflowPath])),
+    IOS_WORKFLOW_PATH_JSON: JSON.stringify(workflowPath),
+    IOS_CONCURRENCY_GROUP: 'hypervibe-ios-' + createHash('sha256').update(params.ios.bundleId).digest('hex').slice(0, 20),
     ENVIRONMENT_JSON: JSON.stringify(environmentName),
     SAFE_ENVIRONMENT: safeEnvironment,
     SERVER_EVIDENCE_VERSION: String(MANAGED_CI_RELEASE_EVIDENCE_VERSION),

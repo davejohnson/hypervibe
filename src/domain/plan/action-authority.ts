@@ -1,3 +1,4 @@
+import { API_POLICY_OPERATION } from '../services/api-policy.js';
 import { EMAIL_SIGNING_OPERATIONS } from '../services/email-signing.service.js';
 import type { PlanAction, PlanResourceKind } from './plan.types.js';
 import { HOSTING_ENVIRONMENT_ENSURE_OPERATION } from './plan.service.js';
@@ -83,6 +84,7 @@ import {
 } from '../services/managed-code-repository.contract.js';
 
 export type PlanMutationCapability =
+  | 'api.policy.accept'
   | 'hosting.volume.mutate'
   | 'hosting.environment.ensure'
   | 'domain.registration.mutate'
@@ -527,6 +529,9 @@ export function resolvePlanActionAuthority(
   ) {
     return authority(action, 'domain.registration.mutate');
   }
+  if (action.metadata?.operation === API_POLICY_OPERATION && exactResource(action, 'ci', 'hypervibe')
+    && action.type === 'update' && action.resource.name === `api-policy:${metadataString(action, 'environmentName')}`
+    && metadataString(action, 'desiredHash') && metadataString(action, 'previousHash')) return authority(action, 'api.policy.accept');
   if (
     isGitHubActionsDeployAction(action)
     && exactResource(action, 'ci', 'github')

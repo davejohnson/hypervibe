@@ -1,3 +1,5 @@
+import { iosBuildContractFingerprint } from './ios-release-evidence.js';
+import { API_RELEASE_WORKFLOW_RENDERER_REVISION, buildApiReleaseWorkflowSteps } from './api-release-workflow.js';
 import { createHash } from 'crypto';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
@@ -81,6 +83,7 @@ export function githubActionsWorkflowInputHash(params: {
   const ios = params.ios?.release
     ? {
         rendererRevision: IOS_RELEASE_WORKFLOW_RENDERER_REVISION,
+        buildContractFingerprint: iosBuildContractFingerprint(params.ios!, params.target.runtime),
         bundleId: params.ios.bundleId,
         release: params.ios.release,
       }
@@ -92,6 +95,7 @@ export function githubActionsWorkflowInputHash(params: {
     target,
     migration: migrationWorkflowInput(params.migration),
     ...(ios ? { ios } : {}),
+    ...(target.api ? { apiRendererRevision: API_RELEASE_WORKFLOW_RENDERER_REVISION } : {}),
   });
 }
 
@@ -996,6 +1000,11 @@ export function buildBranchDeployWorkflow(
     : '';
   const promotionEvidenceStep = buildPromotionEvidenceStep(provider, target);
   const releaseEvidenceStep = buildServerReleaseEvidenceStep(provider, target, deployBlock.releaseImageUri);
+  const apiRelease = buildApiReleaseWorkflowSteps({ environmentName: target.environmentName, api: target.api, workflowPath, runtime: target.runtime,
+    serverValidation: { loader: RELEASE_EVIDENCE_VALIDATION_LOADER, sha256: RELEASE_EVIDENCE_VALIDATION_RUNTIME_SHA256,
+      expected: { provider, environment: target.environmentName, programFingerprint: programFingerprintForWorkflow(target),
+        target: releaseTargetForWorkflow(target), requireImmutableImage: immutableRollback } },
+  });
   const providerName = deployBlock.displayName ?? providerRegistry.getMetadata(provider)?.displayName ?? provider;
   let requiredSecrets = migrationStep
     ? [...deployBlock.requiredSecrets, 'DATABASE_URL']
@@ -1116,7 +1125,7 @@ ${buildReleaseTargetPreflight(provider, target)}      - uses: actions/checkout@v
 ${sourcePreparationCondition ? `        if: ${sourcePreparationCondition}\n` : ''}        with:
           ref: \${{ steps.deploy.outputs.sha }}
           persist-credentials: false
-${buildDeploymentContractStep(target.environmentName)}${rollbackEvidenceSteps}${promotionEvidenceStep}${migrationStep}${deployBlock.steps}${releaseEvidenceStep}      - name: Upload server release evidence
+${buildDeploymentContractStep(target.environmentName)}${rollbackEvidenceSteps}${promotionEvidenceStep}${apiRelease.beforeDeploy}${migrationStep}${deployBlock.steps}${releaseEvidenceStep}${apiRelease.afterDeploy}      - name: Upload server release evidence
         uses: actions/upload-artifact@v7
         with:
           name: ${managedCiReleaseArtifactPrefix(target.environmentName)}\${{ steps.deploy.outputs.sha }}

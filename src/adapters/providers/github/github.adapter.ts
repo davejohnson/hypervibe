@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { createRequire } from 'module';
+import { readBoundedArtifactBody, readReleaseArtifactFilesZip } from './github-artifact.js';
 import {
   providerRegistry,
   type ProviderInspectionRequest,
@@ -826,7 +827,7 @@ export class GitHubAdapter {
     owner: string,
     repo: string,
     workflowId: string | number,
-    options?: { status?: string; per_page?: number }
+    options?: { status?: string; per_page?: number; page?: number }
   ): Promise<{
     total_count: number;
     workflow_runs: Array<{
@@ -846,6 +847,7 @@ export class GitHubAdapter {
     const params = new URLSearchParams();
     if (options?.status) params.set('status', options.status);
     if (options?.per_page) params.set('per_page', String(options.per_page));
+    if (options?.page) params.set('page', String(options.page));
     const query = params.toString() ? `?${params.toString()}` : '';
 
     return await this.request<{
@@ -867,9 +869,8 @@ export class GitHubAdapter {
   }
 
   /**
-   * List repository Actions artifacts. Names and workflow-run identities are
-   * sufficient for release-gate verification; artifact contents remain in
-   * GitHub and are not exposed through command results.
+   * List artifact metadata. Release authorization additionally validates the
+   * exact run's artifact contents; names alone do not prove a released build.
    */
   async listArtifacts(owner: string, repo: string, perPage = 100): Promise<{
     total_count: number;
@@ -920,6 +921,57 @@ export class GitHubAdapter {
       'GET',
       `/repos/${owner}/${repo}/actions/runs/${runId}/artifacts?per_page=100`
     );
+  }
+
+  async getWorkflowRun(owner: string, repo: string, runId: number): Promise<{
+    id: number; path: string; status: string; conclusion: string | null;
+    head_sha: string; head_branch: string; event: string; run_attempt: number;
+    repository: { full_name: string }; head_repository: { full_name: string };
+  }> {
+    if (!Number.isSafeInteger(runId) || runId <= 0) throw new Error('Invalid workflow run id.');
+    return this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${runId}`);
+  }
+
+  /** Authenticated redirect discovery, then credential-free bounded ZIP read. */
+  async readArtifactFiles(owner: string, repo: string, artifactId: number): Promise<Record<string, string>> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    if (!Number.isSafeInteger(artifactId) || artifactId <= 0) throw new Error('Invalid artifact id.');
+    const signal = AbortSignal.timeout(15_000);
+    let redirect: Response;
+    try {
+      redirect = await fetch(`${GITHUB_API_URL}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${artifactId}/zip`, {
+        method: 'GET', redirect: 'manual', signal,
+        headers: { Authorization: `Bearer ${this.credentials.apiToken}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': GITHUB_API_VERSION },
+      });
+    } catch {
+      throw new Error('Could not read the release artifact download receipt.');
+    }
+    if (redirect.status !== 302) throw new Error(`Artifact download unavailable (${redirect.status}).`);
+    let location: URL;
+    try {
+      location = new URL(redirect.headers.get('location') ?? '');
+      if (location.protocol !== 'https:' || location.username || location.password || location.hash) throw new Error();
+    } catch {
+      throw new Error('Invalid release artifact download location.');
+    }
+    let body: Response;
+    try {
+      // The signed URL is provider-returned, expires quickly, and must never be
+      // logged or receive the repository's API token.
+      body = await fetch(location.toString(), { method: 'GET', redirect: 'error', signal });
+    } catch {
+      throw new Error('Could not download the release artifact.');
+    }
+    if (body.status !== 200) throw new Error(`Artifact body unavailable (${body.status}).`);
+    return readReleaseArtifactFilesZip(await readBoundedArtifactBody(body, signal));
+  }
+
+  async readJsonArtifact(owner: string, repo: string, artifactId: number, filename: string): Promise<unknown> {
+    const files = await this.readArtifactFiles(owner, repo, artifactId);
+    try {
+      if (Object.keys(files).length !== 1 || !Object.hasOwn(files, filename)) throw new Error();
+      return JSON.parse(files[filename]);
+    } catch { throw new Error('Invalid release artifact: expected one bounded JSON file in a valid ZIP.'); }
   }
 
   /**

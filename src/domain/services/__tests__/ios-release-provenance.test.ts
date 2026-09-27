@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { parse } from 'yaml';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { IOS_RELEASE_EVIDENCE_VERSION } from '../ios-release-evidence.js';
 import { MANAGED_CI_RELEASE_EVIDENCE_VERSION } from '../managed-ci-evidence.js';
 import { buildIosReleaseWorkflow } from '../ios-release-workflow.service.js';
 
@@ -90,6 +91,10 @@ function setupRelease() {
     HYPERVIBE_SERVER_EVIDENCE_PATH: evidencePath,
     HYPERVIBE_IOS_RELEASE_OUTPUT: outputPath,
     GITHUB_REPOSITORY: 'owner/repo',
+    HYPERVIBE_IOS_EVIDENCE_VERSION: String(IOS_RELEASE_EVIDENCE_VERSION),
+    HYPERVIBE_IOS_BUILD_CONTRACT_FINGERPRINT: 'f'.repeat(64),
+    HYPERVIBE_EXPECTED_IPA_SHA256: 'a'.repeat(64),
+    HYPERVIBE_SERVER_RUN_ID: '55',
   };
   for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
 
@@ -307,7 +312,9 @@ describe('generated managed-number workflow contract', () => {
     const preparation = JSON.stringify(jobs.prepare);
     expect(preparation).not.toContain('actions/checkout');
     expect(preparation).toContain('APP_STORE_CONNECT_PRIVATE_KEY');
-    expect(preparation.indexOf('Verify server release gate')).toBeLessThan(preparation.indexOf('--allocate-build-number'));
+    expect(jobs.prepare.needs).toBe('eligibility');
+    expect(JSON.stringify(jobs.eligibility)).toContain('Verify server release gate');
+    expect(JSON.stringify(jobs.eligibility)).not.toContain('secrets.');
     expect(jobs.prepare.outputs.build_number).toBe('${{ steps.number.outputs.build_number }}');
     expect(jobs.build.needs).toBe('prepare');
     expect(jobs.build.env.HYPERVIBE_BUILD_NUMBER).toBe('${{ needs.prepare.outputs.build_number }}');

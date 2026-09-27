@@ -426,7 +426,7 @@ function appStoreSecretsForGitHubActions(environmentSpec: EnvironmentSpec): {
   secrets: ProviderSecret[];
   error?: string;
 } {
-  if (!environmentSpec.ios?.release) return { secrets: [] };
+  if (!environmentSpec.ios?.release || environmentSpec.ios.release.promoteFrom) return { secrets: [] };
   const resolved = getVerifiedAppStoreConnectCredentials(environmentSpec.ios.bundleId);
   if ('error' in resolved) return { secrets: [], error: resolved.error };
   return {
@@ -440,7 +440,7 @@ function appStoreSecretsForGitHubActions(environmentSpec: EnvironmentSpec): {
 
 function requiredIosBuildSecrets(environmentSpec: EnvironmentSpec): string[] {
   const release = environmentSpec.ios?.release;
-  if (!release) return [];
+  if (!release || release.promoteFrom) return [];
   return [
     ...release.build.requiredSecrets,
     ...(release.signing.provider === 'match' ? MATCH_SIGNING_REQUIRED_SECRETS : []),

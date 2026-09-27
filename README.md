@@ -932,11 +932,14 @@ values to read-only signing preparation; they never enter Hypervibe state or
 the project build step. `build.requiredSecrets` is only for additional secrets
 needed by the app-defined build command.
 
-The server workflow uploads signed release evidence only after provider deploy
-success. The macOS iOS workflow shares the server deploy concurrency group,
-downloads that evidence, and requires the same repository and full Git SHA.
+The server workflow uploads release evidence only after provider deploy
+success. The iOS workflow uses a separate app queue and checks changes before
+protected jobs or approvals. It verifies the exact deployed source and builds
+only when mobile inputs changed or relevance cannot be proven.
 Evidence artifacts use a versioned namespace; after an evidence-contract
-upgrade, run the current server workflow once before rollback or iOS release.
+upgrade, an ordinary server release refreshes evidence for iOS releases and
+unprotected rollback. API-protected environments require a reviewed baseline
+migration when API evidence is missing, and currently block rollback.
 Its build job checks out that exact commit, installs existing Match assets into
 an ephemeral keychain, runs the project build, validates the IPA, and uploads a
 short-lived artifact. A fresh release job revalidates the artifact and server
@@ -951,8 +954,16 @@ remain project files; neither becomes an imperative Hypervibe command.
 
 The iOS artifact records separate mobile and server provenance. Inspect these
 workflows through `hv_ci_status`; final `hv_appstore_submit` also refuses
-submission unless the latest successful server and iOS workflow runs have the
-same SHA.
+submission until the exact tested Apple build and current target server release
+are verified, then requires confirmation. Declare `ios.release.promoteFrom` to
+promote a tested beta without rebuilding it. Cross-commit reuse requires verified
+API evidence for the unchanged supported contract.
+
+Declare versioned API contracts and application compatibility tests to protect
+old web/mobile clients during server releases. New versions coexist with old
+ones; retirement requires an explicit confirmed policy change. See
+[API compatibility and iOS releases](docs/api-mobile-releases.md) for setup,
+workflow behavior, and evidence limits.
 
 ### Retiring or renaming runtime variables
 

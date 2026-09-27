@@ -1,3 +1,4 @@
+import type { ApiReleaseSpec } from '../spec/spec.schema.js';
 import type { ProjectRuntime } from '../spec/project-runtime.js';
 
 export type BranchDeployProvider = string;
@@ -29,6 +30,7 @@ export interface BranchDeployReleaseTarget {
 
 export interface BranchDeployTarget {
   environmentName: string;
+  api?: ApiReleaseSpec;
   kind: BranchDeployEnvironmentKind;
   branch: string;
   autoDeployOnPush: boolean;
