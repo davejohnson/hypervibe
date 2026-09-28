@@ -1501,6 +1501,19 @@ The standard team workflow is:
 
 Do not default to a long-lived `staging` branch. `main` is the accepted-code branch, staging is the deployed preview of `main`, and production is a deliberate manual promotion. Generated production deploy workflows must not run from push events by default; they should use `workflow_dispatch` and support a `commit_sha` input.
 
+An explicit manual GitHub Actions promotion may opt into
+`deploy.promotionTests.workflow`, a literal same-repository reusable workflow path.
+Its fixed contract is required string input `commit_sha`; the repository owns
+exact-SHA checkout validation and a full test run for every invocation. By default,
+no secrets are forwarded. Private-package installation opts into
+`deploy.promotionTests.packageReadToken: true`, forwarding only `NODE_AUTH_TOKEN`.
+The generated test job has `contents: read` and no deployment environment. Its successful result
+gates the entire deploy job, including migrations and provider writes. Rollback
+retains the immutable-release evidence path. This policy enters workflow input and
+environment contract hashes, not the immutable application-program fingerprint.
+Do not accept another revision's successful tests as promotion evidence, and do not
+infer reusable invocation from the event name: it retains the caller's context.
+
 Managed CI rollback is an explicit operational action over that same exact-SHA
 release boundary. `hv_rollback` must select only unexpired server-release
 evidence emitted by a successful run of the exact managed environment workflow.

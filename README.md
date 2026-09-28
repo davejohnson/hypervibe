@@ -1473,6 +1473,24 @@ The marker is environment-specific: production-only desired-state changes do
 not block staging. Production workflows remain manual and enforce the same
 reconciliation check for the promoted SHA.
 
+**Unreleased promotion support:** to require a fresh full test run before a manual GitHub Actions promotion, add
+`deploy.promotionTests: { workflow: ".github/workflows/test.yml" }` alongside an
+explicit `deploy.promoteFrom`. The same-repository reusable workflow must declare
+`workflow_call` with required string input `commit_sha`. Public-package projects
+receive no forwarded secrets. Private-package projects such as Hypercloud add
+`packageReadToken: true` inside `promotionTests` and declare `NODE_AUTH_TOKEN` in
+the reusable workflow; keep that token scoped to dependency installation.
+The workflow must validate the exact candidate SHA and run the whole suite on
+every call, even when its caller has pull-request context.
+
+The generated `promotion_tests` job has only `contents: read`, forwards only the
+explicitly requested package-read secret, and must succeed before deployment. It has
+no production environment or deployment credentials. Existing staging-release and
+applied-contract checks still run before deployment; rollback retains its verified
+immutable-release path without rerunning source tests. Without the opt-in, existing
+workflow behavior is unchanged. Reconcile the changed production contract and
+generated workflow after the reusable workflow and any requested package-read secret exist.
+
 After a deploy job fails, the generated workflow runs a separate evidence job
 with read-only Actions access. It reads the completed deploy job's last 400 log
 lines, applies credential-pattern redaction in addition to GitHub's normal
@@ -1592,6 +1610,16 @@ Provider credentials remain local and encrypted. Database component bindings (co
 The provider catalog is intentionally focused. Every implemented hosting lifecycle currently remains behind the provider-conformance live promotion gate and is `ready-for-live`, not `supported`. Hosting connections contain authentication and account/project scope only; geography belongs in optional `environments.<name>.hosting.region` desired state and otherwise uses a provider default. AWS project actions ensure the shared default-VPC prerequisite and own its tagged workload security group, ECR, IAM roles, and an ECS cluster; every Express mutation preserves the exact default subnets and workload group. RDS is ECS-only: it reuses that exact account/region/default-VPC binding and gives its managed database security group one durable PostgreSQL ingress source—the exact ECS workload group. Azure project actions own the resource group, ACR, role assignments, and managed environment; DigitalOcean project actions reuse or create a free Starter registry. Fly creates one source-less App and stopped Machine per logical service, then managed CI changes only the exact bound Machine to an immutable image digest. Users do not pre-create or paste those infrastructure IDs into credentials. Heroku and Render remain deliberately out of scope. Cloud SQL, Railway, RDS, Supabase, Neon, DigitalOcean, Fly Managed Postgres, and Azure PostgreSQL are ready-for-live database targets. None is promoted to `supported` without dated live lifecycle evidence. Fly Managed Postgres stays private: bounded local query, seed, and migration operations use an operation-scoped WireGuard peer and Hypervibe's packaged userspace connector, then remove the exact peer after the operation.
 
 Redis is a separate cache lifecycle instead of a database component and wires `REDIS_URL`. Amazon ElastiCache is `ready-for-live` with ECS Express: it reuses the auth-only `ecs` connection, resolves the bound default-VPC workload network, and accepts cache region/size only through desired state. Azure Managed Redis with Container Apps, GCP Memorystore with Cloud Run Direct VPC, DigitalOcean Managed Valkey, and Railway Redis are also implemented and `ready-for-live`. PostgreSQL is the only database engine in desired state; MongoDB and MySQL are intentionally outside the core lifecycle.
+
+### Reuse efficient application checks
+
+For existing projects, use the project template's [CI adoption guide](https://github.com/davejohnson/project-template/blob/main/docs/ci-efficiency.md)
+and [testing skill](https://github.com/davejohnson/project-template/blob/main/.agents/skills/project-template-testing/SKILL.md).
+Keep those application checks repository-owned: preserve required check names,
+setup and full-suite gates; do not add duplicate managed `github.actions` checks.
+Manage deployment and repository settings through `hv_spec` → `hv_plan` → `hv_apply`.
+The unreleased `deploy.promotionTests.workflow` integration connects the owned
+full-suite entry to promotion; publish a supporting release before adopting it.
 
 ## Adding New Providers
 
