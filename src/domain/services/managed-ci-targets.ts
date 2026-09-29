@@ -312,6 +312,7 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
       kind,
       branch,
       autoDeployOnPush,
+      ...(environment.deploy.promotionTests ? { promotionTests: environment.deploy.promotionTests } : {}),
       ...(promoteFromEnvironment
         ? {
             promoteFromEnvironment,

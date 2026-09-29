@@ -1009,6 +1009,7 @@ export function buildBranchDeployWorkflow(
   let requiredSecrets = migrationStep
     ? [...deployBlock.requiredSecrets, 'DATABASE_URL']
     : [...deployBlock.requiredSecrets];
+  if (target.promotionTests?.packageReadToken) requiredSecrets.push('NODE_AUTH_TOKEN');
   const requiredVariables = [...deployBlock.requiredVariables];
   const permissionsBlock = deployBlock.permissions ?? `    permissions:
       actions: read
@@ -1039,8 +1040,19 @@ ${target.autoDeployOnPush ? `  reconciliation:
           HYPERVIBE_APPLIED_SPEC_HASH: \${{ vars.HYPERVIBE_APPLIED_SPEC_HASH }}
         run: |
           if [[ "$GITHUB_EVENT_NAME" != push || -n "$HYPERVIBE_APPLIED_SPEC_HASH" ]]; then echo ready=true; else echo ready=false; fi >> "$GITHUB_OUTPUT"
-` : ''}  deploy:
-${target.autoDeployOnPush ? "    needs: reconciliation\n    if: needs.reconciliation.outputs.ready == 'true'\n" : ''}    runs-on: ubuntu-latest
+` : ''}${target.promotionTests ? `  promotion_tests:
+    if: \${{ !inputs.rollback }}
+    uses: ./${target.promotionTests.workflow}
+    permissions:
+      contents: read
+    with:
+      commit_sha: \${{ inputs.commit_sha || github.sha }}
+${target.promotionTests.packageReadToken ? `    secrets:
+      NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}
+` : ''}` : ''}  deploy:
+${target.promotionTests
+    ? "    needs: promotion_tests\n    if: ${{ !cancelled() && (inputs.rollback || needs.promotion_tests.result == 'success') }}\n"
+    : target.autoDeployOnPush ? "    needs: reconciliation\n    if: needs.reconciliation.outputs.ready == 'true'\n" : ''}    runs-on: ubuntu-latest
     environment: ${target.environmentName}
 ${permissionsBlock.trimEnd()}
     steps:
@@ -1158,6 +1170,9 @@ ${buildDeploymentFailureEvidenceJob(target.environmentName)}`;
     ...(migrationStep ? ['Runs the declared database migration before deploying the services.'] : []),
     ...(target.promoteFromEnvironment
       ? [`Requires an unexpired successful ${target.promoteFromEnvironment} release for the exact commit before building.`]
+      : []),
+    ...(target.promotionTests
+      ? [`Requires ${target.promotionTests.workflow} to pass for the exact promoted commit, ${target.promotionTests.packageReadToken ? 'with only the package-read NODE_AUTH_TOKEN secret' : 'with no forwarded secrets'}. Rollbacks retain their verified release-evidence path.`]
       : []),
     ...(deployBlock.reviewDetails ?? []),
     deployBlock.releaseImageUri

@@ -255,6 +255,15 @@ export const deploySpecSchema = z.object({
   autoDeploy: z.boolean().optional(),
   /** Environment whose verified exact-SHA release is required before this manual deployment. */
   promoteFrom: z.string().min(1).optional(),
+  /** Same-repository reusable full-test workflow required before promotion. */
+  promotionTests: z.object({
+    workflow: z.string().regex(
+      /^\.github\/workflows\/[A-Za-z0-9_-]+\.ya?ml$/,
+      'promotionTests.workflow must be a literal .github/workflows/filename.yml or .yaml path'
+    ),
+    /** Forward NODE_AUTH_TOKEN only when the test workflow installs private packages. */
+    packageReadToken: z.boolean().optional(),
+  }).strict().optional(),
 }).strict();
 
 export function effectiveBranchCiAutoDeploy(
@@ -2097,11 +2106,11 @@ export const projectSpecSchema = z.object({
   ).default({}),
   environments: z.record(z.string().min(1), environmentSpecSchema),
 }).strict().superRefine((spec, ctx) => {
+  const githubActions = spec.devops
+    ? spec.devops.code.provider === 'github' && spec.devops.ci?.provider === 'github-actions'
+    : Boolean(spec.github?.repository || /github\.com[:/]/.test(spec.gitRemoteUrl ?? ''));
   for (const [environmentName, environment] of Object.entries(spec.environments)) {
     if (environment.api) {
-      const githubActions = spec.devops
-        ? spec.devops.code.provider === 'github' && spec.devops.ci?.provider === 'github-actions'
-        : Boolean(spec.github?.repository || /github\.com[:/]/.test(spec.gitRemoteUrl ?? ''));
       if (!githubActions) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'API release protection currently requires GitHub Actions; other release paths cannot verify its evidence', path: ['environments', environmentName, 'api'] });
       if (!spec.runtime) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'API compatibility checks require an explicit project runtime', path: ['runtime'] });
     }
@@ -2126,6 +2135,15 @@ export const projectSpecSchema = z.object({
 
   for (const [targetName, target] of Object.entries(spec.environments)) {
     const sourceName = target.deploy?.promoteFrom;
+    if (target.deploy?.promotionTests) {
+      if (!sourceName || !githubActions) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'deploy.promotionTests requires explicit deploy.promoteFrom and GitHub Actions',
+          path: ['environments', targetName, 'deploy', 'promotionTests'],
+        });
+      }
+    }
     if (!sourceName) continue;
     if (sourceName === targetName) {
       ctx.addIssue({

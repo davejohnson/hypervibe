@@ -35,6 +35,8 @@ export interface BranchDeployTarget {
   branch: string;
   autoDeployOnPush: boolean;
   promoteFromEnvironment?: string;
+  /** Reusable workflow receiving commit_sha and opt-in package-read access. */
+  promotionTests?: { workflow: string; packageReadToken?: boolean };
   /** Hosting provider used to derive the exact managed source workflow identity. */
   promoteFromProvider?: string;
   /** Exact source service set required in downloaded promotion evidence. */
