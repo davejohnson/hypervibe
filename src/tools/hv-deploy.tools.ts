@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
 import { requiresProductionConfirm } from '../domain/services/policy.service.js';
+import { previewManagedCiRollback } from '../domain/services/rollback-preflight.service.js';
 import { executeRollback } from '../domain/services/rollback.service.js';
 import { CI_ROLLBACK_NOTE } from '../domain/services/ci-rollback.service.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
@@ -253,24 +254,48 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
 
   commands.register(
     'hv_rollback',
-    'Rollback a managed-CI environment through one plan-authorized command. Providers with a verified release-evidence implementation restore the previous exact-SHA release (or toSha) and return pending until verified with hv_ci_status; unsupported CI providers and direct-provider deployments fail closed without deploying current source. Database migrations and provider-side manual configuration are never reversed implicitly. Protected environments require confirm=true.',
+    'Preview one exact recovery candidate read-only with action=preview, toSha, sourceWorkflowRunId and sourceArtifactId; preview never dispatches or requires confirmation. Original legacy v2 evidence is inspected without upgrading it or enabling unsupported legacy execution. Otherwise rollback a managed-CI environment through one plan-authorized command. Providers with a verified release-evidence implementation restore the previous exact-SHA release (or toSha) and return pending until verified with hv_ci_status; unsupported CI providers and direct-provider deployments fail closed without deploying current source. Database migrations and provider-side manual configuration are never reversed implicitly. Protected environments require confirm=true.',
     {
       project: projectField,
       env: envField,
+      action: z.enum(['preview', 'execute']).optional().describe('Default execute. Preview reads exact original evidence and reports blockers without dispatching, including for the currently running SHA.'),
+      sourceWorkflowRunId: z.string().regex(/^[1-9][0-9]*$/).optional().describe('Exact successful source workflow run; required only for preview.'),
+      sourceArtifactId: z.string().regex(/^[1-9][0-9]*$/).optional().describe('Exact unexpired release artifact from that run; required only for preview.'),
       toRunId: z.string().uuid().optional().describe('Legacy compatibility selector. Direct-provider runs lack verified immutable release evidence, so this input fails closed; managed CI uses toSha. Mutually exclusive with toSha.'),
       toSha: z.string().regex(/^[0-9a-f]{40}$/i).optional().describe('Specific previously verified exact Git SHA for a managed CI rollback. Mutually exclusive with toRunId.'),
       services: z.array(z.string()).optional().describe('Legacy direct-provider selector. Managed CI restores the complete verified release and rejects per-service rollback; direct-provider rollback is unsupported.'),
       confirm: confirmField,
     },
-    wrapCommandHandler(async ({ project: projectRef, env, toRunId, toSha, services, confirm }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, toRunId, toSha, services, confirm, action, sourceWorkflowRunId, sourceArtifactId }) => {
       if (toRunId && toSha) {
         throw new HvError('VALIDATION', 'Pass either toRunId or toSha, not both.', {
           hint: 'Use toSha for a managed-CI release. toRunId is retained only for compatibility and cannot authorize a direct-provider rollback.',
         });
       }
-      const project = ctx.resolveProjectOrThrow({ project: projectRef });
+      const project = ctx.resolveProjectOrThrow({ project: projectRef, readOnly: action === 'preview' });
       const environment = ctx.resolveEnvironmentOrThrow(project, env);
 
+      if (action === 'preview') {
+        if (!toSha || toRunId || services?.length || !sourceWorkflowRunId || !sourceArtifactId
+            || !Number.isSafeInteger(Number(sourceWorkflowRunId)) || !Number.isSafeInteger(Number(sourceArtifactId))) {
+          return commandError('VALIDATION', 'Rollback preview requires toSha and exact sourceWorkflowRunId/sourceArtifactId, and rejects legacy run or service selectors.');
+        }
+        try {
+          const preview = await previewManagedCiRollback({ project, environment, toSha,
+            sourceWorkflowRunId: Number(sourceWorkflowRunId), sourceArtifactId: Number(sourceArtifactId) });
+          return commandSuccess(preview, {
+            hint: 'Read-only evidence inspection is not a verified restore. Resolve every blocker and unchecked boundary before claiming recovery readiness.',
+            warnings: [CI_ROLLBACK_NOTE],
+          });
+        } catch {
+          return commandError('PROVIDER_ERROR', 'Rollback preview could not verify the exact original release evidence or source contract. No workflow was dispatched.', {
+            hint: 'Ensure the reviewed spec and bindings are already recorded and match the repository, then verify source run/artifact selectors and the repository connection with hv_ci_status. Missing or mismatched observations remain blocked.',
+          });
+        }
+      }
+      if (sourceWorkflowRunId || sourceArtifactId) {
+        return commandError('VALIDATION', 'Explicit source workflow/artifact selectors are read-only preview inputs and cannot authorize execution.');
+      }
       assertConfirmed(project, environment, confirm, 'hv_rollback');
 
       const result = await executeRollback({
