@@ -8,6 +8,7 @@ import { getGitHubAdapter } from './github-ops.service.js';
 import { observeManagedWorkflowFiles, resolveManagedWorkflowContract } from './ci-deploy.service.js';
 import { MANAGED_CI_RELEASE_EVIDENCE_FILE, managedCiReleaseArtifactName } from './managed-ci-evidence.js';
 import { inspectRollbackEvidence, type RollbackPreviewBlocker } from './rollback-preflight-evidence.js';
+import { assessRecovery } from './recovery-assessment.js';
 
 /** Read-only inspection of one exact recovery candidate, including the current release. */
 export async function previewManagedCiRollback(params: {
@@ -78,6 +79,8 @@ export async function previewManagedCiRollback(params: {
   return {
     mode: 'preview' as const, status: blockers.length ? 'blocked' : 'evidence-compatible',
     evidenceCompatible: blockers.length === 0, restoreVerified: false,
+    recovery: assessRecovery({ applicationArtifact: !contract.workflow.supportsImmutableRollback
+      ? 'unsupported' : blockers.length === 0 ? 'verified' : 'unknown' }),
     repository, workflow: contract.workflow.path, environment: environment.name,
     rollbackToSha: sha, sourceArtifactId: artifact.id, sourceWorkflowRunId: run.id,
     sourceWorkflowSha: run.head_sha,

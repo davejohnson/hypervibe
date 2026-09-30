@@ -34,7 +34,7 @@ import {
   buildDatabaseEnvVarsFromComponent,
   databaseReplicaEnvKey,
 } from '../../../domain/services/database-env.js';
-import { buildCloudSqlRestoreDrillWorkflow } from './cloudsql-restore-drill.workflow.js';
+import { buildCloudSqlRestoreDrillWorkflow, resolveCloudSqlRestoreDrillSource } from './cloudsql-restore-drill.workflow.js';
 
 // Credentials schema for self-registration
 export const CloudSqlCredentialsSchema = z.object({
@@ -1824,6 +1824,7 @@ providerRegistry.register({
     },
     orchestration: {
       databaseRestoreDrill: {
+        resolveSource: resolveCloudSqlRestoreDrillSource,
         buildWorkflow: buildCloudSqlRestoreDrillWorkflow,
       },
     },

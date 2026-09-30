@@ -192,13 +192,13 @@ describe('planDatabaseResilience', () => {
 
 describe('database snapshot checkpoints', () => {
   const source = {
-    providerScope: { projectId: 'project-1', environmentId: 'production-1' },
-    primaryExternalId: 'primary-1', volumeId: 'volume-1', volumeInstanceId: 'instance-1', backups: [],
+    provider: 'railway', providerScope: { projectId: 'project-1', environmentId: 'production-1' },
+    primaryExternalId: 'primary-1', resourceIdentity: { volumeId: 'volume-1', volumeInstanceId: 'instance-1' }, backups: [],
   };
   it('declares a one-use snapshot independently of HA/PITR and authorizes its exact scope', () => {
     const plan = planDatabaseResilience({ ...fixture({ provider: 'railway', resilience: { checkpoint: { id: 'pre-beta' } }, observedResilience: { checkpointSource: source } }), capabilities: { checkpoints: true } });
     expect(plan.actions).toHaveLength(1);
-    expect(plan.actions[0]).toMatchObject({ id: 'database:railway:checkpoint:pre-beta', type: 'create', verified: true, requiresConfirm: true, billable: true, dataBearing: true, metadata: { checkpointId: 'pre-beta', source } });
+    expect(plan.actions[0]).toMatchObject({ id: 'database:railway:checkpoint:pre-beta', type: 'create', verified: true, requiresConfirm: true, billable: true, dataBearing: true, metadata: { checkpointId: 'pre-beta', source: { provider: 'railway', primaryExternalId: source.primaryExternalId, providerScope: source.providerScope, resourceIdentity: source.resourceIdentity } } });
     expect(plan.serviceDependencies).toEqual([]);
   });
   it('blocks checkpoint creation without complete live inventory', () => {
@@ -208,7 +208,7 @@ describe('database snapshot checkpoints', () => {
 });
 
 describe('checkpoint recovery planning', () => {
-  const identity = { providerScope: { projectId: 'project-1', environmentId: 'production-1' }, primaryExternalId: 'primary-1', volumeId: 'volume-1', volumeInstanceId: 'instance-1' };
+  const identity = { provider: 'railway', providerScope: { projectId: 'project-1', environmentId: 'production-1' }, primaryExternalId: 'primary-1', resourceIdentity: { volumeId: 'volume-1', volumeInstanceId: 'instance-1' } };
   const backup = { id: 'backup-1', externalId: 'snapshot-1', name: 'hv-pre-beta-operation', createdAt: '2026-01-01T00:00:01.000Z', expiresAt: null, usedMB: 12, referencedMB: 12, volumeInstanceSizeMB: 100 };
   const complete = { source: identity, label: backup.name, beforeBackupIds: [], beforeBackupExternalIds: [], requestStartedAt: '2026-01-01T00:00:00.000Z', workflowId: 'workflow-1', state: 'complete', backup, verifiedAt: '2026-01-01T00:00:05.000Z' };
   function plan(binding: unknown = complete, backups: unknown[] = [backup], source = identity) {
@@ -227,7 +227,7 @@ describe('checkpoint recovery planning', () => {
     expect(plan({ state: 'complete' }).actions[0]).toMatchObject({ verified: false, metadata: { blockedReason: 'database_checkpoint_recovery_invalid' } });
     const { backup: _, verifiedAt: __, workflowId: ___, ...pending } = complete;
     expect(plan({ ...pending, state: 'unknown' }).actions[0]).toMatchObject({ verified: false, metadata: { blockedReason: 'database_checkpoint_write_uncertain' } });
-    expect(plan({ ...pending, state: 'running', workflowId: 'workflow-1' }).actions[0]).toMatchObject({ type: 'update', verified: true, metadata: { workflowId: 'workflow-1' } });
+    expect(plan({ ...pending, state: 'running', workflowId: 'workflow-1' }).actions[0]).toMatchObject({ type: 'update', verified: true, metadata: { operationId: 'workflow-1' } });
   });
   it('blocks unsupported providers, foreign environments, and unbound primaries without provisioning', () => {
     expect(plan(complete, [backup], { ...identity, providerScope: { ...identity.providerScope, environmentId: 'staging-1' } }).actions[0]).toMatchObject({ verified: false, metadata: { blockedReason: 'database_checkpoint_source_changed' } });

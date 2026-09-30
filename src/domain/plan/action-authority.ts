@@ -1152,6 +1152,7 @@ export function resolvePlanActionAuthority(
         && metadataString(action, 'checkpointId')
         && action.id === `database:${action.resource.provider}:checkpoint:${metadataString(action, 'checkpointId')}`
         && checkpointSource.success
+        && checkpointSource.data.provider === action.resource.provider
         && checkpointSource.data.primaryExternalId === metadataString(action, 'primaryExternalId')) {
         return authority(action, 'database.checkpoint.create');
       }

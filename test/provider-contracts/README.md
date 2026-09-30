@@ -8,6 +8,14 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+The [shared recovery contract](../../docs/recovery-contract.md) records the
+official recovery-model review for all eight database and seven hosting
+providers. `recovery-provider-contracts.test.ts` checks explicit registry coverage,
+actual capability declarations, unsupported planning and emitted rollback recipe
+capabilities. Shared source/point tests check representation; they do not claim
+unimplemented adapters or live recovery. Existing provider transport and lifecycle
+tests remain the executable API boundary for implemented operations.
+
 Each provider directory contains `source.json`: official source URL, upstream
 revision when available, source-content SHA-256, checked-in schema SHA-256,
 API version, and the exact extraction boundary. Tests verify the local hash.

@@ -17,6 +17,11 @@ select the release currently running in the environment.
    it does not mean an image was pulled, production was restored, or a database
    backup was validated. `restoreVerified` remains false.
 
+The preview also returns the [shared recovery assessment](recovery-contract.md).
+Compatible release evidence can verify only `applicationArtifact`; missing
+database, restoration, availability and migration-compatibility evidence remains
+unknown. Its `ready` field does not authorize any mutation.
+
 The source workflow SHA may differ from the application SHA when the original
 workflow dispatched a selected commit. The preview pins the original workflow
 and bindings to the workflow run's exact SHA, and the application spec to the

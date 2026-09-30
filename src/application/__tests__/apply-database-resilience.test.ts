@@ -7,6 +7,7 @@ import type { PlanAction } from '../../domain/plan/plan.types.js';
 import { environmentSpecSchema } from '../../domain/spec/spec.schema.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import { DATABASE_RESILIENCE_OPERATIONS } from '../../domain/services/database-resilience-plan.service.js';
+import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter.js';
 import { applyDatabaseResilienceAction } from '../apply-database-resilience.js';
 
 function fixture() {
@@ -165,26 +166,31 @@ describe('snapshot checkpoint apply boundary', () => {
   function checkpointFixture() {
     const state = fixture();
     state.setComponent({ ...state.component(), bindings: { provider: 'railway', resilience: {} } });
-    const source = { providerScope: { projectId: 'p1', environmentId: 'production1' }, primaryExternalId: 'primary-1', volumeId: 'v1', volumeInstanceId: 'vi1', backups: [] as unknown[] };
+    const source = { provider: 'railway', providerScope: { projectId: 'p1', environmentId: 'production1' }, primaryExternalId: 'primary-1', resourceIdentity: { volumeId: 'v1', volumeInstanceId: 'vi1' }, backups: [] as unknown[] };
+    const { backups: _backups, ...identity } = source;
     const action: PlanAction = {
       id: 'database:railway:checkpoint:pre-beta', type: 'create', resource: { kind: 'database', provider: 'railway', name: 'postgres' },
       verified: true, reason: 'Requested snapshot', billable: true, dataBearing: true, requiresConfirm: true,
-      metadata: { operation: 'databaseCheckpointCreate', primaryExternalId: 'primary-1', checkpointId: 'pre-beta', source },
+      metadata: { operation: 'databaseCheckpointCreate', primaryExternalId: 'primary-1', checkpointId: 'pre-beta', source: identity },
     };
     const environmentSpec = { ...state.environmentSpec, database: { provider: 'railway', engine: 'postgres', resilience: { checkpoint: { id: 'pre-beta' } } } } as typeof state.environmentSpec;
     const binding = () => (state.component().bindings.resilience as { checkpoints?: Record<string, any> }).checkpoints?.['pre-beta'];
+    const native = new RailwayAdapter();
     const adapter = {
       observeCheckpointSource: vi.fn(async () => structuredClone(source)),
       createCheckpoint: vi.fn(async (_source, label) => {
         expect(binding()).toMatchObject({ state: 'attempting', label, beforeBackupIds: [] });
         source.backups = [{ id: 'b1', externalId: 'backup-external-1', name: label, createdAt: new Date().toISOString(), expiresAt: null, usedMB: 42, referencedMB: 42, volumeInstanceSizeMB: 100 }];
-        return { workflowId: 'w1' };
+        return { acknowledged: true, operationId: 'w1' };
       }),
+      observeCheckpointRequest: vi.fn(async (_environment: Environment, _component: Component, request: import('../../domain/ports/database-checkpoint.port.js').DatabaseCheckpointBinding) => native.observeDatabaseCheckpointRequest(request)),
       observeCheckpointWorkflow: vi.fn(async () => {
-        expect(binding()).toMatchObject({ workflowId: 'w1', state: 'running' });
+        expect(binding()).toMatchObject({ operationId: 'w1', state: 'running' });
         return { state: 'complete' };
       }),
     };
+    vi.spyOn(native, 'observeDatabaseCheckpointSource').mockImplementation(async () => adapter.observeCheckpointSource() as never);
+    vi.spyOn(native, 'observeDatabaseCheckpointWorkflow').mockImplementation(async () => adapter.observeCheckpointWorkflow() as never);
     vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter: adapter as never });
     const apply = (overrides = {}) => applyDatabaseResilienceAction({ ctx: state.ctx, project: state.project, environmentName: 'production', environmentSpec, action, confirmedActionIds: new Set([action.id]), ...overrides });
     return { ...state, action, source, binding, adapter, apply };
@@ -193,13 +199,23 @@ describe('snapshot checkpoint apply boundary', () => {
     const state = checkpointFixture();
     const result = await state.apply();
     expect(result).toMatchObject({ success: true, data: { checkpointId: 'pre-beta', applied: 1, skipped: 0, restoreVerified: false } });
-    expect(state.binding()).toMatchObject({ state: 'complete', workflowId: 'w1', backup: { id: 'b1' } });
-    expect(state.environment().platformBindings.databaseCheckpoints).toMatchObject({ 'pre-beta': { source: { volumeInstanceId: 'vi1' }, backup: { id: 'b1' } } });
+    expect(state.binding()).toMatchObject({ state: 'complete', operationId: 'w1', backup: { id: 'b1' } });
+    expect(state.environment().platformBindings.databaseCheckpoints).toMatchObject({ 'pre-beta': { source: { resourceIdentity: { volumeInstanceId: 'vi1' } }, backup: { id: 'b1' } } });
     expect(state.adapter.createCheckpoint).toHaveBeenCalledOnce();
     const second = await state.apply();
     expect(second).toMatchObject({ success: true, data: { applied: 0, skipped: 1 } });
     expect(state.adapter.createCheckpoint).toHaveBeenCalledOnce();
   });
+  it('retains a safe operation diagnostic when normalized completed evidence is malformed', async () => {
+    const state = checkpointFixture();
+    state.adapter.observeCheckpointRequest.mockResolvedValue({ state: 'complete', source: {}, backup: {} } as never);
+    expect(await state.apply()).toMatchObject({ success: false, status: 'blocked', data: {
+      applied: null, operationId: 'w1', observationFailure: { stage: 'operation_status', category: 'invalid_response' },
+    } });
+    expect(state.adapter.createCheckpoint).toHaveBeenCalledOnce();
+    expect(state.binding()).toMatchObject({ state: 'running', operationId: 'w1' });
+  });
+
   it('never reissues a write with an uncertain acknowledgement', async () => {
     const state = checkpointFixture();
     state.adapter.createCheckpoint.mockRejectedValue(new Error('connection lost with secret raw body'));
@@ -221,7 +237,7 @@ describe('snapshot checkpoint apply boundary', () => {
   });
   it('retains a missing workflow acknowledgement and blocks a new intent as well as a retry', async () => {
     const state = checkpointFixture();
-    state.adapter.createCheckpoint.mockResolvedValue({ workflowId: null } as never);
+    state.adapter.createCheckpoint.mockResolvedValue({ acknowledged: false } as never);
     expect(await state.apply()).toMatchObject({ success: false, status: 'blocked' });
     const nextSpec = { ...state.environmentSpec, database: { provider: 'railway', engine: 'postgres', resilience: { checkpoint: { id: 'another-request' } } } };
     const nextAction = { ...state.action, id: 'database:railway:checkpoint:another-request', metadata: { ...state.action.metadata, checkpointId: 'another-request' } };
@@ -252,7 +268,7 @@ describe('snapshot checkpoint apply boundary', () => {
     const state = checkpointFixture();
     state.adapter.createCheckpoint.mockImplementation(async (_source, label) => {
       state.source.backups = [1, 2].map((i) => ({ id: `b${i}`, externalId: `external-${i}`, name: label, createdAt: new Date().toISOString(), expiresAt: null, usedMB: 0, referencedMB: 0, volumeInstanceSizeMB: 100 }));
-      return { workflowId: 'w1' };
+      return { acknowledged: true, operationId: 'w1' };
     });
     expect(await state.apply()).toMatchObject({ success: false, status: 'blocked' });
     expect(state.binding()).toMatchObject({ state: 'running' });
@@ -265,7 +281,7 @@ describe('snapshot checkpoint apply boundary', () => {
       state.source.backups = [original];
       state.adapter.createCheckpoint.mockImplementation(async (_source, label) => {
         state.source.backups = [{ ...original, id: 'changed-internal-id', name: label, createdAt: new Date().toISOString() }, { ...original, id: 'different-id', externalId: 'different-external', name: label }];
-        return { workflowId: 'w1' };
+        return { acknowledged: true, operationId: 'w1' };
       });
       const pending = state.apply(); await vi.runAllTimersAsync();
       expect(await pending).toMatchObject({ success: false, status: 'pending' });
@@ -294,7 +310,7 @@ describe('snapshot checkpoint apply boundary', () => {
   });
   it('rejects a changed volume instance in the same provider environment before any write', async () => {
     const state = checkpointFixture();
-    state.source.volumeInstanceId = 'replacement-instance';
+    state.source.resourceIdentity.volumeInstanceId = 'replacement-instance';
     state.action.metadata = { ...state.action.metadata, source: { ...state.source, volumeInstanceId: 'vi1' } };
     expect(await state.apply()).toMatchObject({ success: false, status: 'blocked' });
     expect(state.adapter.createCheckpoint).not.toHaveBeenCalled();
