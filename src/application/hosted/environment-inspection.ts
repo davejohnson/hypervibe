@@ -28,7 +28,15 @@ export interface HostedEnvironmentInspectionInputV1 {
     scope: { projectId: string; environmentId: string };
     credentials: unknown;
   };
+  /** Exact names to check for presence; never returns variable values or hashes. */
+  configurationKeys?: string[];
   limits?: { maxRequests?: number; maxResources?: number; timeoutMs?: number };
+}
+
+export interface HostedConfigurationEvidenceV1 {
+  status: 'complete' | 'partial' | 'unknown' | 'unsupported';
+  requestedKeys: string[];
+  services: Array<{ resourceId: string; externalId: string; presentKeys: string[] }>;
 }
 
 export type HostedResourceStatusV1 = 'matching' | 'drifted' | 'missing' | 'unmanaged' | 'unknown' | 'unsupported';
@@ -75,8 +83,12 @@ export interface HostedEnvironmentInspectionReceiptV1 {
   resources: HostedResourceInspectionV1[];
   publicEndpoints: HostedPublicEndpointV1[];
   publicEndpointsTruncated?: boolean;
+  /** Configuration presence is not proof of credential validity, usage or health. */
+  configurationEvidence?: HostedConfigurationEvidenceV1;
 }
 
+const configurationKeysSchema = z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/))
+  .max(20).refine(keys => new Set(keys).size === keys.length);
 const limitsSchema = z.object({
   maxRequests: z.number().int().min(1).max(200).default(80),
   maxResources: z.number().int().min(1).max(200).default(100),
@@ -186,6 +198,10 @@ function compareHosting(input: {
   });
   const serviceComplete = observed.completeness?.services === 'complete';
   const envComplete = observed.completeness?.environment === 'complete';
+  const bindingCounts = new Map<string, number>();
+  for (const binding of Object.values(bindings.services)) {
+    bindingCounts.set(binding.serviceId, (bindingCounts.get(binding.serviceId) ?? 0) + 1);
+  }
   for (const row of resources) {
     if (row.kind === 'environment') {
       const complete = observed.completeness?.project === 'complete' && envComplete;
@@ -202,12 +218,13 @@ function compareHosting(input: {
     const removal = differences.actions.find(candidate => candidate.id === `${row.id}:env-remove`);
     const removalFields = new Set(removal?.diff?.map(field => field.field) ?? []);
     const blocked = action?.metadata?.blockedReason;
-    const complete = serviceComplete && candidates.length <= 1 && !blocked && Boolean(binding);
+    const ambiguous = candidates.length > 1 || Boolean(binding && bindingCounts.get(binding.serviceId)! > 1);
+    const complete = serviceComplete && !ambiguous && !blocked && Boolean(binding);
     row.fields = configFields(spec.services[row.name], live, envVars, fields, complete, removeEnvVars, removalFields);
     if (binding) row.externalId = binding.serviceId;
     if (!complete) {
       row.status = 'unknown';
-      row.reasonCode = !binding ? 'binding_missing' : candidates.length > 1 ? 'ambiguous_identity' : 'observation_incomplete';
+      row.reasonCode = !binding ? 'binding_missing' : ambiguous ? 'ambiguous_identity' : 'observation_incomplete';
     } else if (!live || live.identityOnly) {
       row.current.exists = false; row.status = 'missing';
     } else {
@@ -238,6 +255,27 @@ function compareHosting(input: {
   return omittedResources;
 }
 
+function configurationEvidence(requestedKeys: string[], observed: ObservedState,
+  resources: HostedResourceInspectionV1[], declaredServiceCount: number): HostedConfigurationEvidenceV1 {
+  const evidence: HostedConfigurationEvidenceV1 = { status: 'unknown', requestedKeys, services: [] };
+  // Failed variable reads make service observation incomplete. Never turn that
+  // failure into evidence that a key is present or absent.
+  if (observed.completeness?.services !== 'complete' || observed.completeness.project !== 'complete'
+    || observed.completeness.environment !== 'complete' || !observed.projectExists || !observed.environmentId) return evidence;
+  for (const row of resources) {
+    if (row.kind !== 'service' || !row.desired.exists || row.current.exists !== true || !row.externalId) continue;
+    const candidates = observed.services.filter(service => service.externalId === row.externalId);
+    if (candidates.length !== 1 || candidates[0].identityOnly) continue;
+    const keys = new Set(candidates[0].envVarKeys);
+    evidence.services.push({ resourceId: row.id, externalId: row.externalId,
+      presentKeys: requestedKeys.filter(key => keys.has(key)) });
+  }
+  // Completeness concerns declared service configuration, independently of
+  // unsupported database/domain comparisons in the wider infrastructure report.
+  if (evidence.services.length > 0) evidence.status = evidence.services.length === declaredServiceCount ? 'complete' : 'partial';
+  return evidence;
+}
+
 /** Observe only: no local state, provider mutations, persisted plans or secret output. */
 export async function inspectHostedEnvironmentV1(
   input: HostedEnvironmentInspectionInputV1,
@@ -248,6 +286,9 @@ export async function inspectHostedEnvironmentV1(
   }
   const parsedLimits = limitsSchema.safeParse(input.limits ?? {});
   if (!parsedLimits.success) throw new HostedInspectionError('INVALID_INPUT', 'Hosted inspection limits are invalid.');
+  const parsedKeys = configurationKeysSchema.safeParse(input.configurationKeys === undefined ? [] : input.configurationKeys);
+  if (!parsedKeys.success) throw new HostedInspectionError('INVALID_INPUT', 'Hosted configuration key requests are invalid.');
+  const configurationKeys = parsedKeys.data;
   const limits = parsedLimits.data;
   const now = dependencies.now ?? (() => new Date());
   const attemptedAt = now().toISOString();
@@ -272,12 +313,16 @@ export async function inspectHostedEnvironmentV1(
       unsupportedCapabilities: [...OUTSIDE_SCOPE, ...new Set(allResources.filter(row => row.status === 'unsupported').map(row => row.kind))],
       checkedResources: 0, totalDeclaredResources: allResources.length,
       omittedResources: Math.max(0, allResources.length - resources.length), requests: 0 }, resources, publicEndpoints: [],
+    ...(configurationKeys.length ? { configurationEvidence: {
+      status: 'unknown' as const, requestedKeys: configurationKeys, services: [],
+    } } : {}),
   };
   await import('./providers.js');
   const capability = providerRegistry.get(provider)?.hostedObservation;
   if (!capability) {
     for (const row of resources) { row.status = 'unsupported'; row.reasonCode = 'provider_unsupported'; }
     report.coverage.status = 'unsupported';
+    if (report.configurationEvidence) report.configurationEvidence.status = 'unsupported';
   } else if (!bindings?.provider || !bindings.projectId || !bindings.environmentId) {
     markUnknown(resources, 'binding_missing');
   } else if (!input.connection) {
@@ -300,6 +345,8 @@ export async function inspectHostedEnvironmentV1(
     } else {
       report.coverage.omittedResources += compareHosting({ spec: environment, environment: input.environment, bindings,
         observed: result.observed, resources, maxResources: limits.maxResources });
+      if (configurationKeys.length) report.configurationEvidence = configurationEvidence(configurationKeys,
+        result.observed, resources, Object.keys(environment.services).length);
       const endpoints = endpointProjection<HostedPublicEndpointV1>();
       for (const row of resources) {
         if (row.kind !== 'service' || !row.desired.exists || row.current.exists !== true) continue;
