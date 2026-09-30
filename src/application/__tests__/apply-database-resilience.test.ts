@@ -159,3 +159,144 @@ describe('applyDatabaseResilienceAction', () => {
     expect((state.component().bindings.resilience as { replicas: Record<string, unknown> }).replicas.analytics).toBeTruthy();
   });
 });
+
+describe('snapshot checkpoint apply boundary', () => {
+  afterEach(() => vi.restoreAllMocks());
+  function checkpointFixture() {
+    const state = fixture();
+    state.setComponent({ ...state.component(), bindings: { provider: 'railway', resilience: {} } });
+    const source = { providerScope: { projectId: 'p1', environmentId: 'production1' }, primaryExternalId: 'primary-1', volumeId: 'v1', volumeInstanceId: 'vi1', backups: [] as unknown[] };
+    const action: PlanAction = {
+      id: 'database:railway:checkpoint:pre-beta', type: 'create', resource: { kind: 'database', provider: 'railway', name: 'postgres' },
+      verified: true, reason: 'Requested snapshot', billable: true, dataBearing: true, requiresConfirm: true,
+      metadata: { operation: 'databaseCheckpointCreate', primaryExternalId: 'primary-1', checkpointId: 'pre-beta', source },
+    };
+    const environmentSpec = { ...state.environmentSpec, database: { provider: 'railway', engine: 'postgres', resilience: { checkpoint: { id: 'pre-beta' } } } } as typeof state.environmentSpec;
+    const binding = () => (state.component().bindings.resilience as { checkpoints?: Record<string, any> }).checkpoints?.['pre-beta'];
+    const adapter = {
+      observeCheckpointSource: vi.fn(async () => structuredClone(source)),
+      createCheckpoint: vi.fn(async (_source, label) => {
+        expect(binding()).toMatchObject({ state: 'attempting', label, beforeBackupIds: [] });
+        source.backups = [{ id: 'b1', externalId: 'backup-external-1', name: label, createdAt: new Date().toISOString(), expiresAt: null, usedMB: 42, referencedMB: 42, volumeInstanceSizeMB: 100 }];
+        return { workflowId: 'w1' };
+      }),
+      observeCheckpointWorkflow: vi.fn(async () => {
+        expect(binding()).toMatchObject({ workflowId: 'w1', state: 'running' });
+        return { state: 'complete' };
+      }),
+    };
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter: adapter as never });
+    const apply = (overrides = {}) => applyDatabaseResilienceAction({ ctx: state.ctx, project: state.project, environmentName: 'production', environmentSpec, action, confirmedActionIds: new Set([action.id]), ...overrides });
+    return { ...state, action, source, binding, adapter, apply };
+  }
+  it('persists before a single create, verifies exact workflow and new backup, and exports a safe recovery identity', async () => {
+    const state = checkpointFixture();
+    const result = await state.apply();
+    expect(result).toMatchObject({ success: true, data: { checkpointId: 'pre-beta', applied: 1, skipped: 0, restoreVerified: false } });
+    expect(state.binding()).toMatchObject({ state: 'complete', workflowId: 'w1', backup: { id: 'b1' } });
+    expect(state.environment().platformBindings.databaseCheckpoints).toMatchObject({ 'pre-beta': { source: { volumeInstanceId: 'vi1' }, backup: { id: 'b1' } } });
+    expect(state.adapter.createCheckpoint).toHaveBeenCalledOnce();
+    const second = await state.apply();
+    expect(second).toMatchObject({ success: true, data: { applied: 0, skipped: 1 } });
+    expect(state.adapter.createCheckpoint).toHaveBeenCalledOnce();
+  });
+  it('never reissues a write with an uncertain acknowledgement', async () => {
+    const state = checkpointFixture();
+    state.adapter.createCheckpoint.mockRejectedValue(new Error('connection lost with secret raw body'));
+    const failed = await state.apply();
+    expect(failed).toMatchObject({ success: false, status: 'blocked', data: { checkpointId: 'pre-beta', applied: null, skipped: 0, restoreVerified: false } });
+    expect(JSON.stringify(failed)).not.toContain('secret raw body');
+    expect(state.binding()).toMatchObject({ state: 'unknown' });
+    expect(await state.apply()).toMatchObject({ success: false, status: 'blocked' });
+    expect(state.adapter.createCheckpoint).toHaveBeenCalledOnce();
+  });
+  it('recomputes all confirmation requirements and exact caller confirmation before provider writes', async () => {
+    const state = checkpointFixture();
+    for (const field of ['requiresConfirm', 'billable', 'dataBearing']) {
+      const action = { ...state.action, [field]: false };
+      expect(await state.apply({ action })).toMatchObject({ success: false, status: 'blocked' });
+    }
+    expect(await state.apply({ confirmedActionIds: new Set(['different-action']) })).toMatchObject({ success: false, status: 'blocked' });
+    expect(state.adapter.createCheckpoint).not.toHaveBeenCalled();
+  });
+  it('retains a missing workflow acknowledgement and blocks a new intent as well as a retry', async () => {
+    const state = checkpointFixture();
+    state.adapter.createCheckpoint.mockResolvedValue({ workflowId: null } as never);
+    expect(await state.apply()).toMatchObject({ success: false, status: 'blocked' });
+    const nextSpec = { ...state.environmentSpec, database: { provider: 'railway', engine: 'postgres', resilience: { checkpoint: { id: 'another-request' } } } };
+    const nextAction = { ...state.action, id: 'database:railway:checkpoint:another-request', metadata: { ...state.action.metadata, checkpointId: 'another-request' } };
+    expect(await state.apply({ environmentSpec: nextSpec, action: nextAction })).toMatchObject({ success: false, status: 'blocked' });
+    expect(state.adapter.createCheckpoint).toHaveBeenCalledOnce();
+  });
+  it.each(['error', 'not-found'])('does not repeat a provider workflow that returns %s', async (workflowState) => {
+    const state = checkpointFixture();
+    state.adapter.observeCheckpointWorkflow.mockResolvedValue({ state: workflowState });
+    expect(await state.apply()).toMatchObject({ success: false, status: 'blocked' });
+    expect(await state.apply()).toMatchObject({ success: false, status: 'blocked' });
+    expect(state.adapter.createCheckpoint).toHaveBeenCalledOnce();
+  });
+  it('waits for visibility of the uniquely labeled new backup and resumes without another create', async () => {
+    vi.useFakeTimers();
+    try {
+      const state = checkpointFixture();
+      state.adapter.observeCheckpointWorkflow.mockResolvedValue({ state: 'running' });
+      const pending = state.apply();
+      await vi.runAllTimersAsync();
+      expect(await pending).toMatchObject({ success: false, status: 'pending' });
+      state.adapter.observeCheckpointWorkflow.mockResolvedValue({ state: 'complete' });
+      expect(await state.apply()).toMatchObject({ success: true, data: { applied: 0, skipped: 1 } });
+      expect(state.adapter.createCheckpoint).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); }
+  });
+  it('refuses old or duplicate matching backup identities even after workflow completion', async () => {
+    const state = checkpointFixture();
+    state.adapter.createCheckpoint.mockImplementation(async (_source, label) => {
+      state.source.backups = [1, 2].map((i) => ({ id: `b${i}`, externalId: `external-${i}`, name: label, createdAt: new Date().toISOString(), expiresAt: null, usedMB: 0, referencedMB: 0, volumeInstanceSizeMB: 100 }));
+      return { workflowId: 'w1' };
+    });
+    expect(await state.apply()).toMatchObject({ success: false, status: 'blocked' });
+    expect(state.binding()).toMatchObject({ state: 'running' });
+  });
+  it('rejects previously inventoried external backup IDs and timestamps before the request', async () => {
+    vi.useFakeTimers();
+    try {
+      const state = checkpointFixture();
+      const original = { id: 'b-old', externalId: 'external-old', name: 'old', createdAt: '2020-01-01T00:00:00.000Z', expiresAt: null, usedMB: 0, referencedMB: 0, volumeInstanceSizeMB: 100 };
+      state.source.backups = [original];
+      state.adapter.createCheckpoint.mockImplementation(async (_source, label) => {
+        state.source.backups = [{ ...original, id: 'changed-internal-id', name: label, createdAt: new Date().toISOString() }, { ...original, id: 'different-id', externalId: 'different-external', name: label }];
+        return { workflowId: 'w1' };
+      });
+      const pending = state.apply(); await vi.runAllTimersAsync();
+      expect(await pending).toMatchObject({ success: false, status: 'pending' });
+      expect(state.binding()).not.toHaveProperty('backup');
+      expect(state.adapter.createCheckpoint).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); }
+  });
+  it('does not replace an expired or deleted completed backup on a retry', async () => {
+    const state = checkpointFixture();
+    expect(await state.apply()).toMatchObject({ success: true });
+    state.source.backups = [];
+    expect(await state.apply()).toMatchObject({ success: false, status: 'blocked' });
+    expect(state.adapter.createCheckpoint).toHaveBeenCalledOnce();
+  });
+  it('blocks malformed persisted recovery evidence rather than treating it as a fresh intent', async () => {
+    const state = checkpointFixture();
+    state.setComponent({ ...state.component(), bindings: { ...state.component().bindings, resilience: { checkpoints: { 'pre-beta': { state: 'complete' } } } } });
+    expect(await state.apply()).toMatchObject({ success: false, status: 'blocked' });
+    expect(state.adapter.createCheckpoint).not.toHaveBeenCalled();
+  });
+  it('blocks provider creation when the durable reservation was not persisted', async () => {
+    const state = checkpointFixture();
+    vi.spyOn(state.ctx.repos.components, 'update').mockReturnValue(null);
+    expect(await state.apply()).toMatchObject({ success: false, status: 'blocked' });
+    expect(state.adapter.createCheckpoint).not.toHaveBeenCalled();
+  });
+  it('rejects a changed volume instance in the same provider environment before any write', async () => {
+    const state = checkpointFixture();
+    state.source.volumeInstanceId = 'replacement-instance';
+    state.action.metadata = { ...state.action.metadata, source: { ...state.source, volumeInstanceId: 'vi1' } };
+    expect(await state.apply()).toMatchObject({ success: false, status: 'blocked' });
+    expect(state.adapter.createCheckpoint).not.toHaveBeenCalled();
+  });
+});

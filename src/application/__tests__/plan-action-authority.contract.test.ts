@@ -1627,3 +1627,21 @@ describe('plan action mutation-authority contract', () => {
     expect(resolvePlanActionAuthority(action({ operation: 'unknownMutation' }))).toBeNull();
   });
 });
+
+describe('checkpoint action mutation authority', () => {
+  const checkpoint = (): PlanAction => ({ id: 'database:railway:checkpoint:pre-beta', type: 'create', resource: { kind: 'database', provider: 'railway', name: 'postgres' }, verified: true, reason: 'Snapshot', requiresConfirm: true, billable: true, dataBearing: true,
+    metadata: { operation: 'databaseCheckpointCreate', checkpointId: 'pre-beta', primaryExternalId: 'primary-1', source: { primaryExternalId: 'primary-1', providerScope: { projectId: 'project-1', environmentId: 'production-1' }, volumeId: 'volume-1', volumeInstanceId: 'instance-1' } } });
+  it('accepts only a fully confirmed snapshot operation with exact source identity', () => {
+    const valid = checkpoint();
+    expect(resolvePlanActionAuthority(valid)?.capability).toBe('database.checkpoint.create');
+    for (const flag of ['billable', 'dataBearing', 'requiresConfirm']) {
+      expect(resolvePlanActionAuthority({ ...valid, [flag]: false })).toBeNull();
+    }
+    expect(resolvePlanActionAuthority({ ...valid, metadata: { ...valid.metadata, primaryExternalId: 'different-primary' } })).toBeNull();
+  });
+  it('rejects malformed nested scope and action/intent identity mismatches', () => {
+    const valid = checkpoint();
+    expect(resolvePlanActionAuthority({ ...valid, id: 'database:railway:checkpoint:other-intent' })).toBeNull();
+    expect(resolvePlanActionAuthority({ ...valid, metadata: { ...valid.metadata, source: { ...(valid.metadata!.source as object), providerScope: { projectId: 'p1', environmentId: 'env1', password: 'unexpected' } } } })).toBeNull();
+  });
+});

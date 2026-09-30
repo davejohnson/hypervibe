@@ -1,3 +1,4 @@
+import { databaseCheckpointIdentitySchema } from '../services/database-checkpoint.js';
 import { API_POLICY_OPERATION } from '../services/api-policy.js';
 import { EMAIL_SIGNING_OPERATIONS } from '../services/email-signing.service.js';
 import type { PlanAction, PlanResourceKind } from './plan.types.js';
@@ -128,6 +129,7 @@ export type PlanMutationCapability =
   | 'cache.retained.destroy'
   | 'database.provision'
   | 'database.availability.configure'
+  | 'database.checkpoint.create'
   | 'database.backup-policy.configure'
   | 'database.replica.provision'
   | 'database.replica.destroy'
@@ -1143,6 +1145,17 @@ export function resolvePlanActionAuthority(
   }
   if (exactResource(action, 'database')) {
     if (isDatabaseResilienceAction(action) && metadataString(action, 'primaryExternalId')) {
+      const checkpointSource = databaseCheckpointIdentitySchema.safeParse(action.metadata?.source);
+      if (action.metadata?.operation === DATABASE_RESILIENCE_OPERATIONS.checkpointCreate
+        && ['create', 'update'].includes(action.type) && action.requiresConfirm === true
+        && action.billable === true && action.dataBearing === true
+        && metadataString(action, 'checkpointId')
+        && action.id === `database:${action.resource.provider}:checkpoint:${metadataString(action, 'checkpointId')}`
+        && checkpointSource.success
+        && checkpointSource.data.primaryExternalId === metadataString(action, 'primaryExternalId')) {
+        return authority(action, 'database.checkpoint.create');
+      }
+
       if (
         action.metadata?.operation === DATABASE_RESILIENCE_OPERATIONS.availabilityConfigure
         && action.type === 'update'

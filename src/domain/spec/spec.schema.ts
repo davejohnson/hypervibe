@@ -182,6 +182,10 @@ const databaseRestoreDrillSchema = z.object({
 }).strict();
 
 const databaseResilienceSchema = z.object({
+  /** Named one-use provider snapshot; removing intent never deletes its backup. */
+  checkpoint: z.object({
+    id: z.string().min(1).max(63).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'checkpoint id must be a lowercase slug'),
+  }).strict().optional(),
   /** Zonal uses one zone; regional provisions a synchronous standby. */
   availability: z.enum(['zonal', 'regional']).optional(),
   /** Provider-managed backups and point-in-time recovery retention. */

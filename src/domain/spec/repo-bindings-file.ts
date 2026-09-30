@@ -8,6 +8,7 @@ import { withStorageInstanceScopes } from '../services/storage-instance-identity
 import { primaryWorkspaceDirectory } from '../../lib/workspace-context.js';
 import { parseServiceVolumeBindings } from '../services/service-volume.service.js';
 import type { ServiceVolumeComponentBinding } from '../ports/service-volume.port.js';
+import { databaseCheckpointBindings } from '../services/database-checkpoint.js';
 
 // Bindings are the inverse of the spec's source-of-truth contract: the DB
 // column `environments.platform_bindings` is authoritative (it holds data the
@@ -90,7 +91,14 @@ export function mergeRepoPlatformBindings(
     throw new Error('Malformed retained service-volume bindings; refusing to overwrite recovery state.');
   }
   const merged: Record<string, unknown> = { ...existing, ...repoBindings };
+  if (existing.databaseCheckpoints !== undefined || repoBindings.databaseCheckpoints !== undefined) {
+    merged.databaseCheckpoints = databaseCheckpointBindings(
+      { resilience: { checkpoints: existing.databaseCheckpoints } },
+      { databaseCheckpoints: repoBindings.databaseCheckpoints }
+    );
+  }
   for (const [key, repoValue] of Object.entries(repoBindings)) {
+    if (key === 'databaseCheckpoints') continue;
     if (key === 'serviceVolumes' && existing[key] !== undefined) {
       const retained = { ...incomingVolumes, ...localVolumes };
       for (const [name, next] of Object.entries(incomingVolumes)) {
@@ -167,6 +175,11 @@ function presentStorageInstanceScopes(platformBindings: Record<string, unknown>)
 
 function sanitizePlatformBindings(raw: Record<string, unknown>): Record<string, unknown> {
   const sanitized = sanitize(raw) as Record<string, unknown>;
+  if (raw.databaseCheckpoints !== undefined) {
+    // Strict non-secret checkpoint identities must survive even when their
+    // reviewed logical intent id contains a word such as "token".
+    sanitized.databaseCheckpoints = databaseCheckpointBindings({}, raw);
+  }
   if (raw.serviceVolumes !== undefined) {
     const serviceVolumes = parseServiceVolumeBindings({ platformBindings: raw });
     if (!serviceVolumes) throw new Error('Malformed retained service-volume bindings cannot be exported or imported safely.');
