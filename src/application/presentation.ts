@@ -754,7 +754,17 @@ function specPresentation(data: DataRecord): CommandPresentation {
   };
 }
 
+function rollbackPresentation(data: DataRecord): CommandPresentation {
+  const presentation = commandPresentation('hv_rollback', data);
+  if (data.mode !== 'preview') return presentation;
+  const blocked = statusWord(data) === 'blocked';
+  return { ...presentation, tone: 'warning', icon: blocked ? '🚧' : '🔎',
+    title: blocked ? 'ROLLBACK PREVIEW BLOCKED' : 'ROLLBACK PREVIEW',
+    summary: 'Read-only evidence inspection. No workflow dispatched; restoration remains unverified.' };
+}
+
 const PRESENTERS: Record<string, (data: DataRecord) => CommandPresentation> = {
+  hv_rollback: rollbackPresentation,
   hv_spec: specPresentation,
   hv_plan: planPresentation,
   hv_apply: applyPresentation,

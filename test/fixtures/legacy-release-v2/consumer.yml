@@ -1,0 +1,37 @@
+jobs:
+  deploy:
+    steps:
+      - name: Resolve immutable rollback image
+        id: rollback_evidence
+        if: steps.deploy.outputs.operation == 'rollback'
+        uses: actions/github-script@v8
+        env:
+          HYPERVIBE_RELEASE_EVIDENCE_PATH: ${{ runner.temp }}/hypervibe-rollback-evidence/hypervibe-server-release.json
+          HYPERVIBE_ENVIRONMENT: "production"
+          HYPERVIBE_ROLLBACK_SHA: ${{ steps.deploy.outputs.sha }}
+          HYPERVIBE_SERVICES: "[\"web\",\"worker\",\"cron\"]"
+        with:
+          script: |
+            const { readFileSync } = require('fs');
+            let evidence;
+            try {
+              evidence = JSON.parse(readFileSync(process.env.HYPERVIBE_RELEASE_EVIDENCE_PATH, 'utf8'));
+            } catch {
+              throw new Error('Rollback release evidence is missing or invalid JSON');
+            }
+            const expectedServices = JSON.parse(process.env.HYPERVIBE_SERVICES);
+            const actualServices = Array.isArray(evidence.services) ? evidence.services : [];
+            const servicesMatch = JSON.stringify([...actualServices].sort()) === JSON.stringify([...expectedServices].sort());
+            if (evidence.version !== 2
+                || evidence.environment !== process.env.HYPERVIBE_ENVIRONMENT
+                || evidence.server?.repository !== process.env.GITHUB_REPOSITORY
+                || evidence.server?.sha !== process.env.HYPERVIBE_ROLLBACK_SHA
+                || !servicesMatch) {
+              throw new Error('Rollback release evidence content does not match the reviewed environment, repository, SHA, and services');
+            }
+            const imageUri = String(evidence.server.imageUri || '').trim().toLowerCase();
+            if (!/^[^\s@]+@sha256:[0-9a-f]{64}$/.test(imageUri)) {
+              throw new Error('Rollback release evidence does not contain an immutable image digest');
+            }
+            core.setOutput('image_uri', imageUri);
+            core.info('Resolved immutable rollback image ' + imageUri);

@@ -1514,6 +1514,26 @@ environment contract hashes, not the immutable application-program fingerprint.
 Do not accept another revision's successful tests as promotion evidence, and do not
 infer reusable invocation from the event name: it retains the caller's context.
 
+Managed CI rollback has a read-only preflight through `hv_rollback` with
+`action: "preview"`, an exact `toSha`, `sourceWorkflowRunId`, and
+`sourceArtifactId`. It permits the currently running release as a future
+recovery baseline and never dispatches a workflow or persists a mutation plan.
+The preview reads the original artifact and immutable source files through the
+existing bounded GitHub artifact reader. Current v4 records use the same
+validator as the generated rollback workflow. Explicitly selected v2 records
+retain their original format and content hashes; historical bindings are
+reported as corroboration rather than invented release provenance. Runtime,
+service and migration differences, including build-only install changes, stay
+visible as blockers. Artifact-name metadata alone is insufficient.
+
+This preflight does not implement legacy recovery execution. A v2 result stays
+blocked until a reviewed consumer can verify the missing scope/program
+provenance without rewriting it as v4. Registry image availability, live
+provider identity/configuration, and restored application health are explicitly
+unchecked by this read-only GitHub inspection. Preview selectors cannot be used
+as execution authority, even with confirmation. See
+[rollback recovery preparation](docs/rollback-recovery-preparation.md).
+
 Managed CI rollback is an explicit operational action over that same exact-SHA
 release boundary. `hv_rollback` must select only unexpired server-release
 evidence emitted by a successful run of the exact managed environment workflow.
