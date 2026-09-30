@@ -242,8 +242,13 @@ export class SpecStore {
     if (repoSpec && repoSpecMatchesProject(repoSpec.spec, project)) {
       const latest = this.repo.findLatest(project.id);
       if (latest) {
-        const parsed = parseStoredSpec(latest.document, project.id, latest.revision);
-        if (sameSpec(parsed, repoSpec.spec)) {
+        // The validated repository document is authoritative. An older cached
+        // revision may no longer satisfy the current schema; retain its history
+        // and adopt the repository as a new revision instead of blocking repair.
+        // Corrupt JSON still fails in the repository reader, and cache-only
+        // reads below continue to fail closed on invalid desired state.
+        const parsed = projectSpecSchema.safeParse(latest.document);
+        if (parsed.success && sameSpec(parsed.data, repoSpec.spec)) {
           return { spec: repoSpec.spec, revision: latest.revision, source: { kind: 'repo', path: repoSpec.path } };
         }
       }
