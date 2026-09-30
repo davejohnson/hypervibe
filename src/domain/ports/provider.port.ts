@@ -115,6 +115,8 @@ export interface DeployResult {
 }
 
 export interface JobResult {
+  /** False proves execution stopped before provider mutation; omission is unknown. */
+  mutationAttempted?: boolean;
   jobId: string;
   status: 'running' | 'completed' | 'failed' | 'timeout';
   /** Log tail from the task container. */

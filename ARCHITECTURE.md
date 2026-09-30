@@ -1899,6 +1899,25 @@ imperative shortcut. Re-running or repairing seed or migrated data requires a
 new reviewable desired-state id; Hypervibe does not expose a generic seed or
 copy command runner.
 
+Repeatable application fixture provisioning may instead declare a named
+`github.actions.<id>` of kind `environment-task`. This is an interface-specific
+GitHub CI program, not an MCP/CLI command runner. Its reviewed environment,
+bound source service, fixed argv and typed inputs belong to spec/plan/apply.
+Publishing changed task workflows is billable, exact-action-confirmed work:
+acceptance authorizes each explicit dispatch to create, execute and delete one
+temporary workload in that environment. It cannot adopt or repair a missing
+source service. Tasks share the deployment lock, require the latest successful
+exact-SHA release evidence and immutable deployed image, and reject Actions
+reruns; repeating an application operation requires a new explicit dispatch.
+
+Provider support is capability-gated. Railway's initial task implementation is
+ready for live validation, not live-verified support. CI receives environment
+machine credentials; database credentials remain provider-resolved references
+inside the private environment. Output contains validated numeric fields with
+reviewed labels, finite status enums and provider execution identities, never
+raw application logs. Ambiguous writes and cleanup failures are terminal for
+that execution, with unknown applied counts unless independently verified.
+
 ## New Provider Checklist
 
 New provider support needs a full contract, not a name in an enum. Add or confirm:

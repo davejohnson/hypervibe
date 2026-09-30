@@ -511,6 +511,11 @@ const RELEASE_EVIDENCE_VALIDATION_RUNTIME_SHA256 = createHash('sha256')
   .update(`${RELEASE_EVIDENCE_VALIDATION_RUNTIME.trim()}\n`, 'utf8')
   .digest('hex');
 
+/** Shared with the declared-task CI consumer; never interpolate runtime inputs. */
+export function releaseEvidenceValidationRuntime(): string {
+  return RELEASE_EVIDENCE_VALIDATION_RUNTIME;
+}
+
 const RELEASE_EVIDENCE_VALIDATION_LOADER = `
 const { createHash: createValidatorHash } = require('crypto');
 const { readFileSync: readValidatorSource } = require('fs');
