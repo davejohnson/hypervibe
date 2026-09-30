@@ -11,7 +11,7 @@ import type { IDatabaseAdapter, ProvisionResult, ProvisionableType } from '../..
 import type { ObservedDatabase, ObservedState } from '../../../domain/ports/observe.port.js';
 import type { EnvironmentRepository } from '../../db/repositories/environment.repository.js';
 import type { IDatabaseCheckpointAdapter, DatabaseCheckpointIdentity, DatabaseCheckpointSource,
-  DatabaseCheckpointWorkflow } from '../../../domain/ports/database-checkpoint.port.js';
+  DatabaseCheckpointBinding, DatabaseCheckpointObservation } from '../../../domain/ports/database-checkpoint.port.js';
 import type {
   RailwayServiceInstanceInspection,
   RailwayVolumeResolution,
@@ -21,7 +21,7 @@ import type {
 interface RailwayHostingOps {
   observeDatabaseCheckpointSource?: (target: { projectId: string; environmentId: string; serviceId: string }) => Promise<DatabaseCheckpointSource>;
   createDatabaseCheckpoint?: (source: DatabaseCheckpointIdentity, label: string) => Promise<{ workflowId: string | null }>;
-  observeDatabaseCheckpointWorkflow?: (workflowId: string) => Promise<DatabaseCheckpointWorkflow>;
+  observeDatabaseCheckpointRequest?: (binding: DatabaseCheckpointBinding) => Promise<DatabaseCheckpointObservation>;
   ensureProject: (projectName: string, environment: Environment) => Promise<{
     success: boolean;
     data?: Record<string, unknown>;
@@ -365,11 +365,23 @@ export function createRailwayDatabaseAdapter(params: {
     },
     async createCheckpoint(source, label) {
       if (typeof railway.createDatabaseCheckpoint !== 'function') throw new Error('Railway checkpoint creation is unsupported.');
-      return railway.createDatabaseCheckpoint(source, label);
+      const response = await railway.createDatabaseCheckpoint(source, label);
+      return response.workflowId ? { acknowledged: true, operationId: response.workflowId } : { acknowledged: false };
     },
-    async observeCheckpointWorkflow(workflowId) {
-      if (typeof railway.observeDatabaseCheckpointWorkflow !== 'function') throw new Error('Railway checkpoint observation is unsupported.');
-      return railway.observeDatabaseCheckpointWorkflow(workflowId);
+    async observeCheckpointRequest(environment, component, binding) {
+      const current = envRepo.findById(environment.id) ?? environment;
+      const projectId = assertCurrentProjectScope(current, component);
+      if (component.bindings.provider !== 'railway' || component.type !== 'postgres'
+        || component.bindings.resourceKind !== 'service' || component.bindings.retainedCleanup === true
+        || component.environmentId !== current.id
+        || (componentEnvironmentId(component) !== undefined && componentEnvironmentId(component) !== current.platformBindings.environmentId)
+        || binding.source.provider !== 'railway' || binding.source.primaryExternalId !== component.externalId
+        || binding.source.providerScope.projectId !== projectId
+        || binding.source.providerScope.environmentId !== current.platformBindings.environmentId
+        || typeof railway.observeDatabaseCheckpointRequest !== 'function') {
+        throw new Error('Railway checkpoint request no longer belongs to the bound database scope.');
+      }
+      return railway.observeDatabaseCheckpointRequest(binding);
     },
     capabilities: {
       supportedDatabases: ['postgres'],

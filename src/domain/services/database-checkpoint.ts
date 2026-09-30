@@ -1,37 +1,48 @@
 import { z } from 'zod';
-import type { DatabaseCheckpointBinding, DatabaseCheckpointIdentity } from '../ports/database-checkpoint.port.js';
+import type { DatabaseCheckpointBackup, DatabaseCheckpointBinding } from '../ports/database-checkpoint.port.js';
+import { recoveryIdentityStringSchema, recoverySourceIdentityMatches, recoverySourceIdentitySchema } from './recovery-source.js';
 
-const identityString = z.string().trim().min(1);
-export const databaseCheckpointIdentitySchema = z.object({
+const identityString = recoveryIdentityStringSchema;
+/** Exact pre-contract Railway representation. Never infer its provider from desired state. */
+const legacyRailwayIdentity = z.object({
   providerScope: z.object({ projectId: identityString, environmentId: identityString }).strict(),
-  primaryExternalId: identityString,
-  volumeId: identityString,
-  volumeInstanceId: identityString,
-});
+  primaryExternalId: identityString, volumeId: identityString, volumeInstanceId: identityString,
+}).strict();
+export const databaseCheckpointIdentitySchema = z.union([recoverySourceIdentitySchema,
+  legacyRailwayIdentity.transform(({ volumeId, volumeInstanceId, ...source }) => ({ ...source,
+    provider: 'railway', resourceIdentity: { volumeId, volumeInstanceId } })),
+]);
 const timestamp = z.string().datetime({ offset: true });
 export const databaseCheckpointBackupSchema = z.object({
-  id: identityString, externalId: identityString, name: z.string().nullable(),
+  id: identityString, externalId: identityString.optional(), name: z.string().nullable().optional(),
   createdAt: timestamp, expiresAt: timestamp.nullable(),
-  usedMB: z.number().finite().nonnegative().nullable(),
-  referencedMB: z.number().finite().nonnegative().nullable(),
-  volumeInstanceSizeMB: z.number().finite().nonnegative().nullable(),
+  usedMB: z.number().finite().nonnegative().nullable().optional(),
+  referencedMB: z.number().finite().nonnegative().nullable().optional(),
+  volumeInstanceSizeMB: z.number().finite().nonnegative().nullable().optional(),
 }).strict();
-export const databaseCheckpointSourceSchema = databaseCheckpointIdentitySchema.extend({
-  backups: z.array(databaseCheckpointBackupSchema).refine((backups) => new Set(backups.map((backup) => backup.id)).size === backups.length),
+export const databaseCheckpointSourceSchema = z.object({
+  ...recoverySourceIdentitySchema.shape,
+  backups: z.array(databaseCheckpointBackupSchema).refine(backups => new Set(backups.map(backup => backup.id)).size === backups.length),
 }).strict();
 const bindingSchema = z.object({
-  source: databaseCheckpointIdentitySchema.strict(), label: identityString,
+  source: databaseCheckpointIdentitySchema, label: identityString,
   beforeBackupIds: z.array(identityString), beforeBackupExternalIds: z.array(identityString), requestStartedAt: timestamp,
-  workflowId: identityString.optional(),
+  acknowledged: z.boolean().optional(), operationId: identityString.optional(), workflowId: identityString.optional(),
   state: z.enum(['attempting', 'running', 'complete', 'unknown', 'error']),
   backup: databaseCheckpointBackupSchema.optional(), verifiedAt: timestamp.optional(),
-}).strict().refine((binding) => binding.state !== 'complete' || Boolean(binding.workflowId && binding.backup && binding.verifiedAt));
+}).strict().superRefine((binding, ctx) => {
+  if (binding.workflowId && (binding.acknowledged === false || binding.source.provider !== 'railway'
+    || (binding.operationId && binding.workflowId !== binding.operationId))) {
+    ctx.addIssue({ code: 'custom', message: 'Conflicting or non-Railway legacy checkpoint workflow identity.' });
+  }
+  if (binding.state === 'complete' && !(binding.backup && binding.verifiedAt && (binding.acknowledged === true || binding.workflowId))) {
+    ctx.addIssue({ code: 'custom', message: 'Completed checkpoints require acknowledged, verified recovery-point evidence.' });
+  }
+}).transform(({ workflowId, ...binding }) => ({ ...binding,
+  ...(workflowId ? { operationId: workflowId, acknowledged: true } : {}),
+}));
 
-export function checkpointIdentityMatches(a: DatabaseCheckpointIdentity, b: DatabaseCheckpointIdentity): boolean {
-  return a.primaryExternalId === b.primaryExternalId && a.volumeId === b.volumeId
-    && a.volumeInstanceId === b.volumeInstanceId
-    && JSON.stringify(Object.entries(a.providerScope).sort()) === JSON.stringify(Object.entries(b.providerScope).sort());
-}
+export const checkpointIdentityMatches = recoverySourceIdentityMatches;
 
 /** Invalid recovery state is never interpreted as an unused intent. */
 export function databaseCheckpointBindings(componentBindings: Record<string, unknown>, platformBindings: Record<string, unknown>): Record<string, DatabaseCheckpointBinding> {
@@ -47,7 +58,7 @@ export function databaseCheckpointBindings(componentBindings: Record<string, unk
     if (!checkpointIdentityMatches(binding.source, remote.source) || binding.label !== remote.label
       || binding.requestStartedAt !== remote.requestStartedAt || !sameSet(binding.beforeBackupIds, remote.beforeBackupIds)
       || !sameSet(binding.beforeBackupExternalIds, remote.beforeBackupExternalIds)
-      || (binding.workflowId && remote.workflowId && binding.workflowId !== remote.workflowId)
+      || (binding.operationId && remote.operationId && binding.operationId !== remote.operationId)
       || (binding.backup && remote.backup && (binding.backup.id !== remote.backup.id || binding.backup.externalId !== remote.backup.externalId))) {
       throw new Error('Conflicting database checkpoint recovery identities.');
     }
@@ -59,8 +70,9 @@ export function databaseCheckpointBindings(componentBindings: Record<string, unk
   return merged;
 }
 
-export function checkpointBackupAvailable(binding: DatabaseCheckpointBinding, backups: Array<{id: string; externalId: string; name: string | null; expiresAt: string | null}>, now = Date.now()): boolean {
-  return binding.state === 'complete' && Boolean(binding.backup && backups.some((backup) =>
-    backup.id === binding.backup!.id && backup.externalId === binding.backup!.externalId && backup.name === binding.label
+export function checkpointBackupAvailable(binding: DatabaseCheckpointBinding, backups: DatabaseCheckpointBackup[], now = Date.now()): boolean {
+  return binding.state === 'complete' && Boolean(binding.backup && backups.some(backup =>
+    backup.id === binding.backup!.id && backup.externalId === binding.backup!.externalId
+    && backup.name === binding.backup!.name && backup.createdAt === binding.backup!.createdAt
     && (backup.expiresAt === null || Date.parse(backup.expiresAt) > now)));
 }

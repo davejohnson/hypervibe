@@ -1537,7 +1537,8 @@ as execution authority, even with confirmation. See
 Managed CI rollback is an explicit operational action over that same exact-SHA
 release boundary. `hv_rollback` must select only unexpired server-release
 evidence emitted by a successful run of the exact managed environment workflow.
-When a provider exposes immutable image evidence (currently Railway), the
+When a provider exposes immutable image evidence (Railway, Cloud Run, ECS Express,
+Azure Container Apps and Fly), the
 release record includes the exact registry digest; rollback downloads and
 validates it, skips source checkout and image rebuilding, and deploys the
 recorded immutable image URI.
@@ -1722,6 +1723,15 @@ stage.
 
 ## Database Resilience
 
+Recovery source identities, selected points, operation observations and evidence
+assessments follow the [shared recovery contract](docs/recovery-contract.md).
+Its named provider review covers every registered database and hosting provider.
+The shared layer neither requires one provider's volume/workflow identifiers nor
+parses a provider's native connection-name format. Strict source coordinates are
+safe for repository exports; native requirements and completion correlation stay
+in the provider adapter. Existing Railway records have an explicit compatibility
+reader that preserves uncertain requests instead of reopening creation.
+
 Provider-managed database resilience is optional desired state under
 `database.resilience`. Omitting the block preserves backward compatibility and
 means Hypervibe does not manage resilience settings. Within a declared block:
@@ -1799,11 +1809,12 @@ persisted action confirmation. No checkpoint operation changes a workload, volum
 attachment, database endpoint, or schema.
 
 Before calling the provider, apply durably records a unique operation label,
-the complete prior backup inventory, and request time. It records the returned
-workflow identity before observing completion. Retrying the same intent only
+the complete prior backup inventory, and request time. It records acknowledgement
+and any returned operation identity before observing completion. Retrying the same intent only
 observes that operation; an uncertain acknowledgement never permits another
 create. Completion requires provider-terminal success and a uniquely correlated
-new backup on the same volume instance. Safe receipts and exported bindings retain
+new backup on the same source; Railway's adapter verifies the exact volume instance.
+Safe receipts and exported bindings retain
 the backup identity, source scope, timestamp and expiry, and explicitly say that
 restore verification has not run. A completed intent becomes noop only while
 its recorded backup remains observable and unexpired. Removing the intent does

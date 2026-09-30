@@ -43,7 +43,7 @@ describe('Railway checkpoint durable lifecycle through serialized transport', ()
           const before = ctx.repos.components.findById(component.id)!;
           const recovery = (before.bindings.resilience as any)?.checkpoints?.['pre-beta'];
           expect(recovery).toMatchObject({ state: 'attempting', source: {
-            primaryExternalId: 'checkpoint-db', volumeInstanceId: 'instance-volume-1',
+            primaryExternalId: 'checkpoint-db', resourceIdentity: { volumeInstanceId: 'instance-volume-1' },
           }, beforeBackupIds: [], beforeBackupExternalIds: [] });
           expect(ctx.repos.environments.findById(environment.id)!.platformBindings.databaseCheckpoints)
             .toEqual({ 'pre-beta': recovery });
@@ -69,7 +69,7 @@ describe('Railway checkpoint durable lifecycle through serialized transport', ()
       const currentEnvironment = ctx.repos.environments.findById(environment.id)!;
       const observation = await new PlanService().observeEnvironment(project, currentEnvironment, environmentSpec);
       expect(observation.observed?.databases.find((database) => database.externalId === 'checkpoint-db')?.resilience?.checkpointSource)
-        .toMatchObject({ primaryExternalId: 'checkpoint-db', volumeInstanceId: 'instance-volume-1' });
+        .toMatchObject({ primaryExternalId: 'checkpoint-db', resourceIdentity: { volumeInstanceId: 'instance-volume-1' } });
       const result = planDatabaseResilience({ environmentSpec, capabilities: { checkpoints: true },
         local: { services: [], components: [current], bindings: currentEnvironment.platformBindings } as never,
         observed: observation.observed,
@@ -90,7 +90,7 @@ describe('Railway checkpoint durable lifecycle through serialized transport', ()
     const f = await setup(false, () => failing ? failure.respond()
       : Response.json({ data: { workflowStatus: { status: 'Complete' } } }));
     const expected = { success: false, status: 'blocked', data: {
-      applied: null, skipped: 0, restoreVerified: false, workflowId: 'backup-workflow',
+      applied: null, skipped: 0, restoreVerified: false, operationId: 'backup-workflow',
       observationFailure: { stage: 'workflow_status', category: failure.category,
         ...('httpStatus' in failure ? { httpStatus: failure.httpStatus } : {}) },
     } };
@@ -98,7 +98,7 @@ describe('Railway checkpoint durable lifecycle through serialized transport', ()
     expect(JSON.stringify(first)).not.toContain(privateProviderDetail);
     expect(first).toMatchObject(expected);
     const retained = f.ctx.repos.components.findById(f.component.id)!.bindings;
-    expect((retained.resilience as any).checkpoints['pre-beta']).toMatchObject({ state: 'running', workflowId: 'backup-workflow' });
+    expect((retained.resilience as any).checkpoints['pre-beta']).toMatchObject({ state: 'running', operationId: 'backup-workflow' });
     const next = await f.plan();
     expect(next.type).toBe('update');
     const resumed = await f.apply(next);
@@ -110,7 +110,7 @@ describe('Railway checkpoint durable lifecycle through serialized transport', ()
     // must not finalize it. Only a later successful terminal read can do so.
     failing = false;
     expect(await f.apply(await f.plan())).toMatchObject({ success: true, data: {
-      applied: 0, skipped: 1, restoreVerified: false, workflowId: 'backup-workflow',
+      applied: 0, skipped: 1, restoreVerified: false, operationId: 'backup-workflow',
     } });
     expect(f.http.mutations.map((entry) => entry.field)).toEqual(['volumeInstanceBackupCreate']);
     expect(f.http.contractErrors).toEqual([]);
@@ -125,14 +125,14 @@ describe('Railway checkpoint durable lifecycle through serialized transport', ()
       ? Response.json({ errors: [{ message: privateProviderDetail }] }, { status: 403 }) : undefined);
     const result = await f.apply(await f.plan());
     expect(result).toMatchObject({ success: false, status: 'blocked', data: {
-      applied: null, restoreVerified: false, workflowId: 'backup-workflow',
+      applied: null, restoreVerified: false, operationId: 'backup-workflow',
       observationFailure: { stage: 'source_inventory', category: 'authorization', httpStatus: 403 },
     } });
     expect(JSON.stringify(result)).not.toContain(privateProviderDetail);
     expect(JSON.stringify(result)).not.toContain('No backup was created');
     expect(f.http.mutations.map((entry) => entry.field)).toEqual(['volumeInstanceBackupCreate']);
     expect((f.ctx.repos.components.findById(f.component.id)!.bindings.resilience as any).checkpoints['pre-beta'])
-      .toMatchObject({ state: 'running', workflowId: 'backup-workflow' });
+      .toMatchObject({ state: 'running', operationId: 'backup-workflow' });
   });
 
   it.each(['Complete', 'Error'] as const)('does not call a local persistence failure a failed provider read after %s', async (status) => {
@@ -145,7 +145,7 @@ describe('Railway checkpoint durable lifecycle through serialized transport', ()
     });
     const result = await f.apply(await f.plan());
     expect(result).toMatchObject({ success: false, status: 'blocked', data: {
-      applied: null, workflowId: 'backup-workflow', restoreVerified: false,
+      applied: null, operationId: 'backup-workflow', restoreVerified: false,
     } });
     expect(result.data).not.toHaveProperty('observationFailure');
     expect(JSON.stringify(result)).not.toContain(privateProviderDetail);
@@ -158,7 +158,7 @@ describe('Railway checkpoint durable lifecycle through serialized transport', ()
     expect(await f.apply(action, false)).toMatchObject({ success: false, status: 'blocked' });
     expect(f.http.mutations).toHaveLength(0);
     expect(await f.apply(action)).toMatchObject({ success: true, data: {
-      applied: 1, skipped: 0, restoreVerified: false, workflowId: 'backup-workflow',
+      applied: 1, skipped: 0, restoreVerified: false, operationId: 'backup-workflow',
       backup: { id: 'backup-1', externalId: 'snapshot-1', createdAt: '2026-09-30T06:00:00.000Z' },
     } });
     expect(f.sawIntent()).toBe(true);
@@ -181,4 +181,35 @@ describe('Railway checkpoint durable lifecycle through serialized transport', ()
     expect(f.http.mutations.map((entry) => entry.field)).toEqual(['volumeInstanceBackupCreate']);
     expect(f.http.contractErrors).toEqual([]);
   });
+  it('resumes the pre-contract saved Railway request after a repository/SQLite round trip without creating again', async () => {
+    let denied = true;
+    const f = await setup(false, () => denied
+      ? Response.json({ errors: [{ message: 'not authorized' }] }, { status: 403 })
+      : Response.json({ data: { workflowStatus: { status: 'Complete' } } }));
+    expect(await f.apply(await f.plan())).toMatchObject({ status: 'blocked' });
+    const component = f.ctx.repos.components.findById(f.component.id)!;
+    const retained = (component.bindings.resilience as any).checkpoints['pre-beta'];
+    const { operationId, acknowledged: _acknowledged, source, ...request } = retained;
+    // Exact persisted shape from the preceding Railway implementation, not a
+    // source inferred from the current environment or provider selection.
+    const legacy = { ...request, workflowId: operationId, source: {
+      primaryExternalId: source.primaryExternalId, providerScope: source.providerScope,
+      volumeId: source.resourceIdentity.volumeId, volumeInstanceId: source.resourceIdentity.volumeInstanceId,
+    } };
+    f.ctx.repos.components.update(component.id, { bindings: { ...component.bindings,
+      resilience: { checkpoints: { 'pre-beta': legacy } } } });
+    f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { databaseCheckpoints: { 'pre-beta': legacy } });
+    expect((createCommandContext().repos.components.findById(component.id)!.bindings.resilience as any)
+      .checkpoints['pre-beta'].workflowId).toBe('backup-workflow');
+    denied = false;
+    const plan = await f.plan();
+    expect(plan).toMatchObject({ type: 'update', metadata: { operationId: 'backup-workflow' } });
+    expect(await f.apply(plan)).toMatchObject({ success: true, data: {
+      applied: 0, skipped: 1, operationId: 'backup-workflow', source: { provider: 'railway' },
+      recovery: { ready: false, checks: { recoveryPoint: 'verified', databaseValidation: 'unknown' } },
+    } });
+    expect(f.http.mutations.map(entry => entry.field)).toEqual(['volumeInstanceBackupCreate']);
+    expect(f.http.contractErrors).toEqual([]);
+  });
+
 });

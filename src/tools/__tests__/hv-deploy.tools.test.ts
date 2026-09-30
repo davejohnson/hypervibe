@@ -877,6 +877,22 @@ describe('hv_rollback', () => {
     await t.close();
   });
 
+  it('keeps database recovery and migration compatibility unknown when release evidence matches', async () => {
+    const { inputs, trigger } = mockRollbackPreview();
+    const registry = new CommandRegistry();
+    registerHvDeployTools(registry, createToolContext());
+    const result = await registry.execute('hv_rollback', inputs);
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({ evidenceCompatible: true, recovery: {
+      version: 1, ready: false, checks: {
+        applicationArtifact: 'verified', applicationAvailability: 'unknown', applicationHealth: 'unknown',
+        recoveryPoint: 'unknown', restoreTargetIsolation: 'unknown', restoreSideEffectIsolation: 'unknown',
+        databaseValidation: 'unknown', migrationCompatibility: 'unknown', cleanup: 'unknown',
+      },
+    } });
+    expect(trigger).not.toHaveBeenCalled();
+  });
+
   it('inspects legacy bytes while reporting workflow and legacy execution blockers', async () => {
     const { trigger, inputs, evidence } = mockRollbackPreview();
     vi.mocked(GitHubAdapter.prototype.getFileContent).mockImplementation(async (_owner, _repo, name, ref) => {

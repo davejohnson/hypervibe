@@ -74,8 +74,9 @@ import { redactExactValues } from '../../../utils/redact-exact-values.js';
 import {
   DatabaseCheckpointObservationError,
   type DatabaseCheckpointBackup, type DatabaseCheckpointIdentity, type DatabaseCheckpointSource,
-  type DatabaseCheckpointWorkflow, type DatabaseCheckpointObservationFailure,
+  type DatabaseCheckpointBinding, type DatabaseCheckpointObservation, type DatabaseCheckpointObservationFailure,
 } from '../../../domain/ports/database-checkpoint.port.js';
+import { checkpointIdentityMatches } from '../../../domain/services/database-checkpoint.js';
 
 // Credentials schema for self-registration
 export const RailwayCredentialsSchema = z.object({
@@ -1912,8 +1913,8 @@ export class RailwayAdapter implements
           usedMB: entry.usedMB as number | null, referencedMB: entry.referencedMB as number | null,
           volumeInstanceSizeMB: entry.volumeInstanceSizeMB as number | null });
       }
-      return { providerScope: { projectId: target.projectId, environmentId: target.environmentId },
-        primaryExternalId: target.serviceId, volumeId: volume.volumeId, volumeInstanceId: volume.instanceId, backups };
+      return { provider: 'railway', providerScope: { projectId: target.projectId, environmentId: target.environmentId },
+        primaryExternalId: target.serviceId, resourceIdentity: { volumeId: volume.volumeId, volumeInstanceId: volume.instanceId }, backups };
     } catch (error) {
       throw this.checkpointObservationError(error, 'source_inventory');
     }
@@ -1940,14 +1941,43 @@ export class RailwayAdapter implements
     return new DatabaseCheckpointObservationError(stage, category, httpStatus);
   }
 
+  private checkpointIdentity(source: DatabaseCheckpointIdentity): DatabaseCheckpointIdentity {
+    const id = z.string().trim().min(1);
+    return z.object({ provider: z.literal('railway'), primaryExternalId: id,
+      providerScope: z.object({ projectId: id, environmentId: id }).strict(),
+      resourceIdentity: z.object({ volumeId: id, volumeInstanceId: id }).strict(),
+    }).strict().parse(source);
+  }
+
+  async observeDatabaseCheckpointRequest(binding: DatabaseCheckpointBinding): Promise<DatabaseCheckpointObservation> {
+    const source = this.checkpointIdentity(binding.source);
+    if (binding.acknowledged !== true || !binding.operationId) return { state: 'unknown' };
+    const workflow = await this.observeDatabaseCheckpointWorkflow(binding.operationId);
+    if (workflow.state === 'error') return { state: 'failed' };
+    if (workflow.state === 'not-found') return { state: 'unknown' };
+    if (workflow.state !== 'complete') return { state: 'pending' };
+    const observed = await this.observeDatabaseCheckpointSource({ projectId: source.providerScope.projectId!,
+      environmentId: source.providerScope.environmentId!, serviceId: source.primaryExternalId });
+    if (!checkpointIdentityMatches(source, observed)) return { state: 'unknown' };
+    const matches = observed.backups.filter(backup => backup.name === binding.label
+      && !binding.beforeBackupIds.includes(backup.id)
+      && typeof backup.externalId === 'string' && !binding.beforeBackupExternalIds.includes(backup.externalId)
+      // The provider can round to seconds; allow only the original five-second tolerance.
+      && Date.parse(backup.createdAt) >= Date.parse(binding.requestStartedAt) - 5000
+      && (backup.expiresAt === null || Date.parse(backup.expiresAt) > Date.now()));
+    if (matches.length > 1) return { state: 'unknown' };
+    return matches.length === 1 ? { state: 'complete', source, backup: matches[0]! } : { state: 'pending' };
+  }
+
   async createDatabaseCheckpoint(source: DatabaseCheckpointIdentity, label: string): Promise<{ workflowId: string | null }> {
     if (!this.client) throw new Error('Railway checkpoint creation requires a connected adapter.');
+    source = this.checkpointIdentity(source);
     if (!/^[a-z0-9-]{1,128}$/.test(label)) throw new Error('Invalid checkpoint operation label.');
     const fresh = await this.observeDatabaseCheckpointSource({
       projectId: source.providerScope.projectId!, environmentId: source.providerScope.environmentId!,
       serviceId: source.primaryExternalId,
     });
-    if (fresh.volumeId !== source.volumeId || fresh.volumeInstanceId !== source.volumeInstanceId
+    if (!checkpointIdentityMatches(fresh, source)
       || fresh.backups.some((backup) => backup.name === label)) {
       throw new Error('Railway checkpoint source changed or its operation label already exists. Creation refused.');
     }
@@ -1956,7 +1986,7 @@ export class RailwayAdapter implements
         mutation DatabaseCheckpointCreate($volumeInstanceId: String!, $name: String!) {
           volumeInstanceBackupCreate(volumeInstanceId: $volumeInstanceId, name: $name) { workflowId }
         }
-      `, { volumeInstanceId: source.volumeInstanceId, name: label });
+      `, { volumeInstanceId: source.resourceIdentity.volumeInstanceId, name: label });
       if (!isRecord(result) || !isRecord(result.volumeInstanceBackupCreate)
         || (result.volumeInstanceBackupCreate.workflowId !== null
           && (typeof result.volumeInstanceBackupCreate.workflowId !== 'string'
@@ -1969,7 +1999,7 @@ export class RailwayAdapter implements
     }
   }
 
-  async observeDatabaseCheckpointWorkflow(workflowId: string): Promise<DatabaseCheckpointWorkflow> {
+  async observeDatabaseCheckpointWorkflow(workflowId: string): Promise<{ state: 'running' | 'complete' | 'error' | 'not-found' }> {
     if (!this.client || typeof workflowId !== 'string' || !workflowId.trim()) {
       throw new Error('Railway checkpoint workflow observation requires a connected adapter and exact workflow identity.');
     }

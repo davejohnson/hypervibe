@@ -190,14 +190,14 @@ export function planDatabaseResilience(params: {
       priorPending = Object.entries(bindings).some(([id, binding]) => id !== checkpointId && ['attempting', 'running', 'unknown'].includes(binding.state));
     } catch { invalidRecovery = true; }
     const source = sourceResult.success ? sourceResult.data : undefined;
-    const metadata = { ...commonMetadata, checkpointId, ...(source ? { source } : {}) };
+    const metadata = { ...commonMetadata, checkpointId, ...(source ? { source: { provider: source.provider, primaryExternalId: source.primaryExternalId, providerScope: source.providerScope, resourceIdentity: source.resourceIdentity } } : {}) };
     let blockedReason: string | undefined;
     if (!capabilities?.checkpoints) blockedReason = 'database_checkpoint_unsupported';
     else if (invalidRecovery) blockedReason = 'database_checkpoint_recovery_invalid';
     else if (priorPending) blockedReason = 'database_checkpoint_previous_request_pending';
-    else if (!source || source.primaryExternalId !== primaryExternalId) blockedReason = 'database_checkpoint_observation_unknown';
+    else if (!source || source.provider !== provider || source.primaryExternalId !== primaryExternalId) blockedReason = 'database_checkpoint_observation_unknown';
     else if (recovery && !checkpointIdentityMatches(recovery.source, source)) blockedReason = 'database_checkpoint_source_changed';
-    else if (recovery && !recovery.workflowId) blockedReason = 'database_checkpoint_write_uncertain';
+    else if (recovery && recovery.acknowledged !== true) blockedReason = 'database_checkpoint_write_uncertain';
     else if (recovery?.state === 'error') blockedReason = 'database_checkpoint_failed';
     else if (recovery?.state === 'complete' && !checkpointBackupAvailable(recovery, source.backups)) blockedReason = 'database_checkpoint_backup_unavailable';
     if (blockedReason) {
@@ -208,7 +208,7 @@ export function planDatabaseResilience(params: {
         reason: complete ? 'The named snapshot is provider-confirmed and still available; restore has not been tested.'
           : recovery ? 'Observe the previously requested snapshot; never repeat its create.' : 'Create the requested one-use database snapshot; provider storage charges may apply.',
         billable: !complete, dataBearing: !complete, requiresConfirm: !complete,
-        metadata: { ...metadata, ...(recovery?.workflowId ? { workflowId: recovery.workflowId } : {}) },
+        metadata: { ...metadata, ...(recovery?.operationId ? { operationId: recovery.operationId } : {}) },
       }));
     }
   }

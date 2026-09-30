@@ -1,6 +1,7 @@
 import type {
   DatabaseRestoreDrillTarget,
   DatabaseRestoreDrillWorkflow,
+  ProviderDatabaseRestoreDrillMetadata,
 } from '../../../domain/ports/database-restore-drill.port.js';
 import {
   HYPERVIBE_MANAGED_NODE_VERSION,
@@ -8,6 +9,58 @@ import {
 } from '../../../domain/services/managed-runtime.js';
 
 export const CLOUDSQL_RESTORE_DRILL_SCRIPT_PATH = '.github/hypervibe/cloudsql-restore-drill.mjs';
+
+export const resolveCloudSqlRestoreDrillSource: ProviderDatabaseRestoreDrillMetadata['resolveSource'] = ({ environment, component }) => {
+  const { bindings } = component;
+  const nonempty = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
+  const sourceInstanceId = component.externalId ?? bindings.instanceId;
+  const connectionName = bindings.connectionName;
+  const databaseName = bindings.database;
+  if (
+    component.environmentId !== environment.id
+    || bindings.provider !== 'cloudsql'
+    || !nonempty(sourceInstanceId)
+    || !nonempty(connectionName)
+    || !nonempty(databaseName)
+  ) {
+    return {
+      status: 'binding_missing',
+      message: `The ${environment.name} restore drill requires a durably bound cloudsql primary with exact connection and database identities.`,
+    };
+  }
+
+  // Cloud SQL owns the project:region:instance connection-name format.
+  // https://cloud.google.com/sql/docs/postgres/connect-auth-proxy
+  const parts = connectionName.split(':');
+  const [projectId, region, instanceId] = parts;
+  const scope = bindings.providerScope;
+  const scopeRecord = scope && typeof scope === 'object' && !Array.isArray(scope)
+    ? scope as Record<string, unknown>
+    : undefined;
+  if (
+    parts.length !== 3
+    || !nonempty(projectId)
+    || !nonempty(region)
+    || instanceId !== sourceInstanceId
+    || (bindings.instanceId !== undefined && bindings.instanceId !== sourceInstanceId)
+    || (scope !== undefined && (!scopeRecord || scopeRecord.projectId !== projectId || scopeRecord.region !== region))
+  ) {
+    return {
+      status: 'identity_invalid',
+      message: `The bound connection name for ${environment.name} does not identify the reviewed primary ${sourceInstanceId}.`,
+    };
+  }
+  return {
+    status: 'resolved',
+    source: {
+      provider: 'cloudsql',
+      primaryExternalId: sourceInstanceId,
+      providerScope: { projectId, region },
+      resourceIdentity: {},
+    },
+    databaseName,
+  };
+};
 
 const MANAGED_HEADER = '# Managed by Hypervibe. Change desired state with hv_spec; manual edits will be reconciled.';
 
@@ -369,11 +422,16 @@ export function buildCloudSqlRestoreDrillWorkflow(
   target: DatabaseRestoreDrillTarget
 ): DatabaseRestoreDrillWorkflow {
   const slug = workflowSlug(target.environmentName);
+  const { projectId, region } = target.source.providerScope;
+  const sourceInstanceId = target.source.primaryExternalId;
+  if (target.source.provider !== 'cloudsql' || !projectId || !region || !sourceInstanceId) {
+    throw new Error('Cloud SQL restore drill requires an exact Cloud SQL recovery source.');
+  }
   const config = Buffer.from(JSON.stringify({
-    projectId: target.projectId,
-    region: target.region,
-    sourceInstanceId: target.sourceInstanceId,
-    sourceConnectionName: target.sourceConnectionName,
+    projectId,
+    region,
+    sourceInstanceId,
+    sourceConnectionName: `${projectId}:${region}:${sourceInstanceId}`,
     databaseName: target.databaseName,
     verificationQuery: target.verificationQuery,
     restoreLagMinutes: target.restoreLagMinutes,
@@ -436,7 +494,7 @@ export function buildCloudSqlRestoreDrillWorkflow(
           title: `${target.environmentName} database restore drill`,
           summary: `Adds or updates the scheduled isolated Cloud SQL restore verification for ${target.environmentName}.`,
           details: [
-            `Restores ${target.sourceInstanceId} to a uniquely named temporary instance at a ${target.restoreLagMinutes}-minute PITR offset.`,
+            `Restores ${sourceInstanceId} to a uniquely named temporary instance at a ${target.restoreLagMinutes}-minute PITR offset.`,
             'Runs the declared SQL check inside a read-only transaction and never points application services at the clone.',
             `Keeps failed labeled clones for ${target.retainFailedInstanceDays} day(s), then deletes only matching Hypervibe drill resources.`,
             `Requires the existing GitHub Actions secret ${target.credentialsSecretName}; no credential value is committed.`,

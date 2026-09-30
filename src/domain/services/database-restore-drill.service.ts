@@ -4,6 +4,7 @@ import type { Project } from '../entities/project.entity.js';
 import type { DatabaseRestoreDrillFile } from '../ports/database-restore-drill.port.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import type { ProjectSpec } from '../spec/spec.schema.js';
+import { recoverySourceIdentitySchema } from './recovery-source.js';
 
 export interface DatabaseRestoreDrillCompileIssue {
   code:
@@ -18,17 +19,6 @@ export interface DatabaseRestoreDrillCompileResult {
   files: DatabaseRestoreDrillFile[];
   requiredSecrets: string[];
   issues: DatabaseRestoreDrillCompileIssue[];
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
-function stringField(record: Record<string, unknown> | null, key: string): string | undefined {
-  const value = record?.[key];
-  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
 }
 
 export function compileDatabaseRestoreDrillFiles(params: {
@@ -63,50 +53,52 @@ export function compileDatabaseRestoreDrillFiles(params: {
     const component = environment
       ? componentRepo.findByEnvironmentAndType(environment.id, database.engine)
       : null;
-    const bindings = asRecord(component?.bindings);
-    const boundProvider = stringField(bindings, 'provider');
-    const sourceInstanceId = component?.externalId ?? stringField(bindings, 'instanceId');
-    const sourceConnectionName = stringField(bindings, 'connectionName');
-    const sourceDatabaseName = stringField(bindings, 'database');
     if (
       !environment
+      || environment.projectId !== params.project.id
+      || environment.name !== environmentName
       || !component
-      || boundProvider !== database.provider
-      || !sourceInstanceId
-      || !sourceConnectionName
-      || !sourceDatabaseName
+      || component.environmentId !== environment.id
+      || component.type !== database.engine
+      || component.bindings.provider !== database.provider
     ) {
       issues.push({
         code: 'database_restore_drill_binding_missing',
         environmentName,
-        message: `The ${environmentName} restore drill requires a durably bound ${database.provider} primary with exact connection and database identities.`,
+        message: `The ${environmentName} restore drill requires a durably bound ${database.provider} primary in the selected environment.`,
       });
       continue;
     }
 
-    const connectionParts = sourceConnectionName.split(':');
-    const [projectId, region, connectionInstanceId] = connectionParts;
+    const resolved = compiler.resolveSource({ environment, component });
+    if (resolved.status !== 'resolved') {
+      issues.push({
+        code: `database_restore_drill_${resolved.status}`,
+        environmentName,
+        message: resolved.message,
+      });
+      continue;
+    }
+
+    const source = recoverySourceIdentitySchema.safeParse(resolved.source);
     if (
-      connectionParts.length !== 3
-      || !projectId
-      || !region
-      || connectionInstanceId !== sourceInstanceId
+      !source.success
+      || source.data.provider !== database.provider
+      || (component.externalId !== null && source.data.primaryExternalId !== component.externalId)
+      || !resolved.databaseName.trim()
     ) {
       issues.push({
         code: 'database_restore_drill_identity_invalid',
         environmentName,
-        message: `The bound connection name for ${environmentName} does not identify the reviewed primary ${sourceInstanceId}.`,
+        message: `The ${environmentName} restore drill source resolver returned an invalid recovery identity.`,
       });
       continue;
     }
 
     const workflow = compiler.buildWorkflow({
       environmentName,
-      projectId,
-      region,
-      sourceInstanceId,
-      sourceConnectionName,
-      databaseName: sourceDatabaseName,
+      source: source.data,
+      databaseName: resolved.databaseName,
       schedule: drill.schedule,
       credentialsSecretName: drill.credentialsSecret,
       verificationQuery: drill.verificationQuery,

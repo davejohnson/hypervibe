@@ -3,6 +3,9 @@
 A checkpoint requests one provider snapshot before other infrastructure changes.
 The Railway adapter implements this capability and is ready for live validation.
 It does not require a public database URL or execute SQL against the database.
+The [shared recovery contract](recovery-contract.md) defines provider-neutral
+source identity, request observation and verification boundaries. Other providers
+remain explicitly unsupported for checkpoints until their adapters implement it.
 
 Declare a named intent on the existing database, preserving its other settings:
 
@@ -32,11 +35,16 @@ requires investigation of the retained operation record, not a new automatic
 attempt. Do not discard these bindings or change the intent id to bypass an
 uncertain result.
 
-A completed receipt includes the exact database, volume and volume-instance
-scope, backup identity, creation time and expiry. It means the provider reported
+A completed Railway receipt includes the exact database, volume and volume-instance
+scope, backup identity, creation time and expiry. Native volume IDs are nested in
+the source's `resourceIdentity`; the acknowledged workflow is the `operationId`.
+Older exported records are normalized without creating another request.
+Completion means the provider reported
 completion and Hypervibe observed the matching new backup. It explicitly does
 **not** mean that a restore has been tested. Keep the exported bindings with the
 infrastructure handoff so another checkout retains the same operation evidence.
+The receipt's shared `recovery` assessment verifies only `recoveryPoint`; the
+restore, application and migration checks remain unknown.
 
 The same completed intent is a no-op while that exact backup remains available
 and unexpired. To request another backup, review a new intent id. Removing the
