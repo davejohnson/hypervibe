@@ -151,7 +151,7 @@ describe('schema-upgrade recovery from authoritative repository desired state', 
     });
     const recovered = new SpecStore().get(project)!;
     expect(recovered.revision).toBe(9);
-    const handler = vi.fn(async () => ({ success: true }));
+    const handler = vi.fn(async () => { throw new Error('Stale-plan recovery must not execute actions.'); });
 
     const result = await new ConvergeExecutor().execute({
       planRunId: plan.id, currentSpecRevision: recovered.revision, handler,
