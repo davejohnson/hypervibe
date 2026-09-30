@@ -209,6 +209,22 @@ describe('RailwayAdapter.runJob', () => {
     ]);
   });
 
+  it('does not sweep declared CI executions when a first-seed task runs', async () => {
+    const client = fakeClient({
+      GetProjectServicesConnection: () => ({
+        project: { services: { edges: [
+          { node: { id: 'src-svc-1', name: 'web' } },
+          { node: { id: 'declared-task', name: 'hv-dispatch-tester-101' } },
+          { node: { id: 'old-task-1', name: 'hv-task-123' } },
+        ] } },
+      }),
+    });
+    const result = await adapterWith(client).runJob(environment, webService, 'npm run db:seed', fastOptions);
+    expect(result.status).toBe('completed');
+    expect(client.calls.filter((call) => call.query === 'serviceDelete').map((call) => call.variables.id))
+      .toEqual(['old-task-1', 'task-svc-1']);
+  });
+
   it('returns a warning when the pre-run hv-task sweep cannot delete an orphan', async () => {
     const client = fakeClient({
       GetProjectServicesConnection: () => ({

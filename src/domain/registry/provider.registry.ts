@@ -213,6 +213,12 @@ export interface ProviderMetadata {
       domainTrafficProxy?: 'supported' | 'dns-only';
       /** Provider-owned direct-origin and background-workload suspension. */
       maintenance?: 'managed' | 'unsupported';
+      /** Named CI tasks with provider-resolved variables; live evidence remains separate. */
+      environmentTasks?: {
+        variableMode: 'references';
+        execution: 'temporary-workload';
+        status: 'ready-for-live';
+      };
       /** Smallest provider-owned boundary that completely removes one Hypervibe environment. */
       teardownBoundary: 'services' | 'environment' | 'project';
     };

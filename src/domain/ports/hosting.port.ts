@@ -51,6 +51,19 @@ export interface HostingCapabilities {
   supportsMaintenance?: boolean;
 }
 
+/** A reviewed named CI task; its application layer owns execution authority. */
+export interface EnvironmentTaskOptions {
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+  declaredTask?: {
+    variableMode: 'references';
+    sweep: false;
+    expectedImage: string;
+    registryCredentials?: { username: string; token: string };
+    executionId: string;
+  };
+}
+
 /**
  * Standard binding keys used in platformBindings for hosting providers.
  * Each hosting adapter uses these keys to store its identifiers.
@@ -387,7 +400,8 @@ export interface IHostingAdapter {
   runJob?(
     environment: Environment,
     service: Service,
-    command: string
+    command: string,
+    options?: EnvironmentTaskOptions
   ): Promise<JobResult>;
 
   /**

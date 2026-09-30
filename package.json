@@ -30,6 +30,10 @@
       "types": "./dist/hosted.d.ts",
       "import": "./dist/hosted.js"
     },
+    "./ci/environment-task": {
+      "types": "./dist/ci/environment-task.d.ts",
+      "import": "./dist/ci/environment-task.js"
+    },
     "./*": "./*"
   },
   "bin": {
@@ -89,6 +93,7 @@
     "tldts": "^7.4.6",
     "tweetnacl": "^1.0.3",
     "tweetnacl-sealedbox-js": "^1.2.0",
+    "yaml": "^2.9.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {
@@ -98,8 +103,7 @@
     "@vitest/coverage-v8": "^4.0.18",
     "ajv": "8.20.0",
     "typescript": "^5.6.0",
-    "vitest": "^4.0.18",
-    "yaml": "^2.9.0"
+    "vitest": "^4.0.18"
   },
   "overrides": {
     "googleapis-common": {

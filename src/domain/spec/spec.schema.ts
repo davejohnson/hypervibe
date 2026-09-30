@@ -504,11 +504,55 @@ export const githubCodeAuditAutomationSpecSchema = z.object({
   }).strict().default({}),
 }).strict();
 
+const githubTaskTextSchema = z.string().max(2_048).refine(
+  (value) => !/[\u0000-\u001f\u007f-\u009f]|\$\{\{/.test(value),
+  'environment-task values cannot contain control characters or GitHub expressions'
+);
+
+const githubTaskInputFields = {
+  flag: z.string().regex(/^--[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/, 'task flags must be lowercase long options'),
+  description: githubTaskTextSchema.refine((value) => value.length > 0, 'task input description is required'),
+  required: z.boolean().optional(),
+};
+
+export const githubEnvironmentTaskInputSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('string'),
+    ...githubTaskInputFields,
+    default: githubTaskTextSchema.default(''),
+  }).strict(),
+  z.object({
+    type: z.literal('boolean'),
+    ...githubTaskInputFields,
+    default: z.boolean().default(false),
+  }).strict(),
+]);
+
+export const githubEnvironmentTaskAutomationSpecSchema = z.object({
+  kind: z.literal('environment-task'),
+  enabled: z.boolean().default(true),
+  environment: githubTaskTextSchema.refine((value) => value.length > 0, 'task environment is required'),
+  service: githubTaskTextSchema.refine((value) => value.length > 0, 'task service is required'),
+  /** Fixed argv reviewed in desired state, never a shell command or dispatch input. */
+  command: z.array(githubTaskTextSchema.refine((value) => value.length > 0, 'task arguments cannot be empty')).min(1).max(16),
+  inputs: z.record(
+    z.string().regex(/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/, 'task input ids must use lowercase snake_case'),
+    githubEnvironmentTaskInputSchema
+  ).refine((inputs) => Object.keys(inputs).length <= 10, 'environment-task supports at most 10 inputs').default({}),
+  /** Only this bounded machine receipt can be exposed; task logs stay private. */
+  receiptPrefix: z.string().regex(/^[A-Z_][A-Z0-9_]{0,79}:$/, 'task receipt prefix must be an uppercase marker ending in a colon').optional(),
+  /** Reviewed numeric field names; arbitrary application output cannot supply labels. */
+  receiptCountKeys: z.array(z.string().regex(/^[a-z][A-Za-z0-9_]{0,63}$/, 'task receipt count keys must be identifiers'))
+    .max(32).refine((keys) => new Set(keys).size === keys.length, 'task receipt count keys must be unique')
+    .default(['applied', 'skipped']),
+}).strict();
+
 export const githubAutomationSpecSchema = z.discriminatedUnion('kind', [
   githubCheckAutomationSpecSchema,
   githubAutofixAutomationSpecSchema,
   githubPullRequestReviewAutomationSpecSchema,
   githubCodeAuditAutomationSpecSchema,
+  githubEnvironmentTaskAutomationSpecSchema,
 ]);
 
 const githubCollaborationSpecSchema = z.object({
@@ -614,6 +658,24 @@ export const githubSpecSchema = z.object({
   }).strict().default({}),
 }).strict().superRefine((github, ctx) => {
   for (const [id, automation] of Object.entries(github.actions)) {
+    if (automation.kind === 'environment-task') {
+      if (automation.receiptPrefix && (!automation.receiptCountKeys.includes('applied') || !automation.receiptCountKeys.includes('skipped'))) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'task application receipts require applied and skipped count keys',
+          path: ['actions', id, 'receiptCountKeys'],
+        });
+      }
+      const flags = new Set<string>();
+      for (const [inputId, input] of Object.entries(automation.inputs)) {
+        if (flags.has(input.flag)) ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'environment-task input flags must be unique',
+          path: ['actions', id, 'inputs', inputId, 'flag'],
+        });
+        flags.add(input.flag);
+      }
+    }
     if (automation.kind === 'check') {
       const triggers = automation.triggers;
       if (!triggers.manual && !triggers.pullRequest && triggers.push.length === 0 && !triggers.schedule) {
@@ -2106,6 +2168,21 @@ export const projectSpecSchema = z.object({
   ).default({}),
   environments: z.record(z.string().min(1), environmentSpecSchema),
 }).strict().superRefine((spec, ctx) => {
+  for (const [id, automation] of Object.entries(spec.github?.actions ?? {})) {
+    if (automation.kind !== 'environment-task') continue;
+    const target = Object.hasOwn(spec.environments, automation.environment)
+      ? spec.environments[automation.environment] : undefined;
+    if (!target) ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'environment-task must name a declared environment',
+      path: ['github', 'actions', id, 'environment'],
+    });
+    else if (!Object.hasOwn(target.services, automation.service)) ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'environment-task must name a declared service in its target environment',
+      path: ['github', 'actions', id, 'service'],
+    });
+  }
   const githubActions = spec.devops
     ? spec.devops.code.provider === 'github' && spec.devops.ci?.provider === 'github-actions'
     : Boolean(spec.github?.repository || /github\.com[:/]/.test(spec.gitRemoteUrl ?? ''));
@@ -2565,6 +2642,8 @@ export type ProjectSecretSpec = z.infer<typeof projectSecretSpecSchema>;
 export type CollaborationSpec = z.infer<typeof collaborationSpecSchema>;
 export type GitHubScheduleSpec = z.infer<typeof githubScheduleSpecSchema>;
 export type GitHubAutomationSpec = z.infer<typeof githubAutomationSpecSchema>;
+export type GitHubEnvironmentTaskAutomationSpec = z.infer<typeof githubEnvironmentTaskAutomationSpecSchema>;
+export type GitHubEnvironmentTaskInputSpec = z.infer<typeof githubEnvironmentTaskInputSchema>;
 export type GitHubPagesSpec = z.infer<typeof githubPagesSpecSchema>;
 export type GitHubSpec = z.infer<typeof githubSpecSchema>;
 export type DevOpsSpec = z.infer<typeof devopsSpecSchema>;

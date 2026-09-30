@@ -21,6 +21,7 @@ import {
   createHostingServiceCreateRecovery,
   parseHostingBindings,
   parseHostingServiceCreateRecovery,
+  type EnvironmentTaskOptions,
   type HostingServiceCreateRecovery,
 } from '../../../domain/ports/hosting.port.js';
 import {
@@ -3732,7 +3733,7 @@ export class RailwayAdapter implements
     environment: Environment,
     service: Service,
     command: string,
-    options?: { timeoutMs?: number; pollIntervalMs?: number }
+    options?: EnvironmentTaskOptions
   ): Promise<JobResult> {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
@@ -3740,7 +3741,12 @@ export class RailwayAdapter implements
     const client = this.client;
     const startedAt = Date.now();
     const cleanupWarnings: string[] = [];
-    const fail = (message: string, error?: string, data?: Record<string, unknown>): JobResult => ({
+    let mutationAttempted = false;
+    const declaredTask = options?.declaredTask;
+    const safeResult = (result: JobResult): JobResult => declaredTask
+      ? redactExactValues({ ...result, mutationAttempted }, [this.credentials?.apiToken ?? '', declaredTask.registryCredentials?.token ?? ''])
+      : result;
+    const fail = (message: string, error?: string, data?: Record<string, unknown>): JobResult => safeResult({
       jobId: '',
       status: 'failed',
       runner: 'railway-temp-service',
@@ -3769,26 +3775,35 @@ export class RailwayAdapter implements
       );
     }
 
-    const sweepWarning = await this.sweepTaskServices(projectId, environmentId);
-    if (sweepWarning) {
-      cleanupWarnings.push(sweepWarning);
-    }
+    let prepared: { image: string; variables: Record<string, string>; taskName: string; existingServiceIds: Set<string> } | undefined;
+    if (declaredTask) {
+      try {
+        prepared = await this.prepareDeclaredTask(projectId, environmentId, sourceServiceId, declaredTask);
+      } catch (error) {
+        return fail('Declared environment task preflight failed', error instanceof Error ? error.message : String(error));
+      }
+    } else {
+      const sweepWarning = await this.sweepTaskServices(projectId, environmentId);
+      if (sweepWarning) {
+        cleanupWarnings.push(sweepWarning);
+      }
 
-    const ensuredSourceInstance = await this.ensureServiceInstanceForEnvironment(
-      sourceServiceId,
-      environmentId
-    );
-    if (!ensuredSourceInstance.success) {
-      return fail(
-        `Railway environment task requires service ${service.name} in environment ${environment.name}`,
-        ensuredSourceInstance.error,
-        { phase: 'ensureServiceInstance', serviceId: sourceServiceId, environmentId }
+      const ensuredSourceInstance = await this.ensureServiceInstanceForEnvironment(
+        sourceServiceId,
+        environmentId
       );
+      if (!ensuredSourceInstance.success) {
+        return fail(
+          `Railway environment task requires service ${service.name} in environment ${environment.name}`,
+          ensuredSourceInstance.error,
+          { phase: 'ensureServiceInstance', serviceId: sourceServiceId, environmentId }
+        );
+      }
     }
 
     // Tasks run the deployed image so they execute the same code and deps.
-    let image: string | undefined;
-    try {
+    let image: string | undefined = prepared?.image;
+    if (!prepared) try {
       const result = await client.request<{ serviceInstance?: { source?: { image?: string | null } | null } }>(
         gql`
           query TaskSourceInstance($serviceId: String!, $environmentId: String!) {
@@ -3817,7 +3832,9 @@ export class RailwayAdapter implements
     }
 
     let variables: Record<string, string>;
-    try {
+    if (prepared) {
+      variables = prepared.variables;
+    } else try {
       const vars = await this.getServiceVariables(projectId, sourceServiceId, environmentId);
       // RAILWAY_* are provider-injected for the SOURCE service; the temp
       // service gets its own set from Railway.
@@ -3829,10 +3846,11 @@ export class RailwayAdapter implements
       );
     }
 
-    const taskName = `hv-task-${Date.now()}`;
+    const taskName = prepared?.taskName ?? `hv-task-${Date.now()}`;
     let taskServiceId: string;
     try {
-      const created = await client.request<{ serviceCreate: { id: string } }>(
+      if (declaredTask) mutationAttempted = true;
+      const created = await client.request<{ serviceCreate: { id: string; name: string } }>(
         gql`
           mutation CreateTaskService($input: ServiceCreateInput!) {
             serviceCreate(input: $input) {
@@ -3850,17 +3868,56 @@ export class RailwayAdapter implements
           },
         }
       );
+      if (declaredTask && (typeof created.serviceCreate?.id !== 'string' || !created.serviceCreate.id
+        || created.serviceCreate.name !== taskName || prepared!.existingServiceIds.has(created.serviceCreate.id))) {
+        return fail('Railway returned an ambiguous task identity', 'Inspect the exact execution before retrying.', {
+          executionId: declaredTask.executionId, taskService: taskName, ambiguousCreate: true, ownershipVerified: false,
+        });
+      }
       taskServiceId = created.serviceCreate.id;
     } catch (error) {
       return fail(
         'Could not create the temporary Railway task service',
-        error instanceof Error ? error.message : String(error)
+        error instanceof Error ? error.message : String(error),
+        declaredTask ? { executionId: declaredTask.executionId, taskService: taskName, ambiguousCreate: true, ownershipVerified: false } : undefined
       );
     }
 
+    if (declaredTask) {
+      // A create acknowledgement is not ownership evidence. Never configure or
+      // clean up an identity until a value-free scoped read proves this task.
+      const unverified = (): JobResult => fail(
+        'The created Railway task ownership could not be verified',
+        'Inspect the exact execution before retrying; its acknowledged service has been retained.',
+        { executionId: declaredTask.executionId, taskService: taskName, taskServiceId, ambiguousCreate: true, ownershipVerified: false }
+      );
+      try {
+        const ownership = await client.request<unknown>(gql`
+          query DeclaredTaskOwnership($serviceId: String!, $environmentId: String!) {
+            service(id: $serviceId) { id name projectId deletedAt }
+            serviceInstance(serviceId: $serviceId, environmentId: $environmentId) {
+              id serviceId environmentId deletedAt
+            }
+          }
+        `, { serviceId: taskServiceId, environmentId });
+        if (!isRecord(ownership) || !isRecord(ownership.service)
+          || ownership.service.id !== taskServiceId || ownership.service.name !== taskName
+          || ownership.service.projectId !== projectId || ownership.service.deletedAt !== null
+          || !isRecord(ownership.serviceInstance) || typeof ownership.serviceInstance.id !== 'string'
+          || !ownership.serviceInstance.id || ownership.serviceInstance.serviceId !== taskServiceId
+          || ownership.serviceInstance.environmentId !== environmentId || ownership.serviceInstance.deletedAt !== null) {
+          return unverified();
+        }
+      } catch {
+        return unverified();
+      }
+    }
+
     const runTask = async (): Promise<JobResult> => {
-      const pull = image.startsWith('ghcr.io/')
-        ? (await import('../github/package-pull.js')).githubPackagePullCredentials() : null;
+      const pull = declaredTask
+        ? declaredTask.registryCredentials ?? null
+        : image.startsWith('ghcr.io/')
+          ? (await import('../github/package-pull.js')).githubPackagePullCredentials() : null;
       // The sentinel is the exit-code source of truth: Railway deployment
       // statuses have no run-to-completion value for a NEVER-restart service.
       const startCommand = buildTaskStartCommand(command);
@@ -3909,7 +3966,9 @@ export class RailwayAdapter implements
       const outputFrom = (entries: RailwayLogEntry[]): string => entries
         .slice(-100)
         .map((entry) => entry.message)
-        .filter((message) => !message.includes(TASK_EXIT_SENTINEL_PREFIX))
+        .filter((message) => declaredTask
+          ? !message.trim().startsWith(TASK_EXIT_SENTINEL_PREFIX)
+          : !message.includes(TASK_EXIT_SENTINEL_PREFIX))
         .join('\n')
         .slice(-4000);
       for (;;) {
@@ -3934,12 +3993,17 @@ export class RailwayAdapter implements
           // Logs are unavailable while the image is still building.
         }
         const logText = logs.map((entry) => entry.message).join('\n');
-        const match = logText.match(TASK_EXIT_SENTINEL);
+        const match = declaredTask
+          ? logs.map((entry) => entry.message.trim().match(/^__HYPERVIBE_TASK_EXIT:(\d+)__$/))
+            .find((entry) => entry !== null)
+          : logText.match(TASK_EXIT_SENTINEL);
         if (match) {
           exitCode = Number(match[1]);
           break;
         }
-        if (logText.includes(TASK_EXIT_SENTINEL_PREFIX)) {
+        if (declaredTask
+          ? logs.some((entry) => entry.message.trim().startsWith(TASK_EXIT_SENTINEL_PREFIX))
+          : logText.includes(TASK_EXIT_SENTINEL_PREFIX)) {
           const durationMs = Date.now() - startedAt;
           const output = outputFrom(logs);
           const data = { taskService: taskName, taskServiceId, deploymentId, image, deployStatus };
@@ -4033,7 +4097,8 @@ export class RailwayAdapter implements
     } catch (error) {
       outcome = fail(
         `Railway environment task failed for ${service.name}`,
-        error instanceof Error ? error.message : String(error)
+        error instanceof Error ? error.message : String(error),
+        declaredTask ? { executionId: declaredTask.executionId, taskService: taskName, taskServiceId } : undefined
       );
     }
 
@@ -4050,7 +4115,140 @@ export class RailwayAdapter implements
       cleanupWarnings.push(`Temporary task service ${taskName} (${taskServiceId}) could not be deleted: ${error instanceof Error ? error.message : String(error)}. Delete it in Railway to avoid billing.`);
     }
 
-    return { ...outcome, ...(cleanupWarnings.length > 0 ? { cleanupWarning: cleanupWarnings.join(' ') } : {}) };
+    return safeResult({ ...outcome, ...(cleanupWarnings.length > 0 ? { cleanupWarning: cleanupWarnings.join(' ') } : {}) });
+  }
+
+  /** Read names and exact identities only; Railway resolves these references in the task. */
+  private async prepareDeclaredTask(
+    projectId: string,
+    environmentId: string,
+    sourceServiceId: string,
+    options: NonNullable<EnvironmentTaskOptions['declaredTask']>
+  ): Promise<{ image: string; variables: Record<string, string>; taskName: string; existingServiceIds: Set<string> }> {
+    if (options.variableMode !== 'references' || options.sweep !== false
+      || !/^[A-Za-z0-9_-]{1,80}$/.test(options.executionId)
+      || !/^[^@\s]+@sha256:[a-f0-9]{64}$/.test(options.expectedImage)) {
+      throw new Error('Declared task requires reference variables, disabled sweeping, a safe execution id and an immutable expected image.');
+    }
+    if (options.expectedImage.startsWith('ghcr.io/')
+      && (!options.registryCredentials?.username || !options.registryCredentials.token)) {
+      throw new Error('Declared task requires explicit private image registry credentials.');
+    }
+    const client = this.client!;
+    // Legacy first-seed runners sweep hv-task-*; declared executions must not
+    // enter that namespace while a separately authorized seed is running.
+    const taskName = `hv-dispatch-${options.executionId}`;
+    const source = await client.request<unknown>(gql`
+      query DeclaredTaskSource($serviceId: String!, $environmentId: String!) {
+        environment(id: $environmentId) { id projectId deletedAt }
+        serviceInstance(serviceId: $serviceId, environmentId: $environmentId) {
+          id serviceId environmentId deletedAt source { image }
+        }
+      }
+    `, { serviceId: sourceServiceId, environmentId });
+    if (!isRecord(source) || !isRecord(source.environment)
+      || source.environment.id !== environmentId || source.environment.projectId !== projectId
+      || source.environment.deletedAt !== null || !isRecord(source.serviceInstance)
+      || typeof source.serviceInstance.id !== 'string' || !source.serviceInstance.id
+      || source.serviceInstance.serviceId !== sourceServiceId || source.serviceInstance.environmentId !== environmentId
+      || source.serviceInstance.deletedAt !== null || !isRecord(source.serviceInstance.source)
+      || source.serviceInstance.source.image !== options.expectedImage) {
+      throw new Error('The exact source environment, existing service instance or immutable image could not be verified.');
+    }
+
+    const services: Array<{ id: string; name: string }> = [];
+    const serviceIds = new Set<string>();
+    let cursor: string | undefined;
+    for (let page = 0; ; page += 1) {
+      if (page >= 20) throw new Error('Declared task service inventory exceeded its read budget.');
+      const result: unknown = await client.request<unknown>(gql`
+        query DeclaredTaskServices($projectId: String!, $after: String) {
+          project(id: $projectId) {
+            id
+            services(first: 100, after: $after) {
+              edges { node { id name projectId deletedAt } }
+              pageInfo { hasNextPage endCursor }
+            }
+          }
+        }
+      `, { projectId, ...(cursor ? { after: cursor } : {}) });
+      if (!isRecord(result) || !isRecord(result.project) || result.project.id !== projectId
+        || !isRecord(result.project.services)) throw new Error('Declared task service inventory is incomplete.');
+      const connection: Record<string, unknown> = result.project.services;
+      if (!Array.isArray(connection.edges) || !isRecord(connection.pageInfo)
+        || connection.edges.length > 100 || typeof connection.pageInfo.hasNextPage !== 'boolean'
+        || !('endCursor' in connection.pageInfo)) throw new Error('Declared task service pagination is incomplete.');
+      for (const edge of connection.edges) {
+        const node = isRecord(edge) ? edge.node : undefined;
+        if (!isRecord(node) || typeof node.id !== 'string' || !node.id || typeof node.name !== 'string'
+          || node.projectId !== projectId || (node.deletedAt !== null && typeof node.deletedAt !== 'string')
+          || serviceIds.has(node.id)) {
+          throw new Error('Declared task service inventory is ambiguous or out of scope.');
+        }
+        serviceIds.add(node.id);
+        if (node.deletedAt === null) services.push({ id: node.id, name: node.name });
+      }
+      if (!connection.pageInfo.hasNextPage) break;
+      const next: unknown = connection.pageInfo.endCursor;
+      if (typeof next !== 'string' || !next || next === cursor) throw new Error('Declared task service pagination did not advance.');
+      cursor = next;
+    }
+    const bound = services.find((entry) => entry.id === sourceServiceId);
+    if (!bound || !/^[A-Za-z0-9_-]+$/.test(bound.name)
+      || services.filter((entry) => entry.name === bound.name).length !== 1) {
+      throw new Error('Declared task source service name is unsafe or ambiguous.');
+    }
+    if (services.some((entry) => entry.name === taskName)) {
+      throw new Error('This task execution already has a provider resource. Inspect its receipt before retrying; it will not be rerun or swept.');
+    }
+
+    const variables: Record<string, string> = {};
+    const variableIds = new Set<string>();
+    cursor = undefined;
+    for (let page = 0; ; page += 1) {
+      if (page >= 20) throw new Error('Declared task variable inventory exceeded its read budget.');
+      const result: unknown = await client.request<unknown>(gql`
+        query DeclaredTaskVariables($environmentId: String!, $after: String) {
+          environment(id: $environmentId) {
+            id projectId
+            variables(first: 100, after: $after) {
+              edges { node { id name serviceId environment { id projectId } } }
+              pageInfo { hasNextPage endCursor }
+            }
+          }
+        }
+      `, { environmentId, ...(cursor ? { after: cursor } : {}) });
+      if (!isRecord(result) || !isRecord(result.environment) || result.environment.id !== environmentId
+        || result.environment.projectId !== projectId || !isRecord(result.environment.variables)) {
+        throw new Error('Declared task variable inventory is incomplete.');
+      }
+      const connection: Record<string, unknown> = result.environment.variables;
+      if (!Array.isArray(connection.edges) || !isRecord(connection.pageInfo)
+        || connection.edges.length > 100 || typeof connection.pageInfo.hasNextPage !== 'boolean'
+        || !('endCursor' in connection.pageInfo)) throw new Error('Declared task variable pagination is incomplete.');
+      for (const edge of connection.edges) {
+        const node = isRecord(edge) ? edge.node : undefined;
+        if (!isRecord(node) || typeof node.id !== 'string' || !node.id || typeof node.name !== 'string'
+          || (node.serviceId !== null && (typeof node.serviceId !== 'string' || !node.serviceId))
+          || !isRecord(node.environment) || node.environment.id !== environmentId
+          || node.environment.projectId !== projectId || variableIds.has(node.id)) {
+          throw new Error('Declared task variable inventory is ambiguous or out of scope.');
+        }
+        variableIds.add(node.id);
+        if (node.serviceId !== sourceServiceId || node.name.startsWith('RAILWAY_')) continue;
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(node.name) || Object.hasOwn(variables, node.name)) {
+          throw new Error('Declared task variable name is unsafe or ambiguous.');
+        }
+        // Shared values enabled for this service have a service-scoped reference
+        // alias. Do not copy unrelated shared values or another service's keys.
+        variables[node.name] = '${{' + bound.name + '.' + node.name + '}}';
+      }
+      if (!connection.pageInfo.hasNextPage) break;
+      const next: unknown = connection.pageInfo.endCursor;
+      if (typeof next !== 'string' || !next || next === cursor) throw new Error('Declared task variable pagination did not advance.');
+      cursor = next;
+    }
+    return { image: options.expectedImage, variables, taskName, existingServiceIds: serviceIds };
   }
 
   private async sweepTaskServices(projectId: string, environmentId: string): Promise<string | undefined> {
@@ -7154,6 +7352,7 @@ providerRegistry.register({
     },
     lifecycle: {
       hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'managed', maintenance: 'managed', teardownBoundary: 'environment',
+        environmentTasks: { variableMode: 'references', execution: 'temporary-workload', status: 'ready-for-live' },
         serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only' } },
       databaseEngines: ['postgres'],
       databaseConnectivity: { compatibleHostingProviders: ['railway'] },
