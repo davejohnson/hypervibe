@@ -19,6 +19,10 @@ function record(value: unknown): value is Record<string, unknown> {
 /** Nullable selected fields must be present: omission is not an observed default. */
 function completeManagedConfiguration(operation: string | undefined, data: unknown): boolean {
   if (!record(data)) return false;
+  // The provider's non-null EnvironmentVariables scalar is an object map.
+  // Omitted/null/array responses must not become verified empty configuration.
+  if (operation === 'GetVariables') return record(data.variables)
+    && Object.values(data.variables).every(value => typeof value === 'string');
   if (operation === 'GetProjectDetails' && record(data.project)) {
     const services = data.project.services;
     if (!record(services) || !Array.isArray(services.edges)) return false;
@@ -146,7 +150,7 @@ export async function observeRailwayHosted(input: HostedObservationRequest): Pro
     const serialized = Buffer.concat(chunks);
     if (response.ok) {
       const payload: unknown = JSON.parse(serialized.toString('utf8'));
-      if (record(payload) && !payload.errors
+      if (record(payload) && (!payload.errors || (Array.isArray(payload.errors) && payload.errors.length === 0))
         && !completeManagedConfiguration(operations[0].name?.value, payload.data)) {
         stop('provider_error');
         throw controller.signal.reason;
