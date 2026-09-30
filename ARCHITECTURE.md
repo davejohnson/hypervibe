@@ -1768,6 +1768,33 @@ instance, never a destructive restore onto the primary. Provider-to-provider
 replica promotion/failover, replica replacement, and multi-environment
 restore-drill scheduling are separate future lifecycle slices.
 
+The Railway adapter implements a named, one-use `database.resilience.checkpoint`
+intent through the same spec/plan/apply lifecycle. This is a manual volume
+snapshot, not a backup policy, PITR enablement, or restore drill. Planning freezes
+the bound database service and its exact project, environment, volume and
+volume-instance identities. An outstanding checkpoint is isolated from unrelated
+infrastructure changes; its completion does not advance the environment's applied
+deployment contract. Creation is billable and data-bearing and requires the exact
+persisted action confirmation. No checkpoint operation changes a workload, volume
+attachment, database endpoint, or schema.
+
+Before calling the provider, apply durably records a unique operation label,
+the complete prior backup inventory, and request time. It records the returned
+workflow identity before observing completion. Retrying the same intent only
+observes that operation; an uncertain acknowledgement never permits another
+create. Completion requires provider-terminal success and a uniquely correlated
+new backup on the same volume instance. Safe receipts and exported bindings retain
+the backup identity, source scope, timestamp and expiry, and explicitly say that
+restore verification has not run. A completed intent becomes noop only while
+its recorded backup remains observable and unexpired. Removing the intent does
+not delete backups; a new backup needs a new reviewed intent id.
+
+Railway snapshot restore is not a verification mechanism: it stages a replacement
+of the source service's volume. The checkpoint capability exposes no restore,
+delete, schedule, or PITR mutations. Native snapshots remain dependent on their
+provider volume and are not independent off-provider copies. See
+[database checkpoints](docs/database-checkpoints.md) for the evidence boundary.
+
 Environment data moves are explicit one-use desired state under the target
 environment's `dataMigration`. V1 copies only whole PostgreSQL databases and
 named object buckets from another declared environment. Plan isolates pending

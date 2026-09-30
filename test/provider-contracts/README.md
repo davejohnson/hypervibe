@@ -69,6 +69,13 @@ the table are not thereby schema-certified. Generated workflow execution and
 shared lifecycle parity tests remain complementary gates. No provider is
 promoted to `supported` by these offline tests.
 
+Railway checkpoint tests also execute snapshot creation, inventory and workflow
+status through the real serialized client and pinned SDL. Snapshot identities
+and nullable fields follow the official CLI's
+[`database/pitr.rs`](https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/commands/database/pitr.rs#L1308-L1437),
+including its explicit distinction between a volume id and a volume-instance id.
+The fixture is synthetic; no backup or restore has been performed by these tests.
+
 S3, GCS and Azure Blob Storage also run the shared storage plan/apply/binding
 path with two environments using the same logical resource name. Their
 stateful transport/SDK fixtures check isolated physical identities and noop

@@ -71,6 +71,10 @@ import type {
   ProviderEnvironmentVariablesResult,
 } from '../../../domain/ports/provider-env-vars.port.js';
 import { redactExactValues } from '../../../utils/redact-exact-values.js';
+import type {
+  DatabaseCheckpointBackup, DatabaseCheckpointIdentity, DatabaseCheckpointSource,
+  DatabaseCheckpointWorkflow,
+} from '../../../domain/ports/database-checkpoint.port.js';
 
 // Credentials schema for self-registration
 export const RailwayCredentialsSchema = z.object({
@@ -1720,7 +1724,7 @@ export class RailwayAdapter implements
   }
 
   private async listEnvironmentVolumeInstances(
-    target: RailwayVolumeTarget
+    target: Pick<RailwayVolumeTarget, 'projectId' | 'environmentId'>
   ): Promise<RailwayVolumeInstance[]> {
     if (!this.client) throw new Error('Not connected. Call connect() first.');
     const query = gql`
@@ -1835,6 +1839,134 @@ export class RailwayAdapter implements
     throw new Error(
       `Railway volume inventory exceeded 100 pages for environment ${target.environmentId}; observation is incomplete.`
     );
+  }
+
+  /** Snapshot APIs address a volume INSTANCE, never its parent volume ID.
+   * Pinned official CLI database/pitr.rs:1308-1437 establishes that distinction.
+   * Observation and creation never alter a service, volume mount, or database URL.
+   */
+  async observeDatabaseCheckpointSource(
+    target: Pick<RailwayVolumeTarget, 'projectId' | 'environmentId' | 'serviceId'>
+  ): Promise<DatabaseCheckpointSource> {
+    if (!this.client) throw new Error('Railway checkpoint observation requires a connected adapter.');
+    if (Object.values(target).some((value) => typeof value !== 'string' || !value.trim())) {
+      throw new Error('Railway checkpoints require exact project, environment and service identities.');
+    }
+    try {
+      const response = await this.client.request<unknown>(gql`
+        query DatabaseCheckpointTarget($projectId: String!, $environmentId: String!, $serviceId: String!) {
+          service(id: $serviceId) { id projectId deletedAt }
+          environment(id: $environmentId, projectId: $projectId) { id projectId deletedAt }
+          serviceInstance(serviceId: $serviceId, environmentId: $environmentId) {
+            id serviceId environmentId deletedAt
+          }
+        }
+      `, target);
+      if (!isRecord(response) || !isRecord(response.service) || !isRecord(response.environment)
+        || !isRecord(response.serviceInstance)
+        || response.service.id !== target.serviceId || response.service.projectId !== target.projectId
+        || response.environment.id !== target.environmentId || response.environment.projectId !== target.projectId
+        || typeof response.serviceInstance.id !== 'string' || !response.serviceInstance.id.trim()
+        || response.serviceInstance.serviceId !== target.serviceId
+        || response.serviceInstance.environmentId !== target.environmentId
+        || response.service.deletedAt !== null || response.environment.deletedAt !== null
+        || response.serviceInstance.deletedAt !== null) {
+        throw new Error('Railway checkpoint source ownership could not be verified.');
+      }
+      const volumes = (await this.listEnvironmentVolumeInstances(target))
+        .filter((volume) => volume.deletedAt === null && volume.serviceId === target.serviceId);
+      if (volumes.length !== 1 || volumes[0]!.isPendingDeletion) {
+        throw new Error('Railway checkpoint requires exactly one active, non-deleting volume on the bound database.');
+      }
+      const volume = volumes[0]!;
+      const result = await this.client.request<unknown>(gql`
+        query DatabaseCheckpointBackups($volumeInstanceId: String!) {
+          volumeInstanceBackupList(volumeInstanceId: $volumeInstanceId) {
+            id externalId name createdAt expiresAt usedMB referencedMB volumeInstanceSizeMB
+          }
+        }
+      `, { volumeInstanceId: volume.instanceId });
+      if (!isRecord(result) || !Array.isArray(result.volumeInstanceBackupList)) {
+        throw new Error('Railway did not return a complete checkpoint inventory.');
+      }
+      const backups: DatabaseCheckpointBackup[] = [];
+      const ids = new Set<string>();
+      const externalIds = new Set<string>();
+      for (const entry of result.volumeInstanceBackupList) {
+        if (!isRecord(entry)
+          || typeof entry.id !== 'string' || !entry.id.trim()
+          || typeof entry.externalId !== 'string' || !entry.externalId.trim()
+          || (entry.name !== null && typeof entry.name !== 'string')
+          || typeof entry.createdAt !== 'string' || !Number.isFinite(Date.parse(entry.createdAt))
+          || (entry.expiresAt !== null && (typeof entry.expiresAt !== 'string' || !Number.isFinite(Date.parse(entry.expiresAt))))
+          || ['usedMB', 'referencedMB', 'volumeInstanceSizeMB'].some((key) => entry[key] !== null
+            && (typeof entry[key] !== 'number' || !Number.isSafeInteger(entry[key]) || entry[key] < 0))
+          || ids.has(entry.id) || externalIds.has(entry.externalId)) {
+          throw new Error('Railway returned incomplete, malformed or duplicate checkpoint evidence.');
+        }
+        ids.add(entry.id);
+        externalIds.add(entry.externalId);
+        backups.push({ id: entry.id, externalId: entry.externalId, name: entry.name as string | null,
+          createdAt: entry.createdAt, expiresAt: entry.expiresAt as string | null,
+          usedMB: entry.usedMB as number | null, referencedMB: entry.referencedMB as number | null,
+          volumeInstanceSizeMB: entry.volumeInstanceSizeMB as number | null });
+      }
+      return { providerScope: { projectId: target.projectId, environmentId: target.environmentId },
+        primaryExternalId: target.serviceId, volumeId: volume.volumeId, volumeInstanceId: volume.instanceId, backups };
+    } catch {
+      // Do not forward provider text: it may echo the control-plane credential.
+      throw new Error('Railway checkpoint source or backup inventory could not be completely verified. No backup was created.');
+    }
+  }
+
+  async createDatabaseCheckpoint(source: DatabaseCheckpointIdentity, label: string): Promise<{ workflowId: string | null }> {
+    if (!this.client) throw new Error('Railway checkpoint creation requires a connected adapter.');
+    if (!/^[a-z0-9-]{1,128}$/.test(label)) throw new Error('Invalid checkpoint operation label.');
+    const fresh = await this.observeDatabaseCheckpointSource({
+      projectId: source.providerScope.projectId!, environmentId: source.providerScope.environmentId!,
+      serviceId: source.primaryExternalId,
+    });
+    if (fresh.volumeId !== source.volumeId || fresh.volumeInstanceId !== source.volumeInstanceId
+      || fresh.backups.some((backup) => backup.name === label)) {
+      throw new Error('Railway checkpoint source changed or its operation label already exists. Creation refused.');
+    }
+    try {
+      const result = await this.client.request<unknown>(gql`
+        mutation DatabaseCheckpointCreate($volumeInstanceId: String!, $name: String!) {
+          volumeInstanceBackupCreate(volumeInstanceId: $volumeInstanceId, name: $name) { workflowId }
+        }
+      `, { volumeInstanceId: source.volumeInstanceId, name: label });
+      if (!isRecord(result) || !isRecord(result.volumeInstanceBackupCreate)
+        || (result.volumeInstanceBackupCreate.workflowId !== null
+          && (typeof result.volumeInstanceBackupCreate.workflowId !== 'string'
+            || !result.volumeInstanceBackupCreate.workflowId.trim()))) {
+        throw new Error('Missing checkpoint workflow acknowledgement.');
+      }
+      return { workflowId: result.volumeInstanceBackupCreate.workflowId as string | null };
+    } catch {
+      throw new Error('Railway checkpoint creation outcome is uncertain. Retain the operation record; do not retry creation.');
+    }
+  }
+
+  async observeDatabaseCheckpointWorkflow(workflowId: string): Promise<DatabaseCheckpointWorkflow> {
+    if (!this.client || typeof workflowId !== 'string' || !workflowId.trim()) {
+      throw new Error('Railway checkpoint workflow observation requires a connected adapter and exact workflow identity.');
+    }
+    try {
+      const result = await this.client.request<unknown>(gql`
+        query DatabaseCheckpointWorkflow($workflowId: String!) {
+          workflowStatus(workflowId: $workflowId) { status }
+        }
+      `, { workflowId });
+      const states = { Running: 'running', Complete: 'complete', Error: 'error', NotFound: 'not-found' } as const;
+      if (!isRecord(result) || !isRecord(result.workflowStatus)
+        || typeof result.workflowStatus.status !== 'string' || !Object.hasOwn(states, result.workflowStatus.status)) {
+        throw new Error('Incomplete checkpoint workflow observation.');
+      }
+      return { state: states[result.workflowStatus.status as keyof typeof states] };
+    } catch {
+      throw new Error('Railway checkpoint workflow state is unknown.');
+    }
   }
 
   private async waitForCreatedServiceVolume(
@@ -7356,6 +7488,7 @@ providerRegistry.register({
         serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only' } },
       databaseEngines: ['postgres'],
       databaseConnectivity: { compatibleHostingProviders: ['railway'] },
+      databaseResilience: { checkpoints: true },
       cacheEngines: ['redis'],
       cacheConnectivity: { compatibleHostingProviders: ['railway'] },
       queue: { backend: 'postgres', resources: 'application-managed' },

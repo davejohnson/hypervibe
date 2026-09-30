@@ -832,6 +832,25 @@ export async function executePlanApply(ctx: CommandContext, params: {
     ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
     : project;
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (planScope === 'database-checkpoint') {
+    if (!environment) return { kind: 'env_missing', envName };
+    if (loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
+      return { kind: 'blocked', applyBlocked: [{ provider: 'hypervibe', reason: 'The snapshot plan belongs to a different project or environment.' }] };
+    }
+    const blocked = planService.providerPreflight([envSpec.database?.provider ?? 'unconfigured']);
+    if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
+    const result = await executor.execute({
+      planRunId: planId, confirmActions: params.confirmActions, currentSpecRevision: params.specRevision,
+      handler: async (action) => {
+        if (resolvePlanActionAuthority(action)?.capability !== 'database.checkpoint.create') {
+          return { success: false, status: 'blocked', message: 'The snapshot stage cannot mutate deployment configuration. Re-run hv_plan.' };
+        }
+        return applyDatabaseResilienceAction({ ctx, project, environmentName: envName, environmentSpec: envSpec,
+          action, confirmedActionIds: new Set(params.confirmActions) });
+      },
+    });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [] };
+  }
   if (planScope === 'api-policy') {
     if (!environment) return { kind: 'env_missing', envName };
     if (loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) return { kind: 'blocked', applyBlocked: [{ provider: 'hypervibe', reason: 'The reviewed API policy plan belongs to a different project or environment.' }] };
@@ -1949,7 +1968,8 @@ export async function executePlanApply(ctx: CommandContext, params: {
       });
     }
     if (
-      capability === 'database.availability.configure'
+      capability === 'database.checkpoint.create'
+      || capability === 'database.availability.configure'
       || capability === 'database.backup-policy.configure'
       || capability === 'database.replica.provision'
       || capability === 'database.replica.destroy'
@@ -1960,6 +1980,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
         environmentName: envName,
         environmentSpec: envSpec,
         action,
+        confirmedActionIds,
       });
     }
     if (capability === 'database.seed') {

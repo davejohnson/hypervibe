@@ -191,6 +191,7 @@ export const planRunDocumentSchema = z.object({
     'managed-ci-bindings',
     'hosting-bindings',
     'service-volumes',
+    'database-checkpoint',
     'managed-ci-publication',
   ]).optional(),
   environmentName: z.string().min(1),
@@ -261,6 +262,17 @@ export const planRunDocumentSchema = z.object({
     return;
   }
 
+  if (document.scope === 'database-checkpoint') {
+    const action = document.actions[0];
+    if (document.actions.length !== 1 || action?.resource.kind !== 'database'
+      || action.metadata?.operation !== 'databaseCheckpointCreate'
+      || (action.type !== 'create' && action.type !== 'update') || action.dependsOn?.length
+      || document.overrides || document.integrationFingerprints
+      || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
+      ctx.addIssue({ code: 'custom', message: 'database-checkpoint plans must contain only the independent checkpoint action and no runtime or cross-environment inputs.' });
+    }
+    return;
+  }
   if (document.scope === 'service-volumes') {
     if (!document.actions.length || document.actions.some(action => action.resource.kind !== 'volume') || document.overrides || document.inputRequired?.length) {
       ctx.addIssue({ code: 'custom', message: 'service-volumes plan must contain only filesystem actions and no runtime secret inputs.' });

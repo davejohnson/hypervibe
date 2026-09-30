@@ -255,6 +255,8 @@ export interface ProviderMetadata {
     };
     /** Declarative database resilience features implemented by the adapter. */
     databaseResilience?: {
+      /** Named one-use provider snapshots with durable uncertain-write recovery. */
+      checkpoints?: boolean;
       availabilityModes?: Array<'zonal' | 'regional'>;
       backups?: {
         maxRetainedBackups: number;
