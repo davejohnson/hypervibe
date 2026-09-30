@@ -75,6 +75,12 @@ and nullable fields follow the official CLI's
 [`database/pitr.rs`](https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/commands/database/pitr.rs#L1308-L1437),
 including its explicit distinction between a volume id and a volume-instance id.
 The fixture is synthetic; no backup or restore has been performed by these tests.
+Checkpoint failure diagnostics also follow that revision's
+[`client.rs`](https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/client.rs)
+authorization-error recognition and
+[`workflow.rs`](https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/controllers/workflow.rs)
+status-polling limitations. Error fixtures are reconstructed; they verify safe
+categories and retained recovery identities, not the cause of a live failure.
 
 S3, GCS and Azure Blob Storage also run the shared storage plan/apply/binding
 path with two environments using the same logical resource name. Their

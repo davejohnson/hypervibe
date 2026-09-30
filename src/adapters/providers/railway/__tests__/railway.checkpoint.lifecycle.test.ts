@@ -11,6 +11,7 @@ import { adapterFactory } from '../../../../domain/services/adapter.factory.js';
 import { environmentSpecSchema } from '../../../../domain/spec/spec.schema.js';
 import { createRailwayDatabaseAdapter } from '../railway-database.factory.js';
 import { projectId, stagingId, railwayHttpFixture } from './railway-http.fixture.js';
+import { checkpointObservationFailures, privateProviderDetail } from './railway.checkpoint-observation.fixture.js';
 
 describe('Railway checkpoint durable lifecycle through serialized transport', () => {
   let root: string;
@@ -26,7 +27,8 @@ describe('Railway checkpoint durable lifecycle through serialized transport', ()
     SqliteAdapter.resetInstance(); rmSync(root, { recursive: true, force: true });
   });
 
-  async function setup(dropCreateResponse = false) {
+  async function setup(dropCreateResponse = false, workflowResponse?: () => Response,
+    observationResponse?: (query: string) => Response | undefined) {
     const ctx = createCommandContext();
     const project = ctx.repos.projects.create({ name: 'checkpoint-contract', defaultPlatform: 'railway' });
     const environment = ctx.repos.environments.create({ projectId: project.id, name: 'staging',
@@ -47,8 +49,10 @@ describe('Railway checkpoint durable lifecycle through serialized transport', ()
             .toEqual({ 'pre-beta': recovery });
           sawDurableIntentBeforeMutation = true;
         }
+        const overridden = observationResponse?.(query);
+        if (overridden) return overridden;
         if (query.includes('query DatabaseCheckpointWorkflow')) {
-          return Response.json({ data: { workflowStatus: { status: 'Complete' } } });
+          return workflowResponse?.() ?? Response.json({ data: { workflowStatus: { status: 'Complete' } } });
         }
         return undefined;
       },
@@ -80,6 +84,73 @@ describe('Railway checkpoint durable lifecycle through serialized transport', ()
     });
     return { ctx, environment, component, http, plan, apply, sawIntent: () => sawDurableIntentBeforeMutation };
   }
+
+  it.each(checkpointObservationFailures)('reports $name safely on create and resume without another write', async (failure) => {
+    let failing = true;
+    const f = await setup(false, () => failing ? failure.respond()
+      : Response.json({ data: { workflowStatus: { status: 'Complete' } } }));
+    const expected = { success: false, status: 'blocked', data: {
+      applied: null, skipped: 0, restoreVerified: false, workflowId: 'backup-workflow',
+      observationFailure: { stage: 'workflow_status', category: failure.category,
+        ...('httpStatus' in failure ? { httpStatus: failure.httpStatus } : {}) },
+    } };
+    const first = await f.apply(await f.plan());
+    expect(JSON.stringify(first)).not.toContain(privateProviderDetail);
+    expect(first).toMatchObject(expected);
+    const retained = f.ctx.repos.components.findById(f.component.id)!.bindings;
+    expect((retained.resilience as any).checkpoints['pre-beta']).toMatchObject({ state: 'running', workflowId: 'backup-workflow' });
+    const next = await f.plan();
+    expect(next.type).toBe('update');
+    const resumed = await f.apply(next);
+    expect(JSON.stringify(resumed)).not.toContain(privateProviderDetail);
+    expect(resumed).toMatchObject(expected);
+    expect(f.ctx.repos.components.findById(f.component.id)!.bindings).toEqual(retained);
+    expect(f.http.mutations.map((entry) => entry.field)).toEqual(['volumeInstanceBackupCreate']);
+    // Inventory already contains the matching snapshot, but failed workflow reads
+    // must not finalize it. Only a later successful terminal read can do so.
+    failing = false;
+    expect(await f.apply(await f.plan())).toMatchObject({ success: true, data: {
+      applied: 0, skipped: 1, restoreVerified: false, workflowId: 'backup-workflow',
+    } });
+    expect(f.http.mutations.map((entry) => entry.field)).toEqual(['volumeInstanceBackupCreate']);
+    expect(f.http.contractErrors).toEqual([]);
+  });
+
+  it('distinguishes inventory failure after terminal workflow observation and retains the created request', async () => {
+    let workflowRead = false;
+    const f = await setup(false, () => {
+      workflowRead = true;
+      return Response.json({ data: { workflowStatus: { status: 'Complete' } } });
+    }, (query) => workflowRead && query.includes('DatabaseCheckpointBackups')
+      ? Response.json({ errors: [{ message: privateProviderDetail }] }, { status: 403 }) : undefined);
+    const result = await f.apply(await f.plan());
+    expect(result).toMatchObject({ success: false, status: 'blocked', data: {
+      applied: null, restoreVerified: false, workflowId: 'backup-workflow',
+      observationFailure: { stage: 'source_inventory', category: 'authorization', httpStatus: 403 },
+    } });
+    expect(JSON.stringify(result)).not.toContain(privateProviderDetail);
+    expect(JSON.stringify(result)).not.toContain('No backup was created');
+    expect(f.http.mutations.map((entry) => entry.field)).toEqual(['volumeInstanceBackupCreate']);
+    expect((f.ctx.repos.components.findById(f.component.id)!.bindings.resilience as any).checkpoints['pre-beta'])
+      .toMatchObject({ state: 'running', workflowId: 'backup-workflow' });
+  });
+
+  it.each(['Complete', 'Error'] as const)('does not call a local persistence failure a failed provider read after %s', async (status) => {
+    const f = await setup(false, () => Response.json({ data: { workflowStatus: { status } } }));
+    const update = f.ctx.repos.components.update.bind(f.ctx.repos.components);
+    vi.spyOn(f.ctx.repos.components, 'update').mockImplementation((id, patch) => {
+      const state = (patch.bindings?.resilience as any)?.checkpoints?.['pre-beta']?.state;
+      if (state === 'complete' || state === 'error') throw new Error(privateProviderDetail);
+      return update(id, patch);
+    });
+    const result = await f.apply(await f.plan());
+    expect(result).toMatchObject({ success: false, status: 'blocked', data: {
+      applied: null, workflowId: 'backup-workflow', restoreVerified: false,
+    } });
+    expect(result.data).not.toHaveProperty('observationFailure');
+    expect(JSON.stringify(result)).not.toContain(privateProviderDetail);
+    expect(f.http.mutations.map((entry) => entry.field)).toEqual(['volumeInstanceBackupCreate']);
+  });
 
   it('persists before mutation, records exact provider evidence, and replans mutation-free', async () => {
     const f = await setup();

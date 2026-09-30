@@ -71,9 +71,10 @@ import type {
   ProviderEnvironmentVariablesResult,
 } from '../../../domain/ports/provider-env-vars.port.js';
 import { redactExactValues } from '../../../utils/redact-exact-values.js';
-import type {
-  DatabaseCheckpointBackup, DatabaseCheckpointIdentity, DatabaseCheckpointSource,
-  DatabaseCheckpointWorkflow,
+import {
+  DatabaseCheckpointObservationError,
+  type DatabaseCheckpointBackup, type DatabaseCheckpointIdentity, type DatabaseCheckpointSource,
+  type DatabaseCheckpointWorkflow, type DatabaseCheckpointObservationFailure,
 } from '../../../domain/ports/database-checkpoint.port.js';
 
 // Credentials schema for self-registration
@@ -1913,10 +1914,30 @@ export class RailwayAdapter implements
       }
       return { providerScope: { projectId: target.projectId, environmentId: target.environmentId },
         primaryExternalId: target.serviceId, volumeId: volume.volumeId, volumeInstanceId: volume.instanceId, backups };
-    } catch {
-      // Do not forward provider text: it may echo the control-plane credential.
-      throw new Error('Railway checkpoint source or backup inventory could not be completely verified. No backup was created.');
+    } catch (error) {
+      throw this.checkpointObservationError(error, 'source_inventory');
     }
+  }
+
+  private checkpointObservationError(error: unknown, stage: DatabaseCheckpointObservationFailure['stage']): DatabaseCheckpointObservationError {
+    if (error instanceof DatabaseCheckpointObservationError) return error;
+    const response = isRecord(error) && isRecord(error.response) ? error.response : undefined;
+    const httpStatus = typeof response?.status === 'number' ? response.status : undefined;
+    const errors = Array.isArray(response?.errors) ? response.errors.filter(isRecord) : [];
+    let category: DatabaseCheckpointObservationFailure['category'] = 'unknown';
+    // Official CLI f60f3a7 src/client.rs parse_graphql_response recognizes this
+    // phrase. Classify it locally; the provider message itself must never escape.
+    if (httpStatus === 401 || httpStatus === 403
+      || errors.some((entry) => typeof entry.message === 'string' && entry.message.toLowerCase().includes('not authorized'))) {
+      category = 'authorization';
+    } else if (httpStatus === 429) {
+      category = 'rate_limit';
+    } else if (this.isGraphqlSchemaCompatibilityError(error)) {
+      category = 'schema';
+    } else if ((httpStatus !== undefined && httpStatus >= 400 && httpStatus <= 599) || errors.length > 0) {
+      category = 'provider';
+    }
+    return new DatabaseCheckpointObservationError(stage, category, httpStatus);
   }
 
   async createDatabaseCheckpoint(source: DatabaseCheckpointIdentity, label: string): Promise<{ workflowId: string | null }> {
@@ -1961,11 +1982,11 @@ export class RailwayAdapter implements
       const states = { Running: 'running', Complete: 'complete', Error: 'error', NotFound: 'not-found' } as const;
       if (!isRecord(result) || !isRecord(result.workflowStatus)
         || typeof result.workflowStatus.status !== 'string' || !Object.hasOwn(states, result.workflowStatus.status)) {
-        throw new Error('Incomplete checkpoint workflow observation.');
+        throw new DatabaseCheckpointObservationError('workflow_status', 'invalid_response');
       }
       return { state: states[result.workflowStatus.status as keyof typeof states] };
-    } catch {
-      throw new Error('Railway checkpoint workflow state is unknown.');
+    } catch (error) {
+      throw this.checkpointObservationError(error, 'workflow_status');
     }
   }
 

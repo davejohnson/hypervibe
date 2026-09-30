@@ -3,6 +3,7 @@ import { createRailwayDatabaseAdapter } from '../railway-database.factory.js';
 import { railwayHttpFixture, projectId, productionId, stagingId } from './railway-http.fixture.js';
 import type { Component } from '../../../../domain/entities/component.entity.js';
 import type { IDatabaseCheckpointAdapter } from '../../../../domain/ports/database-checkpoint.port.js';
+import { checkpointObservationFailures, privateProviderDetail } from './railway.checkpoint-observation.fixture.js';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -26,6 +27,17 @@ async function fixture(options: Parameters<typeof railwayHttpFixture>[0] = {}) {
  * Synthetic state proves the transport contract, not live backup restorability.
  */
 describe('Railway database checkpoint API contract', () => {
+  it.each(checkpointObservationFailures)('retains only safe diagnostics for $name', async (failure) => {
+    const f = await fixture({ responseOverride: ({ query }) => query.includes('query DatabaseCheckpointWorkflow')
+      ? failure.respond() : undefined });
+    const error = await f.adapter.observeCheckpointWorkflow('workflow').catch((caught: unknown) => caught);
+    expect(String(error)).not.toContain(privateProviderDetail);
+    expect(JSON.stringify(error)).not.toContain(privateProviderDetail);
+    expect(error).toMatchObject({ stage: 'workflow_status', category: failure.category,
+      ...('httpStatus' in failure ? { httpStatus: failure.httpStatus } : {}) });
+    expect(f.mutations).toEqual([]);
+  });
+
   it('resolves the exact staging volume INSTANCE through pagination and creates only a snapshot', async () => {
     const f = await fixture({ pageSize: 1 });
     const before = structuredClone(f.production.instance);
@@ -93,6 +105,20 @@ describe('Railway database checkpoint API contract', () => {
       ? Response.json({ errors: [{ message: 'synthetic denied' }] }, { status: 403 }) : undefined });
     await expect(f.adapter.observeCheckpointSource(f.environment, f.component)).rejects.toThrow();
     expect(f.mutations).toEqual([]);
+  });
+
+  it('does not claim an observation failure proves no backup was created', async () => {
+    let failInventory = false;
+    const f = await fixture({ responseOverride: ({ query }) => failInventory && query.includes('DatabaseCheckpointBackups')
+      ? Response.json({ errors: [{ message: privateProviderDetail }] }, { status: 403 }) : undefined });
+    const source = await f.adapter.observeCheckpointSource(f.environment, f.component);
+    await f.adapter.createCheckpoint(source, 'hv-test');
+    failInventory = true;
+    const error = await f.adapter.observeCheckpointSource(f.environment, f.component).catch((caught: unknown) => caught);
+    expect(String(error)).not.toContain('No backup was created');
+    expect(String(error)).not.toContain(privateProviderDetail);
+    expect(error).toMatchObject({ stage: 'source_inventory', category: 'authorization', httpStatus: 403 });
+    expect(f.mutations).toHaveLength(1);
   });
 
   it('rejects malformed timestamps and duplicate backup identity in opaque scalar responses', async () => {

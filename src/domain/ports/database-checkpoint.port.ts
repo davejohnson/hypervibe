@@ -27,6 +27,24 @@ export interface DatabaseCheckpointWorkflow {
   state: 'running' | 'complete' | 'error' | 'not-found';
 }
 
+export interface DatabaseCheckpointObservationFailure {
+  stage: 'source_inventory' | 'workflow_status';
+  category: 'authorization' | 'schema' | 'rate_limit' | 'provider' | 'invalid_response' | 'unknown';
+  httpStatus?: number;
+}
+
+/** Locally classified read failure; never retain raw provider text or request data. */
+export class DatabaseCheckpointObservationError extends Error implements DatabaseCheckpointObservationFailure {
+  readonly httpStatus?: number;
+
+  constructor(readonly stage: DatabaseCheckpointObservationFailure['stage'],
+    readonly category: DatabaseCheckpointObservationFailure['category'], httpStatus?: number) {
+    super(`Database checkpoint observation is unknown (${stage}: ${category}).`);
+    this.name = 'DatabaseCheckpointObservationError';
+    if (Number.isInteger(httpStatus) && httpStatus! >= 100 && httpStatus! <= 599) this.httpStatus = httpStatus;
+  }
+}
+
 export interface DatabaseCheckpointBinding {
   source: DatabaseCheckpointIdentity;
   label: string;

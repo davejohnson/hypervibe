@@ -5,11 +5,15 @@ import type { Environment } from '../domain/entities/environment.entity.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { ActionResult } from '../domain/plan/converge.executor.js';
 import type { EnvironmentSpec } from '../domain/spec/spec.schema.js';
-import { supportsDatabaseCheckpoint, type DatabaseCheckpointBinding } from '../domain/ports/database-checkpoint.port.js';
+import { supportsDatabaseCheckpoint, DatabaseCheckpointObservationError, type DatabaseCheckpointBinding, type DatabaseCheckpointObservationFailure } from '../domain/ports/database-checkpoint.port.js';
 import { checkpointBackupAvailable, checkpointIdentityMatches, databaseCheckpointBindings, databaseCheckpointIdentitySchema, databaseCheckpointSourceSchema } from '../domain/services/database-checkpoint.js';
 import type { CommandContext } from './context.js';
 
 const blocked = (message: string): ActionResult => ({ success: false, status: 'blocked', message });
+const observationFailure = (error: unknown, stage: DatabaseCheckpointObservationFailure['stage']): DatabaseCheckpointObservationFailure =>
+  error instanceof DatabaseCheckpointObservationError
+    ? { stage: error.stage, category: error.category, ...(error.httpStatus === undefined ? {} : { httpStatus: error.httpStatus }) }
+    : { stage, category: 'unknown' };
 
 export async function applyDatabaseCheckpoint(params: {
   ctx: CommandContext; environment: Environment; component: Component; environmentSpec: EnvironmentSpec;
@@ -38,7 +42,13 @@ export async function applyDatabaseCheckpoint(params: {
   }
   let source;
   try { source = databaseCheckpointSourceSchema.parse(await adapter.observeCheckpointSource(environment, component)); }
-  catch { return blocked('The exact database snapshot source and backup inventory could not be verified.'); }
+  catch (error) {
+    return { ...blocked('The exact database snapshot source and backup inventory could not be verified.'), data: {
+      checkpointId, ...(binding?.workflowId ? { workflowId: binding.workflowId } : {}),
+      applied: binding ? null : 0, skipped: 0, restoreVerified: false,
+      observationFailure: observationFailure(error, 'source_inventory'),
+    } };
+  }
   if (!checkpointIdentityMatches(reviewedSource.data, source)
     || (binding && !checkpointIdentityMatches(binding.source, source))) {
     return blocked('The snapshot volume or provider scope changed after planning. Re-run hv_plan.');
@@ -54,9 +64,10 @@ export async function applyDatabaseCheckpoint(params: {
       throw new Error('The snapshot recovery export could not be persisted.');
     }
   };
-  const unresolved = (message: string, status: 'blocked' | 'pending' = 'blocked'): ActionResult => ({
+  const unresolved = (message: string, status: 'blocked' | 'pending' = 'blocked', failure?: DatabaseCheckpointObservationFailure): ActionResult => ({
     success: false, status, message,
-    data: { checkpointId, ...(binding?.workflowId ? { workflowId: binding.workflowId } : {}), applied: null, skipped: 0, restoreVerified: false },
+    data: { checkpointId, ...(binding?.workflowId ? { workflowId: binding.workflowId } : {}), applied: null, skipped: 0, restoreVerified: false,
+      ...(failure ? { observationFailure: failure } : {}) },
   });
   const receipt = (applied: number, skipped: number): ActionResult => ({
     success: true, message: 'Provider confirmed the named database snapshot; restore has not been tested.',
@@ -93,14 +104,18 @@ export async function applyDatabaseCheckpoint(params: {
     }
   }
   for (let attempt = 0; attempt < 3; attempt++) {
+    let stage: DatabaseCheckpointObservationFailure['stage'] | undefined = 'workflow_status';
     try {
       const workflow = await adapter.observeCheckpointWorkflow(binding!.workflowId!);
+      stage = undefined;
       if (workflow.state === 'error' || workflow.state === 'not-found') {
         persist({ ...binding!, state: workflow.state === 'error' ? 'error' : 'unknown' });
         return unresolved('The recorded snapshot workflow failed or is unavailable. No second snapshot was requested.');
       }
       if (workflow.state === 'complete') {
+        stage = 'source_inventory';
         const observed = databaseCheckpointSourceSchema.parse(await adapter.observeCheckpointSource(environment, component));
+        stage = undefined;
         if (!checkpointIdentityMatches(binding!.source, observed)) return unresolved('The database volume changed while verifying the snapshot.');
         const matches = observed.backups.filter((backup) => backup.name === binding!.label && !binding!.beforeBackupIds.includes(backup.id)
           && !binding!.beforeBackupExternalIds.includes(backup.externalId)
@@ -115,8 +130,9 @@ export async function applyDatabaseCheckpoint(params: {
       } else if (workflow.state !== 'running') {
         return unresolved('The provider returned an unknown snapshot workflow state.');
       }
-    } catch {
-      return unresolved('Snapshot completion could not be observed. The recorded request will not be repeated.');
+    } catch (error) {
+      return unresolved('Snapshot completion could not be observed. The recorded request will not be repeated.', 'blocked',
+        stage ? observationFailure(error, stage) : undefined);
     }
     if (attempt < 2) await delay(1000);
   }
