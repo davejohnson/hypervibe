@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { StorageObjectClient } from '../ports/storage.port.js';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { createLocalRecoveryStore } from './local-recovery-store.js';
-import { backupAndVerifyPostgres, POSTGRES_BACKUP_FORMAT_VERSION, type PostgresBackupInput, type PostgresBackupResult } from './postgres-backup.service.js';
+import { backupAndVerifyPostgres, postgresBackupEvidenceSchema, type PostgresBackupInput, type PostgresBackupResult } from './postgres-backup.service.js';
 import { createObjectRecoverySet, objectRecoveryIdentitySchema, objectRecoveryManifestKey, restoreObjectRecoverySet,
   storedObjectRevisionSchema, type ObjectRecoveryIdentity, type ObjectRecoveryLimits } from './object-recovery-set.service.js';
 import { recoverySourceIdentityMatches, recoverySourceIdentitySchema } from './recovery-source.js';
@@ -84,9 +84,9 @@ export async function createRecoverySet(input: RecoverySetInput, dependencies: {
   if (input.database) {
     sql = await (dependencies.backupDatabase ?? backupAndVerifyPostgres)({ ...input.database, archive: input.archive,
       destination, runId: input.runId, archivePrefix: prefix.replace(/\/$/, '') + '/sql', fileReferenceQueries: projections });
-    if (sql.evidence.formatVersion !== POSTGRES_BACKUP_FORMAT_VERSION || sql.evidence.runId !== input.runId || !recoverySourceIdentityMatches(sql.evidence.source, input.database.source)
-      || canonicalJsonSha256(sql.evidence.destination) !== canonicalJsonSha256(destination)
-      || sql.evidence.restoreVerified !== true || sql.evidence.cleanupVerified !== true) throw new Error('SQL recovery proof differs from the reviewed source.');
+    sql = { ...sql, evidence: postgresBackupEvidenceSchema.parse(sql.evidence) };
+    if (sql.evidence.runId !== input.runId || !recoverySourceIdentityMatches(sql.evidence.source, input.database.source)
+      || canonicalJsonSha256(sql.evidence.destination) !== canonicalJsonSha256(destination)) throw new Error('SQL recovery proof differs from the reviewed source.');
   }
   const objects: RecoverySetManifest['objects'] = [];
   for (const object of input.objects) {

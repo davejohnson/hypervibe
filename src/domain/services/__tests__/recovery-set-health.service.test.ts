@@ -110,7 +110,7 @@ describe('completed managed recovery observations', () => {
     expect(archive.values.has(key)).toBe(true);
     expect(archive.remove).not.toHaveBeenCalled();
   });
-  it.each(['truncated', 'same-size replacement'])('rejects a %s SQL archive without reading archive bytes', async change => {
+  it.each(['truncated', 'same-size replacement', 'schema-only coverage', 'missing source version', 'unsupported compatibility claim'])('rejects %s SQL evidence without reading archive bytes', async change => {
     const source = store({ file: 'bytes' }), archive = store();
     const database = { componentId: 'database-component', source: { provider: 'railway', primaryExternalId: 'database-service',
       providerScope: { projectId: 'p', environmentId: 'e' }, resourceIdentity: {} } };
@@ -137,9 +137,20 @@ describe('completed managed recovery observations', () => {
     archive.get.mockClear();
     expect(await observeManagedRecoverySet(input)).toMatchObject({ status: 'healthy', manifest: { compatibility: 'references-verified' } });
     expect(archive.get.mock.calls.every(([key]) => key.endsWith('.json'))).toBe(true);
-    const retained = archive.values.get(result.manifest.database!.archiveKey)!;
-    retained.bytes = change === 'truncated' ? Buffer.from('truncated') : Buffer.alloc(retained.bytes.length, 'x');
+    if (change === 'truncated' || change === 'same-size replacement') {
+      const retained = archive.values.get(result.manifest.database!.archiveKey)!;
+      retained.bytes = change === 'truncated' ? Buffer.from('truncated') : Buffer.alloc(retained.bytes.length, 'x');
+    } else {
+      const retained = archive.values.get(result.manifest.database!.manifestKey)!;
+      const manifest = JSON.parse(retained.bytes.toString());
+      if (change === 'schema-only coverage') manifest.coverage = 'schema-only';
+      else if (change === 'missing source version') delete manifest.sourceVersion;
+      else manifest.applicationCompatibility = 'verified';
+      retained.bytes = Buffer.from(JSON.stringify(manifest));
+    }
     expect(await observeManagedRecoverySet(input)).toMatchObject({ status: 'unknown', reasonCodes: ['backup-unverified'] });
+    await expect(applyManagedRecoveryRetention(input)).rejects.toThrow();
+    expect(archive.remove).not.toHaveBeenCalled();
   });
   it('leaves the joint set incomplete when restored SQL references a file absent from the copied bucket', async () => {
     const source = store({ file: 'bytes' }), archive = store();

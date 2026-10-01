@@ -8,7 +8,10 @@ import { Readable } from 'node:stream';
 import { Client } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { StorageObjectClient } from '../../ports/storage.port.js';
-import { backupAndVerifyPostgres, POSTGRES_BACKUP_FORMAT_VERSION } from '../postgres-backup.service.js';
+import { backupAndVerifyPostgres, POSTGRES_BACKUP_FORMAT_VERSION, postgresBackupEvidenceSchema } from '../postgres-backup.service.js';
+import { createRecoverySet } from '../recovery-set.service.js';
+import { observeManagedRecoverySet, recordRecoveryExecution } from '../recovery-set-health.service.js';
+import { managedBackupTargetHash, type ManagedBackupTarget } from '../managed-backup-target.service.js';
 
 const execute = promisify(execFile);
 const source = {
@@ -30,7 +33,8 @@ function archiveStore(corrupt = false) {
   const objects = new Map<string, Buffer>();
   const revision = (data: Buffer) => ({ etag: createHash('sha256').update(data).digest('hex') });
   const client: StorageObjectClient = {
-    list: async () => [...objects].map(([key, data]) => ({ key, size: data.length, revision: revision(data) })),
+    list: async options => [...objects].filter(([key]) => !options?.prefix || key.startsWith(options.prefix))
+      .map(([key, data]) => ({ key, size: data.length, revision: revision(data) })),
     put: async (key, payload, options) => {
       if (options?.ifAbsent && objects.has(key)) throw new Error('object already exists');
       const chunks: Buffer[] = [];
@@ -127,9 +131,34 @@ describe('retained PostgreSQL backup and isolated restore (real PostgreSQL)', ()
     expect(Date.parse(result.dataTime)).toBeLessThanOrEqual(Date.parse(result.completedAt));
     const manifest = JSON.parse(archive.objects.get(result.manifestKey)!.toString());
     expect(manifest).toMatchObject({ ...result, formatVersion: POSTGRES_BACKUP_FORMAT_VERSION });
+    expect(postgresBackupEvidenceSchema.parse(manifest)).toEqual(result);
     expect(archive.objects.size).toBe(2);
     expect(JSON.stringify(result)).not.toContain(sourceUrl);
     expect((await client.query('SELECT count(*)::text AS count FROM backup_test.documents')).rows).toEqual([{ count: '2' }]);
+  }, 60_000);
+
+  it('passes real producer evidence through joint completion and health without accepting schema-only coverage', async () => {
+    const archive = archiveStore();
+    const target: ManagedBackupTarget = { version: 1, project: 'test', environment: 'staging',
+      hosting: { provider: 'railway', providerScope: source.providerScope },
+      runnerImage: `ghcr.io/example/helper@sha256:${'a'.repeat(64)}`,
+      database: { componentId: 'database', source },
+      destination: { name: 'backup', identity: { provider: 's3', externalId: 'backup-bucket', instanceScope: { region: 'us-east-1' } } },
+      objects: [], fileReferenceQueries: [], retainSets: 7, maxDataAgeHours: 24, restoreEveryDays: 7 };
+    const setId = randomUUID();
+    const result = await createRecoverySet({ runId: setId, project: target.project, environment: target.environment,
+      contractHash: managedBackupTargetHash(target), destination: target.destination.identity, archive: archive.client,
+      database: { source, sourceUrl }, objects: [] });
+    const retained = { target, archive: archive.client };
+    await recordRecoveryExecution({ ...retained, setId, jobId: 'synthetic-local-cleanup-attestation' });
+    expect(await observeManagedRecoverySet(retained)).toMatchObject({ status: 'healthy', evidence: 'inventory-and-prior-restore' });
+    const key = result.manifest.database!.manifestKey;
+    const manifest = JSON.parse(archive.objects.get(key)!.toString());
+    expect(manifest).toMatchObject({ formatVersion: 2, coverage: 'single-database-schema-and-data',
+      applicationCompatibility: 'unverified', tableCount: 1, totalRows: '2', fileReferences: [] });
+    manifest.coverage = 'schema-only';
+    archive.objects.set(key, Buffer.from(JSON.stringify(manifest)));
+    expect(await observeManagedRecoverySet(retained)).toMatchObject({ status: 'unknown', reasonCodes: ['backup-unverified'] });
   }, 60_000);
 
   it('verifies the frozen dump even when the source changes after its snapshot', async () => {

@@ -3,8 +3,8 @@ import { z } from 'zod';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import type { StorageObjectClient, StorageObjectRecord } from '../ports/storage.port.js';
 import { managedBackupTargetHash, managedBackupTargetSchema, type ManagedBackupTarget } from './managed-backup-target.service.js';
-import { observeObjectRecoverySetInventory, objectRecoveryManifestKey, objectRecoverySetPrefix, storedObjectRevisionMatches, storedObjectRevisionSchema } from './object-recovery-set.service.js';
-import { POSTGRES_BACKUP_FORMAT_VERSION } from './postgres-backup.service.js';
+import { observeObjectRecoverySetInventory, objectRecoveryManifestKey, objectRecoverySetPrefix, storedObjectRevisionMatches } from './object-recovery-set.service.js';
+import { postgresBackupEvidenceSchema } from './postgres-backup.service.js';
 import { readRecoveryJson, RECOVERY_LIMITS, recoverySetManifestSchema, recoverySetRoot, type RecoverySetManifest } from './recovery-set.service.js';
 
 const MAX_EXECUTIONS = 256;
@@ -85,12 +85,7 @@ async function inspectSet(input: Context & { setId: string; requireExecution: bo
     const database = manifest.database, sqlPrefix = `${prefix}sql/${input.setId}/`;
     if (database.archiveKey !== `${sqlPrefix}database.dump` || database.manifestKey !== `${sqlPrefix}database.complete.json`) throw new Error('SQL recovery paths are not owned by this execution.');
     expected.set(database.archiveKey, database.bytes); expected.set(database.manifestKey, undefined);
-    const sql = z.object({ formatVersion: z.literal(POSTGRES_BACKUP_FORMAT_VERSION), mechanism: z.literal('postgres-logical-archive'),
-      source: recoverySetManifestSchema.shape.database.unwrap().shape.source,
-      destination: managedBackupTargetSchema.shape.destination.shape.identity, runId: uuid,
-      archiveKey: z.string(), archiveRevision: storedObjectRevisionSchema, manifestKey: z.string(), sha256: z.string(), bytes: z.number(), dataTime: timestamp,
-      completedAt: timestamp, restoreVerified: z.literal(true), cleanupVerified: z.literal(true) }).passthrough()
-      .parse(await readRecoveryJson(input.archive, database.manifestKey));
+    const sql = postgresBackupEvidenceSchema.parse(await readRecoveryJson(input.archive, database.manifestKey));
     if (sql.runId !== input.setId || !same(sql.source, database.source) || !same(sql.destination, target.destination.identity)
       || sql.archiveKey !== database.archiveKey || sql.manifestKey !== database.manifestKey || sql.sha256 !== database.sha256
       || !same(sql.archiveRevision, database.archiveRevision)
