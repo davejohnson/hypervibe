@@ -5,6 +5,7 @@ import { platformBindingsColumnSchema } from '../column.schemas.js';
 import type { Environment, CreateEnvironmentInput } from '../../../domain/entities/environment.entity.js';
 import { ProjectRepository } from './project.repository.js';
 import { writeRepoBindingsForEnvironment } from '../../../domain/spec/repo-bindings-file.js';
+import { ComponentRepository } from './component.repository.js';
 
 export class EnvironmentRepository {
   create(input: CreateEnvironmentInput): Environment {
@@ -108,13 +109,19 @@ export class EnvironmentRepository {
     };
   }
 
+  syncRepoBindingsForId(id: string): void {
+    const environment = this.findById(id);
+    if (environment) this.syncRepoBindings(environment);
+  }
+
   private syncRepoBindings(environment: Environment): void {
     const project = new ProjectRepository().findById(environment.projectId);
     if (project) {
       // Persisted provider identity is part of the apply receipt boundary. A
       // malformed or unwritable repository export must fail the operation;
       // the SQLite mutation has already retained the exact identity for retry.
-      writeRepoBindingsForEnvironment(project, environment);
+      writeRepoBindingsForEnvironment(project, environment, undefined,
+        () => new ComponentRepository().findByEnvironmentId(environment.id));
     }
   }
 }

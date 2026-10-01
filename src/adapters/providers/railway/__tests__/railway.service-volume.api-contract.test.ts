@@ -166,7 +166,8 @@ describe('Railway retain-only web volumes through serialized GraphQL', () => {
       state: 'present', externalId: id, pendingDeletion: true,
     });
     expect(await fixture.adapter.serviceVolumes.create(target)).toMatchObject({ success: false, mutationAttempted: false });
-    expect(Object.keys(fixture.adapter.serviceVolumes).sort()).toEqual(['create', 'observe']);
+    expect(Object.keys(fixture.adapter.serviceVolumes).sort()).toEqual(['create', 'dailyBackups', 'observe']);
+    expect(Object.keys(fixture.adapter.serviceVolumes.dailyBackups!).sort()).toEqual(['configureDaily', 'observe']);
     expect(fixture.mutations).toEqual([]);
     expect(fixture.contractErrors).toEqual([]);
   });

@@ -1,6 +1,7 @@
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import { PlanService } from '../domain/plan/plan.service.js';
+import { deploymentPrerequisitePhase } from '../domain/plan/plan-stage.js';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
 import { requiresProductionConfirm } from '../domain/services/policy.service.js';
 import { previewManagedCiRollback } from '../domain/services/rollback-preflight.service.js';
@@ -147,6 +148,7 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
       }
       const deploySourceStage = planned.actions.length > 0
         && planned.actions.every(isProviderNativeDeploySourceAction);
+      const prerequisitePhase = deploymentPrerequisitePhase(planned);
 
       const outcome = await executePlanApply(ctx, {
         project,
@@ -154,8 +156,8 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         specRevision: specResult.revision,
         planId: planned.planRunId,
         confirmActions: [],
-        verifyHttpHealth: !deploySourceStage,
-        alwaysRunBootstrap: !deploySourceStage,
+        verifyHttpHealth: !prerequisitePhase,
+        alwaysRunBootstrap: !prerequisitePhase,
       });
       if (outcome.kind === 'invalid_spec') {
         return commandError('VALIDATION', outcome.message, {
@@ -201,20 +203,26 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         });
       }
 
-      if (deploySourceStage && outcome.result.success) {
+      if (prerequisitePhase && outcome.result.success) {
         return commandSuccess(
           {
             planId: planned.planRunId,
             applyRunId: outcome.result.applyRunId,
             status: 'pending',
+            deployment: 'not_started',
+            phase: prerequisitePhase,
             environment: envName,
             receipts: outcome.result.receipts,
-            message: 'Provider-native deploy sources were reconciled; application deployment has not started.',
+            message: deploySourceStage
+              ? 'Provider-native deploy sources were reconciled; application deployment has not started.'
+              : `The ${prerequisitePhase} prerequisite stage completed; application deployment has not started.`,
           },
           {
-            hint: 'Re-run hv_deploy. The fresh plan will verify that every native source is disconnected before authorizing application or infrastructure mutations.',
+            hint: deploySourceStage
+              ? 'Re-run hv_deploy. The fresh plan will verify that every native source is disconnected before authorizing application or infrastructure mutations.'
+              : 'Run hv_plan to review the next stage, then apply only its exact confirmed actions with hv_apply. Re-plan after each prerequisite; no later stage is automatically authorized.',
             warnings: outcome.actionScopedWarnings,
-            next: ['hv_deploy'],
+            next: deploySourceStage ? ['hv_deploy'] : ['hv_plan'],
           }
         );
       }

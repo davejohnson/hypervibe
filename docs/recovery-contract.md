@@ -4,7 +4,16 @@ Recovery uses the existing spec/plan/apply lifecycle and managed deployment
 evidence. The shared contract describes exact source identity, a recovery point,
 durable operation state, and separate verification boundaries. Provider adapters
 own their native identifiers, polling, correlation and restore implementation.
-No new restore command or provider mutation is introduced by this contract.
+This identity and evidence contract does not itself authorize a restore or
+provider mutation. The existing native checkpoint/drill capabilities and the
+separate [managed retained-set runtime](default-backup-policy.md#managed-retained-recovery-sets)
+perform only their reviewed lifecycle operations.
+
+[Daily backup defaults](default-backup-policy.md) describe recurring protection
+for databases, persistent mounts and object storage through this same lifecycle.
+An observed daily policy does not establish an available recovery point or a
+tested restore. Named checkpoints retain their isolated execution priority;
+recurring policy work does not enlarge checkpoint mutation authority.
 
 ## Identity, points and operations
 
@@ -83,7 +92,7 @@ hosting providers; adding a provider requires updating that explicit review.
 
 | Database provider | Native model checked | Current Hypervibe recovery implementation |
 | --- | --- | --- |
-| Railway | [Volume backups](https://docs.railway.com/volumes/backups): native restore replaces the original service's volume within its project/environment. Volume deletion removes its backups. | Named checkpoint; no isolated restore capability. |
+| Railway | [Volume backups](https://docs.railway.com/volumes/backups): native restore replaces the original service's volume within its project/environment. Volume deletion removes its backups. | Named native checkpoint; no isolated native-volume restore adapter. The separate [logical retained-set runtime](postgres-logical-backup-runtime.md) restores copied SQL bytes into a fresh local PostgreSQL instance. |
 | Cloud SQL | [BackupRun API](https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1beta4/backupRuns): IDs are scoped to an instance and native statuses distinguish successful, pending and failed backups. [Recovery](https://docs.cloud.google.com/sql/docs/postgres/backup-recovery/restore): PITR creates another instance. | Backup/PITR policy and scheduled PITR drill; no named checkpoint adapter. |
 | RDS | [Snapshot restore](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_RestoreFromSnapshot.html) creates a new instance. Snapshot identity is not a volume-instance identity; an available instance can still be loading data. | Checkpoint and drill unsupported by Hypervibe. |
 | Supabase | [New-project restore](https://supabase.com/docs/guides/platform/clone-project) is a database-only copy, requires eligible backups/plan, and can immediately execute copied jobs and external extensions. | Checkpoint and drill unsupported by Hypervibe. |

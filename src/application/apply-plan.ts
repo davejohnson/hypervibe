@@ -1,5 +1,10 @@
 import { applyApiPolicy, planApiPolicy } from '../domain/services/api-policy.js';
 import { PlanService } from '../domain/plan/plan.service.js';
+import { actionRequiresBackupReadiness, deploymentPrerequisitePhase } from '../domain/plan/plan-stage.js';
+import { observeBackupPolicy } from '../domain/services/backup-policy.service.js';
+import { observeBackupHealth } from '../domain/services/backup-health.service.js';
+import { assessBackupReadiness } from '../domain/services/backup-readiness.js';
+import { withBackupStorageDefaults } from '../domain/services/backup-strategy.service.js';
 import { environmentResourceName } from '../domain/services/resource-names.js';
 import {
   ConvergeExecutor,
@@ -138,6 +143,7 @@ import {
   resolvePlanActionAuthority,
 } from '../domain/plan/action-authority.js';
 import { applyDatabaseResilienceAction } from './apply-database-resilience.js';
+import { applyBackupPolicyAction } from './apply-backup-policy.js';
 import { applyDataMigrationAction } from './apply-data-migration.js';
 import { applyMaintenanceAction } from './apply-maintenance.js';
 import { bindingIdentityFingerprint } from '../domain/services/binding-identity.js';
@@ -790,8 +796,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const envName = loaded.document.environmentName;
   const planScope = loaded.document.scope ?? 'full';
   const retainedCleanupOnly = planScope === 'retained-cleanup';
+  const backupProvisioningOnly = planScope === 'backup-provisioning';
   const managedCiBindingsOnly = planScope === 'managed-ci-bindings' || planScope === 'hosting-bindings';
-  const workflowPublicationOnly = planScope === 'managed-ci-publication';
+  const workflowPublicationOnly = planScope === 'managed-ci-publication' || planScope === 'backup-program-publication';
   if (loaded.document.inputRequired?.length) {
     return {
       kind: 'input_required',
@@ -799,7 +806,8 @@ export async function executePlanApply(ctx: CommandContext, params: {
       requirements: loaded.document.inputRequired,
     };
   }
-  const envSpec = spec.environments[envName];
+  const rawEnvironmentSpec = spec.environments[envName];
+  const envSpec = rawEnvironmentSpec ? withBackupStorageDefaults(rawEnvironmentSpec) : undefined;
   if (!envSpec) {
     const repositoryLifecycleOnly = loaded.document.actions.length > 0
       && loaded.document.actions.every((action) => {
@@ -832,6 +840,46 @@ export async function executePlanApply(ctx: CommandContext, params: {
     ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
     : project;
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (backupProvisioningOnly && (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id)) {
+    return { kind: 'blocked', applyBlocked: [{ provider: 'hypervibe', reason: 'The reviewed backup provisioning plan belongs to another project or environment.' }] };
+  }
+  if (planScope === 'backup-readiness') {
+    return { kind: 'blocked', applyBlocked: [{ provider: 'hypervibe',
+      reason: 'Backup readiness is blocked. No provider mutation is authorized; run hv_plan after resolving the reported protection gaps.' }] };
+  }
+  const freshBackupReadiness = async () => {
+    const currentEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+    const context = { spec: envSpec, environment: currentEnvironment, project: projectForPreflight,
+      components: currentEnvironment ? ctx.repos.components.findByEnvironmentId(currentEnvironment.id) : [], adapterFactory };
+    const coverage = await observeBackupPolicy(context);
+    const health = await observeBackupHealth(context);
+    return assessBackupReadiness(coverage, health);
+  };
+  if (loaded.document.actions.some(actionRequiresBackupReadiness)
+    || (params.alwaysRunBootstrap && !deploymentPrerequisitePhase(loaded.document))) {
+    const readiness = await freshBackupReadiness();
+    if (!readiness.ready) return { kind: 'blocked', applyBlocked: [{ provider: 'hypervibe',
+      reason: `Backup readiness blocks deployment: ${readiness.gaps.join(' ')} Run hv_plan to review the required protection stages.` }] };
+  }
+  if (planScope === 'backup-policy') {
+    if (!environment) return { kind: 'env_missing', envName };
+    if (loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
+      return { kind: 'blocked', applyBlocked: [{ provider: 'hypervibe', reason: 'The reviewed backup policy plan belongs to another project or environment.' }] };
+    }
+    const blocked = planService.providerPreflight(loaded.document.actions.map(action => action.resource.provider));
+    if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
+    const result = await executor.execute({
+      planRunId: planId, confirmActions: params.confirmActions, currentSpecRevision: params.specRevision,
+      handler: async action => {
+        if (resolvePlanActionAuthority(action)?.capability !== 'backup-policy.configure') {
+          return { success: false, status: 'blocked', message: 'The backup policy stage can only configure the reviewed daily schedule. Re-run hv_plan.' };
+        }
+        return applyBackupPolicyAction({ ctx, project, environmentName: envName, environmentSpec: envSpec,
+          action, confirmedActionIds: new Set(params.confirmActions) });
+      },
+    });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [] };
+  }
   if (planScope === 'database-checkpoint') {
     if (!environment) return { kind: 'env_missing', envName };
     if (loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
@@ -893,7 +941,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     .map((action) => action.resource.provider);
   const workflowPublicationActions = loaded.document.actions.filter((action) =>
     action.type !== 'noop'
-    && action.metadata?.workflowPublicationRequired === true
+    && (action.metadata?.workflowPublicationRequired === true || action.metadata?.backupWorkflowPublicationRequired === true)
   );
   const workflowPublicationProviders = workflowPublicationActions.map((action) => {
     const codeProvider = stringField(asRecord(action.metadata), 'codeProvider');
@@ -908,7 +956,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     ? planService.providerPreflight(migrationProviders)
     : workflowPublicationOnly
     ? planService.providerPreflight(workflowPublicationProviders)
-    : managedCiBindingsOnly
+    : managedCiBindingsOnly || backupProvisioningOnly
     ? planService.providerPreflight(
         loaded.document.actions
           .filter((action) => action.type !== 'noop')
@@ -929,6 +977,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const shouldRefreshIntegration = (configured: boolean, planned?: string) =>
     !retainedCleanupOnly
     && !workflowPublicationOnly
+    && !backupProvisioningOnly
     && (managedCiBindingsOnly ? Boolean(planned) : configured || Boolean(planned));
   const stripeSpec = envSpec.payments?.stripe;
   if (shouldRefreshIntegration(Boolean(stripeSpec), loaded.document.integrationFingerprints?.stripe)) {
@@ -1157,6 +1206,11 @@ export async function executePlanApply(ctx: CommandContext, params: {
       };
     }
     const capability = authority.capability;
+    if (actionRequiresBackupReadiness(action)) {
+      const readiness = await freshBackupReadiness();
+      if (!readiness.ready) return { success: false, status: 'blocked',
+        message: `Backup readiness changed before rollout: ${readiness.gaps.join(' ')}` };
+    }
 
     const volumeEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
     const volumeSafetyBlock = retainedVolumeHostingBlock(volumeEnvironment, envSpec, action);
@@ -2105,18 +2159,29 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const planIsAllNoop = loaded.document.actions.every((action) => action.type === 'noop');
   if (
     params.alwaysRunBootstrap
+    && !deploymentPrerequisitePhase(loaded.document)
     && planIsAllNoop
     && !deployBootstrap
     && result.success
     && result.applyRunId
   ) {
-    const forced = await ensureDeployBootstrap();
-    if (!forced.success) {
+    const readiness = await freshBackupReadiness();
+    if (!readiness.ready) {
+      const message = `Backup readiness changed before rollout: ${readiness.gaps.join(' ')}`;
+      ctx.repos.runs.updateStatus(result.applyRunId, 'blocked', message);
+      ctx.repos.runs.addReceipt(result.applyRunId, { step: 'backup-readiness', status: 'blocked',
+        result: { message }, timestamp: new Date().toISOString() });
+      result = { ...result, success: false, receipts: [...result.receipts,
+        { actionId: 'backup-readiness', status: 'blocked', message }] };
+    } else {
+      const forced = await ensureDeployBootstrap();
+      if (!forced.success) {
       result = {
         ...result,
         success: false,
         error: String(forced.summary.error ?? 'Deploy failed'),
       };
+      }
     }
   }
 

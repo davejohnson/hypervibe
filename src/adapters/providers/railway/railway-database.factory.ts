@@ -9,6 +9,9 @@ import type {
 } from '../../../domain/ports/provider.port.js';
 import type { IDatabaseAdapter, ProvisionResult, ProvisionableType } from '../../../domain/ports/database.port.js';
 import type { ObservedDatabase, ObservedState } from '../../../domain/ports/observe.port.js';
+import type { DatabaseBackupTarget, DailyBackupReview, IDailyBackupPolicy } from '../../../domain/ports/daily-backup.port.js';
+import type { RailwayDailyBackupTarget } from './railway-daily-backup.js';
+import { recoveryIdentityStringSchema } from '../../../domain/services/recovery-source.js';
 import type { EnvironmentRepository } from '../../db/repositories/environment.repository.js';
 import type { IDatabaseCheckpointAdapter, DatabaseCheckpointIdentity, DatabaseCheckpointSource,
   DatabaseCheckpointBinding, DatabaseCheckpointObservation } from '../../../domain/ports/database-checkpoint.port.js';
@@ -19,6 +22,7 @@ import type {
 } from './railway.adapter.js';
 
 interface RailwayHostingOps {
+  railwayDailyBackups?: IDailyBackupPolicy<RailwayDailyBackupTarget>;
   observeDatabaseCheckpointSource?: (target: { projectId: string; environmentId: string; serviceId: string }) => Promise<DatabaseCheckpointSource>;
   createDatabaseCheckpoint?: (source: DatabaseCheckpointIdentity, label: string) => Promise<{ workflowId: string | null }>;
   observeDatabaseCheckpointRequest?: (binding: DatabaseCheckpointBinding) => Promise<DatabaseCheckpointObservation>;
@@ -68,7 +72,7 @@ interface RailwayHostingOps {
  */
 export function createRailwayDatabaseAdapter(params: {
   hostingAdapter: IProviderAdapter;
-  envRepo: EnvironmentRepository;
+  envRepo: Pick<EnvironmentRepository, 'findById'>;
   project?: Project;
 }): IDatabaseAdapter & IDatabaseCheckpointAdapter {
   const { hostingAdapter, envRepo, project } = params;
@@ -346,8 +350,40 @@ export function createRailwayDatabaseAdapter(params: {
     return candidates[0] ?? null;
   };
 
+  const dailyBackupTarget = ({ environment, component }: DatabaseBackupTarget): RailwayDailyBackupTarget => {
+    const current = envRepo.findById(environment.id) ?? environment;
+    const projectId = assertCurrentProjectScope(current, component);
+    const environmentId = current.platformBindings.environmentId;
+    const boundEnvironmentId = componentEnvironmentId(component);
+    if (component.bindings.provider !== 'railway' || component.type !== 'postgres'
+      || component.bindings.resourceKind !== 'service' || component.bindings.retainedCleanup === true
+      || component.environmentId !== current.id || !component.externalId
+      || typeof environmentId !== 'string' || !environmentId.trim()
+      || (boundEnvironmentId !== undefined && boundEnvironmentId !== environmentId)) {
+      throw new Error('Railway daily backups require the currently bound PostgreSQL service in the exact environment.');
+    }
+    [projectId, environmentId, component.externalId].forEach(value => recoveryIdentityStringSchema.parse(value));
+    const volumeId = component.bindings.volumeId === undefined ? undefined
+      : recoveryIdentityStringSchema.parse(component.bindings.volumeId);
+    const resolved = resolveVolumeTarget(component, current, projectId, volumeId);
+    if (resolved.error) throw new Error('Railway database volume binding is not valid for daily backups.');
+    return { target: resolved.target ?? { projectId, environmentId, serviceId: component.externalId,
+      mountPath: '/var/lib/postgresql/data' }, ...(volumeId ? { externalId: volumeId } : {}) };
+  };
+
   return {
     name: 'railway',
+    ...(railway.railwayDailyBackups ? { dailyBackups: {
+      observe: async (input: DatabaseBackupTarget) => {
+        try { return await railway.railwayDailyBackups!.observe(dailyBackupTarget(input)); }
+        catch { return { state: 'unknown' as const, reason: 'Railway daily backups require a verified bound database and volume scope.' }; }
+      },
+      configureDaily: async (input: DatabaseBackupTarget, reviewed: DailyBackupReview) => {
+        try { return await railway.railwayDailyBackups!.configureDaily(dailyBackupTarget(input), reviewed); }
+        catch { return { success: false, message: 'Railway daily backups require a verified bound database and volume scope.',
+          data: { mutationAttempted: false, applied: 0, skipped: 0 } }; }
+      },
+    } } : {}),
     async observeCheckpointSource(environment, component) {
       const current = envRepo.findById(environment.id) ?? environment;
       const projectId = assertCurrentProjectScope(current, component);

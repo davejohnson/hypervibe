@@ -1,0 +1,14 @@
+**
+!package.json
+!package-lock.json
+!tsconfig.json
+!tsconfig.build.json
+!src
+!src/**
+src/**/__tests__
+src/**/*.test.ts
+src/test
+node_modules
+.git
+.env*
+data

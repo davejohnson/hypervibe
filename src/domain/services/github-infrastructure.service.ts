@@ -18,7 +18,6 @@ import type {
   ProjectRuntimeSpec,
   ProjectSpec,
 } from '../spec/spec.schema.js';
-import type { DatabaseRestoreDrillFile } from '../ports/database-restore-drill.port.js';
 import { parseHostingBindings } from '../ports/hosting.port.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { effectiveGitHubCheckRuntimeVersion } from '../spec/project-runtime.js';
@@ -29,6 +28,7 @@ import {
 } from '../spec/devops-selection.js';
 import { adapterFactory } from './adapter.factory.js';
 import { compileDatabaseRestoreDrillFiles } from './database-restore-drill.service.js';
+import { compileManagedBackupFiles } from './managed-backup-workflows.service.js';
 import { missingManagedCiReleaseBindings, resolveReviewedBranchDeployTargets } from './managed-ci-targets.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import { getGitHubAdapter } from './github-ops.service.js';
@@ -1178,7 +1178,7 @@ export function unresolvedGitHubCheckRuntimeIssues(
 export function compileManagedGitHubFiles(
   github: GitHubSpec,
   projectRuntime?: ProjectRuntimeSpec,
-  databaseRestoreDrillFiles: DatabaseRestoreDrillFile[] = []
+  databaseRestoreDrillFiles: Array<Pick<ManagedGitHubFile, 'path' | 'content' | 'review'>> = []
 ): ManagedGitHubFile[] {
   const runtimeIssues = unresolvedGitHubCheckRuntimeIssues(github, projectRuntime);
   if (runtimeIssues.length > 0) {
@@ -1370,6 +1370,7 @@ function infrastructureAction(params: {
   blockedReason?: string;
   billable?: boolean;
   requiresConfirm?: boolean;
+  backupWorkflowPublicationRequired?: boolean;
 }): PlanAction {
   return {
     id: GITHUB_INFRASTRUCTURE_ACTION_ID,
@@ -1390,6 +1391,7 @@ function infrastructureAction(params: {
       branch: GITHUB_INFRASTRUCTURE_BRANCH,
       pullRequestTitle: GITHUB_INFRASTRUCTURE_PR_TITLE,
       desiredFiles: desiredFileMetadata(params.files),
+      ...(params.backupWorkflowPublicationRequired ? { backupWorkflowPublicationRequired: true } : {}),
       ...(params.blockedReason ? { blockedReason: params.blockedReason } : {}),
     },
   };
@@ -1768,7 +1770,8 @@ export async function planGitHubInfrastructure(params: {
     };
   }
   const restoreDrills = compileDatabaseRestoreDrillFiles({ project: params.project, spec: params.spec });
-  const files = compileManagedGitHubFiles(githubSpec, params.spec.runtime, restoreDrills.files);
+  const backups = await compileManagedBackupFiles({ project: params.project, spec: params.spec });
+  const files = compileManagedGitHubFiles(githubSpec, params.spec.runtime, [...restoreDrills.files, ...backups.files]);
   const adapterResult = getGitHubAdapter(repository);
   if ('error' in adapterResult) {
     return {
@@ -1783,6 +1786,7 @@ export async function planGitHubInfrastructure(params: {
       warnings: [
         ...artifactContractIssues,
         ...restoreDrills.issues.map((issue) => issue.message),
+        ...backups.issues,
         `Cannot observe GitHub infrastructure for ${repository}: ${adapterResult.error}`,
       ],
       blocked: [],
@@ -1797,6 +1801,7 @@ export async function planGitHubInfrastructure(params: {
   const warnings: string[] = [
     ...artifactContractIssues,
     ...restoreDrills.issues.map((issue) => issue.message),
+    ...backups.issues,
     ...taskPrerequisites.warnings,
   ];
   let verified = taskPrerequisites.verified;
@@ -1812,6 +1817,17 @@ export async function planGitHubInfrastructure(params: {
     }
   }
   let restoreDrillBlockedReason: string | undefined = restoreDrills.issues[0]?.code;
+  let backupBlockedReason = backups.issues.length ? 'managed_backup_prerequisites_incomplete' : undefined;
+  for (const required of backups.requiredSecrets) {
+    try {
+      const names = await adapterResult.adapter.listEnvironmentSecrets(parts.owner, parts.repo, required.environment);
+      const missing = required.names.filter(name => !names.includes(name));
+      if (missing.length) {
+        backupBlockedReason = 'managed_backup_credentials_missing';
+        warnings.push(`Managed backups require the existing provider credentials in GitHub environment ${required.environment}: ${missing.join(', ')}.`);
+      }
+    } catch { backupBlockedReason = 'managed_backup_credentials_unknown'; verified = false; }
+  }
   if (restoreDrills.requiredSecrets.length > 0) {
     try {
       const repositorySecrets = await adapterResult.adapter.listRepositorySecrets(parts.owner, parts.repo);
@@ -1832,17 +1848,20 @@ export async function planGitHubInfrastructure(params: {
   }
   const infrastructureBlockedReason = artifactContractIssues.length > 0
     ? 'github_autofix_artifact_contract_incomplete'
-    : restoreDrillBlockedReason ?? taskPrerequisites.blockedReason;
+    : restoreDrillBlockedReason ?? backupBlockedReason ?? taskPrerequisites.blockedReason;
   const restoreDrillPaths = new Set(restoreDrills.files.map((file) => file.path));
   const taskWorkflowDrift = drift.some((path) => taskPrerequisites.paths.has(path));
+  const backupPaths = new Set(backups.files.map(file => file.path));
+  const backupWorkflowDrift = drift.some(path => backupPaths.has(path));
   const actions: PlanAction[] = [infrastructureAction({
     repository,
     files,
     type: drift.length > 0 || Boolean(infrastructureBlockedReason) ? 'update' : 'noop',
     verified,
     drift,
-    billable: !infrastructureBlockedReason && (taskWorkflowDrift || drift.some((path) => restoreDrillPaths.has(path))),
-    requiresConfirm: !infrastructureBlockedReason && taskWorkflowDrift,
+    billable: !infrastructureBlockedReason && (taskWorkflowDrift || backupWorkflowDrift || drift.some((path) => restoreDrillPaths.has(path))),
+    requiresConfirm: !infrastructureBlockedReason && (taskWorkflowDrift || backupWorkflowDrift),
+    backupWorkflowPublicationRequired: backupWorkflowDrift,
     ...(infrastructureBlockedReason ? { blockedReason: infrastructureBlockedReason } : {}),
   })];
   const blocked: GitHubInfrastructureConnectionBlock[] = [];

@@ -37,6 +37,8 @@ import {
   planGitHubInfrastructure,
 } from '../github-infrastructure.service.js';
 
+import * as managedBackups from '../managed-backup-workflows.service.js';
+
 const REPOSITORY = 'owner/example';
 const project = {
   id: 'project-1',
@@ -142,6 +144,20 @@ describe('GitHub infrastructure plan/apply', () => {
       expect.objectContaining({ path: '.github/workflows/hypervibe-fix.yml' }),
     ]));
     expect(result.blocked.find((block) => block.provider === 'openai')).toBeUndefined();
+  });
+
+  it('marks actual backup workflow file drift as confirmed billable publication work', async () => {
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
+    vi.spyOn(managedBackups, 'compileManagedBackupFiles').mockResolvedValue({ files: [{
+      path: '.github/workflows/hypervibe-backup-production.yml', content: 'name: managed backup\n', hash: 'a'.repeat(64),
+    }], issues: [], requiredSecrets: [] });
+    const result = await planGitHubInfrastructure({ project, spec: spec(), environmentName: 'production' });
+    const action = result.actions.find(action => action.metadata?.operation === 'githubInfrastructurePullRequest');
+    expect(action).toMatchObject({ type: 'update', billable: true, requiresConfirm: true,
+      metadata: { backupWorkflowPublicationRequired: true } });
+    expect(action?.metadata?.desiredFiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: '.github/workflows/hypervibe-backup-production.yml' }),
+    ]));
   });
 
   it('blocks unsafe reconciliation until an external autofix source declares its artifact pattern', async () => {

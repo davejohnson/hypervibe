@@ -25,7 +25,7 @@ interface QueryResultLike<T = Record<string, unknown>> {
   rows: T[];
 }
 
-interface SnapshotClient {
+export interface SnapshotClient {
   connect(): Promise<void>;
   end(): Promise<void>;
   query(sql: string): Promise<QueryResultLike>;
@@ -59,7 +59,7 @@ export function postgresProcessEnvironment(connectionUrl: string): NodeJS.Proces
   const sslMode = parsed.searchParams.get('sslmode');
   return {
     ...process.env,
-    PGHOST: parsed.hostname,
+    PGHOST: decodeURIComponent(parsed.hostname),
     PGPORT: parsed.port || '5432',
     PGDATABASE: database,
     ...(parsed.username ? { PGUSER: decodeURIComponent(parsed.username) } : {}),
@@ -82,7 +82,7 @@ export function postgresDumpArguments(snapshotId: string): string[] {
   ];
 }
 
-async function databaseManifest(client: SnapshotClient): Promise<Omit<PostgresTransferManifest, 'dumpBytes'>> {
+export async function databaseManifest(client: SnapshotClient): Promise<Omit<PostgresTransferManifest, 'dumpBytes'>> {
   const version = await client.query('SELECT current_setting(\'server_version_num\') AS version') as QueryResultLike<{ version: string }>;
   const extensions = await client.query('SELECT extname FROM pg_extension ORDER BY extname') as QueryResultLike<{ extname: string }>;
   const tables = await client.query(
@@ -124,8 +124,13 @@ async function exitCode(child: ChildProcessWithoutNullStreams): Promise<number> 
   return code ?? 1;
 }
 
-function sameTables(source: PostgresTableCount[], target: PostgresTableCount[]): boolean {
-  return JSON.stringify(source) === JSON.stringify(target);
+export function postgresTableCountsMatch(source: PostgresTableCount[], target: PostgresTableCount[]): boolean {
+  // Source and target collations may order names differently. Compare complete
+  // identities and counts in one locale-independent order without changing the
+  // existing manifest representation stored by migration callers.
+  const ordered = (tables: PostgresTableCount[]) => tables.map(({ schema, table, rows }) => [schema, table, rows])
+    .sort((left, right) => JSON.stringify(left) < JSON.stringify(right) ? -1 : JSON.stringify(left) > JSON.stringify(right) ? 1 : 0);
+  return JSON.stringify(ordered(source)) === JSON.stringify(ordered(target));
 }
 
 async function runPostgresTools(
@@ -209,7 +214,7 @@ export async function transferPostgresDatabase(
     if (sourceMajor && targetMajor && targetMajor < sourceMajor) {
       throw new Error(`PostgreSQL transfer verification failed: target major version ${targetMajor} is older than source ${sourceMajor}.`);
     }
-    if (!sameTables(sourceManifest.tables, targetManifest.tables)) {
+    if (!postgresTableCountsMatch(sourceManifest.tables, targetManifest.tables)) {
       throw new Error('PostgreSQL transfer verification failed: target table row counts differ from the source snapshot.');
     }
     const missingExtensions = sourceManifest.extensions.filter((name) => !targetManifest.extensions.includes(name));

@@ -51,6 +51,24 @@ export interface HostingCapabilities {
   supportsMaintenance?: boolean;
 }
 
+/** Provider-owned private execution, using the existing one-off task lifecycle.
+ * Caller authority fixes the helper command, selected data sources and immutable
+ * image; providers validate references and current source identity before writes.
+ * A successful result must prove terminal execution and owned cleanup. */
+export interface ManagedRecoveryTaskOptions {
+  variableMode: 'references';
+  sweep: false;
+  expectedImage: string;
+  executionId: string;
+  databaseSource: import('./recovery-source.port.js').RecoverySourceIdentity;
+  variableReferences: Array<{ sourceServiceId: string; variableName: string; targetName: string }>;
+  /** Non-secret reviewed worker configuration; never application environment. */
+  variables: Record<string, string>;
+  /** Only selected destination/source storage credentials. No provider/admin token. */
+  selectedSecretValues?: Record<string, string>;
+  registryCredentials?: { username: string; token: string };
+}
+
 /** A reviewed named CI task; its application layer owns execution authority. */
 export interface EnvironmentTaskOptions {
   timeoutMs?: number;
@@ -62,6 +80,8 @@ export interface EnvironmentTaskOptions {
     registryCredentials?: { username: string; token: string };
     executionId: string;
   };
+  /** Hypervibe's reviewed immutable backup helper; never an application image. */
+  managedRecoveryTask?: ManagedRecoveryTaskOptions;
 }
 
 /**
