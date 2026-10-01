@@ -20,6 +20,7 @@ export {
 export {
   inspectHostedEnvironmentV1,
   type HostedEnvironmentInspectionInputV1, type HostedEnvironmentInspectionReceiptV1,
+  type HostedConfigurationEvidenceV1,
   type HostedResourceInspectionV1, type HostedResourceFieldV1, type HostedResourceStatusV1,
 } from './application/hosted/environment-inspection.js';
 export {

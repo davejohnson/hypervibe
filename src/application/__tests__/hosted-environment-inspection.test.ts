@@ -34,6 +34,138 @@ function input() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('hosted desired/current inspection v1', () => {
+  it('reports requested configuration key presence even when email provisioning is disabled', async () => {
+    const fixture = await railwayHttpFixture();
+    fixture.addService('staging-web', 'web', stagingId);
+    fixture.addService('production-web', 'web', productionId);
+    fixture.variables.set(`staging-web/${stagingId}`, {
+      FEATURE: 'private-feature-value', SENDGRID_API_KEY: 'synthetic-mail-secret', UNREQUESTED_KEY: 'another-private-value',
+    });
+    fixture.variables.set(`production-web/${productionId}`, { STRIPE_SECRET_KEY: 'synthetic-production-secret' });
+    // Independent app contract: application code reads SENDGRID_API_KEY even
+    // when the deployment tool does not provision email. Only transport is mocked;
+    // the existing fixture executes queries against the pinned official schema.
+    const request = { ...input(), configurationKeys: ['SENDGRID_API_KEY', 'STRIPE_SECRET_KEY'] };
+    const document = JSON.parse(new TextDecoder().decode(request.source.content));
+    document.environments.staging.email = { enabled: false };
+    request.source = source(document);
+    const report = await inspectHostedEnvironmentV1(request, { now });
+    expect(report).toMatchObject({ configurationEvidence: {
+      status: 'complete', requestedKeys: ['SENDGRID_API_KEY', 'STRIPE_SECRET_KEY'],
+      services: [{ resourceId: 'service:web', externalId: 'staging-web', presentKeys: ['SENDGRID_API_KEY'] }],
+    } });
+    const serialized = JSON.stringify(report);
+    for (const privateValue of ['synthetic-mail-secret', 'another-private-value', 'synthetic-production-secret', 'UNREQUESTED_KEY', 'envVarHashes']) {
+      expect(serialized).not.toContain(privateValue);
+    }
+    expect(fixture.requests.some(request => request.variables.environmentId === productionId)).toBe(false);
+    expect(fixture.contractErrors).toEqual([]);
+    expect(fixture.mutations).toEqual([]);
+  });
+
+  it('distinguishes checked empty configuration from unavailable reads', async () => {
+    const fixture = await railwayHttpFixture();
+    fixture.addService('staging-web', 'web', stagingId);
+    const report = await inspectHostedEnvironmentV1({ ...input(), configurationKeys: ['SENDGRID_API_KEY'] }, { now });
+    expect(report).toMatchObject({ configurationEvidence: { status: 'complete',
+      services: [{ resourceId: 'service:web', externalId: 'staging-web', presentKeys: [] }] } });
+    const request = { ...input(), configurationKeys: ['SENDGRID_API_KEY'] };
+    request.connection.scope.environmentId = productionId;
+    expect(await inspectHostedEnvironmentV1(request, { now })).toMatchObject({
+      configurationEvidence: { status: 'unknown', services: [] }, observedAt: null,
+    });
+  });
+
+  it('never derives configuration presence from a failed variable read or a same-name unbound service', async () => {
+    const fixture = await railwayHttpFixture({ responseOverride: ({ query }) => query.includes('query GetVariables')
+      ? Response.json({ errors: [{ message: 'Unavailable synthetic provider' }] }, { status: 503 }) : undefined });
+    fixture.addService('staging-web', 'web', stagingId);
+    fixture.variables.set(`staging-web/${stagingId}`, { SENDGRID_API_KEY: 'synthetic-mail-secret' });
+    const request = { ...input(), configurationKeys: ['SENDGRID_API_KEY'] };
+    expect(await inspectHostedEnvironmentV1(request, { now })).toMatchObject({ configurationEvidence: { status: 'unknown', services: [] } });
+    const healthyFixture = await railwayHttpFixture();
+    healthyFixture.addService('staging-web', 'web', stagingId);
+    healthyFixture.variables.set(`staging-web/${stagingId}`, { SENDGRID_API_KEY: 'synthetic-mail-secret' });
+    request.bindings = bindings('not-the-live-service');
+    expect(await inspectHostedEnvironmentV1(request, { now })).toMatchObject({ configurationEvidence: { services: [] } });
+    expect(fixture.mutations).toEqual([]);
+    expect(healthyFixture.mutations).toEqual([]);
+  });
+
+  it('keeps configuration completeness separate from unsupported resources and omitted services', async () => {
+    const fixture = await railwayHttpFixture();
+    fixture.addService('staging-web', 'web', stagingId);
+    fixture.variables.set(`staging-web/${stagingId}`, { SENDGRID_API_KEY: 'synthetic-mail-secret' });
+    const request = { ...input(), configurationKeys: ['SENDGRID_API_KEY'] };
+    const document = JSON.parse(new TextDecoder().decode(request.source.content));
+    document.environments.staging.email = { enabled: true };
+    request.source = source(document);
+    expect(await inspectHostedEnvironmentV1(request, { now })).toMatchObject({
+      coverage: { status: 'partial' }, configurationEvidence: { status: 'complete',
+        services: [{ resourceId: 'service:web', presentKeys: ['SENDGRID_API_KEY'] }] },
+    });
+    document.environments.staging.services.worker = { startCommand: 'node worker.js' };
+    request.source = source(document);
+    expect(await inspectHostedEnvironmentV1(request, { now })).toMatchObject({
+      configurationEvidence: { status: 'partial', services: [{ resourceId: 'service:web' }] },
+    });
+    expect(await inspectHostedEnvironmentV1({ ...request, limits: { maxResources: 1 } }, { now })).toMatchObject({
+      configurationEvidence: { status: 'unknown', services: [] },
+    });
+  });
+
+  it('does not add configuration evidence or provider reads without a key request', async () => {
+    const fixture = await railwayHttpFixture();
+    fixture.addService('staging-web', 'web', stagingId);
+    expect(await inspectHostedEnvironmentV1(input(), { now })).not.toHaveProperty('configurationEvidence');
+    const previousRequests = fixture.requests.length;
+    expect(await inspectHostedEnvironmentV1({ ...input(), configurationKeys: ['SENDGRID_API_KEY'] }, { now }))
+      .toHaveProperty('configurationEvidence.status', 'complete');
+    expect(fixture.requests.length).toBe(previousRequests * 2);
+    expect(fixture.mutations).toEqual([]);
+  });
+
+  it('rejects ambiguous bindings that count one live service as two declared workloads', async () => {
+    const fixture = await railwayHttpFixture();
+    fixture.addService('staging-web', 'web', stagingId);
+    fixture.variables.set(`staging-web/${stagingId}`, { SENDGRID_API_KEY: 'synthetic-mail-secret' });
+    const request = { ...input(), configurationKeys: ['SENDGRID_API_KEY'] };
+    request.source = spec({ web: { public: false }, worker: { public: false } });
+    const document = JSON.parse(new TextDecoder().decode(request.bindings.content));
+    document.environments.staging.platformBindings.services.worker = { serviceId: 'staging-web' };
+    request.bindings = source(document);
+    const report = await inspectHostedEnvironmentV1(request, { now });
+    expect(report.configurationEvidence).toEqual({ status: 'unknown', requestedKeys: ['SENDGRID_API_KEY'], services: [] });
+    for (const name of ['web', 'worker']) {
+      expect(report.resources.find(row => row.id === `service:${name}`)).toMatchObject({
+        status: 'unknown', current: { exists: null }, reasonCode: 'ambiguous_identity',
+      });
+    }
+  });
+
+  it.each([
+    { data: {} }, { data: { variables: null } }, { data: { variables: [] } }, { data: {}, errors: [] },
+  ])('does not turn malformed variable responses into confirmed absence: %j', async (payload) => {
+    const fixture = await railwayHttpFixture({ responseOverride: ({ query }) => query.includes('query GetVariables')
+      ? Response.json(payload) : undefined });
+    fixture.addService('staging-web', 'web', stagingId);
+    const report = await inspectHostedEnvironmentV1({ ...input(), configurationKeys: ['SENDGRID_API_KEY'] }, { now });
+    expect(report.configurationEvidence).toEqual({ status: 'unknown', requestedKeys: ['SENDGRID_API_KEY'], services: [] });
+    expect(report.observedAt).toBeNull();
+    expect(fixture.mutations).toEqual([]);
+  });
+
+  it.each([
+    ['SENDGRID_API_KEY', 'SENDGRID_API_KEY'], ['API=secret'],
+    Array.from({ length: 21 }, (_, index) => `KEY_${index}`), [''], ['A'.repeat(129)],
+  ].map(configurationKeys => ({ configurationKeys })))(
+    'rejects invalid configuration key requests before provider access: $configurationKeys', async ({ configurationKeys }) => {
+      const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+      await expect(inspectHostedEnvironmentV1({ ...input(), configurationKeys }, { now }))
+        .rejects.toMatchObject({ code: 'INVALID_INPUT' });
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
   it.each([undefined, false])('respects the shared web public default without overriding explicit false (%s)', async (isPublic) => {
     const fixture = await railwayHttpFixture();
     const service = fixture.addService('staging-web', 'web', stagingId);
@@ -186,12 +318,13 @@ describe('hosted desired/current inspection v1', () => {
   });
 
   it('marks declarations outside supported observation as unsupported, never matching the environment', async () => {
-    const request = input();
+    const request = { ...input(), configurationKeys: ['SENDGRID_API_KEY'] };
     request.source = source({ version: 1, project: 'demo', gitRemoteUrl: 'https://github.com/acme/demo',
       environments: { staging: { hosting: { provider: 'cloudrun' }, services: { web: {} }, database: { provider: 'supabase' } } } });
     const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
     const report = await inspectHostedEnvironmentV1(request, { now });
     expect(report.coverage.status).toBe('unsupported');
+    expect(report.configurationEvidence).toEqual({ status: 'unsupported', requestedKeys: ['SENDGRID_API_KEY'], services: [] });
     expect(report.resources.every(resource => resource.status === 'unsupported')).toBe(true);
     expect(fetch).not.toHaveBeenCalled();
   });

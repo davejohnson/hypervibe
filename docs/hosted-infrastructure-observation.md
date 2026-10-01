@@ -58,6 +58,14 @@ Projection accepts HTTPS public DNS origins only, omits unsafe/secret-shaped val
 and caps each environment at 100 endpoints (`publicEndpointsTruncated` flags omissions).
 The host must still enforce DNS/redirect safety when checking a URL.
 
+Hosts may request `configurationKeys` (at most 20 unique environment-variable
+names). The optional `configurationEvidence` block reports only which requested
+names are present on exactly bound, observed services; it never returns values,
+hashes or unrequested names. Its completeness is independent of unsupported
+resource comparisons. Incomplete reads remain unknown, and omitted services
+prevent complete coverage. Presence does not verify credentials, deployment,
+usage or health. Without requested keys, the block is omitted.
+
 ## Report semantics
 
 Each resource contains stable identity, desired/current existence, a status,
