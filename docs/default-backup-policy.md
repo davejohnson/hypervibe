@@ -171,6 +171,20 @@ successful completion and verified cleanup of the private task or controller-loc
 run. Partial sets cannot count toward health or retention. Retention deletes only conditionally matched,
 manifest-owned keys after preserving seven complete sets and the latest tested
 restore. It never propagates source deletions into retained history.
+SQL archives and copied files record the native revisions observed during their
+checksum-verified read-back. Health and retention compare those revisions with
+current inventory, including the final inventory used for conditional deletion.
+A same-size replacement with a changed native revision invalidates the prior restore proof. This remains a
+native-validator check, not a continuous byte audit. Provider soft delete or
+version history may retain older billable bytes after a current key is removed;
+this policy does not purge that history.
+
+SQL, object and joint completion manifests now use evidence format 2. Existing
+format-1 proof cannot certify the current program because it lacks retained
+revision evidence. Historical target contracts remain readable as stored JSON
+and are left untouched; they neither certify nor block a newly completed current
+contract. A new helper digest requires a reviewed program update and a fresh
+successful backup. Missing historical proof is never synthesized.
 
 This establishes referential compatibility, not a global transaction across
 arbitrarily mutable files and SQL. Applications that overwrite keys in place
@@ -191,10 +205,11 @@ rollout. GitLab daily recovery execution is not implemented and therefore blocks
 ordinary deployment for a required daily policy. Verified immutable code rollback
 keeps its existing separate evidence path.
 
-The helper image must be built, published and tested on the actual provider
-before activation. No live deployment, backup completion or restore is certified
+The helper image must be built and published before setup. Merging the managed
+workflow enables its schedule; a successful first provider execution is required
+before claiming operational backup protection. No live deployment, backup completion or restore is certified
 by these source changes. The private database runner is currently admitted only
-for Railway. Combined SQL/files jobs also require provider-proven, bucket-scoped
+for Railway hosting with a Railway database. Combined SQL/files jobs also require provider-proven, bucket-scoped
 worker credentials. That handoff is implemented for Railway buckets; S3, GCS
 and Azure remain blocked for combined jobs. Object-only jobs use their stream
 adapters in the controller without handing control-plane credentials to a worker.

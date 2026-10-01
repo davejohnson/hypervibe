@@ -39,6 +39,19 @@ export function managedBackupCredentialKeys(provider: string): Record<string, st
   return metadata?.credentials?.automationSecretKeys ?? metadata?.orchestration?.ci?.secretCredentialKeys;
 }
 
+export function supportsManagedRecoveryDatabase(hostingProvider: string, databaseProvider: string): boolean {
+  return providerRegistry.getMetadata(hostingProvider)?.lifecycle?.hosting?.recoveryTasks
+    ?.databaseProviders.includes(databaseProvider) === true;
+}
+
+/** Object-only recovery need not invent identifiers for an unused hosting scope. */
+export function managedBackupHostingScope(environment: Environment, databaseDeclared: boolean): unknown {
+  const platform = environment.platformBindings;
+  const scope = { projectId: platform.projectId, environmentId: platform.environmentId };
+  return platform.providerScope ?? (databaseDeclared ? scope : Object.fromEntries(['projectId', 'environmentId']
+    .filter(key => platform[key] !== undefined).map(key => [key, platform[key]])));
+}
+
 /** Preserve all provider-native storage scope fields without widening the secret-free public source schema. */
 export function objectRecoverySourceIdentity(identity: ObjectRecoveryIdentity) {
   return recoverySourceIdentitySchema.parse({ provider: identity.provider, primaryExternalId: identity.externalId,
@@ -54,8 +67,9 @@ export async function resolveManagedBackupTarget(context: BackupPolicyContext): 
   const environment = context.environment;
   if (!environment || !context.project) return { state: 'blocked', issues: ['Backup execution requires the selected project and environment bindings.'] };
   const issues = [...strategy.issues];
-  const hosting = providerRegistry.getMetadata(spec.hosting.provider);
-  if (spec.database && !hosting?.lifecycle?.hosting?.recoveryTasks) issues.push('The hosting adapter does not implement private managed recovery tasks.');
+  if (spec.database && !supportsManagedRecoveryDatabase(spec.hosting.provider, spec.database.provider)) {
+    issues.push('The hosting adapter does not implement private managed recovery tasks for the selected database provider.');
+  }
   const bindings = parseStorageBindings(environment);
   const select = (name: string): z.infer<typeof selectedStorage> | undefined => {
     const binding = bindings[name], desired = spec.storage?.[name];
@@ -110,8 +124,7 @@ export async function resolveManagedBackupTarget(context: BackupPolicyContext): 
     if (!keys || !Object.keys(keys).length) issues.push(`${provider} has no reviewed CI credential contract for recovery execution.`);
     else for (const key of Object.keys(keys)) credentialNames.add(key);
   }
-  const platform = environment.platformBindings;
-  const providerScope = platform.providerScope ?? { projectId: platform.projectId, environmentId: platform.environmentId };
+  const providerScope = managedBackupHostingScope(environment, Boolean(spec.database));
   const parsed = managedBackupTargetSchema.safeParse({ version: 1, project: context.project.name, environment: environment.name,
     hosting: { provider: spec.hosting.provider, providerScope }, runnerImage: strategy.runnerImage, destination, database,
     objects, fileReferenceQueries, retainSets: 7, maxDataAgeHours: 24, restoreEveryDays: 7 });

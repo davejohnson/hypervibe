@@ -44,6 +44,51 @@ function fixture() {
 }
 
 describe('managed backup target admission', () => {
+  it('admits object-only recovery without unrelated hosting identifiers', async () => {
+    const f = fixture();
+    delete f.spec.database;
+    f.context.components = [];
+    f.spec.hosting.provider = 'vercel';
+    f.environment.platformBindings = { provider: 'vercel', storage: f.storage };
+    if (f.spec.backups?.mode === 'daily') f.spec.backups.fileReferenceQueries = [];
+    const result = await resolveManagedBackupTarget(f.context);
+    expect(result.state).toBe('ready');
+    if (result.state === 'ready') expect(result.providerCredentialNames).toEqual(['RAILWAY_API_TOKEN']);
+    expect(f.observe).not.toHaveBeenCalled();
+  });
+
+  it.each(['projectId', 'environmentId', 'both'])(
+    'blocks private database recovery when hosting placement lacks %s', async missing => {
+      const f = fixture();
+      if (missing !== 'environmentId') delete f.environment.platformBindings.projectId;
+      if (missing !== 'projectId') delete f.environment.platformBindings.environmentId;
+      // A valid, independently observed DB source does not place the private
+      // runner: Railway's network is isolated to its project/environment.
+      // https://docs.railway.com/networking/private-networking
+      const result = await resolveManagedBackupTarget(f.context);
+      expect(result.state).toBe('blocked');
+      if (result.state === 'blocked') expect(result.issues).toContain('The complete backup execution contract is not available yet.');
+      expect(f.getCredentials).not.toHaveBeenCalled();
+      expect(f.configureDaily).not.toHaveBeenCalled();
+    });
+
+  it('blocks a database provider outside the hosting adapter private-reference contract', async () => {
+    const f = fixture();
+    // Railway private DNS is scoped to its own project/environment; a Cloud SQL
+    // connection requires its own VPC/connector path, which this executor lacks.
+    // https://docs.railway.com/networking/private-networking
+    f.spec.database!.provider = 'cloudsql'; f.component.bindings.provider = 'cloudsql';
+    f.component.bindings.providerScope = { projectId: 'external-gcp-project' };
+    f.observation.source.provider = 'cloudsql';
+    f.observation.source.providerScope = { projectId: 'external-gcp-project' };
+    f.observation.source.resourceIdentity = { instanceId: 'database-service' };
+    const result = await resolveManagedBackupTarget(f.context);
+    expect(result.state).toBe('blocked');
+    if (result.state === 'blocked') expect(result.issues.join(' ')).toMatch(/private.*database provider/);
+    expect(f.getCredentials).not.toHaveBeenCalled();
+    expect(f.configureDaily).not.toHaveBeenCalled();
+  });
+
   it('resolves exact SQL and file identities with registered provider contracts without retrieving credentials or writing', async () => {
     const f = fixture();
     const result = await resolveManagedBackupTarget(f.context);
@@ -116,7 +161,7 @@ describe('managed backup target admission', () => {
     expect(f.observe).not.toHaveBeenCalled();
   });
 
-  it('preserves external database scope rather than substituting hosting scope, accepting an observed optional region', async () => {
+  it('preserves external database scope while blocking an unsupported private worker', async () => {
     const f = fixture();
     f.spec.database!.provider = 'cloudsql'; f.component.bindings.provider = 'cloudsql';
     f.component.bindings.providerScope = { projectId: 'external-gcp-project' };
@@ -124,7 +169,9 @@ describe('managed backup target admission', () => {
     f.observation.source.providerScope = { projectId: 'external-gcp-project', region: 'us-central1' };
     f.observation.source.resourceIdentity = { instanceId: 'database-service' };
     const result = await resolveManagedBackupTarget(f.context);
-    expect(result.state).toBe('ready');
-    if (result.state === 'ready') expect(result.target.database?.source.providerScope).toEqual({ projectId: 'external-gcp-project', region: 'us-central1' });
+    expect(result.state).toBe('blocked');
+    expect(f.observe).toHaveBeenCalledWith({ environment: f.environment, component: f.component });
+    expect(f.component.bindings.providerScope).toEqual({ projectId: 'external-gcp-project' });
+    if (result.state === 'blocked') expect(result.issues.join(' ')).toMatch(/private.*database provider/);
   });
 });

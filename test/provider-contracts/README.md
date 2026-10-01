@@ -40,9 +40,42 @@ that a private database worker can receive every provider's native credentials.
 Shared recovery tests exercise completion-last SHA256 readback, isolated restore,
 bounded streaming, joint database/file references, controller cleanup markers
 and retention of exact owned keys. Hourly health checks read committed manifests
-and object inventories; they report prior restore proof and current presence,
+and object inventories; they report prior restore proof and matching retained revisions,
 not a fresh full-byte audit. Partial executions never certify health or count
 toward the seven complete sets required before retention deletion.
+
+### Recovery quality audit after PR #242
+
+The audit compared the changes since `v0.1.35` through `f4ccec4` with the shared
+contracts and their implemented consumers. Registry matrices cover all eight
+database, seven hosting and four storage providers; unsupported rows stay
+explicit. This is bounded review of recovery, adjacent rollout authority and
+helper publication, not certification of every API operation in the repository.
+
+| Boundary | Executed counterexample and enforcement |
+| --- | --- |
+| Cloud SQL emitted drill | Rejected/uncertain clone, failed or unrelated operation, wrong instance identity, HTTP 200 null after deletion, and provider/credential error leakage. The generated script requires correlated terminal creation before unlabeled cleanup and emits value-free diagnostics. |
+| Retained SQL and object bytes | Same-size replacement after read-back or before health/retention. Real PostgreSQL restore tests and real S3 SDK serialization bind format-2 proof to the verified native revision; final deletion inventory must still match it. |
+| Storage inventory | Missing object names/sizes and malformed or repeated pagination fail as unknown through real S3/Azure SDK transports and the GCS JSON API path. No object silently disappears or becomes zero bytes. |
+| Private helper admission | Public immutable GHCR helper without private credentials; Railway hosting with a non-Railway database; changed or ambiguous destination; missing explicit provider cleanup proof. Shared admission checks the supported pair and current desired selection before execution. |
+| Evidence upgrade | Current-contract legacy proof remains unknown. Historical contracts remain retained without blocking a fresh current set or granting deletion authority. |
+
+These regressions were observed failing before their fixes and run under normal
+`npm test`. The committed acceptance workflow and desired acceptance commands
+both run that suite and type checking; live branch-protection settings were not
+checked. Tests use synthetic/reconstructed responses, actual SDK serialization,
+and isolated local PostgreSQL, not recorded successful provider recovery runs.
+Live permissions, private routing, Railway conditional-storage semantics and a
+real Cloud SQL restore still require isolated provider acceptance. Retention
+checks current-key absence, not physical purging of provider version/soft-delete
+history.
+
+The adjacent hosted-configuration presence review (PR #239) reran its application
+and serialized Railway transport checks without finding another defect. It
+checked requested-name-only projection, repository/revision provenance, exact
+bound service scope, query-only requests and secret redaction against the pinned
+schema and [Railway's variable API](https://docs.railway.com/integrations/api/manage-variables).
+Presence still does not establish runtime use or credential validity.
 
 Each provider directory contains `source.json`: official source URL, upstream
 revision when available, source-content SHA-256, checked-in schema SHA-256,

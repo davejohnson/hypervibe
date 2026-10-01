@@ -5,7 +5,7 @@ import type { StorageObjectClient, StorageObjectPayload } from '../../ports/stor
 import { createRecoverySet, recoverySetRoot } from '../recovery-set.service.js';
 import { managedBackupTargetHash, type ManagedBackupTarget } from '../managed-backup-target.service.js';
 import { applyManagedRecoveryRetention, observeManagedRecoverySet, recordRecoveryExecution } from '../recovery-set-health.service.js';
-import type { PostgresBackupEvidence } from '../postgres-backup.service.js';
+import { POSTGRES_BACKUP_FORMAT_VERSION, type PostgresBackupEvidence } from '../postgres-backup.service.js';
 
 const identity = (externalId: string) => ({ provider: 'railway', externalId, instanceScope: { projectId: 'p', environmentId: 'e' } });
 const target: ManagedBackupTarget = { version: 1, project: 'hls', environment: 'production',
@@ -94,7 +94,23 @@ describe('completed managed recovery observations', () => {
     await expect(applyManagedRecoveryRetention(input)).rejects.toThrow();
     expect(archive.remove).not.toHaveBeenCalled();
   });
-  it('checks the joined SQL archive identity and size without reading archive bytes', async () => {
+  it('keeps legacy evidence unknown for the current contract but retains historical contracts without blocking a new set', async () => {
+    const { input, archive, create, result } = await setup();
+    await create(id(2));
+    const key = result.receipt.manifestKey;
+    const legacy = { ...result.manifest, version: 1 };
+    archive.values.get(key)!.bytes = Buffer.from(JSON.stringify(legacy));
+    expect(await observeManagedRecoverySet(input)).toMatchObject({ status: 'unknown', reasonCodes: ['backup-unverified'] });
+    // A helper digest upgrade creates a new target contract. Old proof remains
+    // retained, but must neither certify today's contract nor block its new set.
+    legacy.contractHash = 'b'.repeat(64);
+    archive.values.get(key)!.bytes = Buffer.from(JSON.stringify(legacy));
+    expect(await observeManagedRecoverySet(input)).toMatchObject({ status: 'healthy', manifest: { setId: id(2) } });
+    expect(await applyManagedRecoveryRetention(input)).toMatchObject({ success: true, deletedSets: 0 });
+    expect(archive.values.has(key)).toBe(true);
+    expect(archive.remove).not.toHaveBeenCalled();
+  });
+  it.each(['truncated', 'same-size replacement'])('rejects a %s SQL archive without reading archive bytes', async change => {
     const source = store({ file: 'bytes' }), archive = store();
     const database = { componentId: 'database-component', source: { provider: 'railway', primaryExternalId: 'database-service',
       providerScope: { projectId: 'p', environmentId: 'e' }, resourceIdentity: {} } };
@@ -105,9 +121,9 @@ describe('completed managed recovery observations', () => {
       objects: [{ name: 'documents', identity: selected.objects[0].identity, client: source.client }] }, {
       backupDatabase: async input => {
         const bytes = Buffer.from('retained SQL archive');
-        const evidence: PostgresBackupEvidence = { formatVersion: 1, mechanism: 'postgres-logical-archive', source: input.source,
+        const evidence: PostgresBackupEvidence = { formatVersion: POSTGRES_BACKUP_FORMAT_VERSION, mechanism: 'postgres-logical-archive', source: input.source,
           destination: input.destination, runId: input.runId, archiveKey: `${input.archivePrefix}/${input.runId}/database.dump`,
-          manifestKey: `${input.archivePrefix}/${input.runId}/database.complete.json`, sha256: createHash('sha256').update(bytes).digest('hex'),
+          manifestKey: `${input.archivePrefix}/${input.runId}/database.complete.json`, archiveRevision: { etag: createHash('sha256').update(bytes).digest('hex') }, sha256: createHash('sha256').update(bytes).digest('hex'),
           bytes: bytes.length, dataTime: new Date().toISOString(), completedAt: new Date().toISOString(), sourceVersion: '16', targetVersion: '16',
           tableCount: 1, totalRows: '1', restoreVerified: true, cleanupVerified: true, coverage: 'single-database-schema-and-data',
           applicationCompatibility: 'unverified', applied: 1, skipped: 0 };
@@ -121,7 +137,8 @@ describe('completed managed recovery observations', () => {
     archive.get.mockClear();
     expect(await observeManagedRecoverySet(input)).toMatchObject({ status: 'healthy', manifest: { compatibility: 'references-verified' } });
     expect(archive.get.mock.calls.every(([key]) => key.endsWith('.json'))).toBe(true);
-    archive.values.get(result.manifest.database!.archiveKey)!.bytes = Buffer.from('truncated');
+    const retained = archive.values.get(result.manifest.database!.archiveKey)!;
+    retained.bytes = change === 'truncated' ? Buffer.from('truncated') : Buffer.alloc(retained.bytes.length, 'x');
     expect(await observeManagedRecoverySet(input)).toMatchObject({ status: 'unknown', reasonCodes: ['backup-unverified'] });
   });
   it('leaves the joint set incomplete when restored SQL references a file absent from the copied bucket', async () => {
@@ -134,9 +151,9 @@ describe('completed managed recovery observations', () => {
       database: { source: database.source, sourceUrl: 'postgres://unused-private-source' }, fileReferenceQueries: selected.fileReferenceQueries,
       objects: [{ name: 'documents', identity: selected.objects[0].identity, client: source.client }] }, {
       backupDatabase: async input => {
-        const evidence: PostgresBackupEvidence = { formatVersion: 1, mechanism: 'postgres-logical-archive', source: input.source,
+        const evidence: PostgresBackupEvidence = { formatVersion: POSTGRES_BACKUP_FORMAT_VERSION, mechanism: 'postgres-logical-archive', source: input.source,
           destination: input.destination, runId: input.runId, archiveKey: `${input.archivePrefix}/${input.runId}/database.dump`,
-          manifestKey: `${input.archivePrefix}/${input.runId}/database.complete.json`, sha256: 'a'.repeat(64), bytes: 3,
+          manifestKey: `${input.archivePrefix}/${input.runId}/database.complete.json`, archiveRevision: { etag: createHash('sha256').update('sql').digest('hex') }, sha256: 'a'.repeat(64), bytes: 3,
           dataTime: new Date().toISOString(), completedAt: new Date().toISOString(), sourceVersion: '16', targetVersion: '16',
           tableCount: 1, totalRows: '1', restoreVerified: true, cleanupVerified: true, coverage: 'single-database-schema-and-data',
           applicationCompatibility: 'unverified', applied: 1, skipped: 0 };
@@ -155,6 +172,28 @@ describe('completed managed recovery observations', () => {
 });
 
 describe('exact completed-execution retention', () => {
+  it.each(['health', 'retention'])('blocks %s when a replacement races the final owned-key inventory', async operation => {
+    const { input, archive, create, result } = await setup();
+    for (let i = 2; i <= 8; i++) await create(id(i));
+    const manifestKey = result.manifest.objects[0].manifestKey;
+    const manifest = JSON.parse(archive.values.get(manifestKey)!.bytes.toString());
+    const prefix = manifestKey.slice(0, -'manifest.json'.length);
+    const list = archive.list.getMockImplementation()!;
+    let replaced = false;
+    archive.list.mockImplementation(async options => {
+      const observed = await list(options);
+      if (!replaced && options?.prefix === prefix) {
+        replaced = true;
+        const value = archive.values.get(manifest.entries[0].backupKey)!;
+        value.bytes = Buffer.alloc(value.bytes.length, 'x');
+      }
+      return observed;
+    });
+    if (operation === 'health') {
+      expect(await observeManagedRecoverySet(input)).toMatchObject({ status: 'unknown', reasonCodes: ['backup-unverified'] });
+    } else await expect(applyManagedRecoveryRetention(input)).rejects.toThrow();
+    expect(archive.remove).not.toHaveBeenCalled();
+  });
   it('retains seven complete executions, ignores partial sets and deletes only the oldest owned keys', async () => {
     const { input, archive, create } = await setup();
     for (let i = 2; i <= 8; i++) await create(id(i));

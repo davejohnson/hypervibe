@@ -226,6 +226,8 @@ export interface ProviderMetadata {
         variableMode: 'references';
         execution: 'temporary-workload';
         status: 'ready-for-live';
+        /** Native database references the private helper can actually resolve. */
+        databaseProviders: readonly string[];
       };
       /** Smallest provider-owned boundary that completely removes one Hypervibe environment. */
       teardownBoundary: 'services' | 'environment' | 'project';

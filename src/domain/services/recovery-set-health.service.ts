@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import type { StorageObjectClient, StorageObjectRecord } from '../ports/storage.port.js';
 import { managedBackupTargetHash, managedBackupTargetSchema, type ManagedBackupTarget } from './managed-backup-target.service.js';
-import { observeObjectRecoverySetInventory, objectRecoveryManifestKey, objectRecoverySetPrefix } from './object-recovery-set.service.js';
+import { observeObjectRecoverySetInventory, objectRecoveryManifestKey, objectRecoverySetPrefix, storedObjectRevisionMatches, storedObjectRevisionSchema } from './object-recovery-set.service.js';
+import { POSTGRES_BACKUP_FORMAT_VERSION } from './postgres-backup.service.js';
 import { readRecoveryJson, RECOVERY_LIMITS, recoverySetManifestSchema, recoverySetRoot, type RecoverySetManifest } from './recovery-set.service.js';
 
 const MAX_EXECUTIONS = 256;
@@ -50,9 +51,13 @@ async function inspectSet(input: Context & { setId: string; requireExecution: bo
   const rootKeys = new Set(rootObjects.map(object => object.key));
   if (rootKeys.has(executionKey) && !rootKeys.has(completeKey)) throw new Error('Execution completion has lost its inner manifest.');
   if (!rootKeys.has(completeKey) || (input.requireExecution && !rootKeys.has(executionKey))) return undefined;
-  const manifest = recoverySetManifestSchema.parse(await readRecoveryJson(input.archive, completeKey));
   // Historical contracts remain retained, but cannot certify or authorize deletion for today's target.
-  if (manifest.contractHash !== managedBackupTargetHash(target)) return undefined;
+  // Read their narrow version-independent envelope before interpreting today's
+  // stronger evidence format. Never fabricate missing historical revisions.
+  const rawManifest = await readRecoveryJson(input.archive, completeKey);
+  const envelope = z.object({ contractHash: z.string().regex(/^[a-f0-9]{64}$/) }).passthrough().parse(rawManifest);
+  if (envelope.contractHash !== managedBackupTargetHash(target)) return undefined;
+  const manifest = recoverySetManifestSchema.parse(rawManifest);
   if (manifest.setId !== input.setId || manifest.project !== target.project || manifest.environment !== target.environment
     || (!manifest.database && !manifest.objects.length)
     || manifest.compatibility !== (manifest.database && manifest.objects.length ? 'references-verified' : 'not-applicable')
@@ -80,14 +85,16 @@ async function inspectSet(input: Context & { setId: string; requireExecution: bo
     const database = manifest.database, sqlPrefix = `${prefix}sql/${input.setId}/`;
     if (database.archiveKey !== `${sqlPrefix}database.dump` || database.manifestKey !== `${sqlPrefix}database.complete.json`) throw new Error('SQL recovery paths are not owned by this execution.');
     expected.set(database.archiveKey, database.bytes); expected.set(database.manifestKey, undefined);
-    const sql = z.object({ formatVersion: z.literal(1), mechanism: z.literal('postgres-logical-archive'),
+    const sql = z.object({ formatVersion: z.literal(POSTGRES_BACKUP_FORMAT_VERSION), mechanism: z.literal('postgres-logical-archive'),
       source: recoverySetManifestSchema.shape.database.unwrap().shape.source,
       destination: managedBackupTargetSchema.shape.destination.shape.identity, runId: uuid,
-      archiveKey: z.string(), manifestKey: z.string(), sha256: z.string(), bytes: z.number(), dataTime: timestamp,
+      archiveKey: z.string(), archiveRevision: storedObjectRevisionSchema, manifestKey: z.string(), sha256: z.string(), bytes: z.number(), dataTime: timestamp,
       completedAt: timestamp, restoreVerified: z.literal(true), cleanupVerified: z.literal(true) }).passthrough()
       .parse(await readRecoveryJson(input.archive, database.manifestKey));
     if (sql.runId !== input.setId || !same(sql.source, database.source) || !same(sql.destination, target.destination.identity)
       || sql.archiveKey !== database.archiveKey || sql.manifestKey !== database.manifestKey || sql.sha256 !== database.sha256
+      || !same(sql.archiveRevision, database.archiveRevision)
+      || !storedObjectRevisionMatches(database.archiveRevision, rootObjects.find(object => object.key === database.archiveKey)?.revision)
       || sql.bytes !== database.bytes || sql.dataTime !== manifest.dataTime || sql.completedAt !== database.restoreVerifiedAt) throw new Error('SQL recovery evidence differs.');
     checkTime(database.restoreVerifiedAt, started, completed);
   }
@@ -105,6 +112,12 @@ async function inspectSet(input: Context & { setId: string; requireExecution: bo
     const objects = checkedInventory(await input.archive.list({ prefix: objectRecoverySetPrefix(object.source, input.setId),
       maxObjects: RECOVERY_LIMITS.maxObjects + 1 }), RECOVERY_LIMITS.maxObjects + 1);
     exactInventory(objects, new Map([[object.manifestKey, undefined], ...objectManifest.entries.map(entry => [entry.backupKey, entry.size] as [string, number])]));
+    // The final inventory becomes conditional-delete authority. A fresh LIST
+    // must not replace the verified revision with newer same-sized bytes.
+    const revisions = new Map(objectManifest.entries.map(entry => [entry.backupKey, entry.backupRevision]));
+    if (objects.some(item => item.key !== object.manifestKey && !storedObjectRevisionMatches(revisions.get(item.key), item.revision))) {
+      throw new Error('Recovery inventory changed before retaining deletion authority.');
+    }
     owned.push(...objects);
   }
   if (new Set(owned.map(object => object.key)).size !== owned.length) throw new Error('Recovery sources have overlapping archive ownership.');

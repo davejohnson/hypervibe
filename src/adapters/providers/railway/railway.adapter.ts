@@ -4386,11 +4386,14 @@ export class RailwayAdapter implements
       || !/^[^@\s]+@sha256:[a-f0-9]{64}$/.test(options.expectedImage)) {
       throw new Error('Declared task requires reference variables, disabled sweeping, a safe execution id and an immutable expected image.');
     }
-    if (options.expectedImage.startsWith('ghcr.io/')
+    const recovery = 'databaseSource' in options ? options : undefined;
+    // Published recovery helpers are verified for anonymous pull by the release
+    // workflow. Preserve the explicit credential requirement for app tasks;
+    // recovery may use a public digest or supplied private-registry credentials.
+    if (!recovery && options.expectedImage.startsWith('ghcr.io/')
       && (!options.registryCredentials?.username || !options.registryCredentials.token)) {
       throw new Error('Declared task requires explicit private image registry credentials.');
     }
-    const recovery = 'databaseSource' in options ? options : undefined;
     if (recovery) {
       const source = recoverySourceIdentitySchema.parse(recovery.databaseSource);
       if (source.provider !== 'railway' || source.primaryExternalId !== sourceServiceId
@@ -7651,7 +7654,7 @@ providerRegistry.register({
     lifecycle: {
       hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'managed', maintenance: 'managed', teardownBoundary: 'environment',
         environmentTasks: { variableMode: 'references', execution: 'temporary-workload', status: 'ready-for-live' },
-        recoveryTasks: { variableMode: 'references', execution: 'temporary-workload', status: 'ready-for-live' },
+        recoveryTasks: { variableMode: 'references', execution: 'temporary-workload', status: 'ready-for-live', databaseProviders: ['railway'] },
         serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only' } },
       databaseEngines: ['postgres'],
       databaseConnectivity: { compatibleHostingProviders: ['railway'] },

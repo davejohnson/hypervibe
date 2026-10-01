@@ -165,8 +165,17 @@ class GcsObjectClient implements StorageObjectClient {
       const response = await this.authorized(`${STORAGE_API}/storage/v1/b/${encodeURIComponent(this.bucket)}/o?${params}`);
       if (!response.ok) throw await responseError(response);
       const body = await response.json() as { items?: GcsObject[]; nextPageToken?: string };
+      if (!body || typeof body !== 'object' || Array.isArray(body)
+        || (body.items !== undefined && !Array.isArray(body.items))
+        || (body.nextPageToken !== undefined && (typeof body.nextPageToken !== 'string' || !body.nextPageToken))) {
+        throw new Error('GCS object listing completeness is unknown.');
+      }
       for (const object of body.items ?? []) {
-        if (object.name) objects.push({ key: object.name, size: Number(object.size ?? 0),
+        if (!object || typeof object.name !== 'string' || !object.name || typeof object.size !== 'string'
+          || !/^\d+$/.test(object.size) || !Number.isSafeInteger(Number(object.size))) {
+          throw new Error('GCS object listing contains an incomplete object identity or size.');
+        }
+        objects.push({ key: object.name, size: Number(object.size),
           ...(object.generation ? { revision: { generation: object.generation,
             ...(object.metageneration ? { metageneration: object.metageneration } : {}) } } : {}) });
         if (options?.maxObjects !== undefined && objects.length > options.maxObjects) throw new Error('GCS object listing exceeds its count limit.');

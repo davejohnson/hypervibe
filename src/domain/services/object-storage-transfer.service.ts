@@ -49,9 +49,14 @@ export function createS3ObjectClient(credentials: StorageCredentials, dependenci
           ...(options?.prefix ? { Prefix: options.prefix } : {}),
           ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
         }));
+        if (typeof page.IsTruncated !== 'boolean' || (page.Contents !== undefined && !Array.isArray(page.Contents))) {
+          throw new Error('Object listing completeness is unknown.');
+        }
         for (const object of page.Contents ?? []) {
-          if (typeof object.Key !== 'string') continue;
-          objects.push({ key: object.Key, size: object.Size ?? 0, revision: {
+          if (typeof object.Key !== 'string' || !object.Key || !Number.isSafeInteger(object.Size) || object.Size! < 0) {
+            throw new Error('Object listing contains an incomplete object identity or size.');
+          }
+          objects.push({ key: object.Key, size: object.Size!, revision: {
             ...(object.ETag ? { etag: object.ETag } : {}),
             ...(object.LastModified ? { lastModified: object.LastModified.toISOString() } : {}),
           } });

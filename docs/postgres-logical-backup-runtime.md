@@ -16,6 +16,10 @@ and no production-volume restore path. Completion is recorded only after the
 restore, row-count and extension checks, optional read-only verification, local
 server stop and temporary-file cleanup. The private completion manifest is
 conditionally written and read back before a successful receipt is returned.
+Format-2 evidence records the native archive revision from that SHA256-verified
+download. After the isolated restore, the runtime rechecks the retained revision
+before writing completion. Later health checks compare it again; byte length
+alone cannot transfer successful restore evidence to an overwritten archive.
 
 The SQL manifest identifies the snapshot's transaction time as `dataTime`.
 Upload/restore completion time does not substitute for data coverage. A failed
@@ -137,12 +141,13 @@ identity sequence and `pgcrypto`, source writes after the snapshot, same-size
 archive corruption, late verification failure, forbidden verification writes,
 unsupported foreign servers, private file references and run collisions. The
 tests require installed PostgreSQL tools and fail rather than silently skipping
-when those tools are absent. Local execution used PostgreSQL 14.20. The locally
-built helper also passed `test/backup-runner-smoke.mjs` with PostgreSQL 16.15 and
+when those tools are absent. Local execution used PostgreSQL 14.20. Before the
+format-2 audit, the locally built helper passed `test/backup-runner-smoke.mjs` with PostgreSQL 16.15 and
 Docker networking disabled: retained SQL and file bytes restored together,
 schema and row checks passed, and a late SQL verification failure left no joint
 completion. That smoke uses an injected object transport. These development
-checks do not publish an image; publication requires a verified release receipt.
+checks do not publish an image or verify the packaged format-2 changes;
+publication requires a new verified release receipt.
 Production routing and provider transports still require live acceptance.
 
 The challenged assumptions were that successful upload proves retained bytes,

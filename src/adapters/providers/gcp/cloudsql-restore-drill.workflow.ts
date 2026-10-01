@@ -83,10 +83,15 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-const config = JSON.parse(Buffer.from(process.env.HYPERVIBE_DRILL_CONFIG_B64 || '', 'base64').toString('utf8'));
+function parsePrivateJson(text, description) {
+  try { return JSON.parse(text); }
+  catch { throw new Error(description + ' is not valid JSON; contents are omitted.'); }
+}
+
+const config = parsePrivateJson(Buffer.from(process.env.HYPERVIBE_DRILL_CONFIG_B64 || '', 'base64').toString('utf8'), 'Restore drill configuration');
 const credentialsText = process.env.HYPERVIBE_DRILL_CREDENTIALS;
 if (!credentialsText) throw new Error('The configured Cloud SQL drill credential secret is empty.');
-const credentials = JSON.parse(credentialsText);
+const credentials = parsePrivateJson(credentialsText, 'Restore drill credentials');
 for (const key of ['projectId', 'region', 'sourceInstanceId', 'sourceConnectionName', 'databaseName', 'verificationQuery']) {
   if (!config[key]) throw new Error('Restore drill config is missing ' + key + '.');
 }
@@ -105,8 +110,11 @@ const namePrefix = 'hv-drill-';
 const summary = ['## Hypervibe Cloud SQL restore drill', ''];
 let targetName = '';
 let cloneRequested = false;
+let cloneCompleted = false;
 let token;
 let credentialsPath;
+
+class DrillError extends Error {}
 
 function mask(value) {
   process.stdout.write('::add-mask::' + value + '\n');
@@ -120,7 +128,9 @@ function reportResource(disposition) {
 }
 
 function shortError(error) {
-  return error instanceof Error ? error.message : String(error);
+  // HTTP/connector/database failures can echo credentials or query contents.
+  // Only locally constructed, value-free diagnostics may enter a CI summary.
+  return error instanceof DrillError ? error.message : 'Restore drill failed; provider and database error details are omitted.';
 }
 
 async function writeSummary() {
@@ -148,7 +158,7 @@ async function accessToken() {
     }),
   });
   const body = await response.text();
-  if (!response.ok) throw new Error('GCP token exchange failed: ' + response.status + ' ' + body);
+  if (!response.ok) throw new DrillError('GCP token exchange failed with HTTP ' + response.status + '.');
   return JSON.parse(body).access_token;
 }
 
@@ -156,36 +166,52 @@ async function googleJson(url, options, description, allowNotFound = false) {
   const response = await fetch(url, options);
   if (allowNotFound && response.status === 404) return null;
   const body = await response.text();
-  if (!response.ok) throw new Error(description + ' failed: ' + response.status + ' ' + body);
-  return body ? JSON.parse(body) : {};
+  if (!response.ok) throw new DrillError(description + ' failed with HTTP ' + response.status + '.');
+  const result = body ? JSON.parse(body) : {};
+  if (!result || typeof result !== 'object' || Array.isArray(result)) {
+    throw new DrillError(description + ' returned an invalid response.');
+  }
+  return result;
 }
 
-async function waitOperation(operation, description) {
-  if (!operation || !operation.name) throw new Error(description + ' did not return an operation id.');
+async function waitOperation(operation, description, targetId, operationTypes) {
+  // Official PITR examples return CREATE or CLONE for the destination. A
+  // request attempt, rejected request, or unrelated DONE is not creation proof.
+  // https://docs.cloud.google.com/sql/docs/postgres/backup-recovery/pitr
+  const matches = (candidate) => candidate && typeof candidate.name === 'string' && candidate.name.length > 0
+    && candidate.targetId === targetId && candidate.targetProject === config.projectId
+    && operationTypes.includes(candidate.operationType);
+  if (!matches(operation)) throw new DrillError(description + ' did not return a correlated operation.');
   for (let attempt = 0; attempt < 180; attempt += 1) {
     const current = await googleJson(
       apiBase + '/operations/' + encodeURIComponent(operation.name),
       { headers: { Authorization: 'Bearer ' + token } },
       description + ' operation lookup'
     );
-    if ((current.status || '').toUpperCase() === 'DONE') {
-      if (current.error && Array.isArray(current.error.errors) && current.error.errors.length > 0) {
-        throw new Error(description + ' failed: ' + current.error.errors.map((entry) => entry.message || entry.code || 'unknown').join('; '));
-      }
+    if (!matches(current) || current.name !== operation.name || current.operationType !== operation.operationType
+      || !['PENDING', 'RUNNING', 'DONE'].includes(current.status)) {
+      throw new DrillError(description + ' operation identity or status could not be verified.');
+    }
+    if (current.status === 'DONE') {
+      if (current.error !== undefined) throw new DrillError(description + ' reported an operation error.');
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 5000));
   }
-  throw new Error(description + ' did not finish before the 15 minute operation timeout.');
+  throw new DrillError(description + ' did not finish before the 15 minute operation timeout.');
 }
 
 async function getInstance(name) {
-  return googleJson(
+  const instance = await googleJson(
     apiBase + '/instances/' + encodeURIComponent(name),
     { headers: { Authorization: 'Bearer ' + token } },
     'Cloud SQL instance lookup',
     true
   );
+  if (instance && (instance.name !== name || instance.project !== config.projectId || instance.region !== config.region)) {
+    throw new DrillError('Cloud SQL instance lookup returned an unverified source identity.');
+  }
+  return instance;
 }
 
 function assertGeneratedTarget(name) {
@@ -217,12 +243,12 @@ async function deleteOwned(instance, description) {
     { method: 'DELETE', headers: { Authorization: 'Bearer ' + token } },
     description
   );
-  await waitOperation(operation, description);
+  await waitOperation(operation, description, instance.name, ['DELETE']);
   await waitForAbsence(instance.name);
 }
 
 async function cleanupCurrentRunBeforeOwnership() {
-  if (!cloneRequested || !targetName) return false;
+  if (!cloneCompleted || !targetName) return false;
   assertGeneratedTarget(targetName);
   const instance = await getInstance(targetName);
   if (!instance) return false;
@@ -232,7 +258,7 @@ async function cleanupCurrentRunBeforeOwnership() {
     { method: 'DELETE', headers: { Authorization: 'Bearer ' + token } },
     'current-run unlabeled clone cleanup'
   );
-  await waitOperation(operation, 'current-run unlabeled clone cleanup');
+  await waitOperation(operation, 'current-run unlabeled clone cleanup', targetName, ['DELETE']);
   await waitForAbsence(targetName);
   return true;
 }
@@ -287,7 +313,7 @@ async function patchOwnership(instance) {
     },
     'restore-drill ownership label update'
   );
-  await waitOperation(operation, 'restore-drill ownership label update');
+  await waitOperation(operation, 'restore-drill ownership label update', instance.name, ['UPDATE']);
   const observed = await getInstance(instance.name);
   if (!observed || !hasOwnership(observed)) throw new Error('Cloud SQL did not report the restore-drill ownership labels.');
   return observed;
@@ -304,7 +330,7 @@ async function setClonePassword(name, password) {
     },
     'restore-drill postgres password update'
   );
-  await waitOperation(operation, 'restore-drill postgres password update');
+  await waitOperation(operation, 'restore-drill postgres password update', name, ['UPDATE_USER']);
 }
 
 async function verifyClone(instance, password) {
@@ -373,7 +399,8 @@ try {
     },
     'Cloud SQL point-in-time clone'
   );
-  await waitOperation(cloneOperation, 'Cloud SQL point-in-time clone');
+  await waitOperation(cloneOperation, 'Cloud SQL point-in-time clone', targetName, ['CREATE', 'CLONE']);
+  cloneCompleted = true;
   reportResource('created');
   let clone = await getInstance(targetName);
   if (!clone || clone.state !== 'RUNNABLE') throw new Error('The restored Cloud SQL clone is not RUNNABLE.');
@@ -402,6 +429,9 @@ try {
       if (deleted) {
         reportResource('deleted');
         summary.push('- Removed the current run\'s unlabeled temporary clone after the failure.');
+      } else if (cloneRequested && current) {
+        reportResource('cleanup-failed');
+        summary.push('- A target is present without verified creation ownership. No ownership or deletion mutation was attempted; inspect the recorded target and operation before cleanup.');
       }
     }
   } catch (cleanupError) {

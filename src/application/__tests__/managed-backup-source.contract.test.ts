@@ -13,7 +13,8 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 // GraphQL schema. Archive evidence and worker execution are mocked at their
 // shared boundaries: this checks source admission, not live backup completion.
 describe('recurring controller freshly verifies its native database source', () => {
-  it.each(['health', 'backup'].flatMap(operation => ['current', 'replaced', 'unknown'].map(state => ({ operation: operation as 'health' | 'backup', state }))))(
+  it.each([...['health', 'backup'].flatMap(operation => ['current', 'replaced', 'unknown'].map(state => ({ operation: operation as 'health' | 'backup', state }))),
+    { operation: 'backup' as const, state: 'cleanup-unknown' }])(
     'checks $state source before $operation evidence or writes', async ({ operation, state }) => {
       vi.restoreAllMocks(); vi.unstubAllGlobals();
       const localState = vi.spyOn(SqliteAdapter, 'getInstance').mockImplementation(() => { throw new Error('Recurring controller must not open local SQLite.'); });
@@ -37,7 +38,7 @@ describe('recurring controller freshly verifies its native database source', () 
       vi.spyOn(providerRegistry, 'createAdapter').mockResolvedValue(http.adapter);
       vi.spyOn(providerRegistry.get('railway')!.derivedAdapters!, 'storage').mockResolvedValue(storage);
       const run = vi.spyOn(http.adapter, 'runJob').mockResolvedValue({ jobId: 'job', status: 'completed', exitCode: 0,
-        receipt: { success: true, message: 'Completed', data: { cleanupVerified: true } } });
+        receipt: { success: true, message: 'Completed', ...(state === 'cleanup-unknown' ? {} : { data: { cleanupVerified: true } }) } });
       const observe = vi.spyOn(retained, 'observeManagedRecoverySet').mockResolvedValue({ status: 'healthy', reasonCodes: [] } as never);
       const record = vi.spyOn(retained, 'recordRecoveryExecution').mockResolvedValue({ applied: 1, skipped: 0 });
       vi.spyOn(retained, 'applyManagedRecoveryRetention').mockResolvedValue({ success: true } as never);
@@ -47,6 +48,10 @@ describe('recurring controller freshly verifies its native database source', () 
         expect(await promise).toMatchObject({ status: 'healthy' });
         expect(observe).toHaveBeenCalledTimes(1);
         expect(run).toHaveBeenCalledTimes(operation === 'backup' ? 1 : 0);
+      } else if (state === 'cleanup-unknown') {
+        await expect(promise).rejects.toThrow(/cleanup is unverified/);
+        expect(run).toHaveBeenCalledOnce();
+        expect(observe).not.toHaveBeenCalled(); expect(record).not.toHaveBeenCalled();
       } else {
         await expect(promise).rejects.toThrow(/database source/i);
         expect(observe).not.toHaveBeenCalled(); expect(run).not.toHaveBeenCalled(); expect(record).not.toHaveBeenCalled();
