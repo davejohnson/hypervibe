@@ -1165,8 +1165,12 @@ Email reconciliation uses separate action authorities for hosting runtime
 variables, SendGrid sender/domain authorization, Cloudflare DNS records,
 SendGrid inbound parsing and delivery events, Cloudflare mailbox forwarding,
 and final domain validation. A service or deploy
-bootstrap must never configure email as a side effect. Inbound route replacement
-is confirmation-gated because SendGrid replaces it through delete/create.
+bootstrap must never configure email as a side effect. Updates to an existing
+signed inbound route require confirmation. Its positively observed security-policy
+attachment is preserved by an exact-hostname PATCH with the complete reviewed
+route settings; unknown attachment evidence blocks changes instead of deleting
+and recreating the route. Alias-only changes record local bindings with read
+permission; route PATCH requires read and update permissions.
 Matching unmanaged provider identities are explicit adoption actions;
 duplicates and observation failures block instead of selecting or creating.
 
@@ -1188,8 +1192,28 @@ Endpoint and hosting identities plus key hashes are durably bound. Unknown reads
 block; noops never mutate; ambiguous writes are re-observed before retries.
 Disable signing and remove the owned key before removing managed intent or
 moving the target. Plan/status distinguish provider signing and key wiring from
-unverified application signature handling. Inbound Parse security remains
-separate and unmanaged. See [delivery-event signing](docs/sendgrid-webhook-signing.md).
+unverified application signature handling. See
+[delivery-event signing](docs/sendgrid-webhook-signing.md).
+
+Inbound Parse `signatureVerification: true` has a narrower evidence-backed
+contract: adopt an already attached, positively observed signed security policy
+and reconcile `SENDGRID_INBOUND_WEBHOOK_PUBLIC_KEY` on the receiving service.
+The confirmed key action pins the hostname, policy ID, hosting identity and key
+hash; ordinary email runtime actions do not own this key. Pending ownership is
+durable before hosting writes. Acknowledged rollout requirements are journaled
+and replayed through shared `runtimeRollouts`, including recovery after a lost
+outer action receipt. An unknown hosting acknowledgement stays pending unless
+a distinct running deployment is observed after its saved, known baseline;
+an unknown baseline cannot recover automatically. Key presence alone cannot
+replace that evidence, and recovery does not repeat an already committed write.
+Missing attachment or signature evidence remains unknown. The official contract does not establish
+unsigned-response or detach semantics, so Hypervibe does not create, rotate,
+detach, disable or delete policies in this slice. Disabling or removing active
+managed intent, or moving its target, blocks while preserving existing state.
+This is an explicit provider capability gap, not a completed onboarding path.
+Noops do not mutate, and application signature validation, raw multipart-body
+handling and replay protection remain unverified. See
+[Inbound Parse signing](docs/sendgrid-inbound-signing.md).
 
 A SendGrid-backed CI email journey reuses this lifecycle rather than adding a
 Hypervibe-hosted inbox. The desired state declares a dedicated staging Inbound

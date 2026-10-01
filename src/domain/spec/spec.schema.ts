@@ -1445,6 +1445,8 @@ export const emailSenderSpecSchema = z.object({
 }).strict();
 
 export const emailInboundSpecSchema = z.object({
+  /** Manage an already attached signing policy; unsupported creation/removal block. */
+  signatureVerification: z.boolean().optional(),
   hostname: emailHostnameSchema,
   service: z.string().min(1),
   path: z.string()
@@ -1468,6 +1470,8 @@ export const SENDGRID_DELIVERY_EVENTS = [
   'spam_report',
   'unsubscribe',
 ] as const;
+
+export const SENDGRID_INBOUND_PUBLIC_KEY = 'SENDGRID_INBOUND_WEBHOOK_PUBLIC_KEY';
 
 export const SENDGRID_EVENT_PUBLIC_KEY = 'SENDGRID_EVENT_WEBHOOK_PUBLIC_KEY';
 
@@ -1519,6 +1523,7 @@ export const emailSpecSchema = z.object({
 });
 
 export const EMAIL_MANAGED_ENV_KEYS = [
+  SENDGRID_INBOUND_PUBLIC_KEY,
   SENDGRID_EVENT_PUBLIC_KEY,
   'SENDGRID_API_KEY',
   'SENDGRID_FROM_EMAIL',

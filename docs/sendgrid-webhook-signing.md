@@ -47,7 +47,9 @@ for the existing lifecycle.
 The app must verify SendGrid's signature over the original request bytes and
 apply suitable timestamp/replay handling before trusting an event. Hypervibe does
 not install application middleware or send test events. Inbound Parse has a
-separate security-policy API and remains unmanaged by this feature. The existing
+separate security-policy API; its [limited declarative support](sendgrid-inbound-signing.md)
+adopts an already attached signed policy and reconciles its receiving-service
+public key, while policy creation and removal remain blocked. The existing
 restriction of one declarative delivery-event target per project remains.
 
 ## Connection access

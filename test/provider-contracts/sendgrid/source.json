@@ -3,9 +3,14 @@
   "upstreamRevision": "fb95a935c87b79f7f982ac34bd37adab1f697dbc",
   "sourceSha256": "001940911ae832cdd8dc0039567f7785355b261a9c3cca8accbc1d1b33539fb3",
   "schemaFile": "openapi.json",
-  "schemaSha256": "2c56438ce36ad06637280b24c54fb8c5e50216a1920f70728258eb87449aaec9",
+  "schemaSha256": "cf1016b76f636bdc7f294b125aab74caec5322ba8fd272c7438e81d7ca5ef924",
   "apiVersion": "v3",
-  "extraction": "Exact GET all, GET/PATCH exact-ID settings, PATCH exact-ID signing operations and transitive component references; field constraints unchanged.",
+  "extraction": "Exact Event Webhook GET all, GET/PATCH exact-ID settings, PATCH exact-ID signing; Inbound Parse GET/PATCH exact-hostname settings; security policy GET exact-ID; transitive component references. Field constraints unchanged.",
   "consultedAt": "2026-09-24",
-  "evidence": "Reconstructed transport fixtures; not recorded traffic or live compatibility."
+  "evidence": "Reconstructed transport fixtures; not recorded traffic or live compatibility.",
+  "semanticEvidence": {
+    "sourceUrl": "https://www.twilio.com/docs/sendgrid/for-developers/parsing-email/securing-your-parse-webhooks",
+    "consultedAt": "2026-09-24",
+    "coverage": "The guide independently documents security_policy as a string policy ID in parse-setting PATCH requests and responses. The pinned ParseSetting schema does not declare this field and therefore does not constrain its type or semantics. It does not document null/detach behavior, omission as authoritative absence, policy name uniqueness, or idempotency for creation."
+  }
 }

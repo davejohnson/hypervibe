@@ -502,6 +502,189 @@
           }
         }
       }
+    },
+    "/v3/user/webhooks/parse/settings/{hostname}": {
+      "parameters": [
+        {
+          "name": "hostname",
+          "in": "path",
+          "description": "The hostname associated with the inbound parse setting that you would like to retrieve.",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "GetParseSetting",
+        "summary": "Retrieve a specific parse setting",
+        "tags": [
+          "Parse Webhook"
+        ],
+        "description": "**This endpoint allows you to retrieve a specific inbound parse setting by hostname.**\n\nYou can retrieve all your Inbound Parse settings and their associated host names with the \"Retrieve all parse settings\" endpoint.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OnBehalfOf"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParseSetting"
+                },
+                "examples": {
+                  "response": {
+                    "value": {
+                      "url": "http://mydomain.com/parse",
+                      "hostname": "mail.mydomain.com",
+                      "spam_check": true,
+                      "send_raw": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Webhook401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Webhook403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Webhook404"
+          },
+          "500": {
+            "$ref": "#/components/responses/Webhook500"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "UpdateParseSetting",
+        "summary": "Update a parse setting",
+        "tags": [
+          "Parse Webhook"
+        ],
+        "description": "**This endpoint allows you to update a specific inbound parse setting by hostname.**\n\nYou can retrieve all your Inbound Parse settings and their associated host names with the \"Retrieve all parse settings\" endpoint.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OnBehalfOf"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/PostPatchParseSetting"
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParseSetting"
+                },
+                "examples": {
+                  "response": {
+                    "value": {
+                      "url": "http://mydomain.com/parse",
+                      "hostname": "mail.mydomain.com",
+                      "spam_check": true,
+                      "send_raw": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Webhook401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Webhook403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Webhook404"
+          },
+          "500": {
+            "$ref": "#/components/responses/Webhook500"
+          }
+        }
+      }
+    },
+    "/v3/user/webhooks/security/policies/{id}": {
+      "get": {
+        "operationId": "GetSecurityPolicy",
+        "summary": "Retrieve a specific webhook security policy",
+        "tags": [
+          "Webhook Security"
+        ],
+        "description": "Retrieve the details of a specific webhook security policy by its ID.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/OnBehalfOf"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "policy": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "oauth": {
+                          "type": "object",
+                          "properties": {
+                            "client_id": {
+                              "type": "string"
+                            },
+                            "token_url": {
+                              "type": "string"
+                            },
+                            "scopes": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        },
+                        "signature": {
+                          "type": "object",
+                          "properties": {
+                            "public_key": {
+                              "type": "string"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -907,6 +1090,72 @@
             "description": "The public key you can use to verify the SendGrid signature."
           }
         }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "message": {
+                  "type": "string",
+                  "description": "An error message."
+                },
+                "field": {
+                  "description": "When applicable, this property value will be the field that generated the error.",
+                  "nullable": true,
+                  "type": "string"
+                },
+                "help": {
+                  "type": "object",
+                  "description": "When applicable, this property value will be helper text or a link to documentation to help you troubleshoot the error."
+                }
+              }
+            }
+          },
+          "id": {
+            "type": "string",
+            "description": "When applicable, this property value will be an error ID."
+          }
+        },
+        "example": {
+          "errors": [
+            {
+              "field": "field_name",
+              "message": "error message"
+            }
+          ]
+        }
+      },
+      "ParseSetting": {
+        "title": "Parse Setting",
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The public URL where you would like SendGrid to POST the data parsed from your email. Any emails sent with the given hostname provided (whose MX records have been updated to point to SendGrid) will be parsed and POSTed to this URL."
+          },
+          "hostname": {
+            "type": "string",
+            "description": "A specific and unique domain or subdomain that you have created to use exclusively to parse your incoming email. For example, `parse.yourdomain.com`."
+          },
+          "spam_check": {
+            "type": "boolean",
+            "description": "Indicates if you would like SendGrid to check the content parsed from your emails for spam before POSTing them to your domain."
+          },
+          "send_raw": {
+            "type": "boolean",
+            "description": "Indicates if you would like SendGrid to post the original MIME-type content of your parsed email. When this parameter is set to `true`, SendGrid will send a JSON payload of the content of your email."
+          }
+        },
+        "example": {
+          "url": "http://email.myhostname.com",
+          "hostname": "myhostname.com",
+          "spam_check": false,
+          "send_raw": true
+        }
       }
     },
     "securitySchemes": {
@@ -914,6 +1163,72 @@
         "type": "http",
         "scheme": "bearer",
         "description": "Twilio SendGrid requires you to authenticate with its APIs using an API key. The API key must be sent as a bearer token in the Authorization header."
+      }
+    },
+    "responses": {
+      "Webhook500": {
+        "description": "",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "errors": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "Webhook404": {
+        "description": "",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Webhook403": {
+        "description": "",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Webhook401": {
+        "description": "",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      }
+    },
+    "requestBodies": {
+      "PostPatchParseSetting": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ParseSetting"
+            }
+          }
+        }
       }
     }
   }

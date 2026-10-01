@@ -1,3 +1,4 @@
+import { observeInboundSigning, inboundSigningBinding, inboundSigningFingerprint, inboundSigningTargetBlock, planInboundSigning, type InboundSigningState } from './email-inbound-signing.service.js';
 import { createHash } from 'crypto';
 import { eventSigningUrl, planEventSigning, signingBinding, type EventSigningState, type EventSigningReadiness } from './email-signing.service.js';
 import type {
@@ -65,9 +66,11 @@ export interface SendGridInboundParseRoute {
   url: string;
   spam_check: boolean;
   send_raw: boolean;
+  security_policy?: string;
 }
 
 export interface EmailIntegrationState {
+  inboundSigning?: InboundSigningState;
   eventSigning?: EventSigningState;
   senderReadiness?: EmailSenderReadiness;
   runtimeKey: { status: 'known'; hash: string } | UnknownObservation;
@@ -84,6 +87,7 @@ export interface EmailIntegrationState {
 }
 
 export interface EmailPlanResult {
+  inboundSigningReadiness?: EventSigningReadiness;
   eventSigningReadiness?: EventSigningReadiness;
   senderReadiness?: EmailSenderReadiness;
   actions: PlanAction[];
@@ -163,6 +167,7 @@ export function emailIntegrationFingerprint(state: EmailIntegrationState): strin
 
   return emailConfigHash({
     runtimeKey: state.runtimeKey,
+    inboundSigning: inboundSigningFingerprint(state.inboundSigning),
     eventSigning: state.eventSigning?.status === 'known' ? { ...state.eventSigning.value, publicKey: state.eventSigning.value.publicKey ? emailConfigHash(state.eventSigning.value.publicKey) : null } : state.eventSigning,
     domainAuthentications: normalize(state.domainAuthentications, normalizedDomainAuth),
     verifiedSenders: normalize(state.verifiedSenders, (sender) => ({
@@ -177,6 +182,7 @@ export function emailIntegrationFingerprint(state: EmailIntegrationState): strin
       url: route.url,
       spamCheck: route.spam_check,
       sendRaw: route.send_raw,
+      securityPolicy: route.security_policy,
     })),
     dnsRecords: normalize(state.dnsRecords, normalizedDnsRecord),
     deliveryEvents: state.deliveryEvents.status === 'unknown'
@@ -237,6 +243,7 @@ export async function resolveEmailIntegrationState(params: {
   let inboundRoutes: EmailIntegrationState['inboundRoutes'] = known();
   let dnsRecords: EmailIntegrationState['dnsRecords'] = known();
   let eventSigning: EventSigningState | undefined;
+  let inboundSigning: InboundSigningState | undefined;
   let deliveryEvents: EmailIntegrationState['deliveryEvents'] = unknown('Delivery-event observation was not requested');
   let forwardingSettings: EmailIntegrationState['forwardingSettings'] = unknown('Email-forwarding observation was not requested');
   let forwardingDestinations: EmailIntegrationState['forwardingDestinations'] = known();
@@ -275,6 +282,13 @@ export async function resolveEmailIntegrationState(params: {
     if (wantsInbound) {
       try {
         inboundRoutes = known(await sendgrid.adapter.listInboundParseWebhooks());
+        if (environmentSpec.email.inbound?.signatureVerification !== undefined || Object.keys(inboundSigningBinding(params.environment ?? null)).length) {
+          inboundSigning = await observeInboundSigning(sendgrid.adapter, environmentSpec.email.inbound!.hostname.toLowerCase());
+          if (inboundSigning.status === 'known') {
+            const exact = inboundSigning.route;
+            inboundRoutes.items = inboundRoutes.items.map(route => route.hostname.toLowerCase() === exact.hostname.toLowerCase() ? exact : route);
+          }
+        }
       } catch (error) {
         inboundRoutes = unknown(error instanceof Error ? error.message : String(error));
       }
@@ -379,6 +393,7 @@ export async function resolveEmailIntegrationState(params: {
   return {
     senderReadiness: await inspectEmailSenderReadiness({ ...params, observed: params.observed ?? null }),
     ...(eventSigning ? { eventSigning } : {}),
+    ...(inboundSigning ? { inboundSigning } : {}),
     runtimeKey,
     domainAuthentications,
     verifiedSenders,
@@ -926,7 +941,8 @@ export async function planEmail(params: {
   const senderWarnings = senderReadiness?.guidance ? [senderReadiness.guidance] : [];
   if (!state) {
     const signing = planEventSigning({ spec: environmentSpec, environment, observed, deliveryReady: false });
-    return { actions: signing.actions, warnings: senderWarnings, ...(signing.readiness ? { eventSigningReadiness: signing.readiness } : {}), ...(senderReadiness ? { senderReadiness } : {}) };
+    const inbound = planInboundSigning({ spec: environmentSpec, environment, observed, routeReady: false });
+    return { actions: [...signing.actions, ...inbound.actions], ...(inbound.readiness ? { inboundSigningReadiness: inbound.readiness } : {}), warnings: senderWarnings, ...(signing.readiness ? { eventSigningReadiness: signing.readiness } : {}), ...(senderReadiness ? { senderReadiness } : {}) };
   }
   const actions: PlanAction[] = [];
   const bindings = emailBindings(environment);
@@ -1204,21 +1220,25 @@ export async function planEmail(params: {
           type = 'noop';
           verified = true;
           reason = `SendGrid inbound parse is in sync for ${hostname}`;
-        } else if (routeMatches && !stringValue(inboundBinding, 'hostname')) {
+        } else if (routeMatches) {
           operation = EMAIL_OPERATIONS.inboundAdopt;
           reason = `Adopt the existing SendGrid inbound parse route for ${hostname}`;
         } else if (expectedUrl) {
           type = 'replace';
           operation = EMAIL_OPERATIONS.inboundReplace;
           requiresConfirm = true;
-          reason = `Replace the SendGrid inbound parse route for ${hostname}`;
+          reason = `Update the SendGrid inbound parse settings for ${hostname} while preserving its security policy`;
+          if (!matches[0].security_policy) blockedReason = 'Inbound policy association is unknown; route replacement could strip verification. Preserve the existing route until its exact policy can be observed.';
         }
       } else {
         type = 'create';
         reason = `Create SendGrid inbound parse for ${hostname}`;
+        if (inbound.signatureVerification !== undefined) blockedReason = 'An existing signed Inbound Parse route is required. Automatic security-policy setup is not supported; preserve the requested verification intent.';
       }
     }
 
+    blockedReason = inboundSigningTargetBlock(environment, environmentSpec) ?? blockedReason;
+    const policyId = state.inboundRoutes.status === 'known' ? state.inboundRoutes.items.find(route => route.hostname.toLowerCase() === hostname)?.security_policy : undefined;
     inboundAction = {
       id: `email:sendgrid:inbound:${hostname}`,
       type,
@@ -1238,6 +1258,7 @@ export async function planEmail(params: {
         aliases: [...inbound.aliases].map((alias) => alias.toLowerCase()).sort(),
         spamCheck: inbound.spamCheck,
         sendRaw: inbound.sendRaw,
+        ...(policyId ? { expectedPolicyId: policyId } : {}),
         configHash,
         ...(expectedUrl ? { expectedUrl } : {}),
         ...(blockedReason ? blockedMetadata(blockedReason) : {}),
@@ -1252,6 +1273,9 @@ export async function planEmail(params: {
     deliveryReady: deliveryActions.length === 1 && deliveryActions[0].type === 'noop' && deliveryActions[0].verified === true });
   // Endpoint configuration is its own plan stage; its new identity must be observed before signing is authorized.
   if (!deliveryActions.some(action => action.type !== 'noop' && !action.metadata?.blockedReason)) actions.push(...eventSigning.actions);
+  const inboundSigning = planInboundSigning({spec: environmentSpec, environment, observed, state: state.inboundSigning,
+    routeReady: inboundAction?.type === 'noop' && inboundAction.verified === true});
+  if (!inboundAction || inboundAction.type === 'noop' || inboundAction.metadata?.blockedReason) actions.push(...inboundSigning.actions);
   actions.push(...planForwarding({ environmentSpec, state, bindings }));
 
   if (environmentSpec.domain) {
@@ -1297,6 +1321,7 @@ export async function planEmail(params: {
     warnings: [...state.warnings, ...senderWarnings],
     ...(senderReadiness ? { senderReadiness } : {}),
     ...(eventSigning.readiness ? { eventSigningReadiness: eventSigning.readiness } : {}),
+    ...(inboundSigning.readiness ? { inboundSigningReadiness: inboundSigning.readiness } : {}),
     fingerprint: emailIntegrationFingerprint(state),
   };
 }
