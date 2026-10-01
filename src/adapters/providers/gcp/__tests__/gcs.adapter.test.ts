@@ -273,7 +273,9 @@ describe('GcsStorageAdapter', () => {
     const request = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       if (url.includes('/o?') && !init?.method) return json({ items: [{ name: 'folder/a.pdf', size: '3' }] });
-      if (url.includes('alt=media')) return new Response('pdf', { headers: { 'content-type': 'application/pdf', 'content-length': '3' } });
+      if (url.includes('alt=media')) return new Response('pdf', { headers: { 'content-type': 'application/pdf', 'content-length': '3', 'x-goog-generation': '1', 'x-goog-metageneration': '1' } });
+      // Reads freeze the native revision before streaming media, preserving metadata and stored bytes.
+      if (url.includes('/o/folder%2Fa.pdf?') && !init?.method) return json({ name: 'folder/a.pdf', size: '3', generation: '1', metageneration: '1', contentType: 'application/pdf' });
       if (url.includes('/upload/storage/v1/') && init?.method === 'POST') return json({ name: 'folder/a.pdf' });
       if (url.includes('/storage/v1/') && init?.method === 'PATCH') return json({ name: 'folder/a.pdf' });
       throw new Error(`unexpected request ${init?.method ?? 'GET'} ${url}`);

@@ -39,6 +39,8 @@ export interface DeployOptions {
   deferProviderDeployment?: boolean;
   /** App namespace only; mount-before-workload providers use this identity stage. */
   deferWorkload?: boolean;
+  /** Provider-enforced creation-only admission; never reconfigure an existing workload. */
+  requireNewWorkload?: boolean;
   /** Exact code revision authorized by the persisted plan for deferred bootstrap. */
   expectedSourceCommitSha?: string;
   /** Project creation is a separate reviewed plan action during hv_apply. */
@@ -97,7 +99,7 @@ export class DeployOrchestrator {
     // the persisted plan — runs.plan is returned verbatim by hv_runs, so
     // values (which include DATABASE_URL and resolved secrets) must never
     // be stored. The step reads the live options.envVars at execution time.
-    if ((options.envVars && Object.keys(options.envVars).length > 0) || (options.envVarsByService && Object.keys(options.envVarsByService).length > 0)) {
+    if (!options.requireNewWorkload && ((options.envVars && Object.keys(options.envVars).length > 0) || (options.envVarsByService && Object.keys(options.envVarsByService).length > 0))) {
       steps.push({
         name: 'set_env_vars',
         action: 'setEnvVars',
@@ -174,6 +176,10 @@ export class DeployOrchestrator {
     });
 
     try {
+      if (options.requireNewWorkload && (options.deferProviderDeployment !== true
+        || options.adapter.capabilities.supportsCreateOnlyDeploy !== true)) {
+        throw new Error(`Provider ${options.adapter.name} does not support creation-only deferred workload provisioning.`);
+      }
       for (const step of plan.steps) {
         const receipt = await this.executeStep(step, options, tx);
         if (receipt.status === 'failure' && typeof receipt.result?.service === 'string') {
@@ -558,6 +564,7 @@ export class DeployOrchestrator {
           const mutationOptions: DeploymentMutationOptions = {
             ...(options.deferProviderDeployment ? { deferDeployment: true } : {}),
             ...(options.deferWorkload ? { deferWorkload: true } : {}),
+            ...(options.requireNewWorkload ? { requireNewWorkload: true } : {}),
             ...(options.expectedSourceCommitSha ? { expectedSourceCommitSha: options.expectedSourceCommitSha } : {}),
           };
           const retainedVolumes = parseServiceVolumeBindings(environment);

@@ -687,6 +687,23 @@ describe('hv_deploy database env injection', () => {
       success: true,
       adapter: {
         name: 'cloudsql',
+        // Deployment now requires backup/restore evidence. This fixture supplies
+        // that prerequisite without changing the database-env injection assertions.
+        dailyBackups: {
+          observe: async () => ({ state: 'known', daily: true, mechanism: 'snapshot',
+            policyFingerprint: 'a'.repeat(64), preservationFingerprint: 'b'.repeat(64),
+            source: { provider: 'cloudsql', primaryExternalId: 'production-postgres',
+              providerScope: { projectId: 'gcp-project', region: 'us-central1' }, resourceIdentity: { instanceId: 'production-postgres' } } }),
+          configureDaily: async () => { throw new Error('The established daily schedule must not be mutated during deployment'); },
+          observeRecovery: async () => {
+            const source = { provider: 'cloudsql', primaryExternalId: 'production-postgres',
+              providerScope: { projectId: 'gcp-project', region: 'us-central1' }, resourceIdentity: { instanceId: 'production-postgres' } };
+            const timestamp = new Date(Date.now() - 1000).toISOString();
+            return { state: 'complete', source, recoveryPointId: 'completed-point', dataTime: timestamp, completedAt: timestamp,
+              restore: { state: 'verified', source, recoveryPointId: 'completed-point', verifiedAt: timestamp,
+                isolationVerified: true, cleanupVerified: true } };
+          },
+        },
         observeDatabase: async () => ({
           provider: 'cloudsql',
           engine: 'postgres',

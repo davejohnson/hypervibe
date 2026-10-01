@@ -76,6 +76,7 @@ export interface ObservedServiceVolume {
 
 /** V1 retains data: no delete, adoption, move, resize or implicit deployment. */
 export interface IServiceVolumes {
+  readonly dailyBackups?: import('./daily-backup.port.js').IDailyBackupPolicy<import('./daily-backup.port.js').VolumeBackupTarget>;
   staged?: IStagedServiceVolumes;
   observe(target: ServiceVolumeTarget, externalId?: string): Promise<ServiceVolumeObservation>;
   create(target: ServiceVolumeTarget): Promise<ServiceVolumeMutationReceipt>;

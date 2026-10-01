@@ -75,10 +75,10 @@ function reviewedTarget(
   };
 }
 
-it('requires a reviewed workflow migration for mount-safe generated runtimes', () => {
-  // Revision 3 workflows did not guard retained mounts / custom ECS definitions.
+it('requires a reviewed workflow migration for mount-safe runtimes and backup deployment gates', () => {
+  // Revision 4 workflows did not enforce effective daily backup health before rollout.
   // They must not remain locked as current after installing this feature.
-  expect(GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION).toBe(4);
+  expect(GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION).toBe(5);
 });
 
 function executeDockerfileStep(workflowContent: string, directory: string): string {

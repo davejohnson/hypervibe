@@ -16,6 +16,34 @@ capabilities. Shared source/point tests check representation; they do not claim
 unimplemented adapters or live recovery. Existing provider transport and lifecycle
 tests remain the executable API boundary for implemented operations.
 
+`daily-backup-provider-matrix.json` records official-source design evidence for
+all eight database, seven hosting/mount and four object-storage providers.
+`daily-backup-provider-contracts.test.ts` checks that roster and the complete
+implemented policy ports against registry flags. Unsupported rows are explicit
+Hypervibe implementation gaps; the matrix does not certify live backup coverage
+or replace the implemented adapters' transport-contract tests. See
+[daily backup defaults](../../docs/default-backup-policy.md).
+
+`managed-recovery-provider-matrix.json` separately reviews the seven hosting
+adapters' private helper execution and all four storage adapters' retained-copy
+transports. Its roster test checks the private helper capability flags and exact
+lockfile SDK versions/integrities. S3/Railway and Azure tests execute their real
+SDK serialization with injected HTTP transports; GCS tests inspect JSON API
+conditions and the raw HTTPS media path, including compressed stored bytes.
+These are documentation-based wire assertions, not checked-in provider schemas
+or live API certification. They cover conditional reads, create-only writes,
+exact conditional deletion, pagination/revision metadata and streamed content.
+Railway's general S3 compatibility claim leaves individual conditional-header
+semantics to isolated live acceptance. Object streaming support does not imply
+that a private database worker can receive every provider's native credentials.
+
+Shared recovery tests exercise completion-last SHA256 readback, isolated restore,
+bounded streaming, joint database/file references, controller cleanup markers
+and retention of exact owned keys. Hourly health checks read committed manifests
+and object inventories; they report prior restore proof and current presence,
+not a fresh full-byte audit. Partial executions never certify health or count
+toward the seven complete sets required before retention deletion.
+
 Each provider directory contains `source.json`: official source URL, upstream
 revision when available, source-content SHA-256, checked-in schema SHA-256,
 API version, and the exact extraction boundary. Tests verify the local hash.

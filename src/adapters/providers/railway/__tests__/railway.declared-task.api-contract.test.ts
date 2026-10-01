@@ -35,7 +35,7 @@ async function fixture(options: {
   sourceName?: string; duplicateSourceName?: boolean; existingExecution?: boolean;
   duplicateVariable?: boolean; wrongVariableEnvironment?: boolean; unsafeVariable?: boolean;
   failVariables?: boolean; failCreate?: boolean; failConfigure?: boolean; exitCode?: number;
-  logs?: string[];
+  logs?: string[]; volumeId?: string; volumeInstanceId?: string;
   deploymentStatus?: 'SUCCESS' | 'CRASHED';
   failDelete?: boolean; malformedPage?: boolean;
   responseOverride?: (query: string, result: unknown) => unknown;
@@ -79,6 +79,11 @@ async function fixture(options: {
     },
     environment: ({ id }: { id: string }) => options.missingEnvironment ? null : {
       id, projectId: 'project-one', deletedAt: null,
+      volumeInstances: ({ after }: { after?: string }) => page([{
+        id: options.volumeInstanceId ?? 'volume-instance-one', serviceId: 'web-id', environmentId: 'staging',
+        mountPath: '/var/lib/postgresql/data', deletedAt: null, isPendingDeletion: false,
+        volume: { id: options.volumeId ?? 'volume-one', projectId: 'project-one' },
+      }], after),
       variables: ({ after }: { after?: string }) => {
         if (options.failVariables) throw new GraphQLError('synthetic permission rejection');
         return page(variables, after);
@@ -337,5 +342,120 @@ describe('Railway declared task serialized contract', () => {
     expect(result.cleanupWarning).toContain('task-id');
     expect(context.services.has('other-task')).toBe(true);
     expect(context.mutations.filter((mutation) => mutation.field === 'serviceDelete')).toHaveLength(1);
+  });
+});
+
+
+const recoveryOptions = {
+  timeoutMs: 100, pollIntervalMs: 1,
+  managedRecoveryTask: {
+    variableMode: 'references' as const, sweep: false as const,
+    expectedImage: `docker.io/example/recovery@sha256:${'b'.repeat(64)}`,
+    executionId: 'recovery-101',
+    databaseSource: {
+      provider: 'railway', primaryExternalId: 'web-id',
+      providerScope: { projectId: 'project-one', environmentId: 'staging' },
+      resourceIdentity: { volumeId: 'volume-one', volumeInstanceId: 'volume-instance-one' },
+    },
+    variableReferences: [{ sourceServiceId: 'web-id', variableName: 'DATABASE_URL', targetName: 'HYPERVIBE_BACKUP_DATABASE_URL' }],
+    variables: { HYPERVIBE_BACKUP_CONFIG: '{"schemaVersion":1}' },
+    selectedSecretValues: { HYPERVIBE_BACKUP_STORAGE_CREDENTIALS_JSON: '{"secret":"synthetic-bucket-secret"}' },
+  },
+};
+const recoveryCommand = 'node /opt/hypervibe/dist/ci/backup-runner.js';
+const withoutApp = { ...environment, platformBindings: {
+  provider: 'railway', projectId: 'project-one', environmentId: 'staging', services: {},
+} } as Environment;
+
+describe('Railway managed recovery task serialized contract', () => {
+  it('runs the reviewed helper before app deployment with selected private references only', async () => {
+    const context = await fixture({ sourceImage: null, logs: ['synthetic-private-database-row', '__HYPERVIBE_TASK_EXIT:0__'] });
+    const result = await context.adapter.runJob(withoutApp, service, recoveryCommand, recoveryOptions);
+    expect(result.status).toBe('completed');
+    expect(result.receipt.data).toMatchObject({ cleanupVerified: true, applied: 1, skipped: 0 });
+    expect(result.output).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('synthetic-private-database-row');
+    const create = context.mutations.find(m => m.field === 'serviceCreate')!;
+    expect(create.args.input).toEqual({
+      projectId: 'project-one', environmentId: 'staging', name: 'hv-dispatch-recovery-101',
+      variables: {
+        HYPERVIBE_BACKUP_DATABASE_URL: '${{web.DATABASE_URL}}',
+        HYPERVIBE_BACKUP_PRIVATE_HOST: '${{web.RAILWAY_PRIVATE_DOMAIN}}',
+        HYPERVIBE_BACKUP_CONFIG: '{"schemaVersion":1}',
+        HYPERVIBE_BACKUP_STORAGE_CREDENTIALS_JSON: '{"secret":"synthetic-bucket-secret"}',
+      },
+    });
+    expect(context.mutations.find(m => m.field === 'serviceInstanceUpdate')?.args.input.source)
+      .toEqual({ image: recoveryOptions.managedRecoveryTask.expectedImage });
+    expect(context.requests.filter(r => r.query.includes('DeclaredTaskVariables'))).toHaveLength(3);
+    expect(context.requests.some(r => /query (GetVariables|TaskSourceInstance)/.test(r.query))).toBe(false);
+    expect(context.services.has('legacy-task')).toBe(true);
+    expect(context.services.has('other-task')).toBe(true);
+  });
+
+  it.each([
+    ['replaced volume', { volumeId: 'replaced-volume' }],
+    ['replaced volume instance', { volumeInstanceId: 'replaced-instance' }],
+    ['unreadable variables', { failVariables: true }],
+    ['duplicate selected variable', { duplicateVariable: true }],
+  ] as const)('blocks %s before mutation', async (_label, options) => {
+    const context = await fixture(options);
+    const result = await context.adapter.runJob(withoutApp, service, recoveryCommand, recoveryOptions);
+    expect(result.status).toBe('failed');
+    expect(result.mutationAttempted).toBe(false);
+    expect(result.receipt.data).toMatchObject({ applied: 0, skipped: 1 });
+    expect(context.mutations).toEqual([]);
+  });
+
+  it.each([
+    ['other environment', { databaseSource: { ...recoveryOptions.managedRecoveryTask.databaseSource, providerScope: { projectId: 'project-one', environmentId: 'production' } } }],
+    ['other provider', { databaseSource: { ...recoveryOptions.managedRecoveryTask.databaseSource, provider: 'cloudsql' } }],
+    ['public URL reference', { variableReferences: [{ sourceServiceId: 'web-id', variableName: 'DATABASE_PUBLIC_URL', targetName: 'HYPERVIBE_BACKUP_DATABASE_URL' }] }],
+    ['unreviewed private host override', { variables: { HYPERVIBE_BACKUP_CONFIG: '{}', HYPERVIBE_BACKUP_PRIVATE_HOST: 'db.example.com' } }],
+    ['unrelated provider token', { selectedSecretValues: { RAILWAY_API_TOKEN: 'synthetic-provider-token' } }],
+    ['unreviewed config reference', { variables: { HYPERVIBE_BACKUP_CONFIG: '${{worker.OTHER_SERVICE_SECRET}}' } }],
+  ])('rejects %s without provider reads', async (_label, override) => {
+    const context = await fixture();
+    const result = await context.adapter.runJob(withoutApp, service, recoveryCommand, {
+      ...recoveryOptions, managedRecoveryTask: { ...recoveryOptions.managedRecoveryTask, ...override },
+    });
+    expect(result.status).toBe('failed');
+    expect(result.mutationAttempted).toBe(false);
+    expect(context.requests).toEqual([]);
+  });
+
+  it('does not retry or sweep an uncertain create', async () => {
+    const context = await fixture({ failCreate: true });
+    const first = await context.adapter.runJob(withoutApp, service, recoveryCommand, recoveryOptions);
+    const retry = await context.adapter.runJob(withoutApp, service, recoveryCommand, recoveryOptions);
+    expect(first.mutationAttempted).toBe(true);
+    expect(first.receipt.data).toMatchObject({ ambiguousCreate: true, applied: null });
+    expect(retry.mutationAttempted).toBe(false);
+    expect(context.mutations.map(m => m.field)).toEqual(['serviceCreate']);
+  });
+
+
+  it('accepts only explicitly selected object credential maps and suppresses provider error echoes', async () => {
+    const context = await fixture({ failConfigure: true });
+    const result = await context.adapter.runJob(withoutApp, service, recoveryCommand, {
+      ...recoveryOptions, managedRecoveryTask: { ...recoveryOptions.managedRecoveryTask,
+        selectedSecretValues: { ...recoveryOptions.managedRecoveryTask.selectedSecretValues,
+          HYPERVIBE_BACKUP_OBJECTS_CREDENTIALS_JSON: '{"documents":{"secretAccessKey":"source-secret"}}' },
+      },
+    });
+    expect(result.status).toBe('failed');
+    expect(result.receipt.data).toMatchObject({ cleanupVerified: true, applied: null, skipped: 0 });
+    expect(JSON.stringify(result)).not.toMatch(/synthetic-registry-token|source-secret|synthetic-bucket-secret/);
+    expect(context.mutations.find(m => m.field === 'serviceCreate')!.args.input.variables)
+      .toHaveProperty('HYPERVIBE_BACKUP_OBJECTS_CREDENTIALS_JSON', '{"documents":{"secretAccessKey":"source-secret"}}');
+  });
+
+  it('never reports completed when owned cleanup cannot be verified', async () => {
+    const context = await fixture({ failDelete: true });
+    const result = await context.adapter.runJob(withoutApp, service, recoveryCommand, recoveryOptions);
+    expect(result.status).toBe('failed');
+    expect(result.receipt.success).toBe(false);
+    expect(result.receipt.data).toMatchObject({ cleanupVerified: false });
+    expect(context.mutations.map(m => m.field)).toEqual(['serviceCreate', 'serviceInstanceUpdate', 'serviceInstanceDeployV2', 'serviceDelete']);
   });
 });

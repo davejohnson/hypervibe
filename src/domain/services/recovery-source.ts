@@ -14,7 +14,7 @@ export const recoverySourceIdentitySchema = z.object({
   provider: id,
   primaryExternalId: id,
   providerScope: coordinates(['projectId', 'environmentId', 'accountId', 'region', 'subscriptionId',
-    'resourceGroup', 'organizationId', 'teamId', 'appId', 'projectRef'])
+    'resourceGroup', 'organizationId', 'teamId', 'appId', 'projectRef', 'storageScopeHash'])
     .refine(scope => Object.keys(scope).length > 0, 'An exact recovery source requires provider scope.'),
   resourceIdentity: coordinates(['volumeId', 'volumeInstanceId', 'instanceId', 'instanceArn', 'clusterId',
     'serverId', 'branchId', 'appId']),
