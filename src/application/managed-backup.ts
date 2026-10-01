@@ -11,8 +11,8 @@ import { projectSpecSchema } from '../domain/spec/spec.schema.js';
 import { repoBindingsFileSchema } from '../domain/spec/repo-bindings.schema.js';
 import { canonicalJsonSha256 } from '../lib/canonical-json.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
-import { managedBackupCredentialKeys, managedBackupProviderNames, managedBackupTargetHash, managedBackupTargetSchema, openRecoveryStorage, type ManagedBackupTarget } from '../domain/services/managed-backup-target.service.js';
-import { withBackupStorageDefaults } from '../domain/services/backup-strategy.service.js';
+import { managedBackupCredentialKeys, managedBackupHostingScope, managedBackupProviderNames, managedBackupTargetHash, managedBackupTargetSchema, openRecoveryStorage, supportsManagedRecoveryDatabase, type ManagedBackupTarget } from '../domain/services/managed-backup-target.service.js';
+import { resolveBackupStrategy, withBackupStorageDefaults } from '../domain/services/backup-strategy.service.js';
 import { parseStorageBindings } from '../domain/services/storage-plan.service.js';
 import { compileBackupWorkflow } from '../domain/services/backup-workflow.service.js';
 import { createRecoverySet } from '../domain/services/recovery-set.service.js';
@@ -60,13 +60,20 @@ export async function verifyManagedBackupAuthority(params: {
   if (!raw || spec.project !== target.project || bindings.project !== target.project || raw.backups?.mode !== 'daily'
     || raw.backups.runnerImage !== target.runnerImage) throw new Error('The current spec does not authorize this backup program.');
   const desired = withBackupStorageDefaults(raw);
+  if (resolveBackupStrategy(desired).destination !== target.destination.name) {
+    throw new Error('The selected backup destination changed or became ambiguous.');
+  }
   const bound = bindings.environments[target.environment]?.platformBindings;
   if (!bound || bound.provider !== target.hosting.provider || desired.hosting.provider !== target.hosting.provider
-    || canonicalJsonSha256(bound.providerScope ?? { projectId: bound.projectId, environmentId: bound.environmentId }) !== canonicalJsonSha256(target.hosting.providerScope)
     || canonicalJsonSha256(raw.backups.fileReferenceQueries ?? []) !== canonicalJsonSha256(target.fileReferenceQueries)) throw new Error('Backup scope or reference projections changed.');
   const now = new Date();
   const environment: Environment = { id: target.environment, name: target.environment, projectId: target.project,
     platformBindings: bound, createdAt: now, updatedAt: now };
+  const hostingScope = managedBackupTargetSchema.shape.hosting.shape.providerScope
+    .safeParse(managedBackupHostingScope(environment, Boolean(desired.database)));
+  if (!hostingScope.success || canonicalJsonSha256(hostingScope.data) !== canonicalJsonSha256(target.hosting.providerScope)) {
+    throw new Error('Backup hosting scope changed.');
+  }
   const storage = parseStorageBindings(environment);
   const sourceNames = Object.entries(desired.storage ?? {}).filter(([, item]) => item.purpose !== 'backup').map(([name]) => name).sort();
   if (JSON.stringify(sourceNames) !== JSON.stringify(target.objects.map(item => item.name).sort())
@@ -77,6 +84,9 @@ export async function verifyManagedBackupAuthority(params: {
       || desired.storage?.[item.name]?.provider !== item.identity.provider || desired.storage[item.name].region !== value.region) throw new Error('Backup storage binding changed.');
   }
   if (Boolean(target.database) !== Boolean(desired.database) || (target.database && desired.database?.provider !== target.database.source.provider)) throw new Error('Backup database declaration changed.');
+  if (target.database && !supportsManagedRecoveryDatabase(target.hosting.provider, target.database.source.provider)) {
+    throw new Error('Private recovery execution is unsupported for the selected database provider.');
+  }
   if (target.database) {
     const selected = target.database;
     const sources = recoveryDatabaseBindings(bound.recoveryDatabases);
@@ -101,6 +111,9 @@ export async function executeManagedBackup(params: {
   credentials: NodeJS.ProcessEnv;
 }) {
   const { target, environment } = params;
+  if (target.database && !supportsManagedRecoveryDatabase(target.hosting.provider, target.database.source.provider)) {
+    throw new Error('Private recovery execution is unsupported for the selected database provider.');
+  }
   const adapters = new Map<string, unknown>();
   async function adapter(provider: string) {
     if (adapters.has(provider)) return adapters.get(provider);
@@ -174,7 +187,10 @@ export async function executeManagedBackup(params: {
           ...(params.credentials.IMAGE_REGISTRY_USERNAME && params.credentials.IMAGE_REGISTRY_TOKEN
             ? { registryCredentials: { username: params.credentials.IMAGE_REGISTRY_USERNAME, token: params.credentials.IMAGE_REGISTRY_TOKEN } } : {}),
         } });
-        if (!result.receipt.success || result.status !== 'completed' || result.exitCode !== 0 || result.cleanupWarning) throw new Error('Private backup execution or cleanup is unverified.');
+        if (!result.receipt.success || result.status !== 'completed' || result.exitCode !== 0
+          || result.cleanupWarning || result.receipt.data?.cleanupVerified !== true) {
+          throw new Error('Private backup execution or cleanup is unverified.');
+        }
         // The private archive is the evidence boundary. Provider logs may include
         // secrets and are never needed to prove a completed recovery set.
         jobId = result.jobId;

@@ -7,10 +7,12 @@ import { join } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { Client } from 'pg';
+import { z } from 'zod';
 import type { RecoverySourceIdentity } from '../ports/recovery-source.port.js';
 import type { StorageObjectClient, StorageObjectPayload } from '../ports/storage.port.js';
 import { recoverySourceIdentitySchema } from './recovery-source.js';
-import { objectRecoveryIdentitySchema, type ObjectRecoveryIdentity } from './object-recovery-set.service.js';
+import { normalizeStoredObjectRevision, objectRecoveryIdentitySchema, storedObjectRevisionMatches, storedObjectRevisionSchema,
+  type ObjectRecoveryIdentity } from './object-recovery-set.service.js';
 import { databaseManifest, postgresDumpArguments, postgresMajorVersion, postgresProcessEnvironment, postgresTableCountsMatch } from './postgres-transfer.service.js';
 
 export interface PostgresBackupInput {
@@ -27,29 +29,34 @@ export interface PostgresBackupInput {
   fileReferenceQueries?: Array<{ storageName: string; query: string }>;
 }
 
-export interface PostgresBackupEvidence {
-  formatVersion: 1;
-  mechanism: 'postgres-logical-archive';
-  source: RecoverySourceIdentity;
-  destination: ObjectRecoveryIdentity;
-  runId: string;
-  archiveKey: string;
-  manifestKey: string;
-  sha256: string;
-  bytes: number;
-  dataTime: string;
-  completedAt: string;
-  sourceVersion: string;
-  targetVersion: string;
-  tableCount: number;
-  totalRows: string;
-  restoreVerified: true;
-  cleanupVerified: true;
-  coverage: 'single-database-schema-and-data';
-  applicationCompatibility: 'unverified';
-  applied: 1;
-  skipped: 0;
-}
+export const POSTGRES_BACKUP_FORMAT_VERSION = 2;
+// The private on-disk manifest also carries fileReferences. Parse its evidence
+// through this same schema without returning those private keys as safe evidence.
+export const postgresBackupEvidenceSchema = z.object({
+  formatVersion: z.literal(POSTGRES_BACKUP_FORMAT_VERSION),
+  mechanism: z.literal('postgres-logical-archive'),
+  source: recoverySourceIdentitySchema,
+  destination: objectRecoveryIdentitySchema,
+  runId: z.string().uuid(),
+  archiveKey: z.string().min(1),
+  archiveRevision: storedObjectRevisionSchema,
+  manifestKey: z.string().min(1),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  bytes: z.number().int().nonnegative().safe(),
+  dataTime: z.string().datetime(),
+  completedAt: z.string().datetime(),
+  sourceVersion: z.string().min(1),
+  targetVersion: z.string().min(1),
+  tableCount: z.number().int().nonnegative().safe(),
+  totalRows: z.string().regex(/^\d+$/),
+  restoreVerified: z.literal(true),
+  cleanupVerified: z.literal(true),
+  coverage: z.literal('single-database-schema-and-data'),
+  applicationCompatibility: z.literal('unverified'),
+  applied: z.literal(1),
+  skipped: z.literal(0),
+}).strip();
+export type PostgresBackupEvidence = z.infer<typeof postgresBackupEvidenceSchema>;
 
 export interface PostgresBackupResult {
   evidence: PostgresBackupEvidence;
@@ -231,18 +238,25 @@ export async function backupAndVerifyPostgres(input: PostgresBackupInput): Promi
       },
     }), createWriteStream(downloadedPath, { mode: 0o600, flags: 'wx' }));
     if (received !== bytes || digest.digest('hex') !== sha256) throw new Error('archive checksum differs');
+    const archiveRevision = normalizeStoredObjectRevision(stored.revision);
     stage = 'restore-verification';
     const { targetVersion, fileReferences } = await restoreLocal(downloadedPath, directory, manifest, input.verificationQuery, input.fileReferenceQueries);
     stage = 'cleanup';
     await rm(directory, { recursive: true, force: true });
     directory = undefined;
-    const evidence: PostgresBackupEvidence = {
-      formatVersion: 1, mechanism: 'postgres-logical-archive', source, destination, runId: input.runId,
-      archiveKey, manifestKey, sha256, bytes, dataTime, completedAt: new Date().toISOString(),
+    // Prior restore evidence applies only to the retained revision whose bytes
+    // we checked. Re-observe after the potentially long isolated restore.
+    stage = 'archive-inventory';
+    const retained = await input.archive.list({ prefix: archiveKey, maxObjects: 2 });
+    if (retained.length !== 1 || retained[0].key !== archiveKey || retained[0].size !== bytes
+      || !storedObjectRevisionMatches(archiveRevision, retained[0].revision)) throw new Error('retained archive changed');
+    const evidence = postgresBackupEvidenceSchema.parse({
+      formatVersion: POSTGRES_BACKUP_FORMAT_VERSION, mechanism: 'postgres-logical-archive', source, destination, runId: input.runId,
+      archiveKey, archiveRevision, manifestKey, sha256, bytes, dataTime, completedAt: new Date().toISOString(),
       sourceVersion: manifest.sourceVersion, targetVersion, tableCount: manifest.tables.length, totalRows: manifest.totalRows,
       restoreVerified: true, cleanupVerified: true, coverage: 'single-database-schema-and-data',
       applicationCompatibility: 'unverified', applied: 1, skipped: 0,
-    };
+    });
     stage = 'completion-manifest';
     const serialized = Buffer.from(JSON.stringify({ ...evidence, fileReferences }));
     await input.archive.put(manifestKey, { body: Readable.from([serialized]), size: serialized.length, contentType: 'application/json' }, { ifAbsent: true });

@@ -244,12 +244,21 @@ class AzureSdkBlobDataPlane implements AzureBlobDataPlane {
 
   async list(options?: { prefix?: string; maxObjects?: number }): Promise<StorageObjectRecord[]> {
     const output: StorageObjectRecord[] = [];
-    for await (const blob of this.containerClient().listBlobsFlat(options)) {
-      output.push({ key: blob.name, size: blob.properties.contentLength ?? 0, revision: {
-        ...(blob.properties.etag ? { etag: blob.properties.etag } : {}),
-        ...(blob.properties.lastModified ? { lastModified: blob.properties.lastModified.toISOString() } : {}),
-      } });
-      if (options?.maxObjects !== undefined && output.length > options.maxObjects) throw new Error('Azure object listing exceeds its count limit.');
+    const tokens = new Set<string>();
+    for await (const page of this.containerClient().listBlobsFlat(options).byPage()) {
+      for (const blob of page.segment.blobItems) {
+        if (typeof blob.name !== 'string' || !blob.name || !Number.isSafeInteger(blob.properties.contentLength)
+          || blob.properties.contentLength! < 0) throw new Error('Azure object listing contains an incomplete object identity or size.');
+        output.push({ key: blob.name, size: blob.properties.contentLength!, revision: {
+          ...(blob.properties.etag ? { etag: blob.properties.etag } : {}),
+          ...(blob.properties.lastModified ? { lastModified: blob.properties.lastModified.toISOString() } : {}),
+        } });
+        if (options?.maxObjects !== undefined && output.length > options.maxObjects) throw new Error('Azure object listing exceeds its count limit.');
+      }
+      if (page.continuationToken) {
+        if (tokens.has(page.continuationToken)) throw new Error('Azure object listing pagination did not advance.');
+        tokens.add(page.continuationToken);
+      }
     }
     return output;
   }

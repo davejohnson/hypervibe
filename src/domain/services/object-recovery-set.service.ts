@@ -17,14 +17,39 @@ export interface ObjectRecoveryLimits { maxObjects: number; maxObjectBytes: numb
 const revisionSchema = z.object({ etag: z.string().min(1).optional(), versionId: z.string().min(1).optional(),
   generation: z.string().min(1).optional(), metageneration: z.string().min(1).optional(), lastModified: z.string().min(1).optional() }).strict()
   .refine(value => Boolean(value.etag || value.versionId || value.generation), 'A native object revision is required.');
+// Persist only validators independently exposed by both GET and ordinary LIST.
+// S3/Azure versionId is GET-only here; their ETag is an opaque validator, never
+// our content checksum. GCS metadata changes require metageneration as well.
+export const storedObjectRevisionSchema = z.union([
+  z.object({ generation: z.string().min(1), metageneration: z.string().min(1) }).strict(),
+  z.object({ etag: z.string().min(1), lastModified: z.string().min(1).optional() }).strict(),
+]);
+export type StoredObjectRevision = z.infer<typeof storedObjectRevisionSchema>;
+export function normalizeStoredObjectRevision(raw: unknown): StoredObjectRevision {
+  const revision = revisionSchema.parse(raw);
+  if ((revision.generation || revision.metageneration) && (revision.etag || revision.versionId || revision.lastModified)) {
+    throw new Error('Stored object revision mixes provider validator formats.');
+  }
+  return storedObjectRevisionSchema.parse(revision.generation || revision.metageneration
+    ? { generation: revision.generation, metageneration: revision.metageneration }
+    : { etag: revision.etag, ...(revision.lastModified ? { lastModified: revision.lastModified } : {}) });
+}
+export function storedObjectRevisionMatches(expected: unknown, actual: unknown): boolean {
+  try {
+    const selected = storedObjectRevisionSchema.parse(expected);
+    const current = normalizeStoredObjectRevision(actual);
+    return sameRevision(selected, current);
+  } catch { return false; }
+}
 const executionIdSchema = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,95}$/);
 const keySchema = z.string().min(1).max(4096);
 const httpSchema = z.object({ contentType: z.string().optional(), contentEncoding: z.string().optional(),
   cacheControl: z.string().optional(), contentDisposition: z.string().optional() }).strict();
 const entrySchema = z.object({ key: keySchema, backupKey: keySchema, size: z.number().int().nonnegative().safe(),
-  sha256: z.string().regex(/^[a-f0-9]{64}$/), revision: revisionSchema, http: httpSchema,
+  sha256: z.string().regex(/^[a-f0-9]{64}$/), revision: revisionSchema, backupRevision: storedObjectRevisionSchema, http: httpSchema,
   metadata: z.record(z.string()) }).strict();
-export const objectRecoveryManifestSchema = z.object({ version: z.literal(1), setId: executionIdSchema,
+export const OBJECT_RECOVERY_FORMAT_VERSION = 2 as const;
+export const objectRecoveryManifestSchema = z.object({ version: z.literal(OBJECT_RECOVERY_FORMAT_VERSION), setId: executionIdSchema,
   sourceIdentity: objectRecoveryIdentitySchema, destinationIdentity: objectRecoveryIdentitySchema,
   createdAt: z.string().datetime(), completedAt: z.string().datetime(),
   consistency: z.literal('revision-checked-object-copy'), sourceInventorySha256: z.string().regex(/^[a-f0-9]{64}$/),
@@ -42,7 +67,7 @@ function bounds(limits: ObjectRecoveryLimits): Required<ObjectRecoveryLimits> {
   return values;
 }
 function distinct(left: ObjectRecoveryIdentity, right: ObjectRecoveryIdentity) {
-  if (left.provider === right.provider && left.externalId === right.externalId) throw new Error('Recovery requires a distinct bucket or container.');
+  if (canonicalJsonSha256(left) === canonicalJsonSha256(right)) throw new Error('Recovery requires a distinct bucket or container.');
 }
 export function objectRecoverySetPrefix(sourceIdentity: ObjectRecoveryIdentity, setId: string): string {
   return `hypervibe-recovery/v1/${canonicalJsonSha256(objectRecoveryIdentitySchema.parse(sourceIdentity))}/${executionIdSchema.parse(setId)}/`;
@@ -78,9 +103,9 @@ function inventory(raw: StorageObjectRecord[], limits: Required<ObjectRecoveryLi
   return records;
 }
 async function digestPayload(payload: StorageObjectPayload, expectedSize: number): Promise<string> {
-  if (payload.size !== expectedSize) throw new Error('Object recovery size changed.');
   const hash = createHash('sha256'); let bytes = 0; const body = readable(payload.body);
   try {
+    if (payload.size !== expectedSize) throw new Error('Object recovery size changed.');
     for await (const chunk of body) {
       const buffer = Buffer.from(chunk); bytes += buffer.length;
       if (bytes > expectedSize) throw new Error('Object stream exceeded its declared size.');
@@ -114,7 +139,7 @@ async function copy(source: StorageObjectClient, destination: StorageObjectClien
   const actualHash = await digestPayload(readback, expectedSize);
   if (canonicalJsonSha256(metadata(readback)) !== canonicalJsonSha256(properties)
     || actualHash !== sha256) throw new Error('Stored object bytes or metadata failed independent read-back verification.');
-  return { sha256, ...properties };
+  return { sha256, backupRevision: normalizeStoredObjectRevision(readback.revision), ...properties };
 }
 function checkedManifest(raw: unknown, limits: Required<ObjectRecoveryLimits>): ObjectRecoveryManifest {
   const manifest = objectRecoveryManifestSchema.parse(raw);
@@ -161,6 +186,10 @@ export async function observeObjectRecoverySetInventory(params: { destination: S
   if (actual.some(object => object.key !== key && manifest.entries.find(entry => entry.backupKey === object.key)?.size !== object.size)) {
     throw new Error('Completed recovery set object size differs from its manifest.');
   }
+  if (actual.some(object => object.key !== key && !storedObjectRevisionMatches(
+    manifest.entries.find(entry => entry.backupKey === object.key)?.backupRevision, object.revision))) {
+    throw new Error('Completed recovery set object revision changed after verification.');
+  }
   return { manifest, manifestSha256: createHash('sha256').update(bytes).digest('hex') };
 }
 
@@ -168,7 +197,10 @@ export async function verifyObjectRecoverySet(params: { destination: StorageObje
   destinationIdentity: ObjectRecoveryIdentity; setId: string; limits: ObjectRecoveryLimits }): Promise<VerifiedObjectRecoverySet> {
   const observed = await observeObjectRecoverySetInventory(params);
   for (const entry of observed.manifest.entries) {
-    const payload = await params.destination.get(entry.backupKey);
+    const payload = await params.destination.get(entry.backupKey, entry.backupRevision);
+    if (!storedObjectRevisionMatches(entry.backupRevision, payload.revision)) {
+      readable(payload.body).destroy(); throw new Error('Recovery set object revision changed before verification.');
+    }
     const actualHash = await digestPayload(payload, entry.size);
     if (canonicalJsonSha256(metadata(payload)) !== canonicalJsonSha256({ http: entry.http, metadata: entry.metadata })
       || actualHash !== entry.sha256) throw new Error('Recovery set content or metadata failed verification.');
@@ -195,7 +227,10 @@ export async function createObjectRecoverySet(params: { source: StorageObjectCli
   const copied = await params.destination.list({ prefix, maxObjects: limits.maxObjects });
   if (copied.length !== entries.length || new Set(copied.map(object => object.key)).size !== entries.length
     || copied.some(object => !entries.some(entry => entry.backupKey === object.key && entry.size === object.size))) throw new Error('Recovery destination inventory differs from the copied set.');
-  const manifest = checkedManifest({ version: 1, setId: params.setId, sourceIdentity, destinationIdentity, createdAt,
+  if (copied.some(object => !storedObjectRevisionMatches(entries.find(entry => entry.backupKey === object.key)?.backupRevision, object.revision))) {
+    throw new Error('Recovery destination revision changed after read-back verification.');
+  }
+  const manifest = checkedManifest({ version: OBJECT_RECOVERY_FORMAT_VERSION, setId: params.setId, sourceIdentity, destinationIdentity, createdAt,
     completedAt: new Date().toISOString(), consistency: 'revision-checked-object-copy', sourceInventorySha256: canonicalJsonSha256(before), entries }, limits);
   const bytes = Buffer.from(JSON.stringify(manifest));
   if (bytes.length > limits.maxManifestBytes) throw new Error('Recovery manifest exceeds its size limit.');
@@ -216,7 +251,7 @@ export async function restoreObjectRecoverySet(params: { backup: StorageObjectCl
   const prefix = `hypervibe-restore/v1/${canonicalJsonSha256(manifest.sourceIdentity)}/${executionIdSchema.parse(params.restoreId)}/`;
   if ((await params.target.list({ prefix, maxObjects: limits.maxObjects })).length) throw new Error('Restore verification requires a fresh isolated target prefix.');
   for (const entry of manifest.entries) {
-    const copied = await copy(params.backup, params.target, entry.backupKey, objectKey(prefix, entry.key), entry.size, undefined);
+    const copied = await copy(params.backup, params.target, entry.backupKey, objectKey(prefix, entry.key), entry.size, entry.backupRevision);
     if (copied.sha256 !== entry.sha256 || canonicalJsonSha256({ http: copied.http, metadata: copied.metadata })
       !== canonicalJsonSha256({ http: entry.http, metadata: entry.metadata })) throw new Error('Restored object differs from its committed recovery manifest.');
   }

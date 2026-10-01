@@ -368,6 +368,22 @@ const withoutApp = { ...environment, platformBindings: {
 } } as Environment;
 
 describe('Railway managed recovery task serialized contract', () => {
+  it('runs the anonymously published GHCR helper without private registry credentials', async () => {
+    // Independent registry contract: public GHCR images support anonymous pulls.
+    // https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry
+    // The release publisher requires that access for the exact helper digest.
+    const context = await fixture({ sourceImage: null });
+    const helper = `ghcr.io/davejohnson/hypervibe/backup-runner@sha256:${'c'.repeat(64)}`;
+    const result = await context.adapter.runJob(withoutApp, service, recoveryCommand, {
+      ...recoveryOptions, managedRecoveryTask: { ...recoveryOptions.managedRecoveryTask, expectedImage: helper },
+    });
+    expect(result.status).toBe('completed');
+    expect(result.receipt.data).toMatchObject({ cleanupVerified: true });
+    const configured = context.mutations.find(m => m.field === 'serviceInstanceUpdate')!;
+    expect(configured.args.input.source).toEqual({ image: helper });
+    expect(configured.args.input).not.toHaveProperty('registryCredentials');
+  });
+
   it('runs the reviewed helper before app deployment with selected private references only', async () => {
     const context = await fixture({ sourceImage: null, logs: ['synthetic-private-database-row', '__HYPERVIBE_TASK_EXIT:0__'] });
     const result = await context.adapter.runJob(withoutApp, service, recoveryCommand, recoveryOptions);

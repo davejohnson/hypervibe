@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { createRecoverySet } from '../recovery-set.service.js';
+import type { PostgresBackupEvidence } from '../postgres-backup.service.js';
 import type { StorageObjectClient, StorageObjectPayload } from '../../ports/storage.port.js';
 
 function store(initial: Record<string, string> = {}) {
@@ -31,6 +32,28 @@ const setup = (files: Record<string, string> = { 'doc.txt': 'verified bytes' }) 
   } };
 };
 describe('usable database and file recovery sets', () => {
+  it.each([
+    { mechanism: 'native-volume-snapshot' },
+    { coverage: 'schema-only' },
+    { sourceVersion: undefined },
+  ])('rejects incomplete SQL evidence before joint completion: %j', async invalid => {
+    const { input, archive } = setup();
+    const source = { provider: 'railway', primaryExternalId: 'database',
+      providerScope: { projectId: 'p', environmentId: 'e' }, resourceIdentity: {} };
+    await expect(createRecoverySet({ ...input, objects: [], database: { source, sourceUrl: 'postgres://unused' } }, {
+      backupDatabase: async request => ({ evidence: {
+        formatVersion: 2, mechanism: 'postgres-logical-archive', source, destination: request.destination,
+        runId: request.runId, archiveKey: `${request.archivePrefix}/${request.runId}/database.dump`,
+        manifestKey: `${request.archivePrefix}/${request.runId}/database.complete.json`,
+        archiveRevision: { etag: 'stored-revision' }, sha256: 'a'.repeat(64), bytes: 3,
+        dataTime: new Date().toISOString(), completedAt: new Date().toISOString(), sourceVersion: '16', targetVersion: '16',
+        tableCount: 1, totalRows: '1', restoreVerified: true, cleanupVerified: true,
+        coverage: 'single-database-schema-and-data', applicationCompatibility: 'unverified', applied: 1, skipped: 0,
+        ...invalid,
+      } as PostgresBackupEvidence, fileReferences: [] }),
+    })).rejects.toThrow();
+    expect([...archive.bytes.keys()].some(key => key.endsWith('/complete.json'))).toBe(false);
+  });
   it('only commits joint completion after files restore and cleanup succeed', async () => {
     const { input, archive, source } = setup();
     const result = await createRecoverySet(input);

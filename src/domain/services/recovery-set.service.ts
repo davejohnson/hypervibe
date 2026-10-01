@@ -4,20 +4,21 @@ import { z } from 'zod';
 import type { StorageObjectClient } from '../ports/storage.port.js';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { createLocalRecoveryStore } from './local-recovery-store.js';
-import { backupAndVerifyPostgres, type PostgresBackupInput, type PostgresBackupResult } from './postgres-backup.service.js';
+import { backupAndVerifyPostgres, postgresBackupEvidenceSchema, type PostgresBackupInput, type PostgresBackupResult } from './postgres-backup.service.js';
 import { createObjectRecoverySet, objectRecoveryIdentitySchema, objectRecoveryManifestKey, restoreObjectRecoverySet,
-  type ObjectRecoveryIdentity, type ObjectRecoveryLimits } from './object-recovery-set.service.js';
+  storedObjectRevisionSchema, type ObjectRecoveryIdentity, type ObjectRecoveryLimits } from './object-recovery-set.service.js';
 import { recoverySourceIdentityMatches, recoverySourceIdentitySchema } from './recovery-source.js';
 
 export const RECOVERY_LIMITS: ObjectRecoveryLimits = { maxObjects: 100_000, maxObjectBytes: 5 * 1024 ** 3, maxTotalBytes: 100 * 1024 ** 3, maxManifestBytes: 32 * 1024 ** 2 };
 const timestamp = z.string().datetime();
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
 const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,100}$/);
-export const recoverySetManifestSchema = z.object({ version: z.literal(1), setId: z.string().uuid(),
+export const RECOVERY_SET_FORMAT_VERSION = 2;
+export const recoverySetManifestSchema = z.object({ version: z.literal(RECOVERY_SET_FORMAT_VERSION), setId: z.string().uuid(),
   project: name, environment: name, contractHash: sha256,
   destination: objectRecoveryIdentitySchema, startedAt: timestamp, dataTime: timestamp, completedAt: timestamp,
   database: z.object({ source: recoverySourceIdentitySchema, archiveKey: z.string().min(1), manifestKey: z.string().min(1),
-    sha256, bytes: z.number().int().nonnegative().safe(), restoreVerifiedAt: timestamp }).strict().optional(),
+    archiveRevision: storedObjectRevisionSchema, sha256, bytes: z.number().int().nonnegative().safe(), restoreVerifiedAt: timestamp }).strict().optional(),
   objects: z.array(z.object({ name, source: objectRecoveryIdentitySchema, manifestKey: z.string().min(1), manifestSha256: sha256,
     objectCount: z.number().int().nonnegative(), totalBytes: z.string().regex(/^\d+$/), restoreVerifiedAt: timestamp }).strict()),
   compatibility: z.enum(['references-verified', 'not-applicable']),
@@ -83,9 +84,9 @@ export async function createRecoverySet(input: RecoverySetInput, dependencies: {
   if (input.database) {
     sql = await (dependencies.backupDatabase ?? backupAndVerifyPostgres)({ ...input.database, archive: input.archive,
       destination, runId: input.runId, archivePrefix: prefix.replace(/\/$/, '') + '/sql', fileReferenceQueries: projections });
+    sql = { ...sql, evidence: postgresBackupEvidenceSchema.parse(sql.evidence) };
     if (sql.evidence.runId !== input.runId || !recoverySourceIdentityMatches(sql.evidence.source, input.database.source)
-      || canonicalJsonSha256(sql.evidence.destination) !== canonicalJsonSha256(destination)
-      || sql.evidence.restoreVerified !== true || sql.evidence.cleanupVerified !== true) throw new Error('SQL recovery proof differs from the reviewed source.');
+      || canonicalJsonSha256(sql.evidence.destination) !== canonicalJsonSha256(destination)) throw new Error('SQL recovery proof differs from the reviewed source.');
   }
   const objects: RecoverySetManifest['objects'] = [];
   for (const object of input.objects) {
@@ -107,11 +108,11 @@ export async function createRecoverySet(input: RecoverySetInput, dependencies: {
       manifestSha256: copy.receipt.manifestSha256, objectCount: copy.receipt.objectCount, totalBytes: copy.receipt.totalBytes,
       restoreVerifiedAt: restoredAt });
   }
-  const manifest = recoverySetManifestSchema.parse({ version: 1, setId: input.runId, project: input.project,
+  const manifest = recoverySetManifestSchema.parse({ version: RECOVERY_SET_FORMAT_VERSION, setId: input.runId, project: input.project,
     environment: input.environment, contractHash: input.contractHash, destination, startedAt,
     dataTime: sql?.evidence.dataTime ?? startedAt, completedAt: new Date().toISOString(),
     ...(sql ? { database: { source: sql.evidence.source, archiveKey: sql.evidence.archiveKey, manifestKey: sql.evidence.manifestKey,
-      sha256: sql.evidence.sha256, bytes: sql.evidence.bytes, restoreVerifiedAt: sql.evidence.completedAt } } : {}),
+      archiveRevision: sql.evidence.archiveRevision, sha256: sql.evidence.sha256, bytes: sql.evidence.bytes, restoreVerifiedAt: sql.evidence.completedAt } } : {}),
     objects, compatibility: sql && objects.length ? 'references-verified' : 'not-applicable',
     consistency: 'database-snapshot-and-revision-checked-files', restoreVerified: true, cleanupVerified: true });
   const manifestKey = `${prefix}complete.json`;

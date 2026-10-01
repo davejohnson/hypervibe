@@ -8,6 +8,8 @@ import { providerRegistry } from '../domain/registry/provider.registry.js';
 export async function runBackupController(env: NodeJS.ProcessEnv = process.env) {
   const operation = env.HYPERVIBE_BACKUP_OPERATION;
   let environment = 'unknown';
+  let counts: { applied: number | null; skipped: number } | undefined = operation === 'backup'
+    ? { applied: 0, skipped: 1 } : undefined;
   try {
     if (!['backup', 'health'].includes(operation ?? '') || !env.GITHUB_TOKEN
       || !['schedule', 'workflow_dispatch', 'push'].includes(env.GITHUB_EVENT_NAME ?? '')
@@ -18,13 +20,16 @@ export async function runBackupController(env: NodeJS.ProcessEnv = process.env) 
     const authorized = await verifyManagedBackupAuthority({ target: input, contractHash: env.HYPERVIBE_BACKUP_CONTRACT_HASH ?? '',
       runnerImage: env.HYPERVIBE_BACKUP_RUNNER_IMAGE ?? '', repository: env.GITHUB_REPOSITORY ?? '', sha: env.GITHUB_SHA ?? '',
       ref: env.GITHUB_REF ?? '', github });
+    if (operation === 'backup') counts = { applied: null, skipped: 0 };
     const receipt = await executeManagedBackup({ ...authorized, operation: operation as 'backup' | 'health',
       repository: env.GITHUB_REPOSITORY ?? '', runId: env.GITHUB_RUN_ID ?? '', credentials: env });
+    if (receipt.counts) counts = receipt.counts;
     if (env.HYPERVIBE_BACKUP_RECEIPT) writeFileSync(env.HYPERVIBE_BACKUP_RECEIPT, JSON.stringify(receipt) + '\n', { mode: 0o600 });
     if (receipt.status !== 'healthy') process.exitCode = 1;
     return receipt;
   } catch {
-    const receipt = { version: 1, environment, status: 'unknown', reasonCodes: ['observation-unavailable'] };
+    const receipt = { version: 1, environment, status: 'unknown', reasonCodes: ['observation-unavailable'],
+      ...(counts ? { counts } : {}) };
     try { if (env.HYPERVIBE_BACKUP_RECEIPT) writeFileSync(env.HYPERVIBE_BACKUP_RECEIPT, JSON.stringify(receipt) + '\n', { mode: 0o600 }); } catch { /* Safe console remains. */ }
     process.exitCode = 1; return receipt;
   }

@@ -72,6 +72,15 @@ describe('retained object recovery sets', () => {
     expect(destination.put).not.toHaveBeenCalled();
   });
 
+  it('closes a retained read-back body when its declared size differs before streaming', async () => {
+    const source = memory({ file: 'abc' }); const destination = memory();
+    const body = Readable.from(['abcd']);
+    destination.get.mockResolvedValueOnce({ body, size: 4, revision: { etag: 'changed' } });
+    await expect(createObjectRecoverySet(input(source.client, destination.client))).rejects.toThrow(/size/i);
+    expect(body.destroyed).toBe(true);
+    expect([...destination.objects.keys()].some(key => key.endsWith('/manifest.json'))).toBe(false);
+  });
+
   it.each(['same-size corruption', 'short stream', 'changed revision', 'missing revision', 'duplicate inventory', 'changed inventory'])(
     'rejects %s before committing a completion manifest', async failure => {
       const source = memory({ file: 'abc' }); const destination = memory();
@@ -106,6 +115,19 @@ describe('retained object recovery sets', () => {
     expect(destination.put).not.toHaveBeenCalled();
   });
 
+  it('treats Railway bucket instances in different environments as distinct native stores', async () => {
+    // Railway's documented environment contract gives one bucket definition
+    // independent instance data and credentials in each environment.
+    const source = memory({ file: 'abc' }); const destination = memory();
+    const sourceIdentity = identity('same-project-bucket');
+    const destinationIdentity = { ...sourceIdentity, instanceScope: { projectId: 'project', environmentId: 'recovery' } };
+    const completed = await createObjectRecoverySet({ ...input(source.client, destination.client), sourceIdentity, destinationIdentity });
+    expect(completed.manifest.sourceIdentity.instanceScope.environmentId).toBe('production');
+    expect(completed.manifest.destinationIdentity.instanceScope.environmentId).toBe('recovery');
+    expect(source.put).not.toHaveBeenCalled();
+    expect(completed.receipt).toMatchObject({ applied: 1, skipped: 0 });
+  });
+
   it('restores all bytes and metadata into a fresh isolated target then independently verifies them', async () => {
     const source = memory({ 'file.txt': 'abc' }); const backup = memory(); const target = memory();
     const completed = await createObjectRecoverySet(input(source.client, backup.client));
@@ -132,7 +154,7 @@ describe('retained object recovery sets', () => {
     const manifests = memory(); let savedKey: string | undefined;
     const destination: StorageObjectClient = { list: async () => [
       ...(savedKey ? [{ key: savedKey, size, revision: { etag: 'saved' } }] : []), ...await manifests.client.list(),
-    ], get: async key => key === savedKey ? { body: body(), size } : manifests.client.get(key),
+    ], get: async key => key === savedKey ? { body: body(), size, revision: { etag: 'saved' } } : manifests.client.get(key),
       put: async (key, payload, options) => {
         if (key.endsWith('/manifest.json')) return manifests.client.put(key, payload, options);
         for await (const bytes of payload.body as Readable) { consumed += Buffer.byteLength(bytes) / chunk.length; await setImmediate(); }

@@ -62,6 +62,48 @@ describe('reviewed recurring backup authority', () => {
     const { input } = fixture();
     expect(await verifyManagedBackupAuthority(input)).toMatchObject({ target: input.target, environment: { name: 'production' } });
   });
+  it.each(['object-only', 'projectId', 'environmentId', 'both'])(
+    'requires private-runner hosting placement only for database authority: %s', async missing => {
+      const { input, target, spec, bindings, files } = fixture();
+      const platform = bindings.environments.production.platformBindings as Record<string, unknown>;
+      if (missing !== 'object-only') {
+        target.database = { componentId: 'component-database', source: { provider: 'railway', primaryExternalId: 'database-service',
+          providerScope: { projectId: 'p', environmentId: 'e' }, resourceIdentity: { volumeId: 'volume', volumeInstanceId: 'instance' } } };
+        Object.assign(spec.environments.production, { database: { provider: 'railway', engine: 'postgres' } });
+        platform.recoveryDatabases = [{ componentId: 'component-database', provider: 'railway', engine: 'postgres', externalId: 'database-service' }];
+      }
+      if (missing !== 'environmentId') { delete platform.projectId; delete target.hosting.providerScope.projectId; }
+      if (missing !== 'projectId') { delete platform.environmentId; delete target.hosting.providerScope.environmentId; }
+      input.contractHash = managedBackupTargetHash(target);
+      for (const file of compileBackupWorkflow({ project: target.project, environment: target.environment,
+        contractHash: input.contractHash, runnerImage: target.runnerImage, providerCredentialNames: ['RAILWAY_API_TOKEN'], contract: target })) files.set(file.path, file.content);
+      files.set('.hypervibe/spec.json', JSON.stringify(spec)); files.set('.hypervibe/bindings.json', JSON.stringify(bindings));
+      if (missing === 'object-only') expect(await verifyManagedBackupAuthority(input)).toMatchObject({ target });
+      else await expect(verifyManagedBackupAuthority(input)).rejects.toThrow(/hosting scope/);
+    });
+  it.each(['reselected', 'ambiguous'])('rejects a formerly authorized destination after desired state is %s', async change => {
+    const { input, spec, bindings, files } = fixture();
+    Object.assign(spec.environments.production.storage, { newvault: { ...spec.environments.production.storage.vault } });
+    Object.assign(bindings.environments.production.platformBindings.storage, {
+      newvault: { ...bindings.environments.production.platformBindings.storage.vault, externalId: 'new-vault' },
+    });
+    if (change === 'reselected') spec.environments.production.backups.destination = 'newvault';
+    else delete (spec.environments.production.backups as Partial<typeof spec.environments.production.backups>).destination;
+    files.set('.hypervibe/spec.json', JSON.stringify(spec));
+    files.set('.hypervibe/bindings.json', JSON.stringify(bindings));
+    await expect(verifyManagedBackupAuthority(input)).rejects.toThrow(/destination/);
+  });
+
+  it.each(['backup', 'health'] as const)('rejects unsupported private database routing before %s credentials or provider access', async operation => {
+    const { target } = fixture();
+    target.database = { componentId: 'db', source: { provider: 'cloudsql', primaryExternalId: 'cloud-instance',
+      providerScope: { projectId: 'gcp-project' }, resourceIdentity: { instanceId: 'cloud-instance' } } };
+    const create = vi.spyOn(providerRegistry, 'createAdapter');
+    await expect(executeManagedBackup({ target, environment: {} as Environment, operation,
+      repository: 'owner/hls', runId: '123', credentials: {} })).rejects.toThrow(/unsupported.*database provider/);
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it.each(['hash', 'image', 'branch', 'head', 'scope', 'source', 'workflow', 'disabled-workflow', 'incomplete-inventory', 'excluded', 'foreign-repository'])(
     'rejects changed %s before a recurring task may run', async change => {
       const { input, github, files, bindings, spec } = fixture();
