@@ -2200,18 +2200,19 @@ export class PlanService {
     if (checkpointStageActive && serviceFilter) {
       return { error: 'A service-filtered plan cannot skip a pending database checkpoint. Run hv_plan without services to complete the isolated backup stage first.' };
     }
-    if (backupPolicy.actions.length > 0 && serviceFilter) {
-      return { error: 'A service-filtered plan cannot skip pending daily backup policy configuration. Run hv_plan without services to review the isolated backup policy stage.' };
-    }
-    if (!backupReadiness.ready && serviceFilter) {
-      return { error: 'A service-filtered plan cannot bypass backup readiness. Run hv_plan without services to review protection for every persistent resource.' };
-    }
     const nativeDeploySources = planProviderNativeDeploySources({
       environmentSpec,
       observed,
       providerDisplayName: hostingMetadata?.displayName ?? environmentSpec.hosting.provider,
       nonNativeSourcePolicy: hostingMetadata?.orchestration?.nativeBranchDeploy?.nonNativeSourcePolicy,
     });
+    const providerSafetyStageActive = checkpointStageActive || maintenance.pending
+      || dataMigration.pending
+      || nativeDeploySources.actions.length > 0;
+    const backupPolicyStageActive = !providerSafetyStageActive && backupPolicy.actions.length > 0;
+    if (backupPolicyStageActive && serviceFilter) {
+      return { error: 'A service-filtered plan cannot skip pending daily backup policy configuration. Run hv_plan without services to review the isolated backup policy stage.' };
+    }
     const blocked: EnvironmentPlan['blocked'] = maintenance.pending
       ? this.providerPreflight(maintenance.providers)
       : dataMigration.pending
@@ -2876,10 +2877,6 @@ export class PlanService {
         action.metadata = { ...action.metadata, blockedReason: 'retained_service_volumes' };
       }
     }
-    const providerSafetyStageActive = checkpointStageActive || maintenance.pending
-      || dataMigration.pending
-      || nativeDeploySources.actions.length > 0;
-    const backupPolicyStageActive = !providerSafetyStageActive && backupPolicy.actions.length > 0;
     const ciBindingStageActive = ciBindingStage && !providerSafetyStageActive && !backupPolicyStageActive;
     const ciWorkflowPublicationStageActive = ciWorkflowPublicationStage && !providerSafetyStageActive && !backupPolicyStageActive;
     const backupProgramPublicationActions = githubInfrastructure.actions.filter(isBackupProgramPublicationAction);
@@ -2932,13 +2929,20 @@ export class PlanService {
       actions = serviceVolumes.actions;
       storage.warnings.push('This plan is limited to the current filesystem component stage. Apply and re-plan to review dependent resources and deployment; no application code is deployed by this stage.');
     } else if (!providerSafetyStageActive && !backupReadiness.ready) {
+      if (serviceFilter) {
+        return { error: 'A service-filtered plan cannot bypass backup readiness. Run hv_plan without services to review protection for every persistent resource.' };
+      }
       const unbound = backupObservation.policy.resources.filter(resource => resource.bindingState === 'unbound');
       const backupDestination = resolveBackupStrategy(environmentSpec).destination;
-      const roots = actions.filter(action => action.type !== 'noop' && isBackupProvisioningAction(action)
+      const provisioningRoots = actions.filter(action => action.type !== 'noop' && isBackupProvisioningAction(action)
         && (['project', 'environment'].includes(action.resource.kind) && unbound.length > 0
           || action.resource.kind === 'storage' && action.resource.name === backupDestination
           || unbound.some(resource => resource.kind === action.resource.kind && resource.name === action.resource.name
             && resource.provider === action.resource.provider)));
+      // Native namespace identity is needed to observe and review resource
+      // creation. Do not request later billable confirmations in that stage.
+      const scaffolding = provisioningRoots.filter(action => ['project', 'environment'].includes(action.resource.kind));
+      const roots = scaffolding.length ? scaffolding : provisioningRoots;
       const closure = actionDependencyClosure(actions, roots.map(action => action.id));
       backupProvisioningStageActive = closure.some(action => action.type !== 'noop') && closure.every(isBackupProvisioningAction);
       backupReadinessStageActive = !backupProvisioningStageActive;

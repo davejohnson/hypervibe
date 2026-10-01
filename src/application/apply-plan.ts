@@ -855,7 +855,16 @@ export async function executePlanApply(ctx: CommandContext, params: {
     const health = await observeBackupHealth(context);
     return assessBackupReadiness(coverage, health);
   };
-  if (loaded.document.actions.some(actionRequiresBackupReadiness)
+  // A volume needs a durable service/namespace before protection can be
+  // configured. Only this deferred creation path may precede backup readiness;
+  // its live identity is checked again immediately before the handler runs.
+  const serviceIdentityOnly = managedCiBindingsOnly && (planScope === 'hosting-bindings'
+    || Object.values(envSpec.services).some(service => service.volume)
+    || hasRetainedServiceVolumes(environment));
+  const isDeferredIdentityCandidate = (action: PlanAction) => serviceIdentityOnly
+    && resolvePlanActionAuthority(action)?.capability === 'hosting.service.converge'
+    && (action.type === 'create' || action.type === 'update' && action.metadata?.workloadCreateRequired === true);
+  if (loaded.document.actions.some(action => actionRequiresBackupReadiness(action) && !isDeferredIdentityCandidate(action))
     || (params.alwaysRunBootstrap && !deploymentPrerequisitePhase(loaded.document))) {
     const readiness = await freshBackupReadiness();
     if (!readiness.ready) return { kind: 'blocked', applyBlocked: [{ provider: 'hypervibe',
@@ -1155,15 +1164,13 @@ export async function executePlanApply(ctx: CommandContext, params: {
   let deployBootstrap: { success: boolean; summary: Record<string, unknown> } | null = null;
   const serviceBootstraps = new Map<string, { success: boolean; summary: Record<string, unknown> }>();
 
-  const ensureServiceBootstrap = async (serviceName: string) => {
+  const ensureServiceBootstrap = async (serviceName: string, requireNewWorkload = false) => {
     const existing = serviceBootstraps.get(serviceName);
     if (existing) return existing;
     const base = await buildDeployBootstrapParams();
-    const volumeIdentityOnly = managedCiBindingsOnly && (planScope === 'hosting-bindings'
-      || Object.values(envSpec.services).some((s) => s.volume)
-      || hasRetainedServiceVolumes(ctx.repos.environments.findByProjectAndName(project.id, envName)));
     const result = await executeBootstrap({ ...scopeBootstrapParamsToService(base, serviceName),
-      ...(volumeIdentityOnly ? { provisionOnly: true } : {}),
+      ...(serviceIdentityOnly ? { provisionOnly: true } : {}),
+      ...(requireNewWorkload ? { requireNewWorkload: true } : {}),
     });
     serviceBootstraps.set(serviceName, result);
     return result;
@@ -1206,13 +1213,29 @@ export async function executePlanApply(ctx: CommandContext, params: {
       };
     }
     const capability = authority.capability;
+    const volumeEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+    const boundServices = asRecord(volumeEnvironment?.platformBindings.services);
+    const boundService = boundServices && Object.prototype.hasOwnProperty.call(boundServices, action.resource.name)
+      ? asRecord(boundServices[action.resource.name]) : undefined;
+    const servicesComplete = observed && (observed.completeness?.services === 'complete'
+      || observed.completeness?.services === undefined && observed.partial === false);
+    const observedServiceIds = observed?.services.filter(service => service.externalId === boundService?.serviceId) ?? [];
+    const deferredIdentityCreation = isDeferredIdentityCandidate(action) && servicesComplete
+      && (action.type === 'create' && !boundService?.serviceId && !action.metadata?.externalId
+          && observed?.services.some(service => service.name === action.resource.name) === false
+        || action.metadata?.workloadCreateRequired === true && typeof boundService?.serviceId === 'string'
+          && action.metadata.externalId === boundService.serviceId && observedServiceIds.length === 1
+          && observedServiceIds[0].identityOnly === true);
+    let requireNewWorkload = false;
     if (actionRequiresBackupReadiness(action)) {
       const readiness = await freshBackupReadiness();
-      if (!readiness.ready) return { success: false, status: 'blocked',
-        message: `Backup readiness changed before rollout: ${readiness.gaps.join(' ')}` };
+      if (!readiness.ready) {
+        if (!deferredIdentityCreation) return { success: false, status: 'blocked',
+          message: `Backup readiness changed before rollout: ${readiness.gaps.join(' ')}` };
+        requireNewWorkload = true;
+      }
     }
 
-    const volumeEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
     const volumeSafetyBlock = retainedVolumeHostingBlock(volumeEnvironment, envSpec, action);
     if (volumeSafetyBlock) return { success: false, status: 'blocked', message: volumeSafetyBlock };
     if (capability === 'hosting.volume.mutate') {
@@ -2134,7 +2157,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
           error: 'Resolve or explicitly clean up the retained provider service identity before applying another service create. No hosting mutation was attempted.',
         };
       }
-      const result = await ensureServiceBootstrap(action.resource.name);
+      const result = await ensureServiceBootstrap(action.resource.name, requireNewWorkload);
       return bootstrapActionResultFromSummary(action, result);
     }
     return {

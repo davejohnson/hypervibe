@@ -19,7 +19,12 @@ afterEach(() => { SqliteAdapter.resetInstance(); vi.restoreAllMocks(); vi.unstub
 
 // Stateful synthetic HTTP shapes from Fly Machines docs. This tests the real
 // serialized adapter composed with SQLite/plan/apply, not live compatibility.
-it.each([false, true])('stages namespace, disk, then Machine; stripped confirmation=%s', async (stripConfirmation) => {
+it.each([
+  { stripConfirmation: false, race: 'none' },
+  { stripConfirmation: true, race: 'none' },
+  { stripConfirmation: false, race: 'deploy' },
+  { stripConfirmation: false, race: 'env' },
+])('stages namespace, disk, then Machine; stripped confirmation=$stripConfirmation; appearing workload=$race', async ({ stripConfirmation, race }) => {
   let app: any;
   let disk: any;
   let machine: any;
@@ -45,11 +50,17 @@ it.each([false, true])('stages namespace, disk, then Machine; stripped confirmat
         disk.attached_machine_id = machine.id;
         return Response.json(machine);
       }
+      if (path.endsWith('/secrets')) return Response.json({ version: 1 });
+      if (path.endsWith('/machines/appeared-machine')) {
+        machine = { ...machine, instance_id: 'appeared-version-updated', config: body.config };
+        return Response.json(machine);
+      }
       throw new Error(`Unexpected mutation ${path}`);
     }
     if (path === '/v1/apps') return Response.json({ apps: app ? [app] : [] });
     if (path.endsWith('/machines')) return Response.json(machine ? [machine] : []);
     if (path.endsWith('/machines/machine-ack')) return Response.json(machine);
+    if (path.endsWith('/machines/appeared-machine')) return Response.json(machine);
     if (path.endsWith('/volumes')) return Response.json(disk ? [disk] : []);
     if (path.endsWith('/volumes/vol_ack')) return Response.json(disk);
     if (path.endsWith('/secrets')) return Response.json({ secrets: [] });
@@ -66,6 +77,7 @@ it.each([false, true])('stages namespace, disk, then Machine; stripped confirmat
   const environment = repo.create({ projectId: project.id, name: 'staging', platformBindings: { provider: 'fly', projectId: 'flyorg:example', environmentId, services: {} } });
   new SpecStore().replace(project, { version: 1, project: project.name, environments: { staging: {
     hosting: { provider: 'fly', region: 'ord' }, services: { web: { public: false, volume: { mountPath: '/data' } } }, deploy: { strategy: 'manual' },
+    ...(race === 'env' ? { envVars: { SYNTHETIC_SETTING: 'reviewed-value' } } : {}),
   } } });
   const adapter = new FlyAdapter();
   await adapter.connect({ apiToken: 'synthetic-token', organizationSlug: 'example' });
@@ -94,8 +106,29 @@ it.each([false, true])('stages namespace, disk, then Machine; stripped confirmat
       return;
     }
     const current = new SpecStore().get(project)!;
+    if (race !== 'none' && disk && !machine && scope === 'hosting-bindings') {
+      // External work appears after apply's complete identity-only observation,
+      // before bootstrap's second provider lookup. No observer result is forged.
+      const observe = PlanService.prototype.observeEnvironment;
+      vi.spyOn(PlanService.prototype, 'observeEnvironment').mockImplementationOnce(async function (this: PlanService, ...args) {
+        const result = await observe.apply(this, args);
+        machine = { id: 'appeared-machine', instance_id: 'appeared-version', state: 'started', config: {
+          image: 'registry.example/application:existing', mounts: [{ volume: 'vol_ack', path: '/data' }],
+          metadata: { hypervibe_managed: 'true', hypervibe_project_id: 'planner', hypervibe_environment_id: environmentId,
+            hypervibe_service_name: 'web', hypervibe_workload_kind: 'web' },
+        } };
+        disk.attached_machine_id = machine.id;
+        return result;
+      });
+    }
     const outcome = await executePlanApply(createToolContext(), { project, spec: current.spec, specRevision: current.revision,
       planId: plan.planRunId, confirmActions: plan.actions.filter(a => a.requiresConfirm).map(a => a.id) });
+    if (race !== 'none' && machine?.id === 'appeared-machine') {
+      expect(outcome, JSON.stringify(outcome)).toMatchObject({ kind: 'executed', result: { success: false } });
+      expect(mutations).toEqual(['/v1/apps', `/v1/apps/${app.name}/volumes`]);
+      expect(machine.config.image).toBe('registry.example/application:existing');
+      return;
+    }
     expect(outcome, JSON.stringify(outcome)).toMatchObject({ kind: 'executed', result: { success: true } });
   };
   await stage('hosting-bindings');
@@ -104,6 +137,10 @@ it.each([false, true])('stages namespace, disk, then Machine; stripped confirmat
   await stage('service-volumes');
   expect(mutations).toEqual(['/v1/apps', `/v1/apps/${app.name}/volumes`]);
   await stage('hosting-bindings');
+  if (race !== 'none') {
+    expect(machine.id).toBe('appeared-machine');
+    return;
+  }
   if (stripConfirmation) {
     expect(mutations).toEqual(['/v1/apps', `/v1/apps/${app.name}/volumes`]);
     return;

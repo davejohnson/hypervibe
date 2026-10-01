@@ -46,6 +46,8 @@ export interface HostingCapabilities {
 
   /** Whether config can converge while exact-SHA CI remains the code release boundary. */
   supportsDeferredDeploy?: boolean;
+  /** Enforces creation-only admission at the final provider mutation boundary. */
+  supportsCreateOnlyDeploy?: boolean;
 
   /** Whether the adapter can provider-verify reversible workload suspension. */
   supportsMaintenance?: boolean;

@@ -248,6 +248,7 @@ export class RailwayAdapter implements
     queues: { backend: 'postgres' },
     supportsOneOffTasks: true,
     supportsDeferredDeploy: true,
+    supportsCreateOnlyDeploy: true,
     supportsTemporaryDatabaseAccess: true,
     supportsMaintenance: true,
   };
@@ -3083,6 +3084,10 @@ export class RailwayAdapter implements
       serviceCreateRecovery?: Record<string, unknown>;
     };
     const projectId = bindings.projectId;
+    if (options.requireNewWorkload && (options.deferDeployment !== true || bindings.services?.[service.name]?.serviceId)) {
+      return { serviceId: service.id, status: 'failed', receipt: { success: false,
+        message: 'Creation-only admission requires a new Railway service and deferred deployment. Re-plan with current workload and backup evidence.' } };
+    }
 
     if (!projectId) {
       return {
@@ -3518,6 +3523,9 @@ export class RailwayAdapter implements
     vars: Record<string, string>,
     options: DeploymentMutationOptions = {}
   ): Promise<Receipt> {
+    if (options.requireNewWorkload) {
+      return { success: false, message: 'Creation-only admission cannot update environment variables on an existing workload.' };
+    }
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
     }

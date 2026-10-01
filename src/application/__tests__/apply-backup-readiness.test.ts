@@ -88,6 +88,55 @@ describe('fresh backup readiness at the real apply boundary', () => {
     expect(spec.environments.production.storage).not.toHaveProperty('hypervibe-backups');
   });
 
+  it.each(['running', 'unknown', 'ambiguous'] as const)('re-observes a purported deferred identity stage and blocks %s workload evidence', async state => {
+    const ctx = createCommandContext();
+    const project = ctx.repos.projects.create({ name: 'identity-admission', defaultPlatform: 'railway' });
+    const environment = ctx.repos.environments.create({ projectId: project.id, name: 'production',
+      platformBindings: { provider: 'railway', projectId: 'p', environmentId: 'e', services: state === 'unknown' ? {} : { web: { serviceId: 'web' } } } });
+    const spec = projectSpecSchema.parse({ version: 1, project: project.name,
+      environments: { production: { hosting: { provider: 'railway' }, services: { web: { volume: { mountPath: '/data' } } } } } });
+    const run = ctx.repos.runs.create({ projectId: project.id, environmentId: environment.id, type: 'plan',
+      plan: { kind: 'hv_plan', scope: 'hosting-bindings', environmentName: 'production', specRevision: 1,
+        observedFingerprint: null, actions: [{ id: 'service:web', type: state === 'unknown' ? 'create' : 'update', resource: { kind: 'service', provider: 'railway', name: 'web' },
+          verified: true, billable: true, requiresConfirm: true, reason: 'An outdated identity-only claim', metadata: { workloadCreateRequired: true, ...(state === 'unknown' ? {} : { externalId: 'web' }) } }] } });
+    vi.spyOn(PlanService.prototype, 'providerPreflight').mockReturnValue([]);
+    const observed = vi.spyOn(PlanService.prototype, 'observeEnvironment').mockResolvedValue({ warnings: [], observed: {
+      provider: 'railway', observedAt: new Date().toISOString(), projectExists: true, projectId: 'p', environmentId: 'e',
+      services: state === 'unknown' ? [] : Array.from({ length: state === 'ambiguous' ? 2 : 1 }, () => ({ name: 'web', externalId: 'web', status: 'running' as const, workloadKind: 'web' as const,
+        ...(state === 'ambiguous' ? { identityOnly: true } : {}), config: {}, envVarKeys: [], envVarHashes: {}, customDomains: [] })),
+      databases: [], partial: state === 'unknown', warnings: [],
+    } });
+    const deploy = vi.spyOn(bootstrap, 'executeBootstrap').mockImplementation(() => { throw new Error('Existing workload must not change without backup proof'); });
+    const result = await executePlanApply(ctx, { project, spec, specRevision: 1, planId: run.id, confirmActions: ['service:web'] });
+    expect(observed).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ kind: 'executed', result: { success: false,
+      receipts: [expect.objectContaining({ actionId: 'service:web', status: 'blocked', message: expect.stringMatching(/backup/i) })] } });
+    expect(deploy).not.toHaveBeenCalled();
+  });
+
+  it('preserves ordinary deferred setup when no backup-readiness exception is needed', async () => {
+    const ctx = createCommandContext();
+    const project = ctx.repos.projects.create({ name: 'ordinary-identity', defaultPlatform: 'railway' });
+    const environment = ctx.repos.environments.create({ projectId: project.id, name: 'production',
+      platformBindings: { provider: 'railway', projectId: 'p', environmentId: 'e', services: {} } });
+    const spec = projectSpecSchema.parse({ version: 1, project: project.name,
+      environments: { production: { hosting: { provider: 'railway' }, services: { web: {} }, email: { enabled: false } } } });
+    const run = ctx.repos.runs.create({ projectId: project.id, environmentId: environment.id, type: 'plan',
+      plan: { kind: 'hv_plan', scope: 'hosting-bindings', environmentName: 'production', specRevision: 1,
+        observedFingerprint: null, actions: [{ id: 'service:web', type: 'create', resource: { kind: 'service', provider: 'railway', name: 'web' },
+          verified: true, reason: 'Provision deferred service identity' }] } });
+    vi.spyOn(PlanService.prototype, 'providerPreflight').mockReturnValue([]);
+    vi.spyOn(PlanService.prototype, 'observeEnvironment').mockResolvedValue({ warnings: [], observed: {
+      provider: 'railway', observedAt: new Date().toISOString(), projectExists: true, projectId: 'p', environmentId: 'e',
+      services: [], databases: [], partial: false, warnings: [],
+    } });
+    const deploy = vi.spyOn(bootstrap, 'executeBootstrap').mockResolvedValue({ success: true, summary: { deploymentMode: 'provision' } });
+    const result = await executePlanApply(ctx, { project, spec, specRevision: 1, planId: run.id, confirmActions: [] });
+    expect(result).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(deploy).toHaveBeenCalledWith(expect.objectContaining({ provisionOnly: true }));
+    expect(deploy.mock.calls[0][0]).not.toHaveProperty('requireNewWorkload');
+  });
+
   it.each([false, true])('keeps backup program publication isolated and honors confirmation=%s', async confirmed => {
     const ctx = createCommandContext();
     const project = ctx.repos.projects.create({ name: 'backup-publication', defaultPlatform: 'railway', gitRemoteUrl: 'https://github.com/acme/backup-publication' });
