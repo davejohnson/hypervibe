@@ -1,0 +1,355 @@
+{
+  "schemaVersion": 1,
+  "reviewedAt": "2026-09-30",
+  "purpose": "Reviewed named-provider daily backup implementation scope. Official documentation is design evidence, not observed resource protection, pinned wire-contract coverage or live certification. Unsupported means the current Hypervibe adapter has no daily policy path; native provider capabilities are described separately.",
+  "resources": [
+    {
+      "resource": "database",
+      "provider": "railway",
+      "implementation": "implemented",
+      "reason": "Policy observation and additive configuration adapter implemented; no live certification or recovery-point inventory.",
+      "nativeCapability": "DAILY is every 24 hours; can coexist with WEEKLY and MONTHLY",
+      "retentionEvidence": {
+        "kind": "fixed",
+        "days": 6
+      },
+      "limitations": [
+        "Mutation acknowledgement is not convergence",
+        "Missing retentionSeconds is unknown observed retention, not proof of six days",
+        "A manual snapshot does not establish a schedule",
+        "Deleting a volume deletes its native backups"
+      ],
+      "officialSources": [
+        "https://docs.railway.com/volumes/backups",
+        "https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/commands/database/pitr.rs#L1678-L1797"
+      ]
+    },
+    {
+      "resource": "database",
+      "provider": "cloudsql",
+      "implementation": "implemented",
+      "reason": "Policy observation and additive configuration adapter implemented; no live certification or recovery-point inventory.",
+      "nativeCapability": "Standard backup option is daily; Enhanced Backup and DR plans are a different control plane",
+      "retentionEvidence": {
+        "kind": "count",
+        "minimum": 1,
+        "maximum": 365,
+        "enterpriseDefault": 7,
+        "enterprisePlusDefault": 15
+      },
+      "limitations": [
+        "Legacy Hypervibe policy currently always enables daily plus PITR; preserve that exact meaning when migrating old specs",
+        "Do not treat Enhanced Backup and DR state as an absent standard policy",
+        "Policy configuration alone is not a usable backup or tested restore"
+      ],
+      "officialSources": [
+        "https://docs.cloud.google.com/sql/docs/postgres/backup-recovery/backup-options",
+        "https://docs.cloud.google.com/sql/docs/postgres/backup-recovery/backups"
+      ]
+    },
+    {
+      "resource": "database",
+      "provider": "supabase",
+      "implementation": "unsupported",
+      "reason": "Daily policy observation/configuration is not implemented in this Hypervibe adapter.",
+      "nativeCapability": "Automatic daily backups on eligible paid projects while PITR is disabled",
+      "retentionEvidence": {
+        "kind": "plan-dependent",
+        "proDays": 7,
+        "teamDays": 14,
+        "enterpriseUpToDays": 30
+      },
+      "limitations": [
+        "Free tier does not supply this automatic daily guarantee",
+        "Database backups do not include Storage API objects",
+        "Deleting a project deletes its backups"
+      ],
+      "officialSources": [
+        "https://supabase.com/docs/guides/platform/backups"
+      ]
+    },
+    {
+      "resource": "database",
+      "provider": "rds",
+      "implementation": "unsupported",
+      "reason": "Daily policy observation/configuration is not implemented in this Hypervibe adapter.",
+      "nativeCapability": "Automated daily full snapshot during the preferred backup window, plus transaction logs",
+      "retentionEvidence": {
+        "kind": "days",
+        "minimumEnabled": 1,
+        "maximum": 35,
+        "apiCreationDefault": 1,
+        "consoleCreationDefault": 7
+      },
+      "limitations": [
+        "Changing retention between zero and nonzero can cause an outage",
+        "Stopped instances do not create backups",
+        "RDS instance and Multi-AZ DB-cluster contracts differ; current adapter uses DB instances"
+      ],
+      "officialSources": [
+        "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_WorkingWithAutomatedBackups.BackupRetention.html",
+        "https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_ModifyDBInstance.html",
+        "https://aws.amazon.com/rds/faqs/"
+      ]
+    },
+    {
+      "resource": "database",
+      "provider": "azure-postgres",
+      "implementation": "unsupported",
+      "reason": "Daily policy observation/configuration is not implemented in this Hypervibe adapter.",
+      "nativeCapability": "Automatic daily snapshot backups; suspended while no data changes, with a new backup immediately after changes resume",
+      "retentionEvidence": {
+        "kind": "days",
+        "default": 7,
+        "minimum": 7,
+        "maximum": 35
+      },
+      "limitations": [
+        "Do not promise a newly created physical snapshot every 24 hours for an idle database",
+        "Daily backup policy does not establish application restore compatibility"
+      ],
+      "officialSources": [
+        "https://learn.microsoft.com/en-us/azure/postgresql/backup-restore/concepts-backup-restore"
+      ]
+    },
+    {
+      "resource": "database",
+      "provider": "neon",
+      "implementation": "unsupported",
+      "reason": "Daily policy observation/configuration is not implemented in this Hypervibe adapter.",
+      "nativeCapability": "Native scheduled snapshots can be daily, weekly or monthly on a paid plan",
+      "retentionEvidence": {
+        "kind": "unknown",
+        "note": "Exact scheduled snapshot retention fields/defaults not established in this bounded review; must pin the full official operation schema before implementation"
+      },
+      "limitations": [
+        "Earlier PITR-only provider description is incomplete",
+        "Do not infer retention from project history retention",
+        "Do not silently change plan or authorize cost"
+      ],
+      "officialSources": [
+        "https://api-docs.neon.tech/reference/setsnapshotschedule",
+        "https://api-docs.neon.tech/reference/getsnapshotschedule",
+        "https://neon.com/blog/three-ways-to-use-your-snapshots"
+      ]
+    },
+    {
+      "resource": "database",
+      "provider": "fly",
+      "implementation": "unsupported",
+      "reason": "Daily policy observation/configuration is not implemented in this Hypervibe adapter.",
+      "nativeCapability": "Managed Postgres official staff describes daily full backups, six-hour differential and hourly incremental backups",
+      "retentionEvidence": {
+        "kind": "unknown",
+        "historicalEvidence": "Official staff stated at least ten calendar days on 2025-08-04; current exact guarantee not established by current docs"
+      },
+      "limitations": [
+        "Do not substitute Fly Volume daily snapshots and five-day retention for Managed Postgres",
+        "Dated staff statements establish design evidence, not current per-cluster guarantees"
+      ],
+      "officialSources": [
+        "https://docs.fly.io/postgres",
+        "https://community.fly.io/t/scheduled-backups-in-managed-postgres/25132",
+        "https://community.fly.io/t/help-needed-with-managed-postgres/25549",
+        "https://docs.fly.io/api/machines/postgres-clusters/list-backups",
+        "https://docs.fly.io/api/machines/postgres-clusters/restore-backup-or-point-in-time-to-new-cluster"
+      ]
+    },
+    {
+      "resource": "database",
+      "provider": "digitalocean",
+      "implementation": "unsupported",
+      "reason": "Daily policy observation/configuration is not implemented in this Hypervibe adapter.",
+      "nativeCapability": "Managed PostgreSQL backups automatically run once daily; provider chooses an unchangeable backup time",
+      "retentionEvidence": {
+        "kind": "fixed",
+        "days": 7
+      },
+      "limitations": [
+        "Deleting the cluster deletes its backups",
+        "Do not substitute Droplet backup policy for managed database policy"
+      ],
+      "officialSources": [
+        "https://docs.digitalocean.com/products/databases/postgresql/how-to/restore-from-backups/"
+      ]
+    },
+    {
+      "resource": "volume",
+      "provider": "railway",
+      "implementation": "implemented",
+      "reason": "Exact bound-volume policy observation and additive configuration adapter implemented; no live certification or recovery-point inventory.",
+      "nativeCapability": "Native manual and scheduled daily/weekly/monthly volume backups. Daily every 24 hours retained 6 days; weekly 27 days; monthly 89 days.",
+      "limitations": [
+        "Volume wiping removes its backups.",
+        "Restore stays within the same project and environment.",
+        "Manual backup size limit is 50% of volume capacity.",
+        "Native snapshot is not an independent offsite copy."
+      ],
+      "officialSources": [
+        "https://docs.railway.com/volumes/backups",
+        "https://docs.railway.com/integrations/api/manage-volumes"
+      ]
+    },
+    {
+      "resource": "volume",
+      "provider": "fly",
+      "implementation": "unsupported",
+      "reason": "Current lifecycle does not observe/converge automatic snapshot settings or latest completed snapshot.",
+      "nativeCapability": "Automatic daily snapshots default on; default retention 5 days, configurable from 1 to 60 days. Restore creates a new volume.",
+      "limitations": [
+        "Changing retention affects new snapshots.",
+        "Native snapshots leave a data-loss window since the latest snapshot.",
+        "Snapshot presence does not prove application consistency."
+      ],
+      "officialSources": [
+        "https://docs.fly.io/volumes/snapshots/"
+      ]
+    },
+    {
+      "resource": "volume",
+      "provider": "ecs",
+      "implementation": "unsupported",
+      "reason": "Add backing-filesystem backup observation/convergence and recovery-point receipts.",
+      "nativeCapability": "AWS Backup supports EFS scheduling, retention, full/item restore. Default EFS automatic backup plan is daily with 35-day retention.",
+      "limitations": [
+        "API/CLI creation defaults backups on only for One Zone; Hypervibe creates regional EFS, so creation success is not evidence of backup enablement.",
+        "Custom vault/plan IAM and charges need reviewed actions."
+      ],
+      "officialSources": [
+        "https://docs.aws.amazon.com/efs/latest/ug/awsbackup.html",
+        "https://docs.aws.amazon.com/efs/latest/ug/automatic-backups.html",
+        "https://docs.aws.amazon.com/efs/latest/APIReference/API_BackupPolicy.html"
+      ]
+    },
+    {
+      "resource": "volume",
+      "provider": "cloudrun",
+      "implementation": "unsupported",
+      "reason": "No Filestore backup schedule, backup inventory, or retention lifecycle currently exists.",
+      "nativeCapability": "Basic Filestore supports standard differential backups. Standard backups have no native scheduling or expiry. Official automation uses Cloud Scheduler and Cloud Run functions. Enhanced Backup and DR scheduling supports Zonal/Regional/Enterprise, not Basic.",
+      "limitations": [
+        "Standard backup survives source share deletion but not source-project deletion.",
+        "Cross-region storage is supported.",
+        "Application-consistent backup requires stopping writers and unmounting according to official guidance.",
+        "Enhanced support/access must be checked per region and tier."
+      ],
+      "officialSources": [
+        "https://docs.cloud.google.com/filestore/docs/backups",
+        "https://docs.cloud.google.com/filestore/docs/schedule-backups-cloud-scheduler"
+      ]
+    },
+    {
+      "resource": "volume",
+      "provider": "azure-container-apps",
+      "implementation": "unsupported",
+      "reason": "No Recovery Services backup policy/protection registration or latest backup observation is implemented.",
+      "nativeCapability": "Azure Backup supports scheduled Azure Files snapshots and vaulted backups; custom daily retention. Vaulted backup transfers the last daily snapshot into a Recovery Services vault.",
+      "limitations": [
+        "Azure Backup Files support is SMB, not NFS.",
+        "Snapshot-only backups stay in the source storage account.",
+        "Vault tier and regional support must be verified.",
+        "Snapshot retention/count limits differ from vaulted retention."
+      ],
+      "officialSources": [
+        "https://learn.microsoft.com/en-us/azure/backup/azure-file-share-support-matrix",
+        "https://learn.microsoft.com/en-us/azure/backup/quick-backup-azure-files-vault-tier-portal",
+        "https://learn.microsoft.com/en-us/azure/backup/backup-azure-files-faq"
+      ]
+    },
+    {
+      "resource": "volume",
+      "provider": "digitalocean",
+      "implementation": "unsupported",
+      "reason": "No provider persistent-mount backup target exists for this adapter.",
+      "nativeCapability": "App Platform local filesystems are ephemeral and persistent volumes are unsupported.",
+      "limitations": [
+        "Do not imply App Platform local writes survive deployment.",
+        "DigitalOcean Spaces is mentioned by provider docs but is not a named Hypervibe storage adapter in this inventory."
+      ],
+      "officialSources": [
+        "https://docs.digitalocean.com/products/app-platform/how-to/store-data/"
+      ]
+    },
+    {
+      "resource": "volume",
+      "provider": "vercel",
+      "implementation": "unsupported",
+      "reason": "No persistent-mount backup target for this adapter.",
+      "nativeCapability": "Vercel Functions do not expose a persistent writable filesystem.",
+      "limitations": [
+        "Temporary scratch space is not a recoverable persistent mount.",
+        "Vercel Blob is not a named Hypervibe storage adapter in this inventory."
+      ],
+      "officialSources": [
+        "https://vercel.com/kb/guide/why-does-my-serverless-function-work-locally-but-not-when-deployed",
+        "https://vercel.com/docs/functions/runtimes#file-system-support"
+      ]
+    },
+    {
+      "resource": "storage",
+      "provider": "railway",
+      "implementation": "unsupported",
+      "reason": "No retained backup destination, schedule, integrity manifest, retention or restore lifecycle.",
+      "nativeCapability": "List/get/put/copy object operations exist. Object versioning, object locks and bucket lifecycle configuration are explicitly unsupported. Bucket instances and credentials are environment-scoped.",
+      "limitations": [
+        "No native scheduled bucket-backup contract established by reviewed documentation.",
+        "Same-project second bucket remains in a shared administrative failure domain.",
+        "A replacement/deletion-propagating mirror is not retained history."
+      ],
+      "officialSources": [
+        "https://docs.railway.com/storage-buckets"
+      ]
+    },
+    {
+      "resource": "storage",
+      "provider": "s3",
+      "implementation": "unsupported",
+      "reason": "No AWS Backup planner, vault selection, policy association or backup status in storage adapter.",
+      "nativeCapability": "AWS Backup supports periodic daily S3 recovery points in a backup vault, with configured retention and cross-account/region copies. S3 versioning is a prerequisite; source versioning itself keeps versions within the same bucket.",
+      "limitations": [
+        "General-purpose buckets only; unsupported storage classes must be reported.",
+        "Continuous backup requires EventBridge configuration; periodic is separate.",
+        "Do not overwrite unrelated bucket notification settings.",
+        "Versioning alone is not an independent copy."
+      ],
+      "officialSources": [
+        "https://docs.aws.amazon.com/aws-backup/latest/devguide/s3-backups.html",
+        "https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html",
+        "https://docs.aws.amazon.com/aws-backup/latest/devguide/backup-feature-availability.html"
+      ]
+    },
+    {
+      "resource": "storage",
+      "provider": "gcs",
+      "implementation": "unsupported",
+      "reason": "No retained object recovery-set schedule/status/restore lifecycle.",
+      "nativeCapability": "Storage Transfer Service supports daily scheduled bucket copies. Versioning preserves noncurrent objects in the same bucket; soft delete/locks are protection, and replication is redundancy.",
+      "limitations": [
+        "A continuously overwritten destination does not establish daily historical restore points.",
+        "Versioning or soft delete in the source is not independent backup.",
+        "No native bucket-backup-vault contract was established in reviewed docs; do not confuse VM Backup and DR with backup of GCS buckets."
+      ],
+      "officialSources": [
+        "https://docs.cloud.google.com/storage/docs/protection-backup-recovery-overview",
+        "https://docs.cloud.google.com/storage-transfer/docs/create-transfers",
+        "https://docs.cloud.google.com/storage-transfer/docs/cloud-storage-to-cloud-storage"
+      ]
+    },
+    {
+      "resource": "storage",
+      "provider": "azureblob",
+      "implementation": "unsupported",
+      "reason": "No Data Protection backup vault/policy/protected instance planner or recovery-point observation.",
+      "nativeCapability": "Azure Blob vaulted backup supports daily or weekly scheduled recovery points and retention policy. Operational backup is continuous local protection and does not place a separate copy in the vault.",
+      "limitations": [
+        "Account/blob type and region must meet provider support matrix.",
+        "Vaulted restore targets a different storage account.",
+        "Source versioning/soft delete alone does not establish independent recovery storage."
+      ],
+      "officialSources": [
+        "https://learn.microsoft.com/en-us/azure/backup/blob-backup-configure-manage",
+        "https://learn.microsoft.com/en-us/azure/backup/blob-backup-overview"
+      ]
+    }
+  ]
+}

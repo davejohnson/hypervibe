@@ -63,6 +63,12 @@ describe('PostgreSQL transfer', () => {
     });
   });
 
+  it('decodes PostgreSQL URI Unix-socket hosts without changing the database identity', () => {
+    expect(postgresProcessEnvironment('postgresql://test_user@%2Ftmp%2Ftest-postgres/test_db')).toMatchObject({
+      PGHOST: '/tmp/test-postgres', PGDATABASE: 'test_db', PGUSER: 'test_user',
+    });
+  });
+
   it('exports one repeatable-read snapshot and verifies target row counts', async () => {
     const tables = [
       { schema: 'public', table: 'Users', rows: '8' },
@@ -99,5 +105,17 @@ describe('PostgreSQL transfer', () => {
       'postgresql://target:secret@target.example/app',
       { createClient: () => clients.shift()!, runTools: async () => 100 }
     )).rejects.toThrow('row counts differ');
+  });
+
+  it('compares the same tables independently of source and target collation order', async () => {
+    const tables = [{ schema: 'public', table: 'alpha', rows: '2' }, { schema: 'public', table: 'Zulu', rows: '3' }];
+    const source = clientFor({ tables });
+    const target = clientFor({ tables: [...tables].reverse() });
+    const clients = [source.client, target.client];
+    await expect(transferPostgresDatabase(
+      'postgresql://source:secret@source.example/test_db',
+      'postgresql://target:secret@target.example/test_db',
+      { createClient: () => clients.shift()!, runTools: async () => 100 }
+    )).resolves.toMatchObject({ manifest: { totalRows: '5' } });
   });
 });

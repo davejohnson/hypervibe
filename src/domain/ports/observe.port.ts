@@ -1,3 +1,4 @@
+import type { DatabaseCheckpointSource } from './database-checkpoint.port.js';
 import { createHash } from 'crypto';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Component } from '../entities/component.entity.js';
@@ -133,6 +134,7 @@ export interface ObservedDatabase {
   name?: string;
   status: 'running' | 'stopped' | 'provisioning' | 'error' | 'unknown';
   resilience?: {
+    checkpointSource?: DatabaseCheckpointSource;
     availability?: 'zonal' | 'regional' | 'unknown';
     backupPolicy?: {
       enabled: boolean;

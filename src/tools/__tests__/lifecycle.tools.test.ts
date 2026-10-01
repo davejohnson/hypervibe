@@ -2478,7 +2478,17 @@ describe('hv_inspect / hv_import', () => {
       action.type === 'create' || action.type === 'destroy'
     )).toEqual([]);
     expect(status.data.drift).toEqual([]);
-    expect(status.data.inSync).toBe(true);
+    // Import matching resources without claiming they have completed backups.
+    // The default protection requirement keeps status unconverged until policy,
+    // a completed point and an isolated restore are independently verified.
+    expect(status.data.inSync).toBe(false);
+    expect(status.data.backupCoverage).toMatchObject({ policy: { mode: 'daily', source: 'default' }, complete: false });
+    expect(status.data.backupReadiness).toMatchObject({ ready: false, policyReady: false,
+      recoveryPointReady: false, restoreReady: false });
+    expect(status.data.backupReadiness.resources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resource: expect.objectContaining({ kind: 'database', provider: 'railway' }), ready: false }),
+      expect.objectContaining({ resource: expect.objectContaining({ kind: 'storage', name: 'uploads' }), ready: false }),
+    ]));
 
     observe.mockResolvedValue({ ...observed, caches: [] });
     const missingCacheStatus = await t.call('hv_status', {

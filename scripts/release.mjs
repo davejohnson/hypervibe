@@ -16,11 +16,12 @@ function usage() {
   console.log(`Usage: npm run release -- [patch|minor|major|X.Y.Z] [options]
 
 Build, validate, commit, tag, and publish a Hypervibe release from main.
-The default mode publishes the npm package plus Apple Silicon and Intel DMGs.
+Every mode publishes the npm package and verified backup helper image.
+The default mode also publishes Apple Silicon and Intel DMGs.
 
 Options:
   --dry-run   Validate git state and print the release plan without changing files
-  --npm-only  Publish the npm package without macOS installers or a GitHub release
+  --npm-only  Publish npm and the backup helper without macOS installers or a GitHub release
   --no-wait   Push the release without waiting for the GitHub publish workflow
   --help      Show this help
 
@@ -226,7 +227,7 @@ async function main() {
     run('git', ['add', '--', 'package.json', 'package-lock.json']);
     run('git', ['diff', '--cached', '--check']);
     const commitMessage = npmOnly
-      ? `Release Hypervibe ${nextVersion} (npm only)`
+      ? `Release Hypervibe ${nextVersion} (without macOS)`
       : `Release Hypervibe ${nextVersion}`;
     run('git', ['commit', '-m', commitMessage]);
     releaseCommitted = output('git', ['rev-parse', 'HEAD']) !== startingHead;

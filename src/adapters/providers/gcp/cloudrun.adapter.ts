@@ -14,7 +14,7 @@ import type { Component, ComponentType } from '../../../domain/entities/componen
 import { providerRegistry, type ProviderInspectionRequest } from '../../../domain/registry/provider.registry.js';
 import { buildCloudRunGitHubActionsSteps, CLOUDRUN_CI_REQUIRED_SECRETS } from './cloudrun-ci.workflow.js';
 import { buildCloudRunPortableRecipe } from './cloudrun-ci.recipe.js';
-import { parseHostingBindings, type GetLogsOptions, type LogEntry } from '../../../domain/ports/hosting.port.js';
+import { parseHostingBindings, type EnvironmentTaskOptions, type GetLogsOptions, type LogEntry } from '../../../domain/ports/hosting.port.js';
 import * as pubsub from './pubsub.api.js';
 import { CloudRunServiceVolumes } from './cloudrun-service-volume.js';
 import { cloudRunFilesystemIdentity } from './cloudrun-volume-runtime.js';
@@ -2108,8 +2108,14 @@ export class CloudRunAdapter implements
   async runJob(
     environment: Environment,
     service: Service,
-    command: string
+    command: string,
+    options?: EnvironmentTaskOptions
   ): Promise<JobResult> {
+    if (options?.managedRecoveryTask) return {
+      jobId: '', status: 'failed', receipt: { success: false,
+        message: 'The Cloud Run adapter does not implement managed recovery tasks.',
+        data: { applied: 0, skipped: 1, mutationAttempted: false } },
+    };
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }

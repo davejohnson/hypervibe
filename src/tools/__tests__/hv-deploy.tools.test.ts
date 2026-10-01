@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseToolEnvelope } from './tool-result.js';
-import { mkdtempSync, rmSync } from 'fs';
+import { createRequire } from 'node:module';
+import { releaseEvidenceValidationRuntime } from '../../domain/services/github-ops.service.js';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -12,6 +14,9 @@ import '../../adapters/providers/railway/railway.adapter.js';
 import '../../adapters/providers/gcp/cloudrun.adapter.js';
 import '../../adapters/providers/gcp/cloudsql.adapter.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
+import { ProjectSpecRepository } from '../../adapters/db/repositories/spec.repository.js';
+import { runWithWorkspaceDirectories } from '../../lib/workspace-context.js';
+import * as repoSpecFiles from '../../domain/spec/repo-spec-file.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
@@ -31,6 +36,8 @@ import {
   githubActionsWorkflowInputHash,
   workflowFilesContentHash,
 } from '../../domain/services/ci-deploy.service.js';
+import { CommandRegistry } from '../../application/commands.js';
+import { parseCliInvocation } from '../../interfaces/cli/parser.js';
 import { createToolContext } from '../../application/context.js';
 import { registerHvDeployTools } from '../hv-deploy.tools.js';
 
@@ -45,6 +52,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   SqliteAdapter.resetInstance();
   rmSync(tempDir, { recursive: true, force: true });
 });
@@ -170,6 +178,37 @@ function mockPreviousSuccessfulRelease(
     artifacts: [runId === 20 ? releaseArtifact(20, currentSha) : releaseArtifact(10, previousSha)],
   }));
   return vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockResolvedValue();
+}
+
+function mockRollbackPreview() {
+  const seeded = seedManagedCiRollbackProject('rollback-preview-app');
+  const { project, workflow } = seeded;
+  const sha = 'b'.repeat(40);
+  const source = new SpecStore().get(project)!.spec;
+  const target = resolveBranchDeployTargets(project).targets[0];
+  const validator = { exports: {} as any };
+  new Function('require', 'module', 'exports', releaseEvidenceValidationRuntime())(createRequire(import.meta.url), validator, validator.exports);
+  const evidence = {
+    version: 4, provider: 'railway', environment: 'production',
+    source: { repository: `davejohnson/${project.name}`, sha },
+    target: { ...target.releaseTarget!, resources: target.releaseTarget!.resources.map(resource => ({ ...resource, imageUri: `ghcr.io/davejohnson/app@sha256:${'d'.repeat(64)}` })) },
+    programFingerprint: target.programFingerprint,
+    deploymentContractFingerprint: validator.exports.deploymentContractFingerprint(source, 'production'),
+    verifiedAt: '2026-07-20T00:05:00Z',
+  };
+  vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockImplementation(async (_owner, _repo, name) => {
+    if (name === '.hypervibe/spec.json') return JSON.stringify(source);
+    if (name === '.hypervibe/bindings.json') return null;
+    return workflow.content;
+  });
+  const trigger = mockPreviousSuccessfulRelease(workflow, sha, 'a'.repeat(40));
+  vi.spyOn(GitHubAdapter.prototype, 'getWorkflowRun').mockResolvedValue({
+    ...workflowRun(20, 'completed', 'success', '2026-07-20T00:00:00Z'),
+    path: workflow.path, run_attempt: 1, repository: { full_name: `davejohnson/${project.name}` }, head_repository: { full_name: `davejohnson/${project.name}` },
+  });
+  vi.spyOn(GitHubAdapter.prototype, 'readArtifactFiles').mockResolvedValue({ 'hypervibe-server-release.json': JSON.stringify(evidence) });
+  return { ...seeded, trigger, sha, evidence,
+    inputs: { project: project.name, env: 'production', action: 'preview', toSha: sha, sourceWorkflowRunId: '20', sourceArtifactId: '200' } };
 }
 
 async function makeClient() {
@@ -648,6 +687,23 @@ describe('hv_deploy database env injection', () => {
       success: true,
       adapter: {
         name: 'cloudsql',
+        // Deployment now requires backup/restore evidence. This fixture supplies
+        // that prerequisite without changing the database-env injection assertions.
+        dailyBackups: {
+          observe: async () => ({ state: 'known', daily: true, mechanism: 'snapshot',
+            policyFingerprint: 'a'.repeat(64), preservationFingerprint: 'b'.repeat(64),
+            source: { provider: 'cloudsql', primaryExternalId: 'production-postgres',
+              providerScope: { projectId: 'gcp-project', region: 'us-central1' }, resourceIdentity: { instanceId: 'production-postgres' } } }),
+          configureDaily: async () => { throw new Error('The established daily schedule must not be mutated during deployment'); },
+          observeRecovery: async () => {
+            const source = { provider: 'cloudsql', primaryExternalId: 'production-postgres',
+              providerScope: { projectId: 'gcp-project', region: 'us-central1' }, resourceIdentity: { instanceId: 'production-postgres' } };
+            const timestamp = new Date(Date.now() - 1000).toISOString();
+            return { state: 'complete', source, recoveryPointId: 'completed-point', dataTime: timestamp, completedAt: timestamp,
+              restore: { state: 'verified', source, recoveryPointId: 'completed-point', verifiedAt: timestamp,
+                isolationVerified: true, cleanupVerified: true } };
+          },
+        },
         observeDatabase: async () => ({
           provider: 'cloudsql',
           engine: 'postgres',
@@ -682,6 +738,227 @@ describe('hv_deploy database env injection', () => {
 });
 
 describe('hv_rollback', () => {
+  it.each(['changed', 'unrecorded-environment'])('does not hydrate %s repository bindings during preview', async kind => {
+    const { project, environment, inputs, trigger } = mockRollbackPreview();
+    const environments = new EnvironmentRepository();
+    const before = environments.findByProjectId(project.id);
+    const checkout = path.join(tempDir, 'bindings-preview');
+    mkdirSync(path.join(checkout, '.git'), { recursive: true });
+    mkdirSync(path.join(checkout, '.hypervibe'));
+    writeFileSync(path.join(checkout, '.hypervibe/spec.json'), JSON.stringify(new ProjectSpecRepository().findLatest(project.id)!.document));
+    const bindingsFile = path.join(checkout, '.hypervibe/bindings.json');
+    const content = JSON.stringify({ version: 1, project: project.name, environments: {
+      [kind === 'changed' ? 'production' : 'staging']: {
+        platformBindings: { ...environment.platformBindings, environmentId: 'another-environment' },
+      },
+    } });
+    writeFileSync(bindingsFile, content);
+    vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', '0');
+    const create = vi.spyOn(EnvironmentRepository.prototype, 'create');
+    const update = vi.spyOn(EnvironmentRepository.prototype, 'update');
+    const registry = new CommandRegistry();
+    registerHvDeployTools(registry, createToolContext());
+    const result = await runWithWorkspaceDirectories([checkout], () => registry.execute('hv_rollback', inputs));
+    expect(create).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(environments.findByProjectId(project.id)).toEqual(before);
+    expect(readFileSync(bindingsFile, 'utf8')).toBe(content);
+    expect(result.ok).toBe(false);
+    expect(trigger).not.toHaveBeenCalled();
+  });
+
+  it('does not create an unregistered repository project during preview', async () => {
+    const name = 'unregistered-preview';
+    const checkout = path.join(tempDir, name);
+    mkdirSync(path.join(checkout, '.git'), { recursive: true });
+    mkdirSync(path.join(checkout, '.hypervibe'));
+    const specFile = path.join(checkout, '.hypervibe/spec.json');
+    const content = JSON.stringify({ version: 1, project: name,
+      gitRemoteUrl: `https://github.com/davejohnson/${name}`,
+      environments: { production: { hosting: { provider: 'railway' }, services: { web: { workloadKind: 'web' } },
+        deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' } } },
+    });
+    writeFileSync(specFile, content);
+    vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', '0');
+    const createProject = vi.spyOn(ProjectRepository.prototype, 'create');
+    const createEnvironment = vi.spyOn(EnvironmentRepository.prototype, 'create');
+    const registry = new CommandRegistry();
+    registerHvDeployTools(registry, createToolContext());
+    const result = await runWithWorkspaceDirectories([checkout], () => registry.execute('hv_rollback', {
+      project: name, env: 'production', action: 'preview', toSha: 'b'.repeat(40), sourceWorkflowRunId: '20', sourceArtifactId: '200',
+    }));
+    expect(createProject).not.toHaveBeenCalled();
+    expect(createEnvironment).not.toHaveBeenCalled();
+    expect(new ProjectRepository().findByName(name)).toBeNull();
+    expect(readFileSync(specFile, 'utf8')).toBe(content);
+    expect(result.ok).toBe(false);
+  });
+
+  it('does not fall back to an unrelated recorded project when the CLI checkout has an unregistered spec', async () => {
+    const { project, inputs, trigger } = mockRollbackPreview();
+    const checkout = path.join(tempDir, 'unregistered-cwd');
+    mkdirSync(path.join(checkout, '.git'), { recursive: true });
+    mkdirSync(path.join(checkout, '.hypervibe'));
+    const spec = structuredClone(new ProjectSpecRepository().findLatest(project.id)!.document) as any;
+    spec.project = 'unregistered-cwd';
+    delete spec.gitRemoteUrl;
+    writeFileSync(path.join(checkout, '.hypervibe/spec.json'), JSON.stringify(spec));
+    vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', '0');
+    vi.spyOn(process, 'cwd').mockReturnValue(checkout);
+    const create = vi.spyOn(ProjectRepository.prototype, 'create');
+    const registry = new CommandRegistry();
+    registerHvDeployTools(registry, createToolContext());
+    const { project: _project, ...withoutProject } = inputs;
+    const result = await registry.execute('hv_rollback', withoutProject);
+    expect(result.ok).toBe(false);
+    expect(new ProjectRepository().findByName('unregistered-cwd')).toBeNull();
+    expect(create).not.toHaveBeenCalled();
+    expect(trigger).not.toHaveBeenCalled();
+  });
+
+  it('does not adopt changed repository desired state during a read-only preview', async () => {
+    const { project, inputs, trigger } = mockRollbackPreview();
+    const specs = new ProjectSpecRepository();
+    const before = specs.findLatest(project.id)!;
+    const changed = structuredClone(before.document) as any;
+    changed.environments.production.services.web.startCommand = 'npm run changed';
+    const checkout = path.join(tempDir, 'checkout');
+    mkdirSync(path.join(checkout, '.git'), { recursive: true });
+    mkdirSync(path.join(checkout, '.hypervibe'));
+    const specFile = path.join(checkout, '.hypervibe/spec.json');
+    const content = JSON.stringify(changed);
+    writeFileSync(specFile, content);
+    vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', '0');
+    const insert = vi.spyOn(ProjectSpecRepository.prototype, 'insert');
+    const write = vi.spyOn(repoSpecFiles, 'preflightRepoSpecWrite');
+    const registry = new CommandRegistry();
+    registerHvDeployTools(registry, createToolContext());
+    const result = await runWithWorkspaceDirectories([checkout], () => registry.execute('hv_rollback', inputs));
+    expect(insert).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+    expect(specs.findLatest(project.id)).toEqual(before);
+    expect(readFileSync(specFile, 'utf8')).toBe(content);
+    expect(result.ok).toBe(false);
+    expect(trigger).not.toHaveBeenCalled();
+  });
+
+  it('does not bootstrap a legacy project or write local files during a read-only preview', async () => {
+    const project = new ProjectRepository().create({
+      name: 'legacy-preview', defaultPlatform: 'railway', gitRemoteUrl: 'https://github.com/davejohnson/legacy-preview',
+      policies: { desiredState: { environmentName: 'production', services: ['web'], deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' } } },
+    });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
+    const checkout = path.join(tempDir, 'legacy-preview');
+    mkdirSync(path.join(checkout, '.git'), { recursive: true });
+    writeFileSync(path.join(checkout, '.git/config'), '[remote "origin"]\nurl = https://github.com/davejohnson/legacy-preview\n');
+    vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', '0');
+    const insert = vi.spyOn(ProjectSpecRepository.prototype, 'insert');
+    const write = vi.spyOn(repoSpecFiles, 'preflightRepoSpecWrite');
+    const registry = new CommandRegistry();
+    registerHvDeployTools(registry, createToolContext());
+    const result = await runWithWorkspaceDirectories([checkout], () => registry.execute('hv_rollback', {
+      project: project.name, env: 'production', action: 'preview', toSha: 'b'.repeat(40), sourceWorkflowRunId: '20', sourceArtifactId: '200',
+    }));
+    expect(insert).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+    expect(new ProjectSpecRepository().findLatest(project.id)).toBeNull();
+    expect(readdirSync(checkout)).toEqual(['.git']);
+    expect(result.ok).toBe(false);
+  });
+
+  it('routes the same read-only exact selectors through the CLI registry', async () => {
+    const { inputs, trigger } = mockRollbackPreview();
+    const registry = new CommandRegistry();
+    registerHvDeployTools(registry, createToolContext());
+    const parsed = await parseCliInvocation(registry, ['rollback', '--action', 'preview', '--project', inputs.project,
+      '--env', 'production', '--to-sha', inputs.toSha, '--source-workflow-run-id', '20', '--source-artifact-id', '200'], async () => '');
+    expect(parsed.command?.id).toBe('hv_rollback');
+    expect(parsed.input).toEqual(inputs);
+    const result = await registry.execute(parsed.command!.id, parsed.input);
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({ mode: 'preview', restoreVerified: false });
+    expect(trigger).not.toHaveBeenCalled();
+  });
+
+  it('previews the currently running protected release without confirmation, dispatch or persisted mutation plan', async () => {
+    const { trigger, inputs, sha } = mockRollbackPreview();
+    const plans = vi.spyOn(RunRepository.prototype, 'create');
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', inputs);
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({ mode: 'preview', status: 'evidence-compatible', rollbackToSha: sha,
+      evidenceCompatible: true, restoreVerified: false, mutationCounts: { providerWrites: 0, ciDispatches: 0 } });
+    expect(result.data.unchecked).toContain('Registry image availability and pull authorization');
+    expect(trigger).not.toHaveBeenCalled();
+    expect(plans).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('keeps database recovery and migration compatibility unknown when release evidence matches', async () => {
+    const { inputs, trigger } = mockRollbackPreview();
+    const registry = new CommandRegistry();
+    registerHvDeployTools(registry, createToolContext());
+    const result = await registry.execute('hv_rollback', inputs);
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({ evidenceCompatible: true, recovery: {
+      version: 1, ready: false, checks: {
+        applicationArtifact: 'verified', applicationAvailability: 'unknown', applicationHealth: 'unknown',
+        recoveryPoint: 'unknown', restoreTargetIsolation: 'unknown', restoreSideEffectIsolation: 'unknown',
+        databaseValidation: 'unknown', migrationCompatibility: 'unknown', cleanup: 'unknown',
+      },
+    } });
+    expect(trigger).not.toHaveBeenCalled();
+  });
+
+  it('inspects legacy bytes while reporting workflow and legacy execution blockers', async () => {
+    const { trigger, inputs, evidence } = mockRollbackPreview();
+    vi.mocked(GitHubAdapter.prototype.getFileContent).mockImplementation(async (_owner, _repo, name, ref) => {
+      if (name === '.hypervibe/spec.json') return JSON.stringify(new SpecStore().get(new ProjectRepository().findByName('rollback-preview-app')!)!.spec);
+      if (name === '.hypervibe/bindings.json') return null;
+      return ref === 'main' ? 'name: drifted workflow' : 'name: historical workflow';
+    });
+    vi.mocked(GitHubAdapter.prototype.readArtifactFiles).mockResolvedValue({ 'hypervibe-server-release.json': JSON.stringify({
+      version: 2, environment: 'production', services: ['web'], verifiedAt: evidence.verifiedAt,
+      server: { ...evidence.source, imageUri: evidence.target.resources[0].imageUri },
+    }) });
+    vi.mocked(GitHubAdapter.prototype.listWorkflowRunArtifacts).mockResolvedValue({ total_count: 1,
+      artifacts: [{ ...releaseArtifact(20, inputs.toSha), name: `hypervibe-server-release-production-${inputs.toSha}` }] });
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', inputs);
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({ mode: 'preview', status: 'blocked', evidenceVersion: 2, restoreVerified: false });
+    expect(result.data.blockers.map((b: any) => b.code)).toEqual(expect.arrayContaining(['workflow_drift', 'legacy_consumer_unsupported', 'legacy_provenance_incomplete']));
+    expect(trigger).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it.each(['foreign-run', 'expired', 'incomplete-list', 'wrong-body', 'private-error'])('fails closed for %s without dispatching or leaking source contents', async reason => {
+    const { inputs, trigger } = mockRollbackPreview();
+    if (reason === 'foreign-run') vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockResolvedValueOnce({
+      ...await GitHubAdapter.prototype.getWorkflowRun('davejohnson', 'app', 20), head_repository: { full_name: 'attacker/app' },
+    });
+    if (reason === 'expired') vi.mocked(GitHubAdapter.prototype.listWorkflowRunArtifacts).mockResolvedValueOnce({ total_count: 1, artifacts: [{ ...releaseArtifact(20, inputs.toSha), expired: true }] });
+    if (reason === 'incomplete-list') vi.mocked(GitHubAdapter.prototype.listWorkflowRunArtifacts).mockResolvedValueOnce({ total_count: 101, artifacts: [releaseArtifact(20, inputs.toSha)] });
+    if (reason === 'wrong-body') vi.mocked(GitHubAdapter.prototype.readArtifactFiles).mockResolvedValueOnce({ 'hypervibe-server-release.json': '{"private":"untrusted-private-value"}' });
+    if (reason === 'private-error') vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockRejectedValueOnce(new Error('untrusted-private-value'));
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', inputs);
+    expect(result.ok).toBe(false);
+    expect(JSON.stringify(result)).not.toContain('untrusted-private-value');
+    expect(trigger).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('cannot convert preview evidence selectors into execution authority even with confirmation', async () => {
+    const { inputs, trigger } = mockRollbackPreview();
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', { ...inputs, action: 'execute', confirm: true });
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(trigger).not.toHaveBeenCalled();
+    await t.close();
+  });
+
   it('rejects conflicting rollback target types before resolving the project', async () => {
     const t = await makeClient();
     const result = await t.call('hv_rollback', {

@@ -78,6 +78,13 @@ export interface BranchDeployTarget {
   containerStartCommand?: string;
   /** Effective project runtime for Hypervibe-generated build tooling. */
   runtime?: ProjectRuntime;
+  /** Effective recovery policy is populated by the spec/binding resolver. */
+  backupPolicy?: {
+    mode: 'daily' | 'disabled';
+    runnerImage?: string;
+    credentialNames?: string[];
+    blockedReason?: string;
+  };
 }
 
 export interface BranchDeployWorkflow {

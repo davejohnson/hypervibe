@@ -32,6 +32,8 @@ export async function railwayHttpFixture(options: {
   stagingExists?: boolean; projectExists?: boolean; pageSize?: number; dropCreateResponse?: boolean;
   bucketDelayMs?: number; omitBucketFlags?: boolean;
   volumeDelayMs?: number; dropVolumeCreateResponse?: boolean; volumeCreateResponseId?: string;
+  dropBackupCreateResponse?: boolean; backupWorkflowId?: string | null;
+  dropScheduleUpdateResponse?: boolean; ignoreScheduleUpdate?: boolean;
   responseOverride?: (request: { query: string; variables: Record<string, any> }) => Response | undefined;
 } = {}) {
   let projectExists = options.projectExists !== false;
@@ -43,6 +45,13 @@ export async function railwayHttpFixture(options: {
   if (options.stagingExists !== false) environments.set(stagingId, { id: stagingId, name: 'staging', config: {} });
   const volumes = new Map<string, Record<string, unknown>>();
   const volumeReadyAt = new Map<string, number>();
+  // Reconstructed from pinned official VolumeInstanceBackup / WorkflowResult,
+  // and CLI database/pitr.rs backup_create/list. These are synthetic responses.
+  const backups = new Map<string, Array<Record<string, unknown>>>();
+  const backupWorkflows = new Map<string, { status: string; error: string | null }>();
+  // Official CLI pitr.rs:1678-1797 replaces selected kinds, preserving existing
+  // backups. Native daily/weekly/monthly retention is fixed by Railway docs.
+  const backupSchedules = new Map<string, Array<Record<string, unknown>>>();
   let nextVolumeId = 0;
   const variables = new Map<string, Record<string, string>>();
   const mutations: Array<{ field: string; args: Record<string, any> }> = [];
@@ -102,6 +111,46 @@ export async function railwayHttpFixture(options: {
   }
 
   const root: Record<string, (args: any) => unknown> = {
+    volumeInstanceBackupScheduleList: ({ volumeInstanceId }) => {
+      expect([...volumes.values()].some((volume) => volume.id === volumeInstanceId)).toBe(true);
+      return backupSchedules.get(volumeInstanceId) ?? [];
+    },
+    volumeInstanceBackupScheduleUpdate: ({ volumeInstanceId, kinds }) => {
+      const volume = [...volumes.values()].find((candidate) => candidate.id === volumeInstanceId);
+      expect(volume?.environmentId).toBe(stagingId);
+      mutations.push({ field: 'volumeInstanceBackupScheduleUpdate', args: { volumeInstanceId, kinds } });
+      if (!options.ignoreScheduleUpdate) {
+        const existing = backupSchedules.get(volumeInstanceId) ?? [];
+        const native = {
+          DAILY: { cron: '0 3 * * *', retentionSeconds: 6 * 86400 },
+          WEEKLY: { cron: '0 3 * * 0', retentionSeconds: 27 * 86400 },
+          MONTHLY: { cron: '0 3 1 * *', retentionSeconds: 89 * 86400 },
+        };
+        backupSchedules.set(volumeInstanceId, kinds.map((kind: keyof typeof native) =>
+          existing.find((schedule) => schedule.kind === kind) ?? {
+            id: `schedule-${kind}`, name: kind, kind, createdAt: '2026-09-30T06:00:00.000Z', ...native[kind],
+          }));
+      }
+      return true;
+    },
+    volumeInstanceBackupList: ({ volumeInstanceId }) => {
+      expect([...volumes.values()].some((volume) => volume.id === volumeInstanceId)).toBe(true);
+      return backups.get(volumeInstanceId) ?? [];
+    },
+    volumeInstanceBackupCreate: ({ volumeInstanceId, name }) => {
+      const volume = [...volumes.values()].find((candidate) => candidate.id === volumeInstanceId);
+      expect(volume?.environmentId).toBe(stagingId);
+      const records = backups.get(volumeInstanceId) ?? [];
+      records.push({ id: `backup-${records.length + 1}`, externalId: `snapshot-${records.length + 1}`,
+        name: name ?? null, createdAt: '2026-09-30T06:00:00.000Z', expiresAt: null,
+        usedMB: null, referencedMB: 8, volumeInstanceSizeMB: 1024 });
+      backups.set(volumeInstanceId, records);
+      const workflowId = options.backupWorkflowId === undefined ? 'backup-workflow' : options.backupWorkflowId;
+      if (workflowId) backupWorkflows.set(workflowId, { status: 'Running', error: null });
+      mutations.push({ field: 'volumeInstanceBackupCreate', args: { volumeInstanceId, name } });
+      return { workflowId };
+    },
+    workflowStatus: ({ workflowId }) => backupWorkflows.get(workflowId) ?? { status: 'NotFound', error: null },
     // ProjectToken.projectId/environmentId are non-null identities in the pinned SDL.
     projectToken: () => options.projectTokenScope,
     projects: () => connection(projectExists ? [{
@@ -256,6 +305,12 @@ export async function railwayHttpFixture(options: {
     if (options.dropVolumeCreateResponse && request.query.includes('mutation VolumeCreate')) {
       throw new TypeError('Synthetic connection reset after volumeCreate committed');
     }
+    if (options.dropBackupCreateResponse && request.query.includes('mutation DatabaseCheckpointCreate')) {
+      throw new TypeError('Synthetic connection reset after backup creation committed');
+    }
+    if (options.dropScheduleUpdateResponse && request.query.includes('mutation DailyBackupScheduleUpdate')) {
+      throw new TypeError('Synthetic connection reset after schedule update committed');
+    }
     return Response.json(result);
   }));
   const adapter = new RailwayAdapter();
@@ -266,5 +321,5 @@ export async function railwayHttpFixture(options: {
     createdAt: new Date(), updatedAt: new Date(),
   };
   return { adapter, environment, services, environments, buckets, volumes, addService, addVolume,
-    mutations, requests, variables, contractErrors };
+    mutations, requests, variables, contractErrors, backups, backupWorkflows, backupSchedules };
 }

@@ -87,6 +87,7 @@ export class FlyAdapter implements IProviderAdapter {
     managedTls: true,
     supportsObserve: true,
     supportsDeferredDeploy: true,
+    supportsCreateOnlyDeploy: true,
   };
 
   private credentials: FlyCredentials | null = null;
@@ -228,6 +229,9 @@ export class FlyAdapter implements IProviderAdapter {
     if (!this.client || !this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }
+    if (options.requireNewWorkload && options.deferDeployment !== true) {
+      return this.failedDeploy(service, 'Creation-only admission requires deferred deployment.');
+    }
     const validation = this.validateService(service);
     if (validation) return this.failedDeploy(service, validation);
 
@@ -303,6 +307,9 @@ export class FlyAdapter implements IProviderAdapter {
         true,
         boundIdentity?.machineId
       );
+      if (options.requireNewWorkload && machine) {
+        throw new Error('Creation-only admission cannot change an existing Fly Machine. Re-plan with current workload and backup evidence.');
+      }
       if (options.deferWorkload) {
         if (machine) throw new Error('Fly app-only bootstrap cannot replace an existing Machine.');
         return {
@@ -439,6 +446,9 @@ export class FlyAdapter implements IProviderAdapter {
     vars: Record<string, string>,
     options: DeploymentMutationOptions = {}
   ): Promise<Receipt> {
+    if (options.requireNewWorkload) {
+      return { success: false, message: 'Creation-only admission cannot update environment variables on an existing workload.' };
+    }
     if (!this.client) {
       return {
         success: false,

@@ -5,6 +5,7 @@ import { RunRepository } from '../../adapters/db/repositories/run.repository.js'
 import type { Run, RunReceipt } from '../entities/run.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
 import { CI_CONFIGURATION_SYNC_OPERATION } from '../services/managed-ci.contract.js';
+import { resolvePlanActionAuthority } from './action-authority.js';
 import type { PlanAction } from './plan.types.js';
 
 /**
@@ -180,6 +181,30 @@ export function isManagedCiBindingAction(action: PlanAction): boolean {
   );
 }
 
+/** Provision durable data identities only; never wire them into application workloads. */
+export function isBackupProvisioningAction(action: PlanAction): boolean {
+  if (action.type === 'noop') return true;
+  if (action.type === 'destroy' || action.type === 'replace') return false;
+  if (['project', 'environment'].includes(action.resource.kind)) {
+    return ['hosting.project.ensure', 'hosting.environment.ensure', 'local.environment.record']
+      .includes(resolvePlanActionAuthority(action)?.capability ?? '');
+  }
+  if (action.resource.kind === 'database') return action.type === 'create'
+    && resolvePlanActionAuthority(action)?.capability === 'database.provision';
+  return action.resource.kind === 'storage'
+    && ['storageEnsure', 'storageCreateRecoveryFinalize', 'storageCreateRecoveryClear'].includes(String(action.metadata?.operation))
+    && resolvePlanActionAuthority(action)?.capability === 'storage.mutate';
+}
+
+/** A reviewed repository proposal may publish the initial backup program before a point exists. */
+export function isBackupProgramPublicationAction(action: PlanAction): boolean {
+  return action.type === 'update' && action.resource.kind === 'repo' && action.resource.provider === 'github'
+    && action.metadata?.operation === 'githubInfrastructurePullRequest'
+    && action.metadata?.backupWorkflowPublicationRequired === true && !action.metadata?.blockedReason
+    && action.verified && action.requiresConfirm === true && action.billable === true
+    && resolvePlanActionAuthority(action)?.capability === 'github.infrastructure.sync';
+}
+
 /** Runtime-validated document stored in runs.plan for type 'plan' runs. */
 export const planRunDocumentSchema = z.object({
   kind: z.literal('hv_plan'),
@@ -191,6 +216,11 @@ export const planRunDocumentSchema = z.object({
     'managed-ci-bindings',
     'hosting-bindings',
     'service-volumes',
+    'database-checkpoint',
+    'backup-policy',
+    'backup-provisioning',
+    'backup-readiness',
+    'backup-program-publication',
     'managed-ci-publication',
   ]).optional(),
   environmentName: z.string().min(1),
@@ -215,6 +245,35 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'backup-program-publication') {
+    if (document.actions.length !== 1 || document.actions.some(action => !isBackupProgramPublicationAction(action) || action.dependsOn?.length)
+      || document.observedFingerprint !== null || document.overrides || document.integrationFingerprints
+      || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
+      ctx.addIssue({ code: 'custom', message: 'Backup program publication contains only its confirmed reviewed repository proposal and no provider or rollout inputs.' });
+    }
+    return;
+  }
+  if (document.scope === 'backup-readiness' || document.scope === 'backup-provisioning') {
+    if ((document.scope === 'backup-readiness' ? document.actions.length !== 0
+      : !document.actions.some(action => action.type !== 'noop') || document.actions.some(action => !isBackupProvisioningAction(action)))
+      || document.scope === 'backup-readiness' && document.observedFingerprint !== null
+      || document.overrides || document.integrationFingerprints || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
+      ctx.addIssue({ code: 'custom', message: 'Backup prerequisite plans may provision only reviewed durable data identities and may not carry rollout inputs.' });
+    }
+    return;
+  }
+  if (document.scope !== 'backup-policy' && document.actions.some(action => action.metadata?.operation === 'dailyBackupConfigure')) {
+    ctx.addIssue({ code: 'custom', message: 'Daily backup policy actions require their isolated backup-policy stage.' });
+  }
+  if (document.scope === 'backup-policy') {
+    if (!document.actions.length || document.actions.some(action => action.metadata?.operation !== 'dailyBackupConfigure'
+      || action.type !== 'update' || action.dependsOn?.length)
+      || document.overrides || document.integrationFingerprints || document.observedFingerprint !== null
+      || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
+      ctx.addIssue({ code: 'custom', message: 'backup-policy plans contain only independent daily backup actions and no deployment inputs.' });
+    }
+    return;
+  }
   if (document.scope === 'api-policy' && (document.actions.length !== 1
     || document.actions[0].metadata?.operation !== API_POLICY_OPERATION
     || document.actions[0].resource.provider !== 'hypervibe'
@@ -261,6 +320,17 @@ export const planRunDocumentSchema = z.object({
     return;
   }
 
+  if (document.scope === 'database-checkpoint') {
+    const action = document.actions[0];
+    if (document.actions.length !== 1 || action?.resource.kind !== 'database'
+      || action.metadata?.operation !== 'databaseCheckpointCreate'
+      || (action.type !== 'create' && action.type !== 'update') || action.dependsOn?.length
+      || document.overrides || document.integrationFingerprints
+      || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
+      ctx.addIssue({ code: 'custom', message: 'database-checkpoint plans must contain only the independent checkpoint action and no runtime or cross-environment inputs.' });
+    }
+    return;
+  }
   if (document.scope === 'service-volumes') {
     if (!document.actions.length || document.actions.some(action => action.resource.kind !== 'volume') || document.overrides || document.inputRequired?.length) {
       ctx.addIssue({ code: 'custom', message: 'service-volumes plan must contain only filesystem actions and no runtime secret inputs.' });

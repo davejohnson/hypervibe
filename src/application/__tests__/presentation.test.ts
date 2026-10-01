@@ -3,6 +3,15 @@ import { formatCommandResult, PRESENTED_COMMAND_IDS } from '../presentation.js';
 import { commandError, commandSuccess } from '../results.js';
 
 describe('command presentation', () => {
+  it('labels rollback evidence inspection as a preview, never a completed restore', () => {
+    for (const status of ['evidence-compatible', 'blocked']) {
+      const output = formatCommandResult('hv_rollback', commandSuccess({ mode: 'preview', status, restoreVerified: false,
+        mutationCounts: { providerWrites: 0, ciDispatches: 0 } }));
+      expect(output).toContain('ROLLBACK PREVIEW');
+      expect(output).not.toContain('ROLLBACK COMPLETE');
+    }
+  });
+
   it('surfaces pending or blocked API policy even when provider resources have no drift', () => {
     const output = formatCommandResult('hv_status', commandSuccess({ inSync: false, verified: true, drift: [], apiReleasePolicy: { status: 'drift' } }));
     expect(output).toContain('API POLICY NEEDS REVIEW');

@@ -55,6 +55,17 @@ async function apply(volumes: IServiceVolumes, action: PlanAction, save?: (value
 }
 
 describe('retained volume lifecycle: real SQLite and schema-executed Railway HTTP', () => {
+  it('rejects creation-only authority when a Railway service is already bound, before config or secret writes', async () => {
+    const f = await setup();
+    const now = new Date();
+    const result = await f.adapter.deploy({ id: 'logical-web', projectId: environment.projectId, name: 'web',
+      buildConfig: { public: false }, envVarSpec: {}, createdAt: now, updatedAt: now }, environment,
+      { SYNTHETIC_SETTING: 'reviewed-value' }, { deferDeployment: true, requireNewWorkload: true });
+    expect(result.receipt.success).toBe(false);
+    expect(f.mutations).toEqual([]);
+    expect(f.contractErrors).toEqual([]);
+  });
+
   it('blocks a retained whole volume explicitly reported not ready', async () => {
     const f = await setup();
     await apply(f.adapter.serviceVolumes, (await plan(f.adapter.serviceVolumes))[0]);

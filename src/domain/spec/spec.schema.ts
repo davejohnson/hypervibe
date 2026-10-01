@@ -182,6 +182,10 @@ const databaseRestoreDrillSchema = z.object({
 }).strict();
 
 const databaseResilienceSchema = z.object({
+  /** Named one-use provider snapshot; removing intent never deletes its backup. */
+  checkpoint: z.object({
+    id: z.string().min(1).max(63).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'checkpoint id must be a lowercase slug'),
+  }).strict().optional(),
   /** Zonal uses one zone; regional provisions a synchronous standby. */
   availability: z.enum(['zonal', 'regional']).optional(),
   /** Provider-managed backups and point-in-time recovery retention. */
@@ -1139,7 +1143,11 @@ export const storageSpecSchema = z.object({
   region: z.string().min(1),
   /** Services that receive this bucket's generated runtime variables. */
   injectInto: z.array(z.string().min(1)),
+  /** A retained backup destination is never wired into application services. */
+  purpose: z.literal('backup').optional(),
 }).strict().superRefine((storage, ctx) => {
+  if (storage.purpose === 'backup' && storage.injectInto.length) ctx.addIssue({ code: z.ZodIssueCode.custom,
+    path: ['injectInto'], message: 'Backup storage cannot be injected into application services.' });
   const railwayRegions = ['sjc', 'iad', 'ams', 'sin'];
   if (storage.provider === 'railway' && !railwayRegions.includes(storage.region)) {
     ctx.addIssue({
@@ -1565,6 +1573,17 @@ export const environmentSpecSchema = z.object({
   }).strict(),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),
+  /** Omission resolves to daily protection without changing legacy spec hashes. */
+  backups: z.discriminatedUnion('mode', [
+    z.object({ mode: z.literal('daily'),
+      destination: z.string().regex(/^[a-z][a-z0-9-]{0,60}$/).optional(),
+      /** Published Hypervibe helper artifact; a mutable tag cannot authorize recovery work. */
+      runnerImage: z.string().regex(/^[^@\s]+@sha256:[a-f0-9]{64}$/).optional(),
+      fileReferenceQueries: z.array(z.object({ storageName: z.string().regex(/^[a-z][a-z0-9-]{0,60}$/),
+        query: z.string().trim().min(1).max(16000) }).strict()).max(32).optional(),
+    }).strict(),
+    z.object({ mode: z.literal('disabled'), reason: z.string().trim().min(1).max(500) }).strict(),
+  ]).optional(),
   cache: cacheSpecSchema.optional(),
   domain: z.string().min(1).optional(),
   /** Whether Cloudflare proxies the custom-domain traffic record. Disable temporarily when origin certificate validation is stuck. */
@@ -1606,6 +1625,18 @@ export const environmentSpecSchema = z.object({
   /** Kept only to produce an actionable migration error for old specs. */
   autofix: z.unknown().optional(),
 }).strict().superRefine((environment, ctx) => {
+  if (environment.backups?.mode === 'daily') {
+    const destination = environment.backups.destination;
+    if (destination && environment.storage?.[destination]?.purpose !== 'backup') ctx.addIssue({ code: z.ZodIssueCode.custom,
+      path: ['backups', 'destination'], message: 'The backup destination must name separate storage declared with purpose="backup".' });
+    const seen = new Set<string>();
+    for (const [index, reference] of (environment.backups.fileReferenceQueries ?? []).entries()) {
+      if (seen.has(reference.storageName) || !environment.database || !environment.storage?.[reference.storageName]
+        || environment.storage[reference.storageName].purpose === 'backup') ctx.addIssue({ code: z.ZodIssueCode.custom,
+        path: ['backups', 'fileReferenceQueries', index], message: 'Each file reference query requires a database and a unique application storage source.' });
+      seen.add(reference.storageName);
+    }
+  }
   if (environment.autofix !== undefined) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,

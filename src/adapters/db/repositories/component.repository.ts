@@ -4,6 +4,7 @@ import { parseJsonColumn } from '../json.codec.js';
 import { componentBindingsColumnSchema } from '../column.schemas.js';
 import { getSecretStore } from '../../secrets/secret-store.js';
 import type { Component, CreateComponentInput } from '../../../domain/entities/component.entity.js';
+import { EnvironmentRepository } from './environment.repository.js';
 
 /**
  * Component bindings carry live database credentials (connection URLs,
@@ -52,7 +53,9 @@ export class ComponentRepository {
       now
     );
 
-    return this.findById(id)!;
+    const created = this.findById(id)!;
+    new EnvironmentRepository().syncRepoBindingsForId(created.environmentId);
+    return created;
   }
 
   findById(id: string): Component | null {
@@ -91,7 +94,9 @@ export class ComponentRepository {
       id
     );
 
-    return this.findById(id);
+    const updated = this.findById(id);
+    if (updated) new EnvironmentRepository().syncRepoBindingsForId(updated.environmentId);
+    return updated;
   }
 
   updateBindings(id: string, bindings: Record<string, unknown>): Component | null {
@@ -108,12 +113,16 @@ export class ComponentRepository {
       WHERE id = ?
     `).run(serializeComponentBindings(merged), now, id);
 
-    return this.findById(id);
+    const updated = this.findById(id);
+    if (updated) new EnvironmentRepository().syncRepoBindingsForId(updated.environmentId);
+    return updated;
   }
 
   delete(id: string): boolean {
     const db = getDb();
+    const existing = this.findById(id);
     const result = db.prepare('DELETE FROM components WHERE id = ?').run(id);
+    if (result.changes > 0 && existing) new EnvironmentRepository().syncRepoBindingsForId(existing.environmentId);
     return result.changes > 0;
   }
 

@@ -11,10 +11,12 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as
 
 const target = {
   environmentName: 'production',
-  projectId: 'gcp-project',
-  region: 'us-central1',
-  sourceInstanceId: 'production-postgres',
-  sourceConnectionName: 'gcp-project:us-central1:production-postgres',
+  source: {
+    provider: 'cloudsql',
+    primaryExternalId: 'production-postgres',
+    providerScope: { projectId: 'gcp-project', region: 'us-central1' },
+    resourceIdentity: {},
+  },
   databaseName: 'app',
   schedule: { cron: '15 5 * * 1', timezone: 'America/Vancouver' },
   credentialsSecretName: 'HYPERVIBE_CLOUDSQL_DRILL_CREDENTIALS',

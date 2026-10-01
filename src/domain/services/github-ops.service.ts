@@ -1,3 +1,4 @@
+import { buildGitHubBackupDeployGate } from './backup-deploy-gate.service.js';
 import { iosBuildContractFingerprint } from './ios-release-evidence.js';
 import { API_RELEASE_WORKFLOW_RENDERER_REVISION, buildApiReleaseWorkflowSteps } from './api-release-workflow.js';
 import { createHash } from 'crypto';
@@ -59,7 +60,7 @@ export type {
   BranchDeployWorkflow,
 };
 
-export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 4;
+export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 5;
 export const GITHUB_ACTIONS_SERVER_PROGRAM_REVISION = 1;
 
 function migrationWorkflowInput(migration: { includeStep: boolean; command?: string }) {
@@ -989,6 +990,7 @@ export function buildBranchDeployWorkflow(
   const migrationStep = migration.includeStep && migration.command && target.runtime
     ? buildMigrationStep(migration.command, target.runtime)
     : '';
+  const backupGate = buildGitHubBackupDeployGate(target);
   const deployBlock = buildProviderDeploySteps(provider, target);
   const immutableRollback = Boolean(deployBlock.releaseImageUri);
   if (target.promoteFromEnvironment && !immutableRollback) {
@@ -1014,6 +1016,7 @@ export function buildBranchDeployWorkflow(
   let requiredSecrets = migrationStep
     ? [...deployBlock.requiredSecrets, 'DATABASE_URL']
     : [...deployBlock.requiredSecrets];
+  requiredSecrets.push(...backupGate.requiredSecrets);
   if (target.promotionTests?.packageReadToken) requiredSecrets.push('NODE_AUTH_TOKEN');
   const requiredVariables = [...deployBlock.requiredVariables];
   const permissionsBlock = deployBlock.permissions ?? `    permissions:
@@ -1142,7 +1145,7 @@ ${buildReleaseTargetPreflight(provider, target)}      - uses: actions/checkout@v
 ${sourcePreparationCondition ? `        if: ${sourcePreparationCondition}\n` : ''}        with:
           ref: \${{ steps.deploy.outputs.sha }}
           persist-credentials: false
-${buildDeploymentContractStep(target.environmentName)}${rollbackEvidenceSteps}${promotionEvidenceStep}${apiRelease.beforeDeploy}${migrationStep}${deployBlock.steps}${releaseEvidenceStep}${apiRelease.afterDeploy}      - name: Upload server release evidence
+${buildDeploymentContractStep(target.environmentName)}${backupGate.steps}${rollbackEvidenceSteps}${promotionEvidenceStep}${apiRelease.beforeDeploy}${migrationStep}${deployBlock.steps}${releaseEvidenceStep}${apiRelease.afterDeploy}      - name: Upload server release evidence
         uses: actions/upload-artifact@v7
         with:
           name: ${managedCiReleaseArtifactPrefix(target.environmentName)}\${{ steps.deploy.outputs.sha }}

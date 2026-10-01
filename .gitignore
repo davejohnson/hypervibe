@@ -38,7 +38,7 @@ bower_components
 build/Release
 
 # Dependency directories
-node_modules/
+node_modules
 jspm_packages/
 
 # Snowpack dependency directory (https://snowpack.dev/)
@@ -142,6 +142,7 @@ vite.config.ts.timestamp-*
 .devbox/
 **/.build/
 /build/macos/
+/build/backup-runner-release.json*
 data/*.db
 data/*.db-journal
 data/*.db-shm

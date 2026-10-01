@@ -1514,10 +1514,31 @@ environment contract hashes, not the immutable application-program fingerprint.
 Do not accept another revision's successful tests as promotion evidence, and do not
 infer reusable invocation from the event name: it retains the caller's context.
 
+Managed CI rollback has a read-only preflight through `hv_rollback` with
+`action: "preview"`, an exact `toSha`, `sourceWorkflowRunId`, and
+`sourceArtifactId`. It permits the currently running release as a future
+recovery baseline and never dispatches a workflow or persists a mutation plan.
+The preview reads the original artifact and immutable source files through the
+existing bounded GitHub artifact reader. Current v4 records use the same
+validator as the generated rollback workflow. Explicitly selected v2 records
+retain their original format and content hashes; historical bindings are
+reported as corroboration rather than invented release provenance. Runtime,
+service and migration differences, including build-only install changes, stay
+visible as blockers. Artifact-name metadata alone is insufficient.
+
+This preflight does not implement legacy recovery execution. A v2 result stays
+blocked until a reviewed consumer can verify the missing scope/program
+provenance without rewriting it as v4. Registry image availability, live
+provider identity/configuration, and restored application health are explicitly
+unchecked by this read-only GitHub inspection. Preview selectors cannot be used
+as execution authority, even with confirmation. See
+[rollback recovery preparation](docs/rollback-recovery-preparation.md).
+
 Managed CI rollback is an explicit operational action over that same exact-SHA
 release boundary. `hv_rollback` must select only unexpired server-release
 evidence emitted by a successful run of the exact managed environment workflow.
-When a provider exposes immutable image evidence (currently Railway), the
+When a provider exposes immutable image evidence (Railway, Cloud Run, ECS Express,
+Azure Container Apps and Fly), the
 release record includes the exact registry digest; rollback downloads and
 validates it, skips source checkout and image rebuilding, and deploys the
 recorded immutable image URI.
@@ -1702,6 +1723,15 @@ stage.
 
 ## Database Resilience
 
+Recovery source identities, selected points, operation observations and evidence
+assessments follow the [shared recovery contract](docs/recovery-contract.md).
+Its named provider review covers every registered database and hosting provider.
+The shared layer neither requires one provider's volume/workflow identifiers nor
+parses a provider's native connection-name format. Strict source coordinates are
+safe for repository exports; native requirements and completion correlation stay
+in the provider adapter. Existing Railway records have an explicit compatibility
+reader that preserves uncertain requests instead of reopening creation.
+
 Provider-managed database resilience is optional desired state under
 `database.resilience`. Omitting the block preserves backward compatibility and
 means Hypervibe does not manage resilience settings. Within a declared block:
@@ -1767,6 +1797,34 @@ drill uses `instances.clone` with an explicit point-in-time to create a new
 instance, never a destructive restore onto the primary. Provider-to-provider
 replica promotion/failover, replica replacement, and multi-environment
 restore-drill scheduling are separate future lifecycle slices.
+
+The Railway adapter implements a named, one-use `database.resilience.checkpoint`
+intent through the same spec/plan/apply lifecycle. This is a manual volume
+snapshot, not a backup policy, PITR enablement, or restore drill. Planning freezes
+the bound database service and its exact project, environment, volume and
+volume-instance identities. An outstanding checkpoint is isolated from unrelated
+infrastructure changes; its completion does not advance the environment's applied
+deployment contract. Creation is billable and data-bearing and requires the exact
+persisted action confirmation. No checkpoint operation changes a workload, volume
+attachment, database endpoint, or schema.
+
+Before calling the provider, apply durably records a unique operation label,
+the complete prior backup inventory, and request time. It records acknowledgement
+and any returned operation identity before observing completion. Retrying the same intent only
+observes that operation; an uncertain acknowledgement never permits another
+create. Completion requires provider-terminal success and a uniquely correlated
+new backup on the same source; Railway's adapter verifies the exact volume instance.
+Safe receipts and exported bindings retain
+the backup identity, source scope, timestamp and expiry, and explicitly say that
+restore verification has not run. A completed intent becomes noop only while
+its recorded backup remains observable and unexpired. Removing the intent does
+not delete backups; a new backup needs a new reviewed intent id.
+
+Railway snapshot restore is not a verification mechanism: it stages a replacement
+of the source service's volume. The checkpoint capability exposes no restore,
+delete, schedule, or PITR mutations. Native snapshots remain dependent on their
+provider volume and are not independent off-provider copies. See
+[database checkpoints](docs/database-checkpoints.md) for the evidence boundary.
 
 Environment data moves are explicit one-use desired state under the target
 environment's `dataMigration`. V1 copies only whole PostgreSQL databases and

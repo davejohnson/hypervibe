@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
+import type { IDatabaseAdapter } from '../../domain/ports/database.port.js';
 import type { IHostingAdapter } from '../../domain/ports/hosting.port.js';
 import type { PlanAction } from '../../domain/plan/plan.types.js';
 import { PlanService } from '../../domain/plan/plan.service.js';
@@ -39,7 +40,7 @@ describe('apply bootstrap database authority', () => {
   it.each([
     { label: 'a reviewed service action', actionType: 'create' as const, alwaysRunBootstrap: false },
     { label: 'an all-noop forced deploy', actionType: 'noop' as const, alwaysRunBootstrap: true },
-  ])('does not resolve a database adapter during $label', async ({ actionType, alwaysRunBootstrap }) => {
+  ])('observes protection without authorizing database mutations during $label', async ({ actionType, alwaysRunBootstrap }) => {
     const project = ctx.repos.projects.create({
       name: `bootstrap-database-authority-${actionType}`,
       defaultPlatform: 'railway',
@@ -148,8 +149,25 @@ describe('apply bootstrap database authority', () => {
         },
       } as IHostingAdapter,
     });
-    const databaseAdapterSpy = vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockImplementation(async () => {
-      throw new Error('database adapters may be resolved only by database actions');
+    // Default protection adds read-only database observation to deployment.
+    // The existing authority invariant remains: a service action cannot write it.
+    const databaseMutation = vi.fn(async () => { throw new Error('No database mutation is authorized.'); });
+    const source = { provider: 'railway', primaryExternalId: 'rail-database',
+      providerScope: { projectId: 'rail-project', environmentId: 'rail-environment' },
+      resourceIdentity: { volumeId: 'database-volume', volumeInstanceId: 'database-volume-instance' } };
+    const observedAt = new Date(Date.now() - 1000).toISOString();
+    const observeRecovery = vi.fn(async () => ({ state: 'complete', source, recoveryPointId: 'verified-point',
+      dataTime: observedAt, completedAt: observedAt,
+      restore: { state: 'verified', source, recoveryPointId: 'verified-point', verifiedAt: observedAt,
+        isolationVerified: true, cleanupVerified: true } }));
+    const databaseAdapterSpy = vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
+      success: true, adapter: { name: 'railway', provision: databaseMutation, destroy: databaseMutation,
+        dailyBackups: {
+          observe: async () => ({ state: 'known', source, daily: true, mechanism: 'snapshot',
+            policyFingerprint: 'a'.repeat(64), preservationFingerprint: 'b'.repeat(64) }),
+          observeRecovery, configureDaily: databaseMutation,
+        },
+      } as unknown as IDatabaseAdapter,
     });
 
     const outcome = await executePlanApply(ctx, {
@@ -166,6 +184,8 @@ describe('apply bootstrap database authority', () => {
       result: { success: true },
     });
     expect(deploy).toHaveBeenCalledOnce();
-    expect(databaseAdapterSpy).not.toHaveBeenCalled();
+    expect(databaseAdapterSpy).toHaveBeenCalled();
+    expect(observeRecovery).toHaveBeenCalledTimes(2);
+    expect(databaseMutation).not.toHaveBeenCalled();
   });
 });

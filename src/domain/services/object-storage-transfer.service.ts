@@ -2,9 +2,11 @@ import { createHash } from 'node:crypto';
 import type { Readable } from 'node:stream';
 import {
   GetObjectCommand,
+  DeleteObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
+  type S3ClientConfig,
 } from '@aws-sdk/client-s3';
 import type {
   StorageCredentials,
@@ -24,11 +26,12 @@ export interface ObjectStorageTransferResult {
   manifestHash: string;
 }
 
-export function createS3ObjectClient(credentials: StorageCredentials): StorageObjectClient {
+export function createS3ObjectClient(credentials: StorageCredentials, dependencies: { requestHandler?: S3ClientConfig['requestHandler'] } = {}): StorageObjectClient {
   const client = new S3Client({
     region: credentials.region,
     endpoint: credentials.endpoint,
     forcePathStyle: credentials.urlStyle === 'path',
+    ...(dependencies.requestHandler ? { requestHandler: dependencies.requestHandler } : {}),
     credentials: {
       accessKeyId: credentials.accessKeyId,
       secretAccessKey: credentials.secretAccessKey,
@@ -36,28 +39,47 @@ export function createS3ObjectClient(credentials: StorageCredentials): StorageOb
     },
   });
   return {
-    async list(): Promise<StorageObjectRecord[]> {
+    async list(options): Promise<StorageObjectRecord[]> {
       const objects: StorageObjectRecord[] = [];
+      const tokens = new Set<string>();
       let continuationToken: string | undefined;
       do {
         const page = await client.send(new ListObjectsV2Command({
           Bucket: credentials.bucket,
+          ...(options?.prefix ? { Prefix: options.prefix } : {}),
           ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
         }));
+        if (typeof page.IsTruncated !== 'boolean' || (page.Contents !== undefined && !Array.isArray(page.Contents))) {
+          throw new Error('Object listing completeness is unknown.');
+        }
         for (const object of page.Contents ?? []) {
-          if (typeof object.Key !== 'string') continue;
-          objects.push({ key: object.Key, size: object.Size ?? 0 });
+          if (typeof object.Key !== 'string' || !object.Key || !Number.isSafeInteger(object.Size) || object.Size! < 0) {
+            throw new Error('Object listing contains an incomplete object identity or size.');
+          }
+          objects.push({ key: object.Key, size: object.Size!, revision: {
+            ...(object.ETag ? { etag: object.ETag } : {}),
+            ...(object.LastModified ? { lastModified: object.LastModified.toISOString() } : {}),
+          } });
+          if (options?.maxObjects !== undefined && objects.length > options.maxObjects) throw new Error('Object listing exceeds its count limit.');
         }
         continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+        if (page.IsTruncated && (!continuationToken || tokens.has(continuationToken))) throw new Error('Object listing pagination did not advance.');
+        if (continuationToken) tokens.add(continuationToken);
       } while (continuationToken);
       return objects.sort((left, right) => left.key.localeCompare(right.key));
     },
-    async get(key): Promise<StorageObjectPayload> {
-      const object = await client.send(new GetObjectCommand({ Bucket: credentials.bucket, Key: key }));
+    async get(key, revision): Promise<StorageObjectPayload> {
+      if (revision?.generation || revision?.metageneration) throw new Error('S3 does not accept a different provider revision format.');
+      const object = await client.send(new GetObjectCommand({ Bucket: credentials.bucket, Key: key,
+        ...(revision?.etag ? { IfMatch: revision.etag } : {}),
+        ...(revision?.versionId ? { VersionId: revision.versionId } : {}),
+      }));
       if (!object.Body) throw new Error('Object storage source returned an empty response body.');
       return {
         body: object.Body as Readable,
         size: object.ContentLength ?? 0,
+        revision: { ...(object.ETag ? { etag: object.ETag } : {}), ...(object.VersionId ? { versionId: object.VersionId } : {}),
+          ...(object.LastModified ? { lastModified: object.LastModified.toISOString() } : {}) },
         ...(object.ContentType ? { contentType: object.ContentType } : {}),
         ...(object.ContentEncoding ? { contentEncoding: object.ContentEncoding } : {}),
         ...(object.CacheControl ? { cacheControl: object.CacheControl } : {}),
@@ -65,7 +87,8 @@ export function createS3ObjectClient(credentials: StorageCredentials): StorageOb
         ...(object.Metadata ? { metadata: object.Metadata } : {}),
       };
     },
-    async put(key, payload): Promise<void> {
+    async put(key, payload, options): Promise<void> {
+      if (!Number.isSafeInteger(payload.size) || payload.size < 0 || payload.size > 5 * 1024 ** 3) throw new Error('The S3 object stream exceeds the supported single-request size.');
       await client.send(new PutObjectCommand({
         Bucket: credentials.bucket,
         Key: key,
@@ -76,7 +99,13 @@ export function createS3ObjectClient(credentials: StorageCredentials): StorageOb
         CacheControl: payload.cacheControl,
         ContentDisposition: payload.contentDisposition,
         Metadata: payload.metadata,
+        ...(options?.ifAbsent ? { IfNoneMatch: '*' } : {}),
       }));
+    },
+    async remove(key, revision) {
+      if (revision?.generation || revision?.metageneration) throw new Error('S3 does not accept a different provider revision format.');
+      await client.send(new DeleteObjectCommand({ Bucket: credentials.bucket, Key: key,
+        ...(revision?.etag ? { IfMatch: revision.etag } : {}), ...(revision?.versionId ? { VersionId: revision.versionId } : {}) }));
     },
     destroy: () => client.destroy(),
   };

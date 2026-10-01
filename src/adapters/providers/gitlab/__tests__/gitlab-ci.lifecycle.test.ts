@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { spawnSync } from 'node:child_process';
+import { parseAllDocuments } from 'yaml';
 import { tmpdir } from 'os';
 import path from 'path';
 import { SqliteAdapter } from '../../../db/sqlite.adapter.js';
@@ -405,8 +407,13 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
     expect(requests.some((request) => request.includes('/repository/files/'))).toBe(false);
   });
 
-  it('publishes one atomic reviewed change, then performs zero mutations at exact convergence', async () => {
+  const baseSpec = spec;
+  it.each([false, true])('publishes reviewed GitLab configuration with persistent recovery coverage %s', async (persistent) => {
     const { project, environment } = seed();
+    const spec = persistent ? projectSpecSchema.parse({ ...baseSpec, environments: {
+      ...baseSpec.environments, staging: { ...baseSpec.environments.staging, database: { provider: 'railway', engine: 'postgres' } },
+    } }) : baseSpec;
+    if (persistent) new SpecStore().replace(project, spec);
     const committed = new Map<string, string>();
     const variables = new Map<string, Record<string, unknown>>();
     const mutationCalls: Array<{ method: string; url: string; body?: string }> = [];
@@ -617,6 +624,25 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
       [action.file_path, action.content]
     )));
     const stagingDeploy = committedFiles['.gitlab/hypervibe/deploy-railway-staging.yml'];
+    if (persistent) {
+      const jobs = parseAllDocuments(stagingDeploy).at(-1)!.toJS();
+      const contractScript = jobs['hypervibe:contract:railway:staging'].script.join('\n');
+      const deployScript = jobs['hypervibe:deploy:railway:staging'].script.join('\n');
+      const diagnostic = 'verified daily recovery is not yet supported';
+      expect(contractScript).toContain(diagnostic);
+      expect(deployScript.indexOf(diagnostic)).toBeGreaterThan(deployScript.indexOf('verify-deployment-contract.cjs'));
+      expect(deployScript.indexOf(diagnostic)).toBeLessThan(deployScript.indexOf('railway-deploy.mjs'));
+      const bin = path.join(dataDir, 'bin'); mkdirSync(bin);
+      writeFileSync(path.join(bin, 'node'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      for (const rollback of ['false', 'true']) {
+        const generated = contractScript.replaceAll('$[[ inputs.rollback ]]', rollback);
+        const execution = spawnSync('sh', ['-eu', '-c', generated], {
+          cwd: dataDir, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, encoding: 'utf8',
+        });
+        expect(execution.status === 0).toBe(rollback === 'true');
+      }
+      return;
+    }
     const appliedSpecGate = stagingDeploy.match(
       /printenv (HYPERVIBE_[0-9A-F]{16}_APPLIED_SPEC_HASH)/
     );

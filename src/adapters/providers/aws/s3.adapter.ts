@@ -25,6 +25,7 @@ import type {
   StorageContext,
   StorageCredentials,
   StorageEnsureResult,
+  StorageObservationTarget,
 } from '../../../domain/ports/storage.port.js';
 import {
   providerRegistry,
@@ -205,8 +206,19 @@ export class S3StorageAdapter implements IStorageAdapter {
     }
   }
 
-  async observe(environment: Environment, context: StorageContext): Promise<ObservedStorage[]> {
+  async observe(environment: Environment, context: StorageContext, target?: StorageObservationTarget): Promise<ObservedStorage[]> {
     this.assertContext(context);
+    if (target) {
+      if (!target.externalId) throw new Error('Exact S3 observation requires a bucket identity.');
+      // Native ownership is authoritative for an already-authorized binding;
+      // checkout UUID tags remain the boundary for ordinary discovery/deletion.
+      const result = await this.s3Client().send(new HeadBucketCommand({
+        Bucket: target.externalId, ExpectedBucketOwner: context.accountId,
+      }));
+      if (result.BucketRegion !== context.region) throw new Error('The bound S3 bucket region could not be verified.');
+      return [{ provider: this.name, kind: 'object', externalId: target.externalId,
+        instanceScope: { ...context }, name: target.externalId, region: result.BucketRegion, status: 'ready' }];
+    }
     const observed: ObservedStorage[] = [];
     let continuationToken: string | undefined;
     do {
@@ -610,6 +622,7 @@ providerRegistry.register({
     credentialsSchema: S3StorageCredentialsSchema,
     setupHelpUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
     credentials: {
+      automationSecretKeys: { AWS_ACCESS_KEY_ID: 'accessKeyId', AWS_SECRET_ACCESS_KEY: 'secretAccessKey' },
       supportsNativeCliAuth: true,
       environmentVariableAliases: [
         ['HYPERVIBE_AWS_ACCESS_KEY_ID', 'AWS_ACCESS_KEY_ID'],
