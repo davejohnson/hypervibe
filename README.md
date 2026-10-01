@@ -1685,14 +1685,15 @@ Use `minor`, `major`, or an exact stable version such as `0.2.0` instead of
 `origin/main`, updates `package.json` and `package-lock.json`, runs the full
 test/typecheck/build/package-safety suite, creates the release commit and an
 annotated `vX.Y.Z` tag, and atomically pushes both. The tag starts
-`release.yml`; it publishes the public npm package with provenance, builds
-native Apple Silicon (`arm64`) and Intel (`x86_64`) DMGs on matching GitHub
-macOS runners, creates SHA-256 checksum files, and attaches all four files to a
-public [GitHub Release](https://github.com/davejohnson/hypervibe/releases). By
-default the command watches that workflow through `gh` and fails if any
-package, installer, or release job fails.
+`release.yml`; it builds and verifies the backup helper before publishing the
+public npm package with provenance. It also builds native Apple Silicon
+(`arm64`) and Intel (`x86_64`) DMGs on matching GitHub macOS runners, creates
+SHA-256 checksum files, and attaches the installers, checksums and helper digest
+receipt to a public [GitHub Release](https://github.com/davejohnson/hypervibe/releases).
+By default the command watches that workflow through `gh` and fails if any
+helper, package, installer, or release job fails.
 
-When only the npm package is needed, use `--npm-only`:
+When macOS installers are not needed, use `--npm-only`:
 
 ```bash
 npm run release -- patch --npm-only
@@ -1701,7 +1702,10 @@ npm run release -- patch --npm-only
 The release remains a fully validated, provenance-backed tagged npm release,
 but the annotated tag records `Release-Mode: npm-only`. The workflow then skips
 both macOS builds and does not create a GitHub Release or publish installer
-assets. Full npm-plus-macOS publication remains the default.
+assets. The tested backup helper and its Actions receipt are still required.
+Full npm-plus-macOS publication remains the default. See the
+[helper publication procedure](docs/postgres-logical-backup-runtime.md#release-publication)
+for digest selection and GHCR's first-publication visibility requirement.
 
 Preview the next version and git operations without changing anything:
 

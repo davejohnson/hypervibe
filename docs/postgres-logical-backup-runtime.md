@@ -58,6 +58,51 @@ The Dockerfile alone is not a published image or live compatibility proof.
 The tools must support the source server's major version; this image is not a
 database upgrade and does not support dumping a newer server.
 
+## Release publication
+
+The tag-triggered [release workflow](../.github/workflows/release.yml) publishes
+the helper alongside npm, including `--npm-only` releases. That option still
+omits the macOS installers and GitHub Release; it does not omit the helper.
+The helper job starts after package validation. It builds one `linux/amd64`
+image from the checked-out release commit, checks its packaged version and runs
+the SQL/files smoke with networking disabled, a read-only root filesystem and
+temporary writable storage. It pushes that tested image without rebuilding.
+
+After pushing, the publisher pulls the registry manifest digest anonymously and
+checks the image identity, source revision, package version, platform and runtime
+user. A local Docker image/config ID is not the registry manifest digest. Only
+after these checks pass does it write `build/backup-runner-release.json`, expose
+the immutable image reference in the job summary and upload the
+`Hypervibe-backup-runner` Actions artifact. Open the release workflow run,
+download that artifact and read the receipt's `image` field. Full GitHub Releases
+also attach the receipt. The workflow requests 90-day artifact retention; commit
+the selected digest in the application's reviewed backup spec when activating it.
+
+The receipt identifies the release source, workflow run, tested package and
+`image` reference to use as `backups.runnerImage`. It records
+`providerLiveVerified: false`: a packaged restore with synthetic data and an
+injected object transport does not verify production routing or provider access.
+Npm publication requires the helper job to succeed. The helper can have been
+pushed even if a later check or another release job fails; a failed job must not
+be interpreted as proof that nothing was published.
+
+**First GHCR publication requires an owner visibility change.** GitHub
+[creates container packages as private by default](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry),
+including packages published from public repositories. Successful authenticated
+push does not establish anonymous pull access. If the first helper job fails its
+anonymous pull, an owner must make the new
+`ghcr.io/<owner>/<repository>/backup-runner` package public in its package
+settings before rerunning the failed release jobs. Until that verification
+succeeds, there is no successful helper receipt and npm publication stays
+blocked. Each attempt uses a separate tag; the script does not retry an uncertain
+push or overwrite a `latest`/version tag. Activate only the digest from a
+successful receipt.
+
+The normal test suite executes the publisher with synthetic Docker command
+responses and checks release admission in both modes. The release job runs the
+real packaged smoke and registry checks. Offline tests do not establish that
+the package has been published or that GHCR access is configured correctly.
+
 ## Provider review
 
 The common data-plane contract is PostgreSQL, not a provider's snapshot API.
@@ -96,9 +141,9 @@ when those tools are absent. Local execution used PostgreSQL 14.20. The locally
 built helper also passed `test/backup-runner-smoke.mjs` with PostgreSQL 16.15 and
 Docker networking disabled: retained SQL and file bytes restored together,
 schema and row checks passed, and a late SQL verification failure left no joint
-completion. That smoke uses an injected object transport. The image has not
-been published, and production routing and provider transports still require
-live acceptance.
+completion. That smoke uses an injected object transport. These development
+checks do not publish an image; publication requires a verified release receipt.
+Production routing and provider transports still require live acceptance.
 
 The challenged assumptions were that successful upload proves retained bytes,
 that verification SQL stays read-only without database enforcement, and that any
