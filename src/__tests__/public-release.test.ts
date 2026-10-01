@@ -1,6 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
+
+function releaseJobs() {
+  return parse(readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8')).jobs;
+}
 
 describe('public release configuration', () => {
   it('publishes the scoped package publicly through the npm registry', () => {
@@ -82,6 +87,46 @@ describe('public release configuration', () => {
     expect(workflow).toContain(
       "needs['build-macos'].result == 'skipped' && needs['release-mode'].outputs.npm_only == 'true'"
     );
+  });
+
+  it('requires a verified backup helper in both release modes and retains its digest receipt', () => {
+    const jobs = releaseJobs();
+    const helper = jobs['publish-backup-helper'];
+    expect(helper).toBeDefined();
+    expect(helper.needs).toContain('validate-package');
+    expect(helper.if).toBeUndefined();
+    expect(helper.permissions).toEqual({ contents: 'read', packages: 'write' });
+    expect(helper.steps).toContainEqual(expect.objectContaining({
+      id: 'backup', run: 'node scripts/release-backup-runner.mjs',
+    }));
+    const artifact = helper.steps.find((step: { uses?: string }) => step.uses?.startsWith('actions/upload-artifact@'));
+    expect(artifact.with).toMatchObject({ name: 'Hypervibe-backup-runner', path: 'build/backup-runner-release.json', 'if-no-files-found': 'error' });
+    expect(helper.outputs.image).toBe('${{ steps.backup.outputs.image }}');
+    expect(jobs['publish-package'].needs).toContain('publish-backup-helper');
+    const download = jobs.release.steps.find((step: { uses?: string }) => step.uses?.startsWith('actions/download-artifact@'));
+    expect(download.with.pattern).toBe('Hypervibe-*');
+    expect(jobs.release.steps.find((step: { name: string }) => step.name === 'Verify release assets').run)
+      .toContain('release-assets/backup-runner-release.json');
+  });
+
+  it.each([false, true])('blocks npm publication on missing or failed helper evidence; npm-only=%s', npmOnly => {
+    const job = releaseJobs()['publish-package'];
+    // Execute this workflow's boolean GitHub expression against both release
+    // modes. The expression uses only needs, always(), &&, || and equality.
+    const expression = job.if.trim().replace(/^\$\{\{\s*/, '').replace(/\s*\}\}$/, '');
+    const admission = new Function('needs', 'always', `return (${expression});`);
+    const needs = {
+      'release-mode': { result: 'success', outputs: { npm_only: String(npmOnly) } },
+      'validate-package': { result: 'success' },
+      'build-macos': { result: npmOnly ? 'skipped' : 'success' },
+      'publish-backup-helper': { result: 'success' },
+    };
+    expect(admission(needs, () => true)).toBe(true);
+    for (const result of ['failure', 'cancelled', 'skipped', undefined]) {
+      expect(admission({ ...needs, 'publish-backup-helper': { result } }, () => true), String(result)).toBe(false);
+    }
+    expect(admission({ ...needs, 'validate-package': { result: 'failure' } }, () => true)).toBe(false);
+    if (!npmOnly) expect(admission({ ...needs, 'build-macos': { result: 'skipped' } }, () => true)).toBe(false);
   });
 
   it('does not declare or bind a long-lived npm publishing token', () => {
