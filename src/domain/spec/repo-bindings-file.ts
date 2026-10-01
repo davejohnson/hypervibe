@@ -8,6 +8,10 @@ import { withStorageInstanceScopes } from '../services/storage-instance-identity
 import { primaryWorkspaceDirectory } from '../../lib/workspace-context.js';
 import { parseServiceVolumeBindings } from '../services/service-volume.service.js';
 import type { ServiceVolumeComponentBinding } from '../ports/service-volume.port.js';
+import { databaseCheckpointBindings } from '../services/database-checkpoint.js';
+import { backupPolicyAttempts, mergeBackupPolicyAttempts } from '../services/backup-policy-attempts.js';
+import { projectRecoveryDatabases, recoveryDatabaseBindings } from '../services/recovery-database-bindings.js';
+import type { Component } from '../entities/component.entity.js';
 
 // Bindings are the inverse of the spec's source-of-truth contract: the DB
 // column `environments.platform_bindings` is authoritative (it holds data the
@@ -84,13 +88,25 @@ export function mergeRepoPlatformBindings(
   existing: Record<string, unknown>,
   repoBindings: Record<string, unknown>
 ): Record<string, unknown> {
+  if (existing.recoveryDatabases !== undefined) recoveryDatabaseBindings(existing.recoveryDatabases);
+  if (repoBindings.recoveryDatabases !== undefined) recoveryDatabaseBindings(repoBindings.recoveryDatabases);
   const localVolumes = parseServiceVolumeBindings({ platformBindings: existing });
   const incomingVolumes = parseServiceVolumeBindings({ platformBindings: repoBindings });
   if (!localVolumes || !incomingVolumes) {
     throw new Error('Malformed retained service-volume bindings; refusing to overwrite recovery state.');
   }
   const merged: Record<string, unknown> = { ...existing, ...repoBindings };
+  if (existing.backupPolicyAttempts !== undefined || repoBindings.backupPolicyAttempts !== undefined) {
+    merged.backupPolicyAttempts = mergeBackupPolicyAttempts(existing.backupPolicyAttempts, repoBindings.backupPolicyAttempts);
+  }
+  if (existing.databaseCheckpoints !== undefined || repoBindings.databaseCheckpoints !== undefined) {
+    merged.databaseCheckpoints = databaseCheckpointBindings(
+      { resilience: { checkpoints: existing.databaseCheckpoints } },
+      { databaseCheckpoints: repoBindings.databaseCheckpoints }
+    );
+  }
   for (const [key, repoValue] of Object.entries(repoBindings)) {
+    if (key === 'databaseCheckpoints' || key === 'backupPolicyAttempts') continue;
     if (key === 'serviceVolumes' && existing[key] !== undefined) {
       const retained = { ...incomingVolumes, ...localVolumes };
       for (const [name, next] of Object.entries(incomingVolumes)) {
@@ -167,6 +183,16 @@ function presentStorageInstanceScopes(platformBindings: Record<string, unknown>)
 
 function sanitizePlatformBindings(raw: Record<string, unknown>): Record<string, unknown> {
   const sanitized = sanitize(raw) as Record<string, unknown>;
+  if (raw.recoveryDatabases !== undefined) sanitized.recoveryDatabases = recoveryDatabaseBindings(raw.recoveryDatabases);
+  if (raw.backupPolicyAttempts !== undefined) {
+    // Strict value-free identities remain recoverable even for secret-shaped names.
+    sanitized.backupPolicyAttempts = backupPolicyAttempts(raw.backupPolicyAttempts);
+  }
+  if (raw.databaseCheckpoints !== undefined) {
+    // Strict non-secret checkpoint identities must survive even when their
+    // reviewed logical intent id contains a word such as "token".
+    sanitized.databaseCheckpoints = databaseCheckpointBindings({}, raw);
+  }
   if (raw.serviceVolumes !== undefined) {
     const serviceVolumes = parseServiceVolumeBindings({ platformBindings: raw });
     if (!serviceVolumes) throw new Error('Malformed retained service-volume bindings cannot be exported or imported safely.');
@@ -246,7 +272,8 @@ export function readRepoBindingsFile(projectName?: string, startDir = primaryWor
   return { path: file, document };
 }
 
-export function writeRepoBindingsForEnvironment(project: Project, environment: Environment, startDir = primaryWorkspaceDirectory()): string | null {
+export function writeRepoBindingsForEnvironment(project: Project, environment: Environment, startDir = primaryWorkspaceDirectory(),
+  loadComponents?: () => Component[]): string | null {
   if (!repoSpecEnabled()) {
     return null;
   }
@@ -272,6 +299,11 @@ export function writeRepoBindingsForEnvironment(project: Project, environment: E
   const platformBindings = presentStorageInstanceScopes(
     sanitizePlatformBindings(environment.platformBindings)
   );
+  const backupPolicy = spec?.environments[environment.name]?.backups;
+  if (Object.keys(platformBindings).length && backupPolicy?.mode === 'daily' && backupPolicy.runnerImage) {
+    if (!loadComponents) throw new Error('Managed backup bindings require a fresh component inventory.');
+    platformBindings.recoveryDatabases = projectRecoveryDatabases(loadComponents(), environment.id);
+  }
   if (Object.keys(platformBindings).length === 0) {
     delete current.environments[environment.name];
   } else {

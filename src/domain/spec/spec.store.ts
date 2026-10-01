@@ -233,6 +233,21 @@ function parseStoredSpec(document: unknown, projectId: string, revision: number)
 export class SpecStore {
   private repo = new ProjectSpecRepository();
 
+  /** Inspect already recorded desired state without adopting edits or bootstrapping legacy projects. */
+  getForInspection(project: Project): SpecResult | null {
+    const latest = this.repo.findLatest(project.id);
+    if (!latest) return null;
+    const spec = parseStoredSpec(latest.document, project.id, latest.revision);
+    const repoSpec = readRepoSpecFile();
+    if (repoSpec && repoSpecMatchesProject(repoSpec.spec, project)) {
+      if (!sameSpec(spec, repoSpec.spec)) {
+        throw new Error('Repository desired state differs from its recorded revision. Record the reviewed spec before read-only inspection.');
+      }
+      return { spec, revision: latest.revision, source: { kind: 'repo', path: repoSpec.path } };
+    }
+    return { spec, revision: latest.revision, source: { kind: 'local' } };
+  }
+
   /**
    * Latest spec for a project. Lazily converts a legacy policies.desiredState
    * blob into revision 1 the first time a project is read.

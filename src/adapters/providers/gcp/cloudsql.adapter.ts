@@ -34,7 +34,10 @@ import {
   buildDatabaseEnvVarsFromComponent,
   databaseReplicaEnvKey,
 } from '../../../domain/services/database-env.js';
-import { buildCloudSqlRestoreDrillWorkflow } from './cloudsql-restore-drill.workflow.js';
+import { buildCloudSqlRestoreDrillWorkflow, resolveCloudSqlRestoreDrillSource } from './cloudsql-restore-drill.workflow.js';
+import type { DatabaseBackupTarget, DailyBackupObservation, DailyBackupReview, IDailyBackupPolicy } from '../../../domain/ports/daily-backup.port.js';
+import { recoverySourceIdentityMatches, recoverySourceIdentitySchema } from '../../../domain/services/recovery-source.js';
+import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
 
 // Credentials schema for self-registration
 export const CloudSqlCredentialsSchema = z.object({
@@ -47,6 +50,7 @@ export type CloudSqlCredentials = z.infer<typeof CloudSqlCredentialsSchema>;
 
 interface CloudSqlInstance {
   name: string;
+  project?: string;
   state: string;
   databaseVersion: string;
   ipAddresses?: Array<{
@@ -63,6 +67,7 @@ interface CloudSqlInstance {
   masterInstanceName?: string;
   replicaNames?: string[];
   settings?: {
+    settingsVersion?: string;
     tier?: string;
     availabilityType?: string;
     edition?: string;
@@ -79,6 +84,24 @@ interface CloudSqlInstance {
     };
   };
 }
+
+// The SQL Admin API defines this as daily backup configuration. Enabling it
+// neither requires nor authorizes changing PITR or snapshot retention.
+// https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1/instances#BackupConfiguration
+const dailyBackupConfigurationSchema = z.object({
+  enabled: z.boolean(),
+  startTime: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/).optional(),
+  pointInTimeRecoveryEnabled: z.boolean().optional(),
+  transactionLogRetentionDays: z.number().int().positive().optional(),
+  backupTier: z.enum(['STANDARD', 'BACKUP_TIER_UNSPECIFIED']).optional(),
+  backupRetentionSettings: z.object({
+    // The native UNSPECIFIED enum explicitly means COUNT; omission need not
+    // invent a retained count when the API has not supplied one.
+    retentionUnit: z.enum(['COUNT', 'RETENTION_UNIT_UNSPECIFIED']).optional(),
+    retainedBackups: z.number().int().positive().optional(),
+  }).passthrough().optional(),
+}).passthrough();
+const preservedDailyBackupFields = ['startTime', 'pointInTimeRecoveryEnabled', 'transactionLogRetentionDays', 'location', 'backupRetentionSettings'] as const;
 
 interface CloudSqlOperation {
   name?: string;
@@ -206,6 +229,11 @@ function projectCloudSqlDatabaseRuntime(
 
 export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, IDatabaseResilienceAdapter {
   readonly name = 'cloudsql';
+
+  readonly dailyBackups: IDailyBackupPolicy<DatabaseBackupTarget> = {
+    observe: target => this.observeDailyBackupPolicy(target),
+    configureDaily: (target, reviewed) => this.configureDailyBackupPolicy(target, reviewed),
+  };
 
   readonly capabilities: DatabaseCapabilities = {
     supportedDatabases: ['postgres'],
@@ -1151,6 +1179,84 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     }
   }
 
+  private async readDailyBackupPolicy(target: DatabaseBackupTarget) {
+    const { component, environment } = target;
+    if (component.environmentId !== environment.id || component.type !== 'postgres' || component.bindings.provider !== this.name) {
+      throw new Error('Daily backups require the exact bound database in this environment.');
+    }
+    this.assertComponentScope(component);
+    const instanceName = this.componentInstanceName(component);
+    if (!this.credentials || !instanceName) throw new Error('A connected, durably bound Cloud SQL instance is required.');
+    const instance = await this.getInstance(instanceName);
+    if (!instance || instance.name !== instanceName || (instance.project !== undefined && instance.project !== this.credentials.projectId)
+      || !instance.region || !instance.databaseVersion?.startsWith('POSTGRES') || instance.masterInstanceName) {
+      throw new Error('Cloud SQL did not return the exact bound PostgreSQL primary.');
+    }
+    this.assertComponentScope(component, instance);
+    if (instance.connectionName) this.assertConnectionNameScope(instance.connectionName, instanceName, component);
+    const policy = dailyBackupConfigurationSchema.parse(instance.settings?.backupConfiguration);
+    const settingsVersion = z.string().regex(/^\d+$/).parse(instance.settings?.settingsVersion);
+    const source = recoverySourceIdentitySchema.parse({
+      provider: this.name, primaryExternalId: instanceName,
+      providerScope: this.instanceProviderScope(instance), resourceIdentity: { instanceId: instanceName },
+    });
+    const observation: Extract<DailyBackupObservation, { state: 'known' }> = {
+      state: 'known', source, daily: policy.enabled, mechanism: 'snapshot',
+      policyFingerprint: canonicalJsonSha256({ source, settingsVersion, policy }),
+      // Unlike the reviewed policy fingerprint, this remains stable after the
+      // authorized enabled flag/settings revision changes. Retry recovery must
+      // prove these original protections survived, not only observe daily=true.
+      preservationFingerprint: canonicalJsonSha256(Object.fromEntries(preservedDailyBackupFields
+        .filter(key => policy[key] !== undefined).map(key => [key, policy[key]]))),
+      ...(policy.backupRetentionSettings?.retainedBackups !== undefined
+        ? { retention: { unit: 'backups' as const, value: policy.backupRetentionSettings.retainedBackups } } : {}),
+    };
+    return { observation, settingsVersion, policy };
+  }
+
+  private async observeDailyBackupPolicy(target: DatabaseBackupTarget): Promise<DailyBackupObservation> {
+    try { return (await this.readDailyBackupPolicy(target)).observation; }
+    catch {
+      // Provider bodies and unexpected fields can contain sensitive values.
+      return { state: 'unknown', reason: 'The exact Cloud SQL primary and its standard daily backup settings could not be verified. Enhanced backup policies require a separate supported adapter.' };
+    }
+  }
+
+  private async configureDailyBackupPolicy(target: DatabaseBackupTarget, reviewed: DailyBackupReview): Promise<Receipt> {
+    let mutationAttempted = false;
+    try {
+      const current = await this.readDailyBackupPolicy(target);
+      if (!recoverySourceIdentityMatches(current.observation.source, reviewed.source)
+        || current.observation.policyFingerprint !== reviewed.policyFingerprint) {
+        return { success: false, message: 'Cloud SQL source or backup settings changed after planning. Re-run hv_plan.', data: { applied: 0, skipped: 1, mutationAttempted: false } };
+      }
+      if (current.observation.daily) return {
+        success: true, message: 'Daily backup scheduling is already enabled; applied 0, skipped 1. Restore has not been tested.',
+        data: { applied: 0, skipped: 1, mutationAttempted: false, observation: current.observation },
+      };
+      const token = await this.getAccessToken();
+      mutationAttempted = true;
+      // Native PATCH merges supplied fields. Do not rewrite retained backup
+      // count, PITR, start time, backup location or unrelated instance settings.
+      // settingsVersion rejects a concurrent settings change instead of losing it.
+      await this.patchInstance({ token, instanceName: current.observation.source.primaryExternalId,
+        body: { settings: { settingsVersion: current.settingsVersion, backupConfiguration: { enabled: true } } },
+        description: 'daily backup scheduling update' });
+      const final = await this.readDailyBackupPolicy(target);
+      const preserved = current.observation.preservationFingerprint === final.observation.preservationFingerprint;
+      if (!final.observation.daily || !recoverySourceIdentityMatches(current.observation.source, final.observation.source) || !preserved) {
+        return { success: false, message: 'Cloud SQL acknowledged the update, but daily scheduling and preservation of existing protection were not verified. Re-plan before further work.', data: { applied: null, skipped: 0, mutationAttempted } };
+      }
+      return { success: true, message: 'Daily backup scheduling verified; applied 1, skipped 0. Backup completion and restore have not been tested.',
+        data: { applied: 1, skipped: 0, mutationAttempted: true, observation: final.observation } };
+    } catch {
+      return { success: false, message: mutationAttempted
+        ? 'Cloud SQL daily backup update could not be verified. No automatic retry was attempted; re-plan to observe the current settings.'
+        : 'Cloud SQL daily backup settings could not be verified; no update was attempted.',
+      data: { applied: mutationAttempted ? null : 0, skipped: mutationAttempted ? 0 : 1, mutationAttempted } };
+    }
+  }
+
   async provisionReadReplica(
     _environment: Environment,
     component: Component,
@@ -1815,6 +1921,7 @@ providerRegistry.register({
     lifecycle: {
       databaseEngines: ['postgres'],
       databaseConnectivity: { compatibleHostingProviders: ['cloudrun'] },
+      dailyBackups: { database: true },
       databaseResilience: {
         availabilityModes: ['zonal', 'regional'],
         backups: { maxRetainedBackups: 365, maxPitrRetentionDays: 7 },
@@ -1824,6 +1931,7 @@ providerRegistry.register({
     },
     orchestration: {
       databaseRestoreDrill: {
+        resolveSource: resolveCloudSqlRestoreDrillSource,
         buildWorkflow: buildCloudSqlRestoreDrillWorkflow,
       },
     },

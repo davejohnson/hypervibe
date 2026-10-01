@@ -85,8 +85,13 @@ export async function executeBootstrap(params: {
   ensureHostingProject?: boolean;
   /** Internal reviewed hosting-identity stage: configure an empty service, never deploy code. */
   provisionOnly?: boolean;
+  /** Backup admission permits creation only; providers must reject an existing workload. */
+  requireNewWorkload?: boolean;
   runtime?: ProjectRuntime;
 }): Promise<{ success: boolean; summary: Record<string, unknown> }> {
+  if (params.requireNewWorkload && params.provisionOnly !== true) {
+    return { success: false, summary: { blocked: true, error: 'Creation-only admission requires provision-only execution.' } };
+  }
   const reservedError = reservedRuntimeEnvError(params.envVars, params.queueEnvVars, ...Object.values(params.envVarsByService ?? {}));
   if (reservedError) return { success: false, summary: { blocked: true, error: reservedError } };
   const tx = new InfraTransaction();
@@ -265,6 +270,14 @@ export async function executeBootstrap(params: {
     };
   }
 
+  if (params.requireNewWorkload && (hostingAdapter.capabilities.supportsCreateOnlyDeploy !== true
+    || hostingAdapter.capabilities.supportsDeferredDeploy !== true)) {
+    const cleanup = await tx.rollback();
+    return { success: false, summary: { blocked: true,
+      error: `Provider ${targetPlatform} does not support creation-only deferred workload provisioning.`,
+      rollback: cleanup, transaction: { created: tx.listResources() } } };
+  }
+
   try {
     await hostingAdapter.configureTarget?.({ region: params.hostingRegion });
   } catch (error) {
@@ -324,6 +337,7 @@ export async function executeBootstrap(params: {
     ...(params.envVarsByService ? { envVarsByService: params.envVarsByService } : {}),
     ...(params.verifyHttpHealth ? { verifyHttpHealth: true } : {}),
     ...(deferProviderDeployment ? { deferProviderDeployment: true } : {}),
+    ...(params.requireNewWorkload ? { requireNewWorkload: true } : {}),
     ...(params.provisionOnly && hostingAdapter.serviceVolumes?.staged?.runtimeMount
       && workloads.every(service => !(environment.platformBindings.services as Record<string, { serviceId?: string }> | undefined)?.[service.name]?.serviceId)
       ? { deferWorkload: true } : {}),

@@ -1,4 +1,8 @@
 import { INBOUND_SIGNING_KEY_OPERATION } from '../services/email-inbound-signing.service.js';
+import { databaseCheckpointIdentitySchema } from '../services/database-checkpoint.js';
+import { backupPolicyActionId, backupPolicyActionMetadataSchema, DAILY_BACKUP_OPERATION } from '../services/backup-policy-plan.service.js';
+import { providerRegistry } from '../registry/provider.registry.js';
+import { API_POLICY_OPERATION } from '../services/api-policy.js';
 import { EMAIL_SIGNING_OPERATIONS } from '../services/email-signing.service.js';
 import type { PlanAction, PlanResourceKind } from './plan.types.js';
 import { HOSTING_ENVIRONMENT_ENSURE_OPERATION } from './plan.service.js';
@@ -84,6 +88,8 @@ import {
 } from '../services/managed-code-repository.contract.js';
 
 export type PlanMutationCapability =
+  | 'backup-policy.configure'
+  | 'api.policy.accept'
   | 'hosting.volume.mutate'
   | 'hosting.environment.ensure'
   | 'domain.registration.mutate'
@@ -127,6 +133,7 @@ export type PlanMutationCapability =
   | 'cache.retained.destroy'
   | 'database.provision'
   | 'database.availability.configure'
+  | 'database.checkpoint.create'
   | 'database.backup-policy.configure'
   | 'database.replica.provision'
   | 'database.replica.destroy'
@@ -475,6 +482,22 @@ export function resolvePlanActionAuthority(
     return null;
   }
 
+  if (action.metadata?.operation === DAILY_BACKUP_OPERATION) {
+    const parsed = backupPolicyActionMetadataSchema.safeParse(action.metadata);
+    if (!parsed.success) return null;
+    const { item, source } = parsed.data;
+    const capability = providerRegistry.getMetadata(action.resource.provider)?.lifecycle?.dailyBackups;
+    if (action.type !== 'update' || !action.verified || action.requiresConfirm !== true
+      || action.billable !== true || action.dataBearing !== true
+      || action.id !== backupPolicyActionId(item.resource)
+      || item.resource.kind !== action.resource.kind || item.resource.name !== action.resource.name
+      || item.resource.provider !== action.resource.provider || source.provider !== action.resource.provider
+      || item.target.kind !== item.resource.kind || !capability?.[item.resource.kind]
+      || (item.target.kind === 'database' ? item.target.componentId !== item.resource.componentId
+        : item.target.name !== item.resource.name)) return null;
+    return authority(action, 'backup-policy.configure');
+  }
+
   if (
     exactResource(action, 'retained-resource')
     && action.type === 'destroy'
@@ -528,6 +551,9 @@ export function resolvePlanActionAuthority(
   ) {
     return authority(action, 'domain.registration.mutate');
   }
+  if (action.metadata?.operation === API_POLICY_OPERATION && exactResource(action, 'ci', 'hypervibe')
+    && action.type === 'update' && action.resource.name === `api-policy:${metadataString(action, 'environmentName')}`
+    && metadataString(action, 'desiredHash') && metadataString(action, 'previousHash')) return authority(action, 'api.policy.accept');
   if (
     isGitHubActionsDeployAction(action)
     && exactResource(action, 'ci', 'github')
@@ -736,6 +762,7 @@ export function resolvePlanActionAuthority(
   }
   if (
     isGitHubInfrastructureAction(action)
+    && (action.metadata?.backupWorkflowPublicationRequired !== true || action.billable === true && action.requiresConfirm === true)
     && exactResource(action, 'repo', 'github')
     && action.type === 'update'
     && action.resource.name === metadataString(action, 'repository')
@@ -1139,6 +1166,18 @@ export function resolvePlanActionAuthority(
   }
   if (exactResource(action, 'database')) {
     if (isDatabaseResilienceAction(action) && metadataString(action, 'primaryExternalId')) {
+      const checkpointSource = databaseCheckpointIdentitySchema.safeParse(action.metadata?.source);
+      if (action.metadata?.operation === DATABASE_RESILIENCE_OPERATIONS.checkpointCreate
+        && ['create', 'update'].includes(action.type) && action.requiresConfirm === true
+        && action.billable === true && action.dataBearing === true
+        && metadataString(action, 'checkpointId')
+        && action.id === `database:${action.resource.provider}:checkpoint:${metadataString(action, 'checkpointId')}`
+        && checkpointSource.success
+        && checkpointSource.data.provider === action.resource.provider
+        && checkpointSource.data.primaryExternalId === metadataString(action, 'primaryExternalId')) {
+        return authority(action, 'database.checkpoint.create');
+      }
+
       if (
         action.metadata?.operation === DATABASE_RESILIENCE_OPERATIONS.availabilityConfigure
         && action.type === 'update'

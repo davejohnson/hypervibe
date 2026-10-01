@@ -11,11 +11,23 @@ export interface StorageCapabilities {
   supportsUsageObservation: boolean;
   /** Provider can expose a streaming object data plane for migration. */
   supportsObjectTransfer?: boolean;
+  /** Provider guarantees getCredentials returns bucket-scoped credentials, never a control-plane account key. */
+  recoveryCredentialScope?: 'bucket';
 }
 
 export interface StorageObjectRecord {
   key: string;
   size: number;
+  revision?: StorageObjectRevision;
+}
+
+/** Native opaque change validators, never content hashes. */
+export interface StorageObjectRevision {
+  etag?: string;
+  versionId?: string;
+  generation?: string;
+  metageneration?: string;
+  lastModified?: string;
 }
 
 export interface StorageObjectPayload {
@@ -26,12 +38,15 @@ export interface StorageObjectPayload {
   cacheControl?: string;
   contentDisposition?: string;
   metadata?: Record<string, string>;
+  revision?: StorageObjectRevision;
 }
 
 export interface StorageObjectClient {
-  list(): Promise<StorageObjectRecord[]>;
-  get(key: string): Promise<StorageObjectPayload>;
-  put(key: string, payload: StorageObjectPayload): Promise<void>;
+  list(options?: { prefix?: string; maxObjects?: number }): Promise<StorageObjectRecord[]>;
+  get(key: string, expectedRevision?: StorageObjectRevision): Promise<StorageObjectPayload>;
+  put(key: string, payload: StorageObjectPayload, options?: { ifAbsent?: boolean }): Promise<void>;
+  /** Delete only an exact owned object; recovery code must never infer prefix authority. */
+  remove?(key: string, expectedRevision?: StorageObjectRevision): Promise<void>;
   destroy(): void;
 }
 
@@ -41,6 +56,9 @@ export interface StorageObjectClient {
  * environment ids, or a cloud account/project plus region).
  */
 export type StorageContext = Record<string, string>;
+
+/** Read an already-authorized binding in native provider scope, without local discovery tags. */
+export interface StorageObservationTarget { externalId: string }
 
 /**
  * Durable, non-secret evidence that a bucket create may have committed but
@@ -170,6 +188,7 @@ export interface StorageEnsureResult {
 
 export interface IStorageAdapter {
   readonly name: string;
+  readonly dailyBackups?: import('./daily-backup.port.js').IDailyBackupPolicy<import('./daily-backup.port.js').StorageBackupTarget>;
   readonly capabilities: StorageCapabilities;
   /** Stable environment-variable names written when a service is wired. */
   runtimeEnvKeys(name: string): string[];
@@ -195,7 +214,7 @@ export interface IStorageAdapter {
     environment: Environment,
     desiredRegion: string
   ): Promise<StorageEnsureResult>;
-  observe(environment: Environment, context: StorageContext): Promise<ObservedStorage[]>;
+  observe(environment: Environment, context: StorageContext, target?: StorageObservationTarget): Promise<ObservedStorage[]>;
   ensureBucket(environment: Environment, context: StorageContext, name: string, region: string): Promise<StorageEnsureResult>;
   /** Resolve provider-native runtime configuration. Secret values never enter receipts or bindings. */
   getRuntimeEnv(environment: Environment, context: StorageContext, externalId: string, name: string): Promise<Record<string, string>>;

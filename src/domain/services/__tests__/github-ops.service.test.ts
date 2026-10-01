@@ -75,10 +75,10 @@ function reviewedTarget(
   };
 }
 
-it('requires a reviewed workflow migration for mount-safe generated runtimes', () => {
-  // Revision 3 workflows did not guard retained mounts / custom ECS definitions.
+it('requires a reviewed workflow migration for mount-safe runtimes and backup deployment gates', () => {
+  // Revision 4 workflows did not enforce effective daily backup health before rollout.
   // They must not remain locked as current after installing this feature.
-  expect(GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION).toBe(4);
+  expect(GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION).toBe(5);
 });
 
 function executeDockerfileStep(workflowContent: string, directory: string): string {
@@ -105,6 +105,46 @@ describe('github tools', () => {
     vi.restoreAllMocks();
     SqliteAdapter.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('carries API policy from the spec into a pre-mutation gate and its reviewed workflow lock', async () => {
+    const project = new ProjectRepository().create({ name: 'api-release', defaultPlatform: 'railway', gitRemoteUrl: 'https://github.com/acme/api-release.git' });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: {
+      provider: 'railway', projectId: 'project', environmentId: 'staging',
+      services: { api: { serviceId: 'api' }, web: { serviceId: 'web' }, worker: { serviceId: 'worker', workloadKind: 'worker' } },
+    } });
+    const spec = projectSpecSchema.parse({ version: 1, project: project.name, gitRemoteUrl: project.gitRemoteUrl,
+      runtime: { kind: 'node', version: '24' }, environments: { staging: {
+        hosting: { provider: 'railway' }, services: { api: {}, web: {}, worker: { workloadKind: 'worker' } },
+        deploy: { strategy: 'branch', trigger: 'ci' },
+        api: { service: 'api', versions: { v1: { path: '/v1', contract: 'api/v1.json' } }, compatibility: { command: 'node check.cjs' } },
+      } } });
+    new SpecStore().replace(project, spec);
+    const { targets, migration } = resolveBranchDeployTargets(project);
+    expect(targets[0].api).toEqual(spec.environments.staging.api);
+    const workflow = buildBranchDeployWorkflow('railway', targets[0], migration);
+    const doc = parseDocument(workflow.content); expect(doc.errors).toEqual([]);
+    const steps = doc.toJS().jobs.deploy.steps as Array<{ name?: string }>;
+    const names = steps.map(step => step.name);
+    expect(names.indexOf('Verify API compatibility before deployment')).toBeLessThan(names.indexOf('Deploy image to Railway'));
+    expect(names.indexOf('Write server release evidence')).toBeLessThan(names.indexOf('Bind API compatibility evidence to server release'));
+    const executable = extractGitHubScript(workflow.content, 'Resolve previous API release');
+    const runtimeFile = path.join(tempDir, 'api-runtime.cjs');
+    const materializer = doc.toJS().jobs.deploy.steps.find((step: {name?: string}) => step.name === 'Prepare API compatibility runtime');
+    execFileSync('bash', ['-eu', '-c', materializer.run], { env: { ...process.env, ...materializer.env, HYPERVIBE_API_RUNTIME_PATH: runtimeFile } });
+    const runtime = await import('../api-release-workflow.js');
+    const outputs: Record<string, unknown> = {};
+    await new AsyncFunction('require', 'process', 'github', 'context', 'core', executable)(
+      (await import('node:module')).createRequire(import.meta.url),
+      { env: { HYPERVIBE_API_RUNTIME_PATH: runtimeFile, HYPERVIBE_API_RUNTIME_SHA256: runtime.API_RELEASE_RUNTIME_SHA256,
+        HYPERVIBE_API_ENVIRONMENT: 'staging', HYPERVIBE_API_WORKFLOW: workflow.path, HYPERVIBE_API_SHA: 'a'.repeat(40), HYPERVIBE_API_OPERATION: 'deploy', RUNNER_TEMP: tempDir } },
+      { rest: { actions: { listWorkflowRuns: async () => ({ data: { total_count: 0, workflow_runs: [] } }) } } },
+      { repo: { owner: 'acme', repo: 'api-release' }, runId: 1 }, { setOutput: (key: string, value: unknown) => { outputs[key] = value; } },
+    );
+    expect(outputs.has_baseline).toBe('false');
+    const input = { provider: 'railway', target: targets[0], migration };
+    expect(githubActionsWorkflowInputHash(input)).not.toBe(githubActionsWorkflowInputHash({ ...input, target: { ...targets[0], api: undefined } }));
+    expect(githubActionsServerProgramFingerprint(input)).toBe(githubActionsServerProgramFingerprint({ ...input, target: { ...targets[0], api: undefined } }));
   });
 
   it('executes one reviewed Railway workflow for web, worker and cron', async () => {
@@ -1257,7 +1297,8 @@ describe('github tools', () => {
     expect(releaseWorkflow).toContain('evidence.deploymentContractFingerprint');
     expect(releaseWorkflow).toContain('server evidence repository/SHA mismatch');
     expect(releaseWorkflow).toContain('concurrency:');
-    expect(releaseWorkflow).toContain('group: hypervibe-deploy-development');
+    expect(releaseWorkflow).toMatch(/group: hypervibe-ios-[0-9a-f]{20}/);
+    expect(releaseWorkflow).not.toContain('group: hypervibe-deploy-development');
     expect(releaseWorkflow).toContain('  build:');
     expect(releaseWorkflow).toContain('  release:\n    needs: build');
     expect(releaseWorkflow).toContain("node-version: '24'");
@@ -1331,12 +1372,12 @@ describe('github tools', () => {
     const releaseDocument = parseDocument(releaseWorkflow, { uniqueKeys: true });
     expect(releaseDocument.errors).toEqual([]);
     const parsedRelease = releaseDocument.toJS() as {
-      jobs: { prepare: { env: Record<string, unknown>; steps: Array<{ name?: string; env?: Record<string, unknown> }> } };
+      jobs: { eligibility: { env: Record<string, unknown>; steps: Array<{ name?: string; env?: Record<string, unknown> }> } };
     };
-    const gateSteps = parsedRelease.jobs.prepare.steps.filter((step) => step.name === 'Verify server release gate');
+    const gateSteps = parsedRelease.jobs.eligibility.steps.filter((step) => step.name === 'Verify server release gate');
     expect(gateSteps).toHaveLength(1);
     const emittedGateEnvironment = {
-      ...parsedRelease.jobs.prepare.env,
+      ...parsedRelease.jobs.eligibility.env,
       ...gateSteps[0]!.env,
     };
     const expectedServerRelease = JSON.parse(String(
@@ -1366,8 +1407,8 @@ describe('github tools', () => {
       inputs?: Record<string, string>;
     } = {}) => {
       const getWorkflowRun = vi.fn(async () => ({ data: options.run ?? serverRun }));
-      const listWorkflowRunArtifacts = vi.fn();
-      const paginate = vi.fn(async () => options.artifacts ?? [serverArtifact]);
+      const artifacts = options.artifacts ?? [serverArtifact];
+      const listWorkflowRunArtifacts = vi.fn(async () => ({data: {total_count: artifacts.length, artifacts}}));
       const outputs = new Map<string, string>();
       const result = new AsyncFunction(
         'github',
@@ -1376,7 +1417,7 @@ describe('github tools', () => {
         'core',
         provenanceScript
       )(
-        { paginate, rest: { actions: { getWorkflowRun, listWorkflowRunArtifacts } } },
+        { rest: { actions: { getWorkflowRun, listWorkflowRunArtifacts } } },
         {
           eventName: options.eventName ?? 'workflow_dispatch',
           payload: options.eventName === 'workflow_run'
@@ -1387,7 +1428,7 @@ describe('github tools', () => {
         { env: { HYPERVIBE_EXPECTED_SERVER_RELEASE: JSON.stringify(expectedServerRelease) } },
         { setOutput: (name: string, value: string) => outputs.set(name, value) }
       );
-      return { getWorkflowRun, listWorkflowRunArtifacts, outputs, paginate, result };
+      return { getWorkflowRun, listWorkflowRunArtifacts, outputs, result };
     };
 
     const provenance = provenanceCase();
@@ -1397,7 +1438,7 @@ describe('github tools', () => {
       repo: 'repo',
       run_id: serverRun.id,
     });
-    expect(provenance.paginate).toHaveBeenCalledWith(provenance.listWorkflowRunArtifacts, {
+    expect(provenance.listWorkflowRunArtifacts).toHaveBeenCalledWith({
       owner: 'owner',
       repo: 'repo',
       run_id: serverRun.id,
@@ -1418,23 +1459,23 @@ describe('github tools', () => {
       await expect(rejected.result).rejects.toThrow(
         'Server release evidence must come from a successful run of'
       );
-      expect(rejected.paginate).not.toHaveBeenCalled();
+      expect(rejected.listWorkflowRunArtifacts).not.toHaveBeenCalled();
     }
     const wrongRequestedSha = provenanceCase({
       inputs: { commit_sha: 'd'.repeat(40), server_run_id: String(serverRun.id) },
     });
     await expect(wrongRequestedSha.result).rejects.toThrow(
-      'commit_sha does not match the selected server workflow run'
+      'commit_sha does not match the server release artifact'
     );
-    expect(wrongRequestedSha.paginate).not.toHaveBeenCalled();
+    expect(wrongRequestedSha.listWorkflowRunArtifacts).toHaveBeenCalledOnce();
     const mismatchedArtifact = provenanceCase({
       artifacts: [{ ...serverArtifact, name: expectedServerRelease.artifactPrefix + 'd'.repeat(40) }],
     });
-    await expect(mismatchedArtifact.result).rejects.toThrow('Expected exactly one unexpired');
+    await expect(mismatchedArtifact.result).rejects.toThrow('commit_sha does not match the server release artifact');
     const duplicateArtifacts = provenanceCase({
       artifacts: [serverArtifact, { ...serverArtifact, id: 73 }],
     });
-    await expect(duplicateArtifacts.result).rejects.toThrow(/found 2$/);
+    await expect(duplicateArtifacts.result).rejects.toThrow('Expected exactly one unexpired');
 
     const runEvidenceGate = (candidate: unknown, suffix: string) => {
       const evidencePath = path.join(tempDir, `ios-server-evidence-${suffix}.json`);

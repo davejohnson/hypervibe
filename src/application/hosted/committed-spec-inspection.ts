@@ -258,7 +258,7 @@ function decodeJsonSource(content: Uint8Array): unknown {
   }
 }
 
-function secretValueLooksPresent(value: string): boolean {
+export function secretValueLooksPresent(value: string): boolean {
   if (SECRET_VALUE_PATTERNS.some((pattern) => pattern.test(value))) {
     return true;
   }

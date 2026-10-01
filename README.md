@@ -932,11 +932,14 @@ values to read-only signing preparation; they never enter Hypervibe state or
 the project build step. `build.requiredSecrets` is only for additional secrets
 needed by the app-defined build command.
 
-The server workflow uploads signed release evidence only after provider deploy
-success. The macOS iOS workflow shares the server deploy concurrency group,
-downloads that evidence, and requires the same repository and full Git SHA.
+The server workflow uploads release evidence only after provider deploy
+success. The iOS workflow uses a separate app queue and checks changes before
+protected jobs or approvals. It verifies the exact deployed source and builds
+only when mobile inputs changed or relevance cannot be proven.
 Evidence artifacts use a versioned namespace; after an evidence-contract
-upgrade, run the current server workflow once before rollback or iOS release.
+upgrade, an ordinary server release refreshes evidence for iOS releases and
+unprotected rollback. API-protected environments require a reviewed baseline
+migration when API evidence is missing, and currently block rollback.
 Its build job checks out that exact commit, installs existing Match assets into
 an ephemeral keychain, runs the project build, validates the IPA, and uploads a
 short-lived artifact. A fresh release job revalidates the artifact and server
@@ -951,8 +954,16 @@ remain project files; neither becomes an imperative Hypervibe command.
 
 The iOS artifact records separate mobile and server provenance. Inspect these
 workflows through `hv_ci_status`; final `hv_appstore_submit` also refuses
-submission unless the latest successful server and iOS workflow runs have the
-same SHA.
+submission until the exact tested Apple build and current target server release
+are verified, then requires confirmation. Declare `ios.release.promoteFrom` to
+promote a tested beta without rebuilding it. Cross-commit reuse requires verified
+API evidence for the unchanged supported contract.
+
+Declare versioned API contracts and application compatibility tests to protect
+old web/mobile clients during server releases. New versions coexist with old
+ones; retirement requires an explicit confirmed policy change. See
+[API compatibility and iOS releases](docs/api-mobile-releases.md) for setup,
+workflow behavior, and evidence limits.
 
 ### Retiring or renaming runtime variables
 
@@ -1462,6 +1473,24 @@ The marker is environment-specific: production-only desired-state changes do
 not block staging. Production workflows remain manual and enforce the same
 reconciliation check for the promoted SHA.
 
+**Unreleased promotion support:** to require a fresh full test run before a manual GitHub Actions promotion, add
+`deploy.promotionTests: { workflow: ".github/workflows/test.yml" }` alongside an
+explicit `deploy.promoteFrom`. The same-repository reusable workflow must declare
+`workflow_call` with required string input `commit_sha`. Public-package projects
+receive no forwarded secrets. Private-package projects such as Hypercloud add
+`packageReadToken: true` inside `promotionTests` and declare `NODE_AUTH_TOKEN` in
+the reusable workflow; keep that token scoped to dependency installation.
+The workflow must validate the exact candidate SHA and run the whole suite on
+every call, even when its caller has pull-request context.
+
+The generated `promotion_tests` job has only `contents: read`, forwards only the
+explicitly requested package-read secret, and must succeed before deployment. It has
+no production environment or deployment credentials. Existing staging-release and
+applied-contract checks still run before deployment; rollback retains its verified
+immutable-release path without rerunning source tests. Without the opt-in, existing
+workflow behavior is unchanged. Reconcile the changed production contract and
+generated workflow after the reusable workflow and any requested package-read secret exist.
+
 After a deploy job fails, the generated workflow runs a separate evidence job
 with read-only Actions access. It reads the completed deploy job's last 400 log
 lines, applies credential-pattern redaction in addition to GitHub's normal
@@ -1582,6 +1611,16 @@ The provider catalog is intentionally focused. Every implemented hosting lifecyc
 
 Redis is a separate cache lifecycle instead of a database component and wires `REDIS_URL`. Amazon ElastiCache is `ready-for-live` with ECS Express: it reuses the auth-only `ecs` connection, resolves the bound default-VPC workload network, and accepts cache region/size only through desired state. Azure Managed Redis with Container Apps, GCP Memorystore with Cloud Run Direct VPC, DigitalOcean Managed Valkey, and Railway Redis are also implemented and `ready-for-live`. PostgreSQL is the only database engine in desired state; MongoDB and MySQL are intentionally outside the core lifecycle.
 
+### Reuse efficient application checks
+
+For existing projects, use the project template's [CI adoption guide](https://github.com/davejohnson/project-template/blob/main/docs/ci-efficiency.md)
+and [testing skill](https://github.com/davejohnson/project-template/blob/main/.agents/skills/project-template-testing/SKILL.md).
+Keep those application checks repository-owned: preserve required check names,
+setup and full-suite gates; do not add duplicate managed `github.actions` checks.
+Manage deployment and repository settings through `hv_spec` → `hv_plan` → `hv_apply`.
+The unreleased `deploy.promotionTests.workflow` integration connects the owned
+full-suite entry to promotion; publish a supporting release before adopting it.
+
 ## Adding New Providers
 
 Providers self-register through the plugin system:
@@ -1646,14 +1685,15 @@ Use `minor`, `major`, or an exact stable version such as `0.2.0` instead of
 `origin/main`, updates `package.json` and `package-lock.json`, runs the full
 test/typecheck/build/package-safety suite, creates the release commit and an
 annotated `vX.Y.Z` tag, and atomically pushes both. The tag starts
-`release.yml`; it publishes the public npm package with provenance, builds
-native Apple Silicon (`arm64`) and Intel (`x86_64`) DMGs on matching GitHub
-macOS runners, creates SHA-256 checksum files, and attaches all four files to a
-public [GitHub Release](https://github.com/davejohnson/hypervibe/releases). By
-default the command watches that workflow through `gh` and fails if any
-package, installer, or release job fails.
+`release.yml`; it builds and verifies the backup helper before publishing the
+public npm package with provenance. It also builds native Apple Silicon
+(`arm64`) and Intel (`x86_64`) DMGs on matching GitHub macOS runners, creates
+SHA-256 checksum files, and attaches the installers, checksums and helper digest
+receipt to a public [GitHub Release](https://github.com/davejohnson/hypervibe/releases).
+By default the command watches that workflow through `gh` and fails if any
+helper, package, installer, or release job fails.
 
-When only the npm package is needed, use `--npm-only`:
+When macOS installers are not needed, use `--npm-only`:
 
 ```bash
 npm run release -- patch --npm-only
@@ -1662,7 +1702,10 @@ npm run release -- patch --npm-only
 The release remains a fully validated, provenance-backed tagged npm release,
 but the annotated tag records `Release-Mode: npm-only`. The workflow then skips
 both macOS builds and does not create a GitHub Release or publish installer
-assets. Full npm-plus-macOS publication remains the default.
+assets. The tested backup helper and its Actions receipt are still required.
+Full npm-plus-macOS publication remains the default. See the
+[helper publication procedure](docs/postgres-logical-backup-runtime.md#release-publication)
+for digest selection and GHCR's first-publication visibility requirement.
 
 Preview the next version and git operations without changing anything:
 

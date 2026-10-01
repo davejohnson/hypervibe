@@ -1,3 +1,4 @@
+import type { ApiReleaseSpec } from '../spec/spec.schema.js';
 import type { ProjectRuntime } from '../spec/project-runtime.js';
 
 export type BranchDeployProvider = string;
@@ -29,10 +30,13 @@ export interface BranchDeployReleaseTarget {
 
 export interface BranchDeployTarget {
   environmentName: string;
+  api?: ApiReleaseSpec;
   kind: BranchDeployEnvironmentKind;
   branch: string;
   autoDeployOnPush: boolean;
   promoteFromEnvironment?: string;
+  /** Reusable workflow receiving commit_sha and opt-in package-read access. */
+  promotionTests?: { workflow: string; packageReadToken?: boolean };
   /** Hosting provider used to derive the exact managed source workflow identity. */
   promoteFromProvider?: string;
   /** Exact source service set required in downloaded promotion evidence. */
@@ -74,6 +78,13 @@ export interface BranchDeployTarget {
   containerStartCommand?: string;
   /** Effective project runtime for Hypervibe-generated build tooling. */
   runtime?: ProjectRuntime;
+  /** Effective recovery policy is populated by the spec/binding resolver. */
+  backupPolicy?: {
+    mode: 'daily' | 'disabled';
+    runnerImage?: string;
+    credentialNames?: string[];
+    blockedReason?: string;
+  };
 }
 
 export interface BranchDeployWorkflow {

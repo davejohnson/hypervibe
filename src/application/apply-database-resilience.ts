@@ -1,3 +1,4 @@
+import { applyDatabaseCheckpoint } from './apply-database-checkpoint.js';
 import type { ActionResult } from '../domain/plan/converge.executor.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { Project } from '../domain/entities/project.entity.js';
@@ -37,6 +38,7 @@ export async function applyDatabaseResilienceAction(params: {
   environmentName: string;
   environmentSpec: EnvironmentSpec;
   action: PlanAction;
+  confirmedActionIds?: ReadonlySet<string>;
 }): Promise<ActionResult> {
   const { ctx, project, environmentName, environmentSpec, action } = params;
   const databaseSpec = environmentSpec.database;
@@ -70,6 +72,9 @@ export async function applyDatabaseResilienceAction(params: {
   const adapterResult = await adapterFactory.getDatabaseAdapter(action.resource.provider, project);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: 'Database adapter unavailable', error: adapterResult.error };
+  }
+  if (operation === DATABASE_RESILIENCE_OPERATIONS.checkpointCreate) {
+    return applyDatabaseCheckpoint({ ...params, environment, component, adapter: adapterResult.adapter });
   }
   if (!supportsDatabaseResilience(adapterResult.adapter)) {
     return blocked(

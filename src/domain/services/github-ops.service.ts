@@ -1,3 +1,6 @@
+import { buildGitHubBackupDeployGate } from './backup-deploy-gate.service.js';
+import { iosBuildContractFingerprint } from './ios-release-evidence.js';
+import { API_RELEASE_WORKFLOW_RENDERER_REVISION, buildApiReleaseWorkflowSteps } from './api-release-workflow.js';
 import { createHash } from 'crypto';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
@@ -57,7 +60,7 @@ export type {
   BranchDeployWorkflow,
 };
 
-export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 4;
+export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 5;
 export const GITHUB_ACTIONS_SERVER_PROGRAM_REVISION = 1;
 
 function migrationWorkflowInput(migration: { includeStep: boolean; command?: string }) {
@@ -81,6 +84,7 @@ export function githubActionsWorkflowInputHash(params: {
   const ios = params.ios?.release
     ? {
         rendererRevision: IOS_RELEASE_WORKFLOW_RENDERER_REVISION,
+        buildContractFingerprint: iosBuildContractFingerprint(params.ios!, params.target.runtime),
         bundleId: params.ios.bundleId,
         release: params.ios.release,
       }
@@ -92,6 +96,7 @@ export function githubActionsWorkflowInputHash(params: {
     target,
     migration: migrationWorkflowInput(params.migration),
     ...(ios ? { ios } : {}),
+    ...(target.api ? { apiRendererRevision: API_RELEASE_WORKFLOW_RENDERER_REVISION } : {}),
   });
 }
 
@@ -506,6 +511,11 @@ module.exports = {
 const RELEASE_EVIDENCE_VALIDATION_RUNTIME_SHA256 = createHash('sha256')
   .update(`${RELEASE_EVIDENCE_VALIDATION_RUNTIME.trim()}\n`, 'utf8')
   .digest('hex');
+
+/** Shared with the declared-task CI consumer; never interpolate runtime inputs. */
+export function releaseEvidenceValidationRuntime(): string {
+  return RELEASE_EVIDENCE_VALIDATION_RUNTIME;
+}
 
 const RELEASE_EVIDENCE_VALIDATION_LOADER = `
 const { createHash: createValidatorHash } = require('crypto');
@@ -980,6 +990,7 @@ export function buildBranchDeployWorkflow(
   const migrationStep = migration.includeStep && migration.command && target.runtime
     ? buildMigrationStep(migration.command, target.runtime)
     : '';
+  const backupGate = buildGitHubBackupDeployGate(target);
   const deployBlock = buildProviderDeploySteps(provider, target);
   const immutableRollback = Boolean(deployBlock.releaseImageUri);
   if (target.promoteFromEnvironment && !immutableRollback) {
@@ -996,10 +1007,17 @@ export function buildBranchDeployWorkflow(
     : '';
   const promotionEvidenceStep = buildPromotionEvidenceStep(provider, target);
   const releaseEvidenceStep = buildServerReleaseEvidenceStep(provider, target, deployBlock.releaseImageUri);
+  const apiRelease = buildApiReleaseWorkflowSteps({ environmentName: target.environmentName, api: target.api, workflowPath, runtime: target.runtime,
+    serverValidation: { loader: RELEASE_EVIDENCE_VALIDATION_LOADER, sha256: RELEASE_EVIDENCE_VALIDATION_RUNTIME_SHA256,
+      expected: { provider, environment: target.environmentName, programFingerprint: programFingerprintForWorkflow(target),
+        target: releaseTargetForWorkflow(target), requireImmutableImage: immutableRollback } },
+  });
   const providerName = deployBlock.displayName ?? providerRegistry.getMetadata(provider)?.displayName ?? provider;
   let requiredSecrets = migrationStep
     ? [...deployBlock.requiredSecrets, 'DATABASE_URL']
     : [...deployBlock.requiredSecrets];
+  requiredSecrets.push(...backupGate.requiredSecrets);
+  if (target.promotionTests?.packageReadToken) requiredSecrets.push('NODE_AUTH_TOKEN');
   const requiredVariables = [...deployBlock.requiredVariables];
   const permissionsBlock = deployBlock.permissions ?? `    permissions:
       actions: read
@@ -1030,8 +1048,19 @@ ${target.autoDeployOnPush ? `  reconciliation:
           HYPERVIBE_APPLIED_SPEC_HASH: \${{ vars.HYPERVIBE_APPLIED_SPEC_HASH }}
         run: |
           if [[ "$GITHUB_EVENT_NAME" != push || -n "$HYPERVIBE_APPLIED_SPEC_HASH" ]]; then echo ready=true; else echo ready=false; fi >> "$GITHUB_OUTPUT"
-` : ''}  deploy:
-${target.autoDeployOnPush ? "    needs: reconciliation\n    if: needs.reconciliation.outputs.ready == 'true'\n" : ''}    runs-on: ubuntu-latest
+` : ''}${target.promotionTests ? `  promotion_tests:
+    if: \${{ !inputs.rollback }}
+    uses: ./${target.promotionTests.workflow}
+    permissions:
+      contents: read
+    with:
+      commit_sha: \${{ inputs.commit_sha || github.sha }}
+${target.promotionTests.packageReadToken ? `    secrets:
+      NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}
+` : ''}` : ''}  deploy:
+${target.promotionTests
+    ? "    needs: promotion_tests\n    if: ${{ !cancelled() && (inputs.rollback || needs.promotion_tests.result == 'success') }}\n"
+    : target.autoDeployOnPush ? "    needs: reconciliation\n    if: needs.reconciliation.outputs.ready == 'true'\n" : ''}    runs-on: ubuntu-latest
     environment: ${target.environmentName}
 ${permissionsBlock.trimEnd()}
     steps:
@@ -1116,7 +1145,7 @@ ${buildReleaseTargetPreflight(provider, target)}      - uses: actions/checkout@v
 ${sourcePreparationCondition ? `        if: ${sourcePreparationCondition}\n` : ''}        with:
           ref: \${{ steps.deploy.outputs.sha }}
           persist-credentials: false
-${buildDeploymentContractStep(target.environmentName)}${rollbackEvidenceSteps}${promotionEvidenceStep}${migrationStep}${deployBlock.steps}${releaseEvidenceStep}      - name: Upload server release evidence
+${buildDeploymentContractStep(target.environmentName)}${backupGate.steps}${rollbackEvidenceSteps}${promotionEvidenceStep}${apiRelease.beforeDeploy}${migrationStep}${deployBlock.steps}${releaseEvidenceStep}${apiRelease.afterDeploy}      - name: Upload server release evidence
         uses: actions/upload-artifact@v7
         with:
           name: ${managedCiReleaseArtifactPrefix(target.environmentName)}\${{ steps.deploy.outputs.sha }}
@@ -1149,6 +1178,9 @@ ${buildDeploymentFailureEvidenceJob(target.environmentName)}`;
     ...(migrationStep ? ['Runs the declared database migration before deploying the services.'] : []),
     ...(target.promoteFromEnvironment
       ? [`Requires an unexpired successful ${target.promoteFromEnvironment} release for the exact commit before building.`]
+      : []),
+    ...(target.promotionTests
+      ? [`Requires ${target.promotionTests.workflow} to pass for the exact promoted commit, ${target.promotionTests.packageReadToken ? 'with only the package-read NODE_AUTH_TOKEN secret' : 'with no forwarded secrets'}. Rollbacks retain their verified release-evidence path.`]
       : []),
     ...(deployBlock.reviewDetails ?? []),
     deployBlock.releaseImageUri

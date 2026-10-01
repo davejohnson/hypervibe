@@ -19,6 +19,10 @@ export interface DeploymentMutationOptions {
   deferDeployment?: boolean;
   /** Reviewed identity-only stage: create an app namespace, not its workload. */
   deferWorkload?: boolean;
+  /** Creation-only admission, distinct from ordinary deferred reconfiguration.
+   * Requires supportsCreateOnlyDeploy and deferDeployment. The provider must
+   * reject an existing workload before any environment/configuration write. */
+  requireNewWorkload?: boolean;
   /** Exact acknowledged filesystem, provisioned by a separate volume action. */
   serviceVolume?: {
     externalId: string;
@@ -93,6 +97,8 @@ export interface ProviderCapabilities {
 
   /** Whether config can converge while exact-SHA CI remains the code release boundary. */
   supportsDeferredDeploy?: boolean;
+  /** Enforces creation-only admission at the final provider mutation boundary. */
+  supportsCreateOnlyDeploy?: boolean;
 
   /** Whether bounded operations can temporarily expose an internal database. */
   supportsTemporaryDatabaseAccess?: boolean;
@@ -115,6 +121,8 @@ export interface DeployResult {
 }
 
 export interface JobResult {
+  /** False proves execution stopped before provider mutation; omission is unknown. */
+  mutationAttempted?: boolean;
   jobId: string;
   status: 'running' | 'completed' | 'failed' | 'timeout';
   /** Log tail from the task container. */

@@ -12,29 +12,37 @@ on:
         required: true
         type: string
 
+      force:
+        description: Build another beta even when no iOS inputs changed
+        required: false
+        type: boolean
+        default: false
+
 permissions:
   actions: read
   contents: read
 
 concurrency:
-  group: hypervibe-deploy-@@ENVIRONMENT@@
+  group: @@IOS_CONCURRENCY_GROUP@@
   cancel-in-progress: false
 
 jobs:
-  prepare:
+  eligibility:
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment: @@ENVIRONMENT@@
     outputs:
       sha: ${{ steps.gate.outputs.sha }}
       server_artifact_id: ${{ steps.provenance.outputs.artifact_id }}
       server_run_id: ${{ steps.provenance.outputs.server_run_id }}
-      build_number: ${{ steps.number.outputs.build_number }}
+      should_release: ${{ steps.relevance.outputs.should_release }}
     env:
       HYPERVIBE_ENVIRONMENT: @@ENVIRONMENT_JSON@@
       HYPERVIBE_BUNDLE_ID: @@BUNDLE_ID_JSON@@
       HYPERVIBE_EXPECTED_SERVER_RELEASE: @@EXPECTED_SERVER_RELEASE_JSON@@
+      HYPERVIBE_IOS_BUILD_CONTRACT_FINGERPRINT: @@IOS_BUILD_FINGERPRINT_JSON@@
+      HYPERVIBE_IOS_INPUT_PATHS: @@IOS_INPUT_PATHS_JSON@@
+      HYPERVIBE_IOS_WORKFLOW_PATH: @@IOS_WORKFLOW_PATH_JSON@@
     steps:
       - uses: actions/setup-node@v6
         with:
@@ -62,32 +70,24 @@ jobs:
               run_id: numericRunId,
             });
             const run = runResponse.data;
-            const sha = String(run.head_sha || '').toLowerCase();
-            if (run.conclusion !== 'success' || run.path !== expected.workflowPath || !/^[0-9a-f]{40}$/.test(sha)) {
-              throw new Error('Server release evidence must come from a successful run of ' + expected.workflowPath + ' at a full commit SHA');
+            const workflowSha = String(run.head_sha || '').toLowerCase();
+            if (run.conclusion !== 'success' || run.path !== expected.workflowPath || !/^[0-9a-f]{40}$/.test(workflowSha)) {
+              throw new Error('Server release evidence must come from a successful run of the exact managed server workflow');
             }
-            if (requestedSha && requestedSha.toLowerCase() !== sha) {
-              throw new Error('commit_sha does not match the selected server workflow run');
-            }
-            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              run_id: numericRunId,
-              per_page: 100,
+            const { data } = await github.rest.actions.listWorkflowRunArtifacts({
+              ...context.repo, run_id: numericRunId, per_page: 100,
             });
-            const expectedArtifactName = expected.artifactPrefix + sha;
-            const matchingArtifacts = artifacts.filter((artifact) => (
-              Number.isSafeInteger(artifact.id)
-              && artifact.id > 0
-              && artifact.name === expectedArtifactName
-              && artifact.expired === false
-              && artifact.workflow_run?.id === numericRunId
-              && String(artifact.workflow_run?.head_sha || '').toLowerCase() === sha
+            if (!Array.isArray(data.artifacts) || data.total_count !== data.artifacts.length) throw new Error('Server artifact listing is incomplete');
+            const matchingArtifacts = data.artifacts.filter(artifact => (
+              Number.isSafeInteger(artifact.id) && artifact.id > 0
+              && String(artifact.name).startsWith(expected.artifactPrefix)
+              && /^[0-9a-f]{40}$/.test(artifact.name.slice(expected.artifactPrefix.length))
+              && artifact.expired === false && artifact.workflow_run?.id === numericRunId
+              && String(artifact.workflow_run?.head_sha || '').toLowerCase() === workflowSha
             ));
-            if (matchingArtifacts.length !== 1) {
-              throw new Error('Expected exactly one unexpired ' + expectedArtifactName
-                + ' artifact from server run ' + serverRunId + ', found ' + matchingArtifacts.length);
-            }
+            if (matchingArtifacts.length !== 1) throw new Error('Expected exactly one unexpired server release artifact');
+            const sha = matchingArtifacts[0].name.slice(expected.artifactPrefix.length);
+            if (requestedSha && requestedSha.toLowerCase() !== sha) throw new Error('commit_sha does not match the server release artifact');
             core.setOutput('artifact_id', String(matchingArtifacts[0].id));
             core.setOutput('sha', sha);
             core.setOutput('server_run_id', serverRunId);
@@ -108,6 +108,157 @@ jobs:
           HYPERVIBE_REQUESTED_SHA: ${{ steps.provenance.outputs.sha }}
         run: |
           node -e 'const fs=require("fs"); const evidence=JSON.parse(fs.readFileSync(process.env.HYPERVIBE_SERVER_EVIDENCE_PATH,"utf8")); const expected=JSON.parse(process.env.HYPERVIBE_EXPECTED_SERVER_RELEASE); const exact=(value,keys)=>value&&typeof value==="object"&&!Array.isArray(value)&&JSON.stringify(Object.keys(value).sort())===JSON.stringify([...keys].sort()); const canonical=(value)=>Array.isArray(value)?value.map(canonical):value&&typeof value==="object"?Object.fromEntries(Object.entries(value).sort(([a],[b])=>a.localeCompare(b)).map(([key,child])=>[key,canonical(child)])):value; const same=(left,right)=>JSON.stringify(canonical(left))===JSON.stringify(canonical(right)); if(!exact(evidence,["version","provider","environment","deploymentContractFingerprint","source","target","programFingerprint","verifiedAt"])||evidence.version!==Number(process.env.HYPERVIBE_SERVER_EVIDENCE_VERSION)||evidence.provider!==expected.provider||evidence.environment!==process.env.HYPERVIBE_ENVIRONMENT||evidence.programFingerprint!==expected.programFingerprint||!/^[0-9a-f]{64}$/.test(evidence.deploymentContractFingerprint)||typeof evidence.verifiedAt!=="string"||Number.isNaN(Date.parse(evidence.verifiedAt))) throw new Error("server evidence contract mismatch"); if(!exact(evidence.source,["repository","sha"])||evidence.source.repository!==process.env.GITHUB_REPOSITORY||!/^[0-9a-f]{40}$/i.test(evidence.source.sha)) throw new Error("server evidence repository/SHA mismatch"); if(process.env.HYPERVIBE_REQUESTED_SHA&&evidence.source.sha!==process.env.HYPERVIBE_REQUESTED_SHA) throw new Error("server evidence does not match requested SHA"); if(!exact(evidence.target,["scope","bindingsFingerprint","resources"])||!/^[0-9a-f]{64}$/.test(evidence.target.bindingsFingerprint)||!Array.isArray(evidence.target.resources)||evidence.target.resources.length===0) throw new Error("server evidence target mismatch"); const resources=evidence.target.resources; for(const resource of resources) if(!exact(resource,["logicalName","workloadKind","providerResourceType","providerResourceId","imageUri"])||typeof resource.logicalName!=="string"||!resource.logicalName||typeof resource.providerResourceId!=="string"||!resource.providerResourceId||!(["web","worker","cron"].includes(resource.workloadKind))||!(["service","job"].includes(resource.providerResourceType))||(resource.providerResourceType==="job"&&resource.workloadKind!=="cron")||(resource.imageUri!==null&&!/^[^\s@]+@sha256:[0-9a-f]{64}$/.test(resource.imageUri))) throw new Error("server evidence resource mismatch"); const identities=resources.map(({imageUri,...identity})=>identity); if(evidence.target.bindingsFingerprint!==expected.target.bindingsFingerprint||!same(evidence.target.scope,expected.target.scope)||!same(identities,expected.target.resources)) throw new Error("server evidence does not match the exact reviewed deployment target"); fs.appendFileSync(process.env.GITHUB_OUTPUT, "sha="+evidence.source.sha+"\n");'
+      - name: Verify mobile source contract
+        uses: actions/github-script@v9
+        env:
+          HYPERVIBE_CANDIDATE_SHA: ${{ steps.gate.outputs.sha }}
+          HYPERVIBE_BUILD_CONTRACT_RUNTIME: @@IOS_BUILD_CONTRACT_RUNTIME_JSON@@
+          HYPERVIBE_SERVER_CONTRACT_RUNTIME: @@SERVER_CONTRACT_RUNTIME_JSON@@
+          HYPERVIBE_SERVER_EVIDENCE_PATH: ${{ runner.temp }}/hypervibe-server-evidence/hypervibe-server-release.json
+        with:
+          script: |
+            try {
+              const { data } = await github.rest.repos.getContent({ ...context.repo, path: '.hypervibe/spec.json', ref: process.env.HYPERVIBE_CANDIDATE_SHA });
+              if (data.type !== 'file' || data.encoding !== 'base64' || typeof data.content !== 'string') throw new Error('unknown source');
+              const spec = JSON.parse(Buffer.from(data.content, 'base64').toString('utf8'));
+              const module = {exports: {}};
+              new Function('module', 'require', Buffer.from(process.env.HYPERVIBE_BUILD_CONTRACT_RUNTIME, 'base64').toString('utf8'))(module, require);
+              const fingerprint = module.exports.iosBuildContractFingerprint(spec.environments?.[process.env.HYPERVIBE_ENVIRONMENT]?.ios, spec.runtime);
+              if (fingerprint !== process.env.HYPERVIBE_IOS_BUILD_CONTRACT_FINGERPRINT) throw new Error('different mobile contract');
+              const serverEvidence = JSON.parse(require('fs').readFileSync(process.env.HYPERVIBE_SERVER_EVIDENCE_PATH, 'utf8'));
+              const hashSource = Buffer.from(process.env.HYPERVIBE_SERVER_CONTRACT_RUNTIME, 'base64').toString('utf8');
+              const sourceContract = new Function('spec', 'environmentName', 'createHash', hashSource + '\nreturn deploymentContractFingerprint(spec, environmentName);')(spec, process.env.HYPERVIBE_ENVIRONMENT, require('node:crypto').createHash);
+              if (serverEvidence.deploymentContractFingerprint !== sourceContract) throw new Error('different source deployment contract');
+            } catch {
+              throw new Error('The deployed source mobile configuration cannot be verified against this reviewed workflow. Apply the matching iOS workflow or select matching deployed source before building.');
+            }
+      - name: Find last successful beta
+        id: baseline
+        uses: actions/github-script@v9
+        with:
+          script: |
+            // Incomplete history never proves irrelevance. Successful skipped
+            // runs have no release artifact and must not advance the baseline.
+            try {
+              const runs = [];
+              let complete = false;
+              for (let page = 1; page <= 5; page++) {
+                const { data } = await github.rest.actions.listWorkflowRuns({
+                  ...context.repo, workflow_id: process.env.HYPERVIBE_IOS_WORKFLOW_PATH,
+                  status: 'success', per_page: 100, page,
+                });
+                if (!Array.isArray(data.workflow_runs) || !Number.isSafeInteger(data.total_count)) return;
+                runs.push(...data.workflow_runs);
+                if (runs.length >= data.total_count) { complete = true; break; }
+              }
+              if (!complete || new Set(runs.map(run => run.id)).size !== runs.length || runs.some(run => !Number.isSafeInteger(run.id) || Number.isNaN(Date.parse(run.updated_at)))) return;
+              runs.sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at) || b.id - a.id);
+              const prefix = 'hypervibe-ios-release-@@SAFE_ENVIRONMENT@@-';
+              let inspected = 0;
+              for (const run of runs) {
+                if (String(run.id) === process.env.GITHUB_RUN_ID) continue;
+                if (++inspected > 50) return;
+                if (run.conclusion !== 'success' || run.path !== process.env.HYPERVIBE_IOS_WORKFLOW_PATH || !/^[0-9a-f]{40}$/.test(run.head_sha || '')) return;
+                // Compare the actual workflow revisions, not the mobile source
+                // SHA: a manual run can execute at B while building source A.
+                if (!/^[0-9a-f]{40}$/.test(process.env.GITHUB_WORKFLOW_SHA || '') || !String(process.env.GITHUB_WORKFLOW_REF || '').startsWith(context.repo.owner + '/' + context.repo.repo + '/' + process.env.HYPERVIBE_IOS_WORKFLOW_PATH + '@')) return;
+                const readWorkflow = async ref => {
+                  const { data } = await github.rest.repos.getContent({ ...context.repo, path: process.env.HYPERVIBE_IOS_WORKFLOW_PATH, ref });
+                  if (data.type !== 'file' || data.encoding !== 'base64' || typeof data.content !== 'string') throw new Error('unknown workflow source');
+                  return Buffer.from(data.content, 'base64').toString('utf8');
+                };
+                if (await readWorkflow(run.head_sha) !== await readWorkflow(process.env.GITHUB_WORKFLOW_SHA)) return;
+                const { data } = await github.rest.actions.listWorkflowRunArtifacts({ ...context.repo, run_id: run.id, per_page: 100 });
+                if (!Array.isArray(data.artifacts) || data.total_count !== data.artifacts.length) return;
+                const artifacts = data.artifacts.filter(artifact => String(artifact.name).startsWith(prefix));
+                if (!artifacts.length) {
+                  const { data: jobs } = await github.rest.actions.listJobsForWorkflowRun({...context.repo, run_id: run.id, per_page: 100, filter: 'latest'});
+                  if (!Array.isArray(jobs.jobs) || jobs.total_count !== 4 || jobs.jobs.length !== 4) return;
+                  for (const name of ['eligibility', 'prepare', 'build', 'release']) {
+                    const matches = jobs.jobs.filter(job => job.name === name && job.run_id === run.id && job.status === 'completed');
+                    if (matches.length !== 1 || matches[0].conclusion !== (name === 'eligibility' ? 'success' : 'skipped')) return;
+                  }
+                  continue;
+                }
+                if (artifacts.length !== 1) return;
+                const artifact = artifacts[0];
+                const sha = artifact.name.slice(prefix.length);
+                if (!/^[0-9a-f]{40}$/.test(sha) || !Number.isSafeInteger(artifact.id) || artifact.id <= 0 || artifact.expired !== false || artifact.workflow_run?.id !== run.id || artifact.workflow_run?.head_sha !== run.head_sha) return;
+                core.setOutput('artifact_id', String(artifact.id));
+                core.setOutput('run_id', String(run.id));
+                core.setOutput('sha', sha);
+                return;
+              }
+            } catch {
+              core.info('Previous beta evidence is unavailable; an iOS build is required.');
+            }
+      - name: Download previous beta evidence
+        if: ${{ steps.baseline.outputs.artifact_id != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ steps.baseline.outputs.artifact_id }}
+          path: ${{ runner.temp }}/hypervibe-previous-beta
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.baseline.outputs.run_id }}
+      - name: Determine iOS change relevance
+        id: relevance
+        uses: actions/github-script@v9
+        env:
+          HYPERVIBE_CANDIDATE_SHA: ${{ steps.gate.outputs.sha }}
+          HYPERVIBE_BASELINE_SHA: ${{ steps.baseline.outputs.sha }}
+          HYPERVIBE_BASELINE_PATH: ${{ runner.temp }}/hypervibe-previous-beta/hypervibe-ios-release.json
+        with:
+          script: |
+            core.setOutput('should_release', 'true');
+            if (context.eventName === 'workflow_dispatch' && String(context.payload.inputs.force || '') === 'true') return;
+            try {
+              const evidence = JSON.parse(require('fs').readFileSync(process.env.HYPERVIBE_BASELINE_PATH, 'utf8'));
+              const sha = process.env.HYPERVIBE_CANDIDATE_SHA;
+              const base = process.env.HYPERVIBE_BASELINE_SHA;
+              const repository = context.repo.owner + '/' + context.repo.repo;
+              if (evidence.version !== @@IOS_EVIDENCE_VERSION@@ || evidence.environment !== process.env.HYPERVIBE_ENVIRONMENT
+                || evidence.mobile?.repository !== repository || evidence.mobile?.sha !== base
+                || evidence.mobile?.buildContractFingerprint !== process.env.HYPERVIBE_IOS_BUILD_CONTRACT_FINGERPRINT
+                || evidence.server?.repository !== repository || evidence.server?.sha !== base
+                || evidence.app?.bundleId !== process.env.HYPERVIBE_BUNDLE_ID
+                || typeof evidence.app?.buildId !== 'string' || !evidence.app.buildId
+                || !/^[0-9a-f]{64}$/.test(evidence.app?.ipaSha256 || '')
+                || !/^[0-9a-f]{40}$/.test(base || '') || !/^[0-9a-f]{40}$/.test(sha || '')) return;
+              if (base === sha) { core.setOutput('should_release', 'false'); return; }
+              const { data } = await github.rest.repos.compareCommitsWithBasehead({ ...context.repo, basehead: base + '...' + sha, per_page: 1, page: 1 });
+              // GitHub caps changed files at 300 even with commit pagination.
+              if (data.status !== 'ahead' || data.merge_base_commit?.sha !== base || !Array.isArray(data.files) || data.files.length >= 300) return;
+              const paths = JSON.parse(process.env.HYPERVIBE_IOS_INPUT_PATHS);
+              const relevant = filename => paths.some(input => input === '.' || filename === input || filename.startsWith(input + '/'));
+              for (const file of data.files) {
+                if (!['added', 'removed', 'modified', 'renamed', 'copied', 'changed', 'unchanged'].includes(file.status) || typeof file.filename !== 'string' || !file.filename || (file.status === 'renamed' && typeof file.previous_filename !== 'string')) return;
+                if (relevant(file.filename) || (typeof file.previous_filename === 'string' && relevant(file.previous_filename))) return;
+              }
+              core.setOutput('should_release', 'false');
+              core.info('No iOS build inputs changed since the last successful beta.');
+            } catch {
+              core.info('Change evidence is incomplete; an iOS build is required.');
+            }
+  prepare:
+    needs: eligibility
+    if: ${{ needs.eligibility.outputs.should_release == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: @@ENVIRONMENT@@
+    outputs:
+      sha: ${{ needs.eligibility.outputs.sha }}
+      server_artifact_id: ${{ needs.eligibility.outputs.server_artifact_id }}
+      server_run_id: ${{ needs.eligibility.outputs.server_run_id }}
+      build_number: ${{ steps.number.outputs.build_number }}
+    env:
+      HYPERVIBE_BUNDLE_ID: @@BUNDLE_ID_JSON@@
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '@@MANAGED_NODE_VERSION@@'
+          check-latest: true
       - name: Materialize Hypervibe release runtime
         shell: bash
         env:
@@ -219,9 +370,12 @@ jobs:
       HYPERVIBE_USES_NON_EXEMPT_ENCRYPTION: @@USES_ENCRYPTION_JSON@@
       HYPERVIBE_SUBMIT_BETA_REVIEW: @@SUBMIT_BETA_REVIEW_JSON@@
       HYPERVIBE_RELEASE_SHA: ${{ needs.build.outputs.sha }}
+      HYPERVIBE_SERVER_RUN_ID: ${{ needs.build.outputs.server_run_id }}
       HYPERVIBE_MARKETING_VERSION: ${{ needs.build.outputs.marketing_version }}
       HYPERVIBE_BUILD_NUMBER: ${{ needs.build.outputs.build_number }}
       HYPERVIBE_EXPECTED_IPA_SHA256: ${{ needs.build.outputs.ipa_sha256 }}
+      HYPERVIBE_IOS_BUILD_CONTRACT_FINGERPRINT: @@IOS_BUILD_FINGERPRINT_JSON@@
+      HYPERVIBE_IOS_EVIDENCE_VERSION: "@@IOS_EVIDENCE_VERSION@@"
       HYPERVIBE_SERVER_EVIDENCE_VERSION: "@@SERVER_EVIDENCE_VERSION@@"
     steps:
       - uses: actions/setup-node@v6

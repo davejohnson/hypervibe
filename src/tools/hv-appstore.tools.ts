@@ -1,18 +1,15 @@
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import type { CommandContext } from '../application/context.js';
-import { commandSuccess, commandError, wrapCommandHandler, HvError, describeError } from '../application/results.js';
+import { commandSuccess, wrapCommandHandler, HvError, describeError } from '../application/results.js';
 import {
   getAppStoreConnectAdapter,
   summarizeBuild,
 } from '../domain/services/appstore-ops.service.js';
 import { connectionSetupOptions, formatConnectionGuidance } from '../domain/services/connection-guidance.js';
-import { SpecStore } from '../domain/spec/spec.store.js';
-import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
-import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
-import { managedCiReleaseArtifactPrefix } from '../domain/services/managed-ci-evidence.js';
 import { projectField } from './schemas.js';
 import { ignoredOptionWarnings } from '../application/command-options.js';
+import { submitAppStoreRelease } from '../application/appstore-submit.js';
 
 type ConnectedAppStoreAdapter = Extract<
   ReturnType<typeof getAppStoreConnectAdapter>,
@@ -179,165 +176,18 @@ export function registerHvAppstoreTools(commands: CommandRegistrar, ctx: Command
 
   commands.register(
     'hv_appstore_submit',
-    'Submit an app version for App Store review only after the latest managed server deploy and iOS release workflows succeeded for the same Git commit. The app must have a PREPARE_FOR_SUBMISSION version with a build attached.',
+    'Preview and explicitly confirm promotion of an exact tested TestFlight build to App Store review. Verifies manifest contents, compatible deployed server evidence, and the attached Apple build. An optional ios.release.promoteFrom selects the beta environment; confirmation preserves the exact selected runs and release fingerprint.',
     {
       project: projectField,
-      environment: z.string().min(1).describe('Desired environment whose server/mobile release evidence gates submission'),
+      environment: z.string().min(1).describe('Target environment whose deployed server gates submission'),
       appIdentifier: z.string().describe('App bundle identifier (e.g. com.example.myapp)'),
       platform: platformField,
+      iosRunId: z.string().regex(/^[1-9][0-9]*$/).optional().describe('Exact successful beta workflow run. Omit for a preview of the latest available release.'),
+      serverRunId: z.string().regex(/^[1-9][0-9]*$/).optional().describe('Exact successful target server run. Omit for a preview of the latest available release.'),
+      releaseFingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional().describe('Exact release fingerprint returned by the preview'),
+      confirm: z.boolean().optional().describe('Approve the exact previewed build and run selection for App Store review'),
     },
-    wrapCommandHandler(async ({ project: projectRef, environment: environmentName, appIdentifier, platform }) => {
-      const resolvedPlatform = platform ?? 'IOS';
-      const project = ctx.resolveProjectOrThrow({ project: projectRef });
-      const stored = new SpecStore().get(project);
-      if (!stored) {
-        return commandError('NOT_FOUND', `Project "${project.name}" has no desired-state spec.`);
-      }
-      const environmentSpec = stored.spec.environments[environmentName];
-      if (!environmentSpec?.ios?.release || environmentSpec.ios.bundleId !== appIdentifier) {
-        return commandError(
-          'VALIDATION',
-          `Environment "${environmentName}" does not declare ios.release for ${appIdentifier}.`,
-          { hint: 'Declare the release under environments.<name>.ios.release and converge it with hv_plan/hv_apply.' }
-        );
-      }
-      const repository = parseGitHubRepoFromRemote(stored.spec.gitRemoteUrl ?? project.gitRemoteUrl);
-      if (!repository) {
-        return commandError('VALIDATION', 'The project has no valid GitHub repository for release evidence.');
-      }
-      const [owner, repo] = repository?.split('/') ?? [];
-      if (!owner || !repo) {
-        return commandError('VALIDATION', 'The project has no valid GitHub repository for release evidence.');
-      }
-      const github = getGitHubAdapter(repository);
-      if ('error' in github) {
-        return commandError('MISSING_CONNECTION', github.error, {
-          ...connectionSetupOptions('github', { project: project.name, scope: repository }),
-        });
-      }
-      const safeEnvironment = environmentName.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
-      const serverWorkflow = `deploy-${environmentSpec.hosting.provider}-${safeEnvironment}.yml`;
-      const iosWorkflow = `hypervibe-ios-release-${safeEnvironment}.yml`;
-      let serverRuns;
-      let iosRuns;
-      let artifacts;
-      try {
-        [serverRuns, iosRuns, artifacts] = await Promise.all([
-          github.adapter.listWorkflowRuns(owner, repo, serverWorkflow, { status: 'completed', per_page: 20 }),
-          github.adapter.listWorkflowRuns(owner, repo, iosWorkflow, { status: 'completed', per_page: 20 }),
-          github.adapter.listArtifacts(owner, repo, 100),
-        ]);
-      } catch (error) {
-        return commandError('PROVIDER_ERROR', `Could not verify managed release workflows: ${describeError(error)}`, {
-          hint: 'Inspect the workflows through hv_ci_status, then retry after both runs succeed.',
-        });
-      }
-      const successfulServerRuns = new Set(
-        serverRuns.workflow_runs.filter((run) => run.conclusion === 'success').map((run) => run.id)
-      );
-      const successfulIosRuns = new Set(
-        iosRuns.workflow_runs.filter((run) => run.conclusion === 'success').map((run) => run.id)
-      );
-      const serverPrefix = managedCiReleaseArtifactPrefix(environmentName);
-      const iosPrefix = `hypervibe-ios-release-${safeEnvironment}-`;
-      const matchingArtifacts = (prefix: string, runIds: Set<number>) => artifacts.artifacts
-        .filter((artifact) =>
-          !artifact.expired
-          && artifact.name.startsWith(prefix)
-          && artifact.workflow_run
-          && runIds.has(artifact.workflow_run.id)
-        )
-        .sort((left, right) => right.created_at.localeCompare(left.created_at));
-      const latestServerArtifact = matchingArtifacts(serverPrefix, successfulServerRuns)[0];
-      const latestIosArtifact = matchingArtifacts(iosPrefix, successfulIosRuns)[0];
-      const serverSha = latestServerArtifact?.name.slice(serverPrefix.length);
-      const iosSha = latestIosArtifact?.name.slice(iosPrefix.length);
-      const validSha = (value: string | undefined): value is string =>
-        Boolean(value && /^[0-9a-f]{40}$/i.test(value));
-      if (!validSha(serverSha) || !validSha(iosSha) || serverSha !== iosSha) {
-        return commandError('VALIDATION', 'App Store submission is blocked by mismatched or missing release evidence.', {
-          details: {
-            environment: environmentName,
-            server: latestServerArtifact
-              ? {
-                runId: latestServerArtifact.workflow_run?.id,
-                artifactId: latestServerArtifact.id,
-                sha: serverSha,
-              }
-              : null,
-            mobile: latestIosArtifact
-              ? {
-                runId: latestIosArtifact.workflow_run?.id,
-                artifactId: latestIosArtifact.id,
-                sha: iosSha,
-              }
-              : null,
-          },
-          hint: 'Run the managed server deploy and iOS release workflows for the same commit, verify them with hv_ci_status, then retry.',
-        });
-      }
-      const adapter = adapterOrThrow(appIdentifier, project.name);
-
-      const app = await adapter.findAppByBundleId(appIdentifier);
-      if (!app) {
-        return commandError('NOT_FOUND', `App not found for bundle ID: ${appIdentifier}.`, {
-          hint: 'Create the app in App Store Connect first.',
-        });
-      }
-
-      const version = await adapter.getEditableAppStoreVersion(app.id, resolvedPlatform);
-      if (!version) {
-        const versions = await adapter.listAppStoreVersions(app.id, { platform: resolvedPlatform, limit: 5 });
-        return commandError('VALIDATION', 'No version ready for submission. Create a new version in App Store Connect with state PREPARE_FOR_SUBMISSION.', {
-          details: { currentVersions: versions.map((v) => ({ version: v.versionString, state: v.appStoreState, platform: v.platform })) },
-        });
-      }
-
-      const build = await adapter.getAppStoreVersionBuild(version.id);
-      if (!build) {
-        return commandError('VALIDATION', `Version ${version.versionString} has no build attached. Select a build in App Store Connect first.`, {
-          details: { version: { versionString: version.versionString, state: version.appStoreState } },
-          hint: 'Run the managed iOS release workflow declared by ios.release, then attach the processed build to the version.',
-        });
-      }
-
-      const { reviewSubmission, reusedExistingSubmission } = await adapter.submitForReview({
-        appId: app.id,
-        appStoreVersionId: version.id,
-        platform: version.platform,
-      });
-      ctx.repos.audit.create({
-        action: 'appstore.submit',
-        resourceType: 'appstore',
-        resourceId: app.id,
-        details: {
-          appIdentifier,
-          environment: environmentName,
-          releaseSha: iosSha,
-          serverRunId: latestServerArtifact.workflow_run?.id,
-          iosRunId: latestIosArtifact.workflow_run?.id,
-          version: version.versionString,
-          buildNumber: build.version,
-          reviewSubmissionId: reviewSubmission.id,
-        },
-      });
-
-      return commandSuccess({
-        message: 'App submitted for App Store review',
-        app,
-        version: { id: version.id, versionString: version.versionString, previousState: version.appStoreState },
-        build: { id: build.id, buildNumber: build.version },
-        reviewSubmission: { id: reviewSubmission.id, state: reviewSubmission.state, reusedExistingSubmission },
-        releaseGate: {
-          environment: environmentName,
-          sha: iosSha,
-          serverRunId: latestServerArtifact.workflow_run?.id,
-          iosRunId: latestIosArtifact.workflow_run?.id,
-          serverArtifactId: latestServerArtifact.id,
-          iosArtifactId: latestIosArtifact.id,
-        },
-      });
-    })
+    wrapCommandHandler((input) => submitAppStoreRelease(ctx, input))
   );
 
 }

@@ -182,6 +182,10 @@ const databaseRestoreDrillSchema = z.object({
 }).strict();
 
 const databaseResilienceSchema = z.object({
+  /** Named one-use provider snapshot; removing intent never deletes its backup. */
+  checkpoint: z.object({
+    id: z.string().min(1).max(63).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'checkpoint id must be a lowercase slug'),
+  }).strict().optional(),
   /** Zonal uses one zone; regional provisions a synchronous standby. */
   availability: z.enum(['zonal', 'regional']).optional(),
   /** Provider-managed backups and point-in-time recovery retention. */
@@ -255,6 +259,15 @@ export const deploySpecSchema = z.object({
   autoDeploy: z.boolean().optional(),
   /** Environment whose verified exact-SHA release is required before this manual deployment. */
   promoteFrom: z.string().min(1).optional(),
+  /** Same-repository reusable full-test workflow required before promotion. */
+  promotionTests: z.object({
+    workflow: z.string().regex(
+      /^\.github\/workflows\/[A-Za-z0-9_-]+\.ya?ml$/,
+      'promotionTests.workflow must be a literal .github/workflows/filename.yml or .yaml path'
+    ),
+    /** Forward NODE_AUTH_TOKEN only when the test workflow installs private packages. */
+    packageReadToken: z.boolean().optional(),
+  }).strict().optional(),
 }).strict();
 
 export function effectiveBranchCiAutoDeploy(
@@ -495,11 +508,55 @@ export const githubCodeAuditAutomationSpecSchema = z.object({
   }).strict().default({}),
 }).strict();
 
+const githubTaskTextSchema = z.string().max(2_048).refine(
+  (value) => !/[\u0000-\u001f\u007f-\u009f]|\$\{\{/.test(value),
+  'environment-task values cannot contain control characters or GitHub expressions'
+);
+
+const githubTaskInputFields = {
+  flag: z.string().regex(/^--[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/, 'task flags must be lowercase long options'),
+  description: githubTaskTextSchema.refine((value) => value.length > 0, 'task input description is required'),
+  required: z.boolean().optional(),
+};
+
+export const githubEnvironmentTaskInputSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('string'),
+    ...githubTaskInputFields,
+    default: githubTaskTextSchema.default(''),
+  }).strict(),
+  z.object({
+    type: z.literal('boolean'),
+    ...githubTaskInputFields,
+    default: z.boolean().default(false),
+  }).strict(),
+]);
+
+export const githubEnvironmentTaskAutomationSpecSchema = z.object({
+  kind: z.literal('environment-task'),
+  enabled: z.boolean().default(true),
+  environment: githubTaskTextSchema.refine((value) => value.length > 0, 'task environment is required'),
+  service: githubTaskTextSchema.refine((value) => value.length > 0, 'task service is required'),
+  /** Fixed argv reviewed in desired state, never a shell command or dispatch input. */
+  command: z.array(githubTaskTextSchema.refine((value) => value.length > 0, 'task arguments cannot be empty')).min(1).max(16),
+  inputs: z.record(
+    z.string().regex(/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/, 'task input ids must use lowercase snake_case'),
+    githubEnvironmentTaskInputSchema
+  ).refine((inputs) => Object.keys(inputs).length <= 10, 'environment-task supports at most 10 inputs').default({}),
+  /** Only this bounded machine receipt can be exposed; task logs stay private. */
+  receiptPrefix: z.string().regex(/^[A-Z_][A-Z0-9_]{0,79}:$/, 'task receipt prefix must be an uppercase marker ending in a colon').optional(),
+  /** Reviewed numeric field names; arbitrary application output cannot supply labels. */
+  receiptCountKeys: z.array(z.string().regex(/^[a-z][A-Za-z0-9_]{0,63}$/, 'task receipt count keys must be identifiers'))
+    .max(32).refine((keys) => new Set(keys).size === keys.length, 'task receipt count keys must be unique')
+    .default(['applied', 'skipped']),
+}).strict();
+
 export const githubAutomationSpecSchema = z.discriminatedUnion('kind', [
   githubCheckAutomationSpecSchema,
   githubAutofixAutomationSpecSchema,
   githubPullRequestReviewAutomationSpecSchema,
   githubCodeAuditAutomationSpecSchema,
+  githubEnvironmentTaskAutomationSpecSchema,
 ]);
 
 const githubCollaborationSpecSchema = z.object({
@@ -605,6 +662,24 @@ export const githubSpecSchema = z.object({
   }).strict().default({}),
 }).strict().superRefine((github, ctx) => {
   for (const [id, automation] of Object.entries(github.actions)) {
+    if (automation.kind === 'environment-task') {
+      if (automation.receiptPrefix && (!automation.receiptCountKeys.includes('applied') || !automation.receiptCountKeys.includes('skipped'))) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'task application receipts require applied and skipped count keys',
+          path: ['actions', id, 'receiptCountKeys'],
+        });
+      }
+      const flags = new Set<string>();
+      for (const [inputId, input] of Object.entries(automation.inputs)) {
+        if (flags.has(input.flag)) ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'environment-task input flags must be unique',
+          path: ['actions', id, 'inputs', inputId, 'flag'],
+        });
+        flags.add(input.flag);
+      }
+    }
     if (automation.kind === 'check') {
       const triggers = automation.triggers;
       if (!triggers.manual && !triggers.pullRequest && triggers.push.length === 0 && !triggers.schedule) {
@@ -882,6 +957,44 @@ const repositoryRelativePathSchema = z.string().min(1).refine(
   'must be a repository-relative path without parent-directory traversal'
 );
 
+/** Literal tracked inputs, never shell globs or paths outside the repository. */
+const releaseInputPathSchema = repositoryRelativePathSchema.refine(
+  (value) => value === '.' || (/^[A-Za-z0-9_.@/-]+$/.test(value)
+    && !value.split('/').some((part) => part === '' || part === '.' || part === '..')),
+  'must be a literal repository-relative file or directory, without globs'
+);
+const releaseCommandSchema = z.string().trim().min(1).refine(
+  value => !value.includes('${{'), 'release command cannot contain GitHub expression interpolation'
+);
+
+export const apiReleaseSpecSchema = z.object({
+  service: z.string().min(1),
+  versions: z.record(z.string().regex(/^v[1-9][0-9]*$/), z.object({
+    path: z.string().regex(/^\/v[1-9][0-9]*$/, 'API routes must use an explicit major version such as /v1'),
+    contract: releaseInputPathSchema.refine(value => value.endsWith('.json'), 'API contracts must be self-contained JSON files'),
+    status: z.enum(['supported', 'deprecated', 'retired']).default('supported'),
+    retirement: z.object({ id: z.string().trim().min(1).max(100), reason: z.string().trim().min(1).max(500) }).strict().optional(),
+  }).strict()).refine(value => Object.keys(value).length > 0 && Object.keys(value).length <= 32, 'declare between 1 and 32 API versions'),
+  consumers: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), z.object({
+    versions: z.array(z.string().regex(/^v[1-9][0-9]*$/)).min(1),
+  }).strict()).default({}),
+  compatibility: z.object({
+    command: releaseCommandSchema,
+    workingDirectory: releaseInputPathSchema.default('.'),
+    installCommand: releaseCommandSchema.optional(),
+  }).strict(),
+}).strict().superRefine((api, ctx) => {
+  for (const [name, version] of Object.entries(api.versions)) {
+    if (version.path !== '/' + name) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'API path must match its version name', path: ['versions', name, 'path'] });
+    if ((version.status === 'retired') !== Boolean(version.retirement)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Only retired API versions require an explicit retirement id and reason', path: ['versions', name, 'retirement'] });
+  }
+  for (const [name, consumer] of Object.entries(api.consumers)) {
+    for (const version of consumer.versions) {
+      if (!api.versions[version] || api.versions[version].status === 'retired') ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'API consumers must name supported or deprecated versions', path: ['consumers', name, 'versions'] });
+    }
+  }
+});
+
 export const iosReleaseSigningSpecSchema = z.discriminatedUnion('provider', [
   z.object({
     /** The project build command owns signing and explicitly names any secrets it needs. */
@@ -913,8 +1026,12 @@ export const iosReleaseSpecSchema = z.object({
   /** Server services whose successful deployment evidence gates this mobile release. */
   services: z.array(z.string().min(1)).min(1),
   trigger: z.enum(['manual', 'after-server-deploy']).default('after-server-deploy'),
+  /** Promote an already tested binary from this environment; never rebuild it for submission. */
+  promoteFrom: z.string().min(1).optional(),
+  apiVersion: z.string().regex(/^v[1-9][0-9]*$/).optional(),
   build: z.object({
     workingDirectory: repositoryRelativePathSchema.default('.'),
+    inputs: z.array(releaseInputPathSchema).min(1).optional(),
     command: z.string().min(1).refine(
       (value) => !value.includes('${{'),
       'build command cannot contain GitHub expression interpolation'
@@ -1026,7 +1143,11 @@ export const storageSpecSchema = z.object({
   region: z.string().min(1),
   /** Services that receive this bucket's generated runtime variables. */
   injectInto: z.array(z.string().min(1)),
+  /** A retained backup destination is never wired into application services. */
+  purpose: z.literal('backup').optional(),
 }).strict().superRefine((storage, ctx) => {
+  if (storage.purpose === 'backup' && storage.injectInto.length) ctx.addIssue({ code: z.ZodIssueCode.custom,
+    path: ['injectInto'], message: 'Backup storage cannot be injected into application services.' });
   const railwayRegions = ['sjc', 'iad', 'ams', 'sin'];
   if (storage.provider === 'railway' && !railwayRegions.includes(storage.region)) {
     ctx.addIssue({
@@ -1457,6 +1578,17 @@ export const environmentSpecSchema = z.object({
   }).strict(),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),
+  /** Omission resolves to daily protection without changing legacy spec hashes. */
+  backups: z.discriminatedUnion('mode', [
+    z.object({ mode: z.literal('daily'),
+      destination: z.string().regex(/^[a-z][a-z0-9-]{0,60}$/).optional(),
+      /** Published Hypervibe helper artifact; a mutable tag cannot authorize recovery work. */
+      runnerImage: z.string().regex(/^[^@\s]+@sha256:[a-f0-9]{64}$/).optional(),
+      fileReferenceQueries: z.array(z.object({ storageName: z.string().regex(/^[a-z][a-z0-9-]{0,60}$/),
+        query: z.string().trim().min(1).max(16000) }).strict()).max(32).optional(),
+    }).strict(),
+    z.object({ mode: z.literal('disabled'), reason: z.string().trim().min(1).max(500) }).strict(),
+  ]).optional(),
   cache: cacheSpecSchema.optional(),
   domain: z.string().min(1).optional(),
   /** Whether Cloudflare proxies the custom-domain traffic record. Disable temporarily when origin certificate validation is stuck. */
@@ -1483,6 +1615,7 @@ export const environmentSpecSchema = z.object({
   deploy: deploySpecSchema.optional(),
   migrations: migrationsSpecSchema.optional(),
   ios: iosSpecSchema.optional(),
+  api: apiReleaseSpecSchema.optional(),
   queues: z.record(
     z.string().regex(/^[a-z][a-z0-9-]{0,60}$/, 'queue names: lowercase alphanumeric and dashes, starting with a letter'),
     queueSpecSchema
@@ -1497,6 +1630,18 @@ export const environmentSpecSchema = z.object({
   /** Kept only to produce an actionable migration error for old specs. */
   autofix: z.unknown().optional(),
 }).strict().superRefine((environment, ctx) => {
+  if (environment.backups?.mode === 'daily') {
+    const destination = environment.backups.destination;
+    if (destination && environment.storage?.[destination]?.purpose !== 'backup') ctx.addIssue({ code: z.ZodIssueCode.custom,
+      path: ['backups', 'destination'], message: 'The backup destination must name separate storage declared with purpose="backup".' });
+    const seen = new Set<string>();
+    for (const [index, reference] of (environment.backups.fileReferenceQueries ?? []).entries()) {
+      if (seen.has(reference.storageName) || !environment.database || !environment.storage?.[reference.storageName]
+        || environment.storage[reference.storageName].purpose === 'backup') ctx.addIssue({ code: z.ZodIssueCode.custom,
+        path: ['backups', 'fileReferenceQueries', index], message: 'Each file reference query requires a database and a unique application storage source.' });
+      seen.add(reference.storageName);
+    }
+  }
   if (environment.autofix !== undefined) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -1754,6 +1899,14 @@ export const environmentSpecSchema = z.object({
         });
       }
     }
+  }
+  if (environment.api) {
+    if (environment.services[environment.api.service]?.workloadKind !== 'web') ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'api.service must name a declared web service', path: ['api', 'service'] });
+    if (environment.deploy?.strategy !== 'branch' || environment.deploy.trigger === 'native') ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'API release protection requires managed branch CI', path: ['api'] });
+    const apiVersion = environment.ios?.release?.apiVersion;
+    if (environment.ios?.release && (!apiVersion || !environment.api.versions[apiVersion] || environment.api.versions[apiVersion].status === 'retired')) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'iOS releases must declare a supported apiVersion when API protection is enabled', path: ['ios', 'release', 'apiVersion'] });
+  } else if (environment.ios?.release?.apiVersion) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'ios.release.apiVersion requires an API policy', path: ['ios', 'release', 'apiVersion'] });
   }
   if (environment.ios?.release) {
     for (const [index, serviceName] of environment.ios.release.services.entries()) {
@@ -2051,6 +2204,40 @@ export const projectSpecSchema = z.object({
   ).default({}),
   environments: z.record(z.string().min(1), environmentSpecSchema),
 }).strict().superRefine((spec, ctx) => {
+  for (const [id, automation] of Object.entries(spec.github?.actions ?? {})) {
+    if (automation.kind !== 'environment-task') continue;
+    const target = Object.hasOwn(spec.environments, automation.environment)
+      ? spec.environments[automation.environment] : undefined;
+    if (!target) ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'environment-task must name a declared environment',
+      path: ['github', 'actions', id, 'environment'],
+    });
+    else if (!Object.hasOwn(target.services, automation.service)) ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'environment-task must name a declared service in its target environment',
+      path: ['github', 'actions', id, 'service'],
+    });
+  }
+  const githubActions = spec.devops
+    ? spec.devops.code.provider === 'github' && spec.devops.ci?.provider === 'github-actions'
+    : Boolean(spec.github?.repository || /github\.com[:/]/.test(spec.gitRemoteUrl ?? ''));
+  for (const [environmentName, environment] of Object.entries(spec.environments)) {
+    if (environment.api) {
+      if (!githubActions) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'API release protection currently requires GitHub Actions; other release paths cannot verify its evidence', path: ['environments', environmentName, 'api'] });
+      if (!spec.runtime) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'API compatibility checks require an explicit project runtime', path: ['runtime'] });
+    }
+    const release = environment.ios?.release;
+    if (!release?.promoteFrom) continue;
+    const source = spec.environments[release.promoteFrom]?.ios;
+    const issue = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message, path: ['environments', environmentName, 'ios', 'release', 'promoteFrom'] });
+    if (release.promoteFrom === environmentName || !source?.release || source.release.promoteFrom) issue('iOS promotion must name a different beta-building environment, without promotion chains');
+    if (release.trigger !== 'manual') issue('iOS promotion targets require trigger="manual"');
+    if (source && (source.bundleId !== environment.ios!.bundleId || source.platform !== environment.ios!.platform)) issue('iOS promotion requires the same bundle ID and platform');
+    if (source?.release && (JSON.stringify(source.release.build) !== JSON.stringify(release.build)
+      || JSON.stringify(source.release.signing) !== JSON.stringify(release.signing)
+      || source.release.apiVersion !== release.apiVersion)) issue('iOS promotion requires identical build, signing, and API version settings for the tested binary');
+  }
   const promotionIssuePath = (environmentName: string): Array<string | number> => (
     ['environments', environmentName, 'deploy', 'promoteFrom']
   );
@@ -2061,6 +2248,15 @@ export const projectSpecSchema = z.object({
 
   for (const [targetName, target] of Object.entries(spec.environments)) {
     const sourceName = target.deploy?.promoteFrom;
+    if (target.deploy?.promotionTests) {
+      if (!sourceName || !githubActions) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'deploy.promotionTests requires explicit deploy.promoteFrom and GitHub Actions',
+          path: ['environments', targetName, 'deploy', 'promotionTests'],
+        });
+      }
+    }
     if (!sourceName) continue;
     if (sourceName === targetName) {
       ctx.addIssue({
@@ -2482,8 +2678,12 @@ export type ProjectSecretSpec = z.infer<typeof projectSecretSpecSchema>;
 export type CollaborationSpec = z.infer<typeof collaborationSpecSchema>;
 export type GitHubScheduleSpec = z.infer<typeof githubScheduleSpecSchema>;
 export type GitHubAutomationSpec = z.infer<typeof githubAutomationSpecSchema>;
+export type GitHubEnvironmentTaskAutomationSpec = z.infer<typeof githubEnvironmentTaskAutomationSpecSchema>;
+export type GitHubEnvironmentTaskInputSpec = z.infer<typeof githubEnvironmentTaskInputSchema>;
 export type GitHubPagesSpec = z.infer<typeof githubPagesSpecSchema>;
 export type GitHubSpec = z.infer<typeof githubSpecSchema>;
 export type DevOpsSpec = z.infer<typeof devopsSpecSchema>;
 export type EnvironmentSpec = z.infer<typeof environmentSpecSchema>;
 export type ProjectSpec = z.infer<typeof projectSpecSchema>;
+
+export type ApiReleaseSpec = z.infer<typeof apiReleaseSpecSchema>;

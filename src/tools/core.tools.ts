@@ -1,3 +1,9 @@
+import { planApiPolicy } from '../domain/services/api-policy.js';
+import { adapterFactory } from '../domain/services/adapter.factory.js';
+import { observeBackupPolicy, resolveBackupPolicies } from '../domain/services/backup-policy.service.js';
+import { planBackupPolicy } from '../domain/services/backup-policy-plan.service.js';
+import { observeBackupHealth } from '../domain/services/backup-health.service.js';
+import { assessBackupReadiness, backupEvidenceSummary } from '../domain/services/backup-readiness.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
@@ -585,6 +591,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           revision: result.revision,
           specSource: result.source ?? { kind: 'local' },
           spec: result.spec,
+          backupPolicies: resolveBackupPolicies(result.spec, ctx.repos.environments.findByProjectId(project.id),
+            ctx.repos.environments.findByProjectId(project.id).flatMap(environment => ctx.repos.components.findByEnvironmentId(environment.id))),
           repositoryRuntime,
           runtimeReview,
           connections: requiredConnectionChecklist(ctx, result.spec),
@@ -723,6 +731,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           environmentEnvFiles: result.environmentEnvFiles ?? [],
           localEnv: localEnv ?? null,
           spec: result.spec,
+          backupPolicies: resolveBackupPolicies(result.spec, ctx.repos.environments.findByProjectId(project.id),
+            ctx.repos.environments.findByProjectId(project.id).flatMap(environment => ctx.repos.components.findByEnvironmentId(environment.id))),
           repositoryRuntime,
           runtimeReview,
           environmentVariableCoverage: coverageReport,
@@ -874,7 +884,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           ? `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. Hypervibe prepared ${localEnv!.path}; fill those values there, then re-run hv_plan with secretRefs=${JSON.stringify(delegatedSecretRefs)}. Do not paste raw values into chat.`
           : `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. If the value and provider access are available on this Mac, re-run hv_plan with secretRefs mapping each key to env:, dotenv:, file:, or a secret-manager reference. Otherwise prepare a value-free handoff naming the key, environment, and principal for the project owner; the value can be transferred through their agreed external channel or shared secret manager. Do not paste raw values into chat.`;
       } else if (pending.length === 0) {
-        hint = 'Everything is in sync — nothing to apply.';
+        hint = result.backupCoverage && !result.backupCoverage.complete
+          ? 'No executable changes are available, but daily backup coverage has gaps. Review backupCoverage; unsupported protection requires an adapter implementation and unknown protection requires a verified provider observation.'
+          : 'Everything is in sync — nothing to apply.';
       } else if (softActionScopedBlocked.length > 0) {
         hint = connectionRecoveryHint(softActionScopedBlocked, {
           project: project.name,
@@ -903,6 +915,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           ...(result.domainSecurity ? { domainSecurity: result.domainSecurity } : {}),
           ...(result.webhookReadiness ? { webhookReadiness: result.webhookReadiness } : {}),
           scope: result.scope,
+          ...(result.backupCoverage ? { backupCoverage: result.backupCoverage } : {}),
+          ...(result.backupReadiness ? { backupReadiness: result.backupReadiness } : {}),
           ...(result.emailSenderReadiness ? { emailSenderReadiness: result.emailSenderReadiness } : {}),
           environment: result.environmentName,
           ...(plannedEnvironmentSpec && managedDatabaseContract(plannedEnvironmentSpec)
@@ -1001,9 +1015,17 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       }
 
       const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+      const apiPolicy = planApiPolicy(envName, environment?.platformBindings.apiPolicy, envSpec.api);
       const projectForStatus = projectWithSpecGitRemoteUrl(project, specResult.spec);
       const { observed, warnings } = await planService.observeEnvironment(projectForStatus, environment, envSpec);
       const local = planService.buildLocalSnapshot(projectForStatus, environment);
+      const backupCoverage = await observeBackupPolicy({ spec: envSpec, environment, components: local.components,
+        project: projectForStatus, adapterFactory });
+      const backupHealth = await observeBackupHealth({ spec: envSpec, environment, components: local.components,
+        project: projectForStatus, adapterFactory });
+      const backupReadiness = assessBackupReadiness(backupCoverage, backupHealth);
+      const backupPolicy = planBackupPolicy(backupCoverage, { explicitDatabaseBackups: Boolean(envSpec.database?.resilience?.backups),
+        attempts: environment?.platformBindings.backupPolicyAttempts });
       const managedDatabaseEnvVars = buildManagedDatabaseEnvVars(
         envSpec.database,
         local.components
@@ -1186,7 +1208,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         observed,
       });
       const restartRequired = restartRequirements.length > 0;
-      const hasConfigurationDrift = maintenanceDrift.length > 0
+      const hasConfigurationDrift = Boolean(apiPolicy.action || apiPolicy.error)
+        || !backupPolicy.complete
+        || !backupReadiness.ready
+        || maintenanceDrift.length > 0
         || nativeDeploySourceDrift.length > 0
         || drift.length > 0
         || cacheDrift.length > 0
@@ -1252,6 +1277,19 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             }
             : {}),
           inSync: !observationIncomplete && !hasConfigurationDrift && !restartRequired,
+          backupCoverage: { ...backupCoverage, complete: backupPolicy.complete,
+            ...backupEvidenceSummary(backupReadiness) },
+          backupHealth,
+          backupReadiness,
+          ...((envSpec.api || environment?.platformBindings.apiPolicy !== undefined) ? {
+            apiReleasePolicy: {
+              status: apiPolicy.error ? 'blocked' : apiPolicy.action ? 'drift' : 'configured',
+              ...(apiPolicy.error ? { reason: apiPolicy.error } : {}),
+              ...(apiPolicy.action ? { action: apiPolicy.action } : {}),
+              versions: Object.fromEntries(Object.entries(envSpec.api?.versions ?? {}).map(([name, value]) => [name, { path: value.path, status: value.status }])),
+              applicationBehavior: 'Verified only by the declared compatibility tests during managed releases.',
+            },
+          } : {}),
           ...(domainSecurity ? { domainSecurity } : {}),
           ...(webhookReadiness ? { webhookReadiness } : {}),
           ...(email.senderReadiness ? { emailSenderReadiness: email.senderReadiness } : {}),
@@ -1270,8 +1308,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
                 },
               }
             : {}),
-          summary: summarizeActions([...maintenance.actions, ...nativeDeploySources.actions, ...diff.actions, ...cache.actions, ...databaseResilience.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...email.actions, ...messaging.actions]),
-          drift: [...maintenanceDrift, ...nativeDeploySourceDrift, ...drift, ...cacheDrift, ...databaseResilienceDrift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift, ...messagingDrift],
+          summary: summarizeActions([...(apiPolicy.action ? [apiPolicy.action] : []), ...maintenance.actions, ...nativeDeploySources.actions, ...diff.actions, ...cache.actions, ...databaseResilience.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...email.actions, ...messaging.actions]),
+          drift: [...(apiPolicy.action ? [apiPolicy.action] : []), ...maintenanceDrift, ...nativeDeploySourceDrift, ...drift, ...cacheDrift, ...databaseResilienceDrift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift, ...messagingDrift],
           unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged],
           ...(envSpec.database?.resilience
             ? {
@@ -1301,7 +1339,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           },
         },
         {
-          warnings: [...warnings, ...maintenance.warnings, ...nativeDeploySources.warnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings],
+          warnings: [...warnings, ...backupPolicy.warnings, ...maintenance.warnings, ...nativeDeploySources.warnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings],
           hint: blocked.length > 0
             ? connectionRecoveryHint(blocked, {
               project: project.name,
@@ -1317,7 +1355,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
               : delegatedSecrets.blockers.length > 0
                 ? `Resolve the managed-secret safety block before planning: ${delegatedSecrets.blockers.map((entry) => entry.reason).join('; ')}.`
               : hasConfigurationDrift
-                ? 'Run hv_plan to get an executable plan for this drift.'
+                ? !backupPolicy.complete && backupPolicy.actions.length === 0
+                  ? 'Daily backup coverage has gaps. Review backupCoverage for unsupported or unknown resources; no schedule write is authorized for those gaps.'
+                  : 'Run hv_plan to get an executable plan for this drift.'
                 : restartRequired
                   ? deployStrategy === 'branch' && deployTrigger === 'ci'
                     ? `Runtime configuration is attached, but ${restartRequirements.map((entry) => entry.service).join(', ')} still ${restartRequirements.length === 1 ? 'runs' : 'run'} a deployment from before the change. Trigger the managed CI deployment${stringField(ciWorkflow, 'path') ? ` (${stringField(ciWorkflow, 'path')})` : ''} with hv_ci_trigger, inspect it with hv_ci_status, then rerun hv_status. Use hv_health for HTTP services and hv_logs source="service" errorsOnly=true for workers.`

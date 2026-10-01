@@ -18,14 +18,18 @@ import type {
   ProjectRuntimeSpec,
   ProjectSpec,
 } from '../spec/spec.schema.js';
-import type { DatabaseRestoreDrillFile } from '../ports/database-restore-drill.port.js';
+import { parseHostingBindings } from '../ports/hosting.port.js';
+import { providerRegistry } from '../registry/provider.registry.js';
 import { effectiveGitHubCheckRuntimeVersion } from '../spec/project-runtime.js';
+import { compileEnvironmentTaskWorkflow } from './environment-task-workflow.service.js';
 import {
   githubActionsCanonicalEnvironment,
   resolveGitHubActionsSelection,
 } from '../spec/devops-selection.js';
 import { adapterFactory } from './adapter.factory.js';
 import { compileDatabaseRestoreDrillFiles } from './database-restore-drill.service.js';
+import { compileManagedBackupFiles } from './managed-backup-workflows.service.js';
+import { missingManagedCiReleaseBindings, resolveReviewedBranchDeployTargets } from './managed-ci-targets.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import { getGitHubAdapter } from './github-ops.service.js';
 import {
@@ -117,6 +121,7 @@ export const GITHUB_AUTOMATION_REGISTRY: Record<GitHubAutomationSpec['kind'], Gi
   autofix: { kind: 'autofix', fileBacked: true, needsOpenAI: true },
   'pull-request-review': { kind: 'pull-request-review', fileBacked: true, needsOpenAI: true },
   'code-audit': { kind: 'code-audit', fileBacked: true, needsOpenAI: true },
+  'environment-task': { kind: 'environment-task', fileBacked: true, needsOpenAI: false },
 };
 
 function sha256(value: string): string {
@@ -190,6 +195,17 @@ function automationReview(
           `Uses ${automation.agent.model} to inspect the repository on its declared schedule.`,
           'Creates GitHub issues for findings instead of changing code automatically.',
         ],
+      };
+    case 'environment-task':
+      return {
+        title: `${name} environment task`,
+        summary: `Adds or updates a manual task for the ${automation.service} service in ${automation.environment}.`,
+        details: [
+          'Runs only from the repository default branch with the reviewed arguments and typed inputs.',
+          'Verifies the exact deployed image and existing provider bindings before running the task.',
+          'Serializes tasks in the same environment and exposes only a safe task receipt.',
+        ],
+        mergeEffect: 'Each explicit dispatch creates, executes, and deletes a temporary workload in the bound environment, with a modest runtime cost.',
       };
   }
 }
@@ -1027,6 +1043,7 @@ export function compileGitHubAutomationWorkflow(
     case 'autofix': return buildAutofixWorkflow(id, automation, github, projectRuntime);
     case 'pull-request-review': return buildReviewWorkflow(id, automation);
     case 'code-audit': return buildAuditWorkflow(id, automation);
+    case 'environment-task': return compileEnvironmentTaskWorkflow(id, automation);
   }
 }
 
@@ -1161,7 +1178,7 @@ export function unresolvedGitHubCheckRuntimeIssues(
 export function compileManagedGitHubFiles(
   github: GitHubSpec,
   projectRuntime?: ProjectRuntimeSpec,
-  databaseRestoreDrillFiles: DatabaseRestoreDrillFile[] = []
+  databaseRestoreDrillFiles: Array<Pick<ManagedGitHubFile, 'path' | 'content' | 'review'>> = []
 ): ManagedGitHubFile[] {
   const runtimeIssues = unresolvedGitHubCheckRuntimeIssues(github, projectRuntime);
   if (runtimeIssues.length > 0) {
@@ -1352,6 +1369,8 @@ function infrastructureAction(params: {
   drift: string[];
   blockedReason?: string;
   billable?: boolean;
+  requiresConfirm?: boolean;
+  backupWorkflowPublicationRequired?: boolean;
 }): PlanAction {
   return {
     id: GITHUB_INFRASTRUCTURE_ACTION_ID,
@@ -1365,12 +1384,14 @@ function infrastructureAction(params: {
       ? { diff: params.drift.map((path) => ({ field: `file:${path}`, from: 'drift', to: 'desired' })) }
       : {}),
     ...(params.billable ? { billable: true } : {}),
+    ...(params.requiresConfirm ? { requiresConfirm: true } : {}),
     metadata: {
       operation: GITHUB_INFRASTRUCTURE_OPERATION,
       repository: params.repository,
       branch: GITHUB_INFRASTRUCTURE_BRANCH,
       pullRequestTitle: GITHUB_INFRASTRUCTURE_PR_TITLE,
       desiredFiles: desiredFileMetadata(params.files),
+      ...(params.backupWorkflowPublicationRequired ? { backupWorkflowPublicationRequired: true } : {}),
       ...(params.blockedReason ? { blockedReason: params.blockedReason } : {}),
     },
   };
@@ -1596,6 +1617,68 @@ export function isGitHubDelegatedSecretAction(action: PlanAction): boolean {
       .includes(String(action.metadata?.operation));
 }
 
+async function environmentTaskPublicationPrerequisites(params: {
+  project: Project;
+  spec: ProjectSpec;
+  adapter: GitHubAdapter;
+  owner: string;
+  repo: string;
+}): Promise<{ verified: boolean; blockedReason?: string; warnings: string[]; paths: Set<string> }> {
+  const tasks = Object.entries(params.spec.github?.actions ?? {})
+    .filter(([, automation]) => automation.enabled && automation.kind === 'environment-task');
+  const result = { verified: true, warnings: [] as string[], paths: new Set<string>(), blockedReason: undefined as string | undefined };
+  if (tasks.length === 0) return result;
+  const environments = new EnvironmentRepository();
+  const secretsByEnvironment = new Map<string, string[] | null>();
+  const block = (code: string, message: string) => {
+    result.blockedReason ??= code;
+    result.warnings.push(message);
+  };
+  const targets = resolveReviewedBranchDeployTargets(params.project, params.spec).targets;
+  for (const [id, task] of tasks) {
+    if (task.kind !== 'environment-task') continue;
+    result.paths.add(`.github/workflows/hypervibe-${id}.yml`);
+    const desired = params.spec.environments[task.environment];
+    const metadata = providerRegistry.getMetadata(desired.hosting.provider);
+    const credentialNames = Object.keys(metadata?.orchestration?.ci?.secretCredentialKeys ?? {});
+    if (!metadata?.lifecycle?.hosting?.environmentTasks || credentialNames.length === 0) {
+      block('github_environment_task_unsupported', `Environment task ${id} requires a provider with a reviewed temporary-task and CI credential capability; ${desired.hosting.provider} does not declare both.`);
+      continue;
+    }
+    const environment = environments.findByProjectAndName(params.project.id, task.environment);
+    const bindings = parseHostingBindings(environment);
+    const target = targets.find((candidate) => candidate.environmentName === task.environment);
+    const workflows = Object.entries(asObject(asObject(bindings.ci)?.deployBranch) ?? {});
+    const workflow = workflows.length === 1 ? workflows[0] : undefined;
+    const accepted = asObject(workflow?.[1]);
+    if (!environment || bindings.provider !== desired.hosting.provider
+      || !target?.providerProjectId?.trim() || !target.providerEnvironmentId?.trim()
+      || missingManagedCiReleaseBindings(target).length > 0
+      || Object.entries(desired.services).some(([name, service]) => bindings.services?.[name]?.workloadKind !== service.workloadKind)
+      || !workflow || !/^\.github\/workflows\/[A-Za-z0-9_-]+\.ya?ml$/.test(workflow[0])
+      || !/^[a-f0-9]{64}$/.test(String(accepted?.contentHash ?? ''))
+      || !/^[a-f0-9]{64}$/.test(String(accepted?.inputHash ?? ''))) {
+      block('github_environment_task_binding_missing', `Environment task ${id} requires complete durable ${task.environment} provider scope, service identities, and one accepted managed deployment workflow. Reconcile that environment before publishing the task.`);
+      continue;
+    }
+    if (!secretsByEnvironment.has(task.environment)) {
+      try {
+        secretsByEnvironment.set(task.environment, await params.adapter.listEnvironmentSecrets(params.owner, params.repo, task.environment));
+      } catch {
+        result.verified = false;
+        secretsByEnvironment.set(task.environment, null);
+        block('github_environment_task_secret_observation_unknown', `Cannot observe GitHub environment secret names for task ${id} in ${task.environment}. Restore authorized GitHub access before publication.`);
+      }
+    }
+    const observed = secretsByEnvironment.get(task.environment);
+    if (!observed) continue;
+    const missing = [...credentialNames, 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']
+      .filter((name) => !observed.includes(name));
+    if (missing.length > 0) block('github_environment_task_secret_missing', `Environment task ${id} requires these existing machine secrets in the exact ${task.environment} GitHub environment: ${missing.join(', ')}. Reconcile its managed deployment credentials; repository-only secrets do not establish environment isolation.`);
+  }
+  return result;
+}
+
 export async function planGitHubInfrastructure(params: {
   project: Project;
   spec: ProjectSpec;
@@ -1687,7 +1770,8 @@ export async function planGitHubInfrastructure(params: {
     };
   }
   const restoreDrills = compileDatabaseRestoreDrillFiles({ project: params.project, spec: params.spec });
-  const files = compileManagedGitHubFiles(githubSpec, params.spec.runtime, restoreDrills.files);
+  const backups = await compileManagedBackupFiles({ project: params.project, spec: params.spec });
+  const files = compileManagedGitHubFiles(githubSpec, params.spec.runtime, [...restoreDrills.files, ...backups.files]);
   const adapterResult = getGitHubAdapter(repository);
   if ('error' in adapterResult) {
     return {
@@ -1702,6 +1786,7 @@ export async function planGitHubInfrastructure(params: {
       warnings: [
         ...artifactContractIssues,
         ...restoreDrills.issues.map((issue) => issue.message),
+        ...backups.issues,
         `Cannot observe GitHub infrastructure for ${repository}: ${adapterResult.error}`,
       ],
       blocked: [],
@@ -1709,11 +1794,17 @@ export async function planGitHubInfrastructure(params: {
     };
   }
 
+  const taskPrerequisites = await environmentTaskPublicationPrerequisites({
+    project: params.project, spec: params.spec, adapter: adapterResult.adapter,
+    owner: parts.owner, repo: parts.repo,
+  });
   const warnings: string[] = [
     ...artifactContractIssues,
     ...restoreDrills.issues.map((issue) => issue.message),
+    ...backups.issues,
+    ...taskPrerequisites.warnings,
   ];
-  let verified = true;
+  let verified = taskPrerequisites.verified;
   const drift: string[] = [];
   for (const file of files) {
     try {
@@ -1726,6 +1817,17 @@ export async function planGitHubInfrastructure(params: {
     }
   }
   let restoreDrillBlockedReason: string | undefined = restoreDrills.issues[0]?.code;
+  let backupBlockedReason = backups.issues.length ? 'managed_backup_prerequisites_incomplete' : undefined;
+  for (const required of backups.requiredSecrets) {
+    try {
+      const names = await adapterResult.adapter.listEnvironmentSecrets(parts.owner, parts.repo, required.environment);
+      const missing = required.names.filter(name => !names.includes(name));
+      if (missing.length) {
+        backupBlockedReason = 'managed_backup_credentials_missing';
+        warnings.push(`Managed backups require the existing provider credentials in GitHub environment ${required.environment}: ${missing.join(', ')}.`);
+      }
+    } catch { backupBlockedReason = 'managed_backup_credentials_unknown'; verified = false; }
+  }
   if (restoreDrills.requiredSecrets.length > 0) {
     try {
       const repositorySecrets = await adapterResult.adapter.listRepositorySecrets(parts.owner, parts.repo);
@@ -1746,15 +1848,20 @@ export async function planGitHubInfrastructure(params: {
   }
   const infrastructureBlockedReason = artifactContractIssues.length > 0
     ? 'github_autofix_artifact_contract_incomplete'
-    : restoreDrillBlockedReason;
+    : restoreDrillBlockedReason ?? backupBlockedReason ?? taskPrerequisites.blockedReason;
   const restoreDrillPaths = new Set(restoreDrills.files.map((file) => file.path));
+  const taskWorkflowDrift = drift.some((path) => taskPrerequisites.paths.has(path));
+  const backupPaths = new Set(backups.files.map(file => file.path));
+  const backupWorkflowDrift = drift.some(path => backupPaths.has(path));
   const actions: PlanAction[] = [infrastructureAction({
     repository,
     files,
     type: drift.length > 0 || Boolean(infrastructureBlockedReason) ? 'update' : 'noop',
     verified,
     drift,
-    billable: !infrastructureBlockedReason && drift.some((path) => restoreDrillPaths.has(path)),
+    billable: !infrastructureBlockedReason && (taskWorkflowDrift || backupWorkflowDrift || drift.some((path) => restoreDrillPaths.has(path))),
+    requiresConfirm: !infrastructureBlockedReason && (taskWorkflowDrift || backupWorkflowDrift),
+    backupWorkflowPublicationRequired: backupWorkflowDrift,
     ...(infrastructureBlockedReason ? { blockedReason: infrastructureBlockedReason } : {}),
   })];
   const blocked: GitHubInfrastructureConnectionBlock[] = [];

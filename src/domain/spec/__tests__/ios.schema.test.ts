@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { iosSpecSchema, environmentSpecSchema } from '../spec.schema.js';
+import { iosSpecSchema, environmentSpecSchema, projectSpecSchema } from '../spec.schema.js';
 
 describe('iosSpecSchema', () => {
   it('reserves the managed build-number handoff against project secret overrides', () => {
@@ -198,5 +198,28 @@ describe('iosSpecSchema', () => {
     expect(result.success).toBe(false);
     expect(result.success ? '' : result.error.message).toContain('unknown service');
     expect(result.success ? '' : result.error.message).toContain('deploy.strategy');
+  });
+});
+
+
+describe('iOS release selection and promotion', () => {
+  const ios = () => ({
+    bundleId: 'com.example.app', testflight: { groups: { beta: {} } },
+    release: { services: ['api'], build: { command: 'make ipa', ipaPath: 'App.ipa', inputs: ['apps/ios', 'shared'] }, testflight: { groups: ['beta'] } },
+  });
+  it('accepts explicit mobile inputs and rejects globs, traversal, and empty lists', () => {
+    expect(iosSpecSchema.safeParse(ios()).success).toBe(true);
+    for (const inputs of [[], ['../ios'], ['apps/**'], ['/ios'], ['!web']]) {
+      const value = ios(); value.release.build.inputs = inputs;
+      expect(iosSpecSchema.safeParse(value).success).toBe(false);
+    }
+  });
+  it('promotes only from a compatible existing app with a manual target', () => {
+    const environment = () => ({ hosting: { provider: 'railway' }, services: { api: {} }, deploy: { strategy: 'branch', trigger: 'ci' }, ios: ios() });
+    const value = { version: 1, project: 'example', environments: { staging: environment(), production: environment() } };
+    Object.assign(value.environments.production.ios.release, { promoteFrom: 'staging', trigger: 'manual' });
+    expect(projectSpecSchema.safeParse(value).success).toBe(true);
+    value.environments.staging.ios.bundleId = 'com.example.other';
+    expect(projectSpecSchema.safeParse(value).success).toBe(false);
   });
 });

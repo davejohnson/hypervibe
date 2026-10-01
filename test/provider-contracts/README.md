@@ -8,6 +8,75 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+The [shared recovery contract](../../docs/recovery-contract.md) records the
+official recovery-model review for all eight database and seven hosting
+providers. `recovery-provider-contracts.test.ts` checks explicit registry coverage,
+actual capability declarations, unsupported planning and emitted rollback recipe
+capabilities. Shared source/point tests check representation; they do not claim
+unimplemented adapters or live recovery. Existing provider transport and lifecycle
+tests remain the executable API boundary for implemented operations.
+
+`daily-backup-provider-matrix.json` records official-source design evidence for
+all eight database, seven hosting/mount and four object-storage providers.
+`daily-backup-provider-contracts.test.ts` checks that roster and the complete
+implemented policy ports against registry flags. Unsupported rows are explicit
+Hypervibe implementation gaps; the matrix does not certify live backup coverage
+or replace the implemented adapters' transport-contract tests. See
+[daily backup defaults](../../docs/default-backup-policy.md).
+
+`managed-recovery-provider-matrix.json` separately reviews the seven hosting
+adapters' private helper execution and all four storage adapters' retained-copy
+transports. Its roster test checks the private helper capability flags and exact
+lockfile SDK versions/integrities. S3/Railway and Azure tests execute their real
+SDK serialization with injected HTTP transports; GCS tests inspect JSON API
+conditions and the raw HTTPS media path, including compressed stored bytes.
+These are documentation-based wire assertions, not checked-in provider schemas
+or live API certification. They cover conditional reads, create-only writes,
+exact conditional deletion, pagination/revision metadata and streamed content.
+Railway's general S3 compatibility claim leaves individual conditional-header
+semantics to isolated live acceptance. Object streaming support does not imply
+that a private database worker can receive every provider's native credentials.
+
+Shared recovery tests exercise completion-last SHA256 readback, isolated restore,
+bounded streaming, joint database/file references, controller cleanup markers
+and retention of exact owned keys. Hourly health checks read committed manifests
+and object inventories; they report prior restore proof and matching retained revisions,
+not a fresh full-byte audit. Partial executions never certify health or count
+toward the seven complete sets required before retention deletion.
+
+### Recovery quality audit after PR #242
+
+The audit compared the changes since `v0.1.35` through `f4ccec4` with the shared
+contracts and their implemented consumers. Registry matrices cover all eight
+database, seven hosting and four storage providers; unsupported rows stay
+explicit. This is bounded review of recovery, adjacent rollout authority and
+helper publication, not certification of every API operation in the repository.
+
+| Boundary | Executed counterexample and enforcement |
+| --- | --- |
+| Cloud SQL emitted drill | Rejected/uncertain clone, failed or unrelated operation, wrong instance identity, HTTP 200 null after deletion, and provider/credential error leakage. The generated script requires correlated terminal creation before unlabeled cleanup and emits value-free diagnostics. |
+| Retained SQL and object bytes | Same-size replacement after read-back or before health/retention. Real PostgreSQL restore tests and real S3 SDK serialization bind format-2 proof to the verified native revision; final deletion inventory must still match it. |
+| Storage inventory | Missing object names/sizes and malformed or repeated pagination fail as unknown through real S3/Azure SDK transports and the GCS JSON API path. No object silently disappears or becomes zero bytes. |
+| Private helper admission | Public immutable GHCR helper without private credentials; Railway hosting with a non-Railway database; changed or ambiguous destination; missing explicit provider cleanup proof. Shared admission checks the supported pair and current desired selection before execution. |
+| Evidence upgrade | Current-contract legacy proof remains unknown. Historical contracts remain retained without blocking a fresh current set or granting deletion authority. |
+
+These regressions were observed failing before their fixes and run under normal
+`npm test`. The committed acceptance workflow and desired acceptance commands
+both run that suite and type checking; live branch-protection settings were not
+checked. Tests use synthetic/reconstructed responses, actual SDK serialization,
+and isolated local PostgreSQL, not recorded successful provider recovery runs.
+Live permissions, private routing, Railway conditional-storage semantics and a
+real Cloud SQL restore still require isolated provider acceptance. Retention
+checks current-key absence, not physical purging of provider version/soft-delete
+history.
+
+The adjacent hosted-configuration presence review (PR #239) reran its application
+and serialized Railway transport checks without finding another defect. It
+checked requested-name-only projection, repository/revision provenance, exact
+bound service scope, query-only requests and secret redaction against the pinned
+schema and [Railway's variable API](https://docs.railway.com/integrations/api/manage-variables).
+Presence still does not establish runtime use or credential validity.
+
 Each provider directory contains `source.json`: official source URL, upstream
 revision when available, source-content SHA-256, checked-in schema SHA-256,
 API version, and the exact extraction boundary. Tests verify the local hash.
@@ -82,6 +151,19 @@ Existing hand-mocked unit tests, generated CI requests, and providers not in
 the table are not thereby schema-certified. Generated workflow execution and
 shared lifecycle parity tests remain complementary gates. No provider is
 promoted to `supported` by these offline tests.
+
+Railway checkpoint tests also execute snapshot creation, inventory and workflow
+status through the real serialized client and pinned SDL. Snapshot identities
+and nullable fields follow the official CLI's
+[`database/pitr.rs`](https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/commands/database/pitr.rs#L1308-L1437),
+including its explicit distinction between a volume id and a volume-instance id.
+The fixture is synthetic; no backup or restore has been performed by these tests.
+Checkpoint failure diagnostics also follow that revision's
+[`client.rs`](https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/client.rs)
+authorization-error recognition and
+[`workflow.rs`](https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/controllers/workflow.rs)
+status-polling limitations. Error fixtures are reconstructed; they verify safe
+categories and retained recovery identities, not the cause of a live failure.
 
 S3, GCS and Azure Blob Storage also run the shared storage plan/apply/binding
 path with two environments using the same logical resource name. Their

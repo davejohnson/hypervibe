@@ -42,7 +42,7 @@ export interface CommandEnvelope {
   /** Safe, machine-readable retry metadata for an interactive interface. */
   confirmation?: {
     message: string;
-    retryInput: Record<string, boolean | string[]>;
+    retryInput: Record<string, boolean | string | string[]>;
   };
 }
 

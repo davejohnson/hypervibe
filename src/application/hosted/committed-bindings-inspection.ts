@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { repoBindingsFileSchema } from '../../domain/spec/repo-bindings.schema.js';
+import { customDomainOrigin, MAX_PUBLIC_ENDPOINTS, publicOrigin } from './public-endpoints.js';
 import {
   readCommittedJsonSourceV1, requireSafeReceiptLabel,
   type CommittedSpecInspectionInputV1,
@@ -11,7 +12,7 @@ export interface HostedEnvironmentBindingsV1 {
   provider?: string;
   projectId?: string;
   environmentId?: string;
-  services: Record<string, { serviceId: string }>;
+  services: Record<string, { serviceId: string; url?: string; customDomains?: string[]; publicEndpointsTruncated?: boolean }>;
 }
 export interface CommittedBindingsInspectionReceiptV1 {
   schemaVersion: 1;
@@ -34,16 +35,22 @@ export class HostedInspectionError extends Error {
   }
 }
 
+export function sameCommittedSource(spec: CommittedSpecInspectionInputV1, bindings: CommittedBindingsInspectionInputV1): boolean {
+  return spec.provider === bindings.provider && spec.revision.toLowerCase() === bindings.revision.toLowerCase()
+    && spec.repository.id === bindings.repository.id && spec.repository.path === bindings.repository.path
+    && spec.repository.remoteIdentity === bindings.repository.remoteIdentity;
+}
+
 // Provider ids are opaque identities, never URLs, command text or credential material.
 const identity = z.string().min(1).max(512).regex(/^[a-zA-Z0-9][a-zA-Z0-9_.:/-]*$/);
 const projection = z.object({
   provider: z.string().regex(/^[a-z][a-z0-9-]*$/).max(128).optional(),
   projectId: identity.optional(),
   environmentId: identity.optional(),
-  services: z.record(z.object({ serviceId: identity.optional() })).optional(),
+  services: z.record(z.object({ serviceId: identity.optional(), url: z.unknown().optional(), customDomains: z.unknown().optional() })).optional(),
 });
 
-/** No checkout access and no full binding values: only scoped hosting identities. */
+/** No checkout access or full binding values: scoped identities and safe public origins only. */
 export function inspectCommittedBindingsV1(input: CommittedBindingsInspectionInputV1): CommittedBindingsInspectionReceiptV1 {
   const { source, document, actualSha256 } = readCommittedJsonSourceV1(input);
   const parsed = repoBindingsFileSchema.safeParse(document);
@@ -57,7 +64,17 @@ export function inspectCommittedBindingsV1(input: CommittedBindingsInspectionInp
     const services: HostedEnvironmentBindingsV1['services'] = Object.create(null);
     for (const [service, binding] of Object.entries(rawServices ?? {})) {
       requireSafeReceiptLabel(service, 'service');
-      if (binding.serviceId) services[service] = { serviceId: binding.serviceId };
+      if (binding.serviceId) {
+        const url = publicOrigin(binding.url);
+        const domains = Array.isArray(binding.customDomains) ? binding.customDomains : [];
+        const customDomains = [...new Set(domains.slice(0, MAX_PUBLIC_ENDPOINTS).flatMap((domain) => {
+          const origin = customDomainOrigin(domain);
+          return origin ? [new URL(origin).hostname] : [];
+        }))];
+        services[service] = { serviceId: binding.serviceId, ...(url ? { url } : {}),
+          ...(customDomains.length ? { customDomains } : {}),
+          ...(domains.length > MAX_PUBLIC_ENDPOINTS ? { publicEndpointsTruncated: true } : {}) };
+      }
     }
     environments[name] = { ...scope, services };
   }

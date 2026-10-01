@@ -19,8 +19,12 @@ import { executePlanApply } from '../../../application/apply-plan.js';
 import { parseDelegatedSecretBindings } from '../../services/delegated-secret.service.js';
 import { hashEnvValue } from '../../ports/observe.port.js';
 import { PlanService } from '../plan.service.js';
+import { dailyBackupEvidence } from '../../../test/backup-fixtures.js';
 
 const FRIEND_KEY = 'sk-ant-api03-plan-secret';
+const databaseRecoverySource = { provider: 'railway', primaryExternalId: 'rail-postgres',
+  providerScope: { projectId: 'rail-project', environmentId: 'rail-environment' },
+  resourceIdentity: { volumeId: 'postgres-volume', volumeInstanceId: 'postgres-volume-instance' } };
 
 function observed(serviceOverrides: Partial<ObservedState['services'][number]> = {}): ObservedState {
   return {
@@ -130,6 +134,10 @@ describe('PlanService delegated secret inputs', () => {
         observe: vi.fn().mockResolvedValue(observed()),
       } as never,
     });
+    // Secret reconciliation scenarios start with an existing protected database.
+    // Supply provider-port evidence while exercising the real backup gates.
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true,
+      adapter: { name: 'railway', dailyBackups: dailyBackupEvidence(databaseRecoverySource) } as never });
   });
 
   afterEach(() => {
@@ -241,9 +249,9 @@ describe('PlanService delegated secret inputs', () => {
     vi.mocked(adapterFactory.getProviderAdapter).mockResolvedValue({ success: true, adapter } as never);
     vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter } as never);
     const provision = vi.fn();
-    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
+    vi.mocked(adapterFactory.getDatabaseAdapter).mockResolvedValue({
       success: true,
-      adapter: { provision },
+      adapter: { name: 'railway', provision, dailyBackups: dailyBackupEvidence(databaseRecoverySource) },
     } as never);
 
     const planned = await new PlanService().plan(project, 'production', {

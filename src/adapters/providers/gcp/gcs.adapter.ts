@@ -1,4 +1,5 @@
 import { Readable } from 'node:stream';
+import { request as httpsRequest } from 'node:https';
 import { GoogleAuth } from 'google-auth-library';
 import { z } from 'zod';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
@@ -10,6 +11,8 @@ import type {
   StorageEnsureResult,
   StorageObjectClient,
   StorageObjectPayload,
+  StorageObjectRevision,
+  StorageObservationTarget,
 } from '../../../domain/ports/storage.port.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
 import {
@@ -55,6 +58,8 @@ type TokenProvider = (credentials: GcsStorageCredentials, serviceAccount: Servic
 
 export interface GcsStorageAdapterOptions {
   fetch?: typeof fetch;
+  /** Raw media bytes; the default HTTPS stream does not transparently decompress. */
+  mediaFetch?: typeof fetch;
   tokenProvider?: TokenProvider;
   defaultProjectProvider?: () => Promise<string>;
 }
@@ -68,7 +73,27 @@ interface GcsBucket {
 interface GcsObject {
   name?: string;
   size?: string;
+  generation?: string;
+  metageneration?: string;
+  contentType?: string;
+  contentEncoding?: string;
+  cacheControl?: string;
+  contentDisposition?: string;
+  metadata?: Record<string, string>;
 }
+
+/** JSON API gzip objects must retain their stored representation. Global fetch
+ * decodes Content-Encoding, so object bodies use an undecoded HTTPS stream. */
+const rawGcsMediaFetch: typeof fetch = async (input, init) => new Promise((resolve, reject) => {
+  const request = httpsRequest(String(input), { method: 'GET', headers: Object.fromEntries(new Headers(init?.headers).entries()) }, response => {
+    const headers = new Headers();
+    for (const [key, value] of Object.entries(response.headers)) {
+      if (value !== undefined) headers.set(key, Array.isArray(value) ? value.join(', ') : value);
+    }
+    resolve(new Response(Readable.toWeb(response) as ReadableStream<Uint8Array>, { status: response.statusCode ?? 500, headers }));
+  });
+  request.once('error', reject); request.end();
+});
 
 async function defaultTokenProvider(_credentials: GcsStorageCredentials, serviceAccount: ServiceAccount | null) {
   const auth = new GoogleAuth({
@@ -124,49 +149,79 @@ class GcsObjectClient implements StorageObjectClient {
   constructor(
     private readonly bucket: string,
     private readonly request: typeof fetch,
-    private readonly getToken: () => Promise<string>
+    private readonly getToken: () => Promise<string>,
+    private readonly mediaRequest: typeof fetch = request,
   ) {}
 
-  async list() {
-    const objects: Array<{ key: string; size: number }> = [];
+  async list(options?: { prefix?: string; maxObjects?: number }) {
+    const objects: Array<{ key: string; size: number; revision?: StorageObjectRevision }> = [];
+    const tokens = new Set<string>();
     let pageToken: string | undefined;
     do {
       const params = new URLSearchParams();
+      if (options?.prefix) params.set('prefix', options.prefix);
+      if (options?.maxObjects !== undefined) params.set('maxResults', String(Math.min(1000, options.maxObjects + 1)));
       if (pageToken) params.set('pageToken', pageToken);
       const response = await this.authorized(`${STORAGE_API}/storage/v1/b/${encodeURIComponent(this.bucket)}/o?${params}`);
       if (!response.ok) throw await responseError(response);
       const body = await response.json() as { items?: GcsObject[]; nextPageToken?: string };
+      if (!body || typeof body !== 'object' || Array.isArray(body)
+        || (body.items !== undefined && !Array.isArray(body.items))
+        || (body.nextPageToken !== undefined && (typeof body.nextPageToken !== 'string' || !body.nextPageToken))) {
+        throw new Error('GCS object listing completeness is unknown.');
+      }
       for (const object of body.items ?? []) {
-        if (object.name) objects.push({ key: object.name, size: Number(object.size ?? 0) });
+        if (!object || typeof object.name !== 'string' || !object.name || typeof object.size !== 'string'
+          || !/^\d+$/.test(object.size) || !Number.isSafeInteger(Number(object.size))) {
+          throw new Error('GCS object listing contains an incomplete object identity or size.');
+        }
+        objects.push({ key: object.name, size: Number(object.size),
+          ...(object.generation ? { revision: { generation: object.generation,
+            ...(object.metageneration ? { metageneration: object.metageneration } : {}) } } : {}) });
+        if (options?.maxObjects !== undefined && objects.length > options.maxObjects) throw new Error('GCS object listing exceeds its count limit.');
       }
       pageToken = body.nextPageToken;
+      if (pageToken && tokens.has(pageToken)) throw new Error('GCS object listing pagination did not advance.');
+      if (pageToken) tokens.add(pageToken);
     } while (pageToken);
     return objects;
   }
 
-  async get(key: string): Promise<StorageObjectPayload> {
-    const response = await this.authorized(
-      `${STORAGE_API}/storage/v1/b/${encodeURIComponent(this.bucket)}/o/${encodeURIComponent(key)}?alt=media`
-    );
+  async get(key: string, expected?: StorageObjectRevision): Promise<StorageObjectPayload> {
+    if (expected?.etag || expected?.versionId || expected?.lastModified) throw new Error('GCS recovery reads require a native generation.');
+    const base = `${STORAGE_API}/storage/v1/b/${encodeURIComponent(this.bucket)}/o/${encodeURIComponent(key)}`;
+    const conditions = new URLSearchParams();
+    if (expected?.generation) conditions.set('ifGenerationMatch', expected.generation);
+    if (expected?.metageneration) conditions.set('ifMetagenerationMatch', expected.metageneration);
+    const metadataResponse = await this.authorized(`${base}?${conditions}`);
+    if (!metadataResponse.ok) throw await responseError(metadataResponse);
+    const object = await metadataResponse.json() as GcsObject;
+    if (!object.generation || !object.metageneration || object.size === undefined
+      || (expected?.generation && object.generation !== expected.generation)
+      || (expected?.metageneration && object.metageneration !== expected.metageneration)) throw new Error('GCS did not identify the exact object generation.');
+    conditions.set('generation', object.generation); conditions.set('ifGenerationMatch', object.generation);
+    conditions.set('ifMetagenerationMatch', object.metageneration); conditions.set('alt', 'media');
+    const response = await this.mediaRequest(`${base}?${conditions}`, { headers: {
+      Authorization: `Bearer ${await this.getToken()}`, 'Accept-Encoding': 'gzip',
+    } });
     if (!response.ok) throw await responseError(response);
     if (!response.body) throw new Error(`Google Cloud Storage object ${key} returned no body.`);
-    const metadata: Record<string, string> = {};
-    response.headers.forEach((value, header) => {
-      if (header.startsWith('x-goog-meta-')) metadata[header.slice('x-goog-meta-'.length)] = value;
-    });
+    if (response.headers.get('x-goog-generation') !== object.generation
+      || response.headers.get('x-goog-metageneration') !== object.metageneration
+      || Number(response.headers.get('content-length')) !== Number(object.size)) {
+      await response.body.cancel(); throw new Error('GCS media response does not match the reviewed stored representation.');
+    }
     return {
       body: response.body,
-      size: Number(response.headers.get('content-length') ?? 0),
-      contentType: response.headers.get('content-type') ?? undefined,
-      contentEncoding: response.headers.get('content-encoding') ?? undefined,
-      cacheControl: response.headers.get('cache-control') ?? undefined,
-      contentDisposition: response.headers.get('content-disposition') ?? undefined,
-      metadata,
+      size: Number(object.size), revision: { generation: object.generation, metageneration: object.metageneration },
+      contentType: object.contentType, contentEncoding: object.contentEncoding,
+      cacheControl: object.cacheControl, contentDisposition: object.contentDisposition, metadata: object.metadata,
     };
   }
 
-  async put(key: string, payload: StorageObjectPayload): Promise<void> {
+  async put(key: string, payload: StorageObjectPayload, options?: { ifAbsent?: boolean }): Promise<void> {
     const params = new URLSearchParams({ uploadType: 'media', name: key });
+    if (options?.ifAbsent) params.set('ifGenerationMatch', '0');
     const headers: Record<string, string> = {};
     if (payload.contentType) headers['content-type'] = payload.contentType;
     const response = await this.authorized(
@@ -174,6 +229,8 @@ class GcsObjectClient implements StorageObjectClient {
       { method: 'POST', body: requestBody(payload), headers, duplex: 'half' } as RequestInit
     );
     if (!response.ok) throw await responseError(response);
+    const uploaded = await response.json() as GcsObject;
+    if (options?.ifAbsent && !uploaded.generation) throw new Error('GCS did not acknowledge the exact new object generation.');
     if (
       payload.contentType
       || payload.contentEncoding
@@ -182,7 +239,8 @@ class GcsObjectClient implements StorageObjectClient {
       || Object.keys(payload.metadata ?? {}).length > 0
     ) {
       const metadataResponse = await this.authorized(
-        `${STORAGE_API}/storage/v1/b/${encodeURIComponent(this.bucket)}/o/${encodeURIComponent(key)}`,
+        `${STORAGE_API}/storage/v1/b/${encodeURIComponent(this.bucket)}/o/${encodeURIComponent(key)}${uploaded.generation
+          ? `?ifGenerationMatch=${encodeURIComponent(uploaded.generation)}${uploaded.metageneration ? `&ifMetagenerationMatch=${encodeURIComponent(uploaded.metageneration)}` : ''}` : ''}`,
         {
           method: 'PATCH',
           headers: { 'content-type': 'application/json' },
@@ -197,6 +255,15 @@ class GcsObjectClient implements StorageObjectClient {
       );
       if (!metadataResponse.ok) throw await responseError(metadataResponse);
     }
+  }
+
+  async remove(key: string, revision?: StorageObjectRevision): Promise<void> {
+    if (revision?.etag || revision?.versionId || revision?.lastModified) throw new Error('GCS deletion requires a native generation.');
+    const conditions = new URLSearchParams();
+    if (revision?.generation) conditions.set('ifGenerationMatch', revision.generation);
+    if (revision?.metageneration) conditions.set('ifMetagenerationMatch', revision.metageneration);
+    const response = await this.authorized(`${STORAGE_API}/storage/v1/b/${encodeURIComponent(this.bucket)}/o/${encodeURIComponent(key)}?${conditions}`, { method: 'DELETE' });
+    if (!response.ok && response.status !== 404) throw await responseError(response);
   }
 
   destroy(): void {}
@@ -226,11 +293,13 @@ export class GcsStorageAdapter implements IStorageAdapter {
   private token: string | null = null;
   private tokenExpiresAt = 0;
   private readonly request: typeof fetch;
+  private readonly mediaRequest: typeof fetch;
   private readonly tokenProvider: TokenProvider;
   private readonly defaultProjectProvider: () => Promise<string>;
 
   constructor(options: GcsStorageAdapterOptions = {}) {
     this.request = options.fetch ?? fetch;
+    this.mediaRequest = options.mediaFetch ?? options.fetch ?? rawGcsMediaFetch;
     this.tokenProvider = options.tokenProvider ?? defaultTokenProvider;
     this.defaultProjectProvider = options.defaultProjectProvider ?? (() => new GoogleAuth().getProjectId());
   }
@@ -321,17 +390,31 @@ export class GcsStorageAdapter implements IStorageAdapter {
     }
   }
 
-  async observe(environment: Environment, context: StorageContext): Promise<ObservedStorage[]> {
+  async observe(environment: Environment, context: StorageContext, target?: StorageObservationTarget): Promise<ObservedStorage[]> {
     await this.assertContext(context);
+    if (target && !target.externalId) throw new Error('Exact GCS observation requires a bucket identity.');
     const observed: ObservedStorage[] = [];
+    const seenPageTokens = new Set<string>();
     let pageToken: string | undefined;
     do {
       const params = new URLSearchParams({ project: context.projectId });
+      if (target) { params.set('prefix', target.externalId); params.set('maxResults', '100'); }
       if (pageToken) params.set('pageToken', pageToken);
       const response = await this.authorized(`${STORAGE_API}/storage/v1/b?${params}`);
       if (!response.ok) throw await responseError(response);
       const body = await response.json() as { items?: GcsBucket[]; nextPageToken?: string };
       for (const bucket of body.items ?? []) {
+        if (target) {
+          // The project-scoped list proves native ownership; a direct bucket
+          // GET could succeed for a bucket shared from a different project.
+          if (bucket.name !== target.externalId) continue;
+          if ([context.region, context.location].some(region => region && region.toLowerCase() !== bucket.location?.toLowerCase())) {
+            throw new Error('The bound GCS bucket location differs from its provider scope.');
+          }
+          observed.push({ provider: this.name, kind: 'object', externalId: bucket.name,
+            instanceScope: { ...context }, name: bucket.name, region: bucket.location?.toLowerCase(), status: 'ready' });
+          continue;
+        }
         if (!bucket.name || bucket.labels?.[ENVIRONMENT_LABEL] !== environment.id) continue;
         const name = bucket.labels[STORAGE_NAME_LABEL];
         if (!name) continue;
@@ -348,6 +431,10 @@ export class GcsStorageAdapter implements IStorageAdapter {
         });
       }
       pageToken = body.nextPageToken;
+      if (target && pageToken) {
+        if (seenPageTokens.has(pageToken) || seenPageTokens.size >= 100) throw new Error('Exact GCS observation pagination is incomplete.');
+        seenPageTokens.add(pageToken);
+      }
     } while (pageToken);
     return observed.sort((left, right) => left.name.localeCompare(right.name));
   }
@@ -492,7 +579,7 @@ export class GcsStorageAdapter implements IStorageAdapter {
     externalId: string
   ): Promise<StorageObjectClient> {
     await this.assertContext(context);
-    return new GcsObjectClient(externalId, this.request, () => this.accessToken());
+    return new GcsObjectClient(externalId, this.request, () => this.accessToken(), this.mediaRequest);
   }
 
   async destroyBucket(environment: Environment, context: StorageContext, externalId: string): Promise<Receipt> {
@@ -593,6 +680,7 @@ providerRegistry.register({
     credentialsSchema: GcsStorageCredentialsSchema,
     setupHelpUrl: 'https://cloud.google.com/iam/docs/keys-create-delete',
     credentials: {
+      automationSecretKeys: { GCP_SERVICE_ACCOUNT_JSON: 'credentials' },
       defaultScalarKey: 'credentials',
       supportsNativeCliAuth: true,
       environmentVariableAliases: [

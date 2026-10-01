@@ -37,6 +37,7 @@ export interface StorageBinding {
   region: string;
   services: string[];
   envKeys: string[];
+  purpose?: 'backup';
   updatedAt?: string;
   dataMigration?: Record<string, unknown>;
   previousTarget?: {
@@ -571,6 +572,10 @@ export function planStorage(params: {
   for (const [name, binding] of Object.entries(bindings)) {
     if (desired[name]) continue;
     if (recoveries.parsed[name]) continue;
+    if (binding.purpose === 'backup') {
+      warnings.push(`Retaining backup storage "${name}" after its policy was removed. Backup exclusion never authorizes deleting recovery history.`);
+      continue;
+    }
     const observationKnown = storageObservationKnown(params.observed, binding.provider);
     if (params.observed && !observationKnown) {
       actions.push(action({
@@ -963,6 +968,7 @@ export async function applyStorageAction(params: {
           externalId: plannedExternalId,
           instanceScope: plannedContext,
           region: desired.region,
+          ...(desired.purpose ? { purpose: desired.purpose } : {}),
           services: [],
           envKeys: adapter.runtimeEnvKeys(name),
           updatedAt: new Date().toISOString(),
@@ -1213,6 +1219,7 @@ export async function applyStorageAction(params: {
         externalId,
         instanceScope: context,
         region: spec.region,
+        ...(spec.purpose ? { purpose: spec.purpose } : {}),
         services: latestBindings[name]?.services ?? [],
         envKeys: adapter.runtimeEnvKeys(name),
         updatedAt: new Date().toISOString(),

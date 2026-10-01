@@ -1293,8 +1293,12 @@ TestFlight upload, or TestFlight distribution commands.
 - A successful server deploy writes an artifact whose name and JSON body carry
   the environment, repository, exact full Git SHA, and deployed service set.
   The artifact is emitted only after provider deployment steps succeed.
-- The iOS workflow shares the server deploy concurrency key and uses three
-  isolated jobs. A checkout-free preparation job validates a specific successful
+- The iOS workflow uses an app-scoped concurrency key independent of server
+  deployments. An environment-free eligibility job validates the exact deployed
+  source and skips protected jobs when complete evidence proves mobile inputs
+  unchanged since the last successful beta. Unknown relevance builds; invalid
+  provenance blocks before approval or Apple access. Three isolated protected
+  jobs follow. A checkout-free preparation job validates a specific successful
   server run and its evidence, then uses the managed runtime with App Store
   credentials to select a new build number. The macOS build job checks out that
   exact SHA, prepares signing, invokes the app-defined build command with
@@ -1342,10 +1346,41 @@ TestFlight upload, or TestFlight distribution commands.
   validation regressions run in ordinary `npm test` acceptance.
 - `hv_ci_status` is the read-only path for workflows, runs, logs, and release
   artifact provenance. `hv_appstore_submit` requires successful managed server
-  and iOS evidence artifacts for the same SHA before final review submission.
+  and iOS artifact bodies, immutable source contracts, and the exact attached
+  Apple build before confirmed review submission. Cross-commit reuse requires
+  an unchanged supported API contract and verified API companion evidence;
+  mobile and server SHAs are always recorded truthfully.
 - Xcode projects, schemes, entitlements, build/test commands, artifact paths,
   App Store metadata/screenshots, and local device operations remain
   project-owned. Hypervibe owns the release envelope around the resulting IPA.
+
+## API Compatibility And Mobile Promotion
+
+An optional environment `api` declaration binds a version ledger to an existing
+web service and a project-owned compatibility command. The first implementation
+requires GitHub Actions. An isolated local `api-policy` plan stage retains version
+paths/statuses in repository bindings; omission cannot erase support. Retirement
+requires a reason, durable tombstone and exact action-ID confirmation recomputed
+from fresh bindings. Policy acceptance performs no provider mutation. Following
+workflow reconciliation is separately reviewed through the ordinary lifecycle.
+
+Generated API gates execute before migrations/provider writes, against frozen
+contract snapshots from a verified earlier release. Passing project tests is
+bounded evidence, not a universal semantic compatibility proof. Every successful
+API release publishes a versioned companion bound to exact server evidence.
+Unknown or missing baseline evidence blocks unless complete history proves a
+first managed release; no automatic version expiry exists.
+API handlers, auth/data compatibility and installed-client update behavior remain
+application-owned. Adding v2 does not retire v1. Existing unenrolled releases and
+API-protected rollback remain blocked where compatible baseline proof is absent.
+
+`ios.release.build.inputs` declares literal relevant paths with conservative
+shared build inputs. Semantic mobile config and exact executed source are checked
+before paid/protected jobs. `ios.release.promoteFrom` selects an already-tested
+beta for explicit production submission, preserving its immutable Apple build ID
+and source configuration. Same-named environment secrets do not establish backend
+configuration equivalence. See [API and mobile releases](docs/api-mobile-releases.md)
+for declaration examples, command inputs, evidence boundaries and limitations.
 
 ## CI And Push Deploys
 
@@ -1490,10 +1525,44 @@ The standard team workflow is:
 
 Do not default to a long-lived `staging` branch. `main` is the accepted-code branch, staging is the deployed preview of `main`, and production is a deliberate manual promotion. Generated production deploy workflows must not run from push events by default; they should use `workflow_dispatch` and support a `commit_sha` input.
 
+An explicit manual GitHub Actions promotion may opt into
+`deploy.promotionTests.workflow`, a literal same-repository reusable workflow path.
+Its fixed contract is required string input `commit_sha`; the repository owns
+exact-SHA checkout validation and a full test run for every invocation. By default,
+no secrets are forwarded. Private-package installation opts into
+`deploy.promotionTests.packageReadToken: true`, forwarding only `NODE_AUTH_TOKEN`.
+The generated test job has `contents: read` and no deployment environment. Its successful result
+gates the entire deploy job, including migrations and provider writes. Rollback
+retains the immutable-release evidence path. This policy enters workflow input and
+environment contract hashes, not the immutable application-program fingerprint.
+Do not accept another revision's successful tests as promotion evidence, and do not
+infer reusable invocation from the event name: it retains the caller's context.
+
+Managed CI rollback has a read-only preflight through `hv_rollback` with
+`action: "preview"`, an exact `toSha`, `sourceWorkflowRunId`, and
+`sourceArtifactId`. It permits the currently running release as a future
+recovery baseline and never dispatches a workflow or persists a mutation plan.
+The preview reads the original artifact and immutable source files through the
+existing bounded GitHub artifact reader. Current v4 records use the same
+validator as the generated rollback workflow. Explicitly selected v2 records
+retain their original format and content hashes; historical bindings are
+reported as corroboration rather than invented release provenance. Runtime,
+service and migration differences, including build-only install changes, stay
+visible as blockers. Artifact-name metadata alone is insufficient.
+
+This preflight does not implement legacy recovery execution. A v2 result stays
+blocked until a reviewed consumer can verify the missing scope/program
+provenance without rewriting it as v4. Registry image availability, live
+provider identity/configuration, and restored application health are explicitly
+unchecked by this read-only GitHub inspection. Preview selectors cannot be used
+as execution authority, even with confirmation. See
+[rollback recovery preparation](docs/rollback-recovery-preparation.md).
+
 Managed CI rollback is an explicit operational action over that same exact-SHA
 release boundary. `hv_rollback` must select only unexpired server-release
 evidence emitted by a successful run of the exact managed environment workflow.
-When a provider exposes immutable image evidence (currently Railway), the
+When a provider exposes immutable image evidence (Railway, Cloud Run, ECS Express,
+Azure Container Apps and Fly), the
 release record includes the exact registry digest; rollback downloads and
 validates it, skips source checkout and image rebuilding, and deploys the
 recorded immutable image URI.
@@ -1678,6 +1747,15 @@ stage.
 
 ## Database Resilience
 
+Recovery source identities, selected points, operation observations and evidence
+assessments follow the [shared recovery contract](docs/recovery-contract.md).
+Its named provider review covers every registered database and hosting provider.
+The shared layer neither requires one provider's volume/workflow identifiers nor
+parses a provider's native connection-name format. Strict source coordinates are
+safe for repository exports; native requirements and completion correlation stay
+in the provider adapter. Existing Railway records have an explicit compatibility
+reader that preserves uncertain requests instead of reopening creation.
+
 Provider-managed database resilience is optional desired state under
 `database.resilience`. Omitting the block preserves backward compatibility and
 means Hypervibe does not manage resilience settings. Within a declared block:
@@ -1743,6 +1821,34 @@ drill uses `instances.clone` with an explicit point-in-time to create a new
 instance, never a destructive restore onto the primary. Provider-to-provider
 replica promotion/failover, replica replacement, and multi-environment
 restore-drill scheduling are separate future lifecycle slices.
+
+The Railway adapter implements a named, one-use `database.resilience.checkpoint`
+intent through the same spec/plan/apply lifecycle. This is a manual volume
+snapshot, not a backup policy, PITR enablement, or restore drill. Planning freezes
+the bound database service and its exact project, environment, volume and
+volume-instance identities. An outstanding checkpoint is isolated from unrelated
+infrastructure changes; its completion does not advance the environment's applied
+deployment contract. Creation is billable and data-bearing and requires the exact
+persisted action confirmation. No checkpoint operation changes a workload, volume
+attachment, database endpoint, or schema.
+
+Before calling the provider, apply durably records a unique operation label,
+the complete prior backup inventory, and request time. It records acknowledgement
+and any returned operation identity before observing completion. Retrying the same intent only
+observes that operation; an uncertain acknowledgement never permits another
+create. Completion requires provider-terminal success and a uniquely correlated
+new backup on the same source; Railway's adapter verifies the exact volume instance.
+Safe receipts and exported bindings retain
+the backup identity, source scope, timestamp and expiry, and explicitly say that
+restore verification has not run. A completed intent becomes noop only while
+its recorded backup remains observable and unexpired. Removing the intent does
+not delete backups; a new backup needs a new reviewed intent id.
+
+Railway snapshot restore is not a verification mechanism: it stages a replacement
+of the source service's volume. The checkpoint capability exposes no restore,
+delete, schedule, or PITR mutations. Native snapshots remain dependent on their
+provider volume and are not independent off-provider copies. See
+[database checkpoints](docs/database-checkpoints.md) for the evidence boundary.
 
 Environment data moves are explicit one-use desired state under the target
 environment's `dataMigration`. V1 copies only whole PostgreSQL databases and
@@ -1874,6 +1980,25 @@ Database resets likewise belong to desired-state destruction, not an
 imperative shortcut. Re-running or repairing seed or migrated data requires a
 new reviewable desired-state id; Hypervibe does not expose a generic seed or
 copy command runner.
+
+Repeatable application fixture provisioning may instead declare a named
+`github.actions.<id>` of kind `environment-task`. This is an interface-specific
+GitHub CI program, not an MCP/CLI command runner. Its reviewed environment,
+bound source service, fixed argv and typed inputs belong to spec/plan/apply.
+Publishing changed task workflows is billable, exact-action-confirmed work:
+acceptance authorizes each explicit dispatch to create, execute and delete one
+temporary workload in that environment. It cannot adopt or repair a missing
+source service. Tasks share the deployment lock, require the latest successful
+exact-SHA release evidence and immutable deployed image, and reject Actions
+reruns; repeating an application operation requires a new explicit dispatch.
+
+Provider support is capability-gated. Railway's initial task implementation is
+ready for live validation, not live-verified support. CI receives environment
+machine credentials; database credentials remain provider-resolved references
+inside the private environment. Output contains validated numeric fields with
+reviewed labels, finite status enums and provider execution identities, never
+raw application logs. Ambiguous writes and cleanup failures are terminal for
+that execution, with unknown applied counts unless independently verified.
 
 ## New Provider Checklist
 

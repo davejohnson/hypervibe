@@ -1,4 +1,5 @@
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
+import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import type { Project } from '../entities/project.entity.js';
 import type {
@@ -12,6 +13,9 @@ import { parseHostingBindings } from '../ports/hosting.port.js';
 import { withMigrationReleaseCommand } from '../spec/spec-bootstrap.js';
 import { effectiveBranchCiAutoDeploy, type ProjectSpec } from '../spec/spec.schema.js';
 import { environmentDeploymentContractHashForApply } from './deployment-contract.service.js';
+import { resolveBackupPolicies } from './backup-policy.service.js';
+import { resolveBackupStrategy, withBackupStorageDefaults } from './backup-strategy.service.js';
+import { providerRegistry } from '../registry/provider.registry.js';
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -308,9 +312,11 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
       }));
     const target: BranchDeployTarget = {
       environmentName,
+      ...(environment.api ? { api: environment.api } : {}),
       kind,
       branch,
       autoDeployOnPush,
+      ...(environment.deploy.promotionTests ? { promotionTests: environment.deploy.promotionTests } : {}),
       ...(promoteFromEnvironment
         ? {
             promoteFromEnvironment,
@@ -336,6 +342,20 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
       containerStartCommand,
       runtime,
     };
+    const boundEnvironment = new EnvironmentRepository().findByProjectAndName(project.id, environmentName);
+    const components = boundEnvironment ? new ComponentRepository().findByEnvironmentId(boundEnvironment.id) : [];
+    const backupPolicy = resolveBackupPolicies(spec, boundEnvironment ? [boundEnvironment] : [], components)[environmentName];
+    if (backupPolicy.resources.length > 0) {
+      const strategy = resolveBackupStrategy(environment);
+      const storageProviders = Object.values(withBackupStorageDefaults(environment).storage ?? {}).map(storage => storage.provider);
+      const providers = [...new Set([environment.hosting.provider, ...storageProviders, ...backupPolicy.resources.map(resource => resource.provider)])];
+      const credentials = [...new Set(providers.flatMap(provider => Object.keys(providerRegistry.getMetadata(provider)?.orchestration?.ci?.secretCredentialKeys ?? {})))].sort();
+      target.backupPolicy = { mode: backupPolicy.mode,
+        ...(strategy.runnerImage ? { runnerImage: strategy.runnerImage } : {}), credentialNames: credentials,
+        ...(backupPolicy.resources.some(resource => resource.retained)
+          ? { blockedReason: 'Retained persistent resources require explicit recovery coverage before rollout.' } : {}),
+      };
+    }
     target.releaseTarget = managedCiReleaseTarget({
       provider: environment.hosting.provider,
       environmentName,

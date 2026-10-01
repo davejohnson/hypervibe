@@ -76,6 +76,48 @@ jobs:
       - name: Validate release package
         run: npm run release:check
 
+  publish-backup-helper:
+    name: Publish verified backup helper
+    needs: [validate-package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.backup.outputs.image }}
+
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: ".node-version"
+          check-latest: true
+
+      - name: Authenticate to the container registry
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build, test and verify the published helper
+        id: backup
+        run: node scripts/release-backup-runner.mjs
+
+      - name: Upload verified helper receipt
+        uses: actions/upload-artifact@v7
+        with:
+          name: Hypervibe-backup-runner
+          path: build/backup-runner-release.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout ghcr.io
+
   build-macos:
     name: Build macOS (${{ matrix.arch }})
     needs: release-mode
@@ -166,12 +208,13 @@ jobs:
 
   publish-package:
     name: Publish public npm package
-    needs: [release-mode, validate-package, build-macos]
+    needs: [release-mode, validate-package, build-macos, publish-backup-helper]
     if: >-
       ${{
         always() &&
         needs['release-mode'].result == 'success' &&
         needs['validate-package'].result == 'success' &&
+        needs['publish-backup-helper'].result == 'success' &&
         (
           needs['build-macos'].result == 'success' ||
           (needs['build-macos'].result == 'skipped' && needs['release-mode'].outputs.npm_only == 'true')
@@ -235,6 +278,7 @@ jobs:
         shell: bash
         run: |
           expected=(
+            "release-assets/backup-runner-release.json"
             "release-assets/Hypervibe-${GITHUB_REF_NAME#v}-arm64.dmg"
             "release-assets/Hypervibe-${GITHUB_REF_NAME#v}-arm64.dmg.sha256"
             "release-assets/Hypervibe-${GITHUB_REF_NAME#v}-x86_64.dmg"

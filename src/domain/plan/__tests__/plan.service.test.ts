@@ -51,6 +51,9 @@ import * as environmentMaintenanceService from '../../services/environment-maint
 import { applyStorageAction, STORAGE_OPERATIONS } from '../../services/storage-plan.service.js';
 import { CACHE_OPERATIONS } from '../../services/cache-plan.service.js';
 import '../../../application/devops-providers.js';
+import { dailyBackupEvidence } from '../../../test/backup-fixtures.js';
+import type { RecoverySourceIdentity } from '../../ports/recovery-source.port.js';
+import type { ObservedDatabase } from '../../ports/observe.port.js';
 
 let project: Project;
 
@@ -250,6 +253,14 @@ function mockObservingAdapter(observed: ObservedState, extra: Record<string, unk
       observe: async () => normalizedObserved,
     },
   });
+}
+
+/** Existing protected-environment cases supply the new prerequisite at its provider port. */
+async function mockProtectedRailwayDatabase(source: RecoverySourceIdentity) {
+  const hosting = await adapterFactory.getProviderAdapter('railway', project);
+  const adapter = { ...createRailwayDatabaseAdapter({ hostingAdapter: hosting.adapter!, envRepo: new EnvironmentRepository() }),
+    dailyBackups: dailyBackupEvidence(source) };
+  vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter });
 }
 
 describe('PlanService datastore naming compatibility policy', () => {
@@ -946,6 +957,8 @@ describe('PlanService.plan', () => {
         DATABASE_PUBLIC_URL: 'postgresql://test:password@db.example.test:5432/app',
       }),
     });
+    await mockProtectedRailwayDatabase({ provider: 'railway', primaryExternalId: 'db-1',
+      providerScope: { projectId: 'rp-1', environmentId: 're-1' }, resourceIdentity: { volumeId: 'db-volume', volumeInstanceId: 'db-volume-instance' } });
     vi.spyOn(StripeAdapter.prototype, 'listProducts').mockResolvedValue([]);
     vi.spyOn(StripeAdapter.prototype, 'listPrices').mockResolvedValue([]);
     vi.spyOn(StripeAdapter.prototype, 'listWebhookEndpoints').mockResolvedValue([]);
@@ -1290,8 +1303,10 @@ describe('PlanService.plan', () => {
     const plan = result as Exclude<typeof result, { error: string }>;
     expect(plan.actions.find((a) => a.id === 'project:railway')).toBeUndefined();
     expect(plan.actions.find((a) => a.id === 'environment:staging')?.type).toBe('create');
-    expect(plan.actions.find((a) => a.id === 'service:web')?.type).toBe('create');
-    expect(plan.actions.find((a) => a.id === 'database:railway')?.type).toBe('create');
+    // Provision the namespace first; its durable identity is required to review
+    // data-bearing resources and their backup policy in the next plan.
+    expect(plan.scope).toBe('backup-provisioning');
+    expect(plan.actions.map(action => action.id)).toEqual(['environment:staging']);
     expect(observedBindings[0]).toMatchObject({
       provider: 'railway',
       projectId: 'rail-project-canonical',
@@ -1415,6 +1430,8 @@ describe('PlanService.plan', () => {
         getConnectionUrl: async () => null,
         destroy: async () => ({ success: true, message: 'unused' }),
         observeDatabase,
+        dailyBackups: dailyBackupEvidence({ provider: 'railway', primaryExternalId: 'database-1',
+          providerScope: { projectId: 'tea-owner-1' }, resourceIdentity: { volumeId: 'database-volume' } }),
       } as never,
     });
 
@@ -1501,10 +1518,11 @@ describe('PlanService.plan', () => {
     mockObservingAdapter(structuredClone(observedState));
     vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
       success: true,
-      adapter: createRailwayDatabaseAdapter({
+      adapter: { ...createRailwayDatabaseAdapter({
         hostingAdapter: { observe: async () => structuredClone(observedState) } as never,
         envRepo: new EnvironmentRepository(),
-      }),
+      }), dailyBackups: dailyBackupEvidence({ provider: 'railway', primaryExternalId: databaseId,
+        providerScope: { projectId: 'rail-project-1', environmentId: 'rail-environment-1' }, resourceIdentity: { volumeId: 'database-volume' } }) },
     });
 
     const result = await new PlanService().plan(project, 'staging');
@@ -1598,15 +1616,8 @@ describe('PlanService.plan', () => {
       metadata: { operation: 'hostingEnvironmentEnsure' },
     });
     expect(plan.actions.find((action) => action.id === 'project:railway')).toBeUndefined();
-    for (const actionId of [
-      'storage:documents',
-      'database:railway',
-      'service:web',
-      'service:worker',
-    ]) {
-      expect(plan.actions.find((action) => action.id === actionId)?.dependsOn)
-        .toContain('environment:staging');
-    }
+    expect(plan.scope).toBe('backup-provisioning');
+    expect(plan.actions.map(action => action.id)).toEqual(['environment:staging']);
   });
 
   it('creates and binds the Railway environment before returning pending for a fresh plan', async () => {
@@ -1683,6 +1694,7 @@ describe('PlanService.plan', () => {
     const planned = await new PlanService().plan(project, 'staging');
     expect(planned).not.toHaveProperty('error');
     const plan = planned as Exclude<typeof planned, { error: string }>;
+    expect(plan.actions.map(action => action.id)).toEqual(['environment:staging']);
     const currentSpec = new SpecStore().get(project)!;
 
     const outcome = await executePlanApply(createToolContext(), {
@@ -1697,16 +1709,12 @@ describe('PlanService.plan', () => {
       kind: 'executed',
       result: {
         success: false,
-        receipts: expect.arrayContaining([
+        receipts: [
           expect.objectContaining({
             actionId: 'environment:staging',
             status: 'pending',
           }),
-          expect.objectContaining({
-            actionId: 'storage:documents',
-            status: 'aborted',
-          }),
-        ]),
+        ],
       },
     });
     expect(ensureEnvironment).toHaveBeenCalledOnce();
@@ -3500,7 +3508,7 @@ describe('PlanService.plan', () => {
       });
     }
 
-    function seedObservedRailwayWeb(): Environment {
+    function seedObservedRailwayWeb(database?: ObservedDatabase): Environment {
       const environment = new EnvironmentRepository().create({
         projectId: project.id,
         name: 'staging',
@@ -3533,7 +3541,7 @@ describe('PlanService.plan', () => {
           envVarHashes: { NODE_ENV: hashEnvValue('staging') },
           status: 'running',
         }],
-        databases: [],
+        databases: database ? [database] : [],
         partial: false,
         warnings: [],
       });
@@ -3673,12 +3681,15 @@ describe('PlanService.plan', () => {
           },
         },
       });
-      const environment = seedObservedRailwayWeb();
+      const environment = seedObservedRailwayWeb({ provider: 'railway', engine: 'postgres', externalId: 'managed-db', status: 'running' });
       new ComponentRepository().create({
         environmentId: environment.id,
         type: 'postgres',
+        externalId: 'managed-db',
         bindings: { provider: 'railway', connectionString: 'postgres://managed-db' },
       });
+      await mockProtectedRailwayDatabase({ provider: 'railway', primaryExternalId: 'managed-db',
+        providerScope: { projectId: 'rp-1', environmentId: 're-1' }, resourceIdentity: { volumeId: 'managed-volume' } });
 
       try {
         process.chdir(path.join(root, 'app'));
@@ -3834,12 +3845,15 @@ describe('PlanService.plan', () => {
           },
         },
       });
-      const environment = seedObservedRailwayWeb();
+      const environment = seedObservedRailwayWeb({ provider: 'railway', engine: 'postgres', externalId: 'managed-db', status: 'running' });
       new ComponentRepository().create({
         environmentId: environment.id,
         type: 'postgres',
+        externalId: 'managed-db',
         bindings: { provider: 'railway', connectionString: 'postgres://managed-db' },
       });
+      await mockProtectedRailwayDatabase({ provider: 'railway', primaryExternalId: 'managed-db',
+        providerScope: { projectId: 'rp-1', environmentId: 're-1' }, resourceIdentity: { volumeId: 'managed-volume' } });
 
       const result = await new PlanService().plan(project, 'staging', { envFile });
       const plan = result as Exclude<typeof result, { error: string }>;

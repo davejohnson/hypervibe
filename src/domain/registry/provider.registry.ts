@@ -164,6 +164,8 @@ export interface ProviderMetadata {
   setupHelpUrl?: string;
   credentials?: {
     defaultScalarKey?: string;
+    /** Explicit control-plane credential mapping for managed automation; not a deploy capability. */
+    automationSecretKeys?: Record<string, string>;
     /** Exact hosted monitoring credential role compatible with a saved local connection. */
     hostedMonitoring?: { credentialKind: string; credentialKey: string; scope: 'project' };
     /** Credential values supplied by an opinionated Hypervibe workflow, not user-facing forms. */
@@ -213,6 +215,20 @@ export interface ProviderMetadata {
       domainTrafficProxy?: 'supported' | 'dns-only';
       /** Provider-owned direct-origin and background-workload suspension. */
       maintenance?: 'managed' | 'unsupported';
+      /** Named CI tasks with provider-resolved variables; live evidence remains separate. */
+      environmentTasks?: {
+        variableMode: 'references';
+        execution: 'temporary-workload';
+        status: 'ready-for-live';
+      };
+      /** A separate immutable recovery helper with exact private source references. */
+      recoveryTasks?: {
+        variableMode: 'references';
+        execution: 'temporary-workload';
+        status: 'ready-for-live';
+        /** Native database references the private helper can actually resolve. */
+        databaseProviders: readonly string[];
+      };
       /** Smallest provider-owned boundary that completely removes one Hypervibe environment. */
       teardownBoundary: 'services' | 'environment' | 'project';
     };
@@ -247,8 +263,16 @@ export interface ProviderMetadata {
       topology: 'monitor-pool-balancer';
       minimumOrigins: number;
     };
+    /**
+     * Complete daily policy observation/configuration ports implemented by the adapter.
+     * Omitted flags mean unimplemented Hypervibe capability, not missing native backups.
+     * Policy support never certifies a recovery point or a tested restore.
+     */
+    dailyBackups?: { database?: true; volume?: true; storage?: true };
     /** Declarative database resilience features implemented by the adapter. */
     databaseResilience?: {
+      /** Named one-use provider snapshots with durable uncertain-write recovery. */
+      checkpoints?: boolean;
       availabilityModes?: Array<'zonal' | 'regional'>;
       backups?: {
         maxRetainedBackups: number;
@@ -332,7 +356,7 @@ export interface RegisteredProvider {
   };
   /** Provider-owned adapters derived from the connected primary adapter. */
   derivedAdapters?: {
-    database?: (adapter: unknown, context: { project?: Project }) => Promise<unknown> | unknown;
+    database?: (adapter: unknown, context: { project?: Project; environment?: Environment }) => Promise<unknown> | unknown;
     cache?: (adapter: unknown, context: { project?: Project }) => Promise<unknown> | unknown;
     storage?: (adapter: unknown, context: { project?: Project }) => Promise<unknown> | unknown;
   };
