@@ -9,6 +9,7 @@ import { ComponentRepository } from '../../adapters/db/repositories/component.re
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import { adapterFactory } from '../services/adapter.factory.js';
+import { planDatabaseScopeBinding } from '../services/database-scope-binding.service.js';
 import { observeBackupPolicy } from '../services/backup-policy.service.js';
 import { planBackupPolicy } from '../services/backup-policy-plan.service.js';
 import { observeBackupHealth } from '../services/backup-health.service.js';
@@ -154,7 +155,7 @@ export interface EnvironmentPlan {
   webhookReadiness?: WebhookReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
-  scope: 'full' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'database-checkpoint' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'api-policy';
+  scope: 'full' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'api-policy';
   backupReadiness?: BackupReadiness;
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
@@ -2188,6 +2189,8 @@ export class PlanService {
     const checkpointStageActive = checkpointActions.length > 0;
     const backupObservation = await observeBackupPolicy({ spec: environmentSpec, environment,
       components: local.components, project: projectForPlan, adapterFactory });
+    const databaseScopeBinding = await planDatabaseScopeBinding({ spec: environmentSpec, environment,
+      components: local.components, project: projectForPlan, adapterFactory });
     const backupPolicy = planBackupPolicy(backupObservation, {
       explicitDatabaseBackups: Boolean(environmentSpec.database?.resilience?.backups),
       attempts: environment?.platformBindings.backupPolicyAttempts,
@@ -2210,6 +2213,10 @@ export class PlanService {
       || dataMigration.pending
       || nativeDeploySources.actions.length > 0;
     const backupPolicyStageActive = !providerSafetyStageActive && backupPolicy.actions.length > 0;
+    const databaseBindingStageActive = !providerSafetyStageActive && !backupPolicyStageActive && databaseScopeBinding.actions.length > 0;
+    if (databaseBindingStageActive && serviceFilter) {
+      return { error: 'A service-filtered plan cannot skip database binding reconciliation. Run hv_plan without services to review the local scope repair.' };
+    }
     if (backupPolicyStageActive && serviceFilter) {
       return { error: 'A service-filtered plan cannot skip pending daily backup policy configuration. Run hv_plan without services to review the isolated backup policy stage.' };
     }
@@ -2877,12 +2884,12 @@ export class PlanService {
         action.metadata = { ...action.metadata, blockedReason: 'retained_service_volumes' };
       }
     }
-    const ciBindingStageActive = ciBindingStage && !providerSafetyStageActive && !backupPolicyStageActive;
-    const ciWorkflowPublicationStageActive = ciWorkflowPublicationStage && !providerSafetyStageActive && !backupPolicyStageActive;
+    const ciBindingStageActive = ciBindingStage && !providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive;
+    const ciWorkflowPublicationStageActive = ciWorkflowPublicationStage && !providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive;
     const backupProgramPublicationActions = githubInfrastructure.actions.filter(isBackupProgramPublicationAction);
-    const backupProgramPublicationStageActive = !providerSafetyStageActive && !backupPolicyStageActive
+    const backupProgramPublicationStageActive = !providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive
       && !ciBindingStageActive && !ciWorkflowPublicationStageActive && backupProgramPublicationActions.length === 1;
-    const volumeStageActive = !providerSafetyStageActive && !backupPolicyStageActive && !ciBindingStageActive && !ciWorkflowPublicationStageActive && !backupProgramPublicationStageActive
+    const volumeStageActive = !providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive && !ciBindingStageActive && !ciWorkflowPublicationStageActive && !backupProgramPublicationStageActive
       && serviceVolumes.actions.some(action => action.type !== 'noop');
     let backupProvisioningStageActive = false;
     let backupReadinessStageActive = false;
@@ -2895,6 +2902,9 @@ export class PlanService {
     } else if (backupPolicyStageActive) {
       actions = backupPolicy.actions;
       backupPolicy.warnings.push('This plan configures only daily backup schedules on bound resources. Re-run hv_plan afterward for remaining infrastructure and backup coverage gaps. Backup completion and restores remain unchecked.');
+    } else if (databaseBindingStageActive) {
+      actions = databaseScopeBinding.actions;
+      databaseScopeBinding.warnings.push('This plan records only the existing database recovery scope. Re-run hv_plan for remaining backup provisioning, verification and deployment work.');
     } else if (ciBindingStageActive) {
       const closure = actionDependencyClosure(
         actions,
@@ -3079,7 +3089,7 @@ export class PlanService {
           : {}),
       }
       : undefined;
-    const isolatedCiStage = checkpointStageActive || backupPolicyStageActive || backupProvisioningStageActive || backupReadinessStageActive || backupProgramPublicationStageActive || ciBindingStageActive || ciWorkflowPublicationStageActive || volumeStageActive;
+    const isolatedCiStage = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || backupProgramPublicationStageActive || ciBindingStageActive || ciWorkflowPublicationStageActive || volumeStageActive;
     const ciSelection = resolveDevOpsSelection(specResult.spec)?.ci;
     const ciConnectionProvider = ciSelection
       ? devOpsProviderRegistry.ciProvider(ciSelection.provider)?.connectionProvider
@@ -3091,20 +3101,20 @@ export class PlanService {
       ? this.providerPreflight(isolatedProviders)
       : blocked;
     if (backupReadinessStageActive) planBlocked.push({ provider: 'hypervibe', policy: 'hard', reason: `Backup readiness is incomplete. ${backupReadiness.gaps.join(' ')}` });
-    const planInputRequired = checkpointStageActive || backupPolicyStageActive || backupProvisioningStageActive || backupReadinessStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive || volumeStageActive
+    const planInputRequired = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive || volumeStageActive
       ? []
       : ciBindingStageActive
         ? ciBindingInputRequired
         : secretInputRequired;
-    const planOverrides = checkpointStageActive || backupPolicyStageActive || backupProvisioningStageActive || backupReadinessStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive || ciProjectBootstrapStage || volumeStageActive ? undefined : overrides;
-    const persistedScope = backupProgramPublicationStageActive ? 'backup-program-publication' as const : checkpointStageActive ? 'database-checkpoint' as const : backupPolicyStageActive ? 'backup-policy' as const
+    const planOverrides = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive || ciProjectBootstrapStage || volumeStageActive ? undefined : overrides;
+    const persistedScope = databaseBindingStageActive ? 'database-bindings' as const : backupProgramPublicationStageActive ? 'backup-program-publication' as const : checkpointStageActive ? 'database-checkpoint' as const : backupPolicyStageActive ? 'backup-policy' as const
       : backupProvisioningStageActive ? 'backup-provisioning' as const : backupReadinessStageActive ? 'backup-readiness' as const : ciBindingStageActive
       ? (volumeIdentityStage && !managedCiEnabled ? 'hosting-bindings' as const : 'managed-ci-bindings' as const)
       : ciWorkflowPublicationStageActive
         ? 'managed-ci-publication' as const
         : volumeStageActive ? 'service-volumes' as const : 'full' as const;
     const actionKinds = new Set(actions.map((action) => action.resource.kind));
-    const integrationFingerprints = checkpointStageActive || backupPolicyStageActive || backupProvisioningStageActive || backupReadinessStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive ? {} : {
+    const integrationFingerprints = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive ? {} : {
       ...((!ciBindingStageActive || actionKinds.has('payment')) && stripeSync.fingerprint
         ? { stripe: stripeSync.fingerprint } : {}),
       ...((!ciBindingStageActive || actionKinds.has('email')) && email.fingerprint
@@ -3127,10 +3137,10 @@ export class PlanService {
       scope: persistedScope,
       environmentName,
       specRevision: specResult.revision,
-      ...(sourceCommitSha ? { sourceCommitSha } : {}),
+      ...(!databaseBindingStageActive && sourceCommitSha ? { sourceCommitSha } : {}),
       backupCoverage,
       backupReadiness,
-      observedFingerprint: ciWorkflowPublicationStageActive || backupProgramPublicationStageActive || backupPolicyStageActive || backupReadinessStageActive
+      observedFingerprint: databaseBindingStageActive || ciWorkflowPublicationStageActive || backupProgramPublicationStageActive || backupPolicyStageActive || backupReadinessStageActive
         ? null
         : observed ? fingerprintObservedState(observed) : null,
       ...(!checkpointStageActive && dataMigration.pending && sourceEnvironment
@@ -3143,7 +3153,7 @@ export class PlanService {
       ...(planInputRequired.length > 0 ? { inputRequired: planInputRequired } : {}),
       ...(planOverrides ? { overrides: planOverrides } : {}),
     };
-    document.warnings = [...(document.warnings ?? []), ...backupPolicy.warnings];
+    document.warnings = [...(document.warnings ?? []), ...backupPolicy.warnings, ...databaseScopeBinding.warnings];
 
     // Plans for untracked environments can't reference an environment row;
     // create the local record now so runs can attach to it.

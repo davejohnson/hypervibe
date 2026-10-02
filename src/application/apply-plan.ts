@@ -1,4 +1,5 @@
 import { applyApiPolicy, planApiPolicy } from '../domain/services/api-policy.js';
+import { applyDatabaseScopeBinding } from './apply-database-scope-binding.js';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { actionRequiresBackupReadiness, deploymentPrerequisitePhase } from '../domain/plan/plan-stage.js';
 import { observeBackupPolicy } from '../domain/services/backup-policy.service.js';
@@ -846,6 +847,22 @@ export async function executePlanApply(ctx: CommandContext, params: {
   if (planScope === 'backup-readiness') {
     return { kind: 'blocked', applyBlocked: [{ provider: 'hypervibe',
       reason: 'Backup readiness is blocked. No provider mutation is authorized; run hv_plan after resolving the reported protection gaps.' }] };
+  }
+  if (planScope === 'database-bindings') {
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
+      return { kind: 'blocked', applyBlocked: [{ provider: 'hypervibe', reason: 'The database binding plan belongs to another project or environment.' }] };
+    }
+    const blocked = planService.providerPreflight(loaded.document.actions.map(action => action.resource.provider));
+    if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
+    const result = await executor.execute({ planRunId: planId, confirmActions: params.confirmActions,
+      currentSpecRevision: params.specRevision, handler: async action => {
+        if (resolvePlanActionAuthority(action)?.capability !== 'database.scope.bind') {
+          return { success: false, status: 'blocked', message: 'This stage can only record the reviewed existing database scope.' };
+        }
+        return applyDatabaseScopeBinding({ ctx, project, environmentName: envName, environmentSpec: envSpec,
+          action, confirmedActionIds: new Set(params.confirmActions) });
+      } });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [] };
   }
   const freshBackupReadiness = async () => {
     const currentEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);

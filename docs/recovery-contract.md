@@ -52,6 +52,43 @@ the safe identity before passing it to the provider compiler. Cloud SQL alone
 parses its `project:region:instance` connection name. Its emitted drill continues
 to restore a separate instance, run the existing SQL check and perform cleanup.
 
+## Legacy database scope reconciliation
+
+An existing database whose `providerScope` is wholly absent may receive one
+confirmed `database-bindings` action. The shared planner uses the native
+`dailyBackups.observe` source, before any managed-program projection. Every
+scope coordinate must agree with the legacy component or its same-provider
+environment binding. Missing, malformed or conflicting evidence is not authority
+to infer placement, adopt another database or overwrite existing scope.
+
+The action pins the exact component, provider, engine, external ID, complete
+recovery source and a credential-free binding fingerprint. Apply rechecks the
+current binding and freshly observed source before merging only `providerScope`.
+It preserves the spec, services, credentials, checkpoint history and deployment
+markers, and reports applied/skipped counts with zero provider mutations. Re-plan
+after applying the prerequisite; it does not enable a schedule or verify a
+restore. An outstanding checkpoint retains priority.
+
+The following review, dated 2026-10-02, covers all eight registered database
+providers. Eligibility is adapter behavior checked against these native identity
+contracts, not a claim of live compatibility.
+
+| Provider | Native identity evidence | Missing-scope repair |
+| --- | --- | --- |
+| Railway | [Pinned official SDL, CLI `f60f3a77`](https://raw.githubusercontent.com/railwayapp/cli/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/gql/schema.json): project-owned service/environment, environment-specific service instance and volume instance. | Eligible only with a matching legacy component project anchor and independently verified exact source, including one active volume. Missing both scope and anchor remains unknown. Ordinary database observation preserves the same complete scope, including custom-image fallback. |
+| Cloud SQL | [Instance GET](https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1beta4/instances/get) selects project and instance; its response identifies project and region. | Blocked: the existing native daily observer requires durable project scope before reading. |
+| RDS | [Instance identity](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_DBInstance.html) includes ARN and immutable regional `DbiResourceId`. | Unsupported: no native daily observation port. |
+| Supabase | [Pinned official OpenAPI, `26585dd4`](https://raw.githubusercontent.com/supabase/supabase/26585dd4a4d6db8910a595214c9f6e8fdd206768/apps/docs/spec/api_v1_openapi.json): project reference, organization and region. | Unsupported: no native daily observation port. |
+| Azure PostgreSQL | [Server GET](https://learn.microsoft.com/en-us/rest/api/postgresql/servers/get?view=rest-postgresql-2024-08-01): ARM server ID includes subscription and resource group. | Unsupported: no native daily observation port. |
+| Neon | [Official OpenAPI](https://neon.com/api_spec/release/v2.json), checked-in source hash `731af8e540fc474a7f3da5fe1420d23da8248960ef11fff713f4b741c6471d24`: project, region and separate ownership/branch identities. | Unsupported: no native daily observation port. |
+| Fly | [Managed Postgres](https://fly.io/docs/flyctl/mpg/): managed cluster and organization, distinct from app volumes. | Unsupported: no native daily observation port. |
+| DigitalOcean | [Cluster schema](https://raw.githubusercontent.com/digitalocean/openapi/main/specification/resources/databases/models/database_cluster.yml): cluster UUID and region. [Account schema](https://raw.githubusercontent.com/digitalocean/openapi/main/specification/resources/account/models/account.yml) distinguishes user UUID from team UUID. | Unsupported: no native daily observation port; the existing account projection is not certified team-ownership evidence. |
+
+Normal acceptance includes real SQLite plan/apply tests and Railway's actual
+serialized GraphQL client against the pinned official schema. Fixture state is
+synthetic. These tests establish preservation, identity rejection and query-only
+provider access; they do not perform a live repair, backup or restore.
+
 ## Verification means separate evidence
 
 Checkpoint receipts and rollback previews use the same versioned `recovery`

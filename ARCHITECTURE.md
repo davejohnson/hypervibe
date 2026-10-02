@@ -1850,6 +1850,15 @@ delete, schedule, or PITR mutations. Native snapshots remain dependent on their
 provider volume and are not independent off-provider copies. See
 [database checkpoints](docs/database-checkpoints.md) for the evidence boundary.
 
+Legacy database bindings with absent provider scope use a separate reviewed
+`database-bindings` prerequisite when the native backup observer can independently
+prove the exact existing source. Apply re-observes the pinned source and merges
+only scope metadata into the unchanged component. This stage does not provision,
+deploy, advance deployment markers or rewrite the spec. Conflicting or incomplete
+identity remains blocked; a full import is not a metadata repair. The
+[shared recovery contract](docs/recovery-contract.md#legacy-database-scope-reconciliation)
+records the provider evidence and limitations.
+
 Environment data moves are explicit one-use desired state under the target
 environment's `dataMigration`. V1 copies only whole PostgreSQL databases and
 named object buckets from another declared environment. Plan isolates pending
