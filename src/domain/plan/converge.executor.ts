@@ -1,4 +1,5 @@
 import { API_POLICY_OPERATION } from '../services/api-policy.js';
+import { DATABASE_SCOPE_BIND_OPERATION, isDatabaseScopeBindingAction } from '../services/database-scope-binding.service.js';
 import { createHash } from 'crypto';
 import { z } from 'zod';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
@@ -217,6 +218,7 @@ export const planRunDocumentSchema = z.object({
     'hosting-bindings',
     'service-volumes',
     'database-checkpoint',
+    'database-bindings',
     'backup-policy',
     'backup-provisioning',
     'backup-readiness',
@@ -245,6 +247,17 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope !== 'database-bindings' && document.actions.some(action => action.metadata?.operation === DATABASE_SCOPE_BIND_OPERATION)) {
+    ctx.addIssue({ code: 'custom', message: 'Database scope binding requires its isolated database-bindings stage.' });
+  }
+  if (document.scope === 'database-bindings') {
+    if (document.actions.length !== 1 || document.actions.some(action => !isDatabaseScopeBindingAction(action))
+      || document.observedFingerprint !== null || document.overrides || document.integrationFingerprints
+      || document.sourceCommitSha || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
+      ctx.addIssue({ code: 'custom', message: 'Database binding plans contain only one confirmed local scope repair and no rollout inputs.' });
+    }
+    return;
+  }
   if (document.scope === 'backup-program-publication') {
     if (document.actions.length !== 1 || document.actions.some(action => !isBackupProgramPublicationAction(action) || action.dependsOn?.length)
       || document.observedFingerprint !== null || document.overrides || document.integrationFingerprints

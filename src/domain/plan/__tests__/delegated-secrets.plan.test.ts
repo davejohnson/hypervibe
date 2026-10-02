@@ -49,6 +49,7 @@ function observed(serviceOverrides: Partial<ObservedState['services'][number]> =
       provider: 'railway',
       engine: 'postgres',
       externalId: 'rail-postgres',
+      providerScope: { ...databaseRecoverySource.providerScope },
       name: 'Postgres',
       status: 'running',
     }],
@@ -124,7 +125,8 @@ describe('PlanService delegated secret inputs', () => {
       environmentId: environment.id,
       type: 'postgres',
       externalId: 'rail-postgres',
-      bindings: { provider: 'railway', pluginName: 'Postgres', serviceId: 'rail-postgres' },
+      bindings: { provider: 'railway', pluginName: 'Postgres', serviceId: 'rail-postgres',
+        providerScope: { ...databaseRecoverySource.providerScope } },
     });
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
@@ -146,6 +148,71 @@ describe('PlanService delegated secret inputs', () => {
     SqliteAdapter.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
+
+  it.each(['missing', 'provided'] as const)(
+    'defers %s delegated input during scope repair and resumes it in the next full plan', async input => {
+      const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+      const components = new ComponentRepository();
+      const component = components.findByEnvironmentAndType(environment.id, 'postgres')!;
+      const { providerScope: _scope, ...legacyBindings } = component.bindings;
+      components.update(component.id, { bindings: { ...legacyBindings, projectId: 'rail-project' } });
+      const connection = new ConnectionRepository().create({
+        provider: 'railway',
+        credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'railway-account-token' }),
+      });
+      new ConnectionRepository().updateStatus(connection.id, 'verified');
+      process.env.FRIEND_ANTHROPIC_API_KEY = FRIEND_KEY;
+      const options = { includeEnvFile: false,
+        ...(input === 'provided' ? { secretRefs: { ANTHROPIC_API_KEY: 'env:FRIEND_ANTHROPIC_API_KEY' } } : {}) };
+      const planner = new PlanService();
+
+      // Synthetic provider-port evidence exercises the real plan/apply boundary;
+      // native source verification is covered by the transport contract suite.
+      const repair = await planner.plan(project, 'production', options);
+      expect(repair).not.toHaveProperty('error');
+      if ('error' in repair) throw new Error(repair.error);
+      expect(repair.scope).toBe('database-bindings');
+      expect(repair.actions).toHaveLength(1);
+      expect(repair.actions[0]).toMatchObject({ requiresConfirm: true,
+        metadata: { operation: 'databaseScopeBind', componentId: component.id } });
+      expect(repair.inputRequired).toEqual([]);
+      const repairDocument = new RunRepository().findById(repair.planRunId)!.plan;
+      expect(repairDocument).not.toHaveProperty('inputRequired');
+      expect(repairDocument).not.toHaveProperty('overrides');
+      expect(JSON.stringify(repairDocument)).not.toContain(FRIEND_KEY);
+      const currentSpec = new SpecStore().get(project)!;
+      expect(await executePlanApply(createToolContext(), {
+        project, spec: currentSpec.spec, specRevision: currentSpec.revision,
+        planId: repair.planRunId, confirmActions: [repair.actions[0].id],
+      })).toMatchObject({ kind: 'executed', result: { success: true, receipts: [
+        { data: { applied: 1, skipped: 0, providerMutations: 0 } },
+      ] } });
+      expect(components.findById(component.id)?.bindings.providerScope)
+        .toEqual(databaseRecoverySource.providerScope);
+
+      const resumed = await planner.plan(project, 'production', options);
+      expect(resumed).not.toHaveProperty('error');
+      if ('error' in resumed) throw new Error(resumed.error);
+      expect(resumed.scope).toBe('full');
+      expect(resumed.actions.some(action => action.metadata?.operation === 'databaseScopeBind')).toBe(false);
+      const resumedDocument = new RunRepository().findById(resumed.planRunId)!.plan as Record<string, unknown>;
+      if (input === 'missing') {
+        expect(resumed.inputRequired).toEqual([
+          expect.objectContaining({ key: 'ANTHROPIC_API_KEY', principal: 'github:alice' }),
+        ]);
+        expect(resumedDocument.inputRequired).toEqual(resumed.inputRequired);
+        expect(resumedDocument.overrides).toBeUndefined();
+      } else {
+        expect(resumed.inputRequired).toEqual([]);
+        expect(resumed.actions.find(action => action.id === 'secret:ANTHROPIC_API_KEY'))
+          .toMatchObject({ type: 'update', metadata: { inputProvided: true, services: ['web'] } });
+        const overrides = resumedDocument.overrides as Record<string, unknown>;
+        expect(getSecretStore().decryptObject(overrides.delegatedSecretVarsEncrypted as string))
+          .toEqual({ ANTHROPIC_API_KEY: FRIEND_KEY });
+        expect(JSON.stringify(resumedDocument)).not.toContain(FRIEND_KEY);
+      }
+    }
+  );
 
   it('persists an inspectable but non-executable plan when required input is absent', async () => {
     const envFile = path.join(tempDir, '.env');

@@ -320,13 +320,34 @@ export function createRailwayDatabaseAdapter(params: {
       if (serviceMatches.length > 1) {
         throw new Error(`Multiple Railway services match durable database id ${component.externalId}`);
       }
+      const currentEnvironmentId = environment.platformBindings.environmentId;
+      const boundEnvironmentId = componentEnvironmentId(component);
+      if (typeof currentEnvironmentId !== 'string' || !currentEnvironmentId.trim()
+        || observed.completeness?.environment !== 'complete'
+        || observed.environmentId !== currentEnvironmentId
+        || (boundEnvironmentId !== undefined && boundEnvironmentId !== currentEnvironmentId)) {
+        throw new Error(
+          `Railway database service ${component.externalId} was not completely observed in its exact environment scope.`
+        );
+      }
       const service = serviceMatches[0];
       if (!service) return null;
+      if (typeof railway.inspectServiceInstance !== 'function') {
+        throw new Error('Railway hosting adapter does not expose exact database instance observation.');
+      }
+      // Custom database images remain services in the aggregate inventory. Verify
+      // their exact live instance before preserving scope for a bound database.
+      const instance = await railway.inspectServiceInstance(service.externalId, observed.environmentId);
+      if (instance.state !== 'present') {
+        throw new Error(
+          `Railway database service ${component.externalId} could not be verified in its exact environment scope.`
+        );
+      }
       return {
         provider: 'railway',
         engine: 'postgres',
         externalId: service.externalId,
-        providerScope: { projectId: currentProjectId },
+        providerScope: { projectId: observed.projectId, environmentId: instance.environmentId },
         name: service.name,
         status: service.status === 'running'
           ? 'running'

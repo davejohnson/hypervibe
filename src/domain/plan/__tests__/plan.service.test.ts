@@ -918,7 +918,8 @@ describe('PlanService.plan', () => {
       environmentId: environment.id,
       type: 'postgres',
       externalId: 'db-1',
-      bindings: { provider: 'railway', projectId: 'rp-1', serviceId: 'db-1' },
+      bindings: { provider: 'railway', projectId: 'rp-1', serviceId: 'db-1', resourceKind: 'service',
+        providerScope: { projectId: 'rp-1', environmentId: 're-1' } },
     });
     new ServiceRepository().create({ projectId: project.id, name: 'web' });
     seedVerifiedConnection('railway', { apiToken: 'railway-token' });
@@ -948,8 +949,10 @@ describe('PlanService.plan', () => {
         provider: 'railway',
         engine: 'postgres',
         externalId: 'db-1',
+        providerScope: { projectId: 'rp-1', environmentId: 're-1' },
         status: 'running',
       }],
+      completeness: { project: 'complete', environment: 'complete', services: 'complete', databases: 'complete' },
       partial: false,
       warnings: [],
     }, {
@@ -1482,6 +1485,7 @@ describe('PlanService.plan', () => {
         environmentId: 'rail-environment-1',
         serviceId: databaseId,
         resourceKind: 'service',
+        providerScope: { projectId: 'rail-project-1', environmentId: 'rail-environment-1' },
         pluginName: 'Postgres',
         seed: {
           commandHash: sha256(seedCommand),
@@ -1519,7 +1523,11 @@ describe('PlanService.plan', () => {
     vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
       success: true,
       adapter: { ...createRailwayDatabaseAdapter({
-        hostingAdapter: { observe: async () => structuredClone(observedState) } as never,
+        hostingAdapter: {
+          observe: async () => structuredClone(observedState),
+          inspectServiceInstance: async () => ({ state: 'present', instanceId: 'database-instance',
+            serviceId: databaseId, environmentId: 'rail-environment-1' }),
+        } as never,
         envRepo: new EnvironmentRepository(),
       }), dailyBackups: dailyBackupEvidence({ provider: 'railway', primaryExternalId: databaseId,
         providerScope: { projectId: 'rail-project-1', environmentId: 'rail-environment-1' }, resourceIdentity: { volumeId: 'database-volume' } }) },
@@ -3542,6 +3550,7 @@ describe('PlanService.plan', () => {
           status: 'running',
         }],
         databases: database ? [database] : [],
+        completeness: { project: 'complete', environment: 'complete', services: 'complete', databases: 'complete' },
         partial: false,
         warnings: [],
       });
@@ -3681,12 +3690,14 @@ describe('PlanService.plan', () => {
           },
         },
       });
-      const environment = seedObservedRailwayWeb({ provider: 'railway', engine: 'postgres', externalId: 'managed-db', status: 'running' });
+      const environment = seedObservedRailwayWeb({ provider: 'railway', engine: 'postgres', externalId: 'managed-db',
+        providerScope: { projectId: 'rp-1', environmentId: 're-1' }, status: 'running' });
       new ComponentRepository().create({
         environmentId: environment.id,
         type: 'postgres',
         externalId: 'managed-db',
-        bindings: { provider: 'railway', connectionString: 'postgres://managed-db' },
+        bindings: { provider: 'railway', connectionString: 'postgres://managed-db', resourceKind: 'service',
+          providerScope: { projectId: 'rp-1', environmentId: 're-1' } },
       });
       await mockProtectedRailwayDatabase({ provider: 'railway', primaryExternalId: 'managed-db',
         providerScope: { projectId: 'rp-1', environmentId: 're-1' }, resourceIdentity: { volumeId: 'managed-volume' } });
@@ -3845,12 +3856,14 @@ describe('PlanService.plan', () => {
           },
         },
       });
-      const environment = seedObservedRailwayWeb({ provider: 'railway', engine: 'postgres', externalId: 'managed-db', status: 'running' });
+      const environment = seedObservedRailwayWeb({ provider: 'railway', engine: 'postgres', externalId: 'managed-db',
+        providerScope: { projectId: 'rp-1', environmentId: 're-1' }, status: 'running' });
       new ComponentRepository().create({
         environmentId: environment.id,
         type: 'postgres',
         externalId: 'managed-db',
-        bindings: { provider: 'railway', connectionString: 'postgres://managed-db' },
+        bindings: { provider: 'railway', connectionString: 'postgres://managed-db', resourceKind: 'service',
+          providerScope: { projectId: 'rp-1', environmentId: 're-1' } },
       });
       await mockProtectedRailwayDatabase({ provider: 'railway', primaryExternalId: 'managed-db',
         providerScope: { projectId: 'rp-1', environmentId: 're-1' }, resourceIdentity: { volumeId: 'managed-volume' } });

@@ -93,7 +93,7 @@ export async function resolveManagedBackupTarget(context: BackupPolicyContext): 
       // not authority for a database that may live in another provider/account.
       const bound = recoverySourceIdentitySchema.safeParse({ provider: components[0].bindings.provider,
         primaryExternalId: components[0].externalId, providerScope: components[0].bindings.providerScope, resourceIdentity: {} });
-      if (!bound.success) issues.push('The database binding lacks valid durable recovery scope; re-import or re-plan the database before configuring backups.');
+      if (!bound.success) issues.push('The database binding lacks valid durable recovery scope; re-plan to review independently verifiable legacy scope. Malformed or unverifiable scope requires resolving the exact binding identity.');
       else try {
         const adapter = await context.adapterFactory.getDatabaseAdapter(spec.database.provider, context.project);
         if (!adapter.success || adapter.adapter?.name !== bound.data.provider) throw new Error('Database adapter differs.');

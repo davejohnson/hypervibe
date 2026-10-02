@@ -127,10 +127,15 @@ backup workflow and exported database identities must be committed before its
 controller accepts a run.
 
 Database bindings must include valid durable `providerScope` coordinates. A
-legacy binding without that scope blocks backup-program compilation with
-re-import or re-plan guidance. Hypervibe checks the observed database provider,
-resource ID and recorded scope before admitting the source; it never substitutes
-the hosting account or environment for missing database placement.
+legacy binding with wholly absent scope may receive a separate, confirmed
+`database-bindings` plan. Its native backup observer must independently prove
+the exact bound database and all scope coordinates, which must agree with the
+existing legacy bindings. Apply rechecks that evidence and saves only the missing
+scope; it does not change provider resources, desired state, credentials or
+checkpoint history. Re-plan after this prerequisite. Conflicting, incomplete or
+unobservable identities remain blocked; see the
+[provider review](recovery-contract.md#legacy-database-scope-reconciliation).
+Hypervibe never substitutes an assumed hosting placement for database evidence.
 
 The managed program currently covers at most one bound PostgreSQL database and
 declared application buckets. Retained databases or buckets outside that target
