@@ -13,6 +13,8 @@ export interface HostedEnvironmentBindingsV1 {
   projectId?: string;
   environmentId?: string;
   services: Record<string, { serviceId: string; url?: string; customDomains?: string[]; publicEndpointsTruncated?: boolean }>;
+  /** The committed primary database identity recorded by apply, when the environment declares one. */
+  database?: { provider: string; externalId: string };
 }
 export interface CommittedBindingsInspectionReceiptV1 {
   schemaVersion: 1;
@@ -48,6 +50,9 @@ const projection = z.object({
   projectId: identity.optional(),
   environmentId: identity.optional(),
   services: z.record(z.object({ serviceId: identity.optional(), url: z.unknown().optional(), customDomains: z.unknown().optional() })).optional(),
+  databaseTopology: z.object({ primary: z.object({
+    provider: z.string().regex(/^[a-z][a-z0-9-]*$/).max(128), externalId: identity,
+  }).optional() }).optional(),
 });
 
 /** No checkout access or full binding values: scoped identities and safe public origins only. */
@@ -60,7 +65,7 @@ export function inspectCommittedBindingsV1(input: CommittedBindingsInspectionInp
     requireSafeReceiptLabel(name, 'environment');
     const projected = projection.safeParse(environment.platformBindings);
     if (!projected.success) throw new HostedInspectionError('INVALID_BINDINGS', 'Committed hosting identities are invalid.');
-    const { services: rawServices, ...scope } = projected.data;
+    const { services: rawServices, databaseTopology, ...scope } = projected.data;
     const services: HostedEnvironmentBindingsV1['services'] = Object.create(null);
     for (const [service, binding] of Object.entries(rawServices ?? {})) {
       requireSafeReceiptLabel(service, 'service');
@@ -76,7 +81,9 @@ export function inspectCommittedBindingsV1(input: CommittedBindingsInspectionInp
           ...(domains.length > MAX_PUBLIC_ENDPOINTS ? { publicEndpointsTruncated: true } : {}) };
       }
     }
-    environments[name] = { ...scope, services };
+    const primary = databaseTopology?.primary;
+    environments[name] = { ...scope, services,
+      ...(primary ? { database: { provider: primary.provider, externalId: primary.externalId } } : {}) };
   }
   return {
     schemaVersion: 1,

@@ -118,7 +118,10 @@ function declaredResources(spec: EnvironmentSpec, environment: string, hasRuntim
   const unsupported = (kind: string, name: string, owner = provider) => {
     resources.push({ ...resource(kind, name, owner), status: 'unsupported', reasonCode: 'capability_unsupported' });
   };
-  if (spec.database) unsupported('database', 'database', spec.database.provider);
+  // A database on the hosting provider is compared with the provider's observed
+  // datastores; databases on another provider remain outside this scope.
+  if (spec.database?.provider === provider) resources.push(resource('database', 'database', provider));
+  else if (spec.database) unsupported('database', 'database', spec.database.provider);
   if (spec.cache) unsupported('cache', 'cache', spec.cache.provider);
   for (const [name, storage] of Object.entries(spec.storage ?? {})) unsupported('storage', name, storage.provider);
   for (const name of Object.keys(spec.queues ?? {})) unsupported('queue', name);
@@ -239,9 +242,34 @@ function compareHosting(input: {
       if (spec.services[row.name][key] !== undefined) row.fields.push({ field: key, status: 'unsupported', desired: 'configured', current: null });
     }
   }
+  // The primary database is identified only by the committed identity apply
+  // recorded, matched exactly in this environment's inventory. Names and images
+  // are never treated as proof that a service is the declared database.
+  const database = resources.find(row => row.kind === 'database' && row.status !== 'unsupported');
+  const databaseBinding = bindings.database?.provider === spec.hosting.provider ? bindings.database : undefined;
+  if (database && !databaseBinding) {
+    database.reasonCode = 'binding_missing';
+  } else if (database && databaseBinding) {
+    database.externalId = databaseBinding.externalId;
+    const candidates = [...observed.services, ...(observed.databases ?? [])]
+      .filter(item => item.externalId === databaseBinding.externalId);
+    const complete = serviceComplete && observed.completeness?.databases !== 'unknown';
+    if (candidates.length === 1) {
+      database.current.exists = true;
+      database.status = 'matching';
+    } else if (candidates.length > 1) {
+      database.reasonCode = 'ambiguous_identity';
+    } else if (complete) {
+      database.current.exists = false;
+      database.status = 'missing';
+    } else {
+      database.reasonCode = 'observation_incomplete';
+    }
+  }
   const boundNames = new Map(Object.entries(bindings.services).map(([name, binding]) => [binding.serviceId, name]));
   let omittedResources = 0;
   for (const live of observed.services) {
+    if (databaseBinding && live.externalId === databaseBinding.externalId) continue;
     const boundName = boundNames.get(live.externalId);
     if (boundName && Object.hasOwn(input.spec.services, boundName)) continue;
     if (resources.length >= input.maxResources) { omittedResources += 1; continue; }
@@ -331,7 +359,8 @@ export async function inspectHostedEnvironmentV1(
     || bindings.projectId !== input.connection.scope?.projectId || bindings.environmentId !== input.connection.scope?.environmentId) {
     markUnknown(resources, 'scope_mismatch');
   } else {
-    report.coverage.supportedResourceKinds = ['environment', 'service'];
+    report.coverage.supportedResourceKinds = ['environment', 'service',
+      ...(resources.some(row => row.kind === 'database' && row.status !== 'unsupported') ? ['database'] : [])];
     const result = await capability.observe({
       environment: { id: input.environment, projectId: spec.project, name: input.environment,
         platformBindings: { ...bindings }, createdAt: now(), updatedAt: now() },
