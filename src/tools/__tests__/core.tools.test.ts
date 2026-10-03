@@ -4159,6 +4159,8 @@ describe('hv_plan / hv_status / hv_apply', () => {
         connectionString: 'postgres://seed:secret@db.example.com/app',
       },
     });
+    // Created databases record their committed primary identity.
+    new EnvironmentRepository().updatePlatformBindings(environment.id, { databaseTopology: { primary: { provider: 'railway', externalId: 'db-1' }, replicas: {} } });
     const observedState: ObservedState = {
       provider: 'railway',
       observedAt: new Date().toISOString(),

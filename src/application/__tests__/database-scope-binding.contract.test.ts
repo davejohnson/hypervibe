@@ -104,7 +104,10 @@ describe('reviewed legacy database scope binding', () => {
       ] } });
     expect(ctx.repos.components.findById(f.component.id)?.bindings).toEqual({ ...f.component.bindings,
       providerScope: { projectId, environmentId: stagingId } });
-    expect(ctx.repos.environments.findById(f.environment.id)).toEqual(f.environment);
+    // The verified identity is also committed for hosted inspection; nothing else in the environment changes.
+    const { databaseTopology, ...unchangedBindings } = ctx.repos.environments.findById(f.environment.id)!.platformBindings;
+    expect(databaseTopology).toEqual({ primary: { provider: 'railway', externalId: f.component.externalId }, replicas: {} });
+    expect(unchangedBindings).toEqual(f.environment.platformBindings);
     expect(ctx.repos.services.findById(f.service.id)).toEqual(f.service);
     expect(new SpecStore().get(f.project)?.revision).toBe(result.specRevision);
     expect(new SpecStore().get(f.project)?.spec).toEqual(f.spec);
@@ -156,6 +159,30 @@ describe('reviewed legacy database scope binding', () => {
     expect(await r.apply()).toMatchObject({ success: false, data: { applied: 0 } });
     expect(ctx.repos.components.findById(f.component.id)?.bindings).not.toHaveProperty('providerScope');
     expect(ctx.repos.components.findById(f.component.id)?.bindings.connectionUrl).toContain('rotated:private');
+    expect(f.http.mutations).toEqual([]);
+  });
+
+  it('records the verified identity of an already scoped database that has no committed primary', async () => {
+    const f = await fixture();
+    ctx.repos.components.updateBindings(f.component.id, { providerScope: { projectId, environmentId: stagingId } });
+    const r = await reviewed(f);
+    expect(r.action.reason).toContain('.hypervibe/bindings.json');
+    expect(await r.apply()).toMatchObject({ success: true, data: { applied: 1, skipped: 0, providerMutations: 0 } });
+    expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings.databaseTopology)
+      .toEqual({ primary: { provider: 'railway', externalId: 'staging-postgres' }, replicas: {} });
+    expect((await planDatabaseScopeBinding(f.context())).actions).toEqual([]);
+    expect(f.http.mutations).toEqual([]);
+  });
+
+  it('never replaces a committed primary that names a different database', async () => {
+    const f = await fixture();
+    const other = { primary: { provider: 'railway', externalId: 'other-postgres' }, replicas: {} };
+    ctx.repos.environments.updatePlatformBindings(f.environment.id, { databaseTopology: other });
+    ctx.repos.components.updateBindings(f.component.id, { providerScope: { projectId, environmentId: stagingId } });
+    const planned = await planDatabaseScopeBinding(f.context());
+    expect(planned.actions).toEqual([]);
+    expect(planned.warnings.join(' ')).toMatch(/different database/);
+    expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings.databaseTopology).toEqual(other);
     expect(f.http.mutations).toEqual([]);
   });
 

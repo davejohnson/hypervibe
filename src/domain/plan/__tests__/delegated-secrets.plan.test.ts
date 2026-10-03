@@ -117,6 +117,8 @@ describe('PlanService delegated secret inputs', () => {
         projectId: 'rail-project',
         environmentId: 'rail-environment',
         services: { web: { serviceId: 'rail-service' } },
+        // Created databases record their committed primary identity.
+        databaseTopology: { primary: { provider: 'railway', externalId: 'rail-postgres' }, replicas: {} },
       },
     });
     new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
