@@ -14,6 +14,7 @@ import { recoverySourceIdentitySchema } from './recovery-source.js';
 import { normalizeStoredObjectRevision, objectRecoveryIdentitySchema, storedObjectRevisionMatches, storedObjectRevisionSchema,
   type ObjectRecoveryIdentity } from './object-recovery-set.service.js';
 import { databaseManifest, postgresDumpArguments, postgresMajorVersion, postgresProcessEnvironment, postgresTableCountsMatch } from './postgres-transfer.service.js';
+import { RecoveryDiagnosticError, recoveryFailure, type RecoveryDiagnostic } from '../ports/recovery-diagnostics.port.js';
 
 export interface PostgresBackupInput {
   sourceUrl: string;
@@ -68,7 +69,9 @@ export interface PostgresBackupResult {
 // Only extension code shipped with PostgreSQL and without remote execution is
 // admitted. Additional extensions need an independently reviewed helper image.
 const safeExtensions = new Set(['plpgsql', 'pgcrypto', 'uuid-ossp', 'citext', 'hstore', 'btree_gin', 'btree_gist', 'pg_trgm', 'unaccent']);
-class LocalCleanupUnverified extends Error {}
+class LocalCleanupUnverified extends Error {
+  constructor(readonly primaryFailure?: RecoveryDiagnosticError) { super(); }
+}
 
 function cleanEnvironment(): NodeJS.ProcessEnv {
   return { PATH: process.env.PATH, LANG: 'C', LC_ALL: 'C', TZ: 'UTC' };
@@ -117,6 +120,8 @@ async function restoreLocal(archivePath: string, directory: string, sourceManife
   let target: Client | undefined;
   let targetVersion: string | undefined;
   const fileReferences: PostgresBackupResult['fileReferences'] = [];
+  let stage: RecoveryDiagnostic['stage'] = 'database-restore';
+  let failure: RecoveryDiagnosticError | undefined;
   try {
     await command('initdb', ['-D', data, '-U', 'hv_admin', '--auth-local=trust', '--auth-host=reject', '--no-locale'], env);
     // A unique local cluster with no TCP listener is the only possible restore
@@ -138,6 +143,7 @@ async function restoreLocal(archivePath: string, directory: string, sourceManife
     await command('pg_restore', ['--no-owner', '--no-acl', '--no-tablespaces', '--exit-on-error', '--single-transaction', '--dbname=hv_restore_test', archivePath], restoreEnv);
     target = new Client({ host: socket, database: 'hv_restore_test', user: 'hv_restore', connectionTimeoutMillis: 15_000 });
     await target.connect();
+    stage = 'database-verification';
     await target.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
     const restored = await databaseManifest(target);
     targetVersion = restored.sourceVersion;
@@ -153,6 +159,7 @@ async function restoreLocal(archivePath: string, directory: string, sourceManife
       if (check.rows.length !== 1 || check.rows[0]?.ok !== true) throw new Error('verification did not return true');
     }
     let keyBytes = 0;
+    stage = 'reference-verification';
     for (const [index, projection] of fileReferenceQueries.entries()) {
       // Wrapping in a subquery plus the extended protocol bounds returned rows
       // and rejects multi-statement/control SQL before it can leave READ ONLY.
@@ -169,11 +176,14 @@ async function restoreLocal(archivePath: string, directory: string, sourceManife
       fileReferences.push({ storageName: projection.storageName, keys: [...keys].sort() });
     }
     await target.query('ROLLBACK');
+  } catch (error) {
+    failure = recoveryFailure(stage, 'execution', error);
+    throw failure;
   } finally {
     await Promise.allSettled([admin?.end(), target?.end()]);
     if (started) {
       try { await command('pg_ctl', ['-D', data, '-m', 'immediate', '-w', '-t', '30', 'stop'], env); }
-      catch { throw new LocalCleanupUnverified(); }
+      catch { throw new LocalCleanupUnverified(failure); }
     }
   }
   if (!targetVersion) throw new Error('restore not completed');
@@ -185,7 +195,11 @@ async function restoreLocal(archivePath: string, directory: string, sourceManife
  * private routing, retention, and archive client shutdown. This function never
  * retries a write or claims native snapshot/PITR/application coverage. */
 export async function backupAndVerifyPostgres(input: PostgresBackupInput): Promise<PostgresBackupResult> {
-  let stage = 'input-validation';
+  const failureStages = { 'input-validation': 'worker-input', 'source-preflight': 'database-backup',
+    'source-dump': 'database-backup', 'archive-upload': 'database-backup', 'archive-readback': 'database-backup',
+    'restore-verification': 'database-restore', cleanup: 'restore-cleanup', 'archive-inventory': 'database-backup',
+    'completion-manifest': 'recovery-completion' } as const;
+  let stage: keyof typeof failureStages = 'input-validation';
   let directory: string | undefined;
   let sourceClient: Client | undefined;
   let snapshotOpen = false;
@@ -273,8 +287,14 @@ export async function backupAndVerifyPostgres(input: PostgresBackupInput): Promi
   } catch (error) {
     // Never remove the data directory of a server whose stop was uncertain.
     // The owning helper workload must be terminally deleted by its controller.
-    if (error instanceof LocalCleanupUnverified) { directory = undefined; stage = 'cleanup'; }
-    throw new Error(`PostgreSQL backup failed (${stage}).`);
+    if (error instanceof LocalCleanupUnverified) {
+      directory = undefined; stage = 'cleanup'; error = error.primaryFailure ?? error;
+    }
+    const message = `PostgreSQL backup failed (${stage}).`;
+    const failure = recoveryFailure(failureStages[stage], stage === 'cleanup' ? 'cleanup' : stage === 'input-validation' ? 'invalid-input' : 'execution',
+      error, undefined, message);
+    throw stage === 'cleanup'
+      ? new RecoveryDiagnosticError({ ...failure.diagnostic, localCleanupFailed: true }, message) : failure;
   } finally {
     if (snapshotOpen) await sourceClient?.query('ROLLBACK').catch(() => undefined);
     await sourceClient?.end().catch(() => undefined);

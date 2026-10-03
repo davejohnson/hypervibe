@@ -3,43 +3,26 @@ import { stringify } from 'yaml';
 import { canonicalizeJson, canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import type { ManagedGitHubFile } from './github-infrastructure.service.js';
 
-export const BACKUP_HEALTH_REASON_CODES = [
-  'backup-missing', 'backup-stale', 'backup-unverified', 'restore-unverified',
-  'files-unverified', 'references-unverified', 'source-mismatch', 'destination-mismatch',
-  'retention-unknown', 'cleanup-unverified', 'scheduler-stale', 'execution-failed',
-  'observation-unavailable', 'receipt-missing', 'receipt-invalid',
-] as const;
+import { backupOperationReceiptValidatorSource } from './backup-operation-receipt.js';
+export { BACKUP_HEALTH_REASON_CODES } from './backup-operation-receipt.js';
 
 function alertScript(): string {
   return `const fs = require('node:fs');
 const env = process.env.HYPERVIBE_BACKUP_ENVIRONMENT;
 if (!/^[a-zA-Z0-9_-]{1,96}$/.test(env || '')) throw new Error('Invalid backup alert scope.');
-const allowedReasons = new Set(${JSON.stringify(BACKUP_HEALTH_REASON_CODES)});
+${backupOperationReceiptValidatorSource()}
 let status = 'unknown';
 let reasons = ['receipt-missing'];
+let diagnostic;
 try {
   const file = process.env.HYPERVIBE_BACKUP_RECEIPT_PATH;
   const stat = fs.lstatSync(file);
   if (!stat.isFile() || stat.size > 16384) throw new Error('Invalid receipt size.');
-  const receipt = JSON.parse(fs.readFileSync(file, 'utf8'));
-  const keys = new Set(['version', 'environment', 'status', 'reasonCodes', 'counts', 'setId', 'completedAt']);
-  const count = value => Number.isSafeInteger(value) && value >= 0;
-  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)
-    || Object.keys(receipt).some(key => !keys.has(key)) || receipt.version !== 1
-    || receipt.environment !== env || !['healthy', 'unhealthy', 'unknown'].includes(receipt.status)
-    || !Array.isArray(receipt.reasonCodes) || receipt.reasonCodes.length > 24
-    || receipt.reasonCodes.some(code => !allowedReasons.has(code))
-    || (receipt.status === 'healthy' && receipt.reasonCodes.length !== 0)
-    || (receipt.setId !== undefined && !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(receipt.setId))
-    || (receipt.completedAt !== undefined && (typeof receipt.completedAt !== 'string' || !Number.isFinite(Date.parse(receipt.completedAt))))
-    || (receipt.counts !== undefined && (!receipt.counts || typeof receipt.counts !== 'object'
-      || Object.keys(receipt.counts).some(key => !['applied', 'skipped'].includes(key))
-      || !(receipt.counts.applied === null || count(receipt.counts.applied)) || !count(receipt.counts.skipped)))) {
-    throw new Error('Invalid backup receipt.');
-  }
-  status = receipt.status; reasons = receipt.reasonCodes;
+  const receipt = parseBackupOperationReceipt(JSON.parse(fs.readFileSync(file, 'utf8')), backupReceiptRules);
+  if (!receipt || receipt.environment !== env) throw new Error('Invalid backup receipt.');
+  status = receipt.status; reasons = receipt.reasonCodes; diagnostic = receipt.diagnostic;
 } catch { reasons = ['receipt-invalid']; }
-if (process.env.HYPERVIBE_BACKUP_JOB_RESULT !== 'success') { status = 'unknown'; reasons = ['execution-failed']; }
+if (process.env.HYPERVIBE_BACKUP_JOB_RESULT !== 'success') { status = 'unknown'; reasons = [...new Set([...reasons, 'execution-failed'])]; }
 const marker = '<!-- hypervibe:backup-health:' + env + ' -->';
 const title = '[Hypervibe] Backup protection needs attention (' + env + ')';
 const base = 'https://api.github.com/repos/' + encodeURIComponent(context.repo.owner) + '/' + encodeURIComponent(context.repo.repo);
@@ -67,6 +50,10 @@ for (let page = 1; ; page++) {
 const run = 'https://github.com/' + encodeURIComponent(context.repo.owner) + '/' + encodeURIComponent(context.repo.repo) + '/actions/runs/' + context.runId;
 const body = marker + '\\n\\n' + (status === 'healthy' ? 'Current retained backup and restore evidence is healthy.'
   : 'Backup protection is ' + status + '. Reason codes: ' + (reasons.length ? reasons.join(', ') : 'observation-unavailable') + '.')
+  + (diagnostic ? '\\n\\nStage: ' + diagnostic.stage + '; category: ' + diagnostic.category
+    + (diagnostic.httpStatus === undefined ? '' : '; HTTP status: ' + diagnostic.httpStatus)
+    + (diagnostic.localCleanupFailed ? '; local cleanup: failed' : '')
+    + (diagnostic.task ? '; task: ' + JSON.stringify(diagnostic.task) : '') + '.' : '')
   + '\\n\\n[Inspect the managed recovery run](' + run + ').';
 let applied = 0; let skipped = 0;
 if (status === 'healthy') {
