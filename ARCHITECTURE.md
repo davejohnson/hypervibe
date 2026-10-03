@@ -840,6 +840,39 @@ encryption key requires an explicit credential rewrap workflow.
 
 ### Delegated secrets
 
+#### Agent-managed owner requests
+
+`hv_cloud_requests` / `hypervibe cloud requests` manages value-free hosted
+invitations. A blocked `hv_plan` returns a command with its persisted `planId`
+and eligible runtime input requirements. New invitations validate that plan's
+repository, environment, current spec revision and freshness, and its source
+commit when pinned. Generated, already supplied, other-environment and CI-only
+inputs are excluded. `inputRequired` expresses input policy, not proven live
+absence. An explicit call without a plan selects declared delegated runtime
+keys instead; neither path reads private values or creates a plan.
+
+The command derives repository and source from the checkout, confirms the
+recipient and exact fields, and verifies the hosted revision and spec digest.
+Separate browser pairing grants request-management access for one repository
+environment; reporting tokens cannot authorize it. This grant cannot read
+values, approve import, or deploy. Confirmed creation/revocation is an explicit
+handoff operation, not an infrastructure lifecycle shortcut.
+
+`resume` discovers existing requests without user-supplied request IDs and
+offers private import calls only for eligible ready requests. Tracking does not
+require the original plan to remain fresh. It is an on-demand read, not a
+background agent wakeup. Stored, encrypted review state preserves the original
+proposal and pre-attempt request IDs across unknown writes; only unique new
+matching evidence reconciles a lost creation receipt. Historical expiry,
+revocation or changed current source must not erase that evidence. Unknown
+reads do not permit a duplicate invitation.
+
+Terminal requests may be explicitly replaced with a newly reviewed invitation.
+Replacement is not another retrieval and never happens automatically; check
+local encrypted import recovery first. After private import, prepare a fresh
+plan and obtain normal apply approval. See [the owner-request workflow](docs/cloud-credential-requests.md)
+for server compatibility and verification limits.
+
 #### Optional hosted one-time import
 
 `hv_cloud_secrets` / `hypervibe cloud secrets` imports a single ready Hypervibe

@@ -20,7 +20,8 @@ const pairingStartSchema = z.object({
   repository: z.string().min(3),
   userCode: z.string().regex(/^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$/),
   verificationUrl: z.string().url(),
-  purpose: z.literal('provider-connections').optional(),
+  purpose: z.enum(['provider-connections', 'credential-requests']).optional(),
+  environment: z.string().min(1).max(80).optional(),
 }).strict();
 
 const pairingPendingSchema = z.object({
@@ -40,7 +41,8 @@ const pairingCompleteSchema = z.object({
   project: z.object({ id: z.string().min(1), name: z.string().min(1) }).strict(),
   skipped: z.number().int().min(0),
   status: z.literal('completed'),
-  purpose: z.literal('provider-connections').optional(),
+  purpose: z.enum(['provider-connections', 'credential-requests']).optional(),
+  environment: z.string().min(1).max(80).optional(),
 }).strict().superRefine((value, context) => {
   if (value.applied !== value.credentials.length) {
     context.addIssue({
@@ -132,7 +134,10 @@ export function createHypervibeCloudPairingClient(options: {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   purpose?: 'provider-connections';
+  grant?: { purpose: 'credential-requests'; environment: string };
 } = {}): HypervibeCloudPairingClient {
+  if (options.purpose && options.grant) throw new HvError('VALIDATION', 'Select one browser-access purpose.');
+  const purpose = options.grant?.purpose ?? options.purpose;
   const baseUrl = normalizeHypervibeCloudBaseUrl(options.baseUrl);
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -142,14 +147,17 @@ export function createHypervibeCloudPairingClient(options: {
   return {
     async start(repository) {
       const payload = await request('/api/v1/pairings', { body: {
-        repositoryFullName: repository, ...(options.purpose ? { purpose: options.purpose } : {}),
+        repositoryFullName: repository, ...(purpose ? { purpose } : {}),
+        ...(options.grant ? { environment: options.grant.environment } : {}),
       } });
       const parsed = pairingStartSchema.safeParse(payload);
-      if (!parsed.success || parsed.data.repository.toLowerCase() !== repository.toLowerCase() || parsed.data.purpose !== options.purpose) {
+      if (!parsed.success || parsed.data.repository.toLowerCase() !== repository.toLowerCase() || parsed.data.purpose !== purpose
+        || parsed.data.environment !== options.grant?.environment) {
         throw new HvError('PROVIDER_ERROR', 'Hypervibe cloud returned an invalid pairing response.');
       }
       const verificationUrl = new URL(parsed.data.verificationUrl);
-      if (verificationUrl.origin !== baseUrl || verificationUrl.pathname !== '/pair' || verificationUrl.username || verificationUrl.password || verificationUrl.hash || verificationUrl.searchParams.get('code') !== parsed.data.userCode) {
+      if (verificationUrl.origin !== baseUrl || verificationUrl.pathname !== '/pair' || verificationUrl.username || verificationUrl.password || verificationUrl.hash
+        || verificationUrl.searchParams.size !== 1 || verificationUrl.searchParams.get('code') !== parsed.data.userCode) {
         throw new HvError('PROVIDER_ERROR', 'Hypervibe cloud returned an unsafe pairing URL.');
       }
       return parsed.data;
@@ -160,8 +168,10 @@ export function createHypervibeCloudPairingClient(options: {
       const pending = pairingPendingSchema.safeParse(payload);
       if (pending.success) return pending.data;
       const completed = pairingCompleteSchema.safeParse(payload);
-      if (completed.success && completed.data.purpose === options.purpose
-        && (!options.purpose || (completed.data.credentials.length === 1 && completed.data.credentials[0]?.expiresAt))) return completed.data;
+      if (completed.success && completed.data.purpose === purpose
+        && completed.data.environment === options.grant?.environment
+        && (!purpose || (completed.data.credentials.length === 1 && completed.data.credentials[0]?.expiresAt))
+        && (!options.grant || completed.data.credentials[0]?.environment.key === options.grant.environment)) return completed.data;
       throw new HvError('PROVIDER_ERROR', 'Hypervibe cloud returned an invalid pairing response.');
     },
   };

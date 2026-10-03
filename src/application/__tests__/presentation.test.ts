@@ -461,6 +461,7 @@ describe('command presentation', () => {
       'hv_ci_trigger',
       'hv_cloud_connections',
       'hv_cloud_pair',
+      'hv_cloud_requests',
       'hv_cloud_secrets',
       'hv_connections',
       'hv_db_query',

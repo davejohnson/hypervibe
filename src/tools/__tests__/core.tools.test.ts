@@ -553,6 +553,12 @@ describe('hv_spec', () => {
         'PUBLIC_WIDGET_KEY',
         'WEBHOOK_SIGNING_SECRET',
       ]);
+      expect(plan.data.credentialRequest).toEqual({
+        command: 'hv_cloud_requests',
+        input: { env: 'staging', planId: plan.data.planId },
+        requirements: plan.data.inputRequired,
+      });
+      expect(plan.next).toContain('hv_cloud_requests');
       expect(plan.data.localEnv).toMatchObject({
         path: stagingPath,
         // Spec writes now scaffold every declared environment before planning.
@@ -608,6 +614,20 @@ describe('hv_spec', () => {
         PORTABLE_RUNTIME_VALUE: 'shared-runtime-value',
       });
 
+      // An explicit input is already known to this plan and must not trigger a
+      // second request merely because its delegated declaration still exists.
+      writeFileSync(stagingPath, readFileSync(stagingPath, 'utf8').replace(
+        'OWNER_MANAGED_SECRET=', 'OWNER_MANAGED_SECRET=synthetic-staging-input'
+      ));
+      const partlySuppliedPlan = await t.call('hv_plan', {
+        project: projectName, env: 'staging', includeEnvFile: false,
+        secretRefs: { OWNER_MANAGED_SECRET: `dotenv:${stagingPath}#OWNER_MANAGED_SECRET` },
+      });
+      expect(partlySuppliedPlan.ok).toBe(true);
+      expect(partlySuppliedPlan.data.credentialRequest.requirements.map((entry: { key: string }) => entry.key))
+        .toEqual(['PUBLIC_WIDGET_KEY', 'WEBHOOK_SIGNING_SECRET']);
+      expect(JSON.stringify(partlySuppliedPlan)).not.toContain('synthetic-staging-input');
+
       const reviewPath = path.join(repoDir, '.env.review');
       expect(existsSync(reviewPath)).toBe(true);
       const reviewPlan = await t.call('hv_plan', {
@@ -616,6 +636,7 @@ describe('hv_spec', () => {
         includeEnvFile: false,
       });
       expect(reviewPlan.ok).toBe(true);
+      expect(reviewPlan.data).not.toHaveProperty('credentialRequest');
       expect(reviewPlan.data.localEnv).toMatchObject({ path: reviewPath });
       expect(existsSync(reviewPath)).toBe(true);
       expect(readFileSync(reviewPath, 'utf8')).toBe('');
