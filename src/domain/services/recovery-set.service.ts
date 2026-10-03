@@ -5,6 +5,7 @@ import type { StorageObjectClient } from '../ports/storage.port.js';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { createLocalRecoveryStore } from './local-recovery-store.js';
 import { backupAndVerifyPostgres, postgresBackupEvidenceSchema, type PostgresBackupInput, type PostgresBackupResult } from './postgres-backup.service.js';
+import { RecoveryDiagnosticError, recoveryFailure, type RecoveryDiagnostic } from '../ports/recovery-diagnostics.port.js';
 import { createObjectRecoverySet, objectRecoveryIdentitySchema, objectRecoveryManifestKey, restoreObjectRecoverySet,
   storedObjectRevisionSchema, type ObjectRecoveryIdentity, type ObjectRecoveryLimits } from './object-recovery-set.service.js';
 import { recoverySourceIdentityMatches, recoverySourceIdentitySchema } from './recovery-source.js';
@@ -61,63 +62,86 @@ async function writeJson(client: StorageObjectClient, key: string, value: unknow
 export async function createRecoverySet(input: RecoverySetInput, dependencies: {
   backupDatabase?: typeof backupAndVerifyPostgres; createRestoreStore?: typeof createLocalRecoveryStore;
 } = {}) {
-  z.string().uuid().parse(input.runId); sha256.parse(input.contractHash);
-  const destination = objectRecoveryIdentitySchema.parse(input.destination);
-  if (!input.database && !input.objects.length) throw new Error('Recovery set has no persistent sources.');
-  const names = new Set(input.objects.map(item => name.parse(item.name)));
-  if (names.size !== input.objects.length) throw new Error('Duplicate recovery source.');
-  for (const object of input.objects) {
-    objectRecoveryIdentitySchema.parse(object.identity);
-    if (canonicalJsonSha256(object.identity) === canonicalJsonSha256(destination)) throw new Error('The archive must be separate from every source.');
-  }
-  const projections = input.fileReferenceQueries ?? [];
-  if (input.database && input.objects.length && (projections.length !== names.size
-    || new Set(projections.map(item => item.storageName)).size !== names.size
-    || projections.some(item => !names.has(item.storageName)))) throw new Error('Database and files require an explicit reference projection for every bucket.');
-  const prefix = `${recoverySetRoot(input.project, input.environment)}${input.runId}/`;
-  // A partial or uncertain execution is not safe to repeat, even if no completion is visible.
-  if ((await input.archive.list({ prefix })).length) throw new Error('This recovery execution already exists; it will not be repeated.');
-  const startedAt = new Date().toISOString();
-  await writeJson(input.archive, `${prefix}started.json`, { version: 1, runId: input.runId, startedAt,
-    project: input.project, environment: input.environment, contractHash: input.contractHash, destination });
-  let sql: PostgresBackupResult | undefined;
-  if (input.database) {
-    sql = await (dependencies.backupDatabase ?? backupAndVerifyPostgres)({ ...input.database, archive: input.archive,
-      destination, runId: input.runId, archivePrefix: prefix.replace(/\/$/, '') + '/sql', fileReferenceQueries: projections });
-    sql = { ...sql, evidence: postgresBackupEvidenceSchema.parse(sql.evidence) };
-    if (sql.evidence.runId !== input.runId || !recoverySourceIdentityMatches(sql.evidence.source, input.database.source)
-      || canonicalJsonSha256(sql.evidence.destination) !== canonicalJsonSha256(destination)) throw new Error('SQL recovery proof differs from the reviewed source.');
-  }
-  const objects: RecoverySetManifest['objects'] = [];
-  for (const object of input.objects) {
-    const copy = await createObjectRecoverySet({ source: object.client, destination: input.archive, sourceIdentity: object.identity,
-      destinationIdentity: destination, setId: input.runId, createdAt: startedAt, limits: RECOVERY_LIMITS });
-    if (sql) {
-      const matching = sql.fileReferences.filter(reference => reference.storageName === object.name);
-      const keys = new Set(copy.manifest.entries.map(entry => entry.key));
-      if (matching.length !== 1 || matching[0].keys.some(key => !keys.has(key))) throw new Error('A file referenced by the restored database is missing from the retained set.');
+  let stage: RecoveryDiagnostic['stage'] = 'worker-input';
+  try {
+    z.string().uuid().parse(input.runId); sha256.parse(input.contractHash);
+    const destination = objectRecoveryIdentitySchema.parse(input.destination);
+    if (!input.database && !input.objects.length) throw recoveryFailure(stage, 'invalid-input', undefined, undefined, 'Recovery set has no persistent sources.');
+    const names = new Set(input.objects.map(item => name.parse(item.name)));
+    if (names.size !== input.objects.length) throw recoveryFailure(stage, 'invalid-input', undefined, undefined, 'Duplicate recovery source.');
+    for (const object of input.objects) {
+      objectRecoveryIdentitySchema.parse(object.identity);
+      if (canonicalJsonSha256(object.identity) === canonicalJsonSha256(destination)) throw recoveryFailure(stage, 'invalid-input', undefined, undefined, 'The archive must be separate from every source.');
     }
-    const target = await (dependencies.createRestoreStore ?? createLocalRecoveryStore)();
-    let restoredAt: string;
-    try {
-      const restore = await restoreObjectRecoverySet({ backup: input.archive, target: target.client,
-        manifest: copy.manifest, targetIdentity: target.identity, restoreId: input.runId, limits: RECOVERY_LIMITS });
-      restoredAt = restore.restoredAt;
-    } finally { await target.cleanup(); }
-    objects.push({ name: object.name, source: object.identity, manifestKey: objectRecoveryManifestKey(object.identity, input.runId),
-      manifestSha256: copy.receipt.manifestSha256, objectCount: copy.receipt.objectCount, totalBytes: copy.receipt.totalBytes,
-      restoreVerifiedAt: restoredAt });
+    const projections = input.fileReferenceQueries ?? [];
+    if (input.database && input.objects.length && (projections.length !== names.size
+      || new Set(projections.map(item => item.storageName)).size !== names.size
+      || projections.some(item => !names.has(item.storageName)))) throw recoveryFailure(stage, 'invalid-input', undefined, undefined, 'Database and files require an explicit reference projection for every bucket.');
+    const prefix = `${recoverySetRoot(input.project, input.environment)}${input.runId}/`;
+    stage = 'recovery-reservation';
+    // A partial or uncertain execution is not safe to repeat, even if no completion is visible.
+    if ((await input.archive.list({ prefix })).length) throw recoveryFailure(stage, 'execution', undefined, undefined, 'This recovery execution already exists; it will not be repeated.');
+    const startedAt = new Date().toISOString();
+    await writeJson(input.archive, `${prefix}started.json`, { version: 1, runId: input.runId, startedAt,
+      project: input.project, environment: input.environment, contractHash: input.contractHash, destination });
+    let sql: PostgresBackupResult | undefined;
+    if (input.database) {
+      stage = 'database-backup';
+      sql = await (dependencies.backupDatabase ?? backupAndVerifyPostgres)({ ...input.database, archive: input.archive,
+        destination, runId: input.runId, archivePrefix: prefix.replace(/\/$/, '') + '/sql', fileReferenceQueries: projections });
+      sql = { ...sql, evidence: postgresBackupEvidenceSchema.parse(sql.evidence) };
+      if (sql.evidence.runId !== input.runId || !recoverySourceIdentityMatches(sql.evidence.source, input.database.source)
+        || canonicalJsonSha256(sql.evidence.destination) !== canonicalJsonSha256(destination)) throw recoveryFailure(stage, 'invalid-response', undefined, undefined, 'SQL recovery proof differs from the reviewed source.');
+    }
+    const objects: RecoverySetManifest['objects'] = [];
+    for (const object of input.objects) {
+      stage = 'object-copy';
+      const copy = await createObjectRecoverySet({ source: object.client, destination: input.archive, sourceIdentity: object.identity,
+        destinationIdentity: destination, setId: input.runId, createdAt: startedAt, limits: RECOVERY_LIMITS });
+      if (sql) {
+        stage = 'reference-verification';
+        const matching = sql.fileReferences.filter(reference => reference.storageName === object.name);
+        const keys = new Set(copy.manifest.entries.map(entry => entry.key));
+        if (matching.length !== 1 || matching[0].keys.some(key => !keys.has(key))) throw recoveryFailure(stage, 'execution', undefined, undefined, 'A file referenced by the restored database is missing from the retained set.');
+      }
+      stage = 'object-restore';
+      const target = await (dependencies.createRestoreStore ?? createLocalRecoveryStore)();
+      let restoredAt: string;
+      let restoreFailure: RecoveryDiagnosticError | undefined;
+      try {
+        const restore = await restoreObjectRecoverySet({ backup: input.archive, target: target.client,
+          manifest: copy.manifest, targetIdentity: target.identity, restoreId: input.runId, limits: RECOVERY_LIMITS });
+        restoredAt = restore.restoredAt;
+      } catch (error) {
+        restoreFailure = recoveryFailure('object-restore', 'execution', error);
+        throw restoreFailure;
+      } finally {
+        try { await target.cleanup(); }
+        catch {
+          throw new RecoveryDiagnosticError({
+            ...(restoreFailure?.diagnostic ?? { stage: 'restore-cleanup', category: 'cleanup' }), localCleanupFailed: true,
+          });
+        }
+      }
+      objects.push({ name: object.name, source: object.identity, manifestKey: objectRecoveryManifestKey(object.identity, input.runId),
+        manifestSha256: copy.receipt.manifestSha256, objectCount: copy.receipt.objectCount, totalBytes: copy.receipt.totalBytes,
+        restoreVerifiedAt: restoredAt });
+    }
+    stage = 'recovery-completion';
+    const manifest = recoverySetManifestSchema.parse({ version: RECOVERY_SET_FORMAT_VERSION, setId: input.runId, project: input.project,
+      environment: input.environment, contractHash: input.contractHash, destination, startedAt,
+      dataTime: sql?.evidence.dataTime ?? startedAt, completedAt: new Date().toISOString(),
+      ...(sql ? { database: { source: sql.evidence.source, archiveKey: sql.evidence.archiveKey, manifestKey: sql.evidence.manifestKey,
+        archiveRevision: sql.evidence.archiveRevision, sha256: sql.evidence.sha256, bytes: sql.evidence.bytes, restoreVerifiedAt: sql.evidence.completedAt } } : {}),
+      objects, compatibility: sql && objects.length ? 'references-verified' : 'not-applicable',
+      consistency: 'database-snapshot-and-revision-checked-files', restoreVerified: true, cleanupVerified: true });
+    const manifestKey = `${prefix}complete.json`;
+    await writeJson(input.archive, manifestKey, manifest);
+    return { manifest, receipt: { setId: input.runId, manifestKey, manifestSha256: createHash('sha256').update(JSON.stringify(manifest)).digest('hex'),
+      completedAt: manifest.completedAt, applied: 1, skipped: 0, databaseCount: sql ? 1 : 0,
+      objectCount: objects.reduce((count, item) => count + item.objectCount, 0), restoreVerified: true, cleanupVerified: true } };
+  } catch (error) {
+    if (error instanceof RecoveryDiagnosticError) throw error;
+    throw recoveryFailure(stage, stage === 'worker-input' ? 'invalid-input' : 'execution', error);
   }
-  const manifest = recoverySetManifestSchema.parse({ version: RECOVERY_SET_FORMAT_VERSION, setId: input.runId, project: input.project,
-    environment: input.environment, contractHash: input.contractHash, destination, startedAt,
-    dataTime: sql?.evidence.dataTime ?? startedAt, completedAt: new Date().toISOString(),
-    ...(sql ? { database: { source: sql.evidence.source, archiveKey: sql.evidence.archiveKey, manifestKey: sql.evidence.manifestKey,
-      archiveRevision: sql.evidence.archiveRevision, sha256: sql.evidence.sha256, bytes: sql.evidence.bytes, restoreVerifiedAt: sql.evidence.completedAt } } : {}),
-    objects, compatibility: sql && objects.length ? 'references-verified' : 'not-applicable',
-    consistency: 'database-snapshot-and-revision-checked-files', restoreVerified: true, cleanupVerified: true });
-  const manifestKey = `${prefix}complete.json`;
-  await writeJson(input.archive, manifestKey, manifest);
-  return { manifest, receipt: { setId: input.runId, manifestKey, manifestSha256: createHash('sha256').update(JSON.stringify(manifest)).digest('hex'),
-    completedAt: manifest.completedAt, applied: 1, skipped: 0, databaseCount: sql ? 1 : 0,
-    objectCount: objects.reduce((count, item) => count + item.objectCount, 0), restoreVerified: true, cleanupVerified: true } };
 }

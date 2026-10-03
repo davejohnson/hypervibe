@@ -6,6 +6,8 @@ import { createRecoverySet } from '../domain/services/recovery-set.service.js';
 import { objectRecoveryIdentitySchema } from '../domain/services/object-recovery-set.service.js';
 import { recoverySourceIdentitySchema } from '../domain/services/recovery-source.js';
 import { createS3ObjectClient } from '../domain/services/object-storage-transfer.service.js';
+import { formatRecoveryFailureMarker, RecoveryDiagnosticError, recoveryFailure, type RecoveryDiagnostic } from '../domain/ports/recovery-diagnostics.port.js';
+import type { StorageObjectClient } from '../domain/ports/storage.port.js';
 
 const configSchema = z.object({
   version: z.literal(1), operation: z.literal('recovery-set'),
@@ -44,30 +46,61 @@ export function parseBackupHelperEnvironment(environment: NodeJS.ProcessEnv) {
     }
     return { config, credentials, sourceCredentials, sourceUrl };
   } catch {
-    throw new Error('Backup helper configuration is invalid.');
+    throw recoveryFailure('worker-input', 'invalid-input', undefined, undefined, 'Backup helper configuration is invalid.');
   }
 }
 
 /** Only the bounded, data-free evidence is returned or written to stdout. The
  * private manifest carries object references for the joint recovery coordinator. */
 export async function runBackupHelper(environment: NodeJS.ProcessEnv = process.env) {
-  const { config, credentials, sourceCredentials, sourceUrl } = parseBackupHelperEnvironment(environment);
-  const archive = createS3ObjectClient(credentials);
-  const objects = config.objects.map(object => ({ name: object.name, identity: object.identity, client: createS3ObjectClient(sourceCredentials[object.name]) }));
+  let stage: RecoveryDiagnostic['stage'] = 'worker-input';
+  let failure: RecoveryDiagnosticError | undefined;
+  const clients: StorageObjectClient[] = [];
   try {
+    const { config, credentials, sourceCredentials, sourceUrl } = parseBackupHelperEnvironment(environment);
+    stage = 'archive-open';
+    const archive = createS3ObjectClient(credentials); clients.push(archive);
+    stage = 'source-open';
+    const objects = config.objects.map(object => {
+      const client = createS3ObjectClient(sourceCredentials[object.name]); clients.push(client);
+      return { name: object.name, identity: object.identity, client };
+    });
+    stage = 'recovery-set';
     const result = await createRecoverySet({ ...config, database: config.database ? { ...config.database, sourceUrl: sourceUrl! } : undefined,
       archive, objects });
     return result.receipt;
-  } finally { archive.destroy(); for (const object of objects) object.client.destroy(); }
+  } catch (error) {
+    failure = recoveryFailure(stage, 'execution', error);
+    throw failure;
+  } finally {
+    let cleanupFailed = false;
+    for (const client of clients) {
+      try { client.destroy(); } catch { cleanupFailed = true; }
+    }
+    if (cleanupFailed) throw new RecoveryDiagnosticError({
+      ...(failure?.diagnostic ?? { stage: 'restore-cleanup', category: 'cleanup' }), localCleanupFailed: true,
+    });
+  }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+export async function runBackupHelperCli(environment: NodeJS.ProcessEnv = process.env) {
+  let executionId: string | undefined;
   try {
-    const evidence = await runBackupHelper();
+    // Parse the entire non-secret configuration before correlating a failure;
+    // an arbitrary object containing a UUID is not execution identity evidence.
+    executionId = configSchema.parse(JSON.parse(environment.HYPERVIBE_BACKUP_CONFIG ?? '')).runId;
+    const evidence = await runBackupHelper(environment);
     process.stdout.write(`HYPERVIBE_RECOVERY_RECEIPT:${JSON.stringify(evidence)}\n`);
-  } catch {
+  } catch (error) {
     // Errors from configuration/SDK/SQL/tools must never be serialized.
+    if (executionId) {
+      const failure = recoveryFailure('worker-input', 'invalid-input', error);
+      try { process.stderr.write(`${formatRecoveryFailureMarker(failure.diagnostic, executionId)}\n`); }
+      catch { /* Invalid diagnostics cannot widen the safe output contract. */ }
+    }
     process.stderr.write('Hypervibe backup helper did not produce verified completion evidence.\n');
     process.exitCode = 1;
   }
 }
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await runBackupHelperCli();

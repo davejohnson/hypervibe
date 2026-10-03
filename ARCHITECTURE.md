@@ -1895,6 +1895,17 @@ delete, schedule, or PITR mutations. Native snapshots remain dependent on their
 provider volume and are not independent off-provider copies. See
 [database checkpoints](docs/database-checkpoints.md) for the evidence boundary.
 
+Recurring managed backup diagnostics use the shared recovery diagnostic port:
+closed stage/category codes cross worker, provider, application and controller
+boundaries without raw errors. An execution-bound worker marker supplies failure
+detail only; provider observations remain authoritative for task completion,
+mutation attempts and cleanup. The version-2 operational receipt and generated
+GitHub alert share one validator. Failed CI jobs preserve existing reason codes
+and cannot close an alert. These receipts do not replace retained recovery
+manifests or establish a successful restore. Compiler and helper changes must
+ship together as a reviewed workflow and pinned image update; see
+[daily backup defaults](docs/default-backup-policy.md).
+
 Legacy database bindings with absent provider scope use a separate reviewed
 `database-bindings` prerequisite when the native backup observer can independently
 prove the exact existing source. Apply re-observes the pinned source and merges

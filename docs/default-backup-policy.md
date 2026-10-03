@@ -229,6 +229,32 @@ that bot-owned alert. Observation checks exact inventory and prior restore
 evidence; it does not download and rehash every byte hourly. A stopped scheduler
 cannot alert about itself, so an independent monitor remains a separate concern.
 
+Controller failures emit a version-2 operational receipt with a closed failure stage and
+category. When known, it includes HTTP status, task status, exit code, whether a
+provider mutation was attempted, and provider cleanup verification. The alert
+uses the same receipt validator as the controller. It preserves these safe
+fields and existing reason codes; raw errors, credentials and worker logs are
+excluded. Worker failure markers cannot certify task completion or cleanup.
+If local restore resources or storage clients also fail cleanup, a finite
+`localCleanupFailed: true` flag preserves that warning alongside the primary
+failure. It is separate from provider task cleanup verification; its absence
+does not certify cleanup.
+An unknown applied count stays `null`; only explicit evidence of no attempted
+mutation permits zero. Inspect a failure after an attempted write before
+manually authorizing another backup, even if its category is authorization or
+timeout. The workflow blocks reruns of the same backup attempt; it does not
+suspend later scheduled runs. A failure before the controller starts may leave
+no receipt, which keeps the alert unknown.
+Diagnostics do not reconstruct the cause of an older generic failure.
+
+Operational receipts are separate from retained recovery evidence: SQL, object
+and joint manifests remain format 2 and controller completion markers remain
+format 1. The alert can read legacy version-1 operational receipts, which have
+no stage detail. Activating the new diagnostics requires a tested, published
+helper digest and a reviewed regeneration of the backup workflow together.
+Updating the local MCP runtime alone does not update the scheduled controller
+or worker. Exact workflow-authority checks reject mixed compiler/helper output.
+
 Generated GitHub deployment checks use fresh backup health before migrations or
 rollout. GitLab daily recovery execution is not implemented and therefore blocks
 ordinary deployment for a required daily policy. Verified immutable code rollback

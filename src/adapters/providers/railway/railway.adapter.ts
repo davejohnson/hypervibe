@@ -14,6 +14,7 @@ import type {
   HostingServiceDeleteOptions,
   HostingServiceDeleteScope,
 } from '../../../domain/ports/provider.port.js';
+import { parseRecoveryFailureMarker, recoveryDiagnosticSchema, recoveryFailure, type RecoveryDiagnostic } from '../../../domain/ports/recovery-diagnostics.port.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../domain/entities/service.entity.js';
 import type { IServiceVolumes, ServiceVolumeTarget, ServiceVolumeObservation } from '../../../domain/ports/service-volume.port.js';
@@ -3977,13 +3978,24 @@ export class RailwayAdapter implements
     let mutationAttempted = false;
     const managedRecoveryTask = options?.managedRecoveryTask;
     const declaredTask = options?.declaredTask ?? managedRecoveryTask;
+    let taskStage: RecoveryDiagnostic['stage'] = 'task-preflight';
     const safeResult = (result: JobResult): JobResult => {
       if (!declaredTask) return result;
       if (managedRecoveryTask) {
         // Worker output can contain database rows or selected storage credentials.
         // Only the finite execution receipt crosses the provider boundary.
         const { output: _output, ...safe } = result;
-        result = { ...safe, receipt: { ...result.receipt,
+        const diagnostic = !result.receipt.success || result.status !== 'completed'
+          ? recoveryDiagnosticSchema.parse({
+            ...(result.diagnostic ?? recoveryFailure(taskStage, 'unknown').diagnostic),
+            task: { status: result.status, mutationAttempted,
+              ...(Number.isSafeInteger(result.exitCode) && result.exitCode! >= -2147483648 && result.exitCode! <= 2147483647
+                ? { exitCode: result.exitCode } : {}),
+              ...(typeof result.receipt.data?.cleanupVerified === 'boolean'
+                ? { cleanupVerified: result.receipt.data.cleanupVerified } : {}),
+            },
+          }) : undefined;
+        result = { ...safe, ...(diagnostic ? { diagnostic } : {}), receipt: { ...result.receipt,
           ...(result.receipt.error ? { error: 'Managed recovery execution could not be verified. Inspect the exact execution before retrying.' } : {}),
           data: { ...result.receipt.data, applied: result.receipt.success ? 1 : mutationAttempted ? null : 0,
             skipped: mutationAttempted ? 0 : 1 },
@@ -3992,7 +4004,8 @@ export class RailwayAdapter implements
       return redactExactValues({ ...result, mutationAttempted }, [this.credentials?.apiToken ?? '',
         declaredTask.registryCredentials?.token ?? '', ...Object.values(managedRecoveryTask?.selectedSecretValues ?? {})]);
     };
-    const fail = (message: string, error?: string, data?: Record<string, unknown>): JobResult => safeResult({
+    const fail = (message: string, error?: string, data?: Record<string, unknown>, diagnostic?: RecoveryDiagnostic): JobResult => safeResult({
+      ...(managedRecoveryTask && diagnostic ? { diagnostic } : {}),
       jobId: '',
       status: 'failed',
       runner: 'railway-temp-service',
@@ -4027,7 +4040,8 @@ export class RailwayAdapter implements
       try {
         prepared = await this.prepareDeclaredTask(projectId, environmentId, sourceServiceId, declaredTask);
       } catch (error) {
-        return fail('Declared environment task preflight failed', error instanceof Error ? error.message : String(error));
+        return fail('Declared environment task preflight failed', error instanceof Error ? error.message : String(error),
+          undefined, recoveryFailure(taskStage, 'unknown', this.checkpointObservationError(error, 'source_inventory')).diagnostic);
       }
     } else {
       const sweepWarning = await this.sweepTaskServices(projectId, environmentId);
@@ -4095,6 +4109,7 @@ export class RailwayAdapter implements
 
     const taskName = prepared?.taskName ?? `hv-task-${Date.now()}`;
     let taskServiceId: string;
+    taskStage = 'task-create';
     try {
       if (declaredTask) mutationAttempted = true;
       const created = await client.request<{ serviceCreate: { id: string; name: string } }>(
@@ -4119,24 +4134,28 @@ export class RailwayAdapter implements
         || created.serviceCreate.name !== taskName || prepared!.existingServiceIds.has(created.serviceCreate.id))) {
         return fail('Railway returned an ambiguous task identity', 'Inspect the exact execution before retrying.', {
           executionId: declaredTask.executionId, taskService: taskName, ambiguousCreate: true, ownershipVerified: false,
-        });
+        }, recoveryFailure(taskStage, 'invalid-response').diagnostic);
       }
       taskServiceId = created.serviceCreate.id;
     } catch (error) {
       return fail(
         'Could not create the temporary Railway task service',
         error instanceof Error ? error.message : String(error),
-        declaredTask ? { executionId: declaredTask.executionId, taskService: taskName, ambiguousCreate: true, ownershipVerified: false } : undefined
+        declaredTask ? { executionId: declaredTask.executionId, taskService: taskName, ambiguousCreate: true, ownershipVerified: false } : undefined,
+        recoveryFailure(taskStage, 'unknown', this.checkpointObservationError(error, 'source_inventory')).diagnostic
       );
     }
 
     if (declaredTask) {
+      taskStage = 'task-ownership';
       // A create acknowledgement is not ownership evidence. Never configure or
       // clean up an identity until a value-free scoped read proves this task.
-      const unverified = (): JobResult => fail(
+      const unverified = (error?: unknown): JobResult => fail(
         'The created Railway task ownership could not be verified',
         'Inspect the exact execution before retrying; its acknowledged service has been retained.',
-        { executionId: declaredTask.executionId, taskService: taskName, taskServiceId, ambiguousCreate: true, ownershipVerified: false }
+        { executionId: declaredTask.executionId, taskService: taskName, taskServiceId, ambiguousCreate: true, ownershipVerified: false },
+        recoveryFailure(taskStage, error === undefined ? 'invalid-response' : 'unknown',
+          error === undefined ? undefined : this.checkpointObservationError(error, 'source_inventory')).diagnostic
       );
       try {
         const ownership = await client.request<unknown>(gql`
@@ -4155,12 +4174,13 @@ export class RailwayAdapter implements
           || ownership.serviceInstance.environmentId !== environmentId || ownership.serviceInstance.deletedAt !== null) {
           return unverified();
         }
-      } catch {
-        return unverified();
+      } catch (error) {
+        return unverified(error);
       }
     }
 
     const runTask = async (): Promise<JobResult> => {
+      taskStage = 'task-configure';
       const pull = declaredTask
         ? declaredTask.registryCredentials ?? null
         : image.startsWith('ghcr.io/')
@@ -4191,6 +4211,7 @@ export class RailwayAdapter implements
         }
       );
 
+      taskStage = 'task-deploy';
       const deployResult = await client.request<{ serviceInstanceDeployV2?: string }>(
         gql`
           mutation DeployTaskService($serviceId: String!, $environmentId: String!) {
@@ -4201,9 +4222,11 @@ export class RailwayAdapter implements
       );
       const deploymentId = deployResult.serviceInstanceDeployV2;
       if (!deploymentId) {
-        return fail('Railway did not return a deployment id for the task service');
+        return fail('Railway did not return a deployment id for the task service', undefined, undefined,
+          recoveryFailure(taskStage, 'invalid-response').diagnostic);
       }
 
+      taskStage = 'task-observe';
       const timeoutMs = options?.timeoutMs ?? 4 * 60 * 1000;
       const pollIntervalMs = options?.pollIntervalMs ?? 3000;
       const deadline = Date.now() + timeoutMs;
@@ -4255,6 +4278,7 @@ export class RailwayAdapter implements
           const output = outputFrom(logs);
           const data = { taskService: taskName, taskServiceId, deploymentId, image, deployStatus };
           return {
+            ...(managedRecoveryTask ? { diagnostic: recoveryFailure('task-execution', 'invalid-response').diagnostic } : {}),
             jobId: deploymentId,
             status: 'failed',
             durationMs,
@@ -4294,6 +4318,8 @@ export class RailwayAdapter implements
       }
       if (exitCode !== undefined) {
         return {
+          ...(managedRecoveryTask ? { diagnostic: parseRecoveryFailureMarker(logs.map(entry => entry.message).join('\n'), managedRecoveryTask.executionId)
+            ?? recoveryFailure('task-execution', 'execution').diagnostic } : {}),
           jobId: deploymentId,
           status: 'failed',
           exitCode,
@@ -4310,6 +4336,7 @@ export class RailwayAdapter implements
       }
       if (deployStatus === 'CRASHED' || deployStatus === 'FAILED') {
         return {
+          ...(managedRecoveryTask ? { diagnostic: recoveryFailure('task-execution', 'execution').diagnostic } : {}),
           jobId: deploymentId,
           status: 'failed',
           durationMs,
@@ -4324,6 +4351,7 @@ export class RailwayAdapter implements
         };
       }
       return {
+        ...(managedRecoveryTask ? { diagnostic: recoveryFailure('task-observe', 'timeout').diagnostic } : {}),
         jobId: deploymentId,
         status: 'timeout',
         durationMs,
@@ -4345,7 +4373,8 @@ export class RailwayAdapter implements
       outcome = fail(
         `Railway environment task failed for ${service.name}`,
         error instanceof Error ? error.message : String(error),
-        declaredTask ? { executionId: declaredTask.executionId, taskService: taskName, taskServiceId } : undefined
+        declaredTask ? { executionId: declaredTask.executionId, taskService: taskName, taskServiceId } : undefined,
+        recoveryFailure(taskStage, 'unknown', this.checkpointObservationError(error, 'source_inventory')).diagnostic
       );
     }
 
@@ -4364,7 +4393,8 @@ export class RailwayAdapter implements
 
     if (managedRecoveryTask) {
       const cleanupVerified = cleanupWarnings.length === 0;
-      outcome = { ...outcome, ...(cleanupVerified ? {} : { status: 'failed' as const }),
+      outcome = { ...outcome, ...(cleanupVerified ? {} : { status: 'failed' as const,
+        diagnostic: outcome.diagnostic ?? recoveryFailure('task-cleanup', 'cleanup').diagnostic }),
         receipt: { ...outcome.receipt, success: outcome.receipt.success && cleanupVerified,
           ...(!cleanupVerified ? { message: 'Managed recovery task cleanup could not be verified.' } : {}),
           data: { ...outcome.receipt.data, cleanupVerified } },

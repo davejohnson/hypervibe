@@ -76,4 +76,33 @@ describe('usable database and file recovery sets', () => {
     await expect(createRecoverySet(input, { createRestoreStore: async () => ({ client: store().client, identity: identity('scratch'), cleanup: vi.fn().mockRejectedValue(new Error('busy')) }) })).rejects.toThrow();
     expect([...archive.bytes.keys()].some(key => key.endsWith('/complete.json'))).toBe(false);
   });
+
+  it.each(['recovery-reservation', 'object-copy', 'object-restore', 'restore-cleanup'] as const)(
+    'retains the safe %s stage without exposing the storage error or completing the set', async stage => {
+      const { input, archive, source } = setup();
+      const sensitive = new Error('https://access-secret:storage-secret@example.invalid/private-document');
+      if (stage === 'recovery-reservation') archive.client.list = vi.fn().mockRejectedValue(sensitive);
+      if (stage === 'object-copy') source.client.list = vi.fn().mockRejectedValue(sensitive);
+      const scratch = store();
+      if (stage === 'object-restore') scratch.client.put = vi.fn().mockRejectedValue(sensitive);
+      const cleanup = stage === 'restore-cleanup' ? vi.fn().mockRejectedValue(sensitive) : vi.fn().mockResolvedValue(undefined);
+      const error = await createRecoverySet(input, { createRestoreStore: async () => ({
+        client: scratch.client, identity: identity('scratch'), cleanup,
+      }) }).catch(error => error);
+      expect(error).toMatchObject({ diagnostic: { stage, category: stage === 'restore-cleanup' ? 'cleanup' : 'execution' } });
+      expect(String(error)).not.toMatch(/storage-secret|access-secret|private-document/);
+      expect(JSON.stringify(error)).not.toMatch(/storage-secret|access-secret|private-document/);
+      expect([...archive.bytes.keys()].some(key => key.endsWith('/complete.json'))).toBe(false);
+    });
+
+  it('preserves the object restore failure when local cleanup also fails', async () => {
+    const { input, archive } = setup(), scratch = store();
+    scratch.client.put = vi.fn().mockRejectedValue(new Error('private-file-data'));
+    const error = await createRecoverySet(input, { createRestoreStore: async () => ({ client: scratch.client,
+      identity: identity('scratch'), cleanup: vi.fn().mockRejectedValue(new Error('secret-path')),
+    }) }).catch(error => error);
+    expect(error).toMatchObject({ diagnostic: { stage: 'object-restore', category: 'execution', localCleanupFailed: true } });
+    expect(JSON.stringify(error)).not.toMatch(/private-file-data|secret-path/);
+    expect([...archive.bytes.keys()].some(key => key.endsWith('/complete.json'))).toBe(false);
+  });
 });

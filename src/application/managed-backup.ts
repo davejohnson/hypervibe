@@ -19,6 +19,8 @@ import { createRecoverySet } from '../domain/services/recovery-set.service.js';
 import { applyManagedRecoveryRetention, observeManagedRecoverySet, recordRecoveryExecution } from '../domain/services/recovery-set-health.service.js';
 import { recoveryDatabaseBindings } from '../domain/services/recovery-database-bindings.js';
 import { recoverySourceIdentityMatches, recoverySourceIdentitySchema } from '../domain/services/recovery-source.js';
+import { RecoveryDiagnosticError, recoveryDiagnosticSchema, recoveryFailure, type RecoveryDiagnostic } from '../domain/ports/recovery-diagnostics.port.js';
+import type { BackupOperationReceipt } from '../domain/services/backup-operation-receipt.js';
 
 export const backupReceiptSchema = z.object({ setId: z.string().uuid(), manifestKey: z.string().min(1), manifestSha256: z.string().regex(/^[a-f0-9]{64}$/),
   completedAt: z.string().datetime(), applied: z.literal(1), skipped: z.literal(0), databaseCount: z.number().int().min(0).max(1),
@@ -110,107 +112,174 @@ export async function executeManagedBackup(params: {
   target: ManagedBackupTarget; environment: Environment; operation: 'backup' | 'health'; repository: string; runId: string;
   credentials: NodeJS.ProcessEnv;
 }) {
-  const { target, environment } = params;
-  if (target.database && !supportsManagedRecoveryDatabase(target.hosting.provider, target.database.source.provider)) {
-    throw new Error('Private recovery execution is unsupported for the selected database provider.');
-  }
-  const adapters = new Map<string, unknown>();
-  async function adapter(provider: string) {
-    if (adapters.has(provider)) return adapters.get(provider);
-    const keys = managedBackupCredentialKeys(provider);
-    if (!keys) throw new Error('Recovery credential mapping is absent.');
-    const credentials = Object.fromEntries(Object.entries(keys).map(([key, property]) => {
-      if (!params.credentials[key]) throw new Error('Recovery provider credential is absent.');
-      return [property, params.credentials[key]];
-    }));
-    const result = await providerRegistry.createAdapter(provider, credentials); adapters.set(provider, result); return result;
-  }
-  async function storageAdapter(provider: string): Promise<IStorageAdapter> {
-    const connected = await adapter(provider), derive = providerRegistry.get(provider)?.derivedAdapters?.storage;
-    return (derive ? await derive(connected, {}) : connected) as IStorageAdapter;
-  }
-  if (target.database) {
-    try {
-      const selected = target.database;
-      const rows = recoveryDatabaseBindings(environment.platformBindings.recoveryDatabases)
-        .filter(row => row.componentId === selected.componentId && row.provider === selected.source.provider
-          && row.externalId === selected.source.primaryExternalId);
-      if (rows.length !== 1) throw new Error('Source binding differs.');
-      const row = rows[0], now = new Date();
-      const component: Component = { id: row.componentId, environmentId: environment.id, type: row.engine,
-        externalId: row.externalId, bindings: { provider: row.provider, providerScope: selected.source.providerScope,
-          ...(row.resourceKind === undefined ? {} : { resourceKind: row.resourceKind }) }, createdAt: now, updatedAt: now };
-      const connected = await adapter(row.provider), derive = providerRegistry.get(row.provider)?.derivedAdapters?.database;
-      const database = (derive ? await derive(connected, { environment }) : connected) as IDatabaseAdapter;
-      if (database.name !== row.provider || !database.dailyBackups?.observe) throw new Error('Source observation is unavailable.');
-      const observed = await database.dailyBackups.observe({ environment, component });
-      if (observed.state !== 'known'
-        || !recoverySourceIdentityMatches(recoverySourceIdentitySchema.parse(observed.source), selected.source)) {
-        throw new Error('Native source differs or is unknown.');
-      }
-    } catch {
-      throw new Error('The current database source is unverified or differs from the reviewed backup program. Re-plan before continuing.');
-    }
-  }
-  const destinationAdapter = await storageAdapter(target.destination.identity.provider);
-  const archive = await openRecoveryStorage(destinationAdapter, environment, target.destination.identity);
-  const sources: StorageObjectClient[] = [];
+  let stage: RecoveryDiagnostic['stage'] = 'task-preflight';
+  let mutationAttempted = false;
+  let taskFacts: RecoveryDiagnostic['task'];
   try {
-    if (params.operation === 'backup') {
-      const setId = managedRecoveryExecutionId(params.repository, params.runId);
-      let jobId: string;
-      if (target.database) {
-        if (!providerRegistry.getMetadata(target.hosting.provider)?.lifecycle?.hosting?.recoveryTasks) throw new Error('Private recovery execution is unsupported.');
-        const hosting = await adapter(target.hosting.provider) as IHostingAdapter;
-        if (!hosting.runJob || destinationAdapter.capabilities?.recoveryCredentialScope !== 'bucket' || !destinationAdapter.getCredentials) throw new Error('Private recovery credential handoff is unsupported.');
-        const archiveCredentials = await destinationAdapter.getCredentials(environment, target.destination.identity.instanceScope, target.destination.identity.externalId);
-        const objectCredentials: Record<string, unknown> = {}, objects = [];
-        for (const item of target.objects) {
-          const storage = await storageAdapter(item.identity.provider);
-          if (storage.capabilities?.recoveryCredentialScope !== 'bucket' || !storage.getCredentials) throw new Error('Private recovery storage handoff is unsupported.');
-          const client = await openRecoveryStorage(storage, environment, item.identity); client.destroy();
-          const credentials = await storage.getCredentials(environment, item.identity.instanceScope, item.identity.externalId);
-          objectCredentials[item.name] = credentials; objects.push({ name: item.name, identity: item.identity, bucket: credentials.bucket });
-        }
-        const config = { version: 1, operation: 'recovery-set', runId: setId, project: target.project, environment: target.environment,
-          contractHash: managedBackupTargetHash(target), database: { source: target.database.source }, destination: target.destination.identity,
-          archiveBucket: archiveCredentials.bucket, objects, fileReferenceQueries: target.fileReferenceQueries };
-        const now = new Date();
-        const result = await hosting.runJob(environment, { id: 'hypervibe-recovery', projectId: target.project, name: 'hypervibe-recovery',
-          buildConfig: { workloadKind: 'worker' }, envVarSpec: {}, createdAt: now, updatedAt: now },
-        'node /opt/hypervibe/dist/ci/backup-runner.js', { timeoutMs: 45 * 60_000, managedRecoveryTask: {
-          variableMode: 'references', sweep: false, expectedImage: target.runnerImage, executionId: setId,
-          databaseSource: target.database.source,
-          variableReferences: [{ sourceServiceId: target.database.source.primaryExternalId, variableName: 'DATABASE_URL', targetName: 'HYPERVIBE_BACKUP_DATABASE_URL' }],
-          variables: { HYPERVIBE_BACKUP_CONFIG: JSON.stringify(config) },
-          selectedSecretValues: { HYPERVIBE_BACKUP_STORAGE_CREDENTIALS_JSON: JSON.stringify(archiveCredentials), HYPERVIBE_BACKUP_OBJECTS_CREDENTIALS_JSON: JSON.stringify(objectCredentials) },
-          ...(params.credentials.IMAGE_REGISTRY_USERNAME && params.credentials.IMAGE_REGISTRY_TOKEN
-            ? { registryCredentials: { username: params.credentials.IMAGE_REGISTRY_USERNAME, token: params.credentials.IMAGE_REGISTRY_TOKEN } } : {}),
-        } });
-        if (!result.receipt.success || result.status !== 'completed' || result.exitCode !== 0
-          || result.cleanupWarning || result.receipt.data?.cleanupVerified !== true) {
-          throw new Error('Private backup execution or cleanup is unverified.');
-        }
-        // The private archive is the evidence boundary. Provider logs may include
-        // secrets and are never needed to prove a completed recovery set.
-        jobId = result.jobId;
-      } else {
-        const objects = [];
-        for (const item of target.objects) {
-          const client = await openRecoveryStorage(await storageAdapter(item.identity.provider), environment, item.identity);
-          sources.push(client); objects.push({ name: item.name, identity: item.identity, client });
-        }
-        await createRecoverySet({ runId: setId, project: target.project, environment: target.environment,
-          contractHash: managedBackupTargetHash(target), destination: target.destination.identity, archive, objects });
-        jobId = `github-run-${params.runId}`;
-      }
-      await recordRecoveryExecution({ archive, target, setId, jobId });
-      const retained = await applyManagedRecoveryRetention({ archive, target });
-      if (!retained.success) return { version: 1 as const, environment: target.environment, status: 'unknown' as const,
-        reasonCodes: ['retention-unknown'], counts: { applied: 1, skipped: 0 } };
+    const { target, environment } = params;
+    if (target.database && !supportsManagedRecoveryDatabase(target.hosting.provider, target.database.source.provider)) {
+      throw recoveryFailure(stage, 'unsupported', undefined, undefined, 'Private recovery execution is unsupported for the selected database provider.');
     }
-    const health = await observeManagedRecoverySet({ archive, target });
-    return { version: 1 as const, environment: target.environment, status: health.status, reasonCodes: health.reasonCodes,
-      ...(params.operation === 'backup' ? { counts: { applied: 1, skipped: 0 } } : {}) };
-  } finally { archive.destroy(); for (const source of sources) source.destroy(); }
+    const adapters = new Map<string, unknown>();
+    async function adapter(provider: string) {
+      try {
+        if (adapters.has(provider)) return adapters.get(provider);
+        const keys = managedBackupCredentialKeys(provider);
+        if (!keys) throw new Error('Recovery credential mapping is absent.');
+        const credentials = Object.fromEntries(Object.entries(keys).map(([key, property]) => {
+          if (!params.credentials[key]) throw new Error('Recovery provider credential is absent.');
+          return [property, params.credentials[key]];
+        }));
+        const result = await providerRegistry.createAdapter(provider, credentials); adapters.set(provider, result); return result;
+      } catch (error) { throw recoveryFailure('credentials', 'unknown', error); }
+    }
+    async function storageAdapter(provider: string): Promise<IStorageAdapter> {
+      const connected = await adapter(provider), derive = providerRegistry.get(provider)?.derivedAdapters?.storage;
+      return (derive ? await derive(connected, {}) : connected) as IStorageAdapter;
+    }
+    if (target.database) {
+      stage = 'source-observation';
+      try {
+        const selected = target.database;
+        const rows = recoveryDatabaseBindings(environment.platformBindings.recoveryDatabases)
+          .filter(row => row.componentId === selected.componentId && row.provider === selected.source.provider
+            && row.externalId === selected.source.primaryExternalId);
+        if (rows.length !== 1) throw new Error('Source binding differs.');
+        const row = rows[0], now = new Date();
+        const component: Component = { id: row.componentId, environmentId: environment.id, type: row.engine,
+          externalId: row.externalId, bindings: { provider: row.provider, providerScope: selected.source.providerScope,
+            ...(row.resourceKind === undefined ? {} : { resourceKind: row.resourceKind }) }, createdAt: now, updatedAt: now };
+        const connected = await adapter(row.provider), derive = providerRegistry.get(row.provider)?.derivedAdapters?.database;
+        const database = (derive ? await derive(connected, { environment }) : connected) as IDatabaseAdapter;
+        if (database.name !== row.provider || !database.dailyBackups?.observe) throw new Error('Source observation is unavailable.');
+        const observed = await database.dailyBackups.observe({ environment, component });
+        if (observed.state !== 'known'
+          || !recoverySourceIdentityMatches(recoverySourceIdentitySchema.parse(observed.source), selected.source)) {
+          throw new Error('Native source differs or is unknown.');
+        }
+      } catch (error) {
+        throw recoveryFailure(stage, 'unknown', error, undefined, 'The current database source is unverified or differs from the reviewed backup program. Re-plan before continuing.');
+      }
+    }
+    stage = 'archive-open';
+    const destinationAdapter = await storageAdapter(target.destination.identity.provider);
+    const archive = await openRecoveryStorage(destinationAdapter, environment, target.destination.identity);
+    const sources: StorageObjectClient[] = [];
+    let operationFailure: RecoveryDiagnosticError | undefined;
+    let operationReceipt: BackupOperationReceipt | undefined;
+    try {
+      if (params.operation === 'backup') {
+        stage = 'input';
+        const setId = managedRecoveryExecutionId(params.repository, params.runId);
+        let jobId: string;
+        if (target.database) {
+          stage = 'task-preflight';
+          if (!providerRegistry.getMetadata(target.hosting.provider)?.lifecycle?.hosting?.recoveryTasks) throw recoveryFailure(stage, 'unsupported');
+          const hosting = await adapter(target.hosting.provider) as IHostingAdapter;
+          stage = 'credential-handoff';
+          if (!hosting.runJob || destinationAdapter.capabilities?.recoveryCredentialScope !== 'bucket' || !destinationAdapter.getCredentials) throw recoveryFailure(stage, 'unsupported', undefined, undefined, 'Private recovery credential handoff is unsupported.');
+          const archiveCredentials = await destinationAdapter.getCredentials(environment, target.destination.identity.instanceScope, target.destination.identity.externalId);
+          const objectCredentials: Record<string, unknown> = {}, objects = [];
+          for (const item of target.objects) {
+            stage = 'credential-handoff';
+            const storage = await storageAdapter(item.identity.provider);
+            if (storage.capabilities?.recoveryCredentialScope !== 'bucket' || !storage.getCredentials) throw recoveryFailure(stage, 'unsupported', undefined, undefined, 'Private recovery storage handoff is unsupported.');
+            stage = 'source-open';
+            const client = await openRecoveryStorage(storage, environment, item.identity); client.destroy();
+            stage = 'credential-handoff';
+            const credentials = await storage.getCredentials(environment, item.identity.instanceScope, item.identity.externalId);
+            objectCredentials[item.name] = credentials; objects.push({ name: item.name, identity: item.identity, bucket: credentials.bucket });
+          }
+          const config = { version: 1, operation: 'recovery-set', runId: setId, project: target.project, environment: target.environment,
+            contractHash: managedBackupTargetHash(target), database: { source: target.database.source }, destination: target.destination.identity,
+            archiveBucket: archiveCredentials.bucket, objects, fileReferenceQueries: target.fileReferenceQueries };
+          const now = new Date();
+          stage = 'task-execution';
+          // A thrown/lost provider result cannot establish that no task was created.
+          mutationAttempted = true;
+          const result = await hosting.runJob(environment, { id: 'hypervibe-recovery', projectId: target.project, name: 'hypervibe-recovery',
+            buildConfig: { workloadKind: 'worker' }, envVarSpec: {}, createdAt: now, updatedAt: now },
+          'node /opt/hypervibe/dist/ci/backup-runner.js', { timeoutMs: 45 * 60_000, managedRecoveryTask: {
+            variableMode: 'references', sweep: false, expectedImage: target.runnerImage, executionId: setId,
+            databaseSource: target.database.source,
+            variableReferences: [{ sourceServiceId: target.database.source.primaryExternalId, variableName: 'DATABASE_URL', targetName: 'HYPERVIBE_BACKUP_DATABASE_URL' }],
+            variables: { HYPERVIBE_BACKUP_CONFIG: JSON.stringify(config) },
+            selectedSecretValues: { HYPERVIBE_BACKUP_STORAGE_CREDENTIALS_JSON: JSON.stringify(archiveCredentials), HYPERVIBE_BACKUP_OBJECTS_CREDENTIALS_JSON: JSON.stringify(objectCredentials) },
+            ...(params.credentials.IMAGE_REGISTRY_USERNAME && params.credentials.IMAGE_REGISTRY_TOKEN
+              ? { registryCredentials: { username: params.credentials.IMAGE_REGISTRY_USERNAME, token: params.credentials.IMAGE_REGISTRY_TOKEN } } : {}),
+          } });
+          mutationAttempted = result.mutationAttempted !== false;
+          taskFacts = {
+            ...(['running', 'completed', 'failed', 'timeout'].includes(result.status) ? { status: result.status } : {}),
+            ...(Number.isInteger(result.exitCode) && result.exitCode! >= -2147483648 && result.exitCode! <= 2147483647 ? { exitCode: result.exitCode } : {}),
+            ...(typeof result.mutationAttempted === 'boolean' ? { mutationAttempted: result.mutationAttempted } : {}),
+            ...(typeof result.receipt.data?.cleanupVerified === 'boolean' ? { cleanupVerified: result.receipt.data.cleanupVerified } : {}),
+          };
+          if (!Object.keys(taskFacts).length) taskFacts = undefined;
+          if (!result.receipt.success || result.status !== 'completed' || result.exitCode !== 0
+            || result.cleanupWarning || result.receipt.data?.cleanupVerified !== true) {
+            const diagnostic = recoveryDiagnosticSchema.safeParse(result.diagnostic);
+            const cleanupOnly = result.receipt.success && result.status === 'completed' && result.exitCode === 0;
+            throw recoveryFailure(cleanupOnly ? 'task-cleanup' : stage,
+              cleanupOnly ? 'cleanup' : result.status === 'timeout' ? 'timeout' : 'execution',
+              diagnostic.success ? new RecoveryDiagnosticError({ ...diagnostic.data, task: undefined }) : undefined,
+              taskFacts, 'Private backup execution or cleanup is unverified.');
+          }
+          // The private archive is the evidence boundary. Provider logs may include
+          // secrets and are never needed to prove a completed recovery set.
+          jobId = result.jobId;
+        } else {
+          const objects = [];
+          for (const item of target.objects) {
+            stage = 'source-open';
+            const client = await openRecoveryStorage(await storageAdapter(item.identity.provider), environment, item.identity);
+            sources.push(client); objects.push({ name: item.name, identity: item.identity, client });
+          }
+          stage = 'recovery-set';
+          mutationAttempted = true;
+          await createRecoverySet({ runId: setId, project: target.project, environment: target.environment,
+            contractHash: managedBackupTargetHash(target), destination: target.destination.identity, archive, objects });
+          jobId = `github-run-${params.runId}`;
+        }
+        stage = 'completion-record';
+        await recordRecoveryExecution({ archive, target, setId, jobId });
+        stage = 'retention';
+        const retained = await applyManagedRecoveryRetention({ archive, target });
+        if (!retained.success) {
+          operationReceipt = { version: 2, environment: target.environment, status: 'unknown',
+            reasonCodes: ['retention-unknown'], counts: { applied: 1, skipped: 0 },
+            diagnostic: { stage: 'retention', category: 'unknown', ...(taskFacts ? { task: taskFacts } : {}) } };
+          return operationReceipt;
+        }
+      }
+      stage = 'health';
+      const health = await observeManagedRecoverySet({ archive, target });
+      operationReceipt = { version: 2, environment: target.environment, status: health.status, reasonCodes: health.reasonCodes,
+        ...(health.status !== 'healthy' && taskFacts ? { diagnostic: { stage: 'health', category: 'unknown', task: taskFacts } as RecoveryDiagnostic } : {}),
+        ...(params.operation === 'backup' ? { counts: { applied: 1, skipped: 0 } } : {}) };
+      return operationReceipt;
+    } catch (error) {
+      operationFailure = recoveryFailure(stage, 'unknown', error, undefined,
+        error instanceof RecoveryDiagnosticError ? error.message : undefined);
+      throw operationFailure;
+    } finally {
+      let cleanupFailed = false;
+      for (const client of [archive, ...sources]) {
+        try { client.destroy(); } catch { cleanupFailed = true; }
+      }
+      if (cleanupFailed) {
+        const diagnostic: RecoveryDiagnostic = { ...(operationFailure?.diagnostic ?? operationReceipt?.diagnostic
+          ?? { stage: 'restore-cleanup', category: 'cleanup' }), ...(taskFacts ? { task: taskFacts } : {}), localCleanupFailed: true };
+        // Preserve verified completed-set counts and any existing unhealthy
+        // receipt. Transport shutdown does not change provider cleanup proof.
+        if (operationReceipt) return { ...operationReceipt, status: 'unknown' as const, diagnostic,
+          reasonCodes: [...new Set([...operationReceipt.reasonCodes, 'cleanup-unverified'])] };
+        throw new RecoveryDiagnosticError(diagnostic, operationFailure?.message);
+      }
+    }
+  } catch (error) {
+    throw recoveryFailure(stage, stage === 'input' ? 'invalid-input' : 'unknown', error,
+      taskFacts ?? (mutationAttempted ? undefined : { mutationAttempted: false }),
+      error instanceof RecoveryDiagnosticError ? error.message : undefined);
+  }
 }

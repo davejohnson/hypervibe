@@ -34,10 +34,10 @@ async function fixture(options: {
   sourceImage?: string | null; missingSource?: boolean; missingEnvironment?: boolean;
   sourceName?: string; duplicateSourceName?: boolean; existingExecution?: boolean;
   duplicateVariable?: boolean; wrongVariableEnvironment?: boolean; unsafeVariable?: boolean;
-  failVariables?: boolean; failCreate?: boolean; failConfigure?: boolean; exitCode?: number;
-  logs?: string[]; volumeId?: string; volumeInstanceId?: string;
+  failVariables?: boolean; failCreate?: boolean; failConfigure?: boolean; failDeploy?: boolean; exitCode?: number;
+  logs?: readonly string[]; volumeId?: string; volumeInstanceId?: string;
   deploymentStatus?: 'SUCCESS' | 'CRASHED';
-  failDelete?: boolean; malformedPage?: boolean;
+  failDelete?: boolean; malformedPage?: boolean; configureHttpStatus?: number;
   responseOverride?: (query: string, result: unknown) => unknown;
 } = {}) {
   const requests: Array<{ query: string; variables: Record<string, any> }> = [];
@@ -124,6 +124,7 @@ async function fixture(options: {
     },
     serviceInstanceDeployV2: (args: Record<string, any>) => {
       mutations.push({ field: 'serviceInstanceDeployV2', args });
+      if (options.failDeploy) throw new Error('provider echoed synthetic-bucket-secret');
       return 'task-deployment';
     },
     deployment: () => ({ status: options.deploymentStatus ?? 'SUCCESS' }),
@@ -145,6 +146,11 @@ async function fixture(options: {
     requests.push(request);
     const document = parse(request.query);
     expect(validate(schema, document).map((error) => error.message)).toEqual([]);
+    if (options.configureHttpStatus && request.query.includes('mutation ConfigureTaskService')) {
+      return new Response(JSON.stringify({ errors: [{ message: 'provider echoed synthetic-private-value' }] }), {
+        status: options.configureHttpStatus, headers: { 'content-type': 'application/json' },
+      });
+    }
     let result: unknown = await execute({ schema, document, rootValue: root, variableValues: request.variables });
     if (options.malformedPage && request.query.includes('DeclaredTaskVariables')) {
       result = { data: { environment: { id: 'staging', projectId: 'project-one', variables: { edges: [], pageInfo: { hasNextPage: true } } } } };
@@ -473,5 +479,103 @@ describe('Railway managed recovery task serialized contract', () => {
     expect(result.receipt.success).toBe(false);
     expect(result.receipt.data).toMatchObject({ cleanupVerified: false });
     expect(context.mutations.map(m => m.field)).toEqual(['serviceCreate', 'serviceInstanceUpdate', 'serviceInstanceDeployV2', 'serviceDelete']);
+  });
+});
+
+
+describe('Railway recovery failure diagnostics through serialized transport', () => {
+  const executionId = '64f5a9d0-343a-4d2f-9832-72e02b0caea5';
+  const options = { ...recoveryOptions, timeoutMs: 1,
+    managedRecoveryTask: { ...recoveryOptions.managedRecoveryTask, executionId } };
+  const marker = (diagnostic: unknown, id = executionId) => `HYPERVIBE_RECOVERY_FAILURE:${JSON.stringify({ version: 1, executionId: id, diagnostic })}`;
+
+  it.each([
+    ['preflight', { failVariables: true }, 'task-preflight', false, undefined],
+    ['ambiguous create', { failCreate: true }, 'task-create', true, undefined],
+    ['configuration', { failConfigure: true }, 'task-configure', true, true],
+    ['deployment', { failDeploy: true }, 'task-deploy', true, true],
+    ['nonzero exit', { exitCode: 7 }, 'task-execution', true, true],
+    ['timeout', { logs: [] }, 'task-observe', true, true],
+    ['startup failure', { logs: [], deploymentStatus: 'CRASHED' }, 'task-execution', true, true],
+    ['cleanup', { failDelete: true }, 'task-cleanup', true, false],
+  ] as const)('preserves the %s boundary without provider messages', async (_label, injected, stage, attempted, cleanup) => {
+    const context = await fixture(injected);
+    const result = await context.adapter.runJob(withoutApp, service, recoveryCommand, options);
+    expect(result.diagnostic).toMatchObject({ stage, task: { mutationAttempted: attempted } });
+    if (cleanup === undefined) expect(result.diagnostic?.task).not.toHaveProperty('cleanupVerified');
+    else expect(result.diagnostic?.task).toMatchObject({ cleanupVerified: cleanup });
+    expect(JSON.stringify(result.diagnostic)).not.toMatch(/synthetic-|task-id|task-deployment|project-one|registry|bucket-secret/);
+    expect(result.output).toBeUndefined();
+  });
+
+  it.each([[401, 'authorization'], [403, 'authorization'], [429, 'rate-limit'], [503, 'provider']] as const)(
+    'retains HTTP %s as a closed category without response text', async (httpStatus, category) => {
+      const context = await fixture({ configureHttpStatus: httpStatus });
+      const result = await context.adapter.runJob(withoutApp, service, recoveryCommand, options);
+      expect(result.diagnostic).toEqual({ stage: 'task-configure', category, httpStatus,
+        task: { status: 'failed', mutationAttempted: true, cleanupVerified: true } });
+      expect(JSON.stringify(result)).not.toContain('synthetic-private-value');
+    });
+
+  it('retains rejected deployment evidence without pretending the task ran', async () => {
+    const context = await fixture({ responseOverride: (query, response) => query.includes('mutation DeployTaskService')
+      ? { data: { serviceInstanceDeployV2: null } } : response });
+    const result = await context.adapter.runJob(withoutApp, service, recoveryCommand, options);
+    expect(result.diagnostic).toEqual({ stage: 'task-deploy', category: 'invalid-response',
+      task: { status: 'failed', mutationAttempted: true, cleanupVerified: true } });
+    expect(context.requests.some(request => request.query.includes('query TaskDeploymentStatus'))).toBe(false);
+  });
+
+  it('retains ownership uncertainty without cleaning an unverified task', async () => {
+    const context = await fixture({ responseOverride: (query, response) => query.includes('DeclaredTaskOwnership')
+      ? { data: { service: null, serviceInstance: null } } : response });
+    const result = await context.adapter.runJob(withoutApp, service, recoveryCommand, options);
+    expect(result.diagnostic).toMatchObject({ stage: 'task-ownership', category: 'invalid-response', task: { mutationAttempted: true } });
+    expect(result.diagnostic?.task).not.toHaveProperty('cleanupVerified');
+    expect(context.mutations.map(m => m.field)).toEqual(['serviceCreate']);
+  });
+
+  it('preserves a failed worker stage alongside an independently failed cleanup', async () => {
+    const context = await fixture({ failDelete: true, logs: [
+      'synthetic-private-database-row', marker({ stage: 'database-backup', category: 'execution', localCleanupFailed: true }), '__HYPERVIBE_TASK_EXIT:9__',
+    ] });
+    const result = await context.adapter.runJob(withoutApp, service, recoveryCommand, options);
+    expect(result.diagnostic).toEqual({ stage: 'database-backup', category: 'execution', localCleanupFailed: true,
+      task: { status: 'failed', exitCode: 9, mutationAttempted: true, cleanupVerified: false } });
+    expect(JSON.stringify(result)).not.toContain('synthetic-private-database-row');
+    expect(result.status).toBe('failed');
+    expect(result.receipt.success).toBe(false);
+  });
+
+  it.each([
+    ['different execution', marker({ stage: 'database-backup', category: 'execution' }, '3f51aade-f1bc-4c57-a4a7-2544274b02f7')],
+    ['unknown field', marker({ stage: 'database-backup', category: 'execution', message: 'synthetic-private-value' })],
+    ['embedded marker', `not-a-receipt ${marker({ stage: 'database-backup', category: 'execution' })}`],
+    ['duplicate marker', `${marker({ stage: 'database-backup', category: 'execution' })}\n${marker({ stage: 'database-backup', category: 'execution' })}`],
+    ['forged task evidence', marker({ stage: 'database-backup', category: 'execution', task: { status: 'completed', cleanupVerified: true } })],
+  ])('ignores %s while retaining actual failed task evidence', async (_label, invalid) => {
+    const context = await fixture({ logs: [invalid, '__HYPERVIBE_TASK_EXIT:3__'] });
+    const result = await context.adapter.runJob(withoutApp, service, recoveryCommand, options);
+    expect(result.diagnostic).toEqual({ stage: 'task-execution', category: 'execution',
+      task: { status: 'failed', exitCode: 3, mutationAttempted: true, cleanupVerified: true } });
+    expect(JSON.stringify(result)).not.toContain('synthetic-private-value');
+  });
+
+  it('omits an out-of-range sentinel value instead of losing the failed task receipt', async () => {
+    const context = await fixture({ logs: ['__HYPERVIBE_TASK_EXIT:9007199254740991__'] });
+    const result = await context.adapter.runJob(withoutApp, service, recoveryCommand, options);
+    expect(result.status).toBe('failed');
+    expect(result.diagnostic).toEqual({ stage: 'task-execution', category: 'execution',
+      task: { status: 'failed', mutationAttempted: true, cleanupVerified: true } });
+  });
+
+  it('does not use a worker failure marker as successful execution or cleanup authority', async () => {
+    const context = await fixture({ failDelete: true, logs: [
+      marker({ stage: 'database-backup', category: 'execution' }), '__HYPERVIBE_TASK_EXIT:0__',
+    ] });
+    const result = await context.adapter.runJob(withoutApp, service, recoveryCommand, options);
+    expect(result.diagnostic).toEqual({ stage: 'task-cleanup', category: 'cleanup',
+      task: { status: 'failed', exitCode: 0, mutationAttempted: true, cleanupVerified: false } });
+    expect(result.receipt.success).toBe(false);
   });
 });

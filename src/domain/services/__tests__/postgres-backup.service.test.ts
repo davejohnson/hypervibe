@@ -1,17 +1,20 @@
 import { execFile } from 'node:child_process';
+import * as childProcess from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
-import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { Client } from 'pg';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StorageObjectClient } from '../../ports/storage.port.js';
 import { backupAndVerifyPostgres, POSTGRES_BACKUP_FORMAT_VERSION, postgresBackupEvidenceSchema } from '../postgres-backup.service.js';
 import { createRecoverySet } from '../recovery-set.service.js';
 import { observeManagedRecoverySet, recordRecoveryExecution } from '../recovery-set-health.service.js';
 import { managedBackupTargetHash, type ManagedBackupTarget } from '../managed-backup-target.service.js';
+
+vi.mock('node:child_process', async importOriginal => ({ ...await importOriginal<typeof import('node:child_process')>() }));
 
 const execute = promisify(execFile);
 const source = {
@@ -228,6 +231,51 @@ describe('retained PostgreSQL backup and isolated restore (real PostgreSQL)', ()
       fileReferenceQueries: [{ storageName: 'documents', query: 'SELECT title AS key, id FROM backup_test.documents' }],
     })).rejects.toThrow('restore-verification');
     expect([...archive.objects.keys()].some(key => key.endsWith('.json'))).toBe(false);
+  }, 60_000);
+
+  it.each(['database-verification', 'reference-verification'] as const)(
+    'preserves the %s stage through real dump and isolated restore without exposing SQL', async stage => {
+      const archive = archiveStore();
+      const error = await backupAndVerifyPostgres({ sourceUrl, source,
+        destination: { provider: 's3', externalId: 'backup-bucket', instanceScope: { region: 'us-east-1' } },
+        runId: randomUUID(), archive: archive.client, archivePrefix: 'test/backups',
+        ...(stage === 'database-verification' ? { verificationQuery: "SELECT false AS ok /* secret-projection */" }
+          : { fileReferenceQueries: [{ storageName: 'documents', query: "SELECT 'secret-document-key' AS wrong_column" }] }),
+      }).catch(error => error);
+      expect(error).toMatchObject({ diagnostic: { stage, category: 'execution' } });
+      expect(error.message).toBe('PostgreSQL backup failed (restore-verification).');
+      expect(JSON.stringify(error)).not.toMatch(/secret-projection|secret-document-key|source_admin/);
+      expect([...archive.objects.keys()].some(key => key.endsWith('.complete.json'))).toBe(false);
+      expect((await client.query('SELECT count(*)::text AS count FROM backup_test.documents')).rows).toEqual([{ count: '2' }]);
+    }, 60_000);
+
+  it('preserves the primary verification diagnostic while retaining a cluster whose stop is unverified', async () => {
+    const spawn = childProcess.spawn;
+    let retainedDirectory: string | undefined;
+    const intercepted = vi.spyOn(childProcess, 'spawn').mockImplementation(((program: string, args: readonly string[] = [], options: childProcess.SpawnOptions = {}) => {
+      if (program === 'pg_ctl' && Array.isArray(args) && args.includes('stop')) {
+        retainedDirectory = String(args[args.indexOf('-D') + 1]);
+        return spawn(process.execPath, ['-e', 'process.exit(1)'], options);
+      }
+      return spawn(program, args, options);
+    }) as unknown as typeof childProcess.spawn);
+    try {
+      const archive = archiveStore();
+      const error = await backupAndVerifyPostgres({ sourceUrl, source,
+        destination: { provider: 's3', externalId: 'backup-bucket', instanceScope: { region: 'us-east-1' } },
+        runId: randomUUID(), archive: archive.client, archivePrefix: 'test/backups', verificationQuery: 'SELECT false AS ok',
+      }).catch(error => error);
+      expect(error).toMatchObject({ diagnostic: { stage: 'database-verification', category: 'execution', localCleanupFailed: true } });
+      expect(retainedDirectory).toBeTruthy();
+      await expect(access(retainedDirectory!)).resolves.toBeUndefined();
+      expect([...archive.objects.keys()].some(key => key.endsWith('.complete.json'))).toBe(false);
+    } finally {
+      intercepted.mockRestore();
+      if (retainedDirectory) {
+        await execute('pg_ctl', ['-D', retainedDirectory, '-m', 'immediate', '-w', 'stop']);
+        await rm(dirname(retainedDirectory), { recursive: true, force: true });
+      }
+    }
   }, 60_000);
 
   it('does not overwrite a reserved run on retry', async () => {
