@@ -9,6 +9,25 @@ afterEach(() => {
 });
 
 describe('Hypervibe cloud pairing client', () => {
+  it.each([
+    `https://hypervibe.dev/pair?code=2345-6789&echo=${'A'.repeat(43)}`,
+    `https://hypervibe.dev/pair?code=2345-6789&code=${'A'.repeat(43)}`,
+    `https://hypervibe.dev/pair?code=2345-6789#${'A'.repeat(43)}`,
+  ])('rejects unexpected approval URL components without exposing the private proof (%#)', async (verificationUrl) => {
+    // Pinned Hypercloud devicePairingService constructs /pair with one public
+    // code parameter. No private device proof belongs in the displayed URL.
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      deviceCode: 'A'.repeat(43), expiresAt: '2026-10-03T12:10:00.000Z',
+      intervalSeconds: 2, repository: 'northstar/launchpad', userCode: '2345-6789',
+      verificationUrl, purpose: 'credential-requests', environment: 'staging',
+    }), { status: 201 }));
+    await expect(createHypervibeCloudPairingClient({ fetchImpl,
+      grant: { purpose: 'credential-requests', environment: 'staging' },
+    }).start('northstar/launchpad')).rejects.toMatchObject({
+      code: 'PROVIDER_ERROR', message: expect.not.stringContaining('A'.repeat(43)),
+    });
+  });
+
   it('requests separate provider-connection authority without expanding reporting grants', async () => {
     const fetchImpl = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
       deviceCode: 'A'.repeat(43), expiresAt: '2026-09-20T12:10:00.000Z',

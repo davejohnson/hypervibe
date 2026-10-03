@@ -1,0 +1,19 @@
+// Source lines 62-79
+// This narrow owner grant is never accepted on retrieval-approval/value routes.
+function requireCredentialRequestAccess(runtime, mutation = false) {
+  return async function authenticateRequestOwner(request, response, next) {
+    const authorization = request.get("authorization");
+    if (authorization) {
+      if (request.get("cookie")) return next(unauthorized("Use either a browser session or device access, not both."));
+      const match = authorization.match(/^Bearer ([^\s]+)$/);
+      if (!match) return next(unauthorized());
+      request.actor = await runtime.credentialAuthService.authenticateCredentialRequests(match[1]);
+      if (request.params.projectKey !== request.actor.credentialProjectId
+        || (request.body?.environmentId && request.body.environmentId !== request.actor.credentialEnvironmentId)
+        || (request.query.environmentId && request.query.environmentId !== request.actor.credentialEnvironmentId)) return next(notFound());
+      return next();
+    }
+    if (!request.actor) return next(unauthorized());
+    return mutation ? runtime.csrf.protect(request, response, next) : next();
+  };
+}

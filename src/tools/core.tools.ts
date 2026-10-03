@@ -89,6 +89,7 @@ import {
 import { planProviderNativeDeploySources } from '../domain/services/provider-native-deploy-source.service.js';
 import { planMaintenance } from '../domain/services/maintenance-plan.service.js';
 import { parseEnvironmentMaintenanceBinding } from '../domain/services/environment-maintenance.service.js';
+import { eligibleCredentialRequirements } from '../application/credential-plan-handoff.js';
 
 // Re-exported for existing test imports; implementation lives in apply-plan.ts.
 export { bootstrapActionResultFromSummary } from '../application/apply-plan.js';
@@ -873,6 +874,17 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           `dotenv:${localEnv.path}#${entry.key}`,
         ]))
         : undefined;
+      const credentialRequirements = currentSpec
+        ? eligibleCredentialRequirements(currentSpec, result.environmentName, result.inputRequired, Object.keys(secretRefs ?? {}))
+        : [];
+      const credentialRequest = credentialRequirements.length > 0 ? {
+        command: 'hv_cloud_requests',
+        input: { env: result.environmentName, planId: result.planRunId },
+        requirements: credentialRequirements,
+      } : undefined;
+      const hostedCredentialHint = credentialRequest
+        ? ` For externally owned runtime inputs, offer the secure owner form with hv_cloud_requests ${JSON.stringify(credentialRequest.input)}; confirm the recipient and invitation before sending. The handoff requests only this plan's eligible input requirements, not every declared key, and does not establish that live credentials are absent or invalid.`
+        : '';
       let hint: string;
       let next: string[] | undefined;
 
@@ -887,8 +899,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         });
       } else if (result.inputRequired.length > 0) {
         hint = delegatedSecretRefs
-          ? `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. Hypervibe prepared ${localEnv!.path}; fill those values there, then re-run hv_plan with secretRefs=${JSON.stringify(delegatedSecretRefs)}. Do not paste raw values into chat.`
-          : `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. If the value and provider access are available on this Mac, re-run hv_plan with secretRefs mapping each key to env:, dotenv:, file:, or a secret-manager reference. Otherwise prepare a value-free handoff naming the key, environment, and principal for the project owner; the value can be transferred through their agreed external channel or shared secret manager. Do not paste raw values into chat.`;
+          ? `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. Hypervibe prepared ${localEnv!.path}; if values are available there, re-run hv_plan with secretRefs=${JSON.stringify(delegatedSecretRefs)}. Do not paste raw values into chat.`
+          : `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. If values are already available here, re-run hv_plan with secretRefs mapping each key to env:, dotenv:, file:, or a secret-manager reference. Otherwise confirm who supplies these inputs. Do not paste raw values into chat.`;
+        hint += hostedCredentialHint;
       } else if (pending.length === 0) {
         hint = result.backupCoverage && !result.backupCoverage.complete
           ? 'No executable changes are available, but daily backup coverage has gaps. Review backupCoverage; unsupported protection requires an adapter implementation and unknown protection requires a verified provider observation.'
@@ -906,7 +919,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       if (hardBlockRecovery) {
         next = hardBlockRecovery.next;
       } else if (result.inputRequired.length > 0) {
-        next = ['hv_plan'];
+        next = credentialRequest ? ['hv_cloud_requests', 'hv_plan'] : ['hv_plan'];
       } else if (pending.length > 0) {
         next = connectBeforeApply.length > 0
           ? ['hv_connections', 'hv_plan']
@@ -939,6 +952,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           actions: reviewActions,
           unmanaged: result.unmanaged,
           inputRequired: result.inputRequired.length > 0 ? result.inputRequired : undefined,
+          ...(credentialRequest ? { credentialRequest } : {}),
           blocked: hardBlocked,
           actionScopedBlocked: actionScopedBlocked.length > 0 ? actionScopedBlocked : undefined,
           ...(classifyPlanBlocks([...result.blocked, ...actionScopedBlocked]).connections.length > 0
@@ -958,9 +972,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             ? {
               agentInstruction: {
                 action: 'ask_user' as const,
-                message: delegatedSecretRefs
-                  ? `Stop before apply. Hypervibe prepared ${localEnv!.path}; ask the owner to fill the required delegated values there without pasting them into chat, then re-run hv_plan with the disclosed dotenv secretRefs.`
-                  : 'Stop before apply. Use a safe local secretRef when the value is available here; otherwise prepare a value-free owner handoff naming the delegated key, environment, and principal.',
+                message: (delegatedSecretRefs
+                  ? `Stop before apply. Hypervibe prepared ${localEnv!.path}; use the disclosed dotenv secretRefs only for values already available there. Otherwise confirm who should supply the inputs; never ask for values in chat.`
+                  : 'Stop before apply. Use a safe local secretRef when the value is available here; otherwise confirm who should supply the inputs without asking for values in chat.') + hostedCredentialHint,
               },
             }
             : {}),
@@ -1358,7 +1372,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
               : deployStrategy === 'branch' && deployTrigger === 'ci' && (ciNeedsSync || ciDeploy.error)
                 ? 'Run hv_plan and hv_apply to converge the selected managed CI provider; use hv_ci_status for runs after configuration is active.'
               : delegatedSecrets.inputRequired.length > 0
-                ? 'Use a safe local secretRef if the value is available here; otherwise prepare a value-free handoff naming the delegated key, environment, and principal. Do not paste raw secret values into chat.'
+                ? 'Use a safe local secretRef if the value is available here. Otherwise run hv_plan for this environment and offer its hv_cloud_requests handoff for externally owned runtime inputs. Confirm the recipient and secure invitation; do not paste values into chat or interpret unverified live state as absence.'
               : delegatedSecrets.blockers.length > 0
                 ? `Resolve the managed-secret safety block before planning: ${delegatedSecrets.blockers.map((entry) => entry.reason).join('; ')}.`
               : hasConfigurationDrift
@@ -1420,11 +1434,11 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       if (outcome.kind === 'input_required') {
         return commandError('VALIDATION', 'This plan is missing required delegated secret inputs.', {
           details: { environment: outcome.envName, inputRequired: outcome.requirements },
-          hint: 'Use safe local secretRefs for values available on this Mac. Otherwise prepare a value-free handoff naming each delegated key, environment, and principal for the project owner. Do not paste raw secrets into chat.',
+          hint: 'Use safe local secretRefs for values available here. Otherwise run hv_plan for this environment and offer its hv_cloud_requests handoff for externally owned runtime inputs. Approve the invitation and private import separately, then create a fresh plan; never paste values into chat.',
           next: ['hv_plan'],
           agentInstruction: {
             action: 'ask_user',
-            message: 'Stop before apply. Use safe local secret references when available, or prepare a value-free owner handoff for the delegated-secret slots.',
+            message: 'Stop before apply. Use safe local secret references when available, or prepare a fresh plan and offer its secure hv_cloud_requests owner handoff. An invitation or imported input never authorizes applying this blocked plan.',
           },
         });
       }

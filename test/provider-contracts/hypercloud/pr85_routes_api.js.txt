@@ -1,0 +1,11 @@
+// Source lines 172-181
+  router.get("/api/v1/projects/:projectKey/credential-request-fields", sensitiveResponseHeaders, requireCredentialRequestAccess(runtime), credentialRequests.fields);
+  router.get("/api/v1/projects/:projectKey/credential-requests", sensitiveResponseHeaders, requireCredentialRequestAccess(runtime), credentialRequests.index);
+  router.post("/api/v1/projects/:projectKey/credential-requests", sensitiveResponseHeaders, requireCredentialRequestAccess(runtime, true), runtime.mutationLimiter, credentialRequests.create);
+  router.get("/api/v1/projects/:projectKey/credential-requests/:requestKey", sensitiveResponseHeaders, requireCredentialRequestAccess(runtime), credentialRequests.show);
+  router.delete("/api/v1/projects/:projectKey/credential-requests/:requestKey", sensitiveResponseHeaders, requireCredentialRequestAccess(runtime, true), runtime.mutationLimiter, credentialRequests.revoke);
+
+  router.delete("/api/v1/credential-request-access", sensitiveResponseHeaders, runtime.mutationLimiter, devicePairingController.revokeRequestAccess);
+
+  router.use("/api/v1", requireSession);
+  router.post("/api/v1/projects/:projectKey/credential-requests/:requestKey/retrieval-authorizations", sensitiveResponseHeaders, runtime.mutationLimiter, runtime.csrf.protect, credentialRequests.approveRetrieval);

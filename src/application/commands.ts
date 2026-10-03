@@ -20,6 +20,7 @@ import { registerHvDevxTools } from '../tools/hv-devx.tools.js';
 import { registerHvCloudTools } from '../tools/hv-cloud.tools.js';
 import { registerHvCloudConnectionsTools } from '../tools/hv-cloud-connections.tools.js';
 import { registerHvCloudSecretsTools } from '../tools/hv-cloud-secrets.tools.js';
+import { registerCloudRequestCommands } from './cloud-requests.js';
 
 export type CommandAccess = 'read' | 'write';
 
@@ -205,6 +206,7 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
   registerHvCloudTools(registry, ctx);
   registerHvCloudSecretsTools(registry, ctx);
   registerHvCloudConnectionsTools(registry, ctx);
+  registerCloudRequestCommands(registry, ctx);
 
   return registry;
 }

@@ -1,0 +1,17 @@
+// Plain branch names, not revision expressions or fully-qualified refs.
+// https://git-scm.com/docs/git-check-ref-format
+function normalizeSourceBranch(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (
+    typeof value !== "string" || value.length > 255 || value.trim() !== value || !value.isWellFormed() ||
+    value === "@" || value === "HEAD" || value.startsWith("refs/") || value.startsWith("-") ||
+    /[\x00-\x20\x7f~^:?*\[\\]/.test(value) || value.includes("..") ||
+    value.includes("@{") || value.endsWith(".") ||
+    value.split("/").some((part) => !part || part.startsWith(".") || part.endsWith(".lock"))
+  ) {
+    throw new TypeError("Enter a valid branch name, not a tag, full ref, or revision expression.");
+  }
+  return value;
+}
+
+module.exports = { normalizeSourceBranch };
