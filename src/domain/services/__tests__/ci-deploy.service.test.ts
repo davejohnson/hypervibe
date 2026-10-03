@@ -3,6 +3,8 @@ import { createHash } from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { parse, stringify } from 'yaml';
+import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
 import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import { RailwayAdapter } from '../../../adapters/providers/railway/railway.adapter.js';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
@@ -811,6 +813,63 @@ describe('ci-deploy.service', () => {
       if (scenario === 'stale-binding') expect(binding.contentHash).not.toBe(sha256(acceptedContent));
       if (scenario === 'legacy') expect(result.action?.metadata?.workflowPublicationRequired).toBe(true);
       if (scenario === 'live-drift') expect(liveContent).not.toBe(acceptedContent);
+    });
+
+    it('requires publication when a reviewed revision-5 workflow still gates on v1 backup receipts', async () => {
+      const { project, envRepo, environmentId } = seedProjectWithSpec();
+      seedVerifiedConnections();
+      const protectedSpec = environmentSpecSchema.parse({
+        ...CI_ENVIRONMENT_SPEC,
+        database: { provider: 'railway', engine: 'postgres' },
+        backups: { mode: 'daily', runnerImage: `ghcr.io/example/backup@sha256:${'b'.repeat(64)}` },
+      });
+      new SpecStore().replace(project, {
+        version: 1, project: project.name, environments: { production: protectedSpec },
+      });
+      const { targets, migration } = resolveBranchDeployTargets(project);
+      const target = { ...targets[0] };
+      delete target.providerImageUris;
+      delete target.programFingerprint;
+      delete target.deploymentContractFingerprint;
+      // Freeze the published revision-5 input contract independently of the
+      // current renderer constant. Its accepted bytes must require migration.
+      const oldInputHash = canonicalJsonSha256({
+        version: 1, rendererRevision: 5, provider: 'railway', target,
+        migration: { includeStep: migration.includeStep,
+          ...(migration.includeStep && migration.command ? { command: migration.command } : {}) },
+      });
+      const workflow = expectedWorkflow(project);
+      const accepted = parse(workflow.content);
+      const gate = accepted.jobs.deploy.steps.find((step: { name?: string }) => step.name === 'Verify retained backup health');
+      expect(gate).toBeDefined();
+      // Reconstructed accepted workflow: retain the published v1-only success
+      // predicate, rather than asking today's generator to supply old behavior.
+      gate.run = [
+        "node <<'NODE'",
+        "const fs = require('node:fs');",
+        "const receipt = JSON.parse(fs.readFileSync(process.env.HYPERVIBE_BACKUP_RECEIPT, 'utf8'));",
+        "if (receipt.version !== 1 || receipt.environment !== process.env.HYPERVIBE_BACKUP_ENVIRONMENT || receipt.status !== 'healthy' || !Array.isArray(receipt.reasonCodes) || receipt.reasonCodes.length !== 0) throw new Error('Backup health is unverified.');",
+        'NODE',
+      ].join('\n');
+      const acceptedContent = stringify(accepted);
+      acceptWorkflow(project, envRepo, environmentId, workflow, {
+        acceptedContent,
+        binding: { ...syncedBinding(project, acceptedContent), inputHash: oldInputHash },
+      });
+      const listEnvironmentSecrets = vi.mocked(GitHubAdapter.prototype.listEnvironmentSecrets);
+
+      const result = await planGitHubActionsDeploy({
+        project, environmentName: 'production', environmentSpec: protectedSpec,
+        environment: envRepo.findById(environmentId),
+      });
+
+      expect(result.action).toMatchObject({
+        type: 'update', verified: true,
+        reason: `GitHub Actions deploy workflow inputs changed for ${workflow.path}`,
+        metadata: { workflowPublicationRequired: true },
+      });
+      expect((result.action?.metadata?.workflow as { inputHash: string }).inputHash).not.toBe(oldInputHash);
+      expect(listEnvironmentSecrets).not.toHaveBeenCalled();
     });
 
     it('keeps managed workflow bytes stable when only deploy-time environment values change', async () => {

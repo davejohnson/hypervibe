@@ -6,7 +6,7 @@ export const BACKUP_HEALTH_REASON_CODES = ['backup-missing', 'backup-stale', 'ba
 const receiptRules = { stages: RECOVERY_FAILURE_STAGES, categories: RECOVERY_FAILURE_CATEGORIES, reasons: BACKUP_HEALTH_REASON_CODES };
 
 /** Self-contained runtime validator, used unchanged in the controller and emitted
- * alert. It accepts legacy receipts for inspection; only v2 permits diagnostics. */
+ * alert/deployment gate. It accepts legacy receipts; only v2 permits diagnostics. */
 function parseBackupOperationReceipt(value: unknown, rules: {
   stages: readonly string[]; categories: readonly string[]; reasons: readonly string[];
 }) {

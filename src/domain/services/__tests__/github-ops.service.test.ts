@@ -75,10 +75,10 @@ function reviewedTarget(
   };
 }
 
-it('requires a reviewed workflow migration for mount-safe runtimes and backup deployment gates', () => {
-  // Revision 4 workflows did not enforce effective daily backup health before rollout.
-  // They must not remain locked as current after installing this feature.
-  expect(GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION).toBe(5);
+it('requires a reviewed workflow migration for the shared backup receipt consumer', () => {
+  // Revision 5 workflows reject current v2 backup health receipts. Their v1-only
+  // success gate must not remain locked as current after installing this fix.
+  expect(GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION).toBe(6);
 });
 
 function executeDockerfileStep(workflowContent: string, directory: string): string {

@@ -60,7 +60,7 @@ export type {
   BranchDeployWorkflow,
 };
 
-export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 5;
+export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 6;
 export const GITHUB_ACTIONS_SERVER_PROGRAM_REVISION = 1;
 
 function migrationWorkflowInput(migration: { includeStep: boolean; command?: string }) {

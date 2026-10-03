@@ -1899,9 +1899,13 @@ Recurring managed backup diagnostics use the shared recovery diagnostic port:
 closed stage/category codes cross worker, provider, application and controller
 boundaries without raw errors. An execution-bound worker marker supplies failure
 detail only; provider observations remain authoritative for task completion,
-mutation attempts and cleanup. The version-2 operational receipt and generated
-GitHub alert share one validator. Failed CI jobs preserve existing reason codes
-and cannot close an alert. These receipts do not replace retained recovery
+mutation attempts and cleanup. The controller, generated GitHub alert and
+deployment health gate share one operational receipt validator, accepting legacy
+version 1 and current version 2. Deployment still requires a successful health
+command and a healthy receipt for the exact environment, without failure reasons
+or diagnostics. Generated gate tests consume actual health-producer receipts in
+staging and production. Failed CI jobs preserve existing reason codes and cannot
+close an alert. These receipts do not replace retained recovery
 manifests or establish a successful restore. Compiler and helper changes must
 ship together as a reviewed workflow and pinned image update; see
 [daily backup defaults](docs/default-backup-policy.md).
