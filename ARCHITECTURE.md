@@ -531,6 +531,12 @@ non-noop action:
   database, queue, storage bucket, domain, or secret first, plan that action and
   make the service action depend on it instead of ensuring the prerequisite
   imperatively.
+- Accepted CI credential setup may precede recovery readiness in its own
+  `managed-ci-credentials` stage. Preserve real resource dependencies and limit
+  apply to the shared credential capabilities; do not publish workflows,
+  dispatch jobs, update applied deployment contracts or run application writes
+  from this stage. Repository publication still belongs to its declared
+  canonical environment.
 - Receipts are action-scoped evidence. Do not reuse a whole-environment
   bootstrap result as proof that several distinct actions succeeded.
 
