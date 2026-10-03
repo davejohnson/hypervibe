@@ -341,6 +341,60 @@ describe('hosted desired/current inspection v1', () => {
     expect(fixture.mutations).toEqual([]);
   });
 
+  function databaseRequest(databaseId?: string) {
+    const request = input();
+    request.source = source({ version: 1, project: 'demo', gitRemoteUrl: 'https://github.com/acme/demo',
+      environments: { staging: { hosting: { provider: 'railway' }, services: { web: { public: false, startCommand: 'node server.js' } },
+        envVars: { FEATURE: 'private-feature-value' }, database: { provider: 'railway', engine: 'postgres' } } } });
+    request.bindings = source({ version: 1, project: 'demo', environments: { staging: { platformBindings: {
+      provider: 'railway', projectId, environmentId: stagingId, services: { web: { serviceId: 'staging-web' } },
+      ...(databaseId ? { databaseTopology: { primary: { provider: 'railway', externalId: databaseId } } } : {}),
+    } } } });
+    return request;
+  }
+  async function databaseFixture() {
+    const fixture = await railwayHttpFixture();
+    const web = fixture.addService('staging-web', 'web', stagingId);
+    Object.assign(web.instances.get(stagingId)!, { startCommand: 'node server.js' });
+    fixture.variables.set(`staging-web/${stagingId}`, { FEATURE: 'private-feature-value' });
+    const database = fixture.addService('staging-postgres', 'Postgres', stagingId);
+    database.instances.get(stagingId)!.source = { image: 'ghcr.io/railwayapp-templates/postgres-ssl:16' };
+    return fixture;
+  }
+
+  it('identifies the declared database by its committed identity, not as an unlinked service', async () => {
+    const fixture = await databaseFixture();
+    const report = await inspectHostedEnvironmentV1(databaseRequest('staging-postgres'), { now });
+    expect(report.resources.find(resource => resource.id === 'database:database')).toMatchObject({
+      kind: 'database', status: 'matching', provider: 'railway', externalId: 'staging-postgres',
+      desired: { exists: true }, current: { exists: true },
+    });
+    expect(report.resources.some(resource => resource.status === 'unmanaged')).toBe(false);
+    expect(report.coverage.supportedResourceKinds).toEqual(['environment', 'service', 'database']);
+    expect(report.coverage.unsupportedCapabilities).not.toContain('database');
+    expect(fixture.mutations).toEqual([]);
+  });
+
+  it('never adopts a database-looking service without a committed database identity', async () => {
+    await databaseFixture();
+    const report = await inspectHostedEnvironmentV1(databaseRequest(), { now });
+    expect(report.resources.find(resource => resource.id === 'database:database')).toMatchObject({
+      status: 'unknown', reasonCode: 'binding_missing', current: { exists: null },
+    });
+    expect(report.resources.find(resource => resource.status === 'unmanaged')).toMatchObject({
+      name: 'Postgres', externalId: 'staging-postgres', reasonCode: 'not_bound',
+    });
+    expect(report.coverage.status).toBe('partial');
+  });
+
+  it('reports a bound database missing only after a complete exact-scope inventory', async () => {
+    await databaseFixture();
+    const report = await inspectHostedEnvironmentV1(databaseRequest('retired-postgres'), { now });
+    expect(report.resources.find(resource => resource.id === 'database:database')).toMatchObject({
+      status: 'missing', externalId: 'retired-postgres', current: { exists: false },
+    });
+  });
+
   it('reports a bound resource missing only after a complete exact-scope inventory', async () => {
     const fixture = await railwayHttpFixture();
     const report = await inspectHostedEnvironmentV1(input(), { now });
