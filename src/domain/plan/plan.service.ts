@@ -41,6 +41,7 @@ import { resolveGitDeploySource } from '../services/deploy-source.js';
 import { diffEnvironment, diffRetainedHostingCleanup } from './diff.engine.js';
 import type { DiffResult, LocalSnapshot, PlanAction } from './plan.types.js';
 import type { PlanBlock } from './plan-block.js';
+import { isManagedCiCredentialAction } from './plan-stage.js';
 import {
   actionDependencyClosure,
   fingerprintObservedState,
@@ -156,7 +157,7 @@ export interface EnvironmentPlan {
   webhookReadiness?: WebhookReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
-  scope: 'full' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'api-policy';
+  scope: 'full' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
   backupReadiness?: BackupReadiness;
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
@@ -2782,8 +2783,9 @@ export class PlanService {
       const syncIds = new Set(ciSyncActions.map((action) => action.id));
       actions = actions.map((action) => {
         if (syncIds.has(action.id)) {
-          return prerequisiteRoots.length > 0
-            ? { ...action, dependsOn: prerequisiteRoots }
+          const dependencies = [...new Set([...(action.dependsOn ?? []), ...prerequisiteRoots])];
+          return dependencies.length > 0
+            ? { ...action, dependsOn: dependencies }
             : { ...action, dependsOn: undefined };
         }
         if (
@@ -2898,6 +2900,7 @@ export class PlanService {
       && serviceVolumes.actions.some(action => action.type !== 'noop');
     let backupProvisioningStageActive = false;
     let backupReadinessStageActive = false;
+    let ciCredentialsStageActive = false;
     if (checkpointStageActive) {
       // A recovery checkpoint acts only on an already-bound database. It must
       // precede workflow publication and unrelated reconciliation, and must
@@ -2960,12 +2963,21 @@ export class PlanService {
       const roots = scaffolding.length ? scaffolding : provisioningRoots;
       const closure = actionDependencyClosure(actions, roots.map(action => action.id));
       backupProvisioningStageActive = closure.some(action => action.type !== 'noop') && closure.every(isBackupProvisioningAction);
-      backupReadinessStageActive = !backupProvisioningStageActive;
+      // Credentials are a prerequisite of the first recovery run. Preserve
+      // genuine dependencies: a missing database URL must provision first.
+      const credentials = actionDependencyClosure(actions, ciSyncActions.filter(isManagedCiCredentialAction).map(action => action.id));
+      const credentialIds = new Set(credentials.map(action => action.id));
+      ciCredentialsStageActive = !backupProvisioningStageActive && credentials.length > 0
+        && credentials.every(action => isManagedCiCredentialAction(action)
+          && (action.dependsOn ?? []).every(dependency => credentialIds.has(dependency)));
+      backupReadinessStageActive = !backupProvisioningStageActive && !ciCredentialsStageActive;
       actions = backupProvisioningStageActive ? closure.map(action => action.type !== 'noop'
         && ['database', 'storage'].includes(action.resource.kind)
-        ? { ...action, requiresConfirm: true, dataBearing: true } : action) : [];
+        ? { ...action, requiresConfirm: true, dataBearing: true } : action) : ciCredentialsStageActive ? credentials : [];
       backupPolicy.warnings.push(backupProvisioningStageActive
         ? 'This plan provisions only durable data identities. Re-run hv_plan to review backup policy, initial recovery points and isolated restore verification before application deployment.'
+        : ciCredentialsStageActive
+        ? 'This plan synchronizes only credentials for accepted CI workflows so recovery can run. Re-plan the canonical repository environment to publish backup files; application deployment remains gated by backup and restore evidence.'
         : `Backup readiness blocks deployment. ${backupReadiness.gaps.join(' ')}`);
     }
 
@@ -3094,32 +3106,32 @@ export class PlanService {
           : {}),
       }
       : undefined;
-    const isolatedCiStage = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || backupProgramPublicationStageActive || ciBindingStageActive || ciWorkflowPublicationStageActive || volumeStageActive;
+    const isolatedCiStage = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || backupProgramPublicationStageActive || ciBindingStageActive || ciWorkflowPublicationStageActive || volumeStageActive;
     const ciSelection = resolveDevOpsSelection(specResult.spec)?.ci;
     const ciConnectionProvider = ciSelection
       ? devOpsProviderRegistry.ciProvider(ciSelection.provider)?.connectionProvider
       : undefined;
-    const isolatedProviders = ciWorkflowPublicationStageActive && ciConnectionProvider
+    const isolatedProviders = (ciWorkflowPublicationStageActive || ciCredentialsStageActive) && ciConnectionProvider
       ? [ciConnectionProvider]
       : actions.map((action) => action.resource.provider);
     const planBlocked = isolatedCiStage
       ? this.providerPreflight(isolatedProviders)
       : blocked;
     if (backupReadinessStageActive) planBlocked.push({ category: 'prerequisite', provider: 'hypervibe', policy: 'hard', reason: `Backup readiness is incomplete. ${backupReadiness.gaps.join(' ')}` });
-    const planInputRequired = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive || volumeStageActive
+    const planInputRequired = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive || volumeStageActive
       ? []
       : ciBindingStageActive
         ? ciBindingInputRequired
         : secretInputRequired;
-    const planOverrides = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive || ciProjectBootstrapStage || volumeStageActive ? undefined : overrides;
+    const planOverrides = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive || ciProjectBootstrapStage || volumeStageActive ? undefined : overrides;
     const persistedScope = databaseBindingStageActive ? 'database-bindings' as const : backupProgramPublicationStageActive ? 'backup-program-publication' as const : checkpointStageActive ? 'database-checkpoint' as const : backupPolicyStageActive ? 'backup-policy' as const
-      : backupProvisioningStageActive ? 'backup-provisioning' as const : backupReadinessStageActive ? 'backup-readiness' as const : ciBindingStageActive
+      : backupProvisioningStageActive ? 'backup-provisioning' as const : ciCredentialsStageActive ? 'managed-ci-credentials' as const : backupReadinessStageActive ? 'backup-readiness' as const : ciBindingStageActive
       ? (volumeIdentityStage && !managedCiEnabled ? 'hosting-bindings' as const : 'managed-ci-bindings' as const)
       : ciWorkflowPublicationStageActive
         ? 'managed-ci-publication' as const
         : volumeStageActive ? 'service-volumes' as const : 'full' as const;
     const actionKinds = new Set(actions.map((action) => action.resource.kind));
-    const integrationFingerprints = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive ? {} : {
+    const integrationFingerprints = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive ? {} : {
       ...((!ciBindingStageActive || actionKinds.has('payment')) && stripeSync.fingerprint
         ? { stripe: stripeSync.fingerprint } : {}),
       ...((!ciBindingStageActive || actionKinds.has('email')) && email.fingerprint
@@ -3142,10 +3154,10 @@ export class PlanService {
       scope: persistedScope,
       environmentName,
       specRevision: specResult.revision,
-      ...(!databaseBindingStageActive && sourceCommitSha ? { sourceCommitSha } : {}),
+      ...(!databaseBindingStageActive && !ciCredentialsStageActive && sourceCommitSha ? { sourceCommitSha } : {}),
       backupCoverage,
       backupReadiness,
-      observedFingerprint: databaseBindingStageActive || ciWorkflowPublicationStageActive || backupProgramPublicationStageActive || backupPolicyStageActive || backupReadinessStageActive
+      observedFingerprint: databaseBindingStageActive || ciCredentialsStageActive || ciWorkflowPublicationStageActive || backupProgramPublicationStageActive || backupPolicyStageActive || backupReadinessStageActive
         ? null
         : observed ? fingerprintObservedState(observed) : null,
       ...(!checkpointStageActive && dataMigration.pending && sourceEnvironment

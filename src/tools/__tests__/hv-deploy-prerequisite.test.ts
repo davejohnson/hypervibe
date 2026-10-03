@@ -25,7 +25,7 @@ describe('deployment prerequisite phase reporting', () => {
   });
 
   it.each(['database-checkpoint', 'backup-policy', 'hosting-bindings', 'managed-ci-bindings',
-    'service-volumes', 'backup-program-publication', 'managed-ci-publication', 'api-policy', 'retained-cleanup'] as const)(
+    'service-volumes', 'backup-program-publication', 'managed-ci-publication', 'managed-ci-credentials', 'api-policy', 'retained-cleanup'] as const)(
     'reports successful %s work as pending, with no completed deployment claim', async scope => {
       const ctx = createCommandContext();
       const project = ctx.repos.projects.create({ name: 'prerequisite-app', defaultPlatform: 'railway' });

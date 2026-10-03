@@ -2,7 +2,7 @@ import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js
 import { applyApiPolicy, planApiPolicy } from '../domain/services/api-policy.js';
 import { applyDatabaseScopeBinding } from './apply-database-scope-binding.js';
 import { PlanService } from '../domain/plan/plan.service.js';
-import { actionRequiresBackupReadiness, deploymentPrerequisitePhase } from '../domain/plan/plan-stage.js';
+import { actionRequiresBackupReadiness, deploymentPrerequisitePhase, isManagedCiCredentialAction } from '../domain/plan/plan-stage.js';
 import { observeBackupPolicy } from '../domain/services/backup-policy.service.js';
 import { observeBackupHealth } from '../domain/services/backup-health.service.js';
 import { assessBackupReadiness } from '../domain/services/backup-readiness.js';
@@ -49,6 +49,8 @@ import {
   isGitHubActionsDeployAction,
 } from '../domain/services/ci-deploy.service.js';
 import { applyManagedCiAction } from '../domain/services/managed-ci.service.js';
+import { resolveDevOpsSelection, resolveGitHubActionsSelection } from '../domain/spec/devops-selection.js';
+import { devOpsProviderRegistry } from '../domain/registry/devops.registry.js';
 import { applyManagedCodeRepositoryAction } from '../domain/services/managed-code-repository.service.js';
 import {
   CI_APPLIED_SPEC_SYNC_OPERATION,
@@ -822,6 +824,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const planScope = loaded.document.scope ?? 'full';
   const retainedCleanupOnly = planScope === 'retained-cleanup';
   const backupProvisioningOnly = planScope === 'backup-provisioning';
+  const ciCredentialsOnly = planScope === 'managed-ci-credentials';
   const managedCiBindingsOnly = planScope === 'managed-ci-bindings' || planScope === 'hosting-bindings';
   const workflowPublicationOnly = planScope === 'managed-ci-publication' || planScope === 'backup-program-publication';
   if (loaded.document.inputRequired?.length) {
@@ -865,8 +868,8 @@ export async function executePlanApply(ctx: CommandContext, params: {
     ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
     : project;
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
-  if (backupProvisioningOnly && (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id)) {
-    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The reviewed backup provisioning plan belongs to another project or environment.' }] };
+  if ((backupProvisioningOnly || ciCredentialsOnly) && (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id)) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The reviewed prerequisite plan belongs to another project or environment.' }] };
   }
   if (planScope === 'backup-readiness') {
     // Saved diagnostics are not execution authority and may predate this field.
@@ -1000,6 +1003,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
     const codeProvider = stringField(asRecord(action.metadata), 'codeProvider');
     return codeProvider ?? action.resource.provider;
   });
+  const selectedCi = resolveDevOpsSelection(spec)?.ci;
+  const credentialConnectionProvider = selectedCi
+    ? devOpsProviderRegistry.ciProvider(selectedCi.provider)?.connectionProvider : undefined;
   const blocked = retainedCleanupOnly
     ? planService.providerPreflight([
         envSpec.hosting.provider,
@@ -1009,6 +1015,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
     ? planService.providerPreflight(migrationProviders)
     : workflowPublicationOnly
     ? planService.providerPreflight(workflowPublicationProviders)
+    : ciCredentialsOnly
+    ? planService.providerPreflight(credentialConnectionProvider ? [credentialConnectionProvider]
+      : loaded.document.actions.map(action => action.resource.provider))
     : managedCiBindingsOnly || backupProvisioningOnly
     ? planService.providerPreflight(
         loaded.document.actions
@@ -1031,6 +1040,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     !retainedCleanupOnly
     && !workflowPublicationOnly
     && !backupProvisioningOnly
+    && !ciCredentialsOnly
     && (managedCiBindingsOnly ? Boolean(planned) : configured || Boolean(planned));
   const stripeSpec = envSpec.payments?.stripe;
   if (shouldRefreshIntegration(Boolean(stripeSpec), loaded.document.integrationFingerprints?.stripe)) {
@@ -1095,7 +1105,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   // proposal state. Unrelated hosting drift cannot stale-reject that stage.
   let observed: ObservedState | null = null;
   let freshFingerprint: string | null = null;
-  if (!workflowPublicationOnly) {
+  if (!workflowPublicationOnly && !ciCredentialsOnly) {
     ({ observed } = await planService.observeEnvironment(
       projectForApply,
       environment,
@@ -1110,6 +1120,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   if (
     !retainedCleanupOnly
     && !workflowPublicationOnly
+    && !ciCredentialsOnly
     && projectForApply.defaultPlatform !== envSpec.hosting.provider
   ) {
     applyProject = ctx.repos.projects.update(projectForApply.id, { defaultPlatform: envSpec.hosting.provider }) ?? projectForApply;
@@ -1257,6 +1268,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
       };
     }
     const capability = authority.capability;
+    if (ciCredentialsOnly && !isManagedCiCredentialAction(action)) {
+      return { success: false, status: 'blocked', message: 'This stage can synchronize only reviewed CI credentials; no application or release mutation is authorized.' };
+    }
     const volumeEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
     const boundServices = asRecord(volumeEnvironment?.platformBindings.services);
     const boundService = boundServices && Object.prototype.hasOwnProperty.call(boundServices, action.resource.name)
@@ -1365,6 +1379,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
       return applyCloudflareDomainRegistration({ project: applyProject, envName, environmentSpec: envSpec, action });
     }
     if (capability === 'github.ci.sync') {
+      if (ciCredentialsOnly && !resolveGitHubActionsSelection(spec)) {
+        return blockedActionIdentity(action, 'The selected CI provider changed; re-run hv_plan.');
+      }
       const expectedRepository = parseGitHubRepoFromRemote(applyProject.gitRemoteUrl);
       if (
         action.resource.name !== `deploy-branch:${envName}`

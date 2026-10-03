@@ -8,6 +8,7 @@ import type { ObservedState } from '../ports/observe.port.js';
 import { CI_CONFIGURATION_SYNC_OPERATION } from '../services/managed-ci.contract.js';
 import { resolvePlanActionAuthority } from './action-authority.js';
 import type { PlanAction } from './plan.types.js';
+import { isManagedCiCredentialAction } from './plan-stage.js';
 
 /**
  * Converge executor: applies a previously persisted plan (terraform
@@ -224,6 +225,7 @@ export const planRunDocumentSchema = z.object({
     'backup-readiness',
     'backup-program-publication',
     'managed-ci-publication',
+    'managed-ci-credentials',
   ]).optional(),
   environmentName: z.string().min(1),
   specRevision: z.number().int().nonnegative(),
@@ -247,6 +249,16 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'managed-ci-credentials') {
+    const ids = new Set(document.actions.map(action => action.id));
+    if (!document.actions.length || document.actions.some(action => !isManagedCiCredentialAction(action)
+      || action.dependsOn?.some(dependency => !ids.has(dependency)))
+      || document.observedFingerprint !== null || document.overrides || document.integrationFingerprints
+      || document.sourceCommitSha || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
+      ctx.addIssue({ code: 'custom', message: 'CI credential prerequisites contain only verified credential synchronization for accepted workflows and no rollout inputs or external dependencies.' });
+    }
+    return;
+  }
   if (document.scope !== 'database-bindings' && document.actions.some(action => action.metadata?.operation === DATABASE_SCOPE_BIND_OPERATION)) {
     ctx.addIssue({ code: 'custom', message: 'Database scope binding requires its isolated database-bindings stage.' });
   }

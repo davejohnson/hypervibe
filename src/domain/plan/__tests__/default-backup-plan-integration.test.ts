@@ -328,7 +328,19 @@ describe('default backup policy in real PlanService orchestration', () => {
       return result;
     });
     const afterBinding = await f.planner.plan(f.project, 'production', { includeEnvFile: false });
-    expect(afterBinding).toMatchObject({ scope: 'backup-readiness', actions: [], blocked: [expect.objectContaining({
+    // Accepted CI credentials are themselves needed to run the first backup.
+    // Exposing that prerequisite must still leave every workload update gated.
+    expect(afterBinding).toMatchObject({ scope: 'managed-ci-credentials', actions: [expect.objectContaining({
+      id: 'ci:github-actions:production:deploy-branch', metadata: expect.objectContaining({ operation: 'githubActionsDeployBranch' }),
+    })] });
+    const hashes = ci.actions[0].metadata?.desiredEnvironmentSecretHashes as Record<string, string>;
+    new EnvironmentRepository().updatePlatformBindings(f.environment.id, { ci: { deployBranch: { [workflow.path]: {
+      inputHash: githubActionsWorkflowInputHash({ provider: 'railway', target, migration }),
+      contentHash: workflowFilesContentHash(files), syncedEnvironmentSecretHashes: hashes,
+    } } } });
+    vi.mocked(GitHubAdapter.prototype.listEnvironmentSecrets).mockResolvedValue(Object.keys(hashes));
+    const afterCredentials = await f.planner.plan(f.project, 'production', { includeEnvFile: false });
+    expect(afterCredentials).toMatchObject({ scope: 'backup-readiness', actions: [], blocked: [expect.objectContaining({
       category: 'prerequisite', provider: 'hypervibe', reason: expect.stringMatching(/backup/i),
     })] });
   });

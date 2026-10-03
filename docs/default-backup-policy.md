@@ -55,6 +55,13 @@ archive from receiving its reviewed storage binding. Archive provisioning keeps
 its real namespace dependencies and does not synchronize CI credentials, wire
 application services or authorize a rollout in the same stage.
 
+Once the deployment workflow is accepted and its resource prerequisites exist,
+`managed-ci-credentials` prepares its environment credentials and records the
+accepted workflow binding. This may create the named GitHub environment if it
+does not exist. It does not deploy the application, update the applied deployment
+contract or count as backup evidence. Missing access and unknown credential
+observations remain blocking.
+
 A recovery-readiness blocker is a prerequisite failure. Tool output preserves
 the protection gaps and directs the operator to resolve them before re-planning;
 it does not request a new provider credential unless a separate connection
@@ -161,11 +168,17 @@ For initial setup, follow the plan's stages in order:
    confirm its prerequisite actions, then apply them with `hv_apply`. Re-plan
    after each prerequisite stage so resource bindings and native policies can
    be observed before dependent work.
-2. When the plan reports `backup-program-publication`, confirm and apply its
-   repository action to open the reviewed infrastructure pull request. This
-   stage publishes the program for review; it does not merge, dispatch a backup
-   or deploy the application. Review and merge the program, current spec and
-   latest `.hypervibe/bindings.json` export into the repository's default branch.
+2. Publish the backup program through the declared canonical GitHub environment.
+   When it is the application environment, the plan reports
+   `backup-program-publication`. If `github.canonicalEnvironment` is different,
+   run `hv_plan` for that environment after resource binding and CI credential
+   prerequisites complete, even if the application plan still reports
+   `backup-readiness`. The reserved `repository` environment uses a repository-only
+   `full` plan and may include other repository changes; review every action.
+   Confirm and apply the repository action to open the infrastructure pull
+   request. This proposes the program; it does not merge, dispatch a backup or
+   deploy the application. Review and merge the program, current spec and latest
+   `.hypervibe/bindings.json` export into the repository's default branch.
 3. Use `hv_ci_status` to discover the published
    `.github/workflows/hypervibe-backup-<environment>.yml` definition. Dispatch that
    exact definition on the default branch with `hv_ci_trigger` and
