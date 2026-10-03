@@ -467,6 +467,13 @@ export async function importRailwayProject(
       } else {
         componentRepo.create({ environmentId: env.id, type, externalId: serviceId, bindings });
       }
+      if (type === 'postgres') {
+        // The confirmed mapping is the identity evidence; commit it as the primary
+        // database so hosted inspection compares this service as the database.
+        const topology = asRecord(envRepo.findById(env.id)?.platformBindings.databaseTopology) ?? {};
+        envRepo.updatePlatformBindings(env.id, { databaseTopology: {
+          ...topology, primary: { provider: 'railway', externalId: serviceId }, replicas: asRecord(topology.replicas) ?? {} } });
+      }
       const prior = createdComponents.findIndex((component) =>
         component.environmentId === env.id && component.type === type
       );

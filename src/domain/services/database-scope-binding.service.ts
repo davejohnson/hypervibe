@@ -70,17 +70,53 @@ export async function observeDatabaseBindingSource(context: BackupPolicyContext,
   } catch { return undefined; }
 }
 
+/** The committed primary database identity hosted inspection and recovery read. */
+export function committedPrimaryDatabase(environmentBindings: Record<string, unknown> | undefined): { provider: string; externalId: string } | undefined {
+  const topology = environmentBindings?.databaseTopology;
+  const primary = topology && typeof topology === 'object' ? (topology as Record<string, unknown>).primary : undefined;
+  if (!primary || typeof primary !== 'object') return undefined;
+  const { provider, externalId } = primary as Record<string, unknown>;
+  return typeof provider === 'string' && typeof externalId === 'string' ? { provider, externalId } : undefined;
+}
+
+export function primaryDatabaseRecordState(environmentBindings: Record<string, unknown> | undefined,
+  component: Component): 'recorded' | 'missing' | 'conflict' {
+  const recorded = committedPrimaryDatabase(environmentBindings);
+  if (!recorded) return 'missing';
+  return recorded.provider === component.bindings.provider && recorded.externalId === component.externalId ? 'recorded' : 'conflict';
+}
+
+function completeProviderScope(component: Component): boolean {
+  const scope = component.bindings.providerScope;
+  const keys = providerRegistry.get(String(component.bindings.provider))?.inspection?.selectors.database?.scopeKeys ?? [];
+  return Boolean(scope) && typeof scope === 'object' && !Array.isArray(scope) && keys.length > 0
+    && keys.every(key => typeof (scope as Record<string, unknown>)[key] === 'string' && Boolean((scope as Record<string, unknown>)[key]));
+}
+
 export async function planDatabaseScopeBinding(context: BackupPolicyContext): Promise<{ actions: PlanAction[]; warnings: string[] }> {
   const component = currentDatabaseScopeComponent(context);
-  if (!component || Object.hasOwn(component.bindings, 'providerScope')) return { actions: [], warnings: [] };
+  if (!component) return { actions: [], warnings: [] };
+  const needsScope = !Object.hasOwn(component.bindings, 'providerScope');
+  const primaryState = primaryDatabaseRecordState(context.environment?.platformBindings, component);
+  const conflictWarning = primaryState === 'conflict'
+    ? ['The committed primary database identity names a different database than the one Hypervibe manages. It was left unchanged; review databaseTopology.primary in .hypervibe/bindings.json.'] : [];
+  if (!needsScope && primaryState !== 'missing') return { actions: [], warnings: conflictWarning };
+  // An identity-only repair is limited to a complete recorded scope; partial or
+  // malformed scope state is preserved untouched rather than adopted.
+  if (!needsScope && !completeProviderScope(component)) return { actions: [], warnings: conflictWarning };
   const source = await observeDatabaseBindingSource(context, component);
-  if (!source) return { actions: [], warnings: [
-    'The current database lacks durable recovery scope and its native recovery source could not be independently verified. No binding repair is authorized.',
+  if (!source) return { actions: [], warnings: [...conflictWarning,
+    needsScope ? 'The current database lacks durable recovery scope and its native recovery source could not be independently verified. No binding repair is authorized.'
+      : 'The current database identity is not recorded in .hypervibe/bindings.json and its native source could not be independently verified. No binding repair is authorized.',
   ] };
   const action: PlanAction = { id: databaseScopeBindingActionId(source.provider, component.id), type: 'update',
     resource: { kind: 'database', name: component.type, provider: source.provider }, verified: true, requiresConfirm: true,
-    reason: 'Record the independently verified recovery scope of the existing database without changing provider resources.',
+    reason: needsScope
+      ? 'Record the independently verified recovery scope of the existing database without changing provider resources.'
+      : 'Record the independently verified identity of the existing database in .hypervibe/bindings.json without changing provider resources.',
     metadata: { operation: DATABASE_SCOPE_BIND_OPERATION, componentId: component.id, source,
-      bindingsFingerprint: bindingIdentityFingerprint(component.bindings) } };
-  return isDatabaseScopeBindingAction(action) ? { actions: [action], warnings: [] } : { actions: [], warnings: [] };
+      // Apply compares the bindings without providerScope; fingerprint the same shape.
+      bindingsFingerprint: bindingIdentityFingerprint(Object.fromEntries(Object.entries(component.bindings)
+        .filter(([key]) => key !== 'providerScope'))) } };
+  return isDatabaseScopeBindingAction(action) ? { actions: [action], warnings: conflictWarning } : { actions: [], warnings: conflictWarning };
 }

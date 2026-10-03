@@ -2175,6 +2175,9 @@ describe('hv_inspect / hv_import', () => {
         pluginName: 'Postgres',
       },
     });
+    // The confirmed mapping is committed as the primary database for hosted inspection.
+    expect(new EnvironmentRepository().findById(environment.id)?.platformBindings.databaseTopology)
+      .toEqual({ primary: { provider: 'railway', externalId: 'svc-postgres' }, replicas: {} });
     await t.close();
   });
 

@@ -921,6 +921,8 @@ describe('PlanService.plan', () => {
       bindings: { provider: 'railway', projectId: 'rp-1', serviceId: 'db-1', resourceKind: 'service',
         providerScope: { projectId: 'rp-1', environmentId: 're-1' } },
     });
+    // Created databases record their committed primary identity.
+    new EnvironmentRepository().updatePlatformBindings(environment.id, { databaseTopology: { primary: { provider: 'railway', externalId: 'db-1' }, replicas: {} } });
     new ServiceRepository().create({ projectId: project.id, name: 'web' });
     seedVerifiedConnection('railway', { apiToken: 'railway-token' });
     seedVerifiedConnection('stripe', { secretKey: 'rk_test_staging' }, 'staging');
@@ -1493,6 +1495,8 @@ describe('PlanService.plan', () => {
         },
       },
     });
+    // Created databases record their committed primary identity.
+    new EnvironmentRepository().updatePlatformBindings(environment.id, { databaseTopology: { primary: { provider: 'railway', externalId: databaseId }, replicas: {} } });
     const observedState: ObservedState = {
       provider: 'railway',
       observedAt: new Date().toISOString(),
@@ -3699,6 +3703,8 @@ describe('PlanService.plan', () => {
         bindings: { provider: 'railway', connectionString: 'postgres://managed-db', resourceKind: 'service',
           providerScope: { projectId: 'rp-1', environmentId: 're-1' } },
       });
+      // Created databases record their committed primary identity.
+      new EnvironmentRepository().updatePlatformBindings(environment.id, { databaseTopology: { primary: { provider: 'railway', externalId: 'managed-db' }, replicas: {} } });
       await mockProtectedRailwayDatabase({ provider: 'railway', primaryExternalId: 'managed-db',
         providerScope: { projectId: 'rp-1', environmentId: 're-1' }, resourceIdentity: { volumeId: 'managed-volume' } });
 
@@ -3865,6 +3871,8 @@ describe('PlanService.plan', () => {
         bindings: { provider: 'railway', connectionString: 'postgres://managed-db', resourceKind: 'service',
           providerScope: { projectId: 'rp-1', environmentId: 're-1' } },
       });
+      // Created databases record their committed primary identity.
+      new EnvironmentRepository().updatePlatformBindings(environment.id, { databaseTopology: { primary: { provider: 'railway', externalId: 'managed-db' }, replicas: {} } });
       await mockProtectedRailwayDatabase({ provider: 'railway', primaryExternalId: 'managed-db',
         providerScope: { projectId: 'rp-1', environmentId: 're-1' }, resourceIdentity: { volumeId: 'managed-volume' } });
 

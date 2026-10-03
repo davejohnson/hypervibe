@@ -6,7 +6,7 @@ import type { EnvironmentSpec } from '../domain/spec/spec.schema.js';
 import type { BackupPolicyContext } from '../domain/services/backup-policy.service.js';
 import { bindingIdentityFingerprint, providerIdentityScopeMatches } from '../domain/services/binding-identity.js';
 import { currentDatabaseScopeComponent, databaseScopeBindingMetadataSchema,
-  isDatabaseScopeBindingAction, observeDatabaseBindingSource } from '../domain/services/database-scope-binding.service.js';
+  isDatabaseScopeBindingAction, observeDatabaseBindingSource, primaryDatabaseRecordState } from '../domain/services/database-scope-binding.service.js';
 import { recoverySourceIdentityMatches } from '../domain/services/recovery-source.js';
 import type { CommandContext } from './context.js';
 
@@ -50,22 +50,44 @@ export async function applyDatabaseScopeBinding(params: {
     || !providerIdentityScopeMatches({ componentBindings: current.component.bindings,
       environmentBindings: current.context.environment!.platformBindings, provider: source.provider,
       liveScope: source.providerScope })) return blocked('Database or environment bindings changed during source observation. Re-run hv_plan.');
+  const environmentId = current.component.environmentId;
+  const primaryState = primaryDatabaseRecordState(current.context.environment!.platformBindings, current.component);
+  if (primaryState === 'conflict') {
+    return blocked('The committed primary database identity names a different database. It was left unchanged; review databaseTopology.primary in .hypervibe/bindings.json.');
+  }
+  let applied = 0;
+  let recordedPrimary = false;
   try {
-    if (current.alreadyBound) {
-      // A prior SQLite write may have succeeded before repository export failed.
-      ctx.repos.environments.syncRepoBindingsForId(current.component.environmentId);
-      return { success: true, message: 'The reviewed database recovery scope is already recorded.',
-        data: { applied: 0, skipped: 1, providerMutations: 0 } };
+    // Record the environment identity first: the component write below also
+    // exports the repository bindings, so a failed export is retried as export-only.
+    if (primaryState === 'missing') {
+      // Record only the exact re-observed identity; never replace another record.
+      const topology = current.context.environment!.platformBindings.databaseTopology as Record<string, unknown> | undefined;
+      const replicas = topology?.replicas && typeof topology.replicas === 'object' ? topology.replicas : {};
+      ctx.repos.environments.updatePlatformBindings(environmentId, { databaseTopology: {
+        primary: { provider: reviewed.source.provider, externalId: reviewed.source.primaryExternalId }, replicas } });
+      recordedPrimary = true;
+      applied = 1;
     }
-    const saved = ctx.repos.components.updateBindings(current.component.id, { providerScope: reviewed.source.providerScope });
-    if (!saved || !isDeepStrictEqual(saved.bindings.providerScope, reviewed.source.providerScope)) {
-      return blocked('The database scope write could not be verified. Re-run hv_plan to inspect the current binding.');
+    if (!current.alreadyBound) {
+      const saved = ctx.repos.components.updateBindings(current.component.id, { providerScope: reviewed.source.providerScope });
+      if (!saved || !isDeepStrictEqual(saved.bindings.providerScope, reviewed.source.providerScope)) {
+        return blocked('The database scope write could not be verified. Re-run hv_plan to inspect the current binding.', applied);
+      }
+      applied = 1;
     }
+    // A prior SQLite write may have succeeded before repository export failed.
+    ctx.repos.environments.syncRepoBindingsForId(environmentId);
   } catch {
     const saved = ctx.repos.components.findById(current.component.id);
-    const applied = !current.alreadyBound && isDeepStrictEqual(saved?.bindings.providerScope, reviewed.source.providerScope) ? 1 : 0;
-    return blocked('Database binding persistence or repository export could not be completed. The exact local identity is retained; retry this reviewed action to verify and export it.', applied);
+    const scopeSaved = !current.alreadyBound && isDeepStrictEqual(saved?.bindings.providerScope, reviewed.source.providerScope);
+    return blocked('Database binding persistence or repository export could not be completed. The exact local identity is retained; retry this reviewed action to verify and export it.',
+      scopeSaved || recordedPrimary ? 1 : 0);
   }
-  return { success: true, message: 'Recorded the existing database recovery scope. Backup completion and restore remain unchecked.',
+  if (!applied) return { success: true, message: 'The reviewed database recovery scope and identity are already recorded.',
+    data: { applied: 0, skipped: 1, providerMutations: 0 } };
+  return { success: true, message: primaryState === 'missing'
+    ? 'Recorded the existing database identity in .hypervibe/bindings.json. Backup completion and restore remain unchecked.'
+    : 'Recorded the existing database recovery scope. Backup completion and restore remain unchecked.',
     data: { applied: 1, skipped: 0, providerMutations: 0 } };
 }
