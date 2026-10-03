@@ -16,12 +16,14 @@ import '../../../application/devops-providers.js';
 import { SpecStore } from '../../spec/spec.store.js';
 import type { ProjectSpec } from '../../spec/spec.schema.js';
 import { PlanService } from '../plan.service.js';
-import { planRunDocumentSchema } from '../converge.executor.js';
+import { orderActions, planRunDocumentSchema } from '../converge.executor.js';
 import type { PlanAction } from '../plan.types.js';
 import * as backupPolicy from '../../services/backup-policy.service.js';
 import * as resilience from '../../services/database-resilience-plan.service.js';
 import * as githubInfrastructure from '../../services/github-infrastructure.service.js';
 import * as managedCi from '../../services/managed-ci.service.js';
+import { buildBranchDeployWorkflow, resolveBranchDeployTargets } from '../../services/github-ops.service.js';
+import { githubActionsWorkflowInputHash, workflowFiles, workflowFilesContentHash } from '../../services/ci-deploy.service.js';
 
 // Orchestration-only fixture. The real provider transport tests establish
 // Railway schedule semantics; this test verifies policy reaches stored plans.
@@ -259,6 +261,115 @@ describe('default backup policy in real PlanService orchestration', () => {
     const document = new RunRepository().findById(result.planRunId)!.plan;
     expect(planRunDocumentSchema.safeParse(document).success).toBe(true);
     for (const field of ['overrides', 'integrationFingerprints', 'inputRequired']) expect(document).not.toHaveProperty(field);
+  });
+
+  it.each(['contract-adoption', 'secret-sync'] as const)('preserves archive provisioning after publication with pending %s, then blocks rollout', async pending => {
+    const f = await fixture();
+    const observe = f.observation.getMockImplementation()!;
+    f.observation.mockImplementation(async context => {
+      const coverage = await observe(context);
+      coverage.resources[0].state = 'scheduled';
+      if (coverage.resources[0].observation?.state === 'known') coverage.resources[0].observation.daily = true;
+      return coverage;
+    });
+    // This is a synthetic GitHub read boundary, but the workflow renderer,
+    // acceptance, CI action and complete PlanService dependency graph are real.
+    const { targets, migration } = resolveBranchDeployTargets(f.project);
+    const target = targets.find(candidate => candidate.environmentName === 'production')!;
+    const workflow = buildBranchDeployWorkflow('railway', target, migration);
+    const files = workflowFiles(workflow);
+    const publication = await f.planner.plan(f.project, 'production', { includeEnvFile: false });
+    expect(publication).toMatchObject({ scope: 'managed-ci-publication', actions: [expect.objectContaining({
+      metadata: expect.objectContaining({ workflowPublicationRequired: true }),
+    })] });
+
+    vi.mocked(GitHubAdapter.prototype.getFileContent).mockImplementation(async (_owner, _repo, filePath) =>
+      files.find(file => file.path === filePath)?.content ?? null);
+    if (pending === 'secret-sync') new EnvironmentRepository().updatePlatformBindings(f.environment.id, {
+      ci: { deployBranch: { [workflow.path]: {
+        inputHash: githubActionsWorkflowInputHash({ provider: 'railway', target, migration }),
+        contentHash: workflowFilesContentHash(files),
+      } } },
+    });
+    const spec = new SpecStore().get(f.project)!.spec;
+    const ci = await managedCi.planManagedCiDeploy({ project: f.project, spec, environmentName: 'production',
+      environmentSpec: spec.environments.production, environment: new EnvironmentRepository().findById(f.environment.id)! });
+    expect(ci.actions).toEqual([expect.objectContaining({ type: 'update', resource: expect.objectContaining({ kind: 'ci' }) })]);
+    expect(ci.actions[0].metadata).not.toHaveProperty('workflowPublicationRequired');
+    expect(ci.actions[0].reason).toMatch(pending === 'secret-sync' ? /secrets need syncing/ : /input contract/);
+
+    // A retry before apply keeps the same isolated authority. Neither pending
+    // CI work nor ordinary service/env changes may enter storage provisioning.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await f.planner.plan(f.project, 'production', { includeEnvFile: false });
+      if ('error' in result) throw new Error(result.error);
+      expect(result.scope).toBe('backup-provisioning');
+      expect(result.actions).toEqual([expect.objectContaining({ id: 'storage:hypervibe-backups',
+        requiresConfirm: true, billable: true, dataBearing: true, metadata: expect.objectContaining({ operation: 'storageEnsure' }) })]);
+      expect(result.actions[0].dependsOn ?? []).toEqual([]);
+      expect(result.inputRequired).toEqual([]);
+      const document = new RunRepository().findById(result.planRunId)!.plan;
+      expect(planRunDocumentSchema.safeParse(document).success).toBe(true);
+      for (const field of ['overrides', 'integrationFingerprints', 'inputRequired']) expect(document).not.toHaveProperty(field);
+    }
+
+    // Stand in for successful provider creation by recording and observing the
+    // new bucket. This does not supply a completed recovery point or restore.
+    new EnvironmentRepository().updatePlatformBindings(f.environment.id, { storage: {
+      ...f.environment.platformBindings.storage as Record<string, unknown>,
+      'hypervibe-backups': { provider: 'railway', externalId: 'backup-bucket-1', purpose: 'backup', region: 'iad', services: [],
+        instanceScope: { projectId: 'project-1', environmentId: 'production-1' } },
+    } });
+    const original = vi.mocked(PlanService.prototype.observeEnvironment).getMockImplementation()!;
+    vi.mocked(PlanService.prototype.observeEnvironment).mockImplementation(async (...args) => {
+      const result = await original(...args);
+      if (result.observed) result.observed.storage = [{ name: 'hypervibe-backups', provider: 'railway', kind: 'object', status: 'running', externalId: 'backup-bucket-1', region: 'iad',
+        instanceScope: { projectId: 'project-1', environmentId: 'production-1' } }];
+      return result;
+    });
+    const afterBinding = await f.planner.plan(f.project, 'production', { includeEnvFile: false });
+    expect(afterBinding).toMatchObject({ scope: 'backup-readiness', actions: [], blocked: [expect.objectContaining({
+      category: 'prerequisite', provider: 'hypervibe', reason: expect.stringMatching(/backup/i),
+    })] });
+  });
+
+  it('preserves database creation before CI database-secret sync and CI before workload changes', async () => {
+    const f = await fixture();
+    // An explicit reviewed exclusion admits the ordinary full graph so this
+    // test can inspect its genuine DATABASE_URL dependency, not a pruned stage.
+    new SpecStore().merge(f.project, { environments: { production: {
+      backups: { mode: 'disabled', reason: 'Disposable dependency-order test environment' },
+      migrations: { mode: 'tool', command: 'npm run migrate' },
+    } } });
+    new ComponentRepository().delete(f.component.id);
+    const original = vi.mocked(PlanService.prototype.observeEnvironment).getMockImplementation()!;
+    vi.mocked(PlanService.prototype.observeEnvironment).mockImplementation(async (...args) => {
+      const result = await original(...args);
+      if (result.observed) result.observed.databases = [];
+      return result;
+    });
+    const observe = f.observation.getMockImplementation()!;
+    f.observation.mockImplementation(async context => ({ ...(await observe(context)), resources: [] }));
+    const { targets, migration } = resolveBranchDeployTargets(f.project);
+    const target = targets.find(candidate => candidate.environmentName === 'production')!;
+    const workflow = buildBranchDeployWorkflow('railway', target, migration);
+    expect(workflow.requiredSecrets).toContain('DATABASE_URL');
+    vi.mocked(GitHubAdapter.prototype.getFileContent).mockImplementation(async (_owner, _repo, filePath) =>
+      workflowFiles(workflow).find(file => file.path === filePath)?.content ?? null);
+
+    const result = await f.planner.plan(f.project, 'production', { includeEnvFile: false });
+    if ('error' in result) throw new Error(result.error);
+    expect(result.scope).toBe('full');
+    const database = result.actions.find(action => action.id === 'database:railway')!;
+    const ci = result.actions.find(action => action.id === 'ci:github-actions:production:deploy-branch')!;
+    const web = result.actions.find(action => action.id === 'service:web')!;
+    expect(database).toMatchObject({ type: 'create', billable: true });
+    expect(database.dependsOn ?? []).not.toContain(ci.id);
+    expect(ci).toMatchObject({ type: 'update', dependsOn: ['database:railway'] });
+    expect(web).toMatchObject({ type: 'update', dependsOn: expect.arrayContaining([database.id, ci.id]) });
+    const order = orderActions(result.actions).map(action => action.id);
+    expect(order.indexOf(database.id)).toBeLessThan(order.indexOf(ci.id));
+    expect(order.indexOf(ci.id)).toBeLessThan(order.indexOf(web.id));
   });
 
   it('cannot bypass an unsupported backup gap with a service filter', async () => {

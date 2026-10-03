@@ -13,10 +13,9 @@ import type { Project } from '../domain/entities/project.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import type { CommandContext } from '../application/context.js';
 import {
-  connectionProviders,
   connectionRecoveryDetails,
-  connectionRecoveryHint,
   executePlanApply,
+  planBlockRecovery,
 } from '../application/apply-plan.js';
 import { projectField, envField, confirmField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
@@ -183,14 +182,9 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         });
       }
       if (outcome.kind === 'blocked') {
-        return commandError('MISSING_CONNECTION', `Missing verified connections: ${connectionProviders(outcome.applyBlocked).join(', ')}.`, {
-          details: {
-            blocked: outcome.applyBlocked,
-            ...connectionRecoveryDetails(outcome.applyBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl }),
-          },
-          hint: connectionRecoveryHint(outcome.applyBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl, after: 'Then re-run hv_deploy.' }),
-          next: ['hv_connections', 'hv_deploy'],
-        });
+        const recovery = planBlockRecovery(outcome.applyBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl,
+          connectionAfter: 'Then re-run hv_deploy.', connectionNext: ['hv_connections', 'hv_deploy'] });
+        return commandError(recovery.code, recovery.message, recovery);
       }
       if (!outcome.result.success && !outcome.result.applyRunId) {
         const conflict = outcome.result.conflict;

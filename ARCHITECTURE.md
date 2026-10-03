@@ -508,6 +508,12 @@ Hypervibe should be stage-gated by default. A failed, blocked, pending, or confi
 
 The shared tool response envelope supports this with `agentInstruction`. Use it to tell agents when to `stop_and_report` or `ask_user`, especially for missing connections, failed receipts, provider errors, pending seed/deploy steps, and confirm-gated actions.
 
+Plan and apply blockers distinguish missing connections from unmet prerequisites.
+Classify new blockers at their source and retain that category through plan,
+apply and deploy responses. Prerequisite failures remain blocking without
+inventing credential setup; mixed failures preserve both reasons and offer
+setup only for the missing connections.
+
 ## Reconciliation Safety Invariants
 
 A persisted plan is an authorization boundary, not just a progress preview.

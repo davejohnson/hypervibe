@@ -1,3 +1,4 @@
+import { classifyPlanBlocks } from '../domain/plan/plan-block.js';
 import { planApiPolicy } from '../domain/services/api-policy.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { observeBackupPolicy, resolveBackupPolicies } from '../domain/services/backup-policy.service.js';
@@ -37,10 +38,10 @@ import {
   actionScopedBlocksAllowedDuringApply,
   actionScopedBlocksRequiringConnectBeforeApply,
   connectionLocalEnvInputs,
-  connectionProviders,
   connectionRecoveryDetails,
   connectionRecoveryHint,
   executePlanApply,
+  planBlockRecovery,
   splitActionScopedConnectionBlocks,
   syncProjectGitRemoteUrl,
   type ConnectionBlock,
@@ -820,6 +821,11 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(result.blocked, result.actions);
       const connectBeforeApply = actionScopedBlocksRequiringConnectBeforeApply(actionScopedBlocked);
       const softActionScopedBlocked = actionScopedBlocksAllowedDuringApply(actionScopedBlocked);
+      const hardBlockRecovery = hardBlocked.length > 0
+        ? planBlockRecovery(hardBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl,
+          connectionAfter: 'Do not run hv_apply until these connections verify; then re-run hv_plan and hv_apply.',
+          connectionNext: ['hv_connections', 'hv_plan'] })
+        : undefined;
       let localEnv: RepoEnvFileWrite | undefined;
       try {
         localEnv = mergeLocalEnvWrites(
@@ -870,8 +876,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       let hint: string;
       let next: string[] | undefined;
 
-      if (hardBlocked.length > 0) {
-        hint = connectionRecoveryHint(hardBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl, after: 'Do not run hv_apply until these connections verify; then re-run hv_plan and hv_apply.' });
+      if (hardBlockRecovery) {
+        hint = hardBlockRecovery.hint;
       } else if (connectBeforeApply.length > 0) {
         hint = connectionRecoveryHint(connectBeforeApply, {
           project: project.name,
@@ -897,8 +903,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         hint = `Apply with hv_apply planId="${result.planRunId}"${confirmIds.length ? ` and confirmActions=${JSON.stringify(confirmIds)} for consequential actions that require explicit confirmation` : ''}.`;
       }
 
-      if (hardBlocked.length > 0) {
-        next = ['hv_connections', 'hv_plan'];
+      if (hardBlockRecovery) {
+        next = hardBlockRecovery.next;
       } else if (result.inputRequired.length > 0) {
         next = ['hv_plan'];
       } else if (pending.length > 0) {
@@ -935,7 +941,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           inputRequired: result.inputRequired.length > 0 ? result.inputRequired : undefined,
           blocked: hardBlocked,
           actionScopedBlocked: actionScopedBlocked.length > 0 ? actionScopedBlocked : undefined,
-          ...(result.blocked.length > 0 || actionScopedBlocked.length > 0
+          ...(classifyPlanBlocks([...result.blocked, ...actionScopedBlocked]).connections.length > 0
             ? connectionRecoveryDetails([...result.blocked, ...actionScopedBlocked], { project: project.name, gitRemoteUrl: project.gitRemoteUrl })
             : {}),
         },
@@ -947,7 +953,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             ...(currentSpec && scope !== 'retained-cleanup' ? environmentResourceWarnings(currentSpec, result.environmentName) : []),
           ],
           next,
-          ...(result.inputRequired.length > 0
+          ...(hardBlockRecovery?.agentInstruction ? { agentInstruction: hardBlockRecovery.agentInstruction }
+            : result.inputRequired.length > 0
             ? {
               agentInstruction: {
                 action: 'ask_user' as const,
@@ -1422,14 +1429,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         });
       }
       if (outcome.kind === 'blocked') {
-        return commandError('MISSING_CONNECTION', `Missing verified connections: ${connectionProviders(outcome.applyBlocked).join(', ')}.`, {
-          details: {
-            blocked: outcome.applyBlocked,
-            ...connectionRecoveryDetails(outcome.applyBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl }),
-          },
-          hint: connectionRecoveryHint(outcome.applyBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl, after: 'Then re-run hv_plan and hv_apply.' }),
-          next: ['hv_connections', 'hv_plan', 'hv_apply'],
-        });
+        const recovery = planBlockRecovery(outcome.applyBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl,
+          connectionAfter: 'Then re-run hv_plan and hv_apply.', connectionNext: ['hv_connections', 'hv_plan', 'hv_apply'] });
+        return commandError(recovery.code, recovery.message, recovery);
       }
 
       const { result, envName } = outcome;

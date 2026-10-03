@@ -40,6 +40,7 @@ import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { resolveGitDeploySource } from '../services/deploy-source.js';
 import { diffEnvironment, diffRetainedHostingCleanup } from './diff.engine.js';
 import type { DiffResult, LocalSnapshot, PlanAction } from './plan.types.js';
+import type { PlanBlock } from './plan-block.js';
 import {
   actionDependencyClosure,
   fingerprintObservedState,
@@ -168,8 +169,8 @@ export interface EnvironmentPlan {
   warnings: string[];
   /** Delegated values that must be supplied in a new hv_plan call before apply. */
   inputRequired: DelegatedSecretInputRequirement[];
-  /** Missing/unverified provider connections that block apply. */
-  blocked: Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions'; actionIds?: string[]; requiredCredentialKeys?: string[] }>;
+  /** Missing provider connections or unmet safety prerequisites that block apply. */
+  blocked: Array<PlanBlock & { reason: string }>;
 }
 
 export const HOSTING_ENVIRONMENT_ENSURE_OPERATION = 'hostingEnvironmentEnsure';
@@ -2788,6 +2789,10 @@ export class PlanService {
         if (
           action.type === 'noop'
           || prerequisiteIds.has(action.id)
+          // Durable namespace/data identities do not consume CI credentials.
+          // Preserve their own prerequisites without making backup bootstrap
+          // depend on a later CI sync that its isolated stage cannot execute.
+          || isBackupProvisioningAction(action)
         ) {
           return action;
         }
@@ -3100,7 +3105,7 @@ export class PlanService {
     const planBlocked = isolatedCiStage
       ? this.providerPreflight(isolatedProviders)
       : blocked;
-    if (backupReadinessStageActive) planBlocked.push({ provider: 'hypervibe', policy: 'hard', reason: `Backup readiness is incomplete. ${backupReadiness.gaps.join(' ')}` });
+    if (backupReadinessStageActive) planBlocked.push({ category: 'prerequisite', provider: 'hypervibe', policy: 'hard', reason: `Backup readiness is incomplete. ${backupReadiness.gaps.join(' ')}` });
     const planInputRequired = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive || volumeStageActive
       ? []
       : ciBindingStageActive
