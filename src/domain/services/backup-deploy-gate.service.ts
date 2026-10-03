@@ -1,6 +1,7 @@
 import { stringify } from 'yaml';
 import { canonicalizeJson } from '../../lib/canonical-json.js';
 import type { BranchDeployTarget } from '../ports/ci-deploy.port.js';
+import { backupOperationReceiptValidatorSource } from './backup-operation-receipt.js';
 
 /** No mutation or automatic backup creation is permitted on a deploy path. */
 export function buildGitHubBackupDeployGate(target: BranchDeployTarget): { steps: string; requiredSecrets: string[] } {
@@ -45,10 +46,11 @@ export function buildGitHubBackupDeployGate(target: BranchDeployTarget): { steps
       '  "$HYPERVIBE_BACKUP_RUNNER_IMAGE" /opt/hypervibe/dist/ci/backup-controller.js',
       'node - "$output/receipt.json" <<\'HYPERVIBE_BACKUP_GATE\'',
       "const fs = require('node:fs');",
+      backupOperationReceiptValidatorSource(),
       "try {",
       "  const file = process.argv[2]; const stat = fs.lstatSync(file); if (!stat.isFile() || stat.size > 16384) throw new Error();",
-      "  const receipt = JSON.parse(fs.readFileSync(file, 'utf8'));",
-      "  if (receipt.version !== 1 || receipt.environment !== process.env.HYPERVIBE_BACKUP_ENVIRONMENT || receipt.status !== 'healthy' || !Array.isArray(receipt.reasonCodes) || receipt.reasonCodes.length !== 0) throw new Error();",
+      "  const receipt = parseBackupOperationReceipt(JSON.parse(fs.readFileSync(file, 'utf8')), backupReceiptRules);",
+      "  if (!receipt || receipt.environment !== process.env.HYPERVIBE_BACKUP_ENVIRONMENT || receipt.status !== 'healthy') throw new Error();",
       "} catch { console.error('Deployment blocked: current retained backup and restore health could not be verified.'); process.exit(1); }",
       'HYPERVIBE_BACKUP_GATE',
     ].join('\n');
