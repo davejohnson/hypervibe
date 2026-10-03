@@ -1,3 +1,4 @@
+import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js';
 import { applyApiPolicy, planApiPolicy } from '../domain/services/api-policy.js';
 import { applyDatabaseScopeBinding } from './apply-database-scope-binding.js';
 import { PlanService } from '../domain/plan/plan.service.js';
@@ -342,20 +343,13 @@ function blockedActionIdentity(
   };
 }
 
-export type ConnectionBlock = {
-  provider: string;
-  reason?: string;
-  scope?: string;
-  policy?: 'hard' | 'action-scoped-if-independent-actions';
-  actionIds?: string[];
-  /** Exact provider credential roles required by this block. */
-  requiredCredentialKeys?: string[];
-};
+/** Compatibility name for callers that supply only connection blockers. */
+export type ConnectionBlock = PlanBlock;
 
 function uniqueConnectionBlocks(blocks: ConnectionBlock[]): ConnectionBlock[] {
   const seen = new Set<string>();
   const output: ConnectionBlock[] = [];
-  for (const block of blocks) {
+  for (const block of classifyPlanBlocks(blocks).connections) {
     const key = `${block.provider}:${block.scope ?? ''}:${block.reason ?? ''}:${[...(block.requiredCredentialKeys ?? [])].sort().join(',')}`;
     if (seen.has(key)) {
       continue;
@@ -464,6 +458,36 @@ export function connectionRecoveryDetails(
 }
 
 
+export function planBlockRecovery(
+  blocked: PlanBlock[],
+  options: { project?: string; gitRemoteUrl?: string; connectionAfter: string; connectionNext: string[] }
+) {
+  const { connections, prerequisites } = classifyPlanBlocks(blocked);
+  const reasons = prerequisites.map(block => block.reason).filter(Boolean).join(' ');
+  const prerequisiteHint = prerequisites.length
+    ? `Prerequisites are incomplete. ${reasons} Resolve the reported gaps, then run hv_plan to review a fresh plan before applying or deploying.`
+    : '';
+  const connectionHint = connections.length
+    ? connectionRecoveryHint(connections, { ...options, after: prerequisites.length ? undefined : options.connectionAfter })
+    : '';
+  return {
+    code: prerequisites.length ? 'VALIDATION' as const : 'MISSING_CONNECTION' as const,
+    message: prerequisites.length
+      ? `Prerequisites block this operation. ${reasons}`
+      : `Missing verified connections: ${connectionProviders(connections).join(', ')}.`,
+    details: {
+      blocked,
+      ...(connections.length ? connectionRecoveryDetails(connections, options) : {}),
+    },
+    hint: [prerequisiteHint, connectionHint].filter(Boolean).join(' '),
+    ...(prerequisites.length ? { agentInstruction: { action: 'stop_and_report' as const,
+      message: 'Stop here. Report the prerequisite blockers and resolve them before reviewing a fresh plan. Do not apply or deploy this blocked plan.' } } : {}),
+    next: prerequisites.length
+      ? [...(connections.length ? ['hv_connections'] : []), 'hv_plan']
+      : options.connectionNext,
+  };
+}
+
 export function syncProjectGitRemoteUrl(ctx: CommandContext, project: Project, spec: ProjectSpec): Project {
   const gitRemoteUrl = spec.gitRemoteUrl?.trim();
   if (!gitRemoteUrl || gitRemoteUrl === project.gitRemoteUrl) {
@@ -534,7 +558,7 @@ export function splitActionScopedConnectionBlocks(
     && !isCloudflareDomainRegistrationAction(action)
   );
   const actionScopedBlocked = blocked.filter((entry) =>
-    entry.policy === 'action-scoped-if-independent-actions'
+    entry.category !== 'prerequisite' && entry.policy === 'action-scoped-if-independent-actions'
     && (entry.actionIds?.some((id) => actions.some((action) => action.id === id && action.type !== 'noop')) ?? hasIndependentPendingAction)
   );
   const ciCredentialBlocks = actions.flatMap((action) => {
@@ -560,7 +584,7 @@ export function splitActionScopedConnectionBlocks(
     }];
   });
   return {
-    hardBlocked: blocked.filter((entry) => entry.policy !== 'action-scoped-if-independent-actions'),
+    hardBlocked: blocked.filter((entry) => entry.category === 'prerequisite' || entry.policy !== 'action-scoped-if-independent-actions'),
     actionScopedBlocked: [...actionScopedBlocked, ...ciCredentialBlocks],
   };
 }
@@ -842,15 +866,18 @@ export async function executePlanApply(ctx: CommandContext, params: {
     : project;
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
   if (backupProvisioningOnly && (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id)) {
-    return { kind: 'blocked', applyBlocked: [{ provider: 'hypervibe', reason: 'The reviewed backup provisioning plan belongs to another project or environment.' }] };
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The reviewed backup provisioning plan belongs to another project or environment.' }] };
   }
   if (planScope === 'backup-readiness') {
-    return { kind: 'blocked', applyBlocked: [{ provider: 'hypervibe',
-      reason: 'Backup readiness is blocked. No provider mutation is authorized; run hv_plan after resolving the reported protection gaps.' }] };
+    // Saved diagnostics are not execution authority and may predate this field.
+    const savedGaps = asRecord(loaded.document.backupReadiness)?.gaps;
+    const gaps = Array.isArray(savedGaps) ? savedGaps.filter((gap): gap is string => typeof gap === 'string').join(' ') : '';
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: `Backup readiness is blocked. ${gaps} No provider mutation is authorized; run hv_plan after resolving the reported protection gaps.` }] };
   }
   if (planScope === 'database-bindings') {
     if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
-      return { kind: 'blocked', applyBlocked: [{ provider: 'hypervibe', reason: 'The database binding plan belongs to another project or environment.' }] };
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The database binding plan belongs to another project or environment.' }] };
     }
     const blocked = planService.providerPreflight(loaded.document.actions.map(action => action.resource.provider));
     if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
@@ -884,13 +911,13 @@ export async function executePlanApply(ctx: CommandContext, params: {
   if (loaded.document.actions.some(action => actionRequiresBackupReadiness(action) && !isDeferredIdentityCandidate(action))
     || (params.alwaysRunBootstrap && !deploymentPrerequisitePhase(loaded.document))) {
     const readiness = await freshBackupReadiness();
-    if (!readiness.ready) return { kind: 'blocked', applyBlocked: [{ provider: 'hypervibe',
+    if (!readiness.ready) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
       reason: `Backup readiness blocks deployment: ${readiness.gaps.join(' ')} Run hv_plan to review the required protection stages.` }] };
   }
   if (planScope === 'backup-policy') {
     if (!environment) return { kind: 'env_missing', envName };
     if (loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
-      return { kind: 'blocked', applyBlocked: [{ provider: 'hypervibe', reason: 'The reviewed backup policy plan belongs to another project or environment.' }] };
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The reviewed backup policy plan belongs to another project or environment.' }] };
     }
     const blocked = planService.providerPreflight(loaded.document.actions.map(action => action.resource.provider));
     if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
@@ -909,7 +936,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   if (planScope === 'database-checkpoint') {
     if (!environment) return { kind: 'env_missing', envName };
     if (loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
-      return { kind: 'blocked', applyBlocked: [{ provider: 'hypervibe', reason: 'The snapshot plan belongs to a different project or environment.' }] };
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The snapshot plan belongs to a different project or environment.' }] };
     }
     const blocked = planService.providerPreflight([envSpec.database?.provider ?? 'unconfigured']);
     if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
@@ -927,7 +954,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   }
   if (planScope === 'api-policy') {
     if (!environment) return { kind: 'env_missing', envName };
-    if (loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) return { kind: 'blocked', applyBlocked: [{ provider: 'hypervibe', reason: 'The reviewed API policy plan belongs to a different project or environment.' }] };
+    if (loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The reviewed API policy plan belongs to a different project or environment.' }] };
     const result = await executor.execute({ planRunId: planId, confirmActions: params.confirmActions, currentSpecRevision: params.specRevision,
       handler: async action => {
         const current = ctx.repos.environments.findByProjectAndName(project.id, envName);
@@ -939,7 +966,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     return { kind: 'executed', envName, result, actionScopedWarnings: [] };
   }
   const apiPolicyState = planApiPolicy(envName, environment?.platformBindings.apiPolicy, envSpec.api);
-  if (apiPolicyState.error || apiPolicyState.action) return { kind: 'blocked', applyBlocked: [{ provider: 'hypervibe', reason: apiPolicyState.error ?? 'API policy changed; run hv_plan and accept the isolated policy stage first.' }] };
+  if (apiPolicyState.error || apiPolicyState.action) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: apiPolicyState.error ?? 'API policy changed; run hv_plan and accept the isolated policy stage first.' }] };
   const migrationActions = loaded.document.actions.filter((action) =>
     action.type === 'update'
     && (
@@ -1043,7 +1070,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     if (!envSpec.messaging) {
       return {
         kind: 'blocked',
-        applyBlocked: [{ provider: 'twilio', reason: 'Twilio messaging desired state changed after planning.', policy: 'hard' }],
+        applyBlocked: [{ category: 'prerequisite', provider: 'twilio', reason: 'Twilio messaging desired state changed after planning.', policy: 'hard' }],
       };
     }
     const messagingState = await resolveTwilioMessagingState({

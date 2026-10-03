@@ -50,7 +50,7 @@ describe('fresh backup readiness at the real apply boundary', () => {
       .mockImplementation(() => { throw new Error('Rollout reached unrelated preflight without backup readiness'); });
     const result = await executePlanApply(ctx, { project, spec, specRevision: 1, planId: run.id,
       confirmActions: [], alwaysRunBootstrap: type === 'noop' });
-    expect(result).toMatchObject({ kind: 'blocked', applyBlocked: [{ provider: 'hypervibe', reason: expect.stringMatching(/backup/i) }] });
+    expect(result).toMatchObject({ kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: expect.stringMatching(/backup/i) }] });
     expect(preflight).not.toHaveBeenCalled();
     expect(ctx.repos.environments.findById(environment.id)?.platformBindings).toEqual(environment.platformBindings);
   });

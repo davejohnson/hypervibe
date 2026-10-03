@@ -49,6 +49,17 @@ tool reports these prerequisite stages as pending. An unsupported source,
 unknown read, missing point or expired restore proof blocks rollout; it is not
 silently waived by a service-only plan or a previously applied spec hash.
 
+Accepted deployment workflows can still need credential or binding
+synchronization. That downstream work must not prevent an independent backup
+archive from receiving its reviewed storage binding. Archive provisioning keeps
+its real namespace dependencies and does not synchronize CI credentials, wire
+application services or authorize a rollout in the same stage.
+
+A recovery-readiness blocker is a prerequisite failure. Tool output preserves
+the protection gaps and directs the operator to resolve them before re-planning;
+it does not request a new provider credential unless a separate connection
+failure was observed.
+
 Supported adapters add daily protection while preserving existing weekly or
 monthly schedules, longer retention and PITR. Native retention is reported as
 observed; the default does not promise the same retention window on every
