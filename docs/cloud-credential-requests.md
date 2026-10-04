@@ -138,6 +138,24 @@ spec digest, including when processing the confirmed creation request.
 cloud-reporting metadata. A reporting token never authorizes request management.
 Custom installations require the same HTTPS and origin checks.
 
+### First-time app setup
+
+Browser approval sends the checked-out branch as an optional app-setup hint.
+Use `action="authorize", sourceBranch="integration/security"` when the intended
+setup branch differs from the checkout. Authorization does not require that
+branch to match local HEAD; preparing an invitation or importing credentials
+still requires the existing exact committed-source checks.
+
+The hint only prefills the browser's review form. It does not connect the app,
+approve agent access, send an invitation, or deploy. Detached checkouts omit
+the hint unless an explicit branch is supplied; they never guess `main` or send
+`HEAD` as a branch. An existing pending approval retains its original hint
+when retried without `sourceBranch`, even if the checkout changes. An explicit
+different branch is rejected before exchange; finish that approval or let its
+code expire before starting another. Legacy pending codes have no hint and are
+not silently rewritten. A branchless retry after code expiry also preserves
+the previous hint (including no hint); supply an explicit branch to change it.
+
 ## Server compatibility and evidence
 
 The server must include [Hypercloud PR #85](https://github.com/davejohnson/hypercloud/pull/85)
@@ -147,6 +165,17 @@ purpose are rejected. There is no cookie-copy fallback. The separate
 rechecks current owner permissions, membership, expiry and revocation. It can
 manage requests, not read values, approve retrievals, report activity or deploy.
 Normal reporting and provider-connection pairing retain their existing contract.
+
+Branch-prefill rollout is **server first, client second**: Hypercloud must first
+accept and persist optional `sourceBranch` on pairing creation and use it in
+the browser setup form, including its database migration. The public pairing
+create/exchange responses remain unchanged, and approval URLs remain exactly
+`/pair?code=...`. No response echoes the hint, so a successful pairing response
+alone does not prove that the deployed server supports prefilling. The local
+`sourceBranch` receipt reports the hint sent, not remote branch validation.
+Client tests use synthetic unchanged responses under this user-approved
+request-only extension; deployed browser interoperability remains separately
+unverified until the matching server release is checked.
 
 Independent server source is pinned in `test/provider-contracts/hypercloud` at
 PR #84 (`8272cd5284aaae010b88d7c09b46feca74334be1`) and PR #85

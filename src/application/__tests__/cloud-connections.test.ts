@@ -19,7 +19,7 @@ beforeEach(() => {
   root = mkdtempSync(path.join(tmpdir(), 'hv-cloud-connections-'));
   SqliteAdapter.resetInstance();
   SqliteAdapter.getInstance(path.join(root, 'state.db')).migrate();
-  git('init'); git('remote', 'add', 'origin', 'https://github.com/studio/app.git');
+  git('init', '-b', 'review/connections'); git('remote', 'add', 'origin', 'https://github.com/studio/app.git');
 });
 afterEach(() => {
   vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs();
@@ -75,11 +75,32 @@ function fixture() {
 }
 
 describe('hosted provider connection sharing', () => {
+  // Synthetic HTTP responses retain the public contract; the owner-approved
+  // onboarding extension adds a request-only hint, not provider access.
+  it('infers a setup branch and preserves an explicit pending hint across checkout changes', async () => {
+    const f = fixture();
+    await f.app.run({ action: 'start', sourceBranch: 'integration/security' });
+    expect(f.requests[0]!.body).toEqual({ repositoryFullName: 'studio/app', purpose: 'provider-connections', sourceBranch: 'integration/security' });
+    git('symbolic-ref', 'HEAD', 'refs/heads/another/branch');
+    expect(await f.app.run({ action: 'start' })).toMatchObject({ status: 'pending', sourceBranch: 'integration/security' });
+    const stored = f.context.repos.connections.findByProviderAndScope('hypervibe-provider-connections', 'https://hypervibe.dev|studio/app')!;
+    const before = stored.credentialsEncrypted;
+    await expect(f.app.run({ action: 'status', sourceBranch: 'another/branch' })).rejects.toMatchObject({ code: 'VALIDATION' });
+    expect(f.requests).toHaveLength(1);
+    expect(f.context.repos.connections.findById(stored.id)?.credentialsEncrypted).toBe(before);
+  });
+  it('omits a detached setup hint rather than sending HEAD or guessing the default', async () => {
+    git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'fixture');
+    git('checkout', '--detach');
+    const f = fixture();
+    await f.app.run({ action: 'start' });
+    expect(f.requests[0]!.body).toEqual({ repositoryFullName: 'studio/app', purpose: 'provider-connections' });
+  });
   it('pairs separately from reporting and stores the expiring grant encrypted without output tokens', async () => {
     const f = fixture(); f.connection('hypervibe-cloud', 'studio/app', { token: 'reporting-do-not-touch' });
     const started = await f.app.run({ action: 'start' });
     const verified = await f.app.run({ action: 'status' });
-    expect(f.requests[0]!.body).toEqual({ repositoryFullName: 'studio/app', purpose: 'provider-connections' });
+    expect(f.requests[0]!.body).toEqual({ repositoryFullName: 'studio/app', purpose: 'provider-connections', sourceBranch: 'review/connections' });
     expect(JSON.stringify([started, verified])).not.toContain(token);
     expect(JSON.stringify(started)).not.toContain('B'.repeat(43));
     expect(verified).toMatchObject({ status: 'verified', expiresAt: '2026-10-20T12:00:00.000Z' });

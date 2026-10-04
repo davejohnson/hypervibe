@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
@@ -13,24 +12,18 @@ import { commandSuccess, HvError, wrapCommandHandler } from './results.js';
 import { findRepoRoot, readRepoSpecFile } from '../domain/spec/repo-spec-file.js';
 import { detectGitRemoteUrl, normalizeGitRemoteIdentity, resolveGitHeadCommitSha } from '../lib/git-remote.js';
 import { primaryWorkspaceDirectory } from '../lib/workspace-context.js';
+import { assertPendingSourceBranch, resolveCloudSourceBranch, sourceBranchSchema as branch } from './cloud-source-branch.js';
 
 const PROVIDER = 'hypervibe-cloud-requests';
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 const email = z.string().trim().toLowerCase().email().max(320);
-const branch = z.string().min(1).max(255).refine(value => (
-  !/[\uD800-\uDFFF]/u.test(value) && !['@', 'HEAD'].includes(value)
-  && !value.startsWith('refs/') && !value.startsWith('-')
-  && !/[\x00-\x20\x7f~^:?*\[\\]/.test(value) && !value.includes('..')
-  && !value.includes('@{') && !value.endsWith('.')
-  && value.split('/').every(part => part && !part.startsWith('.') && !part.endsWith('.lock'))
-), 'Use a plain branch name.');
 const inputShape = {
   action: z.enum(['create', 'list', 'resume', 'replace', 'revoke', 'authorize']).optional().describe('Default: prepare a request; confirm sends it. Resume finds ready requests and private import calls without IDs. Replace explicitly re-requests terminal credentials. List reads history, revoke cancels one request, authorize opens browser access.'),
   env: z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/).optional().describe('Defaults to staging, or the only declared environment.'),
   planId: z.string().uuid().optional().describe('For create/replace, select only unsupplied required runtime inputs from this fresh persisted plan. Resume treats this as a continuity hint, never deployment approval; a fresh plan is required after import.'),
   ownerEmail: email.optional().describe('Usually inferred from secret principal="email:owner@example.com". Supply only when the spec does not name an email owner, or to select one of several declared owners.'),
   fields: z.array(fieldSchema.partial({ label: true, inputType: true }).strict()).min(1).max(16).optional().describe('Optional subset of delegated keys with label/inputType overrides. By default request required keys from the spec with readable labels and hidden inputs. Never include values.'),
-  sourceBranch: branch.optional().describe('Defaults to the checked-out branch. Its committed source must match the server.'),
+  sourceBranch: branch.optional().describe('Defaults to the checked-out branch. Authorize uses it only to prefill app setup; invitations and resume still require matching committed source.'),
   title: z.string().trim().min(1).max(120).regex(/^[^\u0000-\u001f\u007f]+$/).optional(),
   requestId: z.string().uuid().optional().describe('Required only when replacing or revoking a request returned by list/resume.'),
   page: z.number().int().min(1).max(1000).optional(),
@@ -53,7 +46,7 @@ const commonState = {
   version: z.literal(1), baseUrl: z.string(), repository: z.string(), env: z.string(),
   expiresAt: z.string().datetime(), review: reviewSchema.optional(),
 };
-const pendingSchema = z.object({ ...commonState, status: z.literal('pending'), deviceCode: z.string().regex(/^[A-Za-z0-9_-]{43}$/), userCode: z.string(), verificationUrl: z.string().url(), exchangeAttempted: z.boolean().optional() });
+const pendingSchema = z.object({ ...commonState, status: z.literal('pending'), sourceBranch: branch.optional(), deviceCode: z.string().regex(/^[A-Za-z0-9_-]{43}$/), userCode: z.string(), verificationUrl: z.string().url(), exchangeAttempted: z.boolean().optional() });
 const verifiedSchema = z.object({ ...commonState, status: z.literal('verified'), project: z.object({ id: z.string().uuid(), name: z.string() }), environment, token: z.string().regex(/^hvc_[0-9a-f-]{36}_[A-Za-z0-9_-]{43}$/) });
 const stateSchema = z.discriminatedUnion('status', [pendingSchema, verifiedSchema]);
 type State = z.infer<typeof stateSchema>;
@@ -74,10 +67,7 @@ function checkout(input: Input) {
 function committedSource(input: Input, scope: ReturnType<typeof checkout>) {
   const specPath = path.join(scope.root, '.hypervibe/spec.json');
   const revision = resolveGitHeadCommitSha(scope.root, specPath);
-  let sourceBranch = input.sourceBranch;
-  if (!sourceBranch) {
-    try { sourceBranch = execFileSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: scope.root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000 }).trim(); } catch { /* Detached checkout needs an explicit branch. */ }
-  }
+  const sourceBranch = resolveCloudSourceBranch(scope.root, input.sourceBranch);
   if (!revision || !branch.safeParse(sourceBranch).success) throw new HvError('VALIDATION', 'Commit the value-free spec and select its source branch before preparing an invitation.');
   return { sourceBranch: sourceBranch!, expectedSourceRevision: revision, expectedSourceDigest: hash(readFileSync(specPath)) };
 }
@@ -125,7 +115,7 @@ export function registerCloudRequestCommands(commands: CommandRegistrar, context
       const action = input.action ?? 'create';
       if (['revoke', 'replace'].includes(action) && !input.requestId) throw new HvError('VALIDATION', 'Select the requestId from list or resume for this action.');
       const invitationOptions = ['ownerEmail', 'fields', 'sourceBranch', 'title', 'confirm', 'planId'];
-      const allowed: Record<typeof action, string[]> = { create: invitationOptions, replace: [...invitationOptions, 'requestId'], resume: ['sourceBranch', 'planId'], list: ['page', 'sort'], revoke: ['requestId', 'confirm'], authorize: [] };
+      const allowed: Record<typeof action, string[]> = { create: invitationOptions, replace: [...invitationOptions, 'requestId'], resume: ['sourceBranch', 'planId'], list: ['page', 'sort'], revoke: ['requestId', 'confirm'], authorize: ['sourceBranch'] };
       if (Object.entries(input).some(([key, value]) => value !== undefined && !['action', 'env', 'baseUrl', ...allowed[action]].includes(key))) throw new HvError('VALIDATION', 'Use only options for the selected request action.');
       const scope = checkout(input);
       let selectedBaseUrl = input.baseUrl;
@@ -163,17 +153,19 @@ export function registerCloudRequestCommands(commands: CommandRegistrar, context
         state = next;
       };
       const pairing = createHypervibeCloudPairingClient({ baseUrl, grant: { purpose: 'credential-requests', environment: scope.env } });
-      const approval = (pending: z.infer<typeof pendingSchema>) => commandSuccess({ status: 'approval_required', repository: scope.repository, environment: scope.env, verificationUrl: pending.verificationUrl, userCode: pending.userCode }, {
+      const approval = (pending: z.infer<typeof pendingSchema>) => commandSuccess({ status: 'approval_required', repository: scope.repository, environment: scope.env, verificationUrl: pending.verificationUrl, userCode: pending.userCode, ...(pending.sourceBranch ? { sourceBranch: pending.sourceBranch } : {}) }, {
         agentInstruction: { action: 'ask_user', message: 'Offer to open verificationUrl. Ask the user to approve this repository, environment and matching code, then repeat the same command. Never ask for cookies, tokens or credential values.' },
         hint: 'Approve credential-request access in the browser, then repeat this command. No invitation has been sent.',
       });
       if (!state || new Date(state.expiresAt).getTime() <= Date.now()) {
-        const result = await pairing.start(scope.repository);
-        const pending: z.infer<typeof pendingSchema> = { version: 1, status: 'pending', baseUrl, repository: scope.repository, env: scope.env, deviceCode: result.deviceCode, userCode: result.userCode, verificationUrl: result.verificationUrl, expiresAt: result.expiresAt, review: state?.review };
+        const sourceBranch = resolveCloudSourceBranch(scope.root, input.sourceBranch, state?.status === 'pending' ? state : undefined);
+        const result = await pairing.start(scope.repository, sourceBranch);
+        const pending: z.infer<typeof pendingSchema> = { version: 1, status: 'pending', baseUrl, repository: scope.repository, env: scope.env, sourceBranch, deviceCode: result.deviceCode, userCode: result.userCode, verificationUrl: result.verificationUrl, expiresAt: result.expiresAt, review: state?.review };
         save(pending);
         return approval(pending);
       }
       if (state.status === 'pending') {
+        assertPendingSourceBranch(input.sourceBranch, state.sourceBranch);
         if (state.exchangeAttempted) throw new HvError('PROVIDER_ERROR', 'The browser-access exchange has an unknown outcome. Do not repeat it. Let this short approval expire before authorizing again.');
         save({ ...state, exchangeAttempted: true });
         let result;

@@ -13,6 +13,8 @@ import {
 } from '../application/cloud-pairing.js';
 import { commandSuccess, HvError, wrapCommandHandler } from '../application/results.js';
 import { detectGitRemoteUrl, parseGitHubRepoFromRemote } from '../lib/git-remote.js';
+import { primaryWorkspaceDirectory } from '../lib/workspace-context.js';
+import { assertPendingSourceBranch, resolveCloudSourceBranch, sourceBranchSchema } from '../application/cloud-source-branch.js';
 
 interface CloudToolOptions {
   detectRepository?: () => string | null;
@@ -21,7 +23,7 @@ interface CloudToolOptions {
 }
 
 function currentRepository(): string | null {
-  return parseGitHubRepoFromRemote(detectGitRemoteUrl() ?? undefined);
+  return parseGitHubRepoFromRemote(detectGitRemoteUrl(primaryWorkspaceDirectory()) ?? undefined);
 }
 
 function publicConnectionSummary(connection: VerifiedHypervibeCloudConnection) {
@@ -64,8 +66,9 @@ export function registerHvCloudTools(
     {
       action: z.enum(['start', 'status']).optional().describe('Pairing step (default: start)'),
       baseUrl: z.string().optional().describe('Hypervibe cloud origin (default: https://hypervibe.dev; HTTPS required except loopback development)'),
+      sourceBranch: sourceBranchSchema.optional().describe('App-setup branch hint, inferred from the checkout when starting. Does not grant access or deploy. Detached checkouts omit the hint unless explicit.'),
     },
-    wrapCommandHandler(async ({ action = 'start', baseUrl: requestedBaseUrl }) => {
+    wrapCommandHandler(async ({ action = 'start', baseUrl: requestedBaseUrl, sourceBranch: requestedBranch }) => {
       const repository = detectRepository();
       if (!repository) {
         throw new HvError('VALIDATION', 'The current directory does not have a GitHub origin remote.', {
@@ -113,6 +116,7 @@ export function registerHvCloudTools(
           });
         }
 
+        assertPendingSourceBranch(requestedBranch, connection.sourceBranch);
         const result = await createClient(baseUrl).exchange(connection.deviceCode);
         if (result.status === 'pending') {
           return commandSuccess({
@@ -121,6 +125,7 @@ export function registerHvCloudTools(
             userCode: connection.userCode,
             verificationUrl: connection.verificationUrl,
             expiresAt: connection.expiresAt,
+            ...(connection.sourceBranch ? { sourceBranch: connection.sourceBranch } : {}),
             retryAfterSeconds: result.retryAfterSeconds,
           }, {
             hint: 'Approve this repository in the browser, then run hypervibe cloud pair --action status again.',
@@ -160,19 +165,22 @@ export function registerHvCloudTools(
         && connection.baseUrl === baseUrl
         && new Date(connection.expiresAt).getTime() > now().getTime()
       ) {
+        assertPendingSourceBranch(requestedBranch, connection.sourceBranch);
         return commandSuccess({
           status: 'pending',
           repository,
           userCode: connection.userCode,
           verificationUrl: connection.verificationUrl,
           expiresAt: connection.expiresAt,
+          ...(connection.sourceBranch ? { sourceBranch: connection.sourceBranch } : {}),
         }, {
           hint: 'Open the approval link, then run hypervibe cloud pair --action status.',
           next: ['hv_cloud_pair'],
         });
       }
 
-      const result = await createClient(baseUrl).start(repository);
+      const sourceBranch = resolveCloudSourceBranch(primaryWorkspaceDirectory(), requestedBranch, connection?.status === 'pending' ? connection : undefined);
+      const result = await createClient(baseUrl).start(repository, sourceBranch);
       const pending: PendingHypervibeCloudConnection = {
         version: 1,
         status: 'pending',
@@ -182,6 +190,7 @@ export function registerHvCloudTools(
         userCode: result.userCode,
         verificationUrl: result.verificationUrl,
         expiresAt: result.expiresAt,
+        sourceBranch,
       };
       ctx.repos.connections.upsert({
         provider: HYPERVIBE_CLOUD_CONNECTION_PROVIDER,
@@ -194,6 +203,7 @@ export function registerHvCloudTools(
         userCode: pending.userCode,
         verificationUrl: pending.verificationUrl,
         expiresAt: pending.expiresAt,
+        ...(pending.sourceBranch ? { sourceBranch: pending.sourceBranch } : {}),
       }, {
         hint: 'Open the approval link, then run hypervibe cloud pair --action status.',
         next: ['hv_cloud_pair'],

@@ -113,6 +113,16 @@ uses the repositories selected in the Hypervibe GitHub App, and stores the
 one-time device and environment credentials only in the encrypted local
 connection store. Do not paste a GitHub token or choose an environment.
 
+First-time app setup is prefilled with the checked-out branch. Override it with
+`--source-branch integration/security` (`sourceBranch` in MCP); a detached
+checkout leaves it blank unless supplied. This is only a setup hint: connecting
+the app and granting agent access still require separate browser approval.
+Pending retries preserve the original hint; choosing another explicit branch
+requires finishing the existing approval or waiting for its code to expire.
+The same setup hint is available for `cloud requests --action authorize` and
+`cloud connections --action start`. Deploy the compatible Hypercloud server
+and migration before updating clients; see [compatibility and evidence](docs/cloud-credential-requests.md#server-compatibility-and-evidence).
+
 For credentials supplied by someone else through Hypervibe, use the separate
 [one-time secret import](docs/cloud-secret-import.md):
 

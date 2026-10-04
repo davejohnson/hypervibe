@@ -9,6 +9,18 @@ afterEach(() => {
 });
 
 describe('Hypervibe cloud pairing client', () => {
+  it('sends the optional setup branch without changing the strict public response or approval URL contract', async () => {
+    // Synthetic response under the owner-approved request-only extension:
+    // existing servers/clients keep the same public create/exchange shapes.
+    const fetchImpl = vi.fn<typeof fetch>(async () => Response.json({
+      deviceCode: 'A'.repeat(43), expiresAt: '2026-10-04T12:10:00.000Z', intervalSeconds: 2,
+      repository: 'northstar/launchpad', userCode: '2345-6789', verificationUrl: 'https://hypervibe.dev/pair?code=2345-6789',
+    }));
+    const result = await createHypervibeCloudPairingClient({ fetchImpl }).start('northstar/launchpad', 'integration/security');
+    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual({ repositoryFullName: 'northstar/launchpad', sourceBranch: 'integration/security' });
+    expect(result).not.toHaveProperty('sourceBranch');
+    expect(result.verificationUrl).toBe('https://hypervibe.dev/pair?code=2345-6789');
+  });
   it.each([
     `https://hypervibe.dev/pair?code=2345-6789&echo=${'A'.repeat(43)}`,
     `https://hypervibe.dev/pair?code=2345-6789&code=${'A'.repeat(43)}`,

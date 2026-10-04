@@ -8,6 +8,7 @@ import { parseCredentialRef } from './credential-reference.js';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
 import { detectGitRemoteUrl, normalizeGitRemoteIdentity } from '../lib/git-remote.js';
 import { currentWorkspaceDirectories, primaryWorkspaceDirectory } from '../lib/workspace-context.js';
+import { assertPendingSourceBranch, resolveCloudSourceBranch, sourceBranchSchema } from './cloud-source-branch.js';
 
 const PROVIDER = 'hypervibe-provider-connections';
 const identifier = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$/);
@@ -36,13 +37,14 @@ const state = z.object({
   version: z.literal(1), baseUrl: z.string(), repository: z.string(),
   status: z.enum(['pending', 'verified']), expiresAt: z.string().datetime(),
   deviceCode: z.string().optional(), userCode: z.string().optional(), verificationUrl: z.string().optional(),
+  sourceBranch: sourceBranchSchema.optional(),
   token: z.string().optional(), project: z.object({ id: identifier, name: z.string().max(200) }).optional(),
   preview: z.object({ id: z.string().uuid(), digest: z.string(), expiresAt: z.string().datetime() }).optional(),
 }).strict();
 type State = z.infer<typeof state>;
 type Provider = z.infer<typeof provider>;
 export interface CloudConnectionsInput {
-  action?: 'start' | 'status' | 'preview' | 'connect' | 'revoke'; baseUrl?: string;
+  action?: 'start' | 'status' | 'preview' | 'connect' | 'revoke'; baseUrl?: string; sourceBranch?: string;
   provider?: string; env?: string; credentialsRef?: string; credentialKind?: string; connectionId?: string;
   previewId?: string; confirm?: boolean;
 }
@@ -57,7 +59,8 @@ export function createCloudConnections({ context, fetchImpl = fetch, directory =
   }
   function summary(value: State) {
     return { status: value.status, baseUrl: value.baseUrl, repository: value.repository, expiresAt: value.expiresAt,
-      ...(value.status === 'pending' ? { userCode: value.userCode, verificationUrl: value.verificationUrl } : { project: value.project }) };
+      ...(value.status === 'pending' ? { userCode: value.userCode, verificationUrl: value.verificationUrl,
+        ...(value.sourceBranch ? { sourceBranch: value.sourceBranch } : {}) } : { project: value.project }) };
   }
   async function source(item: Provider, input: CloudConnectionsInput, repository: string) {
     const auth = item.authorization;
@@ -90,6 +93,9 @@ export function createCloudConnections({ context, fetchImpl = fetch, directory =
   return {
     async run(input: CloudConnectionsInput) {
       const action = input.action ?? 'preview';
+      const requestedBranch = sourceBranchSchema.optional().parse(input.sourceBranch);
+      if (requestedBranch !== undefined && !['start', 'status'].includes(action))
+        throw new HvError('VALIDATION', 'Use sourceBranch only when starting or checking browser approval.');
       if ((input.credentialsRef || input.connectionId || input.credentialKind || input.env) && !input.provider)
         throw new HvError('VALIDATION', 'Select one provider when choosing a credential or environment.');
       if (input.credentialsRef && input.connectionId)
@@ -113,6 +119,7 @@ export function createCloudConnections({ context, fetchImpl = fetch, directory =
           throw new HvError('VALIDATION', 'Stored Hypervibe access belongs to another repository or site.');
       }
       const active = saved && Date.parse(saved.expiresAt) > now().getTime();
+      if (active && saved?.status === 'pending') assertPendingSourceBranch(requestedBranch, saved.sourceBranch);
       const pairing = createHypervibeCloudPairingClient({ baseUrl, fetchImpl, purpose: 'provider-connections' });
       function forgetMatchingAccess(field: 'token' | 'deviceCode', value: string) {
         const current = context.repos.connections.findByProviderAndScope(PROVIDER, scope);
@@ -150,9 +157,10 @@ export function createCloudConnections({ context, fetchImpl = fetch, directory =
           try { await projectConnections(saved); return summary(saved); }
           catch (error) { if (!cloudAccessRejected(error)) throw error; }
         }
-        const result = await pairing.start(repository);
+        const sourceBranch = resolveCloudSourceBranch(directory(), requestedBranch, saved?.status === 'pending' ? saved : undefined);
+        const result = await pairing.start(repository, sourceBranch);
         saved = { version: 1, status: 'pending', baseUrl, repository, deviceCode: result.deviceCode,
-          userCode: result.userCode, verificationUrl: result.verificationUrl, expiresAt: result.expiresAt };
+          sourceBranch, userCode: result.userCode, verificationUrl: result.verificationUrl, expiresAt: result.expiresAt };
         save(scope, saved);
         return summary(saved);
       }
