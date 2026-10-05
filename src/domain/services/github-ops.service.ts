@@ -81,6 +81,7 @@ export function githubActionsWorkflowInputHash(params: {
   delete target.providerImageUris;
   delete target.programFingerprint;
   delete target.deploymentContractFingerprint;
+  const providerRendererRevision = providerRegistry.getMetadata(params.provider)?.orchestration?.ci?.rendererRevision;
   const ios = params.ios?.release
     ? {
         rendererRevision: IOS_RELEASE_WORKFLOW_RENDERER_REVISION,
@@ -92,6 +93,7 @@ export function githubActionsWorkflowInputHash(params: {
   return canonicalJsonSha256({
     version: 1,
     rendererRevision: GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION,
+    ...(providerRendererRevision !== undefined ? { providerRendererRevision } : {}),
     provider: params.provider,
     target,
     migration: migrationWorkflowInput(params.migration),

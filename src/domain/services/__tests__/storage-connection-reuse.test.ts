@@ -53,6 +53,7 @@ describe('compatible cloud connection reuse', () => {
 
     await expect(adapterFactory.getStorageAdapter('gcs', project)).resolves.toMatchObject({
       success: true,
+      connectionProvider: 'cloudrun',
       adapter: { name: 'gcs' },
     });
   });

@@ -1,3 +1,4 @@
+import { planScheduleActivations } from '../domain/services/schedule-activation.service.js';
 import { classifyPlanBlocks } from '../domain/plan/plan-block.js';
 import { planApiPolicy } from '../domain/services/api-policy.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
@@ -1229,7 +1230,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         observed,
       });
       const restartRequired = restartRequirements.length > 0;
-      const hasConfigurationDrift = Boolean(apiPolicy.action || apiPolicy.error)
+      const pendingSchedules = planScheduleActivations({ environment, environmentSpec: envSpec, observed });
+      const hasConfigurationDrift = pendingSchedules.length > 0 || Boolean(apiPolicy.action || apiPolicy.error)
         || !backupPolicy.complete
         || !backupReadiness.ready
         || maintenanceDrift.length > 0
@@ -1314,6 +1316,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           ...(domainSecurity ? { domainSecurity } : {}),
           ...(webhookReadiness ? { webhookReadiness } : {}),
           ...(email.senderReadiness ? { emailSenderReadiness: email.senderReadiness } : {}),
+          ...(pendingSchedules.length > 0 ? { pendingScheduleActivations: pendingSchedules.map(action => ({
+            service: action.resource.name, state: 'pending', observed: action.verified,
+          })) } : {}),
           restartRequired,
           runtimeConfiguration: {
             status: restartRequired ? 'restart_required' : 'current',
@@ -1329,8 +1334,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
                 },
               }
             : {}),
-          summary: summarizeActions([...(apiPolicy.action ? [apiPolicy.action] : []), ...maintenance.actions, ...nativeDeploySources.actions, ...diff.actions, ...cache.actions, ...databaseResilience.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...email.actions, ...messaging.actions]),
-          drift: [...(apiPolicy.action ? [apiPolicy.action] : []), ...maintenanceDrift, ...nativeDeploySourceDrift, ...drift, ...cacheDrift, ...databaseResilienceDrift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift, ...messagingDrift],
+          summary: summarizeActions([...pendingSchedules, ...(apiPolicy.action ? [apiPolicy.action] : []), ...maintenance.actions, ...nativeDeploySources.actions, ...diff.actions, ...cache.actions, ...databaseResilience.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...email.actions, ...messaging.actions]),
+          drift: [...pendingSchedules, ...(apiPolicy.action ? [apiPolicy.action] : []), ...maintenanceDrift, ...nativeDeploySourceDrift, ...drift, ...cacheDrift, ...databaseResilienceDrift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift, ...messagingDrift],
           unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged],
           ...(envSpec.database?.resilience
             ? {

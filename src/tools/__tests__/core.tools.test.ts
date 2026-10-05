@@ -3377,6 +3377,39 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
+  it.each([true, false])('reports pending cron activation without claiming configuration convergence (observed=%s)', async observedPending => {
+    const t = await makeClient();
+    try {
+      const project = new ProjectRepository().create({ name: 'pending-cron-status', defaultPlatform: 'cloudrun' });
+      new SpecStore().replace(project, { version: 1, project: project.name, environments: { staging: {
+        hosting: { provider: 'cloudrun', region: 'us-central1' },
+        services: { cron: { workloadKind: 'cron', startCommand: 'npm run cron', cronSchedule: '0 * * * *' } },
+        email: { enabled: false }, envVars: {}, envFile: { mode: 'off' },
+      } } });
+      new ServiceRepository().create({ projectId: project.id, name: 'cron', buildConfig: { workloadKind: 'cron' } });
+      const pending = { version: 1, state: 'pending', jobName: 'cron-staging', jobUid: 'uid-staging', holdingImage: `registry.example/holding@sha256:${'d'.repeat(64)}` };
+      const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: {
+        provider: 'cloudrun', projectId: 'gcp-test', providerScope: { projectId: 'gcp-test', region: 'us-central1' },
+        services: { cron: { serviceId: pending.jobName, jobName: pending.jobName, resourceUid: pending.jobUid,
+          resourceType: 'scheduledJob', workloadKind: 'cron', scheduleActivation: pending } },
+      } });
+      verifyConnection('cloudrun', { projectId: 'gcp-test', region: 'us-central1', credentials: '{}' });
+      mockObserved({ provider: 'cloudrun', observedAt: new Date().toISOString(), projectExists: true, projectId: 'gcp-test',
+        services: [{ name: 'cron', externalId: pending.jobName, workloadKind: 'cron', customDomains: [],
+          ...(observedPending ? { scheduleActivationPending: true } : {}),
+          config: { startCommand: 'npm run cron', public: false }, envVarKeys: [], envVarHashes: {}, status: 'empty' }],
+        databases: [], partial: false, warnings: [],
+      });
+      const before = new EnvironmentRepository().findById(environment.id)!.platformBindings;
+      const status = await t.call('hv_status', { project: project.name, env: 'staging' });
+      expect(status.ok).toBe(true);
+      expect(status.data.inSync).toBe(false);
+      expect(status.data.pendingScheduleActivations).toEqual([{ service: 'cron', state: 'pending', observed: observedPending }]);
+      expect(status.data.drift).toContainEqual(expect.objectContaining({ id: 'service:cron:activate-schedule', verified: observedPending }));
+      expect(new EnvironmentRepository().findById(environment.id)!.platformBindings).toEqual(before);
+    } finally { await t.close(); }
+  });
+
   it('reports restart_required when a synced CI service still runs its pre-configuration deployment', async () => {
     const t = await makeClient();
     await t.call('hv_spec', {

@@ -6,6 +6,7 @@ import path from 'path';
 import type { Environment } from '../../entities/environment.entity.js';
 import type { Project } from '../../entities/project.entity.js';
 import type { ServiceVolumeBinding, ServiceVolumeComponentBinding, ServiceVolumeTarget } from '../../ports/service-volume.port.js';
+import { parseHostingBindings } from '../../ports/hosting.port.js';
 import {
   mergeRepoPlatformBindings,
   readRepoBindingsFile,
@@ -79,6 +80,37 @@ describe('staged service-volume binding merge', () => {
 });
 
 describe('repo bindings delegated metadata', () => {
+  it('roundtrips the exact pending schedule and permanent provider UID through export and import', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-cron-bindings-'));
+    execFileSync('git', ['init', '-q', root]);
+    execFileSync('git', ['-C', root, 'remote', 'add', 'origin', 'https://github.com/owner/app.git']);
+    const now = new Date();
+    const project: Project = { id: 'project', name: 'app', gitRemoteUrl: 'https://github.com/owner/app.git', defaultPlatform: 'cloudrun', policies: {}, createdAt: now, updatedAt: now };
+    const scheduleActivation = { version: 1, state: 'pending', jobName: 'cron-job', jobUid: 'stable-uid', holdingImage: `registry.example/holding@sha256:${'a'.repeat(64)}` };
+    const cron = { serviceId: 'cron-job', jobName: 'cron-job', resourceUid: 'stable-uid', resourceType: 'scheduledJob', workloadKind: 'cron', scheduleActivation };
+    const environment: Environment = { id: 'env', projectId: project.id, name: 'staging', platformBindings: { provider: 'cloudrun', projectId: 'gcp-project', services: { cron }, apiToken: 'must-not-export' }, createdAt: now, updatedAt: now };
+    const disabled = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      const file = writeRepoBindingsForEnvironment(project, environment, root)!;
+      expect(readFileSync(file, 'utf8')).not.toContain('must-not-export');
+      const imported = readRepoBindingsFile(project.name, root)!.document.environments.staging.platformBindings;
+      const hydrated = parseHostingBindings({ platformBindings: mergeRepoPlatformBindings({}, imported) });
+      expect(hydrated.services?.cron).toEqual(cron);
+      expect(() => parseHostingBindings({ platformBindings: { ...imported, services: { cron: { ...cron, scheduleActivation: { ...scheduleActivation, rawProviderResponse: 'unexpected' } } } } })).toThrow();
+      const { scheduleActivation: _pending, ...active } = cron;
+      writeRepoBindingsForEnvironment(project, { ...environment, platformBindings: { ...environment.platformBindings, services: { cron: active } } }, root);
+      const activatedImport = readRepoBindingsFile(project.name, root)!.document.environments.staging.platformBindings;
+      const activated = parseHostingBindings({ platformBindings: mergeRepoPlatformBindings(imported, activatedImport) });
+      expect(activated.services?.cron).toEqual(active);
+      expect(activated.services?.cron).not.toHaveProperty('scheduleActivation');
+    } finally {
+      if (disabled === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = disabled;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.each(['whole-volume', 'staged'])('roundtrips exact value-free %s recovery even for a secret-shaped service name', (kind) => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-volume-bindings-'));
     execFileSync('git', ['init', '-q', root]);

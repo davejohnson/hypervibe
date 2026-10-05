@@ -102,6 +102,9 @@ export const CLOUD_RUN_RUNTIME_QUEUE_ROLES = [
   'roles/pubsub.subscriber',
 ] as const;
 
+/** Existing cloud preparation grants these at project scope, not bucket scope. */
+export const CLOUD_RUN_RUNTIME_STORAGE_ROLES = ['roles/storage.objectUser'] as const;
+
 export const CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT_ACCESS_ROLES = [
   'roles/iam.serviceAccountUser',
 ] as const;

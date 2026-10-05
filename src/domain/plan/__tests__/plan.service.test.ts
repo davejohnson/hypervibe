@@ -305,7 +305,110 @@ describe('PlanService datastore naming compatibility policy', () => {
   });
 });
 
+async function prepareCronPlanFixture() {
+    project = new ProjectRepository().update(project.id, {
+      defaultPlatform: 'cloudrun', gitRemoteUrl: 'https://github.com/dave/cron-app',
+    })!;
+    new SpecStore().replace(project, {
+      version: 1, project: project.name, gitRemoteUrl: project.gitRemoteUrl,
+      runtime: { kind: 'node', version: '24', installCommand: 'npm ci' },
+      environments: { staging: {
+        hosting: { provider: 'cloudrun', region: 'us-central1' },
+        services: { cron: { workloadKind: 'cron', startCommand: 'npm run cron', cronSchedule: '0 * * * *' } },
+        email: { enabled: false }, envVars: {}, envFile: { mode: 'off' },
+        deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+      } },
+    });
+    const pending = { version: 1, state: 'pending', jobName: 'cron-staging', jobUid: 'job-uid', holdingImage: `registry.example/holding@sha256:${'d'.repeat(64)}` };
+    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: {
+      provider: 'cloudrun', projectId: 'gcp-test', providerScope: { projectId: 'gcp-test', region: 'us-central1' }, services: { cron: {
+        serviceId: pending.jobName, jobName: pending.jobName, resourceUid: pending.jobUid, resourceType: 'scheduledJob', workloadKind: 'cron', scheduleActivation: pending,
+      } },
+    } });
+    new ServiceRepository().create({ projectId: project.id, name: 'cron', buildConfig: { runtime: { kind: 'node', version: '24', installCommand: 'npm ci' } } });
+    seedVerifiedConnection('cloudrun', { projectId: 'gcp-test', region: 'us-central1', credentials: '{"fixture":true}' });
+    seedVerifiedConnection('github', { apiToken: 'github-token', login: 'dave' });
+    mockObservingAdapter({ provider: 'cloudrun', observedAt: new Date().toISOString(), projectExists: true, projectId: 'gcp-test',
+      services: [{ name: 'cron', externalId: pending.jobName, workloadKind: 'cron', customDomains: [],
+        scheduleActivationPending: true, config: { startCommand: 'npm run cron' }, envVarKeys: [], envVarHashes: {}, status: 'empty' }],
+      databases: [], partial: false, warnings: [],
+    });
+    const { targets, migration } = resolveBranchDeployTargets(project);
+    const target = targets.find(t => t.environmentName === 'staging')!;
+    const workflow = buildBranchDeployWorkflow('cloudrun', target, migration);
+    new EnvironmentRepository().updatePlatformBindings(environment.id, { ci: { deployBranch: { [workflow.path]: {
+      contentHash: workflowFilesContentHash(workflowFiles(workflow)),
+      inputHash: githubActionsWorkflowInputHash({ provider: 'cloudrun', target, migration }),
+      syncedEnvironmentSecrets: ['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID'], syncedEnvironmentSecretHashes: { GCP_SERVICE_ACCOUNT_JSON: sha256('{"fixture":true}'), GCP_PROJECT_ID: sha256('gcp-test') },
+    } } } });
+    mockLiveWorkflow(workflow);
+    vi.spyOn(GitHubAdapter.prototype, 'listEnvironmentSecrets').mockResolvedValue(['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID']);
+    vi.spyOn(GitHubAdapter.prototype, 'getEnvironmentVariable').mockResolvedValue(null);
+    vi.spyOn(GitHubAdapter.prototype, 'getRef').mockResolvedValue({ ref: 'refs/heads/main', object: { sha: 'a'.repeat(40) } });
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockResolvedValue({ total_count: 0, workflow_runs: [] });
+    return { environment, workflow };
+}
+
 describe('PlanService.plan', () => {
+  it('orders prepared cron activation after the applied contract and one exact release', async () => {
+    await prepareCronPlanFixture();
+    const result = await new PlanService().plan(project, 'staging', { includeEnvFile: false });
+    expect(result).not.toHaveProperty('error');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    const activation = plan.actions.find(a => a.metadata?.operation === 'hostingScheduleActivate');
+    const release = plan.actions.find(a => a.metadata?.operation === 'githubActionsRelease');
+    const marker = plan.actions.find(a => a.id === 'ci:github-actions:staging:applied-spec-hash');
+    expect(activation).toMatchObject({ type: 'update', billable: true, requiresConfirm: true, resource: { kind: 'service', name: 'cron', provider: 'cloudrun' },
+      dependsOn: expect.arrayContaining(['ci:github-actions:staging:release']) });
+    expect(release?.dependsOn).toContain(marker?.id);
+    expect(marker?.dependsOn).not.toContain(activation?.id);
+    const ids = orderActions(plan.actions).map(a => a.id);
+    expect(ids.indexOf(marker!.id)).toBeLessThan(ids.indexOf(release!.id));
+    expect(ids.indexOf(release!.id)).toBeLessThan(ids.indexOf(activation!.id));
+    expect(plan.actions.filter(a => a.metadata?.operation === 'githubActionsRelease')).toHaveLength(1);
+    expect(plan.actions.find(a => a.id === 'service:cron')?.type).toBe('noop');
+  });
+
+  it('keeps cron activation out of workflow publication and identity-only prerequisite plans', async () => {
+    const { environment, workflow } = await prepareCronPlanFixture();
+    vi.mocked(GitHubAdapter.prototype.getFileContent).mockResolvedValue(null);
+    let result = await new PlanService().plan(project, 'staging', { includeEnvFile: false });
+    expect(result).not.toHaveProperty('error');
+    let plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.scope).toBe('managed-ci-publication');
+    expect(plan.actions.some(a => ['hostingScheduleActivate', 'githubActionsRelease'].includes(String(a.metadata?.operation)))).toBe(false);
+    expect(plan.actions.every(a => !a.dependsOn?.includes('service:cron:activate-schedule'))).toBe(true);
+
+    // After publication, the same durable pending Job rejoins the release graph.
+    vi.mocked(GitHubAdapter.prototype.getFileContent).mockImplementation(async (_owner, _repo, file) => workflowFiles(workflow).find(entry => entry.path === file)?.content ?? null);
+    result = await new PlanService().plan(project, 'staging', { includeEnvFile: false });
+    expect(result).not.toHaveProperty('error');
+    plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.actions.find(a => a.metadata?.operation === 'hostingScheduleActivate')).toBeDefined();
+
+    new EnvironmentRepository().updatePlatformBindings(environment.id, { services: {} });
+    mockObservingAdapter({ provider: 'cloudrun', observedAt: new Date().toISOString(), projectExists: true, projectId: 'gcp-test',
+      services: [], databases: [], partial: false, warnings: [] });
+    result = await new PlanService().plan(project, 'staging', { includeEnvFile: false });
+    expect(result).not.toHaveProperty('error');
+    plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.scope).toBe('managed-ci-bindings');
+    expect(plan.actions.some(a => ['hostingScheduleActivate', 'githubActionsRelease'].includes(String(a.metadata?.operation)))).toBe(false);
+  });
+
+  it('keeps a present mismatched scheduler visible as ordinary configuration drift', async () => {
+    await prepareCronPlanFixture();
+    const adapter = (await adapterFactory.getProviderAdapter('cloudrun', project)).adapter!;
+    const observed = await adapter.observe!(new EnvironmentRepository().findByProjectAndName(project.id, 'staging')!);
+    observed.services[0].config.cronSchedule = '0 1 * * *';
+    observed.services[0].status = 'running';
+    const result = await new PlanService().plan(project, 'staging', { includeEnvFile: false });
+    expect(result).not.toHaveProperty('error');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.actions.find(a => a.id === 'service:cron')).toMatchObject({ type: 'update',
+      diff: expect.arrayContaining([{ field: 'cronSchedule', from: '0 1 * * *', to: '0 * * * *' }]) });
+  });
+
   it('defers an initially unbound Cloud Run seed until managed CI has exact provider bindings', async () => {
     project = new ProjectRepository().update(project.id, {
       defaultPlatform: 'cloudrun',

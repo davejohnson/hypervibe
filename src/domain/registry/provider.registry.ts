@@ -190,6 +190,8 @@ export interface ProviderMetadata {
   };
   /** Existing provider connections whose authentication shape this adapter can reuse. */
   connectionAliases?: string[];
+  /** Versioned provider-owned runtime projection; changes require reviewed per-consumer rewiring. */
+  storageRuntimeContract?: string;
   maturity?: {
     /** Evidence status for each lifecycle slice implemented by this registration. */
     lifecycle?: Partial<Record<ProviderLifecycleCapability, ProviderCapabilityMaturity>>;

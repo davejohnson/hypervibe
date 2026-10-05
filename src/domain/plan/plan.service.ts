@@ -1,3 +1,4 @@
+import { planScheduleActivations, SCHEDULE_ACTIVATION_OPERATION } from '../services/schedule-activation.service.js';
 import { planApiPolicy } from '../services/api-policy.js';
 import path from 'path';
 import { observeServiceVolumes, planServiceVolumes, retainedVolumeHostingBlock, wireServiceVolumeActions } from '../services/service-volume.service.js';
@@ -2706,18 +2707,23 @@ export class PlanService {
     actions.push(...ios.actions);
     actions.push(...githubConfirmationActions);
 
-    // A CI-managed seed must run only after the exact desired commit is
+    const ciConfigurationPending = checkpointStageActive || ciBindingStage || ciWorkflowPublicationActions.length > 0;
+    const scheduleActivations = ciConfigurationPending ? [] : planScheduleActivations({ environment, environmentSpec, observed });
+    actions.push(...scheduleActivations);
+
+    // Post-release work must run only after the exact desired commit is
     // deployed. Exclude it from the applied-contract marker to avoid a cycle;
-    // the explicit release action below bridges marker -> deploy -> seed.
+    // one release bridges marker -> deploy -> seed and/or schedule activation.
     const managedCiSeedAction = actions.find((action) =>
       action.type !== 'noop'
       && action.metadata?.operation === 'databaseSeed'
       && environmentUsesManagedCi(specResult.spec, environmentName)
     );
+    const postReleaseActions = [...scheduleActivations, ...(managedCiSeedAction ? [managedCiSeedAction] : [])];
+    const postReleaseIds = new Set(postReleaseActions.map(action => action.id));
     const appliedSpecHashDependsOn = actions
-      .filter((action) => action.type !== 'noop' && action.id !== managedCiSeedAction?.id)
+      .filter((action) => action.type !== 'noop' && !postReleaseIds.has(action.id))
       .map((action) => action.id);
-    const ciConfigurationPending = checkpointStageActive || ciBindingStage || ciWorkflowPublicationActions.length > 0;
     const appliedSpecHash = ciConfigurationPending
       ? {
           actions: [] as PlanAction[],
@@ -2739,7 +2745,7 @@ export class PlanService {
     const releaseDependsOn = appliedSpecHashChanges.length > 0
       ? appliedSpecHashChanges.map((action) => action.id)
       : appliedSpecHashDependsOn;
-    const managedSeedRelease = managedCiSeedAction
+    const managedPostRelease = postReleaseActions.length > 0
       && resolveDevOpsSelection(specResult.spec)?.ci?.provider === 'github-actions'
       && !ciConfigurationPending
       ? await planGitHubActionsRelease({
@@ -2749,17 +2755,23 @@ export class PlanService {
         dependsOn: releaseDependsOn,
       })
       : { warnings: [] };
-    if (managedSeedRelease.action && managedCiSeedAction) {
-      actions.push(managedSeedRelease.action);
-      managedCiSeedAction.dependsOn = Array.from(new Set([
-        ...(managedCiSeedAction.dependsOn ?? []),
-        managedSeedRelease.action.id,
-      ]));
-    } else if (managedCiSeedAction) {
-      managedCiSeedAction.metadata = {
-        ...(managedCiSeedAction.metadata ?? {}),
-        blockedReason: 'managed_ci_release_unavailable',
-      };
+    if (managedPostRelease.action) actions.push(managedPostRelease.action);
+    for (const action of postReleaseActions) {
+      if (managedPostRelease.action && !managedPostRelease.action.metadata?.blockedReason) {
+        action.dependsOn = Array.from(new Set([...(action.dependsOn ?? []), managedPostRelease.action.id]));
+        if (action.metadata?.operation === SCHEDULE_ACTIVATION_OPERATION) {
+          const release = managedPostRelease.action.metadata!;
+          action.metadata.release = Object.fromEntries(['repository', 'workflow', 'ref', 'targetSha', 'workflowInputHash', 'workflowContentHash']
+            .map(key => [key, release[key]]));
+        }
+      } else {
+        action.metadata = { ...(action.metadata ?? {}), blockedReason: action.metadata?.operation === SCHEDULE_ACTIVATION_OPERATION
+          && resolveDevOpsSelection(specResult.spec)?.ci?.provider !== 'github-actions'
+          ? 'schedule_activation_ci_unsupported' : 'managed_ci_release_unavailable' };
+        if (action.metadata.blockedReason === 'schedule_activation_ci_unsupported') {
+          action.reason = 'Prepared schedule activation currently requires managed GitHub Actions release evidence; the selected CI provider is unsupported.';
+        }
+      }
     }
 
     if (
@@ -3166,7 +3178,7 @@ export class PlanService {
       ...(Object.keys(integrationFingerprints).length > 0 ? { integrationFingerprints } : {}),
       actions,
       unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged, ...loadBalancer.unmanaged],
-      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...sourceMaintenanceWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...maintenance.warnings, ...dataMigration.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...loadBalancer.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...managedSeedRelease.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings, ...filterWarnings],
+      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...sourceMaintenanceWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...maintenance.warnings, ...dataMigration.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...loadBalancer.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...managedPostRelease.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings, ...filterWarnings],
       ...(planInputRequired.length > 0 ? { inputRequired: planInputRequired } : {}),
       ...(planOverrides ? { overrides: planOverrides } : {}),
     };

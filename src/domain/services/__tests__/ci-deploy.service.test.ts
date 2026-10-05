@@ -2317,7 +2317,7 @@ describe('ci-deploy.service', () => {
 
       expect(result.action).toMatchObject({
         type: 'update',
-        reason: `Deploy and verify exact commit ${sha} before database seeding`,
+        reason: `Deploy and verify exact commit ${sha} before post-release work`,
       });
     });
 

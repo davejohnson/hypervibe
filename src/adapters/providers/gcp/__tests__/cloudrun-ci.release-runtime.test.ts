@@ -230,6 +230,63 @@ describe('Cloud Run generated release runtime', () => {
     expect(requests.some((request) => request.url.includes('/executions'))).toBe(false);
   });
 
+  it('retains writable release Job metadata without replaying execution tokens during PATCH', async () => {
+    const metadata = {
+      name: `projects/${projectId}/locations/${region}/jobs/${jobName}`,
+      labels: { owner: 'operations' },
+      annotations: { 'example.com/reviewed': 'yes' },
+      client: 'reviewed-client',
+      clientVersion: '1.2.3',
+      launchStage: 'BETA',
+      binaryAuthorization: { useDefault: true },
+      etag: 'reviewed-etag',
+    };
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      requests.push({ url, init });
+      if (url === jobUrl && !init?.method) return Response.json(readyJob({
+        ...metadata,
+        uid: 'job-uid',
+        startExecutionToken: 'previous-start-token',
+        runExecutionToken: 'previous-run-token',
+      }));
+      if (url === jobUrl && init?.method === 'PATCH') {
+        return Response.json({ name: configureOperationName, done: true });
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    }) as unknown as typeof fetch;
+    const loaded = await runtime(fetchImpl);
+    await loaded.runCloudRunReleaseCommands({
+      releases: [release()],
+      imageUri: 'candidate@sha256:' + 'b'.repeat(64),
+      projectId,
+      region,
+      headers: { Authorization: 'Bearer token', 'Content-Type': 'application/json' },
+      authHeaders: { Authorization: 'Bearer token' },
+      getJson: vi.fn(async (url: string) => {
+        if (url === serviceUrl) return {
+          name: `projects/${projectId}/locations/${region}/services/${serviceName}`,
+          template: { containers: [{}] },
+        };
+        if (url === jobUrl) return readyJob();
+        if (url === `${jobUrl}:run`) return { name: runOperationName, done: false };
+        throw new Error(`Unexpected getJson ${url}`);
+      }),
+      waitOperation: vi.fn(async (operation: { name: string }) => operation.name === runOperationName
+        ? { ...operation, done: true, response: { name: executionName, completionStatus: 'EXECUTION_SUCCEEDED' } }
+        : { ...operation, done: true }),
+    });
+
+    const update = requests.find((request) => request.init?.method === 'PATCH');
+    expect(update?.url).toBe(jobUrl);
+    const body = JSON.parse(String(update?.init?.body));
+    expect(body).toMatchObject(metadata);
+    for (const field of ['uid', 'generation', 'observedGeneration', 'terminalCondition', 'startExecutionToken', 'runExecutionToken']) {
+      expect(body).not.toHaveProperty(field);
+    }
+  });
+
   it('fails on the exact new execution even if stale execution history could be successful', async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);

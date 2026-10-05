@@ -139,6 +139,7 @@ export function managedCiEnvironmentBindings(
   providerJobNames: string[];
   boundServiceNames: string[];
   serviceIdsByName: Record<string, string>;
+  resourceUidsByName: Record<string, string>;
   releaseJobNamesByName: Record<string, string>;
   releaseResources: BranchDeployReleaseResource[];
 } {
@@ -151,6 +152,7 @@ export function managedCiEnvironmentBindings(
   const providerImageUris: string[] = [];
   const providerJobNames: string[] = [];
   const serviceIdsByName: Record<string, string> = {};
+  const resourceUidsByName: Record<string, string> = {};
   const releaseJobNamesByName: Record<string, string> = {};
   const releaseResources: BranchDeployReleaseResource[] = [];
   for (const [serviceName, service] of Object.entries(services)) {
@@ -170,6 +172,7 @@ export function managedCiEnvironmentBindings(
       : undefined;
     if (imageUri) providerImageUris.push(imageUri);
     if (serviceId) serviceIdsByName[serviceName] = serviceId;
+    if (typeof record?.resourceUid === 'string' && record.resourceUid.trim()) resourceUidsByName[serviceName] = record.resourceUid;
     if (releaseJobName) releaseJobNamesByName[serviceName] = releaseJobName;
     const isScheduledJob = record?.resourceType === 'scheduledJob' || Boolean(jobName);
     if (isScheduledJob) {
@@ -214,6 +217,7 @@ export function managedCiEnvironmentBindings(
     providerJobNames,
     boundServiceNames,
     serviceIdsByName,
+    resourceUidsByName,
     releaseJobNamesByName,
     releaseResources: normalizedReleaseResources(releaseResources),
   };
@@ -292,6 +296,9 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
       const desiredService = effectiveEnvironment.services[resource.logicalName]!;
       return {
         ...resource,
+        ...(bindings.resourceUidsByName[resource.logicalName]
+          ? { providerResourceUid: bindings.resourceUidsByName[resource.logicalName] }
+          : {}),
         startCommand: desiredService.startCommand?.trim() || null,
         healthCheckPath: resource.workloadKind !== 'cron'
           ? desiredService.healthCheckPath?.trim() || null

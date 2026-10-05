@@ -546,7 +546,7 @@ export function diffEnvironment(input: {
       if (live.workloadKind !== serviceSpec.workloadKind && workloadKindObservable) {
         diff.push({ field: 'workloadKind', from: live.workloadKind, to: serviceSpec.workloadKind });
       }
-      const noCode = live.status === 'empty';
+      const noCode = live.status === 'empty' && live.scheduleActivationPending !== true;
       const sourceIssue = spec.deploy?.strategy === 'branch' && expectedSource
         ? diffDeploySource(expectedSource, live)
         : undefined;
@@ -1703,6 +1703,7 @@ function diffServiceConfig(
     ['public', 'public'],
   ];
   for (const [key, field] of fields) {
+    if (key === 'cronSchedule' && live.scheduleActivationPending === true && live.config.cronSchedule === undefined) continue;
     const wanted = spec[key];
     if (wanted === undefined) continue;
     const actual = live.config[key];

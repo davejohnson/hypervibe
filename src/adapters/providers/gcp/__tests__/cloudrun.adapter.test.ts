@@ -2179,7 +2179,7 @@ it('refuses to create a release job when neither it nor the existing service has
     expect(serviceBody.annotations).toEqual({});
   });
 
-  it('fails closed before mutating a first deferred cron workload', async () => {
+  it('does not create a first deferred cron workload when the holding image cannot be built', async () => {
     const adapter = new CloudRunAdapter();
     await adapter.connect({
       projectId: 'gcp-project',
@@ -2219,11 +2219,10 @@ it('refuses to create a release job when neither it nor the existing service has
       status: 'failed',
       receipt: {
         success: false,
-        error: expect.stringMatching(/first.*scheduled.*managed CI/i),
-        data: { phase: 'bootstrap_scheduled_job' },
+        data: { phase: 'image_build' },
       },
     });
-    expect(fetchMock.mock.calls.every(([, init]) => (init?.method ?? 'GET') === 'GET')).toBe(true);
+    expect(fetchMock.mock.calls.some(([url, init]) => String(url).includes('run.googleapis.com') && (init?.method ?? 'GET') !== 'GET')).toBe(false);
   });
 
   it('refuses a direct Cloud Build when GitHub credentials would enter build metadata', async () => {

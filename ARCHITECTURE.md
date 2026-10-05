@@ -1660,9 +1660,11 @@ Generated workflows must gate image deployment on the environment-scoped
 only that environment plus its applicable delegated-secret declarations.
 `hv_plan` models updating this marker after the infrastructure actions that
 affect a release, and `hv_apply` updates it only after those actions complete.
-A non-noop database seed is excluded from the marker's own dependencies to
-avoid a cycle; in a managed-CI environment, an explicit exact-SHA release
-depends on the marker and the seed depends on that verified release. This preserves
+A non-noop database seed or deferred schedule activation is excluded from the
+marker's own dependencies to avoid a cycle. In a managed-CI environment, one
+explicit exact-SHA release depends on the marker and the post-release actions
+depend on that verified release. Deferred activation is omitted from identity,
+workflow-publication and checkpoint prerequisite stages. This preserves
 automatic code-only staging deploys while preventing a changed desired-state
 contract from deploying before reconciliation. Missing, failed, pending, or
 unconfirmed dependencies must leave the previous marker intact.
@@ -1676,6 +1678,9 @@ accepted content and those inputs have not changed, a newer Hypervibe renderer
 does not create drift. Intentional renderer migrations increment the renderer
 revision included in the input hash. A real workflow input change renders the
 latest template and requires review.
+Provider-owned GitHub workflow migrations declare an optional CI renderer revision
+in registry metadata; only that provider's input hash changes, while the shared
+server program fingerprint remains unchanged.
 
 Generated deployment workflow files use a dedicated per-environment managed-CI
 branch and reviewable pull request, so unrelated repository infrastructure
@@ -1698,6 +1703,35 @@ rollback path remains independent of repository contents without copying the
 validator into every step. Workload kind and provider resource type are
 orthogonal: for example, Railway schedules a cron workload on a service, while
 Cloud Run may bind one to a job.
+
+Deferred cron preparation records a real, untriggered Job and a strict pending
+activation binding containing its name, immutable provider UID and holding
+image. A configured holding resource is not an active application schedule.
+The initial apply creates neither a Scheduler trigger nor an execution. CI may
+update only that already-bound Job; its reviewed runtime input preserves the
+provider UID and rejects a same-named replacement before writing. The UID is
+binding authority, separate from the cross-environment program fingerprint.
+
+After the exact application release, a separate confirmation-gated activation
+action validates the shared release evidence and freshly observes the Job's
+UID, immutable image, command and runtime identity. It verifies or grants
+`roles/run.invoker` to that runtime principal on the exact Job before creating
+the trigger; an enabled Scheduler alone does not prove invocation permission.
+An uncertain trigger create retains pending state; a later reviewed attempt
+may reconcile only an exact matching trigger. Unknown observations or a
+mismatched trigger never authorize repair or adoption. Binding identity remains
+stable when activation completes, including the provider UID.
+Status reports pending activation as out of sync even when the holding Job's
+configuration is otherwise correct. Completion receipts distinguish provider
+writes from read-only reconciliation and the local binding update.
+
+The named hosting-provider contract is explicit: Cloud Run implements deferred
+cron activation; Railway and DigitalOcean retain their existing native cron
+paths; Fly, ECS, Azure Container Apps and Vercel do not advertise cron workload
+support. The initial post-release activation bridge uses GitHub Actions evidence;
+other CI providers remain explicitly unsupported for that bridge. This does not
+expand the separate creation-only deployment capability. Offline transport and
+emitted-workflow tests do not establish live provider compatibility.
 
 The deterministic branch must be reusable after merge commits, squash merges,
 and rebase merges. A retained branch may be reset to the current default-branch
@@ -2006,6 +2040,33 @@ explicitly read-only adapter method, while provider registration, resource-group
 creation, and credential derivation remain inside the reviewed apply action.
 Temporary CLI sessions may provision, observe, and migrate storage, but are not
 projected into deployed workloads as long-lived secrets.
+
+Cloud Run with GCS uses the exact workload service account through ADC, rather
+than installing the reused deployment connection's key in the application.
+The hosting adapter observes the exact bound Service or Job; missing bound resources,
+scope/principal mismatches, unknown reads and unbound lookalikes block runtime
+wiring. A confirmed-absent unbound workload may return its configured future
+identity, explicitly distinguished from an observed identity. The legacy GCS
+JSON credential slot is emptied during reviewed runtime synchronization so an
+old key cannot override ADC. Standalone GCS credentials for remote hosting
+retain their explicit existing behavior; this is not a general migration of
+every provider to workload identities.
+
+The explicit `gcsAccess="lifecycle"` preparation preview separates deployer
+`roles/storage.admin` from runtime `roles/storage.objectUser`. Existing cloud
+preparation grants these at **project scope**, so runtime object access spans
+all buckets in that GCP project. It is not bucket-scoped or isolation between
+environments sharing that project. Actual IAM mutation still requires reviewed
+confirmation. See [storage runtime identity](docs/storage-runtime-identity.md)
+for the named-provider compatibility matrix and evidence limits.
+
+Storage runtime projection is versioned by the storage provider registry and
+recorded per consumer after its verified environment update. Legacy or stale
+versions require reviewed rewiring even when every variable name is present;
+all wiring actions become no-ops once every consumer has converged. This is
+applied configuration history, not continuous proof of remote credential absence.
+Amazon S3, Azure Blob Storage and Railway retain their existing runtime access
+contracts.
 
 An ambiguous bucket-create outcome is retained as scoped recovery evidence and
 blocks retries. If complete provider observation later proves that an unresolved

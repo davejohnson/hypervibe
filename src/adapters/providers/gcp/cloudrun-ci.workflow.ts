@@ -418,7 +418,7 @@ ${releaseRuntime}
               const expectedName = 'projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/services/' + serviceName;
               if (current.name !== expectedName) throw new Error('Cloud Run service lookup returned a different resource identity');
               const runtimeResource = cloudRunRuntimeResource(runtimeResources, 'service', serviceName);
-              const filesystem = cloudRunFilesystemGuard(current, 'service');
+              const filesystem = cloudRunFilesystemGuard(current, 'service', runtimeResource.providerResourceUid);
               const template = current.template || {};
               const containers = Array.isArray(template.containers) && template.containers.length > 0 ? [...template.containers] : [primaryServiceContainer(current)];
               containers[0] = cloudRunContainerWithRuntime(containers[0], process.env.IMAGE_URI, runtimeResource);
@@ -443,17 +443,17 @@ ${releaseRuntime}
               const expectedName = 'projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/jobs/' + jobName;
               if (current.name !== expectedName) throw new Error('Cloud Run job lookup returned a different resource identity');
               const runtimeResource = cloudRunRuntimeResource(runtimeResources, 'job', jobName);
-              const filesystem = cloudRunFilesystemGuard(current, 'job');
+              const filesystem = cloudRunFilesystemGuard(current, 'job', runtimeResource.providerResourceUid);
               const template = current.template || {};
               const taskTemplate = template.template || {};
               const containers = Array.isArray(taskTemplate.containers) && taskTemplate.containers.length > 0 ? [...taskTemplate.containers] : [primaryJobContainer(current)];
               containers[0] = cloudRunContainerWithRuntime(containers[0], process.env.IMAGE_URI, runtimeResource);
               taskTemplate.containers = containers;
               template.template = taskTemplate;
-              const operation = await googleJson(url + '?updateMask=template.template.containers', {
+              const operation = await googleJson(url, {
                 method: 'PATCH',
                 headers,
-                body: JSON.stringify({ ...(filesystem.etag ? { etag: filesystem.etag } : {}), template }),
+                body: JSON.stringify(cloudRunJobUpdateBody(current, { ...(filesystem.etag ? { etag: filesystem.etag } : {}), template })),
               }, 'Cloud Run job deployment for ' + jobName);
               await waitOperation(operation, 'job ' + jobName + ' deployment');
               await waitReady(url, jobName, 'job', process.env.IMAGE_URI, runtimeResource, filesystem);

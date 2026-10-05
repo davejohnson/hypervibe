@@ -10,6 +10,7 @@ import {
   GCS_PREPARE_ADDONS,
   CLOUD_RUN_RUNTIME_BASE_ROLES,
   CLOUD_RUN_RUNTIME_QUEUE_ROLES,
+  CLOUD_RUN_RUNTIME_STORAGE_ROLES,
   CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT_ACCESS_ROLES,
   getCloudPrepareProfile,
   getCloudPreparation,
@@ -78,6 +79,7 @@ interface CloudPreparePlan {
   member: string;
   runtimeMember?: string;
   runtimeGrantRoles: string[];
+  runtimeGrantScope?: 'project';
   runtimeRevokeRoles: string[];
   runtimeServiceAccountGrantRoles: string[];
   gcsAccess?: GcsPrepareAccess;
@@ -184,6 +186,7 @@ export async function runCloudPrepare(params: {
     ? Array.from(new Set([
       ...(basePreparation ? CLOUD_RUN_RUNTIME_BASE_ROLES : []),
       ...(queueAccess === 'lifecycle' ? CLOUD_RUN_RUNTIME_QUEUE_ROLES : []),
+      ...(gcsAccess === 'lifecycle' ? CLOUD_RUN_RUNTIME_STORAGE_ROLES : []),
     ]))
     : [];
   const runtimeRevokeRoles: string[] = resolved.runtimeServiceAccountEmail && queueAccess === 'remove'
@@ -224,6 +227,7 @@ export async function runCloudPrepare(params: {
     member,
     ...(runtimeMember ? { runtimeMember } : {}),
     runtimeGrantRoles,
+    ...(runtimeGrantRoles.length > 0 ? { runtimeGrantScope: 'project' as const } : {}),
     runtimeRevokeRoles,
     runtimeServiceAccountGrantRoles,
     ...(gcsAccess ? { gcsAccess } : {}),

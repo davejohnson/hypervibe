@@ -1,3 +1,4 @@
+import { applyScheduleActivation } from '../domain/services/schedule-activation.service.js';
 import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js';
 import { applyApiPolicy, planApiPolicy } from '../domain/services/api-policy.js';
 import { applyDatabaseScopeBinding } from './apply-database-scope-binding.js';
@@ -1467,6 +1468,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
         action,
         appliedSpecHash: true,
       });
+    }
+    if (capability === 'hosting.schedule.activate') {
+      return applyScheduleActivation({ project: applyProject, spec, environmentName: envName, action });
     }
     if (capability === 'github.ci.release') {
       const expectedRepository = parseGitHubRepoFromRemote(applyProject.gitRemoteUrl);

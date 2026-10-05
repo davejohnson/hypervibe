@@ -1,3 +1,4 @@
+import { scheduleActivationActionMetadataSchema } from '../services/schedule-activation.service.js';
 import { INBOUND_SIGNING_KEY_OPERATION } from '../services/email-inbound-signing.service.js';
 import { databaseCheckpointIdentitySchema } from '../services/database-checkpoint.js';
 import { backupPolicyActionId, backupPolicyActionMetadataSchema, DAILY_BACKUP_OPERATION } from '../services/backup-policy-plan.service.js';
@@ -168,6 +169,7 @@ export type PlanMutationCapability =
   | 'messaging.runtime.sync'
   | 'local.environment.record'
   | 'hosting.project.ensure'
+  | 'hosting.schedule.activate'
   | 'hosting.service.converge'
   | 'hosting.service.rollback';
 
@@ -745,6 +747,11 @@ export function resolvePlanActionAuthority(
     && metadataString(action, 'desiredHash')
   ) {
     return authority(action, 'github.applied-spec-hash.sync');
+  }
+  if (action.type === 'update' && exactResource(action, 'service') && action.billable === true && action.requiresConfirm === true
+      && action.id === `service:${action.resource.name}:activate-schedule`
+      && scheduleActivationActionMetadataSchema.safeParse(action.metadata).success) {
+    return authority(action, 'hosting.schedule.activate');
   }
   if (
     isGitHubActionsReleaseAction(action)

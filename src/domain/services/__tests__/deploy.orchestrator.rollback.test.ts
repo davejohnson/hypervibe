@@ -25,6 +25,25 @@ describe('DeployOrchestrator local rollback', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  it('retains an untriggered scheduled Job binding when a later workload fails', async () => {
+    const project = new ProjectRepository().create({ name: 'pending-cron', defaultPlatform: 'cloudrun' });
+    const envRepo = new EnvironmentRepository();
+    const environment = envRepo.create({ projectId: project.id, name: 'staging', platformBindings: { provider: 'cloudrun', projectId: 'gcp-project' } });
+    const serviceRepo = new ServiceRepository();
+    const cron = serviceRepo.create({ projectId: project.id, name: 'cron', buildConfig: { builder: 'dockerfile', workloadKind: 'cron', startCommand: 'npm run cron', cronSchedule: '0 8 * * *' } });
+    const web = serviceRepo.create({ projectId: project.id, name: 'web', buildConfig: { builder: 'dockerfile' } });
+    const scheduleActivation = { version: 1, state: 'pending', jobName: 'cron-job', jobUid: 'owned-uid', holdingImage: `repo/holding@sha256:${'a'.repeat(64)}` };
+    const adapter = {
+      name: 'cloudrun', capabilities: { supportsDeferredCronActivation: true },
+      deploy: vi.fn(async (service) => service.name === 'cron' ? {
+        serviceId: cron.id, externalId: 'cron-job', status: 'configured', receipt: { success: true, message: 'Prepared', data: { jobName: 'cron-job', resourceType: 'scheduledJob', resourceUid: 'owned-uid', scheduleActivation } },
+      } : { serviceId: web.id, status: 'failed', receipt: { success: false, message: 'Failure', error: 'later failure' } }),
+    } as unknown as IHostingAdapter;
+    const result = await new DeployOrchestrator().execute({ project, environment, services: [cron, web], adapter, ensureProject: false, deferProviderDeployment: true });
+    expect(result.success).toBe(false);
+    expect(envRepo.findById(environment.id)?.platformBindings).toMatchObject({ services: { cron: { serviceId: 'cron-job', jobName: 'cron-job', resourceUid: 'owned-uid', scheduleActivation } } });
+  });
+
   it.each([
     {
       provider: 'railway',
