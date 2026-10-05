@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "source": {
+    "repository": "https://github.com/davejohnson/project-template",
+    "commit": "959c3d4df40f32bae1975241ceee8d9a327ab889",
+    "directory": "agent-guidance"
+  },
+  "files": {
+    "WORKFLOW.md": "ce67e5de7d44157e65a26dbbbced69269a866744a5049131cd49dc69fcb15d9a",
+    "product-design/SKILL.md": "a9392c6bf1546e9010e45a3add8da0720f7190893550c20eaae7d9a41b10143c",
+    "product-design/references/examples.md": "d38db613a44ce3740f23764435bbd2e0059fad80628cd8d9352bca86f7f8494d"
+  }
+}
