@@ -439,7 +439,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Grant roles/cloudscheduler.admin when using cron jobs.',
       'Grant roles/pubsub.editor when using queues.',
       'For read-only GCS inventory, explicitly prepare gcsAccess="inspect" to enable storage.googleapis.com and grant roles/storage.viewer.',
-      'For GCS create, object transfer, or teardown, explicitly prepare gcsAccess="lifecycle" to grant roles/storage.admin after reviewing that broader project-scoped access.',
+      'For GCS create, object transfer, or teardown, explicitly prepare gcsAccess="lifecycle" to grant roles/storage.admin to the deploy identity and, when configured, roles/storage.objectUser to the distinct runtime identity. Both grants are project-scoped; runtime object access spans every bucket in that GCP project, not just one bucket.',
       'For read-only Memorystore inventory, explicitly prepare memorystoreAccess="inspect" to enable Redis/Compute APIs and grant roles/redis.viewer plus roles/compute.networkViewer.',
       'For Memorystore create or teardown, explicitly prepare memorystoreAccess="lifecycle" to grant roles/redis.admin, roles/compute.networkViewer, and roles/compute.networkUser after reviewing that broader project-scoped access.',
       'For Pub/Sub queue lifecycle, explicitly prepare queueAccess="lifecycle" to enable pubsub.googleapis.com and grant roles/pubsub.editor. Other preparation modes never add that role.',

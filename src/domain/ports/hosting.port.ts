@@ -48,6 +48,8 @@ export interface HostingCapabilities {
   supportsDeferredDeploy?: boolean;
   /** Enforces creation-only admission at the final provider mutation boundary. */
   supportsCreateOnlyDeploy?: boolean;
+  /** Can prepare an untriggered cron workload and activate it after a verified CI release. */
+  supportsDeferredCronActivation?: boolean;
 
   /** Whether the adapter can provider-verify reversible workload suspension. */
   supportsMaintenance?: boolean;
@@ -111,9 +113,11 @@ export interface HostingBindings {
     imageUri?: string;
     workloadKind?: string;
     resourceType?: string;
+    resourceUid?: string;
     jobName?: string;
     schedulerJobName?: string;
     releaseJobName?: string;
+    scheduleActivation?: PendingScheduleActivation;
     source?: {
       repo?: string;
       branch?: string;
@@ -127,6 +131,16 @@ export interface HostingBindings {
    */
   serviceCreateRecovery?: Record<string, HostingServiceCreateRecovery>;
 }
+
+/** Durable identity of a configured workload whose trigger is deliberately absent. */
+export const pendingScheduleActivationSchema = z.object({
+  version: z.literal(1),
+  state: z.literal('pending'),
+  jobName: z.string().trim().min(1),
+  jobUid: z.string().trim().min(1),
+  holdingImage: z.string().regex(/^[^\s@]+@sha256:[a-f0-9]{64}$/),
+}).strict();
+export type PendingScheduleActivation = z.infer<typeof pendingScheduleActivationSchema>;
 
 export interface HostingServiceCreateRecovery {
   provider: string;
@@ -240,9 +254,11 @@ const hostingServiceBindingSchema = z.object({
   imageUri: z.string().optional(),
   workloadKind: z.string().optional(),
   resourceType: z.string().optional(),
+  resourceUid: nonEmptyHostingBindingString.optional(),
   jobName: nonEmptyHostingBindingString.optional(),
   schedulerJobName: nonEmptyHostingBindingString.optional(),
   releaseJobName: nonEmptyHostingBindingString.optional(),
+  scheduleActivation: pendingScheduleActivationSchema.optional(),
   source: z.object({
     repo: z.string().optional(),
     branch: z.string().optional(),

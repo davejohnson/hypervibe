@@ -13,6 +13,7 @@ import type {
   StorageObjectPayload,
   StorageObjectRevision,
   StorageObservationTarget,
+  StorageRuntimeTarget,
 } from '../../../domain/ports/storage.port.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
 import {
@@ -35,6 +36,7 @@ const ServiceAccountSchema = z.object({
 const GcsStorageAuthenticationSchema = z.object({
   authMode: z.enum(['default', 'serviceAccount']).default('serviceAccount'),
   credentials: z.string().min(1, 'GCP service account JSON is required').optional(),
+  runtimeServiceAccountEmail: z.string().trim().email().optional(),
 }).strict().superRefine((value, ctx) => {
   if (value.authMode === 'default' || value.credentials) return;
   ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['credentials'], message: 'GCP service account JSON is required' });
@@ -44,8 +46,8 @@ export const GcsStorageCredentialsSchema = z.preprocess((input) => {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
   const record = input as Record<string, unknown>;
   if (record.type === 'service_account') return { authMode: 'serviceAccount', credentials: JSON.stringify(record) };
-  if (!record.authMode && record.credentials) record.authMode = 'serviceAccount';
-  return { authMode: record.authMode, credentials: record.credentials };
+  return { authMode: record.authMode ?? (record.credentials ? 'serviceAccount' : undefined),
+    credentials: record.credentials, runtimeServiceAccountEmail: record.runtimeServiceAccountEmail };
 }, GcsStorageAuthenticationSchema);
 
 export type GcsStorageCredentials = z.infer<typeof GcsStorageCredentialsSchema>;
@@ -285,6 +287,7 @@ export class GcsStorageAdapter implements IStorageAdapter {
     privateOnly: true,
     supportsUsageObservation: true,
     supportsObjectTransfer: true,
+    usesWorkloadIdentity: true,
   };
 
   private credentials: GcsStorageCredentials | null = null;
@@ -325,6 +328,11 @@ export class GcsStorageAdapter implements IStorageAdapter {
       throw new Error('GCP service account credentials must be valid JSON.');
     }
     this.serviceAccount = ServiceAccountSchema.parse(parsed);
+    const runtimePrincipal = this.credentials.runtimeServiceAccountEmail;
+    if (runtimePrincipal && (runtimePrincipal === this.serviceAccount.client_email
+      || !runtimePrincipal.endsWith(`@${this.serviceAccount.project_id}.iam.gserviceaccount.com`))) {
+      throw new Error('GCS runtime identity must be distinct from the management identity and belong to the connected GCP project.');
+    }
   }
 
   async disconnect(): Promise<void> {
@@ -556,19 +564,37 @@ export class GcsStorageAdapter implements IStorageAdapter {
     _environment: Environment,
     context: StorageContext,
     externalId: string,
-    _name: string
+    _name: string,
+    target?: StorageRuntimeTarget
   ): Promise<Record<string, string>> {
     await this.assertContext(context);
+    const runtimeEnv = {
+      OBJECT_STORAGE_PROVIDER: 'gcs', OBJECT_STORAGE_BUCKET: externalId,
+      GOOGLE_CLOUD_PROJECT: context.projectId, GOOGLE_CLOUD_STORAGE_BUCKET: externalId,
+    };
+    if (target?.hostingProvider === 'cloudrun') {
+      const identity = target.identity;
+      const configuredPrincipal = this.connectedCredentials().runtimeServiceAccountEmail;
+      if (identity?.provider !== 'gcp' || identity.scope.projectId !== context.projectId
+        || !identity.principal.endsWith(`@${context.projectId}.iam.gserviceaccount.com`)
+        || identity.principal === this.serviceAccount?.client_email
+        || (configuredPrincipal && configuredPrincipal !== identity.principal)) {
+        throw new Error('GCS runtime access requires the exact distinct Cloud Run workload identity and GCP project scope.');
+      }
+      // Empty the legacy slot on reviewed runtime synchronization. Leaving an
+      // old key installed would override workload ADC in existing consumers.
+      return { ...runtimeEnv, GOOGLE_CLOUD_CREDENTIALS_JSON: '' };
+    }
     if (!this.serviceAccount) {
       throw new Error(
         'Google Application Default Credentials can manage and migrate storage, but Hypervibe will not copy a local gcloud user session into a deployed service. Reuse the verified Cloud Run connection/workload identity or connect a service-account JSON for cross-cloud runtime access.'
       );
     }
+    if (target?.connectionProvider !== 'gcs') {
+      throw new Error('GCS runtime access on this host requires an explicitly selected standalone GCS connection; a reused deployment identity cannot be installed in application runtime.');
+    }
     return {
-      OBJECT_STORAGE_PROVIDER: 'gcs',
-      OBJECT_STORAGE_BUCKET: externalId,
-      GOOGLE_CLOUD_PROJECT: context.projectId,
-      GOOGLE_CLOUD_STORAGE_BUCKET: externalId,
+      ...runtimeEnv,
       GOOGLE_CLOUD_CREDENTIALS_JSON: this.connectedCredentials().credentials!,
     };
   }
@@ -680,6 +706,7 @@ providerRegistry.register({
     credentialsSchema: GcsStorageCredentialsSchema,
     setupHelpUrl: 'https://cloud.google.com/iam/docs/keys-create-delete',
     credentials: {
+      agentManagedKeys: ['runtimeServiceAccountEmail'],
       automationSecretKeys: { GCP_SERVICE_ACCOUNT_JSON: 'credentials' },
       defaultScalarKey: 'credentials',
       supportsNativeCliAuth: true,
@@ -688,6 +715,7 @@ providerRegistry.register({
       ],
     },
     connectionAliases: ['cloudrun'],
+    storageRuntimeContract: 'gcs-native-adc-v1',
     maturity: {
       lifecycle: {
         storage: { status: 'ready-for-live' },

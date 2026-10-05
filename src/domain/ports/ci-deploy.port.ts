@@ -13,6 +13,8 @@ export interface BranchDeployReleaseResource {
 
 /** Exact reviewed runtime configuration for one provider-bound workload. */
 export interface BranchDeployRuntimeResource extends BranchDeployReleaseResource {
+  /** Provider-confirmed lifetime identity, retained independently of bootstrap state. */
+  providerResourceUid?: string;
   startCommand: string | null;
   healthCheckPath: string | null;
 }
@@ -130,6 +132,8 @@ export interface CiWorkflowDiagnostic {
 
 export interface ProviderCiDeployMetadata {
   displayName: string;
+  /** Opt-in migration of accepted GitHub workflow inputs for this provider only. */
+  rendererRevision?: number;
   requiredSecrets: string[];
   secretCredentialKeys?: Record<string, string>;
   requiresGitHubPackagePull?: boolean;

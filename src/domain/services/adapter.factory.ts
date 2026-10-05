@@ -18,6 +18,8 @@ export interface AdapterResult<T> {
   success: boolean;
   adapter?: T;
   error?: string;
+  /** Actual verified connection selected, distinct from the requested capability provider. */
+  connectionProvider?: string;
 }
 
 /**
@@ -254,7 +256,7 @@ export class AdapterFactory {
       const credentials = this.secretStore.decryptObject(connection.credentialsEncrypted);
       const adapter = await providerRegistry.createAdapter<T>(providerName, credentials);
 
-      return { success: true, adapter };
+      return { success: true, adapter, connectionProvider: connection.provider };
     } catch (error) {
       return {
         success: false,
@@ -282,7 +284,7 @@ export class AdapterFactory {
       return { success: false, error: base.error || `No ${providerName} adapter available` };
     }
     try {
-      return { success: true, adapter: await derive(base.adapter, { project }) as T };
+      return { success: true, adapter: await derive(base.adapter, { project }) as T, connectionProvider: base.connectionProvider };
     } catch (error) {
       return {
         success: false,

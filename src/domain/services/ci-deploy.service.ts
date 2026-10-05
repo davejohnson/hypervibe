@@ -1263,7 +1263,7 @@ export async function planGitHubActionsRelease(params: {
   const repository = parseGitHubRepoFromRemote(params.project.gitRemoteUrl);
   const [owner, repo] = repository?.split('/') ?? [];
   if (!repository || !owner || !repo) {
-    warnings.push(`Cannot plan the ${params.environmentName} release required by database.seedCommand.`);
+    warnings.push(`Cannot plan the ${params.environmentName} release required by post-release work.`);
     return { warnings };
   }
   const contract = resolveManagedWorkflowContract({
@@ -1302,9 +1302,9 @@ export async function planGitHubActionsRelease(params: {
   });
   const adapterResult = getGitHubAdapter(repository);
   if ('error' in adapterResult) {
-    warnings.push(`Cannot observe the exact release required before database seeding: ${adapterResult.error}`);
+    warnings.push(`Cannot observe the exact release required before post-release work: ${adapterResult.error}`);
     return {
-      action: action(false, `Cannot verify the ${params.environmentName} release required before database seeding`, {
+      action: action(false, `Cannot verify the ${params.environmentName} release required before post-release work`, {
         blockedReason: 'github_release_observation_unknown',
       }),
       warnings,
@@ -1349,7 +1349,7 @@ export async function planGitHubActionsRelease(params: {
         true,
         existing && !mustReleaseAfterPrerequisites
           ? `Exact commit ${targetSha} is already verified as deployed`
-          : `Deploy and verify exact commit ${targetSha} before database seeding`,
+          : `Deploy and verify exact commit ${targetSha} before post-release work`,
         {
           targetSha,
           workflowInputHash,
@@ -1362,9 +1362,9 @@ export async function planGitHubActionsRelease(params: {
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    warnings.push(`Cannot observe the exact release required before database seeding: ${message}`);
+    warnings.push(`Cannot observe the exact release required before post-release work: ${message}`);
     return {
-      action: action(false, `Cannot verify the ${params.environmentName} release required before database seeding`, {
+      action: action(false, `Cannot verify the ${params.environmentName} release required before post-release work`, {
         blockedReason: 'github_release_observation_unknown',
       }),
       warnings,

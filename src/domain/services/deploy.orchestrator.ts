@@ -11,6 +11,7 @@ import type {
 import {
   createHostingServiceCreateRecovery,
   parseHostingServiceCreateRecovery,
+  pendingScheduleActivationSchema,
   type HostingBindings,
   type HostingServiceCreateRecovery,
   type IHostingAdapter,
@@ -153,6 +154,7 @@ export class DeployOrchestrator {
     const errors: string[] = [];
     const tx = new InfraTransaction();
     const pendingServiceCreateRecoveries = new Map<string, HostingServiceCreateRecovery>();
+    const pendingScheduleBindings = new Map<string, HostingBindings['services'][string]>();
 
     // Create run record
     const run = this.runRepo.create({
@@ -182,6 +184,12 @@ export class DeployOrchestrator {
       }
       for (const step of plan.steps) {
         const receipt = await this.executeStep(step, options, tx);
+        if (receipt.status === 'success' && typeof receipt.result?.service === 'string'
+          && receipt.result.scheduleActivation) {
+          const binding = (this.envRepo.findById(options.environment.id)?.platformBindings as Partial<HostingBindings>)
+            ?.services?.[receipt.result.service];
+          if (binding?.scheduleActivation) pendingScheduleBindings.set(receipt.result.service, binding);
+        }
         if (receipt.status === 'failure' && typeof receipt.result?.service === 'string') {
           const recovery = parseHostingServiceCreateRecovery(receipt.result.serviceCreateRecovery);
           if (recovery) {
@@ -211,7 +219,8 @@ export class DeployOrchestrator {
         const recoveryPersistenceError = this.persistServiceCreateRecoveries(
           options.environment.id,
           pendingServiceCreateRecoveries,
-          rollback
+          rollback,
+          pendingScheduleBindings
         );
         if (recoveryPersistenceError) errors.push(recoveryPersistenceError);
       }
@@ -243,7 +252,8 @@ export class DeployOrchestrator {
       const recoveryPersistenceError = this.persistServiceCreateRecoveries(
         options.environment.id,
         pendingServiceCreateRecoveries,
-        rollback
+        rollback,
+        pendingScheduleBindings
       );
       const caughtErrors = [String(error), ...(recoveryPersistenceError ? [recoveryPersistenceError] : [])];
       this.runRepo.updateStatus(run.id, 'failed', caughtErrors.join('; '));
@@ -277,7 +287,8 @@ export class DeployOrchestrator {
   private persistServiceCreateRecoveries(
     environmentId: string,
     recoveries: ReadonlyMap<string, HostingServiceCreateRecovery>,
-    rollback: InfraTransactionRollbackResult
+    rollback: InfraTransactionRollbackResult,
+    pendingScheduleBindings: ReadonlyMap<string, HostingBindings['services'][string]> = new Map()
   ): string | undefined {
     const recoveriesToPersist = new Map(recoveries);
     for (const failed of rollback.failed) {
@@ -313,7 +324,7 @@ export class DeployOrchestrator {
         returnedName: providerResourceName,
       }));
     }
-    if (recoveriesToPersist.size === 0) return undefined;
+    if (recoveriesToPersist.size === 0 && pendingScheduleBindings.size === 0) return undefined;
     try {
       const environment = this.envRepo.findById(environmentId);
       if (!environment) {
@@ -327,7 +338,11 @@ export class DeployOrchestrator {
         currentRecovery[serviceName] = recovery;
       }
       const updated = this.envRepo.updatePlatformBindings(environmentId, {
-        serviceCreateRecovery: currentRecovery,
+        ...(recoveriesToPersist.size > 0 ? { serviceCreateRecovery: currentRecovery } : {}),
+        ...(pendingScheduleBindings.size > 0 ? { services: {
+          ...((environment.platformBindings as Partial<HostingBindings>).services ?? {}),
+          ...Object.fromEntries(pendingScheduleBindings),
+        } } : {}),
       });
       return updated
         ? undefined
@@ -592,6 +607,14 @@ export class DeployOrchestrator {
             ? result.externalId
             : undefined;
           const deployData = (result.receipt.data ?? {}) as Record<string, unknown>;
+          const scheduleActivation = deployData.scheduleActivation === undefined ? undefined
+            : pendingScheduleActivationSchema.parse(deployData.scheduleActivation);
+          if (scheduleActivation && (options.adapter.capabilities.supportsDeferredCronActivation !== true
+            || scheduleActivation.jobName !== externalId || deployData.jobName !== externalId
+            || deployData.resourceUid !== scheduleActivation.jobUid
+            || serviceWorkloadKind(service) !== 'cron')) {
+            throw new Error('Provider returned inconsistent pending schedule identity.');
+          }
           const receiptEnvironmentId = typeof deployData.environmentId === 'string'
             && deployData.environmentId.trim().length > 0
             ? deployData.environmentId
@@ -618,11 +641,12 @@ export class DeployOrchestrator {
               serviceId: externalId,
               url: result.url ?? existingServiceBinding.url,
               workloadKind: serviceWorkloadKind(service),
+              ...(scheduleActivation ? { scheduleActivation } : {}),
             };
             if (typeof deployData.imageUri === 'string') {
               services[service.name].imageUri = deployData.imageUri;
             }
-            for (const key of ['resourceType', 'jobName', 'schedulerJobName', 'releaseJobName'] as const) {
+            for (const key of ['resourceType', 'resourceUid', 'jobName', 'schedulerJobName', 'releaseJobName'] as const) {
               if (typeof deployData[key] === 'string') {
                 services[service.name][key] = deployData[key];
               }
@@ -790,6 +814,7 @@ export class DeployOrchestrator {
               publicUrl: result.url,
               externalId,
               ...(providerResourceName ? { providerResourceName } : {}),
+              ...(scheduleActivation ? { scheduleActivation } : {}),
               ...(serviceCreateRecovery
                 ? { serviceCreateRecovery }
                 : {}),

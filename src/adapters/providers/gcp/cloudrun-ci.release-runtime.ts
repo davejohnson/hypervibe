@@ -3,6 +3,7 @@ import type {
   BranchDeployTarget,
 } from '../../../domain/ports/ci-deploy.port.js';
 import { cloudRunFilesystemIdentity } from './cloudrun-volume-runtime.js';
+import { cloudRunJobUpdateBody } from './cloudrun-job-request.js';
 
 export const CLOUD_RUN_PROVIDER_COMMAND_IMAGE_ENTRYPOINT =
   'echo "Hypervibe applies the runtime command during Cloud Run release." >&2; exit 1';
@@ -42,15 +43,22 @@ export function cloudRunContainerBuildStartCommand(target: BranchDeployTarget): 
 /** Shared provider-API runtime used by GitHub and portable CI Cloud Run deploys. */
 export function buildCloudRunReleaseRuntime(): string {
   return `${cloudRunFilesystemIdentity.toString()}
-function cloudRunFilesystemGuard(resource, kind) {
+${cloudRunJobUpdateBody.toString()}
+function cloudRunFilesystemGuard(resource, kind, expectedUid) {
   const template = kind === 'service' ? resource?.template : resource?.template?.template;
   const fingerprint = cloudRunFilesystemIdentity(template);
+  if (expectedUid !== undefined && (resource?.uid !== expectedUid || typeof resource?.etag !== 'string' || !resource.etag)) {
+    throw new Error('Cloud Run bound resource UID or concurrency identity changed before update');
+  }
   if (fingerprint !== null && (typeof resource.uid !== 'string' || !resource.uid || typeof resource.etag !== 'string' || !resource.etag)) {
     throw new Error('Cloud Run filesystem requires an observable UID and etag identity before update');
   }
-  return { fingerprint, uid: resource?.uid, etag: resource?.etag };
+  return { fingerprint, uid: resource?.uid, etag: resource?.etag, verifyUid: expectedUid !== undefined };
 }
 function cloudRunVerifyFilesystem(resource, kind, expected) {
+  if (expected?.verifyUid && resource?.uid !== expected.uid) {
+    throw new Error('Cloud Run bound resource UID changed during deployment');
+  }
   if (!expected || expected.fingerprint === null) return;
   const template = kind === 'service' ? resource?.template : resource?.template?.template;
   if (resource?.uid !== expected.uid || cloudRunFilesystemIdentity(template) !== expected.fingerprint) {
@@ -113,10 +121,11 @@ function cloudRunRuntimeResourcesFromBase64(encoded, serviceNames, jobNames) {
   if (resources.length !== expected.size) throw new Error('Cloud Run runtime resources do not match the reviewed provider bindings');
   const seen = new Set();
   for (const resource of resources) {
-    const keys = Object.keys(resource || {}).sort().join(',');
+    const keys = Object.keys(resource || {}).filter((key) => key !== 'providerResourceUid').sort().join(',');
     if (keys !== 'healthCheckPath,logicalName,providerResourceId,providerResourceType,startCommand,workloadKind'
         || typeof resource.logicalName !== 'string' || !resource.logicalName.trim()
         || typeof resource.providerResourceId !== 'string' || !resource.providerResourceId.trim()
+        || (resource.providerResourceUid !== undefined && (typeof resource.providerResourceUid !== 'string' || !resource.providerResourceUid.trim()))
         || !['web', 'worker', 'cron'].includes(resource.workloadKind)
         || !['service', 'job'].includes(resource.providerResourceType)
         || expected.get(resource.providerResourceId) !== resource.providerResourceType
@@ -252,7 +261,7 @@ async function runCloudRunReleaseCommands(params) {
     const filesystem = cloudRunFilesystemGuard({ ...previousJob, template: jobSpec.template }, 'job');
     if (previousJob.etag) jobSpec.etag = previousJob.etag;
     const mutationResponse = await fetch(jobUrl, {
-      method: 'PATCH', headers: params.headers, body: JSON.stringify(jobSpec),
+      method: 'PATCH', headers: params.headers, body: JSON.stringify(cloudRunJobUpdateBody(previousJob, jobSpec)),
     });
     const mutation = await cloudRunReleaseResponse(mutationResponse, 'Cloud Run release job configuration for ' + jobName);
     const operationPrefix = 'projects/' + params.projectId + '/locations/' + params.region + '/operations/';

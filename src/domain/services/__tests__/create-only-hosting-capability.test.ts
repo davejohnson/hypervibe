@@ -46,6 +46,16 @@ function fixture(provider: string, capabilities: ProviderCapabilities = adapters
 }
 
 describe('creation-only hosting admission', () => {
+  it('checks deferred cron activation against every registered hosting workload contract', () => {
+    expect(Object.keys(adapters).sort()).toEqual(providerRegistry.namesFor('hosting').sort());
+    const cronProviders = ['railway', 'cloudrun', 'digitalocean'];
+    for (const [provider, adapter] of Object.entries(adapters)) {
+      expect(providerRegistry.getMetadata(provider)?.lifecycle?.hosting?.workloadKinds.includes('cron'), provider).toBe(cronProviders.includes(provider));
+      expect(adapter.capabilities.supportsDeferredCronActivation === true, provider).toBe(provider === 'cloudrun');
+      expect(typeof adapter.activateSchedule === 'function', provider).toBe(provider === 'cloudrun');
+    }
+  });
+
   it('accounts for every named hosting adapter and attests only the implemented Railway/Fly boundary', () => {
     expect(Object.keys(adapters).sort()).toEqual(providerRegistry.namesFor('hosting').sort());
     for (const [provider, adapter] of Object.entries(adapters)) {

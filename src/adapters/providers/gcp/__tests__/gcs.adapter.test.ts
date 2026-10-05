@@ -291,7 +291,9 @@ describe('GcsStorageAdapter', () => {
       'OBJECT_STORAGE_PROVIDER', 'OBJECT_STORAGE_BUCKET', 'GOOGLE_CLOUD_PROJECT',
       'GOOGLE_CLOUD_STORAGE_BUCKET', 'GOOGLE_CLOUD_CREDENTIALS_JSON',
     ]);
-    await expect(adapter.getRuntimeEnv(environment(), context, 'managed', 'documents')).resolves.toMatchObject({
+    await expect(adapter.getRuntimeEnv(environment(), context, 'managed', 'documents', {
+      hostingProvider: 'railway', connectionProvider: 'gcs',
+    })).resolves.toMatchObject({
       OBJECT_STORAGE_PROVIDER: 'gcs', GOOGLE_CLOUD_STORAGE_BUCKET: 'managed', GOOGLE_CLOUD_PROJECT: 'cloud-project',
     });
     const transfer = await adapter.openObjectTransfer(environment(), context, 'managed');

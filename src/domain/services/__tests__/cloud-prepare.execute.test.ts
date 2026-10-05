@@ -484,6 +484,48 @@ describe('runCloudPrepare', () => {
     expect(lifecyclePlan.grantRoles).toEqual(['roles/storage.admin']);
   });
 
+  it('previews project-scoped object access on the runtime identity separately from storage administration', async () => {
+    const project = seedProject();
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    const result = await runCloudPrepare({ project, provider: 'cloudrun', gcsAccess: 'lifecycle',
+      runtimeServiceAccountEmail: RUNTIME_SERVICE_ACCOUNT_EMAIL });
+    expect(result).toMatchObject({ mode: 'preview', plan: {
+      grantRoles: ['roles/storage.admin'], runtimeGrantRoles: ['roles/storage.objectUser'],
+      runtimeGrantScope: 'project',
+      runtimeMember: `serviceAccount:${RUNTIME_SERVICE_ACCOUNT_EMAIL}`,
+    } });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('applies GCS object access to the runtime principal without granting it bucket administration', async () => {
+    const project = seedProject();
+    let policy = { version: 1, etag: 'gcs-policy', bindings: [] as Array<{ role: string; members: string[] }> };
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/v3/projects/hls-property-care')) return Response.json({
+        name: 'projects/123456789012', projectId: 'hls-property-care', state: 'ACTIVE',
+      });
+      if (url.endsWith('/services/storage.googleapis.com')) return Response.json({
+        name: 'projects/123456789012/services/storage.googleapis.com', parent: 'projects/123456789012',
+        config: { name: 'storage.googleapis.com' }, state: 'ENABLED',
+      });
+      if (url.endsWith(':getIamPolicy')) return Response.json(policy);
+      if (url.endsWith(':setIamPolicy') && init?.method === 'POST') {
+        policy = JSON.parse(String(init.body)).policy;
+        return Response.json(policy);
+      }
+      throw new Error(`Unexpected synthetic GCP request: ${url}`);
+    }));
+    const result = await runCloudPrepare({ project, provider: 'cloudrun', gcsAccess: 'lifecycle',
+      runtimeServiceAccountEmail: RUNTIME_SERVICE_ACCOUNT_EMAIL, adminAccessToken: 'synthetic-token', confirm: true });
+    expect(result.success).toBe(true);
+    expect(policy.bindings).toContainEqual({ role: 'roles/storage.admin', members: [`serviceAccount:${DEPLOY_SERVICE_ACCOUNT_EMAIL}`] });
+    expect(policy.bindings).toContainEqual({ role: 'roles/storage.objectUser', members: [`serviceAccount:${RUNTIME_SERVICE_ACCOUNT_EMAIL}`] });
+    expect(policy.bindings.filter((binding) => binding.members.includes(`serviceAccount:${RUNTIME_SERVICE_ACCOUNT_EMAIL}`)))
+      .toEqual([{ role: 'roles/storage.objectUser', members: [`serviceAccount:${RUNTIME_SERVICE_ACCOUNT_EMAIL}`] }]);
+  });
+
   it('keeps Memorystore and Pub/Sub preparation independently explicit', async () => {
     const project = seedProject();
 

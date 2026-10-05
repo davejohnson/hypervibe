@@ -52,6 +52,20 @@ export interface HostingServiceDeleteOptions {
   allowMutation: boolean;
 }
 
+/** Non-secret provider-proven workload principal; never a deployment credential. */
+export interface ProviderRuntimeIdentity {
+  provider: string;
+  principal: string;
+  scope: Record<string, string>;
+  source: 'observed' | 'configured';
+}
+
+export interface ScheduleActivationOptions {
+  expectedImage: string;
+  expectedJobUid: string;
+  sourceCommitSha: string;
+}
+
 /** Non-secret desired hosting placement selected by the spec, not credentials. */
 export interface HostingTargetOptions {
   region?: string;
@@ -99,6 +113,8 @@ export interface ProviderCapabilities {
   supportsDeferredDeploy?: boolean;
   /** Enforces creation-only admission at the final provider mutation boundary. */
   supportsCreateOnlyDeploy?: boolean;
+  /** Prepare an untriggered cron workload, then activate only its verified release. */
+  supportsDeferredCronActivation?: boolean;
 
   /** Whether bounded operations can temporarily expose an internal database. */
   supportsTemporaryDatabaseAccess?: boolean;
@@ -178,6 +194,12 @@ export interface IProviderAdapter {
 
   /** Configure non-secret desired placement before observation or mutation. */
   configureTarget?(target: HostingTargetOptions): void | Promise<void>;
+
+  /** Read the exact workload identity; configured is allowed only after confirmed absence. */
+  resolveRuntimeIdentity?(environment: Environment, service: Pick<Service, 'name' | 'buildConfig'>): Promise<ProviderRuntimeIdentity>;
+
+  /** Grants exact Job invocation and creates its trigger after fresh workload/UID/image verification. */
+  activateSchedule?(service: Service, environment: Environment, options: ScheduleActivationOptions): Promise<DeployResult>;
 
   ensureProject(
     projectName: string,

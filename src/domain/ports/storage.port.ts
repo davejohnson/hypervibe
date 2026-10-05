@@ -13,6 +13,15 @@ export interface StorageCapabilities {
   supportsObjectTransfer?: boolean;
   /** Provider guarantees getCredentials returns bucket-scoped credentials, never a control-plane account key. */
   recoveryCredentialScope?: 'bucket';
+  /** Runtime projection needs the selected host's provider-owned workload identity. */
+  usesWorkloadIdentity?: boolean;
+}
+
+export interface StorageRuntimeTarget {
+  hostingProvider: string;
+  /** Actual selected connection provider, including an explicit alias. */
+  connectionProvider?: string;
+  identity?: import('./provider.port.js').ProviderRuntimeIdentity;
 }
 
 export interface StorageObjectRecord {
@@ -217,7 +226,7 @@ export interface IStorageAdapter {
   observe(environment: Environment, context: StorageContext, target?: StorageObservationTarget): Promise<ObservedStorage[]>;
   ensureBucket(environment: Environment, context: StorageContext, name: string, region: string): Promise<StorageEnsureResult>;
   /** Resolve provider-native runtime configuration. Secret values never enter receipts or bindings. */
-  getRuntimeEnv(environment: Environment, context: StorageContext, externalId: string, name: string): Promise<Record<string, string>>;
+  getRuntimeEnv(environment: Environment, context: StorageContext, externalId: string, name: string, target?: StorageRuntimeTarget): Promise<Record<string, string>>;
   /** S3-compatible data-plane credentials when this provider exposes them. */
   getCredentials?(environment: Environment, context: StorageContext, externalId: string): Promise<StorageCredentials>;
   /**

@@ -64,6 +64,8 @@ export interface ObservedService {
   status: 'running' | 'failed' | 'empty' | 'unknown';
   /** Provider confirms an owned namespace exists but its workload does not yet exist. */
   identityOnly?: boolean;
+  /** Exact bound workload and trigger state observed; final activation receipt is still pending. */
+  scheduleActivationPending?: boolean;
   /**
    * Provider-native identity of the deployment or revision currently selected
    * for this service. This is used to prove that runtime configuration changes

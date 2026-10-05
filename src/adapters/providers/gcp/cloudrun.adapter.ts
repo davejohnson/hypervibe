@@ -7,6 +7,7 @@ import type {
   JobResult,
   ProviderCapabilities,
   DeploymentMutationOptions,
+  ProviderRuntimeIdentity,
 } from '../../../domain/ports/provider.port.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import { serviceWorkloadKind, type Service } from '../../../domain/entities/service.entity.js';
@@ -14,10 +15,11 @@ import type { Component, ComponentType } from '../../../domain/entities/componen
 import { providerRegistry, type ProviderInspectionRequest } from '../../../domain/registry/provider.registry.js';
 import { buildCloudRunGitHubActionsSteps, CLOUDRUN_CI_REQUIRED_SECRETS } from './cloudrun-ci.workflow.js';
 import { buildCloudRunPortableRecipe } from './cloudrun-ci.recipe.js';
-import { parseHostingBindings, type EnvironmentTaskOptions, type GetLogsOptions, type LogEntry } from '../../../domain/ports/hosting.port.js';
+import { createHostingServiceCreateRecovery, parseHostingBindings, pendingScheduleActivationSchema, type EnvironmentTaskOptions, type GetLogsOptions, type LogEntry } from '../../../domain/ports/hosting.port.js';
 import * as pubsub from './pubsub.api.js';
 import { CloudRunServiceVolumes } from './cloudrun-service-volume.js';
 import { cloudRunFilesystemIdentity } from './cloudrun-volume-runtime.js';
+import { cloudRunJobUpdateBody } from './cloudrun-job-request.js';
 import { parseServiceVolumeBindings } from '../../../domain/services/service-volume.service.js';
 import { pubsubQueueResourceIds } from '../../../domain/services/queue-env.js';
 import { hashEnvValue, type ObservedService, type ObservedState } from '../../../domain/ports/observe.port.js';
@@ -236,9 +238,17 @@ interface CloudRunExecution {
 
 interface CloudSchedulerJob {
   name?: string;
+  description?: string;
   schedule?: string;
   timeZone?: string;
   state?: string;
+  httpTarget?: {
+    uri?: string;
+    httpMethod?: string;
+    body?: string;
+    headers?: Record<string, string>;
+    oauthToken?: { serviceAccountEmail?: string; scope?: string };
+  };
   status?: {
     code?: number;
     message?: string;
@@ -463,6 +473,7 @@ export class CloudRunAdapter implements
     queues: { backend: 'pubsub' },
     supportsOneOffTasks: true,
     supportsDeferredDeploy: true,
+    supportsDeferredCronActivation: true,
     supportsMaintenance: true,
   };
 
@@ -498,6 +509,47 @@ export class CloudRunAdapter implements
     } catch {
       throw new Error('Invalid service account JSON');
     }
+  }
+
+  async resolveRuntimeIdentity(environment: Environment, service: Pick<Service, 'name' | 'buildConfig'>): Promise<ProviderRuntimeIdentity> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const { projectId, region } = this.credentials;
+    if (environment.platformBindings.projectId !== projectId
+      || environment.platformBindings.environmentId !== region
+      || (environment.platformBindings.region && environment.platformBindings.region !== region)) {
+      throw new Error('Cloud Run workload runtime identity requires the exact bound project and region scope.');
+    }
+    const principal = this.requiredRuntimeServiceAccountEmail('workload storage access');
+    if (principal === this.serviceAccountCreds?.client_email) {
+      throw new Error('Cloud Run workload runtime identity cannot be the deployment identity.');
+    }
+    const bindings = environment.platformBindings as {
+      services?: Record<string, { serviceId?: string; jobName?: string }>;
+    };
+    const isJob = serviceWorkloadKind(service) === 'cron';
+    const binding = bindings.services?.[service.name];
+    const boundId = isJob ? binding?.jobName : binding?.serviceId;
+    if (binding && !boundId) throw new Error('Cloud Run workload binding has no matching runtime resource identity.');
+    const name = this.workloadResourceName(environment, service.name, boundId);
+    if (!/^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(name)) {
+      throw new Error('Cloud Run workload binding has an invalid runtime resource name.');
+    }
+    const resourceName = `projects/${projectId}/locations/${region}/${isJob ? 'jobs' : 'services'}/${name}`;
+    const current = isJob
+      ? await this.getCloudRunJob(name, await this.getAccessToken())
+      : await this.getService(name);
+    if (!current) {
+      if (boundId) throw new Error('Bound Cloud Run workload is missing; runtime identity remains unknown.');
+      return { provider: 'gcp', principal, scope: { projectId }, source: 'configured' };
+    }
+    if (!boundId) throw new Error('Unbound Cloud Run workload already exists; explicit adoption is required before runtime access.');
+    const observedPrincipal = isJob
+      ? this.jobRuntimeIdentity(current as CloudRunJob)
+      : this.serviceRuntimeIdentity(current as CloudRunService);
+    if (current.name !== resourceName || observedPrincipal !== principal) {
+      throw new Error('Observed Cloud Run workload resource or runtime identity does not match the selected destination.');
+    }
+    return { provider: 'gcp', principal, scope: { projectId }, source: 'observed' };
   }
 
   configureTarget(target: { region?: string }): void {
@@ -729,21 +781,6 @@ export class CloudRunAdapter implements
         },
       };
     }
-    if (bootstrapDeployment && workloadKind === 'cron') {
-      return {
-        serviceId: service.id,
-        status: 'failed',
-        receipt: {
-          success: false,
-          message: `Cloud Run cannot safely prepare the first CI-managed scheduled job ${service.name}`,
-          error: 'The first deferred scheduled workload for managed CI needs an exact candidate job image before Hypervibe can safely enable its scheduler. Deploy a web or worker service first; scheduled-job bootstrap remains fail-closed.',
-          data: {
-            provider: this.name,
-            phase: 'bootstrap_scheduled_job',
-          },
-        },
-      };
-    }
     const explicitImageUri = bootstrapDeployment
       ? undefined
       : deferredImageUri ?? this.imageUriForService(service, envVars);
@@ -812,6 +849,7 @@ export class CloudRunAdapter implements
         schedulerJobName: this.schedulerResourceName(serviceName, serviceBinding?.schedulerJobName),
         deploymentDeferred,
         deferredExpectedImageUri: deferredImageUri,
+        bootstrapDeployment,
       });
     }
 
@@ -1208,6 +1246,7 @@ export class CloudRunAdapter implements
     schedulerJobName: string;
     deploymentDeferred?: boolean;
     deferredExpectedImageUri?: string;
+    bootstrapDeployment?: boolean;
   }): Promise<DeployResult> {
     const {
       service,
@@ -1219,11 +1258,14 @@ export class CloudRunAdapter implements
       schedulerJobName,
       deploymentDeferred,
       deferredExpectedImageUri,
+      bootstrapDeployment,
     } = params;
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }
 
+    let createAttempted = false;
+    let createdIdentity: { name: string; uid?: string } | undefined;
     try {
       if (!service.buildConfig.cronSchedule?.trim()) {
         return {
@@ -1243,15 +1285,25 @@ export class CloudRunAdapter implements
       // Merge with the live job container env so redeploys don't wipe vars
       // injected outside this call (e.g. DATABASE_URL at provision time).
       const currentJob = await this.getCloudRunJob(jobName, token);
+      const serviceBinding = parseHostingBindings(environment).services?.[service.name];
+      const pendingActivation = serviceBinding?.scheduleActivation;
       if (deploymentDeferred) {
         const freshDeferredProblem = this.deferredWorkloadProblem({
-          expectedExisting: true,
+          expectedExisting: Boolean(serviceBinding?.jobName),
           observedExisting: Boolean(currentJob),
           imageUri: this.primaryJobContainer(currentJob)?.image,
           runtimeServiceAccountEmail: this.jobRuntimeIdentity(currentJob),
         }, 'scheduled job', deferredExpectedImageUri);
         if (freshDeferredProblem) {
           return this.deferredDeployFailure(service, freshDeferredProblem);
+        }
+      }
+      if (pendingActivation && (pendingActivation.jobName !== jobName || currentJob?.uid !== pendingActivation.jobUid)) {
+        throw new Error('The pending scheduled workload identity changed; refusing to configure or activate it.');
+      }
+      if (bootstrapDeployment || pendingActivation) {
+        if (await this.getCloudSchedulerJob(schedulerJobName, token)) {
+          throw new Error('A pending scheduled workload has an existing trigger; explicit reconciliation is required before mutation.');
         }
       }
       const vpcAccess = await this.resolveVpcAccess(
@@ -1299,6 +1351,10 @@ export class CloudRunAdapter implements
         jobName,
         jobSpec,
         description: 'scheduled job',
+        ...(deploymentDeferred ? { bindingAuthority: serviceBinding?.jobName ? 'bound' as const : 'unbound' as const } : {}),
+        onCreateAttempt: () => { createAttempted = true; },
+        onCreateAccepted: (identity) => { createdIdentity = identity; },
+        ...(serviceBinding?.resourceUid || pendingActivation ? { expectedUid: serviceBinding?.resourceUid ?? pendingActivation!.jobUid } : {}),
       });
       this.assertReleaseJobConfiguration(readyJob, jobName, jobSpec);
       this.assertVpcAccess(
@@ -1306,6 +1362,23 @@ export class CloudRunAdapter implements
         vpcAccess,
         `Cloud Run job ${jobName}`
       );
+
+      if (bootstrapDeployment || pendingActivation) {
+        const scheduleActivation = pendingScheduleActivationSchema.parse(pendingActivation ?? {
+          version: 1, state: 'pending', jobName, jobUid: readyJob.uid, holdingImage: imageUri,
+        });
+        return {
+          serviceId: service.id, externalId: jobName, status: 'configured',
+          receipt: {
+            success: true,
+            message: `Prepared untriggered scheduled job ${jobName}; schedule activation requires a verified CI release and reviewed apply`,
+            data: {
+              resourceType: 'scheduledJob', resourceUid: scheduleActivation.jobUid, jobName, imageUri, environmentId: region,
+              createdJob, createdScheduler: false, deploymentDeferred: true, scheduleActivation,
+            },
+          },
+        };
+      }
 
       const { created: createdScheduler } = await this.upsertCloudSchedulerJob({
         token,
@@ -1318,11 +1391,12 @@ export class CloudRunAdapter implements
           ?? this.requiredRuntimeServiceAccountEmail('scheduled job'),
       });
 
-      const cleanupWarning = await this.deleteCloudRunServiceIfExists(jobName, token);
+      const cleanupWarning = serviceBinding?.resourceUid
+        ? undefined : await this.deleteCloudRunServiceIfExists(jobName, token);
 
       return {
         serviceId: service.id,
-        externalId: schedulerJobName,
+        externalId: serviceBinding?.serviceId === jobName ? jobName : schedulerJobName,
         status: deploymentDeferred ? 'configured' : 'deployed',
         receipt: {
           success: true,
@@ -1331,6 +1405,7 @@ export class CloudRunAdapter implements
             : `Deployed scheduled job ${jobName} to Cloud Run and Cloud Scheduler`,
           data: {
             resourceType: 'scheduledJob',
+            ...(serviceBinding?.resourceUid ? { resourceUid: serviceBinding.resourceUid } : {}),
             jobName,
             schedulerJobName,
             schedule: service.buildConfig.cronSchedule.trim(),
@@ -1356,13 +1431,101 @@ export class CloudRunAdapter implements
     } catch (error) {
       return {
         serviceId: service.id,
+        ...(createdIdentity ? { externalId: jobName } : {}),
         status: 'failed',
         receipt: {
           success: false,
           message: `Scheduled job deployment failed for ${service.name}`,
           error: this.formatError(error),
+          ...(createAttempted ? { data: {
+            environmentId: this.credentials.region,
+            serviceCreateRecovery: createHostingServiceCreateRecovery({
+              provider: this.name, resourceName: jobName,
+              providerScope: { projectId: this.credentials.projectId, environmentId: this.credentials.region },
+              state: createdIdentity ? 'identified' : 'unresolved',
+              ...(createdIdentity ? { serviceId: jobName, returnedName: jobName } : {}),
+            }),
+          } } : {}),
         },
       };
+    }
+  }
+
+  async activateSchedule(
+    service: Service,
+    environment: Environment,
+    options: { expectedImage: string; expectedJobUid: string; sourceCommitSha: string }
+  ): Promise<DeployResult> {
+    try {
+      if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+      const bindings = parseHostingBindings(environment);
+      if (bindings.projectId !== this.credentials.projectId
+        || (bindings.environmentId && bindings.environmentId !== this.credentials.region)) {
+        throw new Error('Schedule activation requires the exact bound provider project and region.');
+      }
+      const binding = bindings.services?.[service.name];
+      const pending = binding?.scheduleActivation;
+      if (serviceWorkloadKind(service) !== 'cron' || !pending
+        || pending.jobName !== binding?.jobName || binding.serviceId !== pending.jobName
+        || (binding.resourceUid !== undefined && binding.resourceUid !== options.expectedJobUid)
+        || pending.jobUid !== options.expectedJobUid || !/^[a-f0-9]{40}$/.test(options.sourceCommitSha)
+        || !this.isImmutableContainerImage(options.expectedImage) || options.expectedImage === pending.holdingImage) {
+        throw new Error('Schedule activation requires the exact pending workload and a verified immutable application release.');
+      }
+      const token = await this.getAccessToken();
+      const jobName = pending.jobName;
+      const job = await this.getCloudRunJob(jobName, token);
+      const expectedName = `projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs/${jobName}`;
+      const runtimeIdentity = this.requiredRuntimeServiceAccountEmail('scheduled job activation');
+      if (!job || job.name !== expectedName || job.uid !== options.expectedJobUid
+        || !this.cloudRunJobReadiness(job).ready
+        || this.primaryJobContainer(job)?.image !== options.expectedImage
+        || this.containerStartCommand(this.primaryJobContainer(job)) !== this.requiredScheduledJobCommand(service)
+        || this.jobRuntimeIdentity(job) !== runtimeIdentity) {
+        throw new Error('The live scheduled workload does not match the verified release identity, image, command, or runtime principal.');
+      }
+      const schedulerJobName = this.schedulerResourceName(jobName, binding.schedulerJobName);
+      const schedulerSpec = this.cloudSchedulerJobSpec({
+        schedulerJobName, jobName, schedule: service.buildConfig.cronSchedule?.trim() ?? '',
+        timeZone: 'Etc/UTC', runtimeServiceAccountEmail: runtimeIdentity,
+      });
+      const existing = await this.getCloudSchedulerJob(schedulerJobName, token);
+      if (existing && !this.cloudSchedulerMatches(existing, schedulerSpec)) {
+        throw new Error('The existing scheduler does not match the exact reviewed trigger.');
+      }
+      const invokerGrantApplied = await this.ensureScheduledJobInvoker(expectedName, runtimeIdentity, token);
+      // IAM reconciliation takes time. Recheck the exact released Job before
+      // publishing a trigger that can execute it immediately.
+      const latestJob = await this.getCloudRunJob(jobName, token);
+      if (!latestJob || latestJob.name !== expectedName || latestJob.uid !== options.expectedJobUid
+        || !this.cloudRunJobReadiness(latestJob).ready
+        || this.primaryJobContainer(latestJob)?.image !== options.expectedImage
+        || this.containerStartCommand(this.primaryJobContainer(latestJob)) !== this.requiredScheduledJobCommand(service)
+        || this.jobRuntimeIdentity(latestJob) !== runtimeIdentity) {
+        throw new Error('The released Job changed before schedule activation.');
+      }
+      if (!existing) {
+        const response = await fetch(`https://cloudscheduler.googleapis.com/v1/projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs`, {
+          method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(schedulerSpec),
+        });
+        // A conflicting name is never updated or adopted. A lost response can
+        // be reconciled by a later reviewed apply using exact read-back below.
+        if (!response.ok) throw new Error(`Cloud Scheduler activation failed with status ${response.status}.`);
+      }
+      const observed = existing ?? await this.getCloudSchedulerJob(schedulerJobName, token);
+      if (!this.cloudSchedulerMatches(observed, schedulerSpec)) {
+        throw new Error('The scheduler does not match the exact reviewed trigger; refusing to mark activation complete.');
+      }
+      return {
+        serviceId: service.id, externalId: jobName, status: 'configured', receipt: {
+          success: true, message: `Activated schedule for the verified application release of ${service.name}`,
+          data: { jobName, schedulerJobName, scheduleActivated: true, createdScheduler: !existing, invokerGrantApplied, invokerPermissionVerified: true },
+        },
+      };
+    } catch (error) {
+      return { serviceId: service.id, status: 'failed', receipt: { success: false,
+        message: `Schedule activation did not complete for ${service.name}`, error: this.formatError(error) } };
     }
   }
 
@@ -1527,6 +1690,15 @@ export class CloudRunAdapter implements
     }
   }
 
+  private unappliedRuntimeEnvKeys(container: CloudRunContainer | undefined, vars: Record<string, string>): string[] {
+    const observed = new Map(
+      (container?.env ?? [])
+        .filter((entry): entry is { name: string; value?: string } => typeof entry.name === 'string')
+        .map((entry) => [entry.name, entry.value])
+    );
+    return Object.entries(vars).filter(([key, value]) => observed.get(key) !== value).map(([key]) => key);
+  }
+
   async setEnvVars(
     environment: Environment,
     service: Service,
@@ -1611,12 +1783,23 @@ export class CloudRunAdapter implements
           jobName: serviceName,
           jobSpec,
           description: 'scheduled job env update',
+          expectedUid: parseHostingBindings(environment).services?.[service.name]?.resourceUid
+            ?? parseHostingBindings(environment).services?.[service.name]?.scheduleActivation?.jobUid,
+          bindingAuthority: 'bound',
         });
         this.assertVpcAccess(
           readyJob,
           vpcAccess,
           `Cloud Run job ${serviceName}`
         );
+        const unapplied = this.unappliedRuntimeEnvKeys(this.primaryJobContainer(readyJob), runtimeVars);
+        if (unapplied.length > 0) {
+          return {
+            success: false,
+            message: 'Cloud Run accepted the scheduled job update but runtime variables were not verified on the ready job',
+            error: `Failed to verify: ${unapplied.join(', ')}`,
+          };
+        }
 
         return {
           success: true,
@@ -1739,14 +1922,7 @@ export class CloudRunAdapter implements
       const updatedService = await this.waitForCloudRunServiceReady(serviceName, token);
       this.assertVpcAccess(updatedService, vpcAccess, `Cloud Run service ${serviceName}`);
       this.assertPreservedFilesystem(currentService, updatedService);
-      const updatedEnv = new Map(
-        (this.primaryContainer(updatedService)?.env ?? [])
-          .filter((entry): entry is { name: string; value?: string } => typeof entry.name === 'string')
-          .map((entry) => [entry.name, entry.value])
-      );
-      const unapplied = Object.entries(runtimeVars)
-        .filter(([key, value]) => updatedEnv.get(key) !== value)
-        .map(([key]) => key);
+      const unapplied = this.unappliedRuntimeEnvKeys(this.primaryContainer(updatedService), runtimeVars);
       if (unapplied.length > 0) {
         return {
           success: false,
@@ -1852,6 +2028,9 @@ export class CloudRunAdapter implements
           jobName: serviceName,
           jobSpec,
           description: 'scheduled job env removal',
+          expectedUid: parseHostingBindings(environment).services?.[service.name]?.resourceUid
+            ?? parseHostingBindings(environment).services?.[service.name]?.scheduleActivation?.jobUid,
+          bindingAuthority: 'bound',
         });
         const updatedJob = readyJob;
         this.assertVpcAccess(updatedJob, vpcAccess, `Cloud Run job ${serviceName}`);
@@ -2628,16 +2807,7 @@ export class CloudRunAdapter implements
       throw new Error('Not connected. Call connect() first.');
     }
 
-    const bindings = environment.platformBindings as {
-      projectId?: string;
-      environmentId?: string;
-      services?: Record<string, {
-        serviceId?: string;
-        jobName?: string;
-        schedulerJobName?: string;
-        resourceType?: string;
-      }>;
-    };
+    const bindings = parseHostingBindings(environment);
     const observedAt = new Date().toISOString();
 
     if (!bindings.projectId) {
@@ -2782,8 +2952,10 @@ export class CloudRunAdapter implements
         bindingKey ? serviceBindings[bindingKey]?.schedulerJobName : undefined
       );
       let schedulerJob: CloudSchedulerJob | null = null;
+      let schedulerObserved = false;
       try {
         schedulerJob = await this.getCloudSchedulerJob(schedulerJobName, token);
+        schedulerObserved = true;
       } catch (error) {
         serviceObservationKnown = false;
         warnings.push(`Failed to read Cloud Scheduler job ${schedulerJobName}: ${error instanceof Error ? error.message : String(error)}`);
@@ -2792,12 +2964,26 @@ export class CloudRunAdapter implements
       const container = this.primaryJobContainer(liveJob);
       const readiness = this.cloudRunJobReadiness(liveJob);
       const startCommand = this.containerStartCommand(container);
+      const pendingActivation = bindingKey ? serviceBindings[bindingKey]?.scheduleActivation : undefined;
+      const boundUid = bindingKey ? serviceBindings[bindingKey]?.resourceUid : undefined;
+      if (boundUid && liveJob.uid !== boundUid) {
+        serviceObservationKnown = false;
+        warnings.push(`Scheduled workload ${externalId} has a different provider lifetime identity.`);
+      }
+      const pendingIdentityMatches = pendingActivation?.jobName === externalId
+        && pendingActivation?.jobUid === liveJob.uid
+        && liveJob.name === `projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs/${externalId}`;
+      if (pendingActivation && !pendingIdentityMatches) {
+        serviceObservationKnown = false;
+        warnings.push(`Scheduled workload ${externalId} no longer matches its pending activation identity or trigger state.`);
+      }
+      const scheduleActivationPending = Boolean(pendingActivation && pendingIdentityMatches && schedulerObserved);
       const cacheNetwork = this.normalizedVpcAccess(liveJob.template?.template?.vpcAccess);
       services.push({
         name: this.observedServiceName(externalId, liveJob.labels, bindingKey, prefix),
-        externalId: schedulerJob ? schedulerJobName : externalId,
-        // A Job without a Cloud Scheduler trigger is a broken cron: the
-        // missing cronSchedule surfaces as config drift in the diff.
+        externalId: bindingKey && serviceBindings[bindingKey]?.serviceId === externalId
+          ? externalId : schedulerJob ? schedulerJobName : externalId,
+        ...(scheduleActivationPending ? { scheduleActivationPending: true } : {}),
         workloadKind: 'cron',
         customDomains: [],
         config: {
@@ -2806,7 +2992,7 @@ export class CloudRunAdapter implements
           ...(cacheNetwork ? { cacheNetwork } : {}),
         },
         ...this.observedEnvFromContainer(container),
-        status: readiness.ready ? 'running' : readiness.error ? 'failed' : 'unknown',
+        status: scheduleActivationPending && !schedulerJob ? 'empty' : readiness.ready ? 'running' : readiness.error ? 'failed' : 'unknown',
         maintenance: {
           state: schedulerJob?.state === 'PAUSED'
             ? 'suspended'
@@ -4437,8 +4623,39 @@ export class CloudRunAdapter implements
     }
   }
 
-  private async getServiceIamPolicy(resource: string, token: string): Promise<IamPolicy> {
-    const response = await fetch(`https://run.googleapis.com/v2/${resource}:getIamPolicy`, {
+  private async ensureScheduledJobInvoker(resource: string, principal: string, token: string): Promise<boolean> {
+    const read = async () => {
+      const value = await this.getServiceIamPolicy(resource, token, 3);
+      const policy = z.object({
+        etag: z.string().min(1), version: z.number().int().optional(),
+        bindings: z.array(z.object({ role: z.string().min(1), members: z.array(z.string().min(1)),
+          condition: z.object({ expression: z.string().min(1) }).passthrough().optional(),
+        }).passthrough()).optional(),
+      }).passthrough().parse(value);
+      if (policy.bindings?.some(binding => binding.condition) && policy.version !== 3) {
+        throw new Error('Conditional Job IAM bindings require policy version 3.');
+      }
+      return policy;
+    };
+    const policy = await read();
+    const role = 'roles/run.invoker';
+    const member = `serviceAccount:${principal}`;
+    if (this.hasIamBinding(policy.bindings ?? [], role, member)) return false;
+    const bindings = (policy.bindings ?? []).map(binding => ({ ...binding, members: [...binding.members] }));
+    const existing = bindings.find(binding => binding.role === role && !binding.condition);
+    if (existing) existing.members.push(member);
+    else bindings.push({ role, members: [member] });
+    await this.setServiceIamPolicy(resource, { ...policy, version: 3, bindings }, token, 'bindings,etag,version');
+    const verified = await read();
+    if (!this.hasIamBinding(verified.bindings ?? [], role, member)) {
+      throw new Error('The scheduled Job invocation grant could not be verified.');
+    }
+    return true;
+  }
+
+  private async getServiceIamPolicy(resource: string, token: string, policyVersion?: number): Promise<IamPolicy> {
+    const query = policyVersion ? `?options.requestedPolicyVersion=${policyVersion}` : '';
+    const response = await fetch(`https://run.googleapis.com/v2/${resource}:getIamPolicy${query}`, {
       headers: {
         Authorization: `Bearer ${token}`,
       },
@@ -4452,14 +4669,14 @@ export class CloudRunAdapter implements
     return await response.json() as IamPolicy;
   }
 
-  private async setServiceIamPolicy(resource: string, policy: IamPolicy, token: string): Promise<void> {
+  private async setServiceIamPolicy(resource: string, policy: IamPolicy, token: string, updateMask?: string): Promise<void> {
     const response = await fetch(`https://run.googleapis.com/v2/${resource}:setIamPolicy`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ policy }),
+      body: JSON.stringify({ policy, ...(updateMask ? { updateMask } : {}) }),
     });
 
     if (!response.ok) {
@@ -5013,6 +5230,12 @@ export class CloudRunAdapter implements
       const jobName = this.workloadResourceName(environment, service.name, serviceBinding?.jobName);
       const token = await this.getAccessToken();
       const job = await this.getCloudRunJob(jobName, token);
+      if (!expectedExisting && !job) {
+        const scheduler = await this.getCloudSchedulerJob(this.schedulerResourceName(jobName), token);
+        if (scheduler) {
+          throw new Error('An unbound scheduler already targets the fresh workload namespace; explicit reconciliation is required before bootstrap.');
+        }
+      }
       const imageUri = this.primaryJobContainer(job)?.image;
       return {
         expectedExisting,
@@ -5360,6 +5583,9 @@ export class CloudRunAdapter implements
     jobSpec: Record<string, unknown>;
     description: string;
     bindingAuthority?: 'bound' | 'unbound';
+    onCreateAttempt?: () => void;
+    onCreateAccepted?: (identity: { name: string; uid?: string }) => void;
+    expectedUid?: string;
   }): Promise<{ created: boolean; job: CloudRunJob }> {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
@@ -5389,6 +5615,9 @@ export class CloudRunAdapter implements
     if (params.bindingAuthority && liveJob && liveJob.name !== expectedJobName) {
       throw new Error(`Cloud Run ${params.description} lookup returned a different resource identity.`);
     }
+    if (params.expectedUid && (!liveJob || liveJob.uid !== params.expectedUid || !liveJob.etag)) {
+      throw new Error('The bound scheduled workload identity or update precondition changed.');
+    }
     const runtimeServiceAccountEmail = liveJob
       ? liveJob.template?.template?.serviceAccount ?? liveJob.template?.template?.serviceAccountName
       : this.requiredRuntimeServiceAccountEmail(params.description);
@@ -5403,11 +5632,13 @@ export class CloudRunAdapter implements
     }
     candidateTask.serviceAccount = runtimeServiceAccountEmail;
     delete candidateTask.serviceAccountName;
+    if (params.expectedUid) params.jobSpec.etag = liveJob!.etag;
+    if (creatingJob) params.onCreateAttempt?.();
     const upsertResponse = !creatingJob
       ? await fetch(`${jobsBaseUrl}/${params.jobName}`, {
           method: 'PATCH',
           headers,
-          body: JSON.stringify(params.jobSpec),
+          body: JSON.stringify(cloudRunJobUpdateBody(liveJob, params.jobSpec)),
         })
       : await fetch(`${jobsBaseUrl}?jobId=${encodeURIComponent(params.jobName)}`, {
           method: 'POST',
@@ -5421,6 +5652,9 @@ export class CloudRunAdapter implements
     }
 
     const operation = await upsertResponse.json() as CloudRunOperation;
+    if (creatingJob && operation.response?.name === expectedJobName) {
+      params.onCreateAccepted?.({ name: expectedJobName });
+    }
     await this.waitForCloudRunOperation(
       params.token,
       operation,
@@ -5431,6 +5665,9 @@ export class CloudRunAdapter implements
     const jobResourceName = `projects/${projectId}/locations/${region}/jobs/${params.jobName}`;
     if (job.name !== jobResourceName) {
       throw new Error(`Cloud Run ${params.description} became ready with a different resource identity.`);
+    }
+    if (params.expectedUid && job.uid !== params.expectedUid) {
+      throw new Error(`Cloud Run ${params.description} became ready with a different resource UID.`);
     }
     const readyRuntimeServiceAccountEmail = job.template?.template?.serviceAccount
       ?? job.template?.template?.serviceAccountName;
@@ -5468,23 +5705,22 @@ export class CloudRunAdapter implements
     return await response.json() as CloudSchedulerJob;
   }
 
-  private async upsertCloudSchedulerJob(params: {
-    token: string;
+  private cloudSchedulerJobSpec(params: {
     schedulerJobName: string;
     jobName: string;
     schedule: string;
     timeZone: string;
     runtimeServiceAccountEmail: string;
-  }): Promise<{ created: boolean }> {
+  }): CloudSchedulerJob {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }
 
     const { projectId, region } = this.credentials;
-    const baseUrl = `https://cloudscheduler.googleapis.com/v1/projects/${projectId}/locations/${region}/jobs`;
+    if (!params.schedule) throw new Error('Schedule activation requires the reviewed cron schedule.');
     const jobPath = `projects/${projectId}/locations/${region}/jobs/${params.schedulerJobName}`;
     const runUri = `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/jobs/${params.jobName}:run`;
-    const schedulerSpec = {
+    return {
       name: jobPath,
       description: `Run Cloud Run job ${params.jobName}`,
       schedule: params.schedule,
@@ -5500,10 +5736,32 @@ export class CloudRunAdapter implements
         },
       },
     };
+  }
+
+  private cloudSchedulerMatches(observed: CloudSchedulerJob | null, expected: CloudSchedulerJob): boolean {
+    return Boolean(observed && observed.name === expected.name && observed.state === 'ENABLED'
+      && observed.schedule === expected.schedule && observed.timeZone === expected.timeZone
+      && observed.httpTarget?.uri === expected.httpTarget?.uri
+      && observed.httpTarget?.httpMethod === expected.httpTarget?.httpMethod
+      && observed.httpTarget?.body === expected.httpTarget?.body
+      && observed.httpTarget?.oauthToken?.serviceAccountEmail === expected.httpTarget?.oauthToken?.serviceAccountEmail
+      && observed.httpTarget?.oauthToken?.scope === expected.httpTarget?.oauthToken?.scope);
+  }
+
+  private async upsertCloudSchedulerJob(params: {
+    token: string;
+    schedulerJobName: string;
+    jobName: string;
+    schedule: string;
+    timeZone: string;
+    runtimeServiceAccountEmail: string;
+  }): Promise<{ created: boolean }> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const { projectId, region } = this.credentials;
     return this.upsertCloudSchedulerJobOnce({
       ...params,
-      baseUrl,
-      schedulerSpec,
+      baseUrl: `https://cloudscheduler.googleapis.com/v1/projects/${projectId}/locations/${region}/jobs`,
+      schedulerSpec: this.cloudSchedulerJobSpec(params) as Record<string, unknown>,
       retriedAfterEnable: false,
     });
   }
@@ -6300,6 +6558,7 @@ providerRegistry.register({
       },
       ci: {
         displayName: 'Cloud Run',
+        rendererRevision: 1,
         requiredSecrets: CLOUDRUN_CI_REQUIRED_SECRETS,
         secretCredentialKeys: {
           GCP_SERVICE_ACCOUNT_JSON: 'credentials',
