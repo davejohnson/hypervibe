@@ -184,6 +184,23 @@ tests do not expand the pinned-schema certification table above.
 
 ## Changing an integration
 
+Cloud Billing bootstrap regressions execute the real `GcpBootstrapClient`
+through reconstructed HTTP responses and the shared bootstrap preview. Evidence
+is Google's [BillingAccount](https://docs.cloud.google.com/billing/docs/reference/rest/v1/billingAccounts)
+and [ProjectBillingInfo](https://docs.cloud.google.com/billing/docs/reference/rest/v1/ProjectBillingInfo)
+references (both last updated 2025-05-14), the
+[official proto3 definitions](https://github.com/googleapis/googleapis/blob/master/google/cloud/billing/v1/cloud_billing.proto),
+and [ProtoJSON default/null semantics](https://protobuf.dev/programming-guides/json/#presence-and-default-values)
+(reviewed 2026-10-05). These are documentation-based assertions, not a pinned
+schema validator or captured live responses. Omitted/null implicit scalars
+normalize to false/empty; an empty parent denotes a non-subaccount. Malformed
+explicit values and missing/mismatched resource identities still reject.
+Pagination filters closed accounts, preview makes no cloud writes or connection
+changes, confirmation cannot select a closed account, and billing-update polling tolerates disabled
+defaults without accepting them as successful write acknowledgement. These
+regressions run under ordinary `npm test`; they establish a contract defect,
+not which field caused a particular live validation error or live GCP readiness.
+
 Retained service-volume tests additionally exercise Fly, ECS Express/EFS,
 Azure Container Apps/classic Azure Files, and Cloud Run/Filestore through real
 clients with synthetic HTTP/SDK transport. Their fixtures cite official API

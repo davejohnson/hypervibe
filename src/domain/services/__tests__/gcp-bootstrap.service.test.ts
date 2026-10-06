@@ -8,6 +8,7 @@ import { ConnectionRepository } from '../../../adapters/db/repositories/connecti
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { getSecretStore, SecretStore } from '../../../adapters/secrets/secret-store.js';
 import {
+  GcpBootstrapClient,
   GcpBootstrapKeyCleanupRequiredError,
 } from '../../../adapters/providers/gcp/gcp-bootstrap.client.js';
 import type {
@@ -279,6 +280,52 @@ describe('runGcpBootstrap', () => {
     const serialized = JSON.stringify({ result, audit });
     expect(serialized).not.toContain(ADMIN_TOKEN);
     expect(serialized).not.toContain(PRIVATE_KEY);
+  });
+
+  it.each([false, true])('handles billing defaults through the real HTTP client without cloud writes (confirm=%s)', async (confirm) => {
+    // Reconstructed from Cloud Billing v1 + ProtoJSON, not a live recording.
+    // Only transport is mocked: closed accounts omit open and ordinary accounts
+    // may explicitly return an empty masterBillingAccount.
+    const closedAccount = 'billingAccounts/111111-222222-333333';
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      expect(init?.method).toBe('GET');
+      switch (String(input)) {
+        case `https://cloudresourcemanager.googleapis.com/v3/projects/${GCP_PROJECT_ID}`:
+          return Response.json(observedProject);
+        case 'https://cloudbilling.googleapis.com/v1/billingAccounts?pageSize=100':
+          return Response.json({ billingAccounts: [{ name: closedAccount }], nextPageToken: 'next' });
+        case 'https://cloudbilling.googleapis.com/v1/billingAccounts?pageSize=100&pageToken=next':
+          return Response.json({ billingAccounts: [{ ...openBillingAccount, masterBillingAccount: '' }] });
+        case `https://cloudbilling.googleapis.com/v1/projects/${GCP_PROJECT_ID}/billingInfo`:
+          return Response.json({ name: `projects/${GCP_PROJECT_ID}/billingInfo`, projectId: GCP_PROJECT_ID });
+        case `https://serviceusage.googleapis.com/v1/projects/${GCP_PROJECT_ID}/services/iam.googleapis.com`:
+          return Response.json({ name: `${observedProject.name}/services/iam.googleapis.com`,
+            parent: observedProject.name, config: { name: 'iam.googleapis.com' }, state: 'DISABLED' });
+        default:
+          throw new Error('Unexpected request');
+      }
+    });
+    const client = new GcpBootstrapClient({ accessToken: ADMIN_TOKEN, fetch: fetchMock,
+      sleep: vi.fn(async () => undefined) });
+    const dependencies = makeDependencies(client);
+    const result = await runGcpBootstrap({
+      project: seedProject(), gcpProjectId: GCP_PROJECT_ID, confirm,
+      ...(confirm ? { billingAccountName: closedAccount } : {}),
+    }, dependencies);
+
+    if (confirm) {
+      expect(result).toMatchObject({ success: false,
+        error: 'The selected billingAccountName is not an open billing account visible to Application Default Credentials.' });
+    } else {
+      expect(result).toMatchObject({ success: true, mode: 'preview', requiresConfirmation: true,
+        observed: { billing: 'not-linked', billingAccountName: null },
+        openBillingAccounts: [{ name: BILLING_ACCOUNT, displayName: 'Primary billing' }] });
+    }
+    expect(fetchMock.mock.calls.every(([, init]) => init?.method === 'GET')).toBe(true);
+    expect(dependencies.prepareCloud).not.toHaveBeenCalled();
+    expect(dependencies.verifyProvider).not.toHaveBeenCalled();
+    expect(new ConnectionRepository().findAll()).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain(ADMIN_TOKEN);
   });
 
   it('returns exact local ADC setup and Hypervibe preview recovery without credentials', async () => {
