@@ -219,6 +219,106 @@ describe('GcpBootstrapClient', () => {
     expect(sleep).toHaveBeenCalledOnce();
   });
 
+  // Reconstructed Cloud Billing v1 responses, not live recordings. The official
+  // BillingAccount / ProjectBillingInfo contracts and ProtoJSON default/null
+  // semantics are recorded in test/provider-contracts/README.md.
+  it.each([undefined, null, false])('filters closed accounts with open=%s across pages', async (open) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({
+        billingAccounts: [{ name: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC', open }],
+        nextPageToken: 'next page',
+      }))
+      .mockResolvedValueOnce(Response.json({
+        billingAccounts: [{ name: 'billingAccounts/111111-222222-333333', open: true }],
+      }));
+
+    await expect(client(fetchMock).listOpenBillingAccounts()).resolves.toEqual([
+      { name: 'billingAccounts/111111-222222-333333', open: true },
+    ]);
+    expect(fetchMock.mock.calls.map(([url, init]) => [url, init.method])).toEqual([
+      ['https://cloudbilling.googleapis.com/v1/billingAccounts?pageSize=100', 'GET'],
+      ['https://cloudbilling.googleapis.com/v1/billingAccounts?pageSize=100&pageToken=next%20page', 'GET'],
+    ]);
+  });
+
+  it.each([undefined, null, ''])('accepts a non-subaccount with masterBillingAccount=%s', async (masterBillingAccount) => {
+    const fetchMock = vi.fn(async () => Response.json({ billingAccounts: [
+      { name: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC', open: true, masterBillingAccount },
+      { name: 'billingAccounts/111111-222222-333333', open: true,
+        masterBillingAccount: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC' },
+    ] }));
+    await expect(client(fetchMock).listOpenBillingAccounts()).resolves.toEqual([
+      { name: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC', open: true },
+      { name: 'billingAccounts/111111-222222-333333', open: true,
+        masterBillingAccount: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC' },
+    ]);
+  });
+
+  it.each([
+    { open: 'false' }, { open: 0 }, { open: {} },
+    { name: undefined }, { name: 'projects/not-a-billing-account' },
+    { masterBillingAccount: 'bad-parent' }, { masterBillingAccount: 0 },
+  ])('rejects malformed billing account fields: %j', async (fields) => {
+    const fetchMock = vi.fn(async () => Response.json({ billingAccounts: [
+      { name: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC', open: true, ...fields },
+    ] }));
+    await expect(client(fetchMock).listOpenBillingAccounts()).rejects.toThrow('invalid resource identity');
+  });
+
+  it.each([
+    {}, { billingEnabled: null, billingAccountName: null },
+    { billingEnabled: false, billingAccountName: '' },
+    { billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC' },
+  ])('normalizes unlinked or disabled project billing: %j', async (fields) => {
+    const fetchMock = vi.fn(async () => Response.json({
+      name: `projects/${PROJECT_ID}/billingInfo`, projectId: PROJECT_ID, ...fields,
+    }));
+    await expect(client(fetchMock).getProjectBillingInfo(PROJECT_ID)).resolves.toEqual({
+      name: `projects/${PROJECT_ID}/billingInfo`, projectId: PROJECT_ID,
+      billingEnabled: false, billingAccountName: fields.billingAccountName ?? '',
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      `https://cloudbilling.googleapis.com/v1/projects/${PROJECT_ID}/billingInfo`,
+      expect.objectContaining({ method: 'GET' })
+    );
+  });
+
+  it.each([
+    { name: undefined }, { projectId: undefined }, { projectId: 'another-project' },
+    { billingEnabled: 'false' }, { billingEnabled: 0 },
+    { billingAccountName: 0 }, { billingAccountName: 'bad-account' },
+    { billingEnabled: true },
+  ])('keeps malformed or contradictory project billing unknown: %j', async (fields) => {
+    const fetchMock = vi.fn(async () => Response.json({
+      name: `projects/${PROJECT_ID}/billingInfo`, projectId: PROJECT_ID, ...fields,
+    }));
+    await expect(client(fetchMock).getProjectBillingInfo(PROJECT_ID))
+      .rejects.toThrow('different or invalid resource identity');
+  });
+
+  it('waits through omitted billing defaults without repeating the billing write', async () => {
+    const linked = { name: `projects/${PROJECT_ID}/billingInfo`, projectId: PROJECT_ID,
+      billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC', billingEnabled: true };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json(linked))
+      .mockResolvedValueOnce(Response.json({ name: linked.name, projectId: PROJECT_ID }))
+      .mockResolvedValueOnce(Response.json(linked));
+    const sleep = vi.fn(async () => undefined);
+    await expect(client(fetchMock, { sleep }).updateProjectBillingInfo(PROJECT_ID, linked.billingAccountName))
+      .resolves.toEqual(linked);
+    expect(fetchMock.mock.calls.map(([, init]) => init.method)).toEqual(['PUT', 'GET', 'GET']);
+    expect(sleep).toHaveBeenCalledOnce();
+  });
+
+  it('does not accept omitted billing state as a successful write acknowledgement', async () => {
+    const fetchMock = vi.fn(async () => Response.json({
+      name: `projects/${PROJECT_ID}/billingInfo`, projectId: PROJECT_ID,
+    }));
+    await expect(client(fetchMock).updateProjectBillingInfo(PROJECT_ID, 'billingAccounts/AAAAAA-BBBBBB-CCCCCC'))
+      .rejects.toThrow('acknowledged a different billing state');
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it('enables an exact service, waits for its LRO, and verifies ENABLED state', async () => {
     const serviceName = 'iam.googleapis.com';
     const exactServiceName = `${PROJECT_NAME}/services/${serviceName}`;

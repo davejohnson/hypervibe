@@ -626,20 +626,22 @@ export class GcpBootstrapClient {
 
   private parseBillingAccount(value: unknown): GcpBillingAccount {
     const record = this.asRecord(value, 'GCP billing account list returned an invalid response.');
+    // Cloud Billing uses implicit proto3 scalars: omitted/null fields have their
+    // default value. An ordinary account has no master billing account.
+    const open = record.open ?? false;
+    const masterBillingAccount = record.masterBillingAccount ?? '';
     if (!BILLING_ACCOUNT_NAME_PATTERN.test(this.stringValue(record.name))
-      || typeof record.open !== 'boolean'
-      || (record.masterBillingAccount !== undefined
-        && (typeof record.masterBillingAccount !== 'string'
-          || !BILLING_ACCOUNT_NAME_PATTERN.test(record.masterBillingAccount)))) {
+      || typeof open !== 'boolean'
+      || typeof masterBillingAccount !== 'string'
+      || (masterBillingAccount !== ''
+        && !BILLING_ACCOUNT_NAME_PATTERN.test(masterBillingAccount))) {
       throw new Error('GCP billing account list returned an invalid resource identity.');
     }
     return {
       name: record.name as string,
-      open: record.open,
+      open,
       ...(typeof record.displayName === 'string' ? { displayName: record.displayName } : {}),
-      ...(typeof record.masterBillingAccount === 'string'
-        ? { masterBillingAccount: record.masterBillingAccount }
-        : {}),
+      ...(masterBillingAccount === '' ? {} : { masterBillingAccount }),
     };
   }
 
@@ -649,19 +651,22 @@ export class GcpBootstrapClient {
   ): GcpProjectBillingInfo {
     const record = this.asRecord(value, 'GCP project billing lookup returned an invalid response.');
     const expectedName = `projects/${expectedProjectId}/billingInfo`;
+    const billingEnabled = record.billingEnabled ?? false;
+    const billingAccountName = record.billingAccountName ?? '';
     if (record.name !== expectedName
       || record.projectId !== expectedProjectId
-      || typeof record.billingEnabled !== 'boolean'
-      || typeof record.billingAccountName !== 'string'
-      || (record.billingAccountName !== ''
-        && !BILLING_ACCOUNT_NAME_PATTERN.test(record.billingAccountName))) {
+      || typeof billingEnabled !== 'boolean'
+      || typeof billingAccountName !== 'string'
+      || (billingAccountName !== ''
+        && !BILLING_ACCOUNT_NAME_PATTERN.test(billingAccountName))
+      || (billingEnabled && billingAccountName === '')) {
       throw new Error('GCP project billing lookup returned a different or invalid resource identity.');
     }
     return {
       name: expectedName,
       projectId: expectedProjectId,
-      billingAccountName: record.billingAccountName,
-      billingEnabled: record.billingEnabled,
+      billingAccountName,
+      billingEnabled,
     };
   }
 
