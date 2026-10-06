@@ -98,6 +98,81 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); SqliteAdapter.resetInstance(); rmSync(root, { recursive: true, force: true }); });
 
 describe('declarative credential collection', () => {
+  // Synthetic server responses preserve the existing public pairing contract.
+  // The owner-approved onboarding contract adds a request-only branch hint,
+  // independently of invitation approval or committed-source authorization.
+  function pairingTransport() {
+    const f = setup();
+    f.transport.mockImplementation(async url => String(url).endsWith('/pairing-exchanges')
+      ? Response.json({ status: 'pending', applied: 0, skipped: 1, retryAfterSeconds: 2 })
+      : Response.json({ purpose: 'credential-requests', environment: 'staging', deviceCode: 'B'.repeat(43),
+        userCode: '2345-6789', repository: 'studio/app', expiresAt: new Date(Date.now() + 600000).toISOString(),
+        intervalSeconds: 2, verificationUrl: `${baseUrl}/pair?code=2345-6789` }));
+    return f;
+  }
+  it.each(['authorize', 'create', 'resume'])('prefills the checked-out branch through the serialized %s pairing request', async action => {
+    const { run, transport } = pairingTransport();
+    expect(await run({ action })).toMatchObject({ ok: true, data: { status: 'approval_required', sourceBranch: 'review/credentials' } });
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(transport.mock.calls[0][1]?.body))).toEqual({
+      repositoryFullName: 'studio/app', purpose: 'credential-requests', environment: 'staging', sourceBranch: 'review/credentials',
+    });
+  });
+  it('authorizes an explicit setup branch without requiring it to match the local checkout', async () => {
+    const { run, transport } = pairingTransport();
+    expect(await run({ action: 'authorize', sourceBranch: 'integration/security' })).toMatchObject({ ok: true, data: { sourceBranch: 'integration/security' } });
+    expect(JSON.parse(String(transport.mock.calls[0][1]?.body)).sourceBranch).toBe('integration/security');
+  });
+  it('routes the setup override through CLI and MCP without changing the public pairing response', async () => {
+    const { registry, transport } = pairingTransport();
+    let output = '';
+    expect(await runWithWorkspaceDirectories([root], () => runCli(
+      ['cloud', 'requests', '--action', 'authorize', '--source-branch', 'integration/security', '--json'],
+      { registry, initialize: false, io: { writeOut: t => { output += t; }, writeErr: () => {}, readStdin: async () => '', confirm: async () => false, stdinIsTTY: false } }
+    ))).toBe(0);
+    expect(JSON.parse(output)).toMatchObject({ ok: true, data: { sourceBranch: 'integration/security' } });
+    expect(JSON.parse(String(transport.mock.calls[0][1]?.body)).sourceBranch).toBe('integration/security');
+    const handlers = new Map<string, (input: Record<string, unknown>) => Promise<unknown>>();
+    registerCommandRegistry({ registerTool: (id: string, _schema: unknown, fn: (input: Record<string, unknown>) => Promise<unknown>) => handlers.set(id, fn), server: { getClientCapabilities: () => ({}) } } as unknown as McpServer, registry);
+    expect(await runWithWorkspaceDirectories([root], () => handlers.get('hv_cloud_requests')!({ action: 'authorize', sourceBranch: 'integration/security' })))
+      .toMatchObject({ structuredContent: { ok: true, data: { sourceBranch: 'integration/security' } } });
+    expect(transport.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual(['/api/v1/pairings', '/api/v1/pairing-exchanges']);
+  });
+  it('omits a detached setup hint instead of guessing a branch, while invitations still require one', async () => {
+    git('checkout', '--detach');
+    const { run, transport } = pairingTransport();
+    expect(await run({ action: 'authorize' })).toMatchObject({ ok: true, data: { status: 'approval_required' } });
+    expect(JSON.parse(String(transport.mock.calls[0][1]?.body))).not.toHaveProperty('sourceBranch');
+    expect(await run({ action: 'create' })).toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it('preserves a pending setup hint across checkout changes and rejects an explicit replacement before exchange', async () => {
+    const { run, transport } = pairingTransport();
+    await run({ action: 'authorize', sourceBranch: 'integration/security' });
+    git('checkout', '-b', 'another/branch');
+    expect(await run({ action: 'authorize' })).toMatchObject({ ok: true, data: { sourceBranch: 'integration/security' } });
+    const stored = context.repos.connections.findByProviderAndScope('hypervibe-cloud-requests', sessionScope)!;
+    const before = stored.credentialsEncrypted;
+    transport.mockClear();
+    expect(await run({ action: 'authorize', sourceBranch: 'another/branch' })).toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+    expect(transport).not.toHaveBeenCalled();
+    expect(context.repos.connections.findById(stored.id)?.credentialsEncrypted).toBe(before);
+  });
+  it('does not silently retrofit a legacy pending code with a new explicit setup hint', async () => {
+    storeGrant({ status: 'pending', deviceCode: 'B'.repeat(43), userCode: '2345-6789', verificationUrl: `${baseUrl}/pair?code=2345-6789` });
+    const { run, transport } = pairingTransport();
+    expect(await run({ action: 'authorize', sourceBranch: 'integration/security' })).toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+    expect(transport).not.toHaveBeenCalled();
+    expect(await run({ action: 'authorize' })).toMatchObject({ ok: true, data: { status: 'approval_required' } });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it('preserves an expired pending hint when a branchless retry needs a fresh code', async () => {
+    storeGrant({ status: 'pending', sourceBranch: 'integration/security', expiresAt: new Date(0).toISOString(),
+      deviceCode: 'B'.repeat(43), userCode: '2345-6789', verificationUrl: `${baseUrl}/pair?code=2345-6789` });
+    const { run, transport } = pairingTransport();
+    expect(await run({ action: 'authorize' })).toMatchObject({ ok: true, data: { sourceBranch: 'integration/security' } });
+    expect(JSON.parse(String(transport.mock.calls[0][1]?.body)).sourceBranch).toBe('integration/security');
+  });
   it('derives owner, keys, staging and source from the committed checkout without UUID input', async () => {
     storeGrant(); const { run, writes } = setup();
     const result = await run();
@@ -156,7 +231,7 @@ describe('declarative credential collection', () => {
     transport.mockImplementation(async () => Response.json({ purpose: 'credential-requests', environment: 'staging', deviceCode: 'B'.repeat(43), userCode: '2345-6789', repository: 'studio/app', expiresAt: new Date(Date.now() + 600000).toISOString(), intervalSeconds: 2, verificationUrl: `${baseUrl}/pair?code=2345-6789` }));
     const result = await run();
     expect(result).toMatchObject({ ok: true, data: { status: 'approval_required', verificationUrl: `${baseUrl}/pair?code=2345-6789` } });
-    expect(JSON.parse(String(transport.mock.calls[0][1]?.body))).toEqual({ repositoryFullName: 'studio/app', purpose: 'credential-requests', environment: 'staging' });
+    expect(JSON.parse(String(transport.mock.calls[0][1]?.body))).toEqual({ repositoryFullName: 'studio/app', purpose: 'credential-requests', environment: 'staging', sourceBranch: 'review/credentials' });
     expect(JSON.stringify(result)).not.toContain('B'.repeat(43));
     expect(JSON.stringify(result)).not.toContain('credentialsRef');
   });

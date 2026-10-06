@@ -3,6 +3,7 @@ import type { CommandContext } from '../application/context.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import { createCloudConnections } from '../application/cloud-connections.js';
 import { commandSuccess, wrapCommandHandler } from '../application/results.js';
+import { sourceBranchSchema } from '../application/cloud-source-branch.js';
 
 export function registerHvCloudConnectionsTools(commands: CommandRegistrar, context: CommandContext): void {
   const connections = createCloudConnections({ context });
@@ -12,6 +13,7 @@ export function registerHvCloudConnectionsTools(commands: CommandRegistrar, cont
     {
       action: z.enum(['start', 'status', 'preview', 'connect', 'revoke']).optional().describe('Default: preview'),
       baseUrl: z.string().optional().describe('Hypervibe HTTPS origin; defaults to https://hypervibe.dev'),
+      sourceBranch: sourceBranchSchema.optional().describe('Start/status only: app-setup branch hint, inferred from the checkout when starting. Does not grant access or deploy. Detached checkouts omit the hint unless explicit.'),
       provider: z.string().optional().describe('Optional provider id from preview'),
       env: z.string().optional().describe('Exact environment key for environment-scoped credentials; never copies credentials between environments'),
       credentialsRef: z.string().optional().describe('Private env:, dotenv:, file:, or secret-manager reference. Requires provider and credentialKind from preview; values stay local until confirmed upload.'),

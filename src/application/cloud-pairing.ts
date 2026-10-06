@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { HvError } from './results.js';
 import { createCloudJsonClient } from './cloud-http.js';
+import { sourceBranchSchema } from './cloud-source-branch.js';
 
 export const DEFAULT_HYPERVIBE_CLOUD_BASE_URL = 'https://hypervibe.dev';
 export const HYPERVIBE_CLOUD_CONNECTION_PROVIDER = 'hypervibe-cloud';
@@ -74,6 +75,7 @@ export interface PendingHypervibeCloudConnection {
   userCode: string;
   verificationUrl: string;
   expiresAt: string;
+  sourceBranch?: string;
 }
 
 export interface VerifiedHypervibeCloudConnection {
@@ -125,7 +127,7 @@ export function normalizeHypervibeCloudBaseUrl(
 }
 
 export interface HypervibeCloudPairingClient {
-  start(repository: string): Promise<HypervibeCloudPairingStart>;
+  start(repository: string, sourceBranch?: string): Promise<HypervibeCloudPairingStart>;
   exchange(deviceCode: string): Promise<HypervibeCloudPairingExchange>;
 }
 
@@ -145,10 +147,11 @@ export function createHypervibeCloudPairingClient(options: {
   const request = createCloudJsonClient(baseUrl, fetchImpl, timeoutMs);
 
   return {
-    async start(repository) {
+    async start(repository, sourceBranch) {
       const payload = await request('/api/v1/pairings', { body: {
         repositoryFullName: repository, ...(purpose ? { purpose } : {}),
         ...(options.grant ? { environment: options.grant.environment } : {}),
+        ...(sourceBranch !== undefined ? { sourceBranch: sourceBranchSchema.parse(sourceBranch) } : {}),
       } });
       const parsed = pairingStartSchema.safeParse(payload);
       if (!parsed.success || parsed.data.repository.toLowerCase() !== repository.toLowerCase() || parsed.data.purpose !== purpose
