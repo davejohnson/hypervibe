@@ -186,6 +186,80 @@ describe('reviewed legacy database scope binding', () => {
     expect(f.http.mutations).toEqual([]);
   });
 
+  async function identityPlan(f: Awaited<ReturnType<typeof fixture>>) {
+    const result = await f.plan();
+    if ('error' in result) throw new Error(result.error);
+    return result;
+  }
+
+  it('records the database identity without backups when the environment deliberately disables them', async () => {
+    const f = await fixture();
+    f.spec.environments.staging.backups = { mode: 'disabled', reason: 'Staging has no backups by owner choice' };
+    new SpecStore().replace(f.project, f.spec);
+    const result = await identityPlan(f);
+    expect(result.scope).toBe('database-bindings');
+    expect(result.actions).toHaveLength(1);
+    expect(result.actions[0]).toMatchObject({ type: 'update', requiresConfirm: true,
+      resource: { kind: 'database', provider: 'railway', name: 'postgres' },
+      metadata: { operation: 'databaseIdentityRecord', componentId: f.component.id, externalId: 'staging-postgres',
+        projectId, environmentId: stagingId } });
+    expect(resolvePlanActionAuthority(result.actions[0])?.capability).toBe('database.identity.record');
+    expect(JSON.stringify(result.warnings ?? [])).not.toMatch(/native recovery source/);
+    expect(await executePlanApply(ctx, { project: f.project, spec: f.spec, specRevision: result.specRevision,
+      planId: result.planRunId, confirmActions: [result.actions[0].id], alwaysRunBootstrap: true }))
+      .toMatchObject({ kind: 'executed', result: { success: true, receipts: [
+        { data: { applied: 1, skipped: 0, providerMutations: 0 } },
+      ] } });
+    const { databaseTopology, ...unchangedBindings } = ctx.repos.environments.findById(f.environment.id)!.platformBindings;
+    expect(databaseTopology).toEqual({ primary: { provider: 'railway', externalId: 'staging-postgres' }, replicas: {} });
+    expect(unchangedBindings).toEqual(f.environment.platformBindings);
+    // Only the identity is recorded: the backup-gated recovery scope stays absent.
+    expect(ctx.repos.components.findById(f.component.id)).toEqual(f.component);
+    const next = await identityPlan(f);
+    expect(next.actions.some(action => action.metadata?.operation === 'databaseIdentityRecord')).toBe(false);
+    expect(f.http.mutations).toEqual([]);
+  });
+
+  it('records the identity of an imported database whose project-only scope stays untouched', async () => {
+    const f = await fixture();
+    ctx.repos.components.updateBindings(f.component.id, { providerScope: { projectId } });
+    const scoped = ctx.repos.components.findById(f.component.id)!;
+    const result = await identityPlan(f);
+    expect(result.actions).toHaveLength(1);
+    expect(result.actions[0].metadata).toMatchObject({ operation: 'databaseIdentityRecord', externalId: 'staging-postgres' });
+    expect(await executePlanApply(ctx, { project: f.project, spec: f.spec, specRevision: result.specRevision,
+      planId: result.planRunId, confirmActions: [result.actions[0].id], alwaysRunBootstrap: true }))
+      .toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings.databaseTopology)
+      .toEqual({ primary: { provider: 'railway', externalId: 'staging-postgres' }, replicas: {} });
+    expect(ctx.repos.components.findById(f.component.id)).toEqual(scoped);
+  });
+
+  it('never records an identity that a complete inventory of the environment does not contain', async () => {
+    const f = await fixture();
+    f.spec.environments.staging.backups = { mode: 'disabled', reason: 'Staging has no backups by owner choice' };
+    new SpecStore().replace(f.project, f.spec);
+    ctx.repos.components.update(f.component.id, { externalId: 'retired-postgres' });
+    const result = await identityPlan(f);
+    expect(result.actions.some(action => action.metadata?.operation === 'databaseIdentityRecord')).toBe(false);
+    expect((result.warnings ?? []).join(' ')).toMatch(/could not be confirmed in a complete inventory/);
+    expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings).not.toHaveProperty('databaseTopology');
+  });
+
+  it('blocks an identity record when the environment changed after review', async () => {
+    const f = await fixture();
+    f.spec.environments.staging.backups = { mode: 'disabled', reason: 'Staging has no backups by owner choice' };
+    new SpecStore().replace(f.project, f.spec);
+    const result = await identityPlan(f);
+    const other = { primary: { provider: 'railway', externalId: 'other-postgres' }, replicas: {} };
+    ctx.repos.environments.updatePlatformBindings(f.environment.id, { databaseTopology: other });
+    const applied = await executePlanApply(ctx, { project: f.project, spec: f.spec, specRevision: result.specRevision,
+      planId: result.planRunId, confirmActions: [result.actions[0].id], alwaysRunBootstrap: true });
+    expect(JSON.stringify(applied)).not.toMatch(/"applied":1/);
+    expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings.databaseTopology).toEqual(other);
+    expect(f.http.mutations).toEqual([]);
+  });
+
   it('preserves concurrent credentials and never repeats an already completed local repair', async () => {
     const f = await fixture(); const r = await reviewed(f);
     ctx.repos.components.updateBindings(f.component.id, { connectionUrl: 'postgres://rotated:private@database.internal/app' });

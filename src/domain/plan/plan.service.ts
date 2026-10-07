@@ -11,6 +11,7 @@ import { ConnectionRepository } from '../../adapters/db/repositories/connection.
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import { adapterFactory } from '../services/adapter.factory.js';
 import { planDatabaseScopeBinding } from '../services/database-scope-binding.service.js';
+import { planDatabaseIdentityRecord } from '../services/database-identity-binding.service.js';
 import { observeBackupPolicy } from '../services/backup-policy.service.js';
 import { planBackupPolicy } from '../services/backup-policy-plan.service.js';
 import { observeBackupHealth } from '../services/backup-health.service.js';
@@ -2192,8 +2193,19 @@ export class PlanService {
     const checkpointStageActive = checkpointActions.length > 0;
     const backupObservation = await observeBackupPolicy({ spec: environmentSpec, environment,
       components: local.components, project: projectForPlan, adapterFactory });
-    const databaseScopeBinding = await planDatabaseScopeBinding({ spec: environmentSpec, environment,
+    const scopeBinding = await planDatabaseScopeBinding({ spec: environmentSpec, environment,
       components: local.components, project: projectForPlan, adapterFactory });
+    // Recording the database identity does not depend on backups: when the
+    // backup-verified scope repair has nothing to do, confirm the identity from
+    // this plan's exact hosting observation instead.
+    const identityRecord = scopeBinding.actions.length ? { actions: [], warnings: [] }
+      : planDatabaseIdentityRecord({ spec: environmentSpec, environment, components: local.components }, observed ?? undefined);
+    const databaseScopeBinding = scopeBinding.actions.length ? scopeBinding : {
+      actions: identityRecord.actions,
+      // The scope planner's backup-gated warnings are irrelevant when identity is recorded independently.
+      warnings: identityRecord.actions.length ? identityRecord.warnings
+        : [...new Set([...scopeBinding.warnings, ...identityRecord.warnings])],
+    };
     const backupPolicy = planBackupPolicy(backupObservation, {
       explicitDatabaseBackups: Boolean(environmentSpec.database?.resilience?.backups),
       attempts: environment?.platformBindings.backupPolicyAttempts,
@@ -2924,7 +2936,7 @@ export class PlanService {
       backupPolicy.warnings.push('This plan configures only daily backup schedules on bound resources. Re-run hv_plan afterward for remaining infrastructure and backup coverage gaps. Backup completion and restores remain unchecked.');
     } else if (databaseBindingStageActive) {
       actions = databaseScopeBinding.actions;
-      databaseScopeBinding.warnings.push('This plan records only the existing database recovery scope. Re-run hv_plan for remaining backup provisioning, verification and deployment work.');
+      databaseScopeBinding.warnings.push('This plan records only the existing database binding. Re-run hv_plan for remaining backup provisioning, verification and deployment work.');
     } else if (ciBindingStageActive) {
       const closure = actionDependencyClosure(
         actions,
