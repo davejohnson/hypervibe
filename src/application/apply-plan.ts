@@ -2,6 +2,7 @@ import { applyScheduleActivation } from '../domain/services/schedule-activation.
 import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js';
 import { applyApiPolicy, planApiPolicy } from '../domain/services/api-policy.js';
 import { applyDatabaseScopeBinding } from './apply-database-scope-binding.js';
+import { applyDatabaseIdentityRecord } from './apply-database-identity-record.js';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { actionRequiresBackupReadiness, deploymentPrerequisitePhase, isManagedCiCredentialAction } from '../domain/plan/plan-stage.js';
 import { observeBackupPolicy } from '../domain/services/backup-policy.service.js';
@@ -887,8 +888,13 @@ export async function executePlanApply(ctx: CommandContext, params: {
     if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
     const result = await executor.execute({ planRunId: planId, confirmActions: params.confirmActions,
       currentSpecRevision: params.specRevision, handler: async action => {
-        if (resolvePlanActionAuthority(action)?.capability !== 'database.scope.bind') {
-          return { success: false, status: 'blocked', message: 'This stage can only record the reviewed existing database scope.' };
+        const capability = resolvePlanActionAuthority(action)?.capability;
+        if (capability === 'database.identity.record') {
+          return applyDatabaseIdentityRecord({ ctx, project, environmentName: envName, environmentSpec: envSpec,
+            action, confirmedActionIds: new Set(params.confirmActions) });
+        }
+        if (capability !== 'database.scope.bind') {
+          return { success: false, status: 'blocked', message: 'This stage can only record the reviewed existing database scope or identity.' };
         }
         return applyDatabaseScopeBinding({ ctx, project, environmentName: envName, environmentSpec: envSpec,
           action, confirmedActionIds: new Set(params.confirmActions) });
