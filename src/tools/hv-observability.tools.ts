@@ -13,6 +13,7 @@ import {
   ProviderLogsReadError,
 } from '../domain/services/provider-logs.service.js';
 import { fetchStripeWebhookStatuses } from '../domain/services/stripe-ops.service.js';
+import { fetchSendGridEmailLogs } from '../domain/services/sendgrid-ops.service.js';
 import { stripeEnvironmentName } from '../domain/services/stripe-env.service.js';
 import {
   resolveHealthEnvironment,
@@ -91,18 +92,37 @@ async function readProviderLogs<T>(
 export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_logs',
-    'Fetch logs and delivery status: runtime service logs, build logs, recent deployments, or Stripe webhook endpoint status. Recognized read selectors that do not apply to the chosen source are ignored with a visible warning instead of failing the read.',
+    'Fetch runtime service logs, build logs, recent deployments, Stripe webhook status, or sanitized SendGrid delivery logs. SendGrid requires explicit project and env and returns account-scoped evidence, not verified environment attribution. Recognized selectors that do not apply to the source are ignored with a warning.',
     {
       project: projectField,
       env: envField,
       service: z.string().optional().describe('Service name. Defaults to the first bound service for source=service/build.'),
-      source: z.enum(['service', 'build', 'deployments', 'stripe-webhooks']).describe('What to fetch'),
-      limit: z.number().int().min(1).max(500).optional().describe('Max entries for service/deployments, or tail lines for build logs (default 100 service logs, 10 deployments; build logs are unbounded when omitted)'),
-      errorsOnly: z.boolean().optional().describe('source=service only: return only error-like lines'),
+      source: z.enum(['service', 'build', 'deployments', 'stripe-webhooks', 'sendgrid']).describe('What to fetch'),
+      limit: z.number().int().min(1).max(500).optional().describe('Max entries, or tail lines for build logs (default 100 service logs, 10 deployments, 50 SendGrid messages/events; build logs are unbounded when omitted)'),
+      errorsOnly: z.boolean().optional().describe('source=service: error-like lines; source=sendgrid search: deferred, dropped, bounced or blocked messages'),
       deploymentId: z.string().optional().describe('source=build only: specific deployment (defaults to latest)'),
       mode: z.enum(['sandbox', 'live']).optional().describe('source=stripe-webhooks only: optional assertion against the selected environment-scoped connection mode'),
+      messageId: z.string().max(512).optional().describe('source=sendgrid only: exact SendGrid sg_message_id from a prior log search, with event details. Cannot combine with search filters.'),
+      recipient: z.string().max(254).optional().describe('source=sendgrid search only: exact recipient email; never returned or persisted. Quotes, backslashes and whitespace are unsupported.'),
+      since: z.string().max(40).optional().describe('source=sendgrid search only: ISO timestamp within the last 30 days; default 24 hours before until. Filters message creation time.'),
+      until: z.string().max(40).optional().describe('source=sendgrid search only: ISO timestamp, no later than now; defaults to now'),
     },
-    wrapCommandHandler(async ({ project: projectRef, env, service, source, limit, errorsOnly, deploymentId, mode }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, service, source, limit, errorsOnly, deploymentId, mode, messageId, recipient, since, until }) => {
+      if (source === 'sendgrid') {
+        if (!projectRef || !env) throw new HvError('VALIDATION', 'SendGrid log inspection requires explicit project and env selectors.');
+        const project = ctx.resolveProjectOrThrow({ project: projectRef, readOnly: true });
+        const environment = ctx.resolveEnvironmentOrThrow(project, env);
+        const result = await fetchSendGridEmailLogs(project, environment, { messageId, recipient, since, until, limit, errorsOnly });
+        if (!result.success) {
+          throw new HvError(result.code, result.error, {
+            ...(result.code === 'MISSING_CONNECTION' ? connectionSetupOptions('sendgrid', { project: project.name }) : { details: result.details }),
+          });
+        }
+        return commandSuccess({ source, ...result.data }, { warnings: [
+          ...(ignoredOptionWarnings('hv_logs', `source="${source}"`, { service, deploymentId, mode }) ?? []),
+          ...result.warnings,
+        ] });
+      }
       if (source === 'stripe-webhooks') {
         if (!projectRef || !env) {
           throw new HvError('VALIDATION', 'Stripe webhook inspection requires explicit project and env selectors.', {
@@ -114,6 +134,7 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
           limit,
           errorsOnly,
           deploymentId,
+          messageId, recipient, since, until,
         });
         const { project, environment } = resolveEnvOrThrow(ctx, projectRef, env);
         const environmentSpec = new SpecStore().get(project)?.spec.environments[environment.name];
@@ -147,10 +168,10 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
       }
 
       const warnings = ignoredOptionWarnings('hv_logs', `source="${source}"`, source === 'service'
-        ? { deploymentId, mode }
+        ? { deploymentId, mode, messageId, recipient, since, until }
         : source === 'build'
-          ? { errorsOnly, mode }
-          : { errorsOnly, deploymentId, mode });
+          ? { errorsOnly, mode, messageId, recipient, since, until }
+          : { errorsOnly, deploymentId, mode, messageId, recipient, since, until });
 
       const { project, environment, bindings, provider } = resolveEnvOrThrow(ctx, projectRef, env);
       const boundServices = Object.keys(bindings.services ?? {});

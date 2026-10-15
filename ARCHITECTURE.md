@@ -1184,6 +1184,14 @@ unrelated runtime variables continue to use the two-release retirement process.
 
 ## Email Desired State
 
+Read-only delivery diagnostics extend `hv_logs source=sendgrid` through the
+existing SendGrid connection service and adapter. Search and exact-message reads
+are bounded, sanitized provider-account evidence; project/environment selection
+does not establish message provenance. They never persist email contents, send
+mail, change provider settings, or infer health from an empty result. See the
+[Email Logs contract](test/provider-contracts/sendgrid-email-logs.md) for supported
+scope, retention, permissions, and offline verification limits.
+
 SendGrid email configuration lives under each environment's `email` desired
 state. It owns one optional sender identity and one optional Inbound Parse route
 per environment. The inbound route names a public web service and relative path;

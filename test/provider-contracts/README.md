@@ -90,6 +90,7 @@ API definitions.
 | Supabase v1 | Official OpenAPI commit `26585dd4a4d6db8910a595214c9f6e8fdd206768` | Organization response and project-create request validation through the adapter's HTTP transport; ID/slug distinction; negative project-response fixture validation |
 | Neon v2 | Official release OpenAPI snapshot, content hash in `source.json` | Real serialized project-create body/query validation; organization scope; negative input validation |
 | SendGrid v3 webhooks | Official OpenAPI commit `fb95a935c87b79f7f982ac34bd37adab1f697dbc` (selected operations) | Event Webhook exact-ID settings reads, signing PATCH serialization and unique URL discovery; Inbound Parse exact-hostname reads/PATCH requests, exact-ID policy reads, missing/null evidence and canonical P-256 key validation; shared signing/key lifecycle uses reconstructed transport and synthetic hosting observations |
+| SendGrid v3 Email Logs | Exact `tsg_logs_v3.json` at the same official commit, pinned separately as `sendgrid/email-logs.openapi.json` | Full event-name union through the real adapter, safe search/timeline projection, strict account scope, request/body budgets and value-free failure metadata; see [Email Logs](sendgrid-email-logs.md). Separate bounded live account search and same-ID detail succeeded; this does not validate complete response schemas or certify other scopes/accounts. |
 
 Railway SDL is the complete lexicographically sorted official introspection
 schema rendered without descriptions. No fields, arguments, defaults, types,

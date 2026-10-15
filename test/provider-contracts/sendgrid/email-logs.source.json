@@ -1,0 +1,12 @@
+{
+  "sourceUrl": "https://github.com/twilio/sendgrid-oai/blob/fb95a935c87b79f7f982ac34bd37adab1f697dbc/spec/json/tsg_logs_v3.json",
+  "upstreamRevision": "fb95a935c87b79f7f982ac34bd37adab1f697dbc",
+  "sourceSha256": "fae1d749999b9440db3a41c30f6ce5283c5698c8bf98a08193e6d29db6dabf00",
+  "schemaFile": "email-logs.openapi.json",
+  "schemaSha256": "fae1d749999b9440db3a41c30f6ce5283c5698c8bf98a08193e6d29db6dabf00",
+  "apiVersion": "v3",
+  "consultedAt": "2026-10-14",
+  "extraction": "Exact complete published Email Logs OpenAPI document; no fields or constraints changed.",
+  "coverage": "Tests pin the document hash and exercise all EmailLogsEvent discriminator/enum names through the real adapter HTTP boundary. They do not validate full response schemas or establish live compatibility.",
+  "semanticException": "SMTP status codes use RFC 3463 section 2 numeric grammar because the published pattern excludes multi-digit codes independently documented by Twilio, including 5.7.26."
+}
