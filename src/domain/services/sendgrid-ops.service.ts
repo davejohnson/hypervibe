@@ -8,6 +8,10 @@ import {
 import type { SendGridCredentials } from '../../adapters/providers/sendgrid/sendgrid.adapter.js';
 import type { SendGridPermissionAudit } from '../../adapters/providers/sendgrid/sendgrid.adapter.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
+import { SendGridLogsError, type SendGridEmailLogsInput } from '../../adapters/providers/sendgrid/sendgrid-email-logs.js';
+import type { Project } from '../entities/project.entity.js';
+import type { Environment } from '../entities/environment.entity.js';
+import { getProjectScopeHints } from './project-scope.js';
 
 const connectionRepo = new ConnectionRepository();
 
@@ -74,6 +78,39 @@ export function getSendGridAdapter(scopeHints?: string[]): { adapter: SendGridAd
   adapter.connect(credentials);
 
   return { adapter };
+}
+
+/** Read provider history through the existing scoped connection boundary; never persist email evidence. */
+export async function fetchSendGridEmailLogs(project: Project, environment: Environment, input: SendGridEmailLogsInput) {
+  try {
+    const resolved = getSendGridAdapter(getProjectScopeHints(project));
+    if ('error' in resolved) return { success: false as const, code: 'MISSING_CONNECTION' as const, error: resolved.error };
+    const logs = await resolved.adapter.readEmailLogs(input);
+    return {
+      success: true as const,
+      data: {
+        project: project.name, environment: environment.name, provider: 'sendgrid',
+        evidenceSource: 'sendgrid-email-logs-api', persisted: false,
+        scope: { kind: 'provider-account', environmentAttribution: 'unverified', region: 'global', delegatedSubuser: false },
+        ...logs,
+      },
+      warnings: [
+        'These are SendGrid account logs. Project and environment select the connection context; they do not prove which environment sent a message. EU regional accounts and delegated parent-account subuser searches are not supported by this read.',
+        'SendGrid retains limited history. A delivered status reports provider delivery, not inbox placement or human receipt.',
+        ...(logs.messages.length === 0 ? ['No messages matched this bounded search. This does not prove that no send was attempted.'] : []),
+        ...(logs.truncated ? ['The result may be truncated. Narrow the search window or inspect an exact messageId.'] : []),
+      ],
+    };
+  } catch (error) {
+    const safe = error instanceof SendGridLogsError ? error : new SendGridLogsError('unavailable');
+    return {
+      success: false as const,
+      code: safe.category === 'invalid_input' ? 'VALIDATION' as const : safe.category === 'not_found' ? 'NOT_FOUND' as const : 'PROVIDER_ERROR' as const,
+      error: safe.message,
+      details: { provider: 'sendgrid', operation: 'email-log-read', category: safe.category,
+        ...(safe.status ? { status: safe.status } : {}), ...(safe.validation ? { validation: safe.validation } : {}) },
+    };
+  }
 }
 
 /** Resolve only a one-way runtime-key hash for drift detection; never returns the key. */

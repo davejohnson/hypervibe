@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { createPublicKey } from 'node:crypto';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import { readSendGridEmailLogs, SendGridLogsError, type SendGridEmailLogsInput } from './sendgrid-email-logs.js';
 
 const SENDGRID_API_URL = 'https://api.sendgrid.com/v3';
 
@@ -254,6 +255,11 @@ export class SendGridAdapter {
 
   connect(credentials: unknown): void {
     this.credentials = credentials as SendGridCredentials;
+  }
+
+  async readEmailLogs(input: SendGridEmailLogsInput) {
+    if (!this.credentials?.apiKey) throw new SendGridLogsError('access_denied');
+    return readSendGridEmailLogs(this.credentials.apiKey, input);
   }
 
   private async request<T>(

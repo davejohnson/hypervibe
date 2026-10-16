@@ -5,9 +5,12 @@ import { tmpdir } from 'os';
 import path from 'path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createMcpCommandRegistrar } from '../../interfaces/mcp/adapter.js';
+import { CommandRegistry } from '../../application/commands.js';
+import { runCli } from '../../interfaces/cli/run.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
+import { providerRegistry } from '../../domain/registry/provider.registry.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
@@ -56,6 +59,98 @@ async function makeClient() {
 }
 
 describe('hv_logs', () => {
+  it('keeps the reviewed email provider roster explicit for delivery diagnostics', () => {
+    expect(providerRegistry.getByCategory('email').map((provider) => provider.metadata.name).sort()).toEqual(['sendgrid']);
+  });
+
+  it('reads SendGrid delivery evidence in explicit account scope without exposing a recipient', async () => {
+    const project = new ProjectRepository().create({ name: 'sendgrid-logs-app', gitRemoteUrl: 'https://github.com/example/sendgrid-logs-app' });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: {} });
+    new ConnectionRepository().create({ provider: 'sendgrid', scope: 'example/sendgrid-logs-app', credentialsEncrypted: getSecretStore().encryptObject({ apiKey: 'synthetic-project-key' }) });
+    new ConnectionRepository().create({ provider: 'sendgrid', scope: 'example/unrelated', credentialsEncrypted: getSecretStore().encryptObject({ apiKey: 'synthetic-unrelated-key' }) });
+    const fetchMock = vi.fn().mockImplementation(async () => Response.json({ messages: [{ sg_message_id: 'safe-message-id', status: 'dropped', to_email: 'recipient@example.test', reason: 'private reason' }] }));
+    vi.stubGlobal('fetch', fetchMock);
+    SqliteAdapter.getInstance().getDb().pragma('query_only = ON');
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_logs', { project: project.name, env: 'staging', source: 'sendgrid', recipient: 'recipient@example.test', limit: 5 });
+      expect(result).toMatchObject({ ok: true, data: {
+        source: 'sendgrid', evidenceSource: 'sendgrid-email-logs-api', persisted: false,
+        project: project.name, environment: 'staging', scope: { kind: 'provider-account', environmentAttribution: 'unverified' },
+        messages: [{ messageId: 'safe-message-id', status: 'dropped' }],
+      } });
+      expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer synthetic-project-key');
+      expect(result.warnings.join(' ')).toContain('account');
+      expect(JSON.stringify(result)).not.toMatch(/recipient@|private reason|synthetic-project-key|synthetic-unrelated-key/);
+      const registry = new CommandRegistry();
+      registerHvObservabilityTools(registry, createToolContext());
+      let stdout = '';
+      let stderr = '';
+      const exitCode = await runCli(['logs', '--project', project.name, '--env', 'staging', '--source', 'sendgrid', '--recipient', 'recipient@example.test', '--limit', '5', '--json'], {
+        registry, initialize: false, io: {
+          stdinIsTTY: false, readStdin: async () => '', confirm: async () => false,
+          writeOut: (text) => { stdout += text; }, writeErr: (text) => { stderr += text; },
+        },
+      });
+      expect(exitCode).toBe(0);
+      expect(JSON.parse(stdout).data).toMatchObject({ scope: result.data.scope, messages: result.data.messages });
+      expect(stdout + stderr).not.toMatch(/recipient@|private reason|synthetic-project-key/);
+    } finally { await t.close(); }
+  });
+
+  it('requires explicit SendGrid project and environment before reading', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_logs', { source: 'sendgrid' });
+      expect(result).toMatchObject({ ok: false, error: { code: 'VALIDATION', message: expect.stringContaining('explicit project and env') } });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally { await t.close(); }
+  });
+
+  it('keeps SendGrid denied access distinct from an empty message list', async () => {
+    const project = new ProjectRepository().create({ name: 'sendgrid-denied-app' });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: {} });
+    new ConnectionRepository().create({ provider: 'sendgrid', credentialsEncrypted: getSecretStore().encryptObject({ apiKey: 'synthetic-key' }) });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ errors: [{ message: 'recipient@example.test synthetic-key' }] }, { status: 403 })));
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_logs', { project: project.name, env: 'staging', source: 'sendgrid' });
+      expect(result).toMatchObject({ ok: false, error: { code: 'PROVIDER_ERROR', details: { category: 'access_denied', status: 403 } } });
+      expect(JSON.stringify(result)).not.toMatch(/recipient@|synthetic-key|upgrade|purchase/i);
+    } finally { await t.close(); }
+  });
+
+  it('never borrows another project connection to read SendGrid history', async () => {
+    const project = new ProjectRepository().create({ name: 'sendgrid-no-access', gitRemoteUrl: 'https://github.com/example/sendgrid-no-access' });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: {} });
+    new ConnectionRepository().create({ provider: 'sendgrid', scope: 'example/unrelated', credentialsEncrypted: getSecretStore().encryptObject({ apiKey: 'synthetic-unrelated-key' }) });
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_logs', { project: project.name, env: 'staging', source: 'sendgrid' });
+      expect(result).toMatchObject({ ok: false, error: { code: 'MISSING_CONNECTION' } });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally { await t.close(); }
+  });
+
+  it('preserves safe SendGrid validation metadata through the command boundary', async () => {
+    const project = new ProjectRepository().create({ name: 'sendgrid-shape-app' });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: {} });
+    new ConnectionRepository().create({ provider: 'sendgrid', credentialsEncrypted: getSecretStore().encryptObject({ apiKey: 'synthetic-key' }) });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ sg_message_id: 'safe-message-id', events: [{ timestamp: 'recipient@example.test' }] })));
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_logs', { project: project.name, env: 'staging', source: 'sendgrid', messageId: 'safe-message-id' });
+      expect(result).toMatchObject({ ok: false, error: { code: 'PROVIDER_ERROR', details: {
+        category: 'invalid_response', validation: { stage: 'events', reason: 'schema', fields: ['events.*.timestamp'] },
+      } } });
+      expect(JSON.stringify(result)).not.toMatch(/recipient@|synthetic-key/);
+    } finally { await t.close(); }
+  });
+
   it('returns project-scoped hosting setup before reading provider logs', async () => {
     const project = new ProjectRepository().create({
       name: 'provider-logs-app',
