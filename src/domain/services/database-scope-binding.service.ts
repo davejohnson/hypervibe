@@ -35,7 +35,8 @@ export function isDatabaseScopeBindingAction(action: PlanAction): boolean {
 /** Select an existing current identity, never a retained or unfinished create. */
 export function currentDatabaseScopeComponent(context: BackupPolicyContext): Component | undefined {
   const desired = context.spec.database;
-  if (!desired || !context.environment || context.spec.backups?.mode === 'disabled') return undefined;
+  // Identity reconciliation is independent of whether backup management is enabled.
+  if (!desired || !context.environment) return undefined;
   const candidates = context.components.filter(component => component.environmentId === context.environment!.id
     && component.type === desired.engine);
   if (candidates.length !== 1) return undefined;

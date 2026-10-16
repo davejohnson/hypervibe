@@ -25,7 +25,7 @@ import { railwayHttpFixture, projectId, stagingId } from '../../adapters/provide
 
 // Real SQLite and graphql-request against the pinned official Railway SDL.
 // Synthetic scope/volume state, not a recording or live provider certification.
-describe('reviewed legacy database scope binding', () => {
+describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope binding with %s backups', backupMode => {
   let directory: string;
   let ctx: CommandContext;
   beforeEach(() => {
@@ -48,10 +48,12 @@ describe('reviewed legacy database scope binding', () => {
     const volume = http.addVolume('staging-postgres', stagingId, '/var/lib/postgresql/data');
     http.backupSchedules.set(String(volume.instance.id), [{ id: 'daily', kind: 'DAILY', name: 'Daily',
       cron: '0 0 * * *', retentionSeconds: 6 * 86400, createdAt: '2026-10-01T00:00:00Z' }]);
+    if (backupMode === 'disabled') http.backupSchedules.clear();
     const project = ctx.repos.projects.create({ name: 'legacy-scope', defaultPlatform: 'railway' });
     const spec = projectSpecSchema.parse({ version: 1, project: project.name,
       runtime: { kind: 'node', version: '24', installCommand: 'npm ci --omit=dev' },
       environments: { staging: { hosting: { provider: 'railway' }, services: { web: {} },
+        backups: backupMode === 'disabled' ? { mode: 'disabled', reason: 'Daily backups are not wanted for staging.' } : { mode: 'daily' },
         database: { provider: 'railway' }, email: { enabled: false }, envVars: {} } } });
     const stored = new SpecStore().replace(project, spec);
     const checkpoints = { preserved: { source: { provider: 'railway', primaryExternalId: 'staging-postgres',
@@ -166,11 +168,17 @@ describe('reviewed legacy database scope binding', () => {
     const f = await fixture();
     ctx.repos.components.updateBindings(f.component.id, { providerScope: { projectId, environmentId: stagingId } });
     const r = await reviewed(f);
+    expect(r.result.actions).toHaveLength(1);
+    expect(r.action.requiresConfirm).toBe(true);
     expect(r.action.reason).toContain('.hypervibe/bindings.json');
     expect(await r.apply()).toMatchObject({ success: true, data: { applied: 1, skipped: 0, providerMutations: 0 } });
     expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings.databaseTopology)
       .toEqual({ primary: { provider: 'railway', externalId: 'staging-postgres' }, replicas: {} });
     expect((await planDatabaseScopeBinding(f.context())).actions).toEqual([]);
+    expect(await r.apply()).toMatchObject({ success: true, data: { applied: 0, skipped: 1, providerMutations: 0 } });
+    expect(new SpecStore().get(f.project)?.spec).toEqual(f.spec);
+    if (backupMode === 'disabled') expect(f.http.backupSchedules.size).toBe(0);
+    expect(f.http.contractErrors).toEqual([]);
     expect(f.http.mutations).toEqual([]);
   });
 
@@ -212,7 +220,7 @@ describe('reviewed legacy database scope binding', () => {
     expect(f.http.mutations).toEqual([]);
   });
 
-  it.each(['explicit-scope', 'malformed-scope', 'unfinished-create', 'malformed-create', 'retained', 'duplicate', 'disabled'])('preserves %s state without adopting it', async change => {
+  it.each(['explicit-scope', 'malformed-scope', 'unfinished-create', 'malformed-create', 'retained', 'duplicate'])('preserves %s state without adopting it', async change => {
     const f = await fixture();
     if (change === 'explicit-scope') ctx.repos.components.updateBindings(f.component.id, { providerScope: { projectId } });
     if (change === 'malformed-scope') ctx.repos.components.updateBindings(f.component.id, { providerScope: null });
@@ -220,7 +228,6 @@ describe('reviewed legacy database scope binding', () => {
       unresolvedMutation: createUnresolvedDatabaseMutation('postgres', { projectId, environmentId: stagingId }) });
     if (change === 'malformed-create') ctx.repos.components.updateBindings(f.component.id, { unresolvedMutation: {} });
     if (change === 'retained') ctx.repos.components.updateBindings(f.component.id, { retainedCleanup: true });
-    if (change === 'disabled') f.spec.environments.staging.backups = { mode: 'disabled', reason: 'Explicit owner exclusion' };
     const before = ctx.repos.components.findByEnvironmentId(f.environment.id);
     const context = f.context();
     // SQLite disallows duplicate environment/type rows. Also guard an ambiguous

@@ -69,6 +69,24 @@ markers, and reports applied/skipped counts with zero provider mutations. Re-pla
 after applying the prerequisite; it does not enable a schedule or verify a
 restore. An outstanding checkpoint retains priority.
 
+Identity repair is independent of `backups.mode`: disabling backup management
+still permits the same confirmed, independently verified repair. A database with
+complete recorded scope but no committed `databaseTopology.primary` receives an
+identity-only repair under the same checks. Apply and export retries re-observe
+the exact source without enabling schedules or mutating provider resources.
+
+The disabled-policy regression failed before removing the shared selector's
+backup-policy guard: the full planner returned `full` instead of
+`database-bindings` for an already scoped Railway database missing its committed
+primary. The expanded contract had 20 failures and 44 passes before the fix;
+all 64 checks pass afterward, as do 106 adjacent backup/provider checks and
+source typechecking. Both policy modes exercise confirmation, conflicting and
+ambiguous identities, unverifiable scope, and persistence retries. Railway
+transport fixtures are synthetic and validated against the pinned official SDL;
+they are not live repair evidence. These checks remain in ordinary `npm test`.
+The committed acceptance workflow and desired required-check configuration both
+include that gate; live branch-protection enforcement was not inspected.
+
 The following review, dated 2026-10-02, covers all eight registered database
 providers. Eligibility is adapter behavior checked against these native identity
 contracts, not a claim of live compatibility.
