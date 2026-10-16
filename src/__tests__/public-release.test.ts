@@ -1,5 +1,7 @@
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
@@ -8,6 +10,35 @@ function releaseJobs() {
 }
 
 describe('public release configuration', () => {
+  it.each([0, 29])('requires the high-severity dependency audit before release checks; audit exit=%s', (auditExit) => {
+    const directory = mkdtempSync(join(tmpdir(), 'hypervibe-release-audit-'));
+    try {
+      const npm = join(directory, 'npm');
+      const calls = join(directory, 'calls');
+      writeFileSync(npm, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$RELEASE_TEST_CALLS"\nif [ "$1" = "audit" ]; then exit "$RELEASE_TEST_AUDIT_EXIT"; fi\n');
+      chmodSync(npm, 0o755);
+      const metadata = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+      const result = spawnSync('/bin/sh', ['-c', metadata.scripts['release:check']], {
+        encoding: 'utf8',
+        env: {
+          PATH: directory,
+          RELEASE_TEST_CALLS: calls,
+          RELEASE_TEST_AUDIT_EXIT: String(auditExit),
+        },
+      });
+
+      expect(result.status).toBe(auditExit);
+      expect(readFileSync(calls, 'utf8').trim().split('\n')).toEqual(auditExit === 0
+        ? ['audit --audit-level=high', 'test', 'run typecheck', 'run build', 'run prepublish-check']
+        : ['audit --audit-level=high']);
+      expect(releaseJobs()['validate-package'].steps).toContainEqual(expect.objectContaining({
+        run: 'npm run release:check',
+      }));
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('publishes the scoped package publicly through the npm registry', () => {
     const packageMetadata = JSON.parse(
       readFileSync(new URL('../../package.json', import.meta.url), 'utf8')
