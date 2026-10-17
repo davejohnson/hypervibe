@@ -2,7 +2,10 @@
   "version": 1,
   "managedBy": "hypervibe",
   "files": [
+    ".github/dependabot.yml",
     ".github/hypervibe/codex-provider-truth/config.toml",
+    ".github/pull_request_template.md",
+    ".github/workflows/hypervibe-acceptance.yml",
     ".github/workflows/hypervibe-provider-conformance.yml",
     ".github/workflows/hypervibe-provider-truth.yml"
   ]
