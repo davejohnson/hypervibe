@@ -298,7 +298,7 @@ export async function planGitHubCollaboration(params: {
         type: 'update',
         resource: { kind: 'repo', name: repo, provider: 'github' },
         verified: false,
-        reason: 'GitHub collaboration setup needs to be synced',
+        reason: 'GitHub settings for protecting code and organizing work could not be checked',
         metadata: metadataBase,
       },
       warnings,
@@ -349,8 +349,10 @@ export async function planGitHubCollaboration(params: {
       resource: { kind: 'repo', name: repo, provider: 'github' },
       verified,
       reason: type === 'noop'
-        ? 'GitHub collaboration setup is in sync'
-        : `GitHub collaboration setup needs syncing (${drift.join(', ')})`,
+        ? 'Your GitHub code safeguards and work organization are up to date'
+        : (collaboration.pullRequests.requirePr
+          ? 'Help protect your code on GitHub from accidental overwrites and keep work organized'
+          : 'Keep work organized on GitHub with templates and labels'),
       ...(drift.length > 0
         ? { diff: drift.map((field) => ({ field, from: 'drift', to: 'desired' })) }
         : {}),
@@ -451,7 +453,7 @@ export async function applyGitHubCollaboration(params: {
 
   return {
     success: true,
-    message: `Synced GitHub collaboration setup for ${repo}`,
+    message: `Updated GitHub settings for ${repo} to match your project setup`,
     data: {
       repository: repo,
       files,
