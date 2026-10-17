@@ -1,16 +1,22 @@
+# Managed by Hypervibe. Change desired state with hv_spec; manual edits will be reconciled.
+
 ## Summary
 
-## Issue
+- What changed and why?
+
+## Related issue
 
 Closes #
 
-## Screenshots / recording
+## Screenshots or recording
 
-## Test results
+- Add visual evidence for UI changes, or write “Not applicable.”
 
-- [ ] Relevant tests pass
-- [ ] Typecheck passes
-- [ ] Manual testing completed, or limitations documented
+## Verification
+
+- [ ] Focused automated checks are listed with their results.
+- [ ] Manual verification is described, when applicable.
+- [ ] Any intentionally skipped broad checks are called out.
 
 ### Assumption challenged
 
@@ -21,31 +27,22 @@ Closes #
 - Independent evidence (requirement/source URL + revision, or redacted observation; label synthetic/reconstructed/recorded):
 - Counterexample and regression test (observed failure before fix -> passing afterward):
 - Other affected lifecycle paths/providers checked, and checks not performed:
-- Remaining uncertainty (including whether the customer incident's cause is proven):
+- Remaining uncertainty (including whether the customer incident cause is proven):
 
-## Risks / uncertainties
+## Deployment and infrastructure impact
 
-## Product-owner review checklist
+- Describe configuration, secrets, migrations, rollout, or rollback concerns, or write “None.”
 
-- [ ] Matches the acceptance criteria
-- [ ] UX makes sense for nontechnical users
-- [ ] Copy is clear
-- [ ] Edge cases are acceptable
+## Existing behavior or tests changed
 
-## Project checklist
+- List changed or removed expectations and the product reason, or write “None.”
 
-- [ ] PR links the GitHub issue, when applicable.
-- [ ] Changes are limited to the requested scope and use the least code needed.
-- [ ] Relevant `ARCHITECTURE.md` guidance was read before infrastructure changes.
-- [ ] Auth, billing, permissions, deployment, and database changes are called out
-  above, or none were made.
-- [ ] Screenshots or screen recording are included for UI changes.
-- [ ] Test and typecheck results, skipped checks, and limitations are documented above.
-- [ ] MCP and CLI parity is preserved through shared application commands.
-- [ ] Lifecycle changes use spec/plan/apply and respect action-scoped authorization.
-- [ ] Unknown observations block unsafe changes; noops cause no provider mutations.
-- [ ] Billable or data-bearing actions require exact action-id confirmation.
-- [ ] Unattempted actions are reported as skipped or aborted, not failed.
-- [ ] Provider support claims distinguish mocked tests from recent live evidence.
-- [ ] Relevant regression tests were added or updated, or no tests were needed.
-- [ ] No secrets or sensitive data were logged or committed.
+## Risks and follow-up
+
+- Note known risks, uncertainties, or follow-up work, or write “None.”
+
+## Review checklist
+
+- [ ] The existing mechanism was reused, or a new mechanism is justified.
+- [ ] Sensitive values and credentials are not included.
+- [ ] Compatibility and deployment consequences are understood.
