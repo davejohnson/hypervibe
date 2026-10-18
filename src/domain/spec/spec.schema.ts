@@ -304,7 +304,7 @@ export const collaborationSpecSchema = z.object({
   pullRequests: z.object({
     targetBranch: z.string().min(1).default('main'),
     requirePr: z.boolean().default(true),
-    requireReview: z.boolean().default(true),
+    requireReview: z.boolean().default(false),
     requiredReviewers: z.number().int().min(1).max(6).default(1),
     dismissStaleReviews: z.boolean().default(false),
     requireCodeOwnerReviews: z.boolean().default(false),
@@ -568,7 +568,7 @@ const githubCollaborationSpecSchema = z.object({
   pullRequests: z.object({
     targetBranch: z.string().min(1).default('main'),
     requirePr: z.boolean().default(true),
-    requireReview: z.boolean().default(true),
+    requireReview: z.boolean().default(false),
     requiredReviewers: z.number().int().min(1).max(6).default(1),
     dismissStaleReviews: z.boolean().default(false),
     requireCodeOwnerReviews: z.boolean().default(false),

@@ -164,6 +164,8 @@ MCP ─┘
 
 ## Repository Collaboration
 
+Mandatory approval by another person is opt-in. Both repository collaboration schemas default `requireReview` to `false`; preserve an explicit owner choice, and never infer review requirements from collaborator counts or requests for automated checks and overwrite safeguards. Review settings remain independent of required checks and force-push/deletion protection.
+
 Repository collaboration setup is lifecycle development infrastructure. GitHub issue labels, issue templates, PR templates, branch protection, and deploy-promotion guardrails should be expressed in the project spec and converged through `hv_plan`/`hv_apply`. Do not add one-off setup tools for these paths unless they are read-only inspection or explicit repair operations.
 
 Collaborator invitations are guidance-only by default. If Hypervibe ever mutates repository access, that must be confirm-gated, permission-audited, and represented as desired state rather than hidden inside a helper tool.

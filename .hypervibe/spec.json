@@ -21,7 +21,7 @@
       "pullRequests": {
         "targetBranch": "main",
         "requirePr": true,
-        "requireReview": true,
+        "requireReview": false,
         "requiredReviewers": 1,
         "dismissStaleReviews": false,
         "requireCodeOwnerReviews": false,

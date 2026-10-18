@@ -189,6 +189,9 @@ function branchProtectionDrift(current: BranchProtection, collaboration: Collabo
     return ['branchProtection'];
   }
   const reviews = current.required_pull_request_reviews;
+  if (Boolean(reviews) !== desired.requireReview) {
+    drift.push('requireReview');
+  }
   if (desired.requireReview) {
     if (!reviews || reviews.required_approving_review_count !== desired.requiredReviewers) {
       drift.push('requiredReviewers');

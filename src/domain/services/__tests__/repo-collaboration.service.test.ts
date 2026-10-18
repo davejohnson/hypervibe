@@ -124,7 +124,7 @@ describe('repo-collaboration.service', () => {
     );
     expect(writeLabel).toHaveBeenCalledWith('davejohnson', 'billforge', expect.objectContaining({ name: 'agent-ready' }));
     expect(protect).toHaveBeenCalledWith('davejohnson', 'billforge', 'main', expect.objectContaining({
-      requireReviews: true,
+      requireReviews: false,
       requiredReviewers: 1,
       preserveStatusChecks: true,
     }));

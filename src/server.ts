@@ -5,6 +5,7 @@ import { registerCommandRegistry } from './interfaces/mcp/adapter.js';
 import { HYPERVIBE_VERSION } from './version.js';
 
 export const HYPERVIBE_SERVER_INSTRUCTIONS = [
+  'Never require another person to approve merges by default on any repository. Mandatory reviews are opt-in: enable them only when the user explicitly requests them and explain that merging will require another person. Requests for code safeguards or automated checks, and the presence of collaborators, do not authorize this requirement. Preserve existing owner-chosen review policies unless the user asks to change them.',
   'Hypervibe exposes one desired-state infrastructure engine (hosting, databases, DNS, email, secrets, CI) through its hv_* MCP tools and the Hypervibe CLI.',
   'When these MCP tools are available, use them directly instead of spawning the Hypervibe CLI. Do NOT shell out to provider CLIs (railway, gcloud, vercel, doppler, op, bws, gh, etc.) or call provider APIs directly: those bypass Hypervibe state, reviewed plans, and audit history.',
   'Core workflow: hv_spec (desired state) → hv_plan (diff against live infrastructure, returns planId) → hv_apply planId=... → hv_status / hv_logs / hv_health to verify.',
