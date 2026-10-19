@@ -9,6 +9,7 @@ import { CI_CONFIGURATION_SYNC_OPERATION } from '../services/managed-ci.contract
 import { resolvePlanActionAuthority } from './action-authority.js';
 import type { PlanAction } from './plan.types.js';
 import { isManagedCiCredentialAction } from './plan-stage.js';
+import { isScopedSecretAction } from './scoped-secrets.js';
 
 /**
  * Converge executor: applies a previously persisted plan (terraform
@@ -213,6 +214,7 @@ export const planRunDocumentSchema = z.object({
   /** Omitted by plans created before scoped planning; those remain full plans. */
   scope: z.enum([
     'full',
+    'secrets',
     'api-policy',
     'retained-cleanup',
     'managed-ci-bindings',
@@ -249,6 +251,18 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'secrets') {
+    const keys = document.overrides?.delegatedSecretKeys ?? [];
+    if (!keys.length || new Set(keys).size !== keys.length || document.actions.length !== keys.length
+      || new Set(document.actions.map(action => action.resource.name)).size !== keys.length
+      || document.actions.some(action => !isScopedSecretAction(action) || !keys.includes(action.resource.name))
+      || !document.observedFingerprint || !document.overrides?.delegatedSecretVarsEncrypted
+      || Object.keys(document.overrides).some(key => !['delegatedSecretKeys', 'delegatedSecretVarsEncrypted'].includes(key))
+      || document.sourceCommitSha || document.integrationFingerprints || document.lockEnvironmentIds?.length || document.inputRequired?.length) {
+      ctx.addIssue({ code: 'custom', message: 'Secret-only plans require exact selected delegated keys, encrypted input, verified bound targets and no other actions or deployment inputs.' });
+    }
+    return;
+  }
   if (document.scope === 'managed-ci-credentials') {
     const ids = new Set(document.actions.map(action => action.id));
     if (!document.actions.length || document.actions.some(action => !isManagedCiCredentialAction(action)

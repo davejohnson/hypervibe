@@ -754,11 +754,11 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_plan',
-    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Hypervibe-owned application secrets are generated automatically inside the encrypted plan boundary. Externally owned values are accepted only through secretRefs and are never returned. Optional services restricts a full plan to selected services.',
+    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Hypervibe-owned application secrets are generated automatically inside the encrypted plan boundary. Externally owned values are accepted only through secretRefs and are never returned. Optional services restricts a full plan to selected services.',
     {
       project: projectField,
       env: envField,
-      scope: z.enum(['full', 'retained-cleanup']).optional().describe('Default full. Use retained-cleanup to persist only exact retained abandoned-host, database, cache, or provider-resource destroy actions.'),
+      scope: z.enum(['full', 'retained-cleanup', 'secrets']).optional().describe('Default full. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
       envVars: z.record(z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
@@ -794,7 +794,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       // its git-safety and filesystem boundary before PlanService persists an
       // executable plan, so an unsafe tracked .env cannot leave an undisclosed
       // authorization record behind.
-      const preparedLocalEnv = currentSpec
+      const preparedLocalEnv = currentSpec && scope !== 'secrets'
         ? ensureProjectLocalEnv({
           source: currentSpecResult?.source,
           projectName: project.name,
@@ -806,9 +806,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         : undefined;
       const result = await planService.plan(project, plannedEnvironment, {
         ...(scope ? { scope } : {}),
-        ...(services?.length ? { serviceFilter: services } : {}),
-        ...(envVars && Object.keys(envVars).length > 0 ? { envVarOverrides: envVars } : {}),
-        ...(envFile ? { envFile } : {}),
+        ...(services !== undefined && (scope === 'secrets' || services.length > 0) ? { serviceFilter: services } : {}),
+        ...(envVars !== undefined && (scope === 'secrets' || Object.keys(envVars).length > 0) ? { envVarOverrides: envVars } : {}),
+        ...(envFile !== undefined && (scope === 'secrets' || envFile) ? { envFile } : {}),
         ...(includeEnvFile !== undefined ? { includeEnvFile } : {}),
         ...(secretRefs && Object.keys(secretRefs).length > 0 ? { secretRefs } : {}),
       });
@@ -830,7 +830,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         : undefined;
       let localEnv: RepoEnvFileWrite | undefined;
       try {
-        localEnv = mergeLocalEnvWrites(
+        localEnv = scope === 'secrets' ? undefined : mergeLocalEnvWrites(
           preparedLocalEnv,
           ensureProjectLocalEnv({
             source: currentSpecResult?.source,
@@ -904,7 +904,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           : `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. If values are already available here, re-run hv_plan with secretRefs mapping each key to env:, dotenv:, file:, or a secret-manager reference. Otherwise confirm who supplies these inputs. Do not paste raw values into chat.`;
         hint += hostedCredentialHint;
       } else if (pending.length === 0) {
-        hint = result.backupCoverage && !result.backupCoverage.complete
+        hint = result.scope === 'secrets'
+          ? 'The selected secrets already match. This does not verify deployment or other environment settings.'
+          : result.backupCoverage && !result.backupCoverage.complete
           ? 'No executable changes are available, but daily backup coverage has gaps. Review backupCoverage; unsupported protection requires an adapter implementation and unknown protection requires a verified provider observation.'
           : 'Everything is in sync — nothing to apply.';
       } else if (softActionScopedBlocked.length > 0) {
@@ -939,7 +941,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           ...(result.backupReadiness ? { backupReadiness: result.backupReadiness } : {}),
           ...(result.emailSenderReadiness ? { emailSenderReadiness: result.emailSenderReadiness } : {}),
           environment: result.environmentName,
-          ...(plannedEnvironmentSpec && managedDatabaseContract(plannedEnvironmentSpec)
+          ...(result.scope !== 'secrets' && plannedEnvironmentSpec && managedDatabaseContract(plannedEnvironmentSpec)
             ? { managedDatabase: managedDatabaseContract(plannedEnvironmentSpec) }
             : {}),
           specRevision: result.specRevision,
@@ -965,7 +967,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           warnings: [
             ...result.warnings,
             ...actionScopedWarnings,
-            ...(currentSpec && scope !== 'retained-cleanup' ? environmentResourceWarnings(currentSpec, result.environmentName) : []),
+            ...(currentSpec && scope !== 'retained-cleanup' && scope !== 'secrets' ? environmentResourceWarnings(currentSpec, result.environmentName) : []),
           ],
           next,
           ...(hardBlockRecovery?.agentInstruction ? { agentInstruction: hardBlockRecovery.agentInstruction }
@@ -1454,6 +1456,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       }
 
       const { result, envName } = outcome;
+      const secretOnly = asRecord(ctx.repos.runs.findById(planId)?.plan)?.scope === 'secrets';
       const skipped = result.receipts.filter((r) => r.status === 'skipped_requires_confirm');
       const pending = result.receipts.filter((r) => r.status === 'pending');
       const blockedReceipts = result.receipts.filter((r) => r.status === 'blocked');
@@ -1489,10 +1492,12 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
               : pending.length > 0
                 ? `Apply has pending provider workflows: ${pending.map((r) => r.actionId).join(', ')}. Re-run hv_plan and hv_apply after they progress.`
             : result.success
-              ? 'Apply complete. Check hv_status to verify convergence.'
+              ? secretOnly
+                ? 'The selected secrets are saved. They take effect after the managed CI deployment; select its workflow with hv_ci_status, then use hv_ci_trigger.'
+                : 'Apply complete. Check hv_status to verify convergence.'
               : 'Apply failed; compensations ran where registered. Inspect receipts and re-run hv_plan.',
           warnings: outcome.actionScopedWarnings,
-          next: [result.success || pending.length > 0 ? 'hv_status' : 'hv_plan'],
+          next: [result.success && secretOnly ? 'hv_ci_status' : result.success || pending.length > 0 ? 'hv_status' : 'hv_plan'],
         }
       );
     })

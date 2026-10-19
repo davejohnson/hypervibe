@@ -1,4 +1,5 @@
 import { planScheduleActivations, SCHEDULE_ACTIVATION_OPERATION } from '../services/schedule-activation.service.js';
+import { scopedSecretObservation } from './scoped-secrets.js';
 import { planApiPolicy } from '../services/api-policy.js';
 import path from 'path';
 import { observeServiceVolumes, planServiceVolumes, retainedVolumeHostingBlock, wireServiceVolumeActions } from '../services/service-volume.service.js';
@@ -137,7 +138,7 @@ import {
 
 export interface PlanOptions {
   /** Restrict the plan to one lifecycle stage. Omission preserves full-plan behavior. */
-  scope?: 'full' | 'retained-cleanup';
+  scope?: 'full' | 'retained-cleanup' | 'secrets';
   /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
   serviceFilter?: string[];
   /** One-off env var overrides merged over spec.envVars, frozen (encrypted) into the plan. */
@@ -158,7 +159,7 @@ export interface EnvironmentPlan {
   webhookReadiness?: WebhookReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
-  scope: 'full' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
+  scope: 'full' | 'secrets' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
   backupReadiness?: BackupReadiness;
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
@@ -1584,6 +1585,58 @@ export class PlanService {
     };
   }
 
+  private async planSecrets(project: Project, environmentName: string, specResult: SpecResult, options: PlanOptions): Promise<EnvironmentPlan | { error: string }> {
+    const spec = specResult.spec;
+    const environmentSpec = spec.environments[environmentName];
+    const keys = Object.keys(options.secretRefs ?? {}).sort();
+    if (!keys.length || options.serviceFilter !== undefined || options.envVarOverrides !== undefined
+      || options.envFile !== undefined || options.includeEnvFile === true) {
+      return { error: 'scope="secrets" requires nonempty secretRefs and accepts no services, envVars, envFile or bulk env-file input.' };
+    }
+    if (!environmentSpec || environmentSpec.deploy?.strategy !== 'branch' || environmentSpec.deploy.trigger !== 'ci') {
+      return { error: 'scope="secrets" requires an existing environment deployed through managed CI.' };
+    }
+    const invalid = keys.filter(key => spec.secrets[key]?.ownership !== 'delegated'
+      || !spec.secrets[key]?.environments.includes(environmentName));
+    if (invalid.length) return { error: `These keys are not delegated runtime secrets for ${environmentName}: ${invalid.join(', ')}.` };
+    const environment = this.envRepo.findByProjectAndName(project.id, environmentName);
+    if (!environment) return { error: `Environment ${environmentName} has no existing hosting bindings. Review initial setup with a full plan.` };
+    const blocked = this.providerPreflight([environmentSpec.hosting.provider]);
+    if (blocked.length) return { error: blocked.map(block => block.reason).join(' ') };
+    const adapter = await adapterFactory.getProviderAdapter(environmentSpec.hosting.provider, project);
+    if (!adapter.success || adapter.adapter?.capabilities.supportsDeferredSecretUpdates !== true) {
+      return { error: `${environmentSpec.hosting.provider} does not yet support verified secret-only updates without restarting workloads.` };
+    }
+    const { observed, warnings } = await this.observeEnvironment(project, environment, environmentSpec, { hostingOnly: true });
+    let evidence: ReturnType<typeof scopedSecretObservation>;
+    try { evidence = scopedSecretObservation(environment, environmentSpec, observed, keys); }
+    catch (error) { return { error: error instanceof Error ? error.message : 'Secret destinations could not be verified.' }; }
+    const values: Record<string, string> = {};
+    try {
+      for (const key of keys) {
+        const value = await resolveSecretValueRef(options.secretRefs![key], { projectId: project.id, environmentName });
+        if (!value) return { error: `secretRefs["${key}"] resolved to an empty value.` };
+        values[key] = value;
+      }
+    } catch {
+      return { error: 'Could not read the selected secret reference. Check the local input and retry; no plan was saved.' };
+    }
+    const selectedSpec = { ...spec, secrets: Object.fromEntries(keys.map(key => [key, spec.secrets[key]])) };
+    const planned = planDelegatedSecrets({ spec: selectedSpec, environmentName, environment,
+      hostingProvider: environmentSpec.hosting.provider, observed, suppliedValues: values });
+    const actions = planned.actions.map(action => ({ ...action,
+      metadata: { ...action.metadata, deferDeployment: true, targetFingerprint: evidence.targetFingerprint } }));
+    warnings.push('This plan updates only the selected secrets. Services keep running with their current configuration until the managed CI deployment completes.');
+    const document: PlanRunDocument = { kind: 'hv_plan', scope: 'secrets', environmentName, specRevision: specResult.revision,
+      observedFingerprint: evidence.fingerprint, actions, warnings,
+      overrides: { delegatedSecretKeys: keys, delegatedSecretVarsEncrypted: getSecretStore().encryptObject(values) } };
+    const run = this.runRepo.create({ projectId: project.id, environmentId: environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
+    this.runRepo.updateStatus(run.id, 'succeeded');
+    return { planRunId: run.id, scope: 'secrets', specRevision: specResult.revision,
+      specSource: specResult.source ?? { kind: 'local' }, environmentName, verified: true,
+      observed, actions, unmanaged: [], warnings, inputRequired: [], blocked: [] };
+  }
+
   async plan(
     project: Project,
     environmentName: string,
@@ -1600,6 +1653,7 @@ export class PlanService {
       return { error: providerValidation.message };
     }
     const scope = options?.scope ?? 'full';
+    if (scope === 'secrets') return this.planSecrets(projectWithSpecGitRemoteUrl(project, specResult.spec), environmentName, specResult, options!);
     if (scope === 'retained-cleanup') {
       const incompatibleInputs = [
         options && Object.prototype.hasOwnProperty.call(options, 'serviceFilter') ? 'services' : null,
