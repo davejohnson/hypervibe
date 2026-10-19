@@ -3,6 +3,7 @@ import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js
 import { applyApiPolicy, planApiPolicy } from '../domain/services/api-policy.js';
 import { applyDatabaseScopeBinding } from './apply-database-scope-binding.js';
 import { PlanService } from '../domain/plan/plan.service.js';
+import { isScopedSecretAction, scopedSecretObservation } from '../domain/plan/scoped-secrets.js';
 import { actionRequiresBackupReadiness, deploymentPrerequisitePhase, isManagedCiCredentialAction } from '../domain/plan/plan-stage.js';
 import { observeBackupPolicy } from '../domain/services/backup-policy.service.js';
 import { observeBackupHealth } from '../domain/services/backup-health.service.js';
@@ -823,6 +824,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   }
   const envName = loaded.document.environmentName;
   const planScope = loaded.document.scope ?? 'full';
+  const secretsOnly = planScope === 'secrets';
   const retainedCleanupOnly = planScope === 'retained-cleanup';
   const backupProvisioningOnly = planScope === 'backup-provisioning';
   const ciCredentialsOnly = planScope === 'managed-ci-credentials';
@@ -838,6 +840,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const rawEnvironmentSpec = spec.environments[envName];
   const envSpec = rawEnvironmentSpec ? withBackupStorageDefaults(rawEnvironmentSpec) : undefined;
   if (!envSpec) {
+    if (secretsOnly) return { kind: 'env_missing', envName };
     const repositoryLifecycleOnly = loaded.document.actions.length > 0
       && loaded.document.actions.every((action) => {
         const capability = resolvePlanActionAuthority(action)?.capability;
@@ -869,6 +872,18 @@ export async function executePlanApply(ctx: CommandContext, params: {
     ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
     : project;
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (secretsOnly && (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
+    || envSpec.deploy?.strategy !== 'branch' || envSpec.deploy.trigger !== 'ci' || params.alwaysRunBootstrap)) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'Secret-only apply requires the reviewed existing project/environment and managed CI; it cannot deploy or repair bindings.' }] };
+  }
+  if (secretsOnly) {
+    const adapter = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, projectForPreflight);
+    if (!adapter.success || adapter.adapter?.capabilities.supportsDeferredSecretUpdates !== true) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: envSpec.hosting.provider,
+        reason: 'The hosting adapter cannot verify secret-only updates without restarting workloads.' }] };
+    }
+  }
   if ((backupProvisioningOnly || ciCredentialsOnly) && (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id)) {
     return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The reviewed prerequisite plan belongs to another project or environment.' }] };
   }
@@ -912,8 +927,8 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const isDeferredIdentityCandidate = (action: PlanAction) => serviceIdentityOnly
     && resolvePlanActionAuthority(action)?.capability === 'hosting.service.converge'
     && (action.type === 'create' || action.type === 'update' && action.metadata?.workloadCreateRequired === true);
-  if (loaded.document.actions.some(action => actionRequiresBackupReadiness(action) && !isDeferredIdentityCandidate(action))
-    || (params.alwaysRunBootstrap && !deploymentPrerequisitePhase(loaded.document))) {
+  if (!secretsOnly && (loaded.document.actions.some(action => actionRequiresBackupReadiness(action) && !isDeferredIdentityCandidate(action))
+    || (params.alwaysRunBootstrap && !deploymentPrerequisitePhase(loaded.document)))) {
     const readiness = await freshBackupReadiness();
     if (!readiness.ready) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
       reason: `Backup readiness blocks deployment: ${readiness.gaps.join(' ')} Run hv_plan to review the required protection stages.` }] };
@@ -970,7 +985,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     return { kind: 'executed', envName, result, actionScopedWarnings: [] };
   }
   const apiPolicyState = planApiPolicy(envName, environment?.platformBindings.apiPolicy, envSpec.api);
-  if (apiPolicyState.error || apiPolicyState.action) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: apiPolicyState.error ?? 'API policy changed; run hv_plan and accept the isolated policy stage first.' }] };
+  if (!secretsOnly && (apiPolicyState.error || apiPolicyState.action)) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: apiPolicyState.error ?? 'API policy changed; run hv_plan and accept the isolated policy stage first.' }] };
   const migrationActions = loaded.document.actions.filter((action) =>
     action.type === 'update'
     && (
@@ -1007,7 +1022,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const selectedCi = resolveDevOpsSelection(spec)?.ci;
   const credentialConnectionProvider = selectedCi
     ? devOpsProviderRegistry.ciProvider(selectedCi.provider)?.connectionProvider : undefined;
-  const blocked = retainedCleanupOnly
+  const blocked = secretsOnly
+    ? planService.providerPreflight([envSpec.hosting.provider])
+    : retainedCleanupOnly
     ? planService.providerPreflight([
         envSpec.hosting.provider,
         ...cleanupProviders,
@@ -1038,7 +1055,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   }
   let freshIntegrationFingerprints: Record<string, string> | undefined;
   const shouldRefreshIntegration = (configured: boolean, planned?: string) =>
-    !retainedCleanupOnly
+    !secretsOnly && !retainedCleanupOnly
     && !workflowPublicationOnly
     && !backupProvisioningOnly
     && !ciCredentialsOnly
@@ -1098,7 +1115,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     `${entry.reason} This blocks only the related action; independent service and CI actions will still be applied.`
   );
 
-  const projectForApply = retainedCleanupOnly
+  const projectForApply = retainedCleanupOnly || secretsOnly
     ? project
     : syncProjectGitRemoteUrl(ctx, project, spec);
 
@@ -1111,15 +1128,27 @@ export async function executePlanApply(ctx: CommandContext, params: {
       projectForApply,
       environment,
       envSpec,
-      { hostingOnly: retainedCleanupOnly }
+      { hostingOnly: retainedCleanupOnly || secretsOnly }
     ));
     freshFingerprint = observed ? fingerprintObservedState(observed) : null;
   }
+  if (secretsOnly) {
+    try {
+      const evidence = scopedSecretObservation(environment!, envSpec, observed, loaded.document.overrides!.delegatedSecretKeys!);
+      if (loaded.document.actions.some(action => action.metadata?.targetFingerprint !== evidence.targetFingerprint)) {
+        throw new Error('The reviewed secret destinations have changed. Re-run the secret-only plan.');
+      }
+      freshFingerprint = evidence.fingerprint;
+    } catch (error) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: envSpec.hosting.provider,
+        reason: error instanceof Error ? error.message : 'Secret destinations could not be verified.' }] };
+    }
+  }
 
   // The bootstrap path derives the hosting adapter from project.defaultPlatform.
-  let applyProject: Project = projectForApply;
+  let applyProject: Project = secretsOnly ? { ...projectForApply, defaultPlatform: envSpec.hosting.provider } : projectForApply;
   if (
-    !retainedCleanupOnly
+    !secretsOnly && !retainedCleanupOnly
     && !workflowPublicationOnly
     && !ciCredentialsOnly
     && projectForApply.defaultPlatform !== envSpec.hosting.provider
@@ -1140,6 +1169,12 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const delegatedSecretEnvVars = overrides?.delegatedSecretVarsEncrypted
     ? getSecretStore().decryptObject<Record<string, string>>(overrides.delegatedSecretVarsEncrypted)
     : undefined;
+  if (secretsOnly && (!delegatedSecretEnvVars
+    || JSON.stringify(Object.keys(delegatedSecretEnvVars).sort()) !== JSON.stringify([...overrides!.delegatedSecretKeys!].sort())
+    || Object.values(delegatedSecretEnvVars).some(value => typeof value !== 'string' || !value))) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'The encrypted secret input must match exactly the reviewed keys. Re-run hv_plan.' }] };
+  }
   const confirmedActionIds = new Set(params.confirmActions);
   const buildDeployBootstrapParams = async () => {
     let bootstrapParams = specToBootstrapParams(applyProject.name, envName, envSpec, spec.runtime);
@@ -1269,6 +1304,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
       };
     }
     const capability = authority.capability;
+    if (secretsOnly && (!isScopedSecretAction(action) || capability !== 'hosting.delegated-secret.sync')) {
+      return blockedActionIdentity(action, 'Secret-only apply permits only the reviewed delegated secret updates.');
+    }
     if (ciCredentialsOnly && !isManagedCiCredentialAction(action)) {
       return { success: false, status: 'blocked', message: 'This stage can synchronize only reviewed CI credentials; no application or release mutation is authorized.' };
     }
@@ -1286,7 +1324,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
           && action.metadata.externalId === boundService.serviceId && observedServiceIds.length === 1
           && observedServiceIds[0].identityOnly === true);
     let requireNewWorkload = false;
-    if (actionRequiresBackupReadiness(action)) {
+    if (!secretsOnly && actionRequiresBackupReadiness(action)) {
       const readiness = await freshBackupReadiness();
       if (!readiness.ready) {
         if (!deferredIdentityCreation) return { success: false, status: 'blocked',
@@ -1785,6 +1823,20 @@ export async function executePlanApply(ctx: CommandContext, params: {
         }
       }
 
+      let secretObserved = observed;
+      if (secretsOnly) {
+        try {
+          secretObserved = (await planService.observeEnvironment(applyProject, latestEnvironment, envSpec, { hostingOnly: true })).observed;
+          const fresh = scopedSecretObservation(latestEnvironment, envSpec, secretObserved, [key]);
+          const previous = scopedSecretObservation(environment!, envSpec, observed, [key]);
+          if (fresh.targetFingerprint !== metadata?.targetFingerprint || fresh.fingerprint !== previous.fingerprint) {
+            return blockedActionIdentity(action, 'The selected secret or its destination changed before this write.');
+          }
+        } catch {
+          return blockedActionIdentity(action, 'The exact secret destinations could not be verified before this write.');
+        }
+      }
+
       if (bindingOnly) {
         try {
           recordDelegatedSecretBinding({
@@ -1826,13 +1878,17 @@ export async function executePlanApply(ctx: CommandContext, params: {
 
       const failures: string[] = [];
       let appliedCount = 0;
-      let deploymentDeferred = false;
-      let runtimeRolloutRequired = false;
+      let deploymentDeferred = secretsOnly;
+      let runtimeRolloutRequired = secretsOnly;
       const rolloutBaselines: Record<string, unknown> = {};
       for (const serviceName of destinationServices) {
+        if (secretsOnly && secretObserved?.services.find(service => service.name === serviceName)?.envVarHashes[key] === hashEnvValue(value)) {
+          continue;
+        }
         const service = ctx.repos.services.findByProjectAndName(project.id, serviceName);
         if (!service) {
           failures.push(`${serviceName}: service is not tracked locally`);
+          if (secretsOnly) break;
           continue;
         }
         const receipt = await syncHostingEnvVars({
@@ -1840,10 +1896,12 @@ export async function executePlanApply(ctx: CommandContext, params: {
           environment: latestEnvironment,
           service,
           vars: { [action.resource.name]: value },
-          deferDeployment: envSpec.deploy?.strategy === 'branch' && envSpec.deploy.trigger !== 'native',
+          deferDeployment: secretsOnly || envSpec.deploy?.strategy === 'branch' && envSpec.deploy.trigger !== 'native',
+          ...(secretsOnly ? { requireDeferredSecretUpdate: true } : {}),
         });
         if (!receipt.success) {
           failures.push(`${serviceName}: ${receipt.error ?? receipt.message}`);
+          if (secretsOnly) break;
         } else {
           appliedCount += 1;
           const receiptData = asRecord(receipt.data);
@@ -1862,7 +1920,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
         requestedCount: destinationServices.length,
         appliedCount,
         failedCount: failures.length,
-        skippedCount: 0,
+        skippedCount: secretsOnly ? destinationServices.length - appliedCount - failures.length : 0,
       };
       if (failures.length > 0) {
         return {
@@ -1873,7 +1931,8 @@ export async function executePlanApply(ctx: CommandContext, params: {
         };
       }
 
-      if (immutableContract) {
+      if (immutableContract || secretsOnly) {
+        const expectedValueHash = immutableContract?.expectedValueHash ?? hashEnvValue(value);
         let verified = false;
         for (let attempt = 0; attempt < 3; attempt += 1) {
           const verificationEnvironment = ctx.repos.environments
@@ -1881,7 +1940,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
           if (!verificationEnvironment) {
             return blockedActionIdentity(
               action,
-              `Environment ${envName} disappeared before immutable ${key} could be verified.`
+              `Environment ${envName} disappeared before ${key} could be verified.`
             );
           }
           bindingEnvironment = verificationEnvironment;
@@ -1896,7 +1955,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
           } catch {
             verificationObserved = null;
           }
-          const conflict = immutableSecretConflict({
+          const conflict = immutableContract && immutableSecretConflict({
             environment: verificationEnvironment,
             observed: verificationObserved,
             serviceNames: destinationServices,
@@ -1920,14 +1979,19 @@ export async function executePlanApply(ctx: CommandContext, params: {
             destinationServices,
             key
           );
+          let targetsMatch = true;
+          if (secretsOnly) {
+            try { targetsMatch = scopedSecretObservation(verificationEnvironment, envSpec, verificationObserved, [key]).targetFingerprint === metadata?.targetFingerprint; }
+            catch { targetsMatch = false; }
+          }
           if (
-            verifiedLive.state === 'consistent'
-            && verifiedLive.hash === immutableContract.expectedValueHash
+            targetsMatch && verifiedLive.state === 'consistent'
+            && verifiedLive.hash === expectedValueHash
           ) {
             verified = true;
             break;
           }
-          if (verifiedLive.hashes.some((hash) => hash !== immutableContract.expectedValueHash)) {
+          if (immutableContract && verifiedLive.hashes.some((hash) => hash !== expectedValueHash)) {
             return {
               success: false,
               status: 'blocked',
@@ -1944,7 +2008,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
           return {
             success: false,
             status: 'pending',
-            message: `Provider acknowledged ${key}, but its immutable value is not yet visible on every target`,
+            message: `Provider acknowledged ${key}, but its reviewed value is not yet visible on every target`,
             error: `Re-run hv_plan after ${key} becomes observable; no binding was recorded.`,
             data: { ...counts, bindingRecorded: false, failureStage: 'verification' },
           };

@@ -46,6 +46,7 @@ export async function syncHostingEnvVars(params: {
   vars: Record<string, string>;
   /** Keep exact-SHA CI as the next code release boundary when supported. */
   deferDeployment?: boolean;
+  requireDeferredSecretUpdate?: boolean;
 }): Promise<Receipt & { provider?: string }> {
   const reservedError = reservedRuntimeEnvError(params.vars);
   if (reservedError) return { success: false, message: reservedError, error: reservedError };
@@ -72,6 +73,9 @@ export async function syncHostingEnvVars(params: {
   }
 
   const adapter = adapterResult.adapter as unknown as Partial<IHostingAdapter>;
+  if (params.requireDeferredSecretUpdate && (params.deferDeployment !== true || adapter.capabilities?.supportsDeferredSecretUpdates !== true)) {
+    return { success: false, message: 'This adapter cannot update selected secrets without restarting workloads.', provider };
+  }
   if (typeof adapter.setEnvVars !== 'function') {
     return {
       success: false,
@@ -82,7 +86,7 @@ export async function syncHostingEnvVars(params: {
   }
 
   const deferDeployment = params.deferDeployment === true
-    && adapter.capabilities?.supportsDeferredDeploy === true;
+    && (params.requireDeferredSecretUpdate === true || adapter.capabilities?.supportsDeferredDeploy === true);
   const exactValues = Object.values(params.vars);
   try {
     const receipt = deferDeployment
@@ -90,7 +94,7 @@ export async function syncHostingEnvVars(params: {
         params.environment,
         params.service,
         params.vars,
-        { deferDeployment: true }
+        { deferDeployment: true, ...(params.requireDeferredSecretUpdate ? { requireDeferredSecretUpdate: true } : {}) }
       )
       : await adapter.setEnvVars(
         params.environment,

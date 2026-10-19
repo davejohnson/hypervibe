@@ -8,6 +8,15 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+The [scoped secret contract](../../docs/scoped-secret-updates.md) reviews all
+seven hosting providers and distinguishes native capabilities from implemented
+admission. `scoped-secret-provider-contracts.test.ts` pins that roster and the
+explicit deferred-write capability. The application lifecycle regression uses
+the real Railway client and pinned GraphQL transport to cover exact environment
+identity, additive writes, no deployment, encrypted plan inputs, stale plans,
+unknown reads, lost write acknowledgments, delayed visibility and acceptance
+recovery. This is synthetic offline evidence, not a successful live key rotation.
+
 The [shared recovery contract](../../docs/recovery-contract.md) records the
 official recovery-model review for all eight database and seven hosting
 providers. `recovery-provider-contracts.test.ts` checks explicit registry coverage,

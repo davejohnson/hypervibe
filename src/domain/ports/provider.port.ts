@@ -17,6 +17,10 @@ export interface DeploymentMutationOptions {
    * against the currently deployed image.
    */
   deferDeployment?: boolean;
+  /** Secret-only maintenance authority. Requires deferDeployment and
+   * supportsDeferredSecretUpdates; forbid target discovery/adoption, resource
+   * creation, unrelated configuration changes and workload restarts. */
+  requireDeferredSecretUpdate?: boolean;
   /** Reviewed identity-only stage: create an app namespace, not its workload. */
   deferWorkload?: boolean;
   /** Creation-only admission, distinct from ordinary deferred reconfiguration.
@@ -111,6 +115,8 @@ export interface ProviderCapabilities {
 
   /** Whether config can converge while exact-SHA CI remains the code release boundary. */
   supportsDeferredDeploy?: boolean;
+  /** Selected-key writes to exact bound services without creates or workload restarts. */
+  supportsDeferredSecretUpdates?: boolean;
   /** Enforces creation-only admission at the final provider mutation boundary. */
   supportsCreateOnlyDeploy?: boolean;
   /** Prepare an untriggered cron workload, then activate only its verified release. */

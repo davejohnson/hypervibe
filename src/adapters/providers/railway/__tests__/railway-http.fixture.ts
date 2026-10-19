@@ -34,6 +34,7 @@ export async function railwayHttpFixture(options: {
   volumeDelayMs?: number; dropVolumeCreateResponse?: boolean; volumeCreateResponseId?: string;
   dropBackupCreateResponse?: boolean; backupWorkflowId?: string | null;
   dropScheduleUpdateResponse?: boolean; ignoreScheduleUpdate?: boolean;
+  dropVariableResponse?: boolean;
   responseOverride?: (request: { query: string; variables: Record<string, any> }) => Response | undefined;
 } = {}) {
   let projectExists = options.projectExists !== false;
@@ -211,7 +212,11 @@ export async function railwayHttpFixture(options: {
     variableCollectionUpsert: ({ input }) => {
       expect(input.projectId).toBe(projectId);
       expect(services.get(input.serviceId)?.instances.has(input.environmentId)).toBe(true);
-      variables.set(`${input.serviceId}/${input.environmentId}`, { ...input.variables });
+      // Railway documents additive upsert unless replace:true is selected.
+      // EnvironmentVariables is opaque in the schema; these semantics come
+      // from https://docs.railway.com/integrations/api/manage-variables.
+      const key = `${input.serviceId}/${input.environmentId}`;
+      variables.set(key, { ...(input.replace ? {} : variables.get(key)), ...input.variables });
       return true;
     },
     volumeCreate: ({ input }) => {
@@ -310,6 +315,9 @@ export async function railwayHttpFixture(options: {
     }
     if (options.dropScheduleUpdateResponse && request.query.includes('mutation DailyBackupScheduleUpdate')) {
       throw new TypeError('Synthetic connection reset after schedule update committed');
+    }
+    if (options.dropVariableResponse && request.query.includes('mutation UpsertVariables')) {
+      throw new TypeError('Synthetic connection reset after variable update committed');
     }
     return Response.json(result);
   }));

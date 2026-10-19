@@ -46,6 +46,9 @@ export interface HostingCapabilities {
 
   /** Whether config can converge while exact-SHA CI remains the code release boundary. */
   supportsDeferredDeploy?: boolean;
+  /** Selected-key writes to exact bound services without creates or workload
+   * restarts; verified configuration is picked up by a later managed CI run. */
+  supportsDeferredSecretUpdates?: boolean;
   /** Enforces creation-only admission at the final provider mutation boundary. */
   supportsCreateOnlyDeploy?: boolean;
   /** Can prepare an untriggered cron workload and activate it after a verified CI release. */

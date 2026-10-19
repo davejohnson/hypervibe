@@ -249,6 +249,7 @@ export class RailwayAdapter implements
     queues: { backend: 'postgres' },
     supportsOneOffTasks: true,
     supportsDeferredDeploy: true,
+    supportsDeferredSecretUpdates: true,
     supportsCreateOnlyDeploy: true,
     supportsTemporaryDatabaseAccess: true,
     supportsMaintenance: true,
@@ -3524,6 +3525,12 @@ export class RailwayAdapter implements
     vars: Record<string, string>,
     options: DeploymentMutationOptions = {}
   ): Promise<Receipt> {
+    if (options.requireDeferredSecretUpdate && (!options.deferDeployment
+      || environment.platformBindings.provider !== this.name
+      || !environment.platformBindings.projectId || !environment.platformBindings.environmentId
+      || !parseHostingBindings(environment).services?.[service.name]?.serviceId)) {
+      return { success: false, message: 'Secret-only updates require deployment deferral and exact existing Railway bindings.' };
+    }
     if (options.requireNewWorkload) {
       return { success: false, message: 'Creation-only admission cannot update environment variables on an existing workload.' };
     }
@@ -3564,7 +3571,8 @@ export class RailwayAdapter implements
         bindings.services?.[service.name]?.serviceId
       );
       const railwayServiceId = serviceResolution.serviceId;
-      if (!railwayServiceId) {
+      if (!railwayServiceId || options.requireDeferredSecretUpdate
+        && railwayServiceId !== bindings.services?.[service.name]?.serviceId) {
         return safeReceipt({
           success: false,
           message: `Service ${service.name} not found in Railway environment ${environment.name}`,
@@ -3626,13 +3634,16 @@ export class RailwayAdapter implements
         }
       }
 
-      await this.client.request(mutation, {
+      const acknowledged = await this.client.request<{ variableCollectionUpsert: boolean }>(mutation, {
         projectId: projectId,
         serviceId: railwayServiceId,
         environmentId: environmentId,
         variables: vars,
         skipDeploys: options.deferDeployment === true,
       });
+      if (options.requireDeferredSecretUpdate && acknowledged.variableCollectionUpsert !== true) {
+        return safeReceipt({ success: false, message: 'Railway did not acknowledge the selected secret update. Re-observe before retrying.' });
+      }
 
       if (options.deferDeployment) {
         try {
@@ -5040,12 +5051,18 @@ export class RailwayAdapter implements
       }
     `;
 
-    const result = await this.client.request<{ variables: Record<string, string> }>(query, {
+    const result = await this.client.request<{ variables: unknown }>(query, {
       projectId,
       serviceId,
       environmentId,
     });
-    return result.variables ?? {};
+    // The pinned Query.variables field is non-null. Its opaque scalar does
+    // not validate the nested map; Railway's variables API documents strings.
+    // An omitted/malformed result cannot prove that a key is absent.
+    if (!isRecord(result.variables) || Object.values(result.variables).some(value => typeof value !== 'string')) {
+      throw new Error('Railway returned incomplete service variable evidence.');
+    }
+    return result.variables as Record<string, string>;
   }
 
   /**
