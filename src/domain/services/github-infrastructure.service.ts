@@ -2098,7 +2098,11 @@ export async function planGitHubInfrastructure(params: {
       type: collaborationDrift ? 'update' : 'noop',
       resource: { kind: 'repo', name: repository, provider: 'github' },
       verified,
-      reason: collaborationDrift ? 'GitHub labels or pull-request guardrails need syncing' : 'GitHub collaboration settings are in sync',
+      reason: collaborationDrift
+        ? (githubSpec.collaboration.pullRequests.requirePr
+          ? 'Help protect your code on GitHub from accidental overwrites and keep work organized'
+          : 'Keep work organized on GitHub with labels')
+        : 'Your GitHub code safeguards and work labels are up to date',
       metadata: {
         operation: 'githubCollaborationSettings',
         repository,
@@ -2981,7 +2985,7 @@ export async function applyGitHubNativeSetting(params: {
           });
         }
       }
-      return { success: true, message: 'Synced GitHub labels and pull-request guardrails', data: { repository } };
+      return { success: true, message: 'Updated GitHub settings to match your project setup', data: { repository } };
     }
     return { success: false, message: 'GitHub settings plan action is invalid', error: `Unknown operation ${operation}.` };
   } catch (error) {

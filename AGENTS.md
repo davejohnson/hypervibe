@@ -6,6 +6,12 @@ Hypervibe is an infrastructure creation, migration, and destruction orchestrator
 
 Hypervibe is built for nontechnical vibe coders who want to bring their projects to life on the web. Optimize the product and agent experience for the easiest, fastest sensible path from an existing repository to a working deployment. Hypervibe should do the infrastructure work and explain the outcome in plain language.
 
+Communication:
+
+- Never require another person's approval to merge by default on any repository. Enable mandatory reviews only when the user explicitly requests them, and explain that they prevent merging without another person's approval. Do not infer this choice from requests for code safeguards, automated checks, or the presence of collaborators. Preserve existing owner-chosen review policies unless the user asks to change them.
+- Explain infrastructure changes by their practical benefit. For example, say "I'll help protect your code on GitHub from accidental overwrites" instead of "enable branch protection on main." Explain reviews or automated checks in everyday language when they affect how the user publishes changes.
+- For routine safeguards already declared in the project or authorized by the user, explain the benefit and proceed through spec/plan/apply. Do not ask for another confirmation just because a technical setting appears in the plan. Preserve explicit user choices and confirmations required for consequential changes.
+
 Onboarding and deployment defaults:
 
 - Make routine decisions instead of asking users to design infrastructure. Infer the application name and runtime from the repository, reuse verified connections when their resource scope belongs to the selected project, and choose supported, economical defaults. Do not ask users to approve ordinary names, suffixes, or other reversible implementation details.

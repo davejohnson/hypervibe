@@ -95,9 +95,11 @@ describe('repo-collaboration.service', () => {
       resource: { kind: 'repo', name: REPO, provider: 'github' },
       verified: true,
     });
-    expect(result.action?.reason).toContain('template:.github/ISSUE_TEMPLATE/task.yml');
-    expect(result.action?.reason).toContain('label:agent-ready');
-    expect(result.action?.reason).toContain('branch:branchProtection');
+    expect(result.action?.diff).toEqual(expect.arrayContaining([
+      { field: 'template:.github/ISSUE_TEMPLATE/task.yml', from: 'drift', to: 'desired' },
+      { field: 'label:agent-ready', from: 'drift', to: 'desired' },
+      { field: 'branch:branchProtection', from: 'drift', to: 'desired' },
+    ]));
     expect(result.warnings[0]).toContain('collaborator invitations are manual');
   });
 
@@ -122,7 +124,7 @@ describe('repo-collaboration.service', () => {
     );
     expect(writeLabel).toHaveBeenCalledWith('davejohnson', 'billforge', expect.objectContaining({ name: 'agent-ready' }));
     expect(protect).toHaveBeenCalledWith('davejohnson', 'billforge', 'main', expect.objectContaining({
-      requireReviews: true,
+      requireReviews: false,
       requiredReviewers: 1,
       preserveStatusChecks: true,
     }));
