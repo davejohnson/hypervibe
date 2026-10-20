@@ -61,7 +61,7 @@
       },
       "provider-truth": {
         "kind": "code-audit",
-        "enabled": true,
+        "enabled": false,
         "schedule": {
           "cron": "17 5 * * *",
           "timezone": "UTC"
