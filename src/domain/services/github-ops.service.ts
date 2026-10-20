@@ -61,6 +61,7 @@ export type {
 };
 
 export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 6;
+const GITHUB_ACTIONS_PROMOTION_RENDERER_REVISION = 1;
 export const GITHUB_ACTIONS_SERVER_PROGRAM_REVISION = 1;
 
 function migrationWorkflowInput(migration: { includeStep: boolean; command?: string }) {
@@ -99,6 +100,7 @@ export function githubActionsWorkflowInputHash(params: {
     migration: migrationWorkflowInput(params.migration),
     ...(ios ? { ios } : {}),
     ...(target.api ? { apiRendererRevision: API_RELEASE_WORKFLOW_RENDERER_REVISION } : {}),
+    ...(target.promoteFromEnvironment ? { promotionRendererRevision: GITHUB_ACTIONS_PROMOTION_RENDERER_REVISION } : {}),
   });
 }
 
@@ -692,51 +694,45 @@ function buildPromotionEvidenceStep(
               throw new Error('Promotion requires a full 40-character Git commit SHA');
             }
             const expectedArtifactName = '${managedCiReleaseArtifactPrefix(sourceEnvironment)}' + targetSha;
-            const response = await github.rest.actions.listWorkflowRuns({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: sourceWorkflow,
-              head_sha: targetSha,
-              status: 'success',
-              per_page: 20,
-            });
-            const runs = Array.isArray(response.data.workflow_runs) ? response.data.workflow_runs : [];
-            const candidates = runs.filter((run) => (
-              Number.isSafeInteger(run.id)
-              && run.id > 0
-              && String(run.head_sha || '').toLowerCase() === targetSha
-              && run.conclusion === 'success'
-              && run.path === sourceWorkflow
-            ));
-            if (candidates.length === 0) {
-              throw new Error(
-                'No successful ' + sourceEnvironment + ' deployment of ' + targetSha
-                + ' was found in ' + sourceWorkflow
-              );
-            }
             let verified;
-            for (const run of candidates) {
-              const artifactResponse = await github.rest.actions.listWorkflowRunArtifacts({
+            for (let page = 1; page <= 10; page += 1) {
+              const artifactResponse = await github.rest.actions.listArtifactsForRepo({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                run_id: run.id,
+                name: expectedArtifactName,
                 per_page: 100,
+                page,
               });
-              const artifacts = Array.isArray(artifactResponse.data.artifacts)
-                ? artifactResponse.data.artifacts
-                : [];
-              const artifact = artifacts.find((candidate) => (
+              const artifacts = artifactResponse.data.artifacts;
+              if (!Array.isArray(artifacts)) throw new Error('Promotion artifact listing is incomplete');
+              const candidates = artifacts.filter((candidate) => (
                 Number.isSafeInteger(candidate.id)
                 && candidate.id > 0
                 && candidate.name === expectedArtifactName
                 && candidate.expired === false
-                && candidate.workflow_run?.id === run.id
-                && String(candidate.workflow_run?.head_sha || '').toLowerCase() === targetSha
+                && Number.isSafeInteger(candidate.workflow_run?.id)
+                && candidate.workflow_run.id > 0
+                && /^[0-9a-f]{40}$/.test(String(candidate.workflow_run?.head_sha || '').toLowerCase())
               ));
-              if (artifact) {
-                verified = { run, artifact };
-                break;
+              for (const artifact of candidates) {
+                const { data: run } = await github.rest.actions.getWorkflowRun({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  run_id: artifact.workflow_run.id,
+                });
+                // A dispatched workflow's head SHA identifies its workflow ref,
+                // while the release artifact and its validated contents identify
+                // the deployed commit. Keep the artifact bound to its real run.
+                if (run.id === artifact.workflow_run.id
+                  && run.conclusion === 'success'
+                  && run.path === sourceWorkflow
+                  && String(run.head_sha || '').toLowerCase() === artifact.workflow_run.head_sha.toLowerCase()) {
+                  verified = { run, artifact };
+                  break;
+                }
               }
+              if (verified || artifacts.length < 100) break;
+              if (page === 10) throw new Error('Promotion artifact search exceeded its 1000-artifact limit');
             }
             if (!verified) {
               throw new Error(
