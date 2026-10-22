@@ -197,6 +197,7 @@ export interface DatabaseBindings {
  */
 export interface IDatabaseAdapter {
   readonly name: string;
+  readonly credentialAliases?: import('./database-credential-aliases.port.js').IDatabaseCredentialAliases;
   readonly dailyBackups?: import('./daily-backup.port.js').IDailyBackupPolicy<import('./daily-backup.port.js').DatabaseBackupTarget>;
 
   /** Provider capabilities */

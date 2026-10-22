@@ -51,6 +51,8 @@ import {
   type NormalizedDnsRecord,
 } from '../../../domain/services/domain-dns-records.js';
 import { inspectRailwayResources } from './railway-inspection.driver.js';
+import { createRailwayCredentialAliases } from './railway-credential-aliases.js';
+import { compareDatabaseCredentials, type DatabaseCredentialConsumer, type DatabaseVariableEvidence } from './railway-database-credential-alignment.js';
 import type {
   IWorkloadMaintenanceAdapter,
   MaintenanceWorkloadObservation,
@@ -235,6 +237,7 @@ export class RailwayAdapter implements
   IProviderBuildLogsAdapter,
   IProviderEnvironmentVariablesAdapter {
   readonly name = 'railway';
+  readonly railwayCredentialAliases = createRailwayCredentialAliases(() => this.client);
 
   readonly capabilities: ProviderCapabilities = {
     supportedBuilders: ['nixpacks', 'dockerfile'],
@@ -1542,7 +1545,9 @@ export class RailwayAdapter implements
 
     if (type === 'postgres') {
       const password = randomBytes(18).toString('base64url');
-      const connectionUrl = `postgresql://postgres:${password}@${serviceHost}:5432/postgres`;
+      // Railway regenerates POSTGRES_PASSWORD; aliases must follow that issuer.
+      const passwordRef = '${{POSTGRES_PASSWORD}}';
+      const connectionUrl = `postgresql://postgres:${passwordRef}@${serviceHost}:5432/postgres`;
       return {
         POSTGRES_PASSWORD: password,
         POSTGRES_USER: 'postgres',
@@ -1555,7 +1560,7 @@ export class RailwayAdapter implements
         PGHOST: serviceHost,
         PGPORT: '5432',
         PGUSER: 'postgres',
-        PGPASSWORD: password,
+        PGPASSWORD: passwordRef,
         PGDATABASE: 'postgres',
       };
     }
@@ -7030,6 +7035,8 @@ export class RailwayAdapter implements
 
     const services: ObservedService[] = [];
     const databases: ObservedDatabase[] = [];
+    const databaseVariables = new Map<string, DatabaseVariableEvidence>();
+    const credentialConsumers: DatabaseCredentialConsumer[] = [];
     const caches: ObservedCache[] = [];
     const storage: ObservedStorage[] = [];
     let databaseObservationComplete = true;
@@ -7089,6 +7096,22 @@ export class RailwayAdapter implements
             name: node.name,
             status: this.toObservedDatastoreStatus(instance.latestDeployment?.status),
           });
+          if (engine === 'postgres') {
+            let evidence: DatabaseVariableEvidence = { reason: 'scope_unverified' };
+            if (bindings.environmentId === environmentId) {
+              try {
+                const vars = await this.fetchServiceVariables(projectId, node.id, environmentId);
+                evidence = { variables: Object.fromEntries(
+                  ['POSTGRES_PASSWORD', 'DATABASE_URL', 'DATABASE_PRIVATE_URL']
+                    .filter(key => vars[key] !== undefined).map(key => [key, vars[key]])
+                ) };
+              } catch {
+                // This diagnostic cannot make resource existence unknown or echo provider credentials.
+                evidence = { reason: 'read_failed' };
+              }
+            }
+            databaseVariables.set(node.id, evidence);
+          }
         }
         continue;
       }
@@ -7159,6 +7182,7 @@ export class RailwayAdapter implements
 
       const envVarKeys: string[] = [];
       const envVarHashes: Record<string, string> = {};
+      let consumerEvidence: DatabaseVariableEvidence = { reason: 'read_failed' };
       if (environmentId) {
         try {
           const vars = await this.fetchServiceVariables(projectId, node.id, environmentId);
@@ -7166,10 +7190,17 @@ export class RailwayAdapter implements
             envVarKeys.push(key);
             envVarHashes[key] = hashEnvValue(value);
           }
-        } catch (error) {
-          warnings.push(`Failed to read variables for "${observedServiceName}" (${node.name}): ${this.describeError(error)}`);
+          consumerEvidence = { variables: vars.DATABASE_URL === undefined ? {} : { DATABASE_URL: vars.DATABASE_URL } };
+        } catch {
+          warnings.push(`Failed to read variables for "${observedServiceName}" (${node.name}): provider_read_failed`);
           partial = true;
         }
+      }
+      if (boundServiceName) {
+        credentialConsumers.push({
+          name: boundServiceName, externalId: node.id,
+          evidence: bindings.environmentId === environmentId ? consumerEvidence : { reason: 'scope_unverified' },
+        });
       }
 
       // serviceConnect sets ServiceInstance.source.repo (per-environment);
@@ -7228,6 +7259,12 @@ export class RailwayAdapter implements
           ...(sleepApplication === undefined ? {} : { sleepApplication }),
         },
       });
+    }
+
+    // Compare after all resources have been read: provider inventory order is not a dependency.
+    for (const database of databases) {
+      const evidence = databaseVariables.get(database.externalId);
+      if (evidence) database.credentialAlignment = compareDatabaseCredentials(evidence, credentialConsumers);
     }
 
     const serviceObservationComplete = !partial;
