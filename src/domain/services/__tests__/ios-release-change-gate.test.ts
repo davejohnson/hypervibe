@@ -13,14 +13,14 @@ const SHA = 'a'.repeat(40);
 const BASE = 'b'.repeat(40);
 const DISPATCH_REF_SHA = 'c'.repeat(40);
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...args: string[]) => (...args: any[]) => Promise<unknown>;
-function generated(environmentName = 'staging', workingDirectory = '.', inputs: string[] | null = ['mobile', 'packages/shared']) {
+function generated(environmentName = 'staging', workingDirectory = '.', inputs: string[] | null = ['mobile', 'packages/shared'], expectedInfoPlist?: Record<string, string>) {
   return parse(buildIosReleaseWorkflow({
     provider: 'railway', providerName: 'Railway', serverWorkflowPath: `.github/workflows/deploy-railway-${environmentName}.yml`,
     target: { environmentName, kind: 'staging', branch: 'main', autoDeployOnPush: true, serviceNames: ['web'], providerServiceIds: ['web-id'],
       programFingerprint: 'd'.repeat(64), releaseTarget: {scope: {providerProjectId: 'project-id', providerEnvironmentId: environmentName},
         bindingsFingerprint: 'e'.repeat(64), resources: [{logicalName: 'web', workloadKind: 'web', providerResourceType: 'service', providerResourceId: 'web-id'}]} },
     ios: {bundleId: 'com.example.app', platform: 'IOS', capabilities: [], release: {services: ['web'], trigger: 'after-server-deploy',
-      build: {workingDirectory, ...(inputs ? {inputs} : {}), command: 'make ios', ipaPath: 'build/app.ipa', requiredSecrets: []},
+      build: {workingDirectory, ...(inputs ? {inputs} : {}), command: 'make ios', ipaPath: 'build/app.ipa', requiredSecrets: [], ...(expectedInfoPlist ? {expectedInfoPlist} : {})},
       signing: {provider: 'project'}, testflight: {groups: ['Internal'], usesNonExemptEncryption: false, submitForBetaReview: false}}} as never,
   })!.files[0].content);
 }
@@ -74,8 +74,8 @@ function manifest(workflow: any) {
   server: {repository: 'owner/app', sha: BASE},
   app: {bundleId: 'com.example.app', appId: 'app-id', buildId: 'build-id', ipaSha256: 'f'.repeat(64)}};
 }
-function relevance(options: {files?: unknown; status?: string; mergeBase?: string; evidence?: unknown; force?: boolean; error?: boolean; baseline?: string; workingDirectory?: string} = {}) {
-  const workflow = options.workingDirectory ? generated('staging', options.workingDirectory, null) : generated();
+function relevance(options: {files?: unknown; status?: string; mergeBase?: string; evidence?: unknown; force?: boolean; error?: boolean; baseline?: string; workingDirectory?: string; expectedInfoPlist?: Record<string, string>} = {}) {
+  const workflow = generated('staging', options.workingDirectory ?? '.', options.workingDirectory ? null : ['mobile', 'packages/shared'], options.expectedInfoPlist);
   const emitted = step(workflow, 'Determine iOS change relevance');
   const compare = vi.fn(async () => {
     if (options.error) throw new Error('API unavailable');
@@ -106,6 +106,16 @@ describe('executed comparison from the last completed beta', () => {
   it('treats a path prefix without a directory boundary as irrelevant', async () => {
     const result = relevance({files: [{filename: 'mobile-web/home.tsx', status: 'modified'}]});
     await result.result; expect(result.outputs.should_release).toBe('false');
+  });
+  it.each([
+    ['previously unchecked metadata', undefined],
+    ['different embedded backend', {AppEnvironment: 'staging', APIBaseURL: 'https://invoiceperfect.com'}],
+  ] as const)('builds for a changed metadata contract despite web-only changes: %s', async (_label, previous) => {
+    const evidence = manifest(generated('staging', '.', ['mobile', 'packages/shared'], previous));
+    const result = relevance({evidence, expectedInfoPlist: {AppEnvironment: 'staging', APIBaseURL: 'https://staging.invoiceperfect.com'}});
+    await result.result;
+    expect(result.outputs.should_release).toBe('true');
+    expect(result.compare).not.toHaveBeenCalled();
   });
   it.each([
     {evidence: null}, {evidence: {}}, {baseline: ''}, {status: 'diverged'}, {mergeBase: DISPATCH_REF_SHA},
@@ -189,6 +199,24 @@ describe('exact mobile source contract before protected build jobs', () => {
     const github = {rest: {repos: {getContent: vi.fn(async () => ({data: {type: 'file', encoding: 'base64', content: Buffer.from(JSON.stringify({environments: {staging: {ios: {bundleId: 'another.app'}}}})).toString('base64')}}))}}};
     const execution = runScript(gate.with.script, github, {repo: {owner: 'owner', repo: 'app'}}, {...workflow.jobs.eligibility.env, ...gate.env, HYPERVIBE_CANDIDATE_SHA: SHA});
     await expect(execution.result).rejects.toThrow(/mobile.*source|source.*mobile/i);
+  });
+  it.each(['matching', 'different', 'omitted'] as const)('verifies %s embedded backend expectations in the exact deployed source', async variant => {
+    const expectedInfoPlist = {AppEnvironment: 'staging', APIBaseURL: 'https://staging.invoiceperfect.com'};
+    const workflow = generated('staging', '.', ['mobile', 'packages/shared'], expectedInfoPlist);
+    const gate = step(workflow, 'Verify mobile source contract');
+    const historicalSpec = {environments: {staging: {ios: {bundleId: 'com.example.app', release: {
+      services: ['web'], build: {inputs: ['mobile', 'packages/shared'], command: 'make ios', ipaPath: 'build/app.ipa',
+        ...(variant === 'omitted' ? {} : {expectedInfoPlist: {...expectedInfoPlist,
+          APIBaseURL: variant === 'different' ? 'https://invoiceperfect.com' : expectedInfoPlist.APIBaseURL}})},
+      testflight: {groups: ['Internal']},
+    }}}}};
+    const getContent = vi.fn(async () => ({data: {type: 'file', encoding: 'base64', content: Buffer.from(JSON.stringify(historicalSpec)).toString('base64')}}));
+    const execution = runScript(gate.with.script, {rest: {repos: {getContent}}}, {repo: {owner: 'owner', repo: 'app'}},
+      {...workflow.jobs.eligibility.env, ...gate.env, HYPERVIBE_CANDIDATE_SHA: SHA},
+      vi.fn(() => JSON.stringify({deploymentContractFingerprint: environmentDeploymentContractHash(historicalSpec, 'staging')})));
+    if (variant === 'matching') await expect(execution.result).resolves.toBeUndefined();
+    else await expect(execution.result).rejects.toThrow(/mobile.*configuration.*reviewed workflow/i);
+    expect(getContent).toHaveBeenCalledWith({owner: 'owner', repo: 'app', path: '.hypervibe/spec.json', ref: SHA});
   });
 });
 

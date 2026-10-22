@@ -41,7 +41,7 @@ afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
-function seedConnection(options: { promotion?: boolean; api?: boolean; newerServer?: boolean } = {}) {
+function seedConnection(options: { promotion?: boolean; api?: boolean; newerServer?: boolean; expectedInfoPlist?: Record<string, string>; reorderPromotionExpectations?: boolean } = {}) {
   const appStore = new ConnectionRepository().create({
     provider: 'appstoreconnect',
     credentialsEncrypted: getSecretStore().encryptObject({
@@ -84,6 +84,9 @@ function seedConnection(options: { promotion?: boolean; api?: boolean; newerServ
     },
   } as never);
   const configured = new SpecStore().get(project)!.spec;
+  if (options.expectedInfoPlist) {
+    configured.environments.production.ios!.release!.build.expectedInfoPlist = options.expectedInfoPlist;
+  }
   if (options.api) {
     configured.runtime = { kind: 'node', version: '24' };
     configured.environments.production.api = {
@@ -97,6 +100,9 @@ function seedConnection(options: { promotion?: boolean; api?: boolean; newerServ
     configured.environments.staging.ios!.release!.trigger = 'after-server-deploy';
     configured.environments.production.ios!.release!.promoteFrom = 'staging';
     configured.environments.production.ios!.release!.trigger = 'manual';
+    if (options.reorderPromotionExpectations && options.expectedInfoPlist) {
+      configured.environments.production.ios!.release!.build.expectedInfoPlist = Object.fromEntries(Object.entries(options.expectedInfoPlist).reverse());
+    }
     new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: {
       provider: 'railway', projectId: 'rail-project', environmentId: 'rail-stage', services: { web: { serviceId: 'stage-web' } },
     } });
@@ -358,6 +364,39 @@ describe('hv_appstore_submit', () => {
     await t.close();
   });
 
+  // Synthetic release manifests exercise command validation, not live Apple or
+  // GitHub compatibility. IPA metadata itself is checked by the emitted-validator tests.
+  it.each(['manifest backend', 'immutable source backend', 'missing immutable source expectations'] as const)(
+    'rechecks %s before confirmed submission of the same Apple identity', async changed => {
+      const fixture = seedConnection({expectedInfoPlist: {
+        AppEnvironment: 'production', APIBaseURL: 'https://invoiceperfect.com',
+      }});
+      const getEditableVersion = stubSubmittableVersion();
+      const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview');
+      const t = await makeClient();
+      const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+      expect(preview.error?.code, JSON.stringify(preview)).toBe('CONFIRM_REQUIRED');
+      getEditableVersion.mockClear();
+
+      const historical = structuredClone(fixture.spec);
+      const build = historical.environments.production.ios!.release!.build;
+      if (changed === 'missing immutable source expectations') delete build.expectedInfoPlist;
+      else build.expectedInfoPlist!.APIBaseURL = 'https://staging.invoiceperfect.com';
+      if (changed === 'manifest backend') {
+        fixture.mobile.mobile.buildContractFingerprint = iosBuildContractFingerprint(historical.environments.production.ios!, historical.runtime);
+      } else {
+        vi.mocked(GitHubAdapter.prototype.getFileContent).mockImplementation(async (_owner, _repo, file) =>
+          file === '.hypervibe/spec.json' ? JSON.stringify(historical) : fixture.workflows.get(file) ?? null);
+      }
+      const result = await t.call('hv_appstore_submit', {...SUBMIT_INPUT, ...preview.confirmation.retryInput});
+      expect(result.error?.code, JSON.stringify(result)).toBe('VALIDATION');
+      expect(result.error?.message).toContain('immutable source contract');
+      expect(getEditableVersion).not.toHaveBeenCalled();
+      expect(submit).not.toHaveBeenCalled();
+      await t.close();
+    }
+  );
+
   it('blocks an older pinned server release after a newer target run starts', async () => {
     const fixture = seedConnection();
     stubSubmittableVersion();
@@ -408,6 +447,24 @@ describe('hv_appstore_submit', () => {
     expect(preview.confirmation.message).toContain('retains staging build configuration');
     expect(submit).not.toHaveBeenCalled();
     const result = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    expect(result.data.build.id).toBe('build-1');
+    expect(submit).toHaveBeenCalledTimes(1);
+    await t.close();
+  });
+
+  it('promotes identical embedded production settings despite declaration key order', async () => {
+    seedConnection({promotion: true, reorderPromotionExpectations: true, expectedInfoPlist: {
+      AppEnvironment: 'production', APIBaseURL: 'https://invoiceperfect.com', CFBundleDisplayName: 'Invoice Perfect',
+    }});
+    stubSubmittableVersion();
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview').mockResolvedValue({
+      reviewSubmission: {id: 'review-1', state: 'WAITING_FOR_REVIEW', platform: 'IOS'}, reusedExistingSubmission: false,
+    });
+    const t = await makeClient();
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(preview.error?.code, JSON.stringify(preview)).toBe('CONFIRM_REQUIRED');
+    const result = await t.call('hv_appstore_submit', {...SUBMIT_INPUT, ...preview.confirmation.retryInput});
     expect(result.ok, JSON.stringify(result)).toBe(true);
     expect(result.data.build.id).toBe('build-1');
     expect(submit).toHaveBeenCalledTimes(1);

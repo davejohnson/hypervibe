@@ -50,6 +50,124 @@ release queue. Apps sharing one bundle ID in the repository share the mobile
 queue to reduce build-number collisions. Other repositories and external
 uploaders can still race; upload identity safeguards remain in effect.
 
+## Build a separate staging app
+
+Declare an iOS app in each environment to keep staging and production installed
+side by side. For Invoice Perfect, the intended configuration is:
+
+| | Production | Staging |
+|---|---|---|
+| Display name | Invoice Perfect | IP Staging |
+| Icon | Normal icon | Same icon with a prominent **STAGING** ribbon |
+| Backend | `https://invoiceperfect.com` | `https://staging.invoiceperfect.com` |
+| Bundle ID | Existing ID | Existing ID + `.staging` |
+| Build quality | Release | Release |
+
+Both apps use the same code. Their shared Xcode schemes select different
+configuration and branding while preserving Release-quality archive settings.
+For example, create `Release-Production` and `Release-Staging` configurations
+from Release and assign each to its scheme's Archive action. Staging/production
+and Debug/Release are independent choices.
+
+The application owns schemes, backend settings, installed display names, icon
+assets, and the Fastlane command that selects them. Xcode's asset catalog supports
+separate app icon sets; see [Apple's app icon documentation](https://developer.apple.com/documentation/xcode/configuring-your-app-icon).
+Hypervibe owns the per-environment bundle registration, declared TestFlight
+groups, signing preparation, server release gate, and finished IPA validation.
+`ios.appName` names the registered bundle ID; it does not set the installed name.
+
+This partial spec illustrates the arrangement; merge each `ios` block into an
+existing environment with a managed CI branch deployment and its `web` service.
+Replace `existing.bundle.id` with the current production ID. The paths, schemes,
+and Fastlane lane are examples the application must implement, including consuming
+`HYPERVIBE_BUILD_NUMBER` as its `CFBundleVersion`.
+
+```json
+{
+  "environments": {
+    "production": {
+      "ios": {
+        "bundleId": "existing.bundle.id",
+        "appName": "Invoice Perfect",
+        "testflight": { "groups": { "beta": {} } },
+        "release": {
+          "services": ["web"],
+          "build": {
+            "workingDirectory": "apps/ios",
+            "command": "bundle exec fastlane build scheme:InvoicePerfect configuration:Release-Production",
+            "ipaPath": "build/InvoicePerfect.ipa",
+            "expectedInfoPlist": {
+              "AppEnvironment": "production",
+              "APIBaseURL": "https://invoiceperfect.com",
+              "CFBundleDisplayName": "Invoice Perfect"
+            }
+          },
+          "signing": { "provider": "match" },
+          "testflight": { "groups": ["beta"] }
+        }
+      }
+    },
+    "staging": {
+      "ios": {
+        "bundleId": "existing.bundle.id.staging",
+        "appName": "IP Staging",
+        "testflight": { "groups": { "beta": {} } },
+        "release": {
+          "services": ["web"],
+          "build": {
+            "workingDirectory": "apps/ios",
+            "command": "bundle exec fastlane build scheme:InvoicePerfectStaging configuration:Release-Staging",
+            "ipaPath": "build/InvoicePerfect.ipa",
+            "expectedInfoPlist": {
+              "AppEnvironment": "staging",
+              "APIBaseURL": "https://staging.invoiceperfect.com",
+              "CFBundleDisplayName": "IP Staging"
+            }
+          },
+          "signing": { "provider": "match" },
+          "testflight": { "groups": ["beta"] }
+        }
+      }
+    }
+  }
+}
+```
+
+Each app needs its own existing App Store Connect app record. The current
+Hypervibe lifecycle registers bundle IDs but stops with guidance when the app
+record is missing. Match signing installs existing assets read-only; provision
+the certificates/profiles for both bundle IDs before releasing. Existing Match
+credentials belong in the corresponding GitHub environment. App Store Connect
+credentials are coordinated through the reviewed workflow lifecycle. Declaring
+these blocks does not establish that either app record or signing asset exists.
+
+`ios.release.build.expectedInfoPlist` is an optional, bounded, nonempty map of
+exact non-secret strings. Keys are literal keys in the main app's root
+`Info.plist`, including project-defined keys such as `AppEnvironment` and
+`APIBaseURL`; they are not nested paths. The application must embed and consume
+the same configuration. Apple permits custom keys and documents the generated
+bundle plist in its [Info.plist reference](https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/AboutInformationPropertyListFiles.html).
+
+Hypervibe compares every declared key with the finished IPA after the build and
+again on the isolated release runner before uploading to Apple. Missing keys,
+different values, and non-string values block the release without printing the
+values. Expected values are pinned to the reviewed workflow, fingerprinted as
+build inputs, and compared during same-binary promotion. Omitting the map keeps
+existing identity/build-number validation without asserting a backend check.
+Use only public configuration here: specs and generated workflows contain these
+values in plain text.
+
+This proves the declared raw metadata is embedded. It does not prove which
+backend the app actually contacts, the rendered icon, or the installed localized
+display name. Apple supports `InfoPlist.strings` and platform/device overrides;
+those effective values are outside this root-plist comparison. Application tests
+must verify that runtime configuration and branding use the intended values.
+
+The staging bundle cannot be promoted to the production bundle with
+`ios.release.promoteFrom`: that path preserves one exact Apple binary and
+requires the same bundle ID and build settings. Build a separate production IPA
+from the selected code when the bundle ID or embedded backend differs.
+
 ## Declare supported API versions
 
 ```json
@@ -167,6 +285,19 @@ responses in ordinary `npm test`. They do not establish live GitHub/Apple
 permissions, code-signing compatibility, app runtime behavior,
 or a successful production rollout. No live deployment or Apple submission is
 part of this implementation's local acceptance.
+
+The staging validation challenges the assumption that a matching bundle ID and
+build number prove the intended backend. A counterexample is an IPA with both
+identities correct but `APIBaseURL` pointing at production in a staging build.
+Expected behavior comes from the declared environment settings and Apple's
+documented custom `Info.plist` contract. The regression boundary executes the
+generated build and release validators against real ZIP/plist fixtures. Before
+the fix, both validators accepted the wrong backend and changing the declared
+backend did not change the mobile build fingerprint; the new regressions failed
+as expected. After the fix, the validators reject those fixtures and configuration
+changes invalidate the fingerprint. These checks run in ordinary `npm test`;
+synthetic fixtures establish metadata comparison, not a successful Xcode build
+or observed app network behavior.
 
 Independent references: [GitHub environment protection](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments),
 [GitHub compare response limits](https://docs.github.com/en/rest/commits/commits#compare-two-commits),

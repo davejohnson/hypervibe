@@ -223,3 +223,114 @@ describe('iOS release selection and promotion', () => {
     expect(projectSpecSchema.safeParse(value).success).toBe(false);
   });
 });
+
+describe('iOS embedded environment expectations', () => {
+  const environment = (expectedInfoPlist?: unknown) => ({
+    hosting: { provider: 'railway' },
+    services: { web: {} },
+    deploy: { strategy: 'branch', trigger: 'ci' },
+    ios: {
+      bundleId: 'com.example.invoiceperfect',
+      testflight: { groups: { beta: {} } },
+      release: {
+        services: ['web'],
+        build: {
+          command: 'bundle exec fastlane build configuration:Release',
+          ipaPath: 'build/InvoicePerfect.ipa',
+          ...(expectedInfoPlist === undefined ? {} : { expectedInfoPlist }),
+        },
+        testflight: { groups: ['beta'] },
+      },
+    },
+  });
+
+  it('accepts separate release-quality staging and production app contracts', () => {
+    const production = environment({
+      AppEnvironment: 'production',
+      APIBaseURL: 'https://invoiceperfect.com',
+      CFBundleDisplayName: 'Invoice Perfect',
+    });
+    const staging = environment({
+      AppEnvironment: 'staging',
+      APIBaseURL: 'https://staging.invoiceperfect.com',
+      CFBundleDisplayName: 'IP Staging',
+    });
+    staging.ios.bundleId += '.staging';
+    const result = projectSpecSchema.parse({
+      version: 1, project: 'invoice-perfect', environments: { production, staging },
+    });
+    expect(result.environments.production.ios?.bundleId).toBe('com.example.invoiceperfect');
+    expect(result.environments.staging.ios?.bundleId).toBe('com.example.invoiceperfect.staging');
+    expect(result.environments.production.ios?.release?.build.expectedInfoPlist).toEqual(production.ios.release.build.expectedInfoPlist);
+    expect(result.environments.staging.ios?.release?.build.expectedInfoPlist).toEqual(staging.ios.release.build.expectedInfoPlist);
+  });
+
+  it('preserves absent expectations on existing specs', () => {
+    expect(environmentSpecSchema.parse(environment()).ios?.release?.build).not.toHaveProperty('expectedInfoPlist');
+  });
+
+  it('keeps exact public strings and literal keys within the declared bounds', () => {
+    const expectedInfoPlist = {
+      'com.example.app-environment': ' staging ',
+      API_BASE_URL: 'https://staging.invoiceperfect.com',
+      CFBundleShortVersionString: '1.2.3',
+      ['K'.repeat(128)]: 'v'.repeat(2048),
+      ...Object.fromEntries(Array.from({ length: 28 }, (_, index) => [`PublicSetting${index}`, 'value'])),
+    };
+    expect(environmentSpecSchema.parse(environment(expectedInfoPlist)).ios?.release?.build.expectedInfoPlist).toEqual(expectedInfoPlist);
+  });
+
+  it.each([
+    ['empty record', {}],
+    ['too many keys', Object.fromEntries(Array.from({ length: 33 }, (_, index) => [`Setting${index}`, 'value']))],
+    ['empty key', { '': 'staging' }],
+    ['nonliteral key', { 'AppEnvironment:Nested': 'staging' }],
+    ['interpolated key', { '$(APP_ENVIRONMENT)': 'staging' }],
+    ['invalid first character', { _AppEnvironment: 'staging' }],
+    ['too long key', { ['K'.repeat(129)]: 'staging' }],
+    ['empty value', { AppEnvironment: '' }],
+    ['blank value', { AppEnvironment: '   ' }],
+    ['too long value', { AppEnvironment: 'v'.repeat(2049) }],
+    ['NUL', { AppEnvironment: 'stag\0ing' }],
+    ['newline', { AppEnvironment: 'staging\n' }],
+    ['control character', { AppEnvironment: 'stag\u0085ing' }],
+    ['unresolved Xcode setting', { APIBaseURL: '$(API_BASE_URL)' }],
+    ['unresolved variable', { APIBaseURL: '${API_BASE_URL}' }],
+    ['GitHub expression', { APIBaseURL: '${{ vars.API_BASE_URL }}' }],
+    ['managed bundle identity', { CFBundleIdentifier: 'com.example.invoiceperfect.staging' }],
+    ['managed build number', { CFBundleVersion: '42' }],
+    ['nested value', { AppEnvironment: { name: 'staging' } }],
+    ['numeric value', { AppEnvironment: 42 }],
+    ['boolean value', { AppEnvironment: false }],
+    ['null value', { AppEnvironment: null }],
+    ['null record', null],
+    ['array record', ['staging']],
+  ])('rejects malformed expectations: %s', (_description, expectedInfoPlist) => {
+    expect(environmentSpecSchema.safeParse(environment(expectedInfoPlist)).success).toBe(false);
+  });
+
+  it('accepts promotion with reordered metadata keys without rewriting either declaration', () => {
+    const staging = environment({ AppEnvironment: 'staging', APIBaseURL: 'https://staging.invoiceperfect.com' });
+    const production = environment({ APIBaseURL: 'https://staging.invoiceperfect.com', AppEnvironment: 'staging' });
+    Object.assign(production.ios.release, { promoteFrom: 'staging', trigger: 'manual' });
+    const result = projectSpecSchema.parse({
+      version: 1, project: 'invoice-perfect', environments: { staging, production },
+    });
+    expect(Object.keys(result.environments.staging.ios!.release!.build.expectedInfoPlist!)).toEqual(['AppEnvironment', 'APIBaseURL']);
+    expect(Object.keys(result.environments.production.ios!.release!.build.expectedInfoPlist!)).toEqual(['APIBaseURL', 'AppEnvironment']);
+  });
+
+  it('rejects promoting a binary whose embedded environment contract differs', () => {
+    const staging = environment({ AppEnvironment: 'staging', APIBaseURL: 'https://staging.invoiceperfect.com' });
+    const production = environment({ AppEnvironment: 'staging', APIBaseURL: 'https://staging.invoiceperfect.com' });
+    Object.assign(production.ios.release, { promoteFrom: 'staging', trigger: 'manual' });
+    const spec = { version: 1, project: 'invoice-perfect', environments: { staging, production } };
+    expect(projectSpecSchema.safeParse(spec).success).toBe(true);
+    production.ios.release.build.expectedInfoPlist = {
+      AppEnvironment: 'production', APIBaseURL: 'https://invoiceperfect.com',
+    };
+    const result = projectSpecSchema.safeParse(spec);
+    expect(result.success).toBe(false);
+    expect(result.success ? '' : result.error.message).toContain('iOS promotion requires identical build');
+  });
+});

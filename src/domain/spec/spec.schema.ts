@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { parse as parseDomain } from 'tldts';
 import { isReservedRuntimeEnvKey, RESERVED_RUNTIME_ENV_ERROR } from '../services/runtime-env-policy.js';
+import { canonicalizeJson } from '../../lib/canonical-json.js';
 
 /**
  * The canonical desired-state document ("spec") for a project — the single
@@ -1040,6 +1041,17 @@ export const iosReleaseSpecSchema = z.object({
       (value) => value.toLowerCase().endsWith('.ipa'),
       'ipaPath must end in .ipa'
     ),
+    /** Exact public top-level metadata required in the finished IPA; never secret values. */
+    expectedInfoPlist: z.record(
+      z.string().regex(/^[A-Za-z][A-Za-z0-9_.-]{0,127}$/, 'expectedInfoPlist keys must be literal top-level Info.plist names')
+        .refine((key) => key !== 'CFBundleIdentifier' && key !== 'CFBundleVersion',
+          'bundle ID and build number are already validated by the managed release boundary'),
+      z.string().min(1).max(2048)
+        .refine((value) => value.trim().length > 0, 'expectedInfoPlist values must be nonempty strings')
+        .refine((value) => !/[\u0000-\u001f\u007f-\u009f]/.test(value), 'expectedInfoPlist values cannot contain control characters')
+        .refine((value) => !/\$[({]/.test(value), 'expectedInfoPlist values must be resolved literals without interpolation')
+    ).refine((value) => Object.keys(value).length >= 1 && Object.keys(value).length <= 32,
+      'declare between 1 and 32 expectedInfoPlist entries').optional(),
     /** Existing GitHub environment secret names needed only by the project build command. */
     requiredSecrets: z.array(runtimeEnvVarNameSchema).default([]),
   }).strict(),
@@ -2234,7 +2246,7 @@ export const projectSpecSchema = z.object({
     if (release.promoteFrom === environmentName || !source?.release || source.release.promoteFrom) issue('iOS promotion must name a different beta-building environment, without promotion chains');
     if (release.trigger !== 'manual') issue('iOS promotion targets require trigger="manual"');
     if (source && (source.bundleId !== environment.ios!.bundleId || source.platform !== environment.ios!.platform)) issue('iOS promotion requires the same bundle ID and platform');
-    if (source?.release && (JSON.stringify(source.release.build) !== JSON.stringify(release.build)
+    if (source?.release && (JSON.stringify(canonicalizeJson(source.release.build)) !== JSON.stringify(canonicalizeJson(release.build))
       || JSON.stringify(source.release.signing) !== JSON.stringify(release.signing)
       || source.release.apiVersion !== release.apiVersion)) issue('iOS promotion requires identical build, signing, and API version settings for the tested binary');
   }
