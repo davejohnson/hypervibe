@@ -16,6 +16,16 @@ import {
 describe('connection guidance', () => {
   const noSetupUrlExpected = new Set(['database', 'local', 'xcode']);
 
+  it('separates SendGrid setup access from the delegated application sending key', () => {
+    const guidance = getConnectionGuidance('sendgrid')!;
+    expect(guidance.credentialExample).toContain('.env#HYPERVIBE_SENDGRID_API_KEY');
+    expect(guidance.permissions.join(' ')).not.toContain('mail.send');
+    expect(guidance.notes?.join(' ')).toContain('SENDGRID_API_KEY');
+    expect(guidance.notes?.join(' ')).toContain('mail.send');
+    expect(guidance.notes?.join(' ')).toContain('every other permission No Access');
+    expect(guidance.notes?.join(' ')).toContain('delegated runtime secret');
+  });
+
   it('keeps every registered provider and secret manager actionable', () => {
     const providers = [...providerRegistry.names(), ...secretManagerRegistry.names()].sort();
     const missing = providers.filter((provider) => !getConnectionGuidance(provider));

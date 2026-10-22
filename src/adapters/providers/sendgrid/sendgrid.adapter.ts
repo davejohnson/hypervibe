@@ -215,7 +215,7 @@ export function assessSendGridScopes(scopes: string[]): SendGridPermissionAudit 
   const canManageSenderVerification = missingScopes.senderVerification.length === 0;
   const canConfigureEventWebhook = missingScopes.eventWebhook.length === 0;
   const canConfigureInboundParse = missingScopes.inboundParse.length === 0;
-  const setupReady = hasMailSend && (canManageDomainAuthentication || canManageSenderVerification);
+  const setupReady = canManageDomainAuthentication || canManageSenderVerification;
 
   return {
     scopes,
@@ -228,16 +228,13 @@ export function assessSendGridScopes(scopes: string[]): SendGridPermissionAudit 
     missingScopes,
     requiredAuthorizationPaths: ['domainAuthentication', 'senderVerification'],
     recommendation: setupReady
-      ? 'The SendGrid API key can send mail and authorize sender identities through at least one supported setup path.'
-      : 'Create a SendGrid API key with Mail Send plus either Domain Authentication permissions (whitelabel.read, whitelabel.create, whitelabel.update) or Sender Identity permissions (user.email.read, user.email.create, user.email.update). Full Access is acceptable for setup, then rotate to a narrower runtime key after sender/domain authorization is complete.',
+      ? 'The SendGrid management key can authorize sender identities through at least one supported setup path. Supply a separate application sending key as a delegated runtime secret.'
+      : 'Create a separate SendGrid management key with either Domain Authentication permissions (whitelabel.read, whitelabel.create, whitelabel.update) or Sender Identity permissions (user.email.read, user.email.create, user.email.update). Setup does not require mail.send. Keep the application sending-only key separate.',
   };
 }
 
 function missingSetupScopeSummary(permissions: SendGridPermissionAudit): string {
   const missing: Array<[string, string[]]> = [];
-  if (!permissions.hasMailSend) {
-    missing.push(['mailSend', permissions.missingScopes.mailSend]);
-  }
   if (!permissions.canManageDomainAuthentication && !permissions.canManageSenderVerification) {
     missing.push(['domainAuthentication', permissions.missingScopes.domainAuthentication]);
     missing.push(['senderVerification', permissions.missingScopes.senderVerification]);

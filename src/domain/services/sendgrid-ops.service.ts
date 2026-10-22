@@ -1,4 +1,3 @@
-import { createHash } from 'crypto';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import {
@@ -17,7 +16,6 @@ const connectionRepo = new ConnectionRepository();
 
 function missingScopeGroups(permissions: SendGridPermissionAudit, requireWebhook = false): Record<string, string[]> {
   const missing: Record<string, string[]> = {};
-  if (!permissions.hasMailSend) missing.mailSend = permissions.missingScopes.mailSend;
   if (!permissions.canManageDomainAuthentication && !permissions.canManageSenderVerification) {
     missing.domainAuthentication = permissions.missingScopes.domainAuthentication;
     missing.senderVerification = permissions.missingScopes.senderVerification;
@@ -42,7 +40,6 @@ export function sendGridPermissionPayload(permissions: SendGridPermissionAudit, 
     canConfigureEventWebhook: permissions.canConfigureEventWebhook,
     canConfigureInboundParse: permissions.canConfigureInboundParse,
     requiredScopes: {
-      mailSend: SENDGRID_SCOPE_REQUIREMENTS.mailSend,
       domainAuthentication: SENDGRID_SCOPE_REQUIREMENTS.domainAuthentication,
       senderVerification: SENDGRID_SCOPE_REQUIREMENTS.senderVerification,
       eventWebhook: SENDGRID_SCOPE_REQUIREMENTS.eventWebhook,
@@ -111,14 +108,4 @@ export async function fetchSendGridEmailLogs(project: Project, environment: Envi
         ...(safe.status ? { status: safe.status } : {}), ...(safe.validation ? { validation: safe.validation } : {}) },
     };
   }
-}
-
-/** Resolve only a one-way runtime-key hash for drift detection; never returns the key. */
-export function getSendGridApiKeyHash(scopeHints?: string[]): { hash: string } | { error: string } {
-  const connection = connectionRepo.findBestMatchFromHints('sendgrid', scopeHints);
-  if (!connection) {
-    return { error: `No SendGrid connection found. ${formatConnectionGuidance('sendgrid')}` };
-  }
-  const credentials = getSecretStore().decryptObject<SendGridCredentials>(connection.credentialsEncrypted);
-  return { hash: createHash('sha256').update(credentials.apiKey, 'utf8').digest('hex') };
 }

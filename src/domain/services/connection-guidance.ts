@@ -824,19 +824,19 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   sendgrid: {
     provider: 'sendgrid',
     displayName: 'SendGrid',
-    tokenType: 'SendGrid API key (Restricted Access for least privilege; Full Access is the reliable choice during setup)',
+    tokenType: 'SendGrid management API key (Restricted Access for domain authentication; separate from the application sending key)',
     setupUrl: 'https://app.sendgrid.com/settings/api_keys',
     permissions: [
-      'Grant mail.send so Hypervibe can sync a runtime SENDGRID_API_KEY that can send transactional email.',
       'For domain authentication: whitelabel.read, whitelabel.create, whitelabel.update (SendGrid still names these scopes "whitelabel" even though the UI says Sender Authentication).',
       'For single-sender verification: SendGrid publishes no restricted scope for the /verified_senders API — use a Full Access key for this path; hypervibe checks user.email.* as a best-effort signal.',
       'For event webhook setup: user.webhooks.event.settings.read and user.webhooks.event.settings.update.',
       'For SendGrid Inbound Parse: user.webhooks.parse.settings read/create/delete.',
     ],
-    credentialExample: 'hv_connections provider="sendgrid" credentialsRef="dotenv:/absolute/path/.env#SENDGRID_API_KEY"',
+    credentialExample: 'hv_connections provider="sendgrid" credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_SENDGRID_API_KEY"',
     notes: [
-      'Setup needs mail.send plus EITHER domain authentication OR sender verification — not necessarily all scopes.',
-      'Full Access is acceptable during setup; rotate to a narrower runtime key after sender/domain authorization if desired. Note some restricted keys cannot call GET /v3/scopes, which fails verification even for usable keys.',
+      'Save the management credential as HYPERVIBE_SENDGRID_API_KEY. Setup needs either domain authentication or sender verification; it does not need Mail Send.',
+      'Save a separate application key as SENDGRID_API_KEY and declare it as a delegated runtime secret. Use Restricted/Custom Access, Mail Send > Mail Send > Full Access (mail.send), and every other permission No Access. Use separate keys per project/environment.',
+      'Never install the management credential into application runtime or widen the sending key for setup or readiness checks. Note some restricted keys cannot call GET /v3/scopes, which fails connection verification even for usable keys.',
     ],
   },
   twilio: {
