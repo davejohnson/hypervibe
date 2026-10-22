@@ -327,6 +327,7 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
       ...(promoteFromEnvironment
         ? {
             promoteFromEnvironment,
+            promoteFromBranch: promoteFromEnvironmentSpec!.deploy?.branch ?? 'main',
             promoteFromProvider: spec.environments[promoteFromEnvironment]!.hosting.provider,
             promoteFromServiceNames: Object.keys(promoteFromEnvironmentSpec!.services),
           }
