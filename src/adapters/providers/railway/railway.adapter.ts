@@ -1,6 +1,7 @@
 import { GraphQLClient, gql } from 'graphql-request';
 import { randomBytes } from 'crypto';
 import { z } from 'zod';
+import { railwayRegistryCredentialRepair } from './railway-registry-credentials.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
 import type {
   IProviderAdapter,
@@ -256,6 +257,7 @@ export class RailwayAdapter implements
   };
 
   private client: GraphQLClient | null = null;
+  readonly registryCredentialRepair = railwayRegistryCredentialRepair(() => this.client);
   private credentials: RailwayCredentials | null = null;
   private resolvedWorkspaceId: string | null | undefined;
 

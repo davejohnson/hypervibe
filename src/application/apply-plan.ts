@@ -150,6 +150,7 @@ import {
 } from '../domain/plan/action-authority.js';
 import { applyDatabaseResilienceAction } from './apply-database-resilience.js';
 import { applyBackupPolicyAction } from './apply-backup-policy.js';
+import { applyRegistryCredentials } from './apply-registry-credentials.js';
 import { applyDataMigrationAction } from './apply-data-migration.js';
 import { applyMaintenanceAction } from './apply-maintenance.js';
 import { bindingIdentityFingerprint } from '../domain/services/binding-identity.js';
@@ -872,6 +873,17 @@ export async function executePlanApply(ctx: CommandContext, params: {
     ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
     : project;
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (planScope === 'registry-credentials') {
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'Registry repair must target its reviewed existing environment and cannot deploy.' }] };
+    }
+    const result = await executor.execute({ planRunId: planId, confirmActions: params.confirmActions,
+      currentSpecRevision: params.specRevision, handler: action => applyRegistryCredentials({ ctx,
+        project: projectForPreflight, spec, environmentName: envName, planId, action,
+        encrypted: loaded.document.overrides!.registryCredentialsEncrypted!, confirmed: params.confirmActions }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [] };
+  }
   if (secretsOnly && (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
     || envSpec.deploy?.strategy !== 'branch' || envSpec.deploy.trigger !== 'ci' || params.alwaysRunBootstrap)) {
     return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',

@@ -56,6 +56,7 @@ export interface CiLifecyclePort {
 }
 
 export interface CodeHostRegistration {
+  registryCredentials?: import('../ports/registry-credentials.port.js').RegistryCredentialSource;
   id: string;
   connectionProvider: string;
   suggestedCiProvider?: string;

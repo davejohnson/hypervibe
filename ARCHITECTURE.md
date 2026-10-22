@@ -541,6 +541,14 @@ non-noop action:
   canonical environment.
 - Receipts are action-scoped evidence. Do not reuse a whole-environment
   bootstrap result as proof that several distinct actions succeeded.
+- `hv_plan scope="registry-credentials" services=["cron"]` isolates an existing
+  service's image-pull credential repair from backup setup and deployment.
+  Apply preserves the exact observed image, schedule and runtime configuration,
+  freezes repository-scoped credentials encrypted, and records intent before
+  writing. A write-only acknowledgment remains pending execution verification;
+  retries require a new explicitly confirmed plan. This scope neither advances
+  the applied deployment contract nor relaxes ordinary deployment backup gates.
+  See [registry credential repairs](docs/registry-credential-repairs.md).
 
 Observation is tri-state: present, absent, or unknown. Only provider-confirmed
 absence may authorize a create based on observed state:
