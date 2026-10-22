@@ -45,7 +45,7 @@ describe('explicit secret-only plans', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  async function fixture(options: Parameters<typeof railwayHttpFixture>[0] = {}) {
+  async function fixture(options: Parameters<typeof railwayHttpFixture>[0] = {}, managedEmail = false) {
     const wire = await railwayHttpFixture(options);
     for (const name of ['web', 'worker']) {
       wire.addService(`staging-${name}`, name, stagingId);
@@ -63,9 +63,13 @@ describe('explicit secret-only plans', () => {
         OTHER_REQUIRED_KEY: { ownership: 'delegated', principal: 'github:other', environments: ['staging'], required: true },
         GENERATED_KEY: { ownership: 'hypervibe', generator: 'random-base64url-32-v1', environments: ['staging'] },
         PRODUCTION_ONLY: { ownership: 'delegated', principal: 'github:owner', environments: ['production'] },
+        ...(managedEmail ? {
+          SENDGRID_API_KEY: { ownership: 'delegated', principal: 'github:owner', environments: ['staging', 'production'] },
+        } : {}),
       },
       environments: {
         staging: { hosting: { provider: 'railway' }, envFile: { mode: 'off' },
+          ...(managedEmail ? { email: { enabled: true } } : {}),
           services: { web: { workloadKind: 'web' }, worker: { workloadKind: 'worker' } },
           database: { provider: 'railway', engine: 'postgres' },
           deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' } },
@@ -102,6 +106,42 @@ describe('explicit secret-only plans', () => {
     const apply = (planId: string) => executePlanApply(ctx, { project, spec: spec.spec, specRevision: spec.revision, planId, confirmActions: [] });
     return { wire, project, environment, production, spec, file, input, plan, apply };
   }
+
+  it('installs a separate sending key while keeping email setup credentials out of runtime', async () => {
+    // Twilio recommends a restricted mail.send-only application credential:
+    // https://www.twilio.com/docs/sendgrid/for-developers/sending-email/quickstart-nodejs#create-and-store-a-sendgrid-api-key
+    // Email setup remains managed; this boundary uses real Railway serialization.
+    const f = await fixture({}, true);
+    const sendingKey = 'synthetic-mail-send-only-key';
+    const setupKey = 'synthetic-domain-management-key';
+    const connection = ctx.repos.connections.create({ provider: 'sendgrid',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiKey: setupKey }) });
+    ctx.repos.connections.updateStatus(connection.id, 'verified');
+    f.wire.variables.set(`production-web/${productionId}`, { SENDGRID_API_KEY: 'separate-production-mail-key' });
+    writeFileSync(f.file, `SENDGRID_API_KEY=${sendingKey}\nHYPERVIBE_SENDGRID_API_KEY=${setupKey}\n`, { mode: 0o600 });
+    const overrides = { secretRefs: { SENDGRID_API_KEY: `dotenv:${f.file}#SENDGRID_API_KEY` } };
+    const plan = await f.plan(overrides);
+    expect(plan.actions).toMatchObject([{ id: 'secret:SENDGRID_API_KEY', type: 'update' }]);
+    const storedPlan = ctx.repos.runs.findById(plan.planRunId)!.plan;
+    expect(JSON.stringify(storedPlan)).not.toContain(sendingKey);
+    expect(JSON.stringify(storedPlan)).not.toContain(setupKey);
+    expect(await f.apply(plan.planRunId)).toMatchObject({ kind: 'executed', result: { success: true,
+      receipts: [{ data: { appliedCount: 2, skippedCount: 0, failedCount: 0, deploymentDeferred: true } }] } });
+    expect(f.wire.mutations).toHaveLength(2);
+    for (const mutation of f.wire.mutations) {
+      expect(mutation).toMatchObject({ field: 'variableCollectionUpsert', args: { input: {
+        environmentId: stagingId, skipDeploys: true, replace: false,
+        variables: { SENDGRID_API_KEY: sendingKey },
+      } } });
+      expect(JSON.stringify(mutation)).not.toContain(setupKey);
+    }
+    expect(f.wire.variables.get(`production-web/${productionId}`)).toEqual({ SENDGRID_API_KEY: 'separate-production-mail-key' });
+    const second = await f.plan(overrides);
+    expect(second.actions).toMatchObject([{ type: 'noop' }]);
+    expect(await f.apply(second.planRunId)).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(f.wire.mutations).toHaveLength(2);
+    expect(f.wire.contractErrors).toEqual([]);
+  });
 
   it('updates only the selected staging secret despite pending backup setup, then replans to a mutation-free noop', async () => {
     const f = await fixture();

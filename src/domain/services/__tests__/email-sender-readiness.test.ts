@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Resolver } from 'node:dns/promises';
+import { createHash } from 'node:crypto';
+import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
+import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
+import type { ObservedService, ObservedState } from '../../ports/observe.port.js';
 import { environmentSpecSchema } from '../../spec/spec.schema.js';
 import { planEmail } from '../email-plan.service.js';
 import { inspectEmailSenderReadiness } from '../email-sender-readiness.service.js';
@@ -61,6 +65,70 @@ describe('SendGrid application sender readiness through the email planner', () =
     expect(fetch.mock.calls.every(([, init]) => init?.method === 'GET')).toBe(true);
     expect(JSON.stringify(result)).not.toContain('SG.synthetic-key');
     expect(JSON.stringify(result)).not.toContain('orders@example.com');
+  });
+});
+
+describe('SendGrid readiness credential identity', () => {
+  const setupKey = 'SG.setup-only-key';
+  const sendingKey = 'SG.app-sending-key';
+  const digest = (key: string) => createHash('sha256').update(key).digest('hex');
+  const spec = () => environmentSpecSchema.parse({
+    hosting: { provider: 'railway' }, services: { web: {}, worker: { workloadKind: 'worker' } },
+    email: { enabled: true, sender: { address: 'orders@example.com' } },
+  });
+  function observed(hashes: Array<string | undefined>): ObservedState {
+    return { provider: 'railway', observedAt: new Date().toISOString(), projectExists: true,
+      databases: [], partial: false, warnings: [],
+      services: hashes.map((hash, index): ObservedService => ({
+        name: index ? 'worker' : 'web', externalId: `service-${index}`, workloadKind: index ? 'worker' : 'web',
+        customDomains: [], config: {}, status: 'running', envVarKeys: ['SENDGRID_API_KEY'],
+        envVarHashes: hash ? { SENDGRID_API_KEY: hash } : {},
+      })),
+    };
+  }
+  beforeEach(() => {
+    vi.spyOn(ConnectionRepository.prototype, 'findBestMatchFromHints').mockReturnValue({
+      id: 'setup-connection', provider: 'sendgrid', scope: null, status: 'verified',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiKey: setupKey }),
+      createdAt: new Date(), updatedAt: new Date(), lastVerifiedAt: new Date(),
+    });
+  });
+
+  it.each([
+    ['without observed runtime identity', null],
+    ['with another application key', observed([digest(sendingKey)])],
+    ['with a missing workload key hash', observed([digest(setupKey), undefined])],
+  ])('does not infer setup-key identity from enabled email %s', async (_label, live) => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async url => String(url).includes('whitelabel')
+      ? response([{ id: 1, domain: 'example.com', valid: true }]) : response({ results: [] }));
+
+    const result = await inspectEmailSenderReadiness({ project, environmentSpec: spec(), observed: live });
+
+    expect(result?.status).toBe('unknown');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('uses a verified connection only when every sending workload has its exact key hash', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async url => String(url).includes('whitelabel')
+      ? response([{ id: 1, domain: 'example.com', valid: true }]) : response({ results: [] }));
+
+    const result = await inspectEmailSenderReadiness({ project, environmentSpec: spec(), observed: observed([digest(setupKey), digest(setupKey)]) });
+
+    expect(result?.status).toBe('verified');
+    expect(fetch.mock.calls.every(([, init]) => new Headers(init?.headers).get('Authorization') === `Bearer ${setupKey}`)).toBe(true);
+  });
+
+  it('keeps sender authorization unknown when the exact app key cannot read identities', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(response({}, 403));
+
+    const result = await inspectEmailSenderReadiness({ project, environmentSpec: spec(), observed: null,
+      runtimeValues: { SENDGRID_API_KEY: sendingKey } });
+
+    expect(result?.status).toBe('unknown');
+    expect(fetch).toHaveBeenCalled();
+    expect(fetch.mock.calls.every(([, init]) => new Headers(init?.headers).get('Authorization') === `Bearer ${sendingKey}`)).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(sendingKey);
+    expect(JSON.stringify(result)).not.toContain(setupKey);
   });
 });
 

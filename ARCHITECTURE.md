@@ -1234,6 +1234,17 @@ its provider URL is derived from that service's durable hosting binding. Alias
 local parts are application routing intent because SendGrid delivers all mail
 for one parse hostname to one endpoint.
 
+The SendGrid connection is a management credential, conventionally supplied as
+`HYPERVIBE_SENDGRID_API_KEY`. Supply the application's separate `SENDGRID_API_KEY`
+as a delegated runtime secret, issuing it with `mail.send` only. Legacy explicit
+runtime inputs remain supported; Hypervibe does not validate the sending key's
+scopes. Email runtime actions own sender
+and routing metadata, never the sending key; historical email bindings cannot
+authorize overwriting or deleting that key. Setup verification does not require
+Mail Send permission. Enabling email alone neither supplies a runtime credential
+nor proves its account identity. Sender-readiness observation may use a connected
+credential only when its hash matches the observed application credential.
+
 Read-only plan/status sender readiness also detects existing SendGrid env
 configuration. Both From and Reply-To require exact-domain or individual sender
 verification in the application's account; Reply-To verification is Hypervibe

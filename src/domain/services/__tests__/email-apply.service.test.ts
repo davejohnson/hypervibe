@@ -10,6 +10,7 @@ import { ServiceRepository } from '../../../adapters/db/repositories/service.rep
 import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import { SendGridAdapter } from '../../../adapters/providers/sendgrid/sendgrid.adapter.js';
 import { CloudflareAdapter } from '../../../adapters/providers/cloudflare/cloudflare.adapter.js';
+import { railwayHttpFixture, projectId, stagingId } from '../../../adapters/providers/railway/__tests__/railway-http.fixture.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import type { PlanAction } from '../../plan/plan.types.js';
 import { environmentSpecSchema } from '../../spec/spec.schema.js';
@@ -104,8 +105,70 @@ describe('declarative email apply', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     SqliteAdapter.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it.each([true, false])('keeps setup credentials out of runtime when an application key is present: %s', async (hasRuntimeKey) => {
+    // Twilio recommends a separate Mail Send-only application key. Exercise
+    // the real Railway serialization against the pinned official schema.
+    // https://www.twilio.com/docs/sendgrid/for-developers/sending-email/quickstart-nodejs
+    const wire = await railwayHttpFixture();
+    wire.addService('staging-api', 'api', stagingId);
+    wire.variables.set(`staging-api/${stagingId}`, {
+      ...(hasRuntimeKey ? { SENDGRID_API_KEY: 'SG.synthetic-application-send-only' } : {}),
+      KEEP_ME: 'unchanged',
+    });
+    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: {
+      provider: 'railway', projectId,
+      environmentId: stagingId,
+      services: { api: { serviceId: 'staging-api', url: 'https://api.example.com' } },
+      email: { runtime: { perServiceKeys: { api: ['SENDGRID_API_KEY'] } } },
+    },
+    });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter: wire.adapter });
+    const spec = emailSpec();
+    const result = await applyEmailAction({ project, environmentName: 'staging', environmentSpec: spec,
+      action: { id: 'email:runtime', type: 'update', resource: { kind: 'email', name: 'staging', provider: 'railway' },
+        verified: false, reason: 'Sync sender configuration', metadata: { operation: EMAIL_OPERATIONS.runtimeSync,
+          services: ['api'], configHash: emailRuntimeConfigHash(spec),
+          credentialHash: createHash('sha256').update('SG.secret-runtime-value').digest('hex'),
+        } },
+    });
+
+    expect(result.success, JSON.stringify(result)).toBe(true);
+    expect(wire.variables.get(`staging-api/${stagingId}`)?.SENDGRID_API_KEY)
+      .toBe(hasRuntimeKey ? 'SG.synthetic-application-send-only' : undefined);
+    expect(wire.variables.get(`staging-api/${stagingId}`)).toMatchObject({
+      KEEP_ME: 'unchanged', SENDGRID_FROM_EMAIL: 'hello@example.com',
+    });
+    expect(JSON.stringify(wire.mutations)).not.toContain('SG.secret-runtime-value');
+    expect(wire.mutations.some(mutation => mutation.field === 'variableDelete')).toBe(false);
+    expect(SendGridAdapter.prototype.getScopes).not.toHaveBeenCalled();
+    const binding = new EnvironmentRepository().findById(environment.id)!.platformBindings.email as Record<string, unknown>;
+    expect(binding.runtime).not.toHaveProperty('credentialHash');
+    expect(binding.runtime).toMatchObject({ perServiceKeys: { api: expect.not.arrayContaining(['SENDGRID_API_KEY']) } });
+    expect(wire.contractErrors).toEqual([]);
+  });
+
+  it('retires only previous email metadata without submitting an empty environment update', async () => {
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    new EnvironmentRepository().updatePlatformBindings(environment.id, {
+      email: { runtime: { perServiceKeys: { api: ['SENDGRID_API_KEY', 'SENDGRID_FROM_EMAIL'] } } },
+    });
+    const setEnvVars = vi.fn().mockResolvedValue({ success: true, message: 'synced' });
+    const deleteEnvVars = vi.fn().mockResolvedValue({ success: true, message: 'removed' });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true,
+      adapter: { name: 'railway', capabilities: {}, setEnvVars, deleteEnvVars } as never });
+    const spec = environmentSpecSchema.parse({ hosting: { provider: 'railway' }, services: { api: {} }, email: { enabled: true } });
+    const result = await applyEmailAction({ project, environmentName: 'production', environmentSpec: spec,
+      action: { id: 'email:runtime', type: 'update', resource: { kind: 'email', name: 'production', provider: 'railway' },
+        verified: false, reason: 'Retire sender metadata', metadata: { operation: EMAIL_OPERATIONS.runtimeSync,
+          services: ['api'], configHash: emailRuntimeConfigHash(spec) } } });
+    expect(result.success).toBe(true);
+    expect(setEnvVars).not.toHaveBeenCalled();
+    expect(deleteEnvVars).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ name: 'api' }), ['SENDGRID_FROM_EMAIL']);
   });
 
   it('syncs sender defaults and inbound aliases only through the reviewed runtime action', async () => {
@@ -136,7 +199,6 @@ describe('declarative email apply', () => {
         operation: EMAIL_OPERATIONS.runtimeSync,
         services: ['api'],
         configHash: emailRuntimeConfigHash(spec),
-        credentialHash: createHash('sha256').update('SG.secret-runtime-value', 'utf8').digest('hex'),
       },
     };
 
@@ -152,7 +214,6 @@ describe('declarative email apply', () => {
       expect.anything(),
       expect.objectContaining({ name: 'api' }),
       {
-        SENDGRID_API_KEY: 'SG.secret-runtime-value',
         SENDGRID_FROM_EMAIL: 'hello@example.com',
         SENDGRID_FROM_NAME: 'Example',
         SENDGRID_REPLY_TO: 'support@example.com',
@@ -197,7 +258,6 @@ describe('declarative email apply', () => {
         operation: EMAIL_OPERATIONS.runtimeSync,
         services: ['api'],
         configHash: emailRuntimeConfigHash(spec),
-        credentialHash: createHash('sha256').update('SG.secret-runtime-value', 'utf8').digest('hex'),
       },
     };
 
@@ -213,7 +273,6 @@ describe('declarative email apply', () => {
       expect.anything(),
       expect.objectContaining({ name: 'api' }),
       {
-        SENDGRID_API_KEY: 'SG.secret-runtime-value',
         SENDGRID_FROM_EMAIL: 'canary@staging.example.com',
         SENDGRID_FROM_NAME: 'Example Canary',
         SENDGRID_INBOUND_HOSTNAME: 'ci-mail.staging.example.com',
@@ -224,7 +283,6 @@ describe('declarative email apply', () => {
     expect(result.data).toMatchObject({
       services: ['api'],
       keys: [
-        'SENDGRID_API_KEY',
         'SENDGRID_FROM_EMAIL',
         'SENDGRID_FROM_NAME',
         'SENDGRID_INBOUND_ALIASES',

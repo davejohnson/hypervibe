@@ -24,7 +24,7 @@ import {
 import { findCloudflareZone, getCloudflareAdapterFromHints } from './cloudflare-ops.service.js';
 import { cloudflareScopeHintsForDomain, normalizeDomainName } from './domain-scope.js';
 import { getProjectScopeHints } from './project-scope.js';
-import { getSendGridAdapter, getSendGridApiKeyHash } from './sendgrid-ops.service.js';
+import { getSendGridAdapter } from './sendgrid-ops.service.js';
 import {
   forwardedTo,
   resolveCloudflareEmailContext,
@@ -73,7 +73,6 @@ export interface EmailIntegrationState {
   inboundSigning?: InboundSigningState;
   eventSigning?: EventSigningState;
   senderReadiness?: EmailSenderReadiness;
-  runtimeKey: { status: 'known'; hash: string } | UnknownObservation;
   domainAuthentications: EmailObservation<SendGridDomainAuthentication>;
   verifiedSenders: EmailObservation<SendGridVerifiedSender>;
   inboundRoutes: EmailObservation<SendGridInboundParseRoute>;
@@ -166,7 +165,6 @@ export function emailIntegrationFingerprint(state: EmailIntegrationState): strin
       : { status: 'known', items: observation.items.map(mapper) };
 
   return emailConfigHash({
-    runtimeKey: state.runtimeKey,
     inboundSigning: inboundSigningFingerprint(state.inboundSigning),
     eventSigning: state.eventSigning?.status === 'known' ? { ...state.eventSigning.value, publicKey: state.eventSigning.value.publicKey ? emailConfigHash(state.eventSigning.value.publicKey) : null } : state.eventSigning,
     domainAuthentications: normalize(state.domainAuthentications, normalizedDomainAuth),
@@ -253,11 +251,6 @@ export async function resolveEmailIntegrationState(params: {
     ...(environmentSpec.domain ? [environmentSpec.domain] : []),
     ...getProjectScopeHints(project),
   ];
-  const runtimeKeyResult = getSendGridApiKeyHash(scopeHints);
-  const runtimeKey: EmailIntegrationState['runtimeKey'] = 'error' in runtimeKeyResult
-    ? unknown(runtimeKeyResult.error)
-    : { status: 'known', hash: runtimeKeyResult.hash };
-
   const sendgrid = getSendGridAdapter(scopeHints);
   if ('error' in sendgrid) {
     if (wantsDomain) domainAuthentications = unknown(sendgrid.error);
@@ -372,7 +365,6 @@ export async function resolveEmailIntegrationState(params: {
   }
 
   for (const [name, observation] of Object.entries({
-    runtimeKey,
     domainAuthentication: domainAuthentications,
     senderVerification: verifiedSenders,
     inboundParse: inboundRoutes,
@@ -394,7 +386,6 @@ export async function resolveEmailIntegrationState(params: {
     senderReadiness: await inspectEmailSenderReadiness({ ...params, observed: params.observed ?? null }),
     ...(eventSigning ? { eventSigning } : {}),
     ...(inboundSigning ? { inboundSigning } : {}),
-    runtimeKey,
     domainAuthentications,
     verifiedSenders,
     inboundRoutes,
@@ -432,7 +423,7 @@ export function inboundParseUrl(environment: Environment | null, inbound: EmailI
 }
 
 export function emailRuntimeKeysForService(environmentSpec: EnvironmentSpec, serviceName: string): string[] {
-  const keys = ['SENDGRID_API_KEY'];
+  const keys: string[] = [];
   if (environmentSpec.email.sender) {
     keys.push('SENDGRID_FROM_EMAIL');
     if (environmentSpec.email.sender.name) keys.push('SENDGRID_FROM_NAME');
@@ -950,43 +941,38 @@ export async function planEmail(params: {
 
   const runtimeBinding = asRecord(bindings.runtime);
   const runtimeConfigHash = emailRuntimeConfigHash(environmentSpec);
+  const previousRuntimeKeys = Object.values(asRecord(runtimeBinding?.perServiceKeys) ?? {})
+    .flatMap(keys => Array.isArray(keys) ? keys.filter(key => typeof key === 'string' && key !== 'SENDGRID_API_KEY') : []);
+  const runtimeNotRequired = previousRuntimeKeys.length === 0
+    && serviceNames.every(service => emailRuntimeKeysForService(environmentSpec, service).length === 0);
   const servicesKnown = observed !== null && observed.completeness?.services !== 'unknown';
-  const desiredRuntimeKeyHash = state.runtimeKey.status === 'known' ? state.runtimeKey.hash : undefined;
-  const boundRuntimeKeyHash = stringValue(runtimeBinding, 'credentialHash');
-  const runtimeCredentialMatches = desiredRuntimeKeyHash
-    ? boundRuntimeKeyHash === desiredRuntimeKeyHash
-    : Boolean(boundRuntimeKeyHash);
   const runtimeKeysPresent = servicesKnown && serviceNames.every((serviceName) => {
     const desiredKeys = emailRuntimeKeysForService(environmentSpec, serviceName);
     const observedService = observed?.services.find((service) => service.name === serviceName);
-    return desiredKeys.every((key) => {
-      if (!observedService?.envVarKeys.includes(key)) return false;
-      if (key !== 'SENDGRID_API_KEY' || !desiredRuntimeKeyHash) return true;
-      const liveHash = observedService.envVarHashes.SENDGRID_API_KEY;
-      return liveHash ? liveHash === desiredRuntimeKeyHash : runtimeCredentialMatches;
-    });
+    return desiredKeys.every((key) => observedService?.envVarKeys.includes(key));
   });
-  const runtimeBindingMatches = stringValue(runtimeBinding, 'configHash') === runtimeConfigHash
-    && runtimeCredentialMatches;
-  const runtimePreserved = (!servicesKnown || state.runtimeKey.status === 'unknown') && runtimeBindingMatches;
+  const runtimeBindingMatches = stringValue(runtimeBinding, 'configHash') === runtimeConfigHash;
+  const runtimePreserved = !servicesKnown && runtimeBindingMatches;
+  const runtimeVerified = runtimeNotRequired || runtimeKeysPresent && runtimeBindingMatches;
   actions.push({
     id: 'email:runtime',
-    type: runtimeKeysPresent && runtimeBindingMatches || runtimePreserved ? 'noop' : 'update',
+    type: runtimeVerified || runtimePreserved ? 'noop' : 'update',
     resource: { kind: 'email', name: environmentName, provider: environmentSpec.hosting.provider },
-    verified: runtimeKeysPresent && runtimeBindingMatches,
-    reason: runtimeKeysPresent && runtimeBindingMatches
-      ? 'SendGrid runtime configuration is present on every declared service'
+    verified: runtimeVerified,
+    reason: runtimeNotRequired
+      ? 'No email runtime metadata is declared'
+      : runtimeKeysPresent && runtimeBindingMatches
+      ? 'Email sender and inbound settings are present on every declared service'
       : runtimePreserved
-        ? 'Preserving recorded SendGrid runtime configuration because service observation is unknown'
-        : 'Sync SendGrid runtime configuration to declared services',
+        ? 'Preserving recorded email settings because service observation is unknown'
+        : 'Sync email sender and inbound settings to declared services',
     ...(params.serviceDependencies?.length ? { dependsOn: [...new Set(params.serviceDependencies)] } : {}),
     metadata: {
       operation: EMAIL_OPERATIONS.runtimeSync,
       services: serviceNames,
       configHash: runtimeConfigHash,
-      ...(desiredRuntimeKeyHash ? { credentialHash: desiredRuntimeKeyHash } : {}),
       managedKeys: [...EMAIL_MANAGED_ENV_KEYS],
-      ...((!servicesKnown || state.runtimeKey.status === 'unknown') && !runtimeBindingMatches
+      ...(!runtimeNotRequired && !servicesKnown && !runtimeBindingMatches
         ? blockedMetadata('email_runtime_observation_unknown')
         : {}),
     },
@@ -1313,7 +1299,7 @@ export async function planEmail(params: {
   }
 
   if (!environmentSpec.domain && !environmentSpec.email.sender) {
-    state.warnings.push('Email is enabled without environment.domain or email.sender; Hypervibe will sync the runtime key but cannot verify a sender identity.');
+    state.warnings.push('Email is enabled without environment.domain or email.sender; Hypervibe cannot verify a sender identity. Configure the application sending key separately as a delegated SENDGRID_API_KEY secret.');
   }
 
   return {
