@@ -22,6 +22,7 @@ import { parseHostingBindings } from '../ports/hosting.port.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { effectiveGitHubCheckRuntimeVersion } from '../spec/project-runtime.js';
 import { compileEnvironmentTaskWorkflow } from './environment-task-workflow.service.js';
+import { buildSecurityReviewWorkflow, securityReviewScript, SECURITY_REVIEW_SCRIPT_PATH } from './security-review-workflow.service.js';
 import {
   githubActionsCanonicalEnvironment,
   resolveGitHubActionsSelection,
@@ -121,6 +122,7 @@ export const GITHUB_AUTOMATION_REGISTRY: Record<GitHubAutomationSpec['kind'], Gi
   autofix: { kind: 'autofix', fileBacked: true, needsOpenAI: true },
   'pull-request-review': { kind: 'pull-request-review', fileBacked: true, needsOpenAI: true },
   'code-audit': { kind: 'code-audit', fileBacked: true, needsOpenAI: true },
+  'security-review': { kind: 'security-review', fileBacked: true, needsOpenAI: false },
   'environment-task': { kind: 'environment-task', fileBacked: true, needsOpenAI: false },
 };
 
@@ -194,6 +196,16 @@ function automationReview(
         details: [
           `Uses ${automation.agent.model} to inspect the repository on its declared schedule.`,
           'Creates GitHub issues for findings instead of changing code automatically.',
+        ],
+      };
+    case 'security-review':
+      return {
+        title: `${name} security review`,
+        summary: 'Adds or updates a scheduled review of public dependency advisories and Node security releases.',
+        details: [
+          'Reads declared lockfiles and runtime evidence without installing application dependencies.',
+          'Fails on findings or incomplete coverage and retains a bounded review report.',
+          'Does not update code, deploy applications, or rotate credentials.',
         ],
       };
     case 'environment-task':
@@ -1043,6 +1055,7 @@ export function compileGitHubAutomationWorkflow(
     case 'autofix': return buildAutofixWorkflow(id, automation, github, projectRuntime);
     case 'pull-request-review': return buildReviewWorkflow(id, automation);
     case 'code-audit': return buildAuditWorkflow(id, automation);
+    case 'security-review': return buildSecurityReviewWorkflow(id, automation, projectRuntime);
     case 'environment-task': return compileEnvironmentTaskWorkflow(id, automation);
   }
 }
@@ -1209,6 +1222,13 @@ export function compileManagedGitHubFiles(
   }
   for (const [id, automation] of Object.entries(github.actions).sort(([a], [b]) => a.localeCompare(b))) {
     if (!automation.enabled) continue;
+    if (automation.kind === 'security-review' && !files.some((file) => file.path === SECURITY_REVIEW_SCRIPT_PATH)) {
+      files.push(managedFile(SECURITY_REVIEW_SCRIPT_PATH, securityReviewScript(), {
+        title: 'Public advisory scanner',
+        summary: 'Publishes the reviewed scanner source alongside its scheduled workflow.',
+        details: ['Uses only public advisory endpoints and runs without installing packages or reading credentials.'],
+      }));
+    }
     if (automation.kind === 'code-audit' && automation.documentationDomains.length > 0) {
       files.push(managedFile(
         `${auditCodexHome(id)}/config.toml`,

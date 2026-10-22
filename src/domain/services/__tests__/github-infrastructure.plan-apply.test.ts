@@ -146,6 +146,39 @@ describe('GitHub infrastructure plan/apply', () => {
     expect(result.blocked.find((block) => block.provider === 'openai')).toBeUndefined();
   });
 
+  it('plans the advisory scanner and daily schedule together without credentials or provider writes', async () => {
+    const desiredSpec = projectSpecSchema.parse({
+      version: 1, project: 'example',
+      github: {
+        collaboration: { issues: { enabled: false, templates: false }, pullRequests: { requirePr: false } },
+        actions: { security: { kind: 'security-review' } },
+      },
+      environments: { production: { hosting: { provider: 'railway' }, services: {} } },
+    });
+    const read = vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
+    const secrets = vi.spyOn(GitHubAdapter.prototype, 'listRepositorySecrets');
+    const mutation = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile');
+    const first = await planGitHubInfrastructure({ project, spec: desiredSpec, environmentName: 'production' });
+    const publication = first.actions.find((action) => action.id === GITHUB_INFRASTRUCTURE_ACTION_ID)!;
+    expect(publication.type).toBe('update');
+    const desiredFiles = publication.metadata?.desiredFiles as Array<{ path: string; content: string }>;
+    expect(desiredFiles.map((file) => file.path)).toEqual(expect.arrayContaining([
+      '.github/hypervibe/security-review.mjs', '.github/workflows/hypervibe-security.yml', GITHUB_INFRASTRUCTURE_MANIFEST,
+    ]));
+    expect(first.blocked).toEqual([]);
+    expect(secrets).not.toHaveBeenCalled();
+    expect(mutation).not.toHaveBeenCalled();
+
+    const accepted = new Map(desiredFiles.map((file) => [file.path, file.content]));
+    read.mockImplementation(async (_owner, _repo, filePath) => accepted.get(filePath) ?? null);
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main', private: true });
+    const reconciled = await planGitHubInfrastructure({ project, spec: desiredSpec, environmentName: 'production' });
+    expect(reconciled.actions.find((action) => action.id === GITHUB_INFRASTRUCTURE_ACTION_ID)?.type).toBe('noop');
+    expect(reconciled.actions.some((action) => action.id === GITHUB_OPENAI_SECRET_ACTION_ID)).toBe(false);
+    expect(mutation).not.toHaveBeenCalled();
+    expect(secrets).not.toHaveBeenCalled();
+  });
+
   it('marks actual backup workflow file drift as confirmed billable publication work', async () => {
     vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
     vi.spyOn(managedBackups, 'compileManagedBackupFiles').mockResolvedValue({ files: [{

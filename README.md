@@ -61,8 +61,9 @@ Lifecycle maturity is reported by `hv_inspect {}` and `hv_connections {}`. Every
 - **Environment management** - Staging, production, PR previews
 - **Migration support** - Run Prisma, Drizzle, TypeORM migrations
 - **Local development** - Generate Docker Compose for local parity
-- **Secret rotation** - Rotate once, propagate to all environments
+- **Credential rotation** - [Project-wide inventory and recovery planning](docs/project-key-rotation.md), with scoped Supabase database password replacement through reviewed plans during maintenance; other issuers and application recovery retain explicit limits
 - **Audit trail** - Track secret access across deploys
+- **Security reviews** - Review public npm advisories and declared Node security releases across local projects with `hypervibe security`; declare daily checks, weekly reviews, and monthly credential work through the [recurring security policy](docs/recurring-security.md). Installed automation and completed remediation require separate evidence.
 
 ## Quick Start
 
@@ -290,6 +291,12 @@ database diagnostics, secrets, domains/DNS, email, payments, CI, App
 Store/TestFlight, and local dev tools.
 
 `hv_connections` and `hv_secrets` both accept `project="name-or-id"` to select and validate project context. Provider `scope` remains separate: it identifies the actual repository, domain, account, or environment covered by a credential.
+
+`hv_rotation project="my-app" mode="incident"` prepares a project-wide rotation
+inventory and process with explicit blockers. `action="start"` saves its local
+snapshot and `action="status"` resumes inspection. This preparation workflow
+does not rotate keys; issuer automation and live consumer verification remain
+unsupported. See the [rotation workflow](docs/project-key-rotation.md).
 
 Their parameter modes are intentionally explicit:
 

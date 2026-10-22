@@ -711,8 +711,9 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'The project must have access to gpt-5.6-sol and the key must allow model reads plus Responses API writes.',
       'Scope the key to this project and keep it out of the repository; Hypervibe syncs it only as the OPENAI_API_KEY Actions secret.',
     ],
-    credentialExample: 'hv_connections provider="openai" scope="owner/repository" credentialsRef="env:OPENAI_API_KEY"',
+    credentialExample: 'hv_connections provider="openai" scope="owner/repository" credentialsRef="env:HYPERVIBE_OPENAI_API_KEY"',
     notes: [
+      'Export the automation key as HYPERVIBE_OPENAI_API_KEY and connect that exact name. Keep any application OPENAI_API_KEY separate; the GitHub Actions destination remains OPENAI_API_KEY.',
       'OpenAI API billing is separate from ChatGPT plans. Set project budgets and usage limits in the OpenAI Platform before enabling scheduled AI automation.',
       'The key is never included in specs, plans, logs, snapshots, or workflow files.',
     ],
@@ -998,6 +999,9 @@ function credentialExample(
       if (options.requiredCredentialKeys?.includes('packageReadToken')) {
         example = 'hv_connections provider="github" scope="owner/repository" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"NODE_AUTH_TOKEN"}';
       }
+      if (options.scope) example = example.replace('scope="owner/repository"', `scope="${options.scope}"`);
+      break;
+    case 'openai':
       if (options.scope) example = example.replace('scope="owner/repository"', `scope="${options.scope}"`);
       break;
     case 'database':

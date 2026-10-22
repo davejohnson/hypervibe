@@ -221,6 +221,12 @@ export const databaseSpecSchema = z.object({
    */
   seedCommand: z.string().min(1).optional(),
   resilience: databaseResilienceSchema.optional(),
+  /** Reviewed replacement request; declarations of consumer scope and destination trust are owner assertions, not observation. */
+  credentialRotation: z.object({
+    generation: z.number().int().positive(),
+    consumers: z.literal('environment-only'),
+    destinations: z.literal('trusted'),
+  }).strict().optional(),
 }).strict();
 
 export const cacheSpecSchema = z.object({
@@ -508,6 +514,25 @@ export const githubCodeAuditAutomationSpecSchema = z.object({
   }).strict().default({}),
 }).strict();
 
+const securityReviewLockfilePathSchema = z.string().max(240).regex(
+  /^(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*\/)*package-lock\.json$/,
+  'security review lockfiles must be literal repository-relative package-lock.json paths'
+);
+
+export const githubSecurityReviewAutomationSpecSchema = z.object({
+  kind: z.literal('security-review'),
+  enabled: z.boolean().default(true),
+  schedule: githubScheduleSpecSchema.default({ cron: '17 5 * * *' }),
+  lockfilePaths: z.array(securityReviewLockfilePathSchema).min(1).max(16)
+    .refine((paths) => new Set(paths).size === paths.length, 'security review lockfiles must be unique')
+    .default(['package-lock.json']),
+  /** Owner-reviewed public package identities; private names must never be sent to a public advisory API. */
+  publicPackageNames: z.array(z.string().max(214).regex(/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/)).max(256)
+    .refine((names) => new Set(names).size === names.length, 'public package names must be unique').default([]),
+  /** Additional reviewed Node selectors; unresolved selectors remain incomplete coverage. */
+  nodeVersions: z.array(z.string().max(64).regex(/^v?[0-9]+(?:\.[0-9]+(?:\.[0-9]+)?)?$/)).max(16).default([]),
+}).strict();
+
 const githubTaskTextSchema = z.string().max(2_048).refine(
   (value) => !/[\u0000-\u001f\u007f-\u009f]|\$\{\{/.test(value),
   'environment-task values cannot contain control characters or GitHub expressions'
@@ -556,6 +581,7 @@ export const githubAutomationSpecSchema = z.discriminatedUnion('kind', [
   githubAutofixAutomationSpecSchema,
   githubPullRequestReviewAutomationSpecSchema,
   githubCodeAuditAutomationSpecSchema,
+  githubSecurityReviewAutomationSpecSchema,
   githubEnvironmentTaskAutomationSpecSchema,
 ]);
 
@@ -1010,13 +1036,13 @@ export const iosReleaseSigningSpecSchema = z.discriminatedUnion('provider', [
   }).strict(),
 ]);
 
-const appStoreReleaseSecretNames = [
+export const appStoreReleaseSecretNames = [
   'APP_STORE_CONNECT_KEY_ID',
   'APP_STORE_CONNECT_ISSUER_ID',
   'APP_STORE_CONNECT_PRIVATE_KEY',
 ];
 
-const matchSigningSecretNames = [
+export const matchSigningSecretNames = [
   'MATCH_GIT_URL',
   'MATCH_PASSWORD',
   'MATCH_GIT_BASIC_AUTHORIZATION',
@@ -2187,12 +2213,22 @@ export const environmentSpecSchema = z.object({
   }
 });
 
+/** Desired cadence only; completion evidence and active schedules are observed separately. */
+export const securityPolicySpecSchema = z.object({
+  advisoryReview: z.object({ intervalDays: z.number().int().min(1).max(365).default(1) }).strict().default({}),
+  codeReview: z.object({ intervalDays: z.number().int().min(1).max(365).default(7) }).strict().default({}),
+  credentialRotation: z.object({ intervalMonths: z.number().int().min(1).max(12).default(1) }).strict().default({}),
+}).strict();
+
+export type SecurityPolicySpec = z.infer<typeof securityPolicySpecSchema>;
+
 export const projectSpecSchema = z.object({
   version: z.literal(1),
   project: z.string().min(1),
   gitRemoteUrl: z.string().min(1).optional(),
   /** Project-wide build and automation runtime desired state. */
   runtime: projectRuntimeSpecSchema.optional(),
+  securityPolicy: securityPolicySpecSchema.optional(),
   /** Canonical provider-neutral code-host and primary application-CI selection. */
   devops: devopsSpecSchema.optional(),
   github: githubSpecSchema.optional(),

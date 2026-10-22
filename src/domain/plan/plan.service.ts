@@ -1,3 +1,4 @@
+import { planDatabaseRotation, rotationGenerationPending } from '../services/database-rotation.service.js';
 import { planScheduleActivations, SCHEDULE_ACTIVATION_OPERATION } from '../services/schedule-activation.service.js';
 import { scopedSecretObservation } from './scoped-secrets.js';
 import { planApiPolicy } from '../services/api-policy.js';
@@ -138,7 +139,7 @@ import {
 
 export interface PlanOptions {
   /** Restrict the plan to one lifecycle stage. Omission preserves full-plan behavior. */
-  scope?: 'full' | 'retained-cleanup' | 'secrets';
+  scope?: 'full' | 'retained-cleanup' | 'secrets' | 'database-rotation';
   /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
   serviceFilter?: string[];
   /** One-off env var overrides merged over spec.envVars, frozen (encrypted) into the plan. */
@@ -159,7 +160,7 @@ export interface EnvironmentPlan {
   webhookReadiness?: WebhookReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
-  scope: 'full' | 'secrets' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
+  scope: 'full' | 'secrets' | 'database-rotation' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
   backupReadiness?: BackupReadiness;
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
@@ -303,7 +304,7 @@ export class PlanService {
     project: Project,
     environment: Environment | null,
     environmentSpec: EnvironmentSpec,
-    options: { hostingOnly?: boolean } = {}
+    options: { hostingOnly?: boolean; includeMaintenance?: boolean; maintenanceDatabaseUrl?: string } = {}
   ): Promise<{ observed: ObservedState | null; warnings: string[] }> {
     const warnings: string[] = [];
     if (!environment) {
@@ -396,6 +397,14 @@ export class PlanService {
       };
 
       if (options.hostingOnly) {
+        if (options.includeMaintenance) {
+          observed.maintenance = await observeEnvironmentMaintenance({ project, environment, environmentSpec,
+            hostingAdapter: adapter, databaseUrlOverride: options.maintenanceDatabaseUrl });
+          if (observed.maintenance.state === 'unknown') {
+            observed.partial = true;
+            observed.warnings.push('Environment maintenance observation is incomplete; credential writes are blocked.');
+          }
+        }
         return { observed, warnings };
       }
 
@@ -1653,6 +1662,9 @@ export class PlanService {
       return { error: providerValidation.message };
     }
     const scope = options?.scope ?? 'full';
+    if (scope === 'database-rotation') return planDatabaseRotation({ project: projectWithSpecGitRemoteUrl(project, specResult.spec),
+      spec: specResult.spec, revision: specResult.revision, environmentName, options,
+      observe: (p, e, s, recovery) => this.observeEnvironment(p, e, s, { hostingOnly: true, includeMaintenance: true, maintenanceDatabaseUrl: recovery?.databaseUrl }) });
     if (scope === 'secrets') return this.planSecrets(projectWithSpecGitRemoteUrl(project, specResult.spec), environmentName, specResult, options!);
     if (scope === 'retained-cleanup') {
       const incompatibleInputs = [
@@ -2054,6 +2066,16 @@ export class PlanService {
           providers: [],
           warnings: [],
         };
+    const rotationComponent = environmentForObserve ? this.componentRepo.findByEnvironmentAndType(environmentForObserve.id, environmentSpec.database?.engine ?? 'postgres') : null;
+    const pendingCredentialRotation = rotationComponent?.bindings.credentialRotation as { phase?: string } | undefined;
+    if (pendingCredentialRotation && pendingCredentialRotation.phase !== 'installed' && !environmentSpec.maintenance?.enabled) {
+      return { error: 'A database password rotation is unresolved. Keep maintenance enabled and recover the original encrypted rotation before any rollout or maintenance exit.' };
+    }
+    if (!maintenance.pending && environmentSpec.database?.credentialRotation
+      && rotationGenerationPending(environmentSpec, rotationComponent?.bindings ?? {})) {
+      return planDatabaseRotation({ project: projectForPlan, spec: specResult.spec, revision: specResult.revision, environmentName, options,
+        observe: (p, e, s, recovery) => this.observeEnvironment(p, e, s, { hostingOnly: true, includeMaintenance: true, maintenanceDatabaseUrl: recovery?.databaseUrl }) });
+    }
     if (maintenance.pending && serviceFilter) {
       return {
         error: 'Environment maintenance must use a full environment plan. Remove services= and re-run hv_plan.',

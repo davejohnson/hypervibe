@@ -91,6 +91,7 @@ import { planProviderNativeDeploySources } from '../domain/services/provider-nat
 import { planMaintenance } from '../domain/services/maintenance-plan.service.js';
 import { parseEnvironmentMaintenanceBinding } from '../domain/services/environment-maintenance.service.js';
 import { eligibleCredentialRequirements } from '../application/credential-plan-handoff.js';
+import { assessSecurityPolicy } from '../domain/services/security-policy.service.js';
 
 // Re-exported for existing test imports; implementation lives in apply-plan.ts.
 export { bootstrapActionResultFromSummary } from '../application/apply-plan.js';
@@ -153,6 +154,14 @@ function summarizeActions(actions: PlanAction[]) {
     counts[action.type] = (counts[action.type] ?? 0) + 1;
   }
   return counts;
+}
+
+function securityReviewAdvice(spec?: ProjectSpec) {
+  return {
+    ...assessSecurityPolicy({ policy: spec?.securityPolicy, now: new Date() }),
+    nextCommand: 'hv_security',
+    guidance: 'Run hv_security (hypervibe security) for this project’s local checkout to review advisories and runtime evidence. Completion is unverified; schedules and credential replacements require separately reviewed desired state.',
+  };
 }
 
 function managedDatabaseContract(environment: EnvironmentSpec) {
@@ -518,10 +527,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_spec',
-    'Read or update the desired-state ProjectSpec used by hv_plan. Omit spec to read. In a fresh git repository, that read returns a successful uninitialized contract with native runtime, lockfile/package-manager, build-script, and start-script evidence; one unambiguous concrete Node or Python selection plus reviewed install/build commands is persisted on initial write. Missing/conflicting commands, custom languages, and ambiguous projects require an explicit decision or repository Dockerfile. Later native drift is suggested for review, never applied silently. When spec is supplied, it merges by default; use replace=true for full replacement and null to delete a field. In a git worktree Hypervibe syncs .hypervibe/spec.json. Secret declarations contain ownership and targets, never values.',
+    'Read or update the desired-state ProjectSpec used by hv_plan. Omit spec to read. Reads include a security-review cadence assessment and an hv_security suggestion; policy and schedule changes still require explicit desired state. In a fresh git repository, that read returns a successful uninitialized contract with native runtime, lockfile/package-manager, build-script, and start-script evidence; one unambiguous concrete Node or Python selection plus reviewed install/build commands is persisted on initial write. Missing/conflicting commands, custom languages, and ambiguous projects require an explicit decision or repository Dockerfile. Later native drift is suggested for review, never applied silently. When spec is supplied, it merges by default; use replace=true for full replacement and null to delete a field. In a git worktree Hypervibe syncs .hypervibe/spec.json. Secret declarations contain ownership and targets, never values.',
     {
       project: projectField,
-      spec: z.record(z.unknown()).optional().describe('Full ProjectSpec or partial patch. Omit to read the current spec. Main fields are project, runtime, github, secrets, and environments; environment resources include hosting, services, databases, caches, storage, queues, domains, email, deploy, migrations, and iOS.'),
+      spec: z.record(z.unknown()).optional().describe('Full ProjectSpec or partial patch. Omit to read the current spec. Main fields are project, runtime, securityPolicy, github, secrets, and environments; environment resources include hosting, services, databases, caches, storage, queues, domains, email, deploy, migrations, and iOS.'),
       replace: z.boolean().optional().describe('Replace the entire spec instead of merging'),
       confirmNativeDeploy: z.boolean().optional().describe('Required when introducing deploy.trigger="native"; acknowledges provider-native deploys are provider-specific and may require external repository-app access.'),
     },
@@ -551,6 +560,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             specSource: null,
             spec: null,
             repositoryRuntime,
+            securityReview: securityReviewAdvice(),
             bootstrap: {
               required: true,
               nextCommand: 'hv_spec',
@@ -598,6 +608,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             ctx.repos.environments.findByProjectId(project.id).flatMap(environment => ctx.repos.components.findByEnvironmentId(environment.id))),
           repositoryRuntime,
           runtimeReview,
+          securityReview: securityReviewAdvice(result.spec),
           connections: requiredConnectionChecklist(ctx, result.spec),
         }, { warnings });
       }
@@ -758,7 +769,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
     {
       project: projectField,
       env: envField,
-      scope: z.enum(['full', 'retained-cleanup', 'secrets']).optional().describe('Default full. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
+      scope: z.enum(['full', 'retained-cleanup', 'secrets', 'database-rotation']).optional().describe('Default full. database-rotation isolates reviewed issuer reset and stopped-consumer password installation. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
       envVars: z.record(z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
@@ -794,7 +805,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       // its git-safety and filesystem boundary before PlanService persists an
       // executable plan, so an unsafe tracked .env cannot leave an undisclosed
       // authorization record behind.
-      const preparedLocalEnv = currentSpec && scope !== 'secrets'
+      const preparedLocalEnv = currentSpec && scope !== 'secrets' && scope !== 'database-rotation'
         ? ensureProjectLocalEnv({
           source: currentSpecResult?.source,
           projectName: project.name,

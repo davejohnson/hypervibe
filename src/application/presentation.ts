@@ -37,6 +37,8 @@ const COMMAND_PRESENTATION = {
   hv_appstore_submit: { label: 'APP STORE SUBMIT' },
   hv_runs: { label: 'RUNS' },
   hv_secrets: { label: 'SECRETS' },
+  hv_rotation: { label: 'KEY ROTATION WORKFLOW' },
+  hv_security: { label: 'PROJECT SECURITY REVIEW' },
   hv_db_query: { label: 'DATABASE QUERY' },
   hv_deploy: { label: 'DEPLOY' },
   hv_rollback: { label: 'ROLLBACK' },
@@ -738,10 +740,34 @@ function errorPresentation(commandId: string, envelope: CommandEnvelope): Comman
   };
 }
 
+function securityPolicyLines(assessment: DataRecord | undefined): string[] {
+  const policy = record(assessment?.policy);
+  const advisoryDays = numberValue(record(policy?.advisoryReview)?.intervalDays);
+  const reviewDays = numberValue(record(policy?.codeReview)?.intervalDays);
+  const rotationMonths = numberValue(record(policy?.credentialRotation)?.intervalMonths);
+  const cadence = advisoryDays !== undefined && reviewDays !== undefined && rotationMonths !== undefined
+    ? `${assessment?.policySource === 'declared' ? 'Declared' : 'Suggested'} cadence: advisory review every ${plural(advisoryDays, 'day')}; code review every ${plural(reviewDays, 'day')}; credential rotation every ${plural(rotationMonths, 'month')}.`
+    : 'Security cadence is unverified.';
+  const activityNames: Record<string, string> = { advisoryReview: 'Advisory review', codeReview: 'Code review', credentialRotation: 'Credential rotation' };
+  return [
+    cadence,
+    ...arrayValue(assessment?.activities).map(record).filter((value): value is DataRecord => Boolean(value)).map(activity =>
+      `${activityNames[stringValue(activity.activity) ?? ''] ?? 'Security work'}: ${activity.due === true ? 'due' : activity.due === false ? 'current' : 'unverified'} (${stringValue(activity.status) ?? 'unverified'}).`),
+    'Completion and active automation require separate evidence.',
+  ];
+}
+
 function specPresentation(data: DataRecord): CommandPresentation {
   const project = record(data.project);
   const initialized = data.initialized !== false;
-  const details = genericLines(data, new Set(['initialized', 'project', 'revision']));
+  const securityReview = record(data.securityReview);
+  const details = genericLines(data, new Set(['initialized', 'project', 'revision', 'securityReview']));
+  const sections: PresentationSection[] = [];
+  if (securityReview) sections.push({ title: '🔎  SECURITY REVIEW', lines: [
+    ...securityPolicyLines(securityReview),
+    stringValue(securityReview.guidance) ?? 'Run hv_security (hypervibe security) for this project’s local checkout.',
+  ] });
+  if (details.length > 0) sections.push({ title: '📎  DETAILS', lines: details });
   return {
     tone: initialized ? 'success' : 'info',
     icon: initialized ? '✅' : '🌱',
@@ -751,7 +777,7 @@ function specPresentation(data: DataRecord): CommandPresentation {
       numberValue(data.revision) !== undefined ? `revision ${data.revision}` : undefined,
     ].filter(Boolean).join(' · '),
     summary: initialized ? 'Desired state loaded.' : 'No desired state has been defined yet.',
-    sections: details.length > 0 ? [{ title: '📎  DETAILS', lines: details }] : [],
+    sections,
   };
 }
 
@@ -764,7 +790,54 @@ function rollbackPresentation(data: DataRecord): CommandPresentation {
     summary: 'Read-only evidence inspection. No workflow dispatched; restoration remains unverified.' };
 }
 
+function rotationPresentation(data: DataRecord): CommandPresentation {
+  const workflow = record(data.workflow);
+  const project = record(data.project);
+  const inventory = arrayValue(data.inventory).map(record).filter((entry): entry is DataRecord => Boolean(entry));
+  const process = arrayValue(data.process).map(record).filter((entry): entry is DataRecord => Boolean(entry));
+  const blocked = arrayValue(data.blocked).map(record).filter((entry): entry is DataRecord => Boolean(entry));
+  return {
+    tone: 'warning', icon: '🔎', title: data.status === 'stale' ? 'ROTATION WORKFLOW CHANGED' : 'KEY ROTATION WORKFLOW',
+    context: [stringValue(project?.name), stringValue(data.mode), stringValue(workflow?.id)].filter(Boolean).join(' · '),
+    summary: 'No keys rotated. Recorded local inventory only; live coverage and issuer operations remain unverified.',
+    sections: [
+      { title: 'INVENTORY', lines: inventory.flatMap(entry => [
+        `${stringValue(entry.category) ?? 'review'} · ${arrayValue(entry.keys).join(', ') || stringValue(entry.id) || 'credential scope'}`,
+        ...arrayValue(entry.destinations).map(record).filter((value): value is DataRecord => Boolean(value))
+          .map(destination => `  Destination: ${[destination.kind, destination.repository, destination.environment,
+            destination.service, destination.resource, destination.scope].filter(value => typeof value === 'string').join(' · ')}`),
+        ...arrayValue(entry.blockers).map(record).filter((value): value is DataRecord => Boolean(value))
+          .map(blocker => `  Blocked: ${stringValue(blocker.message) ?? 'Unverified boundary'}`),
+        ...(entry.category === 'generated-secret' ? arrayValue(entry.stages).map(record)
+          .filter((value): value is DataRecord => Boolean(value)).map(stage =>
+            `  ${stringValue(stage.id)}: ${stringValue(stage.message) ?? 'requires verification'}`) : []),
+      ]) },
+      { title: 'EXTERNAL CREDENTIAL PROCESS', lines: process.map(step => `${stringValue(step.id) ?? 'stage'}: ${stringValue(step.message) ?? 'requires verification'}`) },
+      { title: 'BLOCKED', lines: blocked.map(blocker => stringValue(blocker.message) ?? stringValue(blocker.code) ?? 'Unverified boundary') },
+    ],
+  };
+}
+
 const PRESENTERS: Record<string, (data: DataRecord) => CommandPresentation> = {
+  hv_security: data => ({ tone: data.status === 'clear' ? 'info' : 'warning', icon: '🔎', title: 'PROJECT SECURITY REVIEW',
+    summary: 'Read-only source review. Running deployments and active schedules are unchecked.',
+    sections: arrayValue(data.repositories).map(record).filter((value): value is DataRecord => Boolean(value)).map(repository => {
+      const report = record(repository.report);
+      const npm = record(report?.npm);
+      const node = record(report?.node);
+      const assessment = record(repository.policy);
+      return { title: stringValue(repository.repository) ?? 'Repository', lines: [
+        `Assessment: ${stringValue(report?.status) ?? 'unknown'}. npm packages queried: ${npm?.queriedPackages ?? 0}; skipped: ${npm?.skippedPackages ?? 0}.`,
+        ...arrayValue(npm?.findings).map(record).filter((value): value is DataRecord => Boolean(value))
+          .map(finding => `${finding.package}@${finding.version}: ${finding.advisoryId} — ${finding.url}`),
+        ...arrayValue(node?.entries).map(record).filter((value): value is DataRecord => Boolean(value))
+          .map(entry => `Node ${entry.version ?? 'unknown'} (${entry.source}): ${entry.status}${entry.recommendedVersion ? `; update to ${entry.recommendedVersion}` : ''}${record(entry.latestSecurityRelease)?.version ? `; latest security release ${record(entry.latestSecurityRelease)!.version}` : ''}`),
+        ...arrayValue(report?.issues).filter((value): value is string => typeof value === 'string'),
+        ...arrayValue(repository.issues).filter((value): value is string => typeof value === 'string'),
+        ...securityPolicyLines(assessment),
+      ] };
+    }) }),
+  hv_rotation: rotationPresentation,
   hv_rollback: rollbackPresentation,
   hv_spec: specPresentation,
   hv_plan: planPresentation,

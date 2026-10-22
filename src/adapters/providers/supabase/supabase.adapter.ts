@@ -2,6 +2,7 @@ import { environmentResourceName } from '../../../domain/services/resource-names
 import { z } from 'zod';
 import { lookup } from 'dns/promises';
 import pg from 'pg';
+import { SupabasePasswordRotation } from './supabase.password-rotation.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { Component } from '../../../domain/entities/component.entity.js';
 import type { Receipt, VerifyResult } from '../../../domain/ports/provider.port.js';
@@ -104,6 +105,11 @@ function projectSupabaseDatabaseRuntime(
 
 export class SupabaseAdapter implements IDatabaseAdapter {
   readonly name = 'supabase';
+  readonly passwordRotation = new SupabasePasswordRotation(async component => {
+    const scope = await this.assertComponentScope(component);
+    if (!this.credentials) throw new Error('Supabase password rotation requires an authorized connection.');
+    return { accessToken: this.credentials.accessToken, scope };
+  });
 
   readonly capabilities: DatabaseCapabilities = {
     supportedDatabases: ['postgres'],
