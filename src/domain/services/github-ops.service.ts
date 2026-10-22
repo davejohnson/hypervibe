@@ -61,7 +61,7 @@ export type {
 };
 
 export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 6;
-const GITHUB_ACTIONS_PROMOTION_RENDERER_REVISION = 1;
+const GITHUB_ACTIONS_PROMOTION_RENDERER_REVISION = 2;
 export const GITHUB_ACTIONS_SERVER_PROGRAM_REVISION = 1;
 
 function migrationWorkflowInput(migration: { includeStep: boolean; command?: string }) {
@@ -666,6 +666,9 @@ function buildPromotionEvidenceStep(
   if (!target.promoteFromEnvironment) return '';
   const sourceEnvironment = target.promoteFromEnvironment;
   const sourceProvider = target.promoteFromProvider ?? provider;
+  if (!target.promoteFromBranch) {
+    throw new Error(`Promotion target ${target.environmentName} has no reviewed source branch`);
+  }
   if (target.promoteFromServiceNames === undefined) {
     throw new Error(`Promotion target ${target.environmentName} has no reviewed source service set`);
   }
@@ -684,16 +687,30 @@ function buildPromotionEvidenceStep(
         env:
           HYPERVIBE_PROMOTE_FROM_ENVIRONMENT: ${JSON.stringify(sourceEnvironment)}
           HYPERVIBE_PROMOTE_FROM_WORKFLOW: ${JSON.stringify(sourceWorkflowPath)}
+          HYPERVIBE_PROMOTE_FROM_BRANCH: ${JSON.stringify(target.promoteFromBranch)}
           HYPERVIBE_PROMOTION_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
             const sourceEnvironment = process.env.HYPERVIBE_PROMOTE_FROM_ENVIRONMENT;
             const sourceWorkflow = process.env.HYPERVIBE_PROMOTE_FROM_WORKFLOW;
+            const sourceBranch = process.env.HYPERVIBE_PROMOTE_FROM_BRANCH;
+            const expectedRepository = (context.repo.owner + '/' + context.repo.repo).toLowerCase();
             const targetSha = (process.env.HYPERVIBE_PROMOTION_SHA || '').toLowerCase();
             if (!/^[0-9a-f]{40}$/.test(targetSha)) {
               throw new Error('Promotion requires a full 40-character Git commit SHA');
             }
             const expectedArtifactName = '${managedCiReleaseArtifactPrefix(sourceEnvironment)}' + targetSha;
+            // Resolve heads explicitly: workflow_dispatch also accepts tags.
+            const { data: sourceRef } = await github.rest.git.getRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'heads/' + sourceBranch,
+            });
+            const trustedHeadSha = String(sourceRef?.object?.sha || '').toLowerCase();
+            if (!sourceBranch || sourceRef?.ref !== 'refs/heads/' + sourceBranch
+              || sourceRef?.object?.type !== 'commit' || !/^[0-9a-f]{40}$/.test(trustedHeadSha)) {
+              throw new Error('Promotion source branch could not be verified');
+            }
             let verified;
             for (let page = 1; page <= 10; page += 1) {
               const artifactResponse = await github.rest.actions.listArtifactsForRepo({
@@ -720,16 +737,36 @@ function buildPromotionEvidenceStep(
                   repo: context.repo.repo,
                   run_id: artifact.workflow_run.id,
                 });
-                // A dispatched workflow's head SHA identifies its workflow ref,
-                // while the release artifact and its validated contents identify
-                // the deployed commit. Keep the artifact bound to its real run.
-                if (run.id === artifact.workflow_run.id
-                  && run.conclusion === 'success'
-                  && run.path === sourceWorkflow
-                  && String(run.head_sha || '').toLowerCase() === artifact.workflow_run.head_sha.toLowerCase()) {
-                  verified = { run, artifact };
-                  break;
-                }
+                // Content fingerprints are public: authenticate the producer
+                // independently before trusting its claimed deployment commit.
+                const workflowSha = String(run.head_sha || '').toLowerCase();
+                if (run.id !== artifact.workflow_run.id
+                  || run.status !== 'completed' || run.conclusion !== 'success'
+                  || !['push', 'workflow_dispatch'].includes(run.event)
+                  || run.path !== sourceWorkflow || run.head_branch !== sourceBranch
+                  || String(run.repository?.full_name || '').toLowerCase() !== expectedRepository
+                  || String(run.head_repository?.full_name || '').toLowerCase() !== expectedRepository
+                  || !Number.isSafeInteger(run.repository?.id) || run.repository.id <= 0
+                  || run.head_repository?.id !== run.repository.id
+                  || artifact.workflow_run.repository_id !== run.repository.id
+                  || artifact.workflow_run.head_repository_id !== run.repository.id
+                  || artifact.workflow_run.head_branch !== sourceBranch
+                  || workflowSha !== artifact.workflow_run.head_sha.toLowerCase()) continue;
+                // A branch label alone cannot prove accepted source. Compare
+                // immutable commits so a same-named tag cannot supply new code.
+                const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  basehead: workflowSha + '...' + trustedHeadSha,
+                  per_page: 1,
+                });
+                if (!['ahead', 'identical'].includes(comparison?.status)
+                  || String(comparison?.base_commit?.sha || '').toLowerCase() !== workflowSha
+                  || String(comparison?.merge_base_commit?.sha || '').toLowerCase() !== workflowSha) continue;
+                // The trusted workflow SHA may differ from the application SHA
+                // checked separately in the artifact name and evidence contents.
+                verified = { run, artifact };
+                break;
               }
               if (verified || artifacts.length < 100) break;
               if (page === 10) throw new Error('Promotion artifact search exceeded its 1000-artifact limit');
