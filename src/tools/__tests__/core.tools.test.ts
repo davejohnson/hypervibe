@@ -169,6 +169,33 @@ describe('bootstrap action receipt mapping', () => {
 });
 
 describe('hv_spec', () => {
+  it.each([undefined, { advisoryReview: { intervalDays: 2 }, codeReview: { intervalDays: 14 }, credentialRotation: { intervalMonths: 3 } }])(
+    'suggests a security review during ordinary reads without persisting policy or claiming automation: %j', async (securityPolicy) => {
+      const t = await makeClient();
+      try {
+        const written = await t.call('hv_spec', { spec: { ...SPEC, ...(securityPolicy ? { securityPolicy } : {}) } });
+        expect(written.ok).toBe(true);
+        for (let count = 0; count < 2; count++) {
+          const read = await t.call('hv_spec', { project: SPEC.project });
+          expect(read).toMatchObject({ ok: true, data: { securityReview: {
+            policySource: securityPolicy ? 'declared' : 'suggested',
+            automationStatus: 'unverified', nextCommand: 'hv_security',
+            policy: securityPolicy ?? { advisoryReview: { intervalDays: 1 }, codeReview: { intervalDays: 7 }, credentialRotation: { intervalMonths: 1 } },
+            activities: [
+              { activity: 'advisoryReview', due: true, status: 'missing-evidence' },
+              { activity: 'codeReview', due: true, status: 'missing-evidence' },
+              { activity: 'credentialRotation', due: true, status: 'missing-evidence' },
+            ],
+          } } });
+          expect(read.data.spec).toEqual(written.data.spec);
+          expect(read.data.revision).toBe(written.data.revision);
+          expect(read.data.spec.github).toBeUndefined();
+          if (!securityPolicy) expect(read.data.spec).not.toHaveProperty('securityPolicy');
+        }
+      } finally { await t.close(); }
+    }
+  );
+
   it.each(['railway', 'cloudrun', 'digitalocean', 'fly', 'ecs', 'azure-container-apps', 'vercel'])(
     'warns about resource differences on spec write/read without copying them for %s', async (provider) => {
       const t = await makeClient();
@@ -283,6 +310,10 @@ describe('hv_spec', () => {
         next: ['hv_spec'],
       });
       expect(discovered.hint).toContain('normal fresh-project state');
+      expect(discovered.data.securityReview).toMatchObject({
+        policySource: 'suggested', automationStatus: 'unverified', nextCommand: 'hv_security',
+        activities: expect.arrayContaining([{ activity: 'credentialRotation', due: true, status: 'missing-evidence' }]),
+      });
       expect(discovered.hint).toContain('Do not run hv_plan or hv_deploy');
       expect(new ProjectRepository().findByName('fresh-agent-app')).toBeNull();
       expect(new ProjectRepository().findByName('unrelated-existing-app')).toBeTruthy();

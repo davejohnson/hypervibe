@@ -197,6 +197,7 @@ export interface DatabaseBindings {
  */
 export interface IDatabaseAdapter {
   readonly name: string;
+  readonly passwordRotation?: import('./database-password-rotation.port.js').IDatabasePasswordRotation;
   readonly dailyBackups?: import('./daily-backup.port.js').IDailyBackupPolicy<import('./daily-backup.port.js').DatabaseBackupTarget>;
 
   /** Provider capabilities */

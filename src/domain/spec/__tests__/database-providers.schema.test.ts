@@ -2,6 +2,24 @@ import { describe, expect, it } from 'vitest';
 import { databaseSpecSchema } from '../spec.schema.js';
 
 describe('database provider schema', () => {
+  it('accepts explicit reviewed database password replacement without changing legacy declarations', () => {
+    expect(databaseSpecSchema.parse({ provider: 'supabase' })).not.toHaveProperty('credentialRotation');
+    expect(databaseSpecSchema.parse({
+      provider: 'supabase',
+      credentialRotation: { generation: 1, consumers: 'environment-only', destinations: 'trusted' },
+    }).credentialRotation).toEqual({ generation: 1, consumers: 'environment-only', destinations: 'trusted' });
+  });
+
+  it.each([
+    {}, { generation: 0 }, { generation: -1 }, { generation: 1.5 }, { generation: '1' },
+    { generation: 1 },
+    { generation: 1, consumers: 'all', destinations: 'trusted' },
+    { generation: 1, consumers: 'environment-only', destinations: 'unknown' },
+    { generation: 1, consumers: 'environment-only', destinations: 'trusted', password: 'not-spec-data' },
+  ])('rejects incomplete or unsafe database credential replacement intent: %j', (credentialRotation) => {
+    expect(databaseSpecSchema.safeParse({ provider: 'supabase', credentialRotation }).success).toBe(false);
+  });
+
   it.each([
     'railway',
     'cloudsql',

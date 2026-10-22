@@ -21,6 +21,8 @@ import { registerHvCloudTools } from '../tools/hv-cloud.tools.js';
 import { registerHvCloudConnectionsTools } from '../tools/hv-cloud-connections.tools.js';
 import { registerHvCloudSecretsTools } from '../tools/hv-cloud-secrets.tools.js';
 import { registerCloudRequestCommands } from './cloud-requests.js';
+import { registerProjectRotationCommands } from './project-rotation.js';
+import { registerProjectSecurityCommands } from './project-security.js';
 
 export type CommandAccess = 'read' | 'write';
 
@@ -85,6 +87,7 @@ export interface CommandRegistrar {
 }
 
 const READ_ONLY_COMMANDS = new Set([
+  'hv_security',
   'hv_status',
   'hv_inspect',
   'hv_logs',
@@ -207,6 +210,8 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
   registerHvCloudSecretsTools(registry, ctx);
   registerHvCloudConnectionsTools(registry, ctx);
   registerCloudRequestCommands(registry, ctx);
+  registerProjectRotationCommands(registry, ctx);
+  registerProjectSecurityCommands(registry);
 
   return registry;
 }

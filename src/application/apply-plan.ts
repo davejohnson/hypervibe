@@ -1,3 +1,4 @@
+import { applyDatabaseRotation, verifyInstalledDatabaseRotation } from '../domain/services/database-rotation.service.js';
 import { applyScheduleActivation } from '../domain/services/schedule-activation.service.js';
 import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js';
 import { applyApiPolicy, planApiPolicy } from '../domain/services/api-policy.js';
@@ -872,6 +873,30 @@ export async function executePlanApply(ctx: CommandContext, params: {
     ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
     : project;
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  const pendingDatabaseRotation = environment ? ctx.repos.components.findByEnvironmentId(environment.id)
+    .some(component => component.bindings.credentialRotation && (component.bindings.credentialRotation as { phase?: string }).phase !== 'installed') : false;
+  if (pendingDatabaseRotation && planScope !== 'database-rotation') {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'A database password rotation needs recovery. Ordinary deployment and maintenance exit are blocked until credential installation is verified.' }] };
+  }
+  if (planScope === 'database-rotation') {
+    if (loaded.document.databaseRotationReady !== true) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The saved database rotation assessment has unresolved prerequisites. Review a fresh plan before applying.' }] };
+    }
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'Database rotation requires its exact existing environment and cannot deploy.' }] };
+    }
+    if (!loaded.document.actions.length && !await verifyInstalledDatabaseRotation({ project: projectForPreflight, projectSpec: spec, spec: envSpec,
+      environmentName: envName, metadata: loaded.document.databaseRotationVerification,
+      observe: (p, e, s, recovery) => planService.observeEnvironment(p, e, s, { hostingOnly: true, includeMaintenance: true, maintenanceDatabaseUrl: recovery?.databaseUrl }) })) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The installed database rotation could not be freshly verified. No noop completion was claimed; re-plan.' }] };
+    }
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
+      handler: action => applyDatabaseRotation({ project: projectForPreflight, projectSpec: spec, spec: envSpec, environmentName: envName, action,
+        confirmed: new Set(params.confirmActions), encrypted: loaded.document.overrides?.databaseRotationEncrypted,
+        observe: (p, e, s, recovery) => planService.observeEnvironment(p, e, s, { hostingOnly: true, includeMaintenance: true, maintenanceDatabaseUrl: recovery?.databaseUrl }) }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Database credential installation does not verify application use, existing-session termination or runtime rollout.'] };
+  }
   if (secretsOnly && (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
     || envSpec.deploy?.strategy !== 'branch' || envSpec.deploy.trigger !== 'ci' || params.alwaysRunBootstrap)) {
     return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',

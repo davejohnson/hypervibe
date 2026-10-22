@@ -473,8 +473,10 @@ describe('command presentation', () => {
       'hv_logs',
       'hv_plan',
       'hv_rollback',
+      'hv_rotation',
       'hv_runs',
       'hv_secrets',
+      'hv_security',
       'hv_spec',
       'hv_status',
     ]);
@@ -483,6 +485,35 @@ describe('command presentation', () => {
       expect(output).toContain('HYPERVIBE ·');
       expect(output).not.toContain('HYPERVIBE · COMPLETE');
     });
+  });
+
+  it('renders declared security cadence and due work without replacing it with suggested defaults', () => {
+    const output = formatCommandResult('hv_security', commandSuccess({ status: 'incomplete', repositories: [{
+      repository: 'reviewed-project', report: { status: 'incomplete', npm: { queriedPackages: 1, skippedPackages: 2 }, node: { entries: [] } },
+      policy: { policySource: 'declared', policy: { advisoryReview: { intervalDays: 2 }, codeReview: { intervalDays: 14 }, credentialRotation: { intervalMonths: 3 } },
+        activities: [{ activity: 'credentialRotation', status: 'missing-evidence', due: true }] },
+    }] }));
+    expect(output).toContain('2 days');
+    expect(output).toContain('14 days');
+    expect(output).toContain('3 months');
+    expect(output).toContain('missing-evidence');
+    expect(output).not.toContain('Suggested cadence: daily');
+  });
+
+  it('surfaces an actionable security reminder during a normal spec read', () => {
+    const output = formatCommandResult('hv_spec', commandSuccess({
+      project: { name: 'reviewed-project' }, revision: 1, spec: { project: 'reviewed-project' },
+      securityReview: { policySource: 'suggested', automationStatus: 'unverified', nextCommand: 'hv_security',
+        policy: { advisoryReview: { intervalDays: 1 }, codeReview: { intervalDays: 7 }, credentialRotation: { intervalMonths: 1 } },
+        activities: [{ activity: 'credentialRotation', status: 'missing-evidence', due: true }],
+      },
+    }));
+    expect(output).toContain('SECURITY REVIEW');
+    expect(output).toContain('Suggested cadence: advisory review every 1 day');
+    expect(output).toContain('Credential rotation: due (missing-evidence)');
+    expect(output).toContain('hv_security');
+    expect(output).toContain('Completion and active automation require separate evidence.');
+    expect(output).not.toContain('automationStatus:');
   });
 
   it('renders environment coverage errors without clipping variable names or messages', () => {

@@ -39,7 +39,9 @@ const EXPECTED_TOOLS = [
   // Database
   'hv_db_query',
   // Secrets
-  'hv_secrets',
+  'hv_secrets', 'hv_rotation',
+  // Read-only project security reviews
+  'hv_security',
   // CI
   'hv_ci_status', 'hv_ci_trigger',
   // App Store / iOS
@@ -78,12 +80,12 @@ describe('server tool surface', () => {
     await server.close();
   });
 
-  it('registers exactly the 23 pinned hv_* tools', async () => {
+  it('registers exactly the 25 pinned hv_* tools', async () => {
     const { client, server } = await makeClient();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(EXPECTED_TOOLS);
-    expect(names).toHaveLength(23);
+    expect(names).toHaveLength(25);
     expect(tools.find((tool) => tool.name === 'hv_ci_status')?.description).toContain(
       'Use this instead of gh, GitHub connectors/apps, browser/UI inspection, or direct CI/provider API calls.'
     );
@@ -92,6 +94,7 @@ describe('server tool surface', () => {
     );
     expect(names).not.toContain('hv_db_migrate');
     expect(tools.find((tool) => tool.name === 'hv_logs')?.annotations?.readOnlyHint).toBe(true);
+    expect(tools.find((tool) => tool.name === 'hv_security')?.annotations?.readOnlyHint).toBe(true);
     expect(tools.find((tool) => tool.name === 'hv_apply')?.annotations?.readOnlyHint).toBe(false);
     expect(tools.find((tool) => tool.name === 'hv_cloud_secrets')?.annotations?.readOnlyHint).toBe(false);
     await client.close();
@@ -121,7 +124,9 @@ describe('server tool surface', () => {
 
     expect(ids).toEqual(EXPECTED_TOOLS);
     expect([...PRESENTED_COMMAND_IDS].sort()).toEqual(ids);
-    expect(new Set(cliPaths).size).toBe(23);
+    expect(new Set(cliPaths).size).toBe(25);
+    expect(registry.get('hv_security')?.cliPath).toEqual(['security']);
+    expect(registry.get('hv_security')?.access).toBe('read');
     expect(registry.get('hv_cloud_requests')?.cliPath).toEqual(['cloud', 'requests']);
     expect(registry.get('hv_cloud_requests')?.access).toBe('write');
     expect(registry.get('hv_cloud_secrets')?.cliPath).toEqual(['cloud', 'secrets']);

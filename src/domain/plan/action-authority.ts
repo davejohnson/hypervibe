@@ -1,3 +1,4 @@
+import { databaseRotationActionSchema } from '../services/database-rotation.service.js';
 import { scheduleActivationActionMetadataSchema } from '../services/schedule-activation.service.js';
 import { INBOUND_SIGNING_KEY_OPERATION } from '../services/email-inbound-signing.service.js';
 import { databaseCheckpointIdentitySchema } from '../services/database-checkpoint.js';
@@ -90,6 +91,8 @@ import {
 } from '../services/managed-code-repository.contract.js';
 
 export type PlanMutationCapability =
+  | 'database.password.rotate'
+  | 'database.password.distribute'
   | 'database.scope.bind'
   | 'backup-policy.configure'
   | 'api.policy.accept'
@@ -484,6 +487,11 @@ export function resolvePlanActionAuthority(
   if (action.type === 'noop') return null;
   if (!action.id.trim() || !action.resource.name.trim() || !action.resource.provider.trim()) {
     return null;
+  }
+
+  if (action.metadata?.operation === 'databasePasswordRotate' || action.metadata?.operation === 'databasePasswordDistribute') {
+    return databaseRotationActionSchema.safeParse(action).success
+      ? authority(action, action.metadata.operation === 'databasePasswordRotate' ? 'database.password.rotate' : 'database.password.distribute') : null;
   }
 
   if (action.metadata?.operation === DATABASE_SCOPE_BIND_OPERATION) {

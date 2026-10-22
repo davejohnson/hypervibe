@@ -783,6 +783,42 @@ When adding or changing token guidance, include all of these details:
 
 Tests should fail if new provider guidance omits these basics. Update `src/domain/services/__tests__/connection-guidance.test.ts` and add provider-specific verification-error assertions for ambiguous or commonly miscreated tokens.
 
+## Recurring Security Reviews
+
+The optional project-level `securityPolicy` records desired advisory-review,
+code-review, and credential-rotation cadence. Defaults apply only when the block
+is explicitly supplied: one day, seven days, and one calendar month. Omitted
+policy preserves legacy spec hashes. Pure due assessment accepts only verified
+complete timestamps; missing, invalid, or future evidence remains due. Policy
+does not establish an active scheduler or authorize credential generation changes.
+Ordinary `hv_spec` reads surface the pure cadence assessment and an `hv_security`
+suggestion for the selected project's checkout, including fresh-project reads.
+This advice neither persists defaults nor creates completion evidence or runs a
+scan; it preserves the existing setup and desired-state workflow.
+
+`hv_security` is a read-only application command shared by CLI and MCP. It can
+review up to twenty explicitly selected local checkouts without adopting projects,
+opening stored credentials, installing dependencies, executing application scripts,
+or writing spec journals. Each report retains source/advisory attribution and
+explicit unsupported or unknown coverage. A complete source review does not
+prove running deployment configuration, exploitability, remediation, or active
+automation. Command results are ephemeral; they are not durable completion claims.
+
+The `github.actions` `security-review` kind installs the same packaged scanner
+through the existing managed-file infrastructure lifecycle. The reviewed proposal
+contains both scanner source and schedule; no unpublished package or application
+dependency install is required. The workflow checks out the event's exact commit,
+uses read-only repository permissions without retained checkout credentials,
+preserves nonzero scanner status, and retains a bounded report. Missing advisory
+or source evidence must fail rather than appear clear. Existing `code-audit` and
+Dependabot capabilities supply separately reviewed source audits and update
+proposals; none automatically merges fixes, deploys, or rotates secrets.
+
+See [recurring security reviews](docs/recurring-security.md) for policy examples,
+publication prerequisites, monthly work, and verification boundaries. Public npm
+lockfile and declared Node coverage must not be presented as whole-project or
+live-runtime security assurance.
+
 ## Runtime Secrets
 
 `ProjectSpec.secrets` has two explicit ownership modes. Use Hypervibe ownership
@@ -839,6 +875,63 @@ target and proves every conflict still absent. Immutable conflict names are
 excluded from deploy env inputs, cannot simultaneously be desired runtime
 keys, and cannot be retired through `removeEnvVars`; replacing a legacy
 encryption key requires an explicit credential rewrap workflow.
+
+### Project credential rotation preparation
+
+`hv_rotation` / `hypervibe rotation` projects recorded desired state into a
+project-wide inventory and staged incident or routine workflow. `preview` is
+read-only; `start` saves an idempotent local metadata snapshot; `status` inspects
+its original revision and checks current local scope. Preparation never issues,
+installs, activates or revokes credentials. It does not decrypt component bindings
+to summarize private execution state; its scoped-execution pointer explicitly
+leaves prerequisites and progress unchecked. Generated-secret generation,
+delegated installation and scoped database password replacement are independent
+spec/plan/apply paths, not completed campaign stages.
+
+The inventory separates environment/service and CI destinations, generated and
+immutable keys, unclassified configuration, provider credential obligations and
+scoped connection candidates. Candidate scope and prior connection verification
+do not prove ownership, exposure or current validity. Live and outside-consumer
+coverage remain explicitly unchecked even for an empty declaration set.
+
+Migration 12 stores value-free workflow metadata and an internal scope
+fingerprint. It never stores candidate secrets, authorization, provider success
+receipts or completion attestations. Exact project ownership guards reads;
+concurrent retries reuse the same snapshot. Changed recorded spec/bindings or
+selected credentials invalidate snapshot compatibility. Failed current reads
+preserve original evidence with unknown current scope; inspection never adopts
+repository edits. A workflow ID cannot authorize `hv_apply`.
+
+Routine workflow guidance separates replacement, distribution, rollout,
+application use and issuer revocation. Incident guidance exposes early
+containment and downtime consequences, then independently accepted recovery
+destinations. Immutable encryption keys require an application-aware rewrap
+workflow. See [project rotation](docs/project-key-rotation.md) and its
+[named provider contract review](docs/project-key-rotation-provider-contracts.md)
+for current limitations, proposed execution stages and acceptance requirements.
+
+The separate `database.credentialRotation` declaration records a positive
+generation plus owner-reviewed `consumers: "environment-only"` and
+`destinations: "trusted"` assertions. `hv_plan scope="database-rotation"` admits
+only one exact bound database with a registered password-rotation capability,
+verified maintenance and supported stopped-consumer updates. Supabase currently
+implements the native issuer operation; other database providers are explicitly
+unsupported. Known CI/backup/replica consumers and ambiguous shared identities
+block before replacement where their complete distribution is unsupported.
+
+Apply persists the exact target and both password versions encrypted before the
+issuer request. It tests old acceptance and candidate rejection first, then
+candidate acceptance and old rejection on fresh TLS connections to the direct
+endpoint and every bound pooler. Unknown responses retain the original candidate;
+recovery checks authentication without automatically repeating the reset. Exact
+dependent secret actions install and verify database variables and declared aliases
+while workloads stay stopped. `installed` records configuration delivery only;
+runtime rollout, application use and existing sessions remain unchecked. An
+unfinished replacement blocks maintenance exit. No successful substep means the
+project-wide campaign is complete. See the
+[database password contract](docs/database-password-rotation.md) for evidence and
+provider limitations. The monthly security policy is a due signal and never
+authorizes generation changes or issuer writes by itself.
 
 ### Delegated secrets
 

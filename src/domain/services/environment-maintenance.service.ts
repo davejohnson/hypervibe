@@ -95,6 +95,8 @@ export async function observeEnvironmentMaintenance(params: {
   environment: Environment;
   environmentSpec: EnvironmentSpec;
   hostingAdapter: unknown;
+  /** Private recovery input, supplied only after exact issuer identity and fresh authentication verification. Never persisted or returned. */
+  databaseUrlOverride?: string;
 }): Promise<EnvironmentMaintenanceObservation> {
   const binding = parseEnvironmentMaintenanceBinding(params.environment);
   const hostname = params.environmentSpec.domain ?? '';
@@ -133,7 +135,7 @@ export async function observeEnvironmentMaintenance(params: {
   } else if (params.environmentSpec.database.engine !== 'postgres') {
     database = { state: 'unknown', reason: 'maintenance_database_engine_unsupported' };
   } else {
-    const connectionUrl = await resolveExternalDatabaseUrl(params.project, params.environment);
+    const connectionUrl = params.databaseUrlOverride ?? await resolveExternalDatabaseUrl(params.project, params.environment);
     database = connectionUrl
       ? await observePostgresWriteFence(connectionUrl)
       : { state: 'unknown', reason: 'maintenance_database_access_unavailable' };

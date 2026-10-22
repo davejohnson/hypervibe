@@ -377,6 +377,25 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 12,
+    name: 'rotation_workflow_snapshots',
+    up: `
+      CREATE TABLE rotation_workflows (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        mode TEXT NOT NULL,
+        spec_revision INTEGER NOT NULL,
+        scope_fingerprint TEXT NOT NULL,
+        recorded_environments TEXT NOT NULL,
+        connections TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        project_git_remote_url TEXT,
+        UNIQUE(project_id, mode, spec_revision, scope_fingerprint)
+      );
+      CREATE INDEX idx_rotation_workflows_project_created ON rotation_workflows(project_id, created_at DESC);
+    `,
+  },
 ];
 
 export class SqliteAdapter {

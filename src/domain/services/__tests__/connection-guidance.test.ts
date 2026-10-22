@@ -16,6 +16,29 @@ import {
 describe('connection guidance', () => {
   const noSetupUrlExpected = new Set(['database', 'local', 'xcode']);
 
+  it('separates the local OpenAI automation credential from the application name', () => {
+    const setup = connectionSetupDetails('openai', {
+      project: 'example',
+      scope: 'owner/example',
+    });
+    const guidance = formatConnectionGuidance('openai', {
+      scope: 'owner/example',
+    });
+
+    expect(setup.credentialExample).toBe(
+      'hv_connections project="example" provider="openai" scope="owner/example" credentialsRef="env:HYPERVIBE_OPENAI_API_KEY"'
+    );
+    expect(guidance).toContain(
+      'hv_connections provider="openai" scope="owner/example" credentialsRef="env:HYPERVIBE_OPENAI_API_KEY"'
+    );
+    expect(guidance).not.toContain('credentialsRef="env:OPENAI_API_KEY"');
+    expect(setup.notes).toContainEqual(expect.stringContaining('HYPERVIBE_OPENAI_API_KEY'));
+    expect(setup.notes).toContainEqual(expect.stringContaining('application'));
+    expect(setup.requiredPermissions).toContainEqual(
+      expect.stringContaining('OPENAI_API_KEY Actions secret')
+    );
+  });
+
   it('keeps every registered provider and secret manager actionable', () => {
     const providers = [...providerRegistry.names(), ...secretManagerRegistry.names()].sort();
     const missing = providers.filter((provider) => !getConnectionGuidance(provider));

@@ -1,6 +1,8 @@
+import { databaseRotationActionSchema, rotationMetadataSchema } from '../services/database-rotation.service.js';
 import { API_POLICY_OPERATION } from '../services/api-policy.js';
 import { DATABASE_SCOPE_BIND_OPERATION, isDatabaseScopeBindingAction } from '../services/database-scope-binding.service.js';
 import { createHash } from 'crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import type { Run, RunReceipt } from '../entities/run.entity.js';
@@ -221,6 +223,7 @@ export const planRunDocumentSchema = z.object({
     'hosting-bindings',
     'service-volumes',
     'database-checkpoint',
+    'database-rotation',
     'database-bindings',
     'backup-policy',
     'backup-provisioning',
@@ -230,6 +233,8 @@ export const planRunDocumentSchema = z.object({
     'managed-ci-credentials',
   ]).optional(),
   environmentName: z.string().min(1),
+  databaseRotationReady: z.boolean().optional(),
+  databaseRotationVerification: rotationMetadataSchema.optional(),
   specRevision: z.number().int().nonnegative(),
   /** Immutable application revision reviewed with this deployment plan. */
   sourceCommitSha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
@@ -247,10 +252,37 @@ export const planRunDocumentSchema = z.object({
     envFileVarsEncrypted: z.string().optional(),
     envVarKeys: z.array(z.string()).optional(),
     envVarsEncrypted: z.string().optional(),
+    databaseRotationEncrypted: z.string().min(1).optional(),
     delegatedSecretKeys: z.array(z.string()).optional(),
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'database-rotation') {
+    const actions = document.actions;
+    const issuer = actions.find(action => action.metadata?.operation === 'databasePasswordRotate');
+    const consumers = issuer?.metadata?.services as string[] | undefined;
+    const metadataMatches = (action: PlanAction) => ['componentId', 'generation', 'target', 'services', 'environmentFingerprint', 'bindingsFingerprint']
+      .every(key => isDeepStrictEqual(action.metadata?.[key], issuer?.metadata?.[key]));
+    const noopsVerified = document.databaseRotationReady !== true || actions.length > 0
+      || document.databaseRotationVerification?.operation === 'databasePasswordRotate'
+        && !document.databaseRotationVerification.service && !document.databaseRotationVerification.serviceId;
+    if (!noopsVerified || document.inputRequired?.length || document.lockEnvironmentIds?.length || document.sourceCommitSha
+      || document.overrides && Object.keys(document.overrides).some(key => key !== 'databaseRotationEncrypted')
+      || actions.some(action => !databaseRotationActionSchema.safeParse(action).success)
+      || actions.length && (!issuer || !consumers || actions.length !== consumers.length + 1
+        || consumers.some(service => actions.filter(action => action.metadata?.service === service).length !== 1)
+        || !document.overrides?.databaseRotationEncrypted
+        || actions.filter(action => action.metadata?.operation === 'databasePasswordRotate').length !== 1
+        || actions.some(action => !metadataMatches(action))
+        || new Set(actions.filter(action => action !== issuer).map(action => action.resource.provider)).size !== 1)) {
+      ctx.addIssue({ code: 'custom', message: 'Database rotation must contain only exact password operations and encrypted recovery inputs.' });
+    }
+  }
+  if (document.scope !== 'database-rotation' && (document.databaseRotationReady !== undefined || document.databaseRotationVerification
+    || document.overrides?.databaseRotationEncrypted || document.actions.some(action =>
+      action.metadata?.operation === 'databasePasswordRotate' || action.metadata?.operation === 'databasePasswordDistribute'))) {
+    ctx.addIssue({ code: 'custom', message: 'Database password operations require the isolated database-rotation scope.' });
+  }
   if (document.scope === 'secrets') {
     const keys = document.overrides?.delegatedSecretKeys ?? [];
     if (!keys.length || new Set(keys).size !== keys.length || document.actions.length !== keys.length
