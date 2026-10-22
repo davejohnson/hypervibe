@@ -6,7 +6,8 @@ import '../providers.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { createCommandContext, type CommandContext } from '../context.js';
 import { AdapterFactory } from '../../domain/services/adapter.factory.js';
-import { PlanService } from '../../domain/plan/plan.service.js';
+import { PlanService, type PlanOptions } from '../../domain/plan/plan.service.js';
+import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { executePlanApply } from '../apply-plan.js';
@@ -40,7 +41,7 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true });
   });
 
-  async function fixture(options: Parameters<typeof railwayHttpFixture>[0] = {}) {
+  async function fixture(options: Parameters<typeof railwayHttpFixture>[0] = {}, credentialAliases = false) {
     const http = await railwayHttpFixture(options);
     const nativeService = http.addService('staging-postgres', 'postgres', stagingId);
     Object.assign(nativeService.instances.get(stagingId)!, { source: { image: 'ghcr.io/railwayapp-templates/postgres-ssl:16' },
@@ -54,7 +55,8 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
       runtime: { kind: 'node', version: '24', installCommand: 'npm ci --omit=dev' },
       environments: { staging: { hosting: { provider: 'railway' }, services: { web: {} },
         backups: backupMode === 'disabled' ? { mode: 'disabled', reason: 'Daily backups are not wanted for staging.' } : { mode: 'daily' },
-        database: { provider: 'railway' }, email: { enabled: false }, envVars: {} } } });
+        database: { provider: 'railway', ...(credentialAliases ? { credentialAliases: { mode: 'issuer-references' } } : {}) },
+        email: { enabled: false }, envVars: {} } } });
     const stored = new SpecStore().replace(project, spec);
     const checkpoints = { preserved: { source: { provider: 'railway', primaryExternalId: 'staging-postgres',
       providerScope: { projectId, environmentId: stagingId }, resourceIdentity: { volumeId: volume.id, volumeInstanceId: String(volume.instance.id) } },
@@ -77,7 +79,7 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     vi.spyOn(PlanService.prototype, 'providerPreflight').mockReturnValue([]);
     vi.spyOn(PlanService.prototype, 'preflight').mockReturnValue([]);
     const planner = new PlanService();
-    const plan = () => planner.plan(project, 'staging', { includeEnvFile: false });
+    const plan = (options: PlanOptions = {}) => planner.plan(project, 'staging', { includeEnvFile: false, ...options });
     const context = () => ({ project, spec: spec.environments.staging,
       environment: ctx.repos.environments.findById(environment.id)!,
       components: ctx.repos.components.findByEnvironmentId(environment.id), adapterFactory: ctx.adapterFactory });
@@ -123,6 +125,100 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     expect(next.actions.find(action => action.resource.kind === 'database')).toMatchObject({ type: 'noop' });
     expect(f.http.mutations).toEqual([]);
     expect(f.http.contractErrors).toEqual([]);
+  });
+
+  it.each(['missing', 'provided'] as const)('normalizes legacy scope, repairs aliases and resumes %s deployment input', async input => {
+    const f = await fixture({ renderVariableReferences: true }, true);
+    f.spec = projectSpecSchema.parse({ ...f.spec, secrets: {
+      ANTHROPIC_API_KEY: { principal: 'github:tester', environments: ['staging'] },
+    } });
+    new SpecStore().replace(f.project, f.spec);
+    vi.stubEnv('ALIAS_TEST_DELEGATED', 'synthetic-delegated-secret');
+    const options = { envVarOverrides: { FEATURE_FLAG: 'reviewed' },
+      ...(input === 'provided' ? { secretRefs: { ANTHROPIC_API_KEY: 'env:ALIAS_TEST_DELEGATED' } } : {}) };
+    f.http.variables.set(`staging-postgres/${stagingId}`, { POSTGRES_PASSWORD: 'synthetic-current',
+      PGPASSWORD: 'synthetic-previous', DATABASE_URL: 'postgresql://postgres:synthetic-previous@database.internal:5432/postgres' });
+    const bindingPlan = await f.plan(options);
+    if ('error' in bindingPlan) throw new Error(bindingPlan.error);
+    expect(bindingPlan.scope).toBe('database-bindings');
+    expect(bindingPlan.actions).toHaveLength(1);
+    const bindingDocument = ctx.repos.runs.findById(bindingPlan.planRunId)!.plan;
+    expect(bindingDocument).not.toHaveProperty('overrides');
+    expect(bindingDocument).not.toHaveProperty('inputRequired');
+    expect(JSON.stringify(bindingDocument)).not.toContain('synthetic-delegated-secret');
+    expect(await executePlanApply(ctx, { project: f.project, spec: f.spec, specRevision: bindingPlan.specRevision,
+      planId: bindingPlan.planRunId, confirmActions: [bindingPlan.actions[0].id] }))
+      .toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(f.http.mutations).toEqual([]);
+    expect(ctx.repos.components.findById(f.component.id)?.bindings.providerScope).toEqual({ projectId, environmentId: stagingId });
+    const aliases = await f.plan(options);
+    if ('error' in aliases) throw new Error(aliases.error);
+    expect(aliases.scope).toBe('database-credential-aliases');
+    expect(aliases.blocked).toEqual([]);
+    expect(aliases.actions).toHaveLength(1);
+    const aliasDocument = ctx.repos.runs.findById(aliases.planRunId)!.plan as Record<string, any>;
+    expect(Object.keys(aliasDocument.overrides)).toEqual(['databaseCredentialAliasesEncrypted']);
+    expect(aliasDocument).not.toHaveProperty('inputRequired');
+    expect(await executePlanApply(ctx, { project: f.project, spec: f.spec, specRevision: aliases.specRevision,
+      planId: aliases.planRunId, confirmActions: [aliases.actions[0].id] }))
+      .toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(f.http.mutations).toHaveLength(1);
+    expect(f.http.mutations[0]).toMatchObject({ field: 'variableCollectionUpsert', args: { input: { skipDeploys: true, replace: false } } });
+    const resumed = await f.plan(options);
+    if ('error' in resumed) throw new Error(resumed.error);
+    const resumedDocument = ctx.repos.runs.findById(resumed.planRunId)!.plan as Record<string, any>;
+    if (backupMode === 'daily') {
+      // Configured schedules without an available recovery point still gate rollout.
+      expect(resumed.scope).toBe('backup-readiness');
+      expect(resumedDocument).not.toHaveProperty('overrides');
+    } else {
+      expect(resumed.scope).toBe('full');
+      expect(getSecretStore().decryptObject(resumedDocument.overrides.envVarsEncrypted)).toEqual({ FEATURE_FLAG: 'reviewed' });
+      if (input === 'missing') {
+        expect(resumed.inputRequired).toContainEqual(expect.objectContaining({ key: 'ANTHROPIC_API_KEY' }));
+      } else {
+        expect(resumed.inputRequired).toEqual([]);
+        expect(getSecretStore().decryptObject(resumedDocument.overrides.delegatedSecretVarsEncrypted))
+          .toEqual({ ANTHROPIC_API_KEY: 'synthetic-delegated-secret' });
+      }
+    }
+    expect(f.http.mutations).toHaveLength(1);
+    expect(f.http.contractErrors).toEqual([]);
+  });
+
+  it.each(['unknown', 'partial', 'malformed', 'unsupported', 'rotation'] as const)('keeps %s scope blocked when aliases are declared', async state => {
+    const f = await fixture(state === 'unknown' ? { responseOverride: ({ query }) => query.includes('DatabaseCheckpointTarget')
+      ? Response.json({ errors: [{ message: 'synthetic unavailable scope' }] }, { status: 403 }) : undefined } : {}, true);
+    if (state === 'partial') ctx.repos.components.updateBindings(f.component.id, { providerScope: { projectId } });
+    if (state === 'malformed') ctx.repos.components.updateBindings(f.component.id, { providerScope: null });
+    if (state === 'unsupported') vi.mocked(AdapterFactory.prototype.getDatabaseAdapter)
+      .mockResolvedValue({ success: true, adapter: { ...f.database, credentialAliases: undefined } });
+    if (state === 'rotation') ctx.repos.components.updateBindings(f.component.id, { credentialRotation: { phase: 'attempted' } });
+    const planned = await f.plan();
+    if ('error' in planned) throw new Error(planned.error);
+    expect(planned.scope).toBe('database-credential-aliases');
+    expect(planned.actions).toEqual([]);
+    expect(planned.blocked.length).toBeGreaterThan(0);
+    expect(f.http.mutations).toEqual([]);
+  });
+
+  it('preserves pending alias recovery and blocks an earlier unrelated scope-repair plan', async () => {
+    const f = await fixture({}, true);
+    const before = await f.plan();
+    if ('error' in before) throw new Error(before.error);
+    expect(before.scope).toBe('database-bindings');
+    const recovery = { phase: 'attempted', inspectionEncrypted: 'preserved-local-evidence' };
+    ctx.repos.components.updateBindings(f.component.id, { credentialAliasRepair: recovery });
+    const pending = await f.plan();
+    if ('error' in pending) throw new Error(pending.error);
+    expect(pending.scope).toBe('database-credential-aliases');
+    expect(pending.actions).toEqual([]);
+    expect(pending.blocked.length).toBeGreaterThan(0);
+    expect(await executePlanApply(ctx, { project: f.project, spec: f.spec, specRevision: before.specRevision,
+      planId: before.planRunId, confirmActions: [before.actions[0].id] })).toMatchObject({ kind: 'blocked' });
+    expect(ctx.repos.components.findById(f.component.id)?.bindings.credentialAliasRepair).toEqual(recovery);
+    expect(ctx.repos.components.findById(f.component.id)?.bindings).not.toHaveProperty('providerScope');
+    expect(f.http.mutations).toEqual([]);
   });
 
   async function reviewed(f: Awaited<ReturnType<typeof fixture>>) {

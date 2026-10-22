@@ -221,6 +221,8 @@ export const databaseSpecSchema = z.object({
    */
   seedCommand: z.string().min(1).optional(),
   resilience: databaseResilienceSchema.optional(),
+  /** Keep provider-managed connection aliases tied to its existing issuer password. */
+  credentialAliases: z.object({ mode: z.literal('issuer-references') }).strict().optional(),
 }).strict();
 
 export const cacheSpecSchema = z.object({

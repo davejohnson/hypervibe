@@ -21,6 +21,7 @@ import type { PlanAction } from '../domain/plan/plan.types.js';
 import { planIos } from '../domain/services/appstore-plan.service.js';
 import { planCache } from '../domain/services/cache-plan.service.js';
 import { planDatabaseResilience } from '../domain/services/database-resilience-plan.service.js';
+import { observeDatabaseCredentialAliases } from '../domain/services/database-credential-aliases.service.js';
 import { planQueues } from '../domain/services/queue-plan.service.js';
 import { planStorage } from '../domain/services/storage-plan.service.js';
 import { planServiceVolumes } from '../domain/services/service-volume.service.js';
@@ -754,11 +755,11 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_plan',
-    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Hypervibe-owned application secrets are generated automatically inside the encrypted plan boundary. Externally owned values are accepted only through secretRefs and are never returned. Optional services restricts a full plan to selected services.',
+    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. scope="database-credential-aliases" repairs declared database password references while preserving the canonical password and connection targets, without SQL changes or deployment. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Hypervibe-owned application secrets are generated automatically inside the encrypted plan boundary. Externally owned values are accepted only through secretRefs and are never returned. Optional services restricts a full plan to selected services.',
     {
       project: projectField,
       env: envField,
-      scope: z.enum(['full', 'retained-cleanup', 'secrets']).optional().describe('Default full. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
+      scope: z.enum(['full', 'retained-cleanup', 'secrets', 'database-credential-aliases']).optional().describe('Default full. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
       envVars: z.record(z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
@@ -794,7 +795,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       // its git-safety and filesystem boundary before PlanService persists an
       // executable plan, so an unsafe tracked .env cannot leave an undisclosed
       // authorization record behind.
-      const preparedLocalEnv = currentSpec && scope !== 'secrets'
+      const preparedLocalEnv = currentSpec && scope !== 'secrets' && scope !== 'database-credential-aliases'
         ? ensureProjectLocalEnv({
           source: currentSpecResult?.source,
           projectName: project.name,
@@ -1091,6 +1092,15 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           ?.lifecycle?.databaseResilience,
       });
       const databaseResilienceDrift = databaseResilience.actions.filter((action) => action.type !== 'noop');
+      const databaseAliases = await observeDatabaseCredentialAliases({
+        project: projectForStatus, spec: envSpec, environmentName: envName,
+      });
+      const databaseAliasDrift: PlanAction[] = databaseAliases?.state === 'drift' ? [{
+        id: 'database:credential-aliases', type: 'update',
+        resource: { kind: 'database', provider: envSpec.database!.provider, name: envSpec.database!.engine },
+        verified: true,
+        reason: 'Database password aliases do not reference their issuer. Run hv_plan with scope="database-credential-aliases" to review a repair.',
+      }] : [];
       const nativeDeploySources = planProviderNativeDeploySources({
         environmentSpec: envSpec,
         observed,
@@ -1241,6 +1251,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         || drift.length > 0
         || cacheDrift.length > 0
         || databaseResilienceDrift.length > 0
+        || databaseAliasDrift.length > 0
         || iosDrift.length > 0
         || queueDrift.length > 0
         || storageDrift.length > 0
@@ -1285,7 +1296,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             : {}),
           specRevision: specResult.revision,
           specSource: specResult.source ?? { kind: 'local' },
-          verified: observed !== null && !observed.partial,
+          verified: observed !== null && !observed.partial && databaseAliases?.state !== 'unknown',
           ...(observed
             ? {
               observedAt: observed.observedAt,
@@ -1301,7 +1312,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
               }),
             }
             : {}),
-          inSync: !observationIncomplete && !hasConfigurationDrift && !restartRequired,
+          inSync: !observationIncomplete && databaseAliases?.state !== 'unknown' && !hasConfigurationDrift && !restartRequired,
+          ...(databaseAliases ? { databaseAliases } : {}),
           backupCoverage: { ...backupCoverage, complete: backupPolicy.complete,
             ...backupEvidenceSummary(backupReadiness) },
           backupHealth,
@@ -1336,8 +1348,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
                 },
               }
             : {}),
-          summary: summarizeActions([...pendingSchedules, ...(apiPolicy.action ? [apiPolicy.action] : []), ...maintenance.actions, ...nativeDeploySources.actions, ...diff.actions, ...cache.actions, ...databaseResilience.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...email.actions, ...messaging.actions]),
-          drift: [...pendingSchedules, ...(apiPolicy.action ? [apiPolicy.action] : []), ...maintenanceDrift, ...nativeDeploySourceDrift, ...drift, ...cacheDrift, ...databaseResilienceDrift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift, ...messagingDrift],
+          summary: summarizeActions([...pendingSchedules, ...(apiPolicy.action ? [apiPolicy.action] : []), ...maintenance.actions, ...nativeDeploySources.actions, ...diff.actions, ...cache.actions, ...databaseResilience.actions, ...databaseAliasDrift, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...email.actions, ...messaging.actions]),
+          drift: [...pendingSchedules, ...(apiPolicy.action ? [apiPolicy.action] : []), ...maintenanceDrift, ...nativeDeploySourceDrift, ...drift, ...cacheDrift, ...databaseResilienceDrift, ...databaseAliasDrift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift, ...messagingDrift],
           unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged],
           ...(envSpec.database?.resilience
             ? {
@@ -1382,6 +1394,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
                 ? 'Use a safe local secretRef if the value is available here. Otherwise run hv_plan for this environment and offer its hv_cloud_requests handoff for externally owned runtime inputs. Confirm the recipient and secure invitation; do not paste values into chat or interpret unverified live state as absence.'
               : delegatedSecrets.blockers.length > 0
                 ? `Resolve the managed-secret safety block before planning: ${delegatedSecrets.blockers.map((entry) => entry.reason).join('; ')}.`
+              : databaseAliases?.state === 'unknown'
+                ? `${databaseAliases.reason ?? 'Database password references could not be verified.'} No alias write or deployment was attempted.`
               : hasConfigurationDrift
                 ? !backupPolicy.complete && backupPolicy.actions.length === 0
                   ? 'Daily backup coverage has gaps. Review backupCoverage for unsupported or unknown resources; no schedule write is authorized for those gaps.'

@@ -1,3 +1,4 @@
+import { planDatabaseCredentialAliases } from '../services/database-credential-aliases.service.js';
 import { planScheduleActivations, SCHEDULE_ACTIVATION_OPERATION } from '../services/schedule-activation.service.js';
 import { scopedSecretObservation } from './scoped-secrets.js';
 import { planApiPolicy } from '../services/api-policy.js';
@@ -138,7 +139,7 @@ import {
 
 export interface PlanOptions {
   /** Restrict the plan to one lifecycle stage. Omission preserves full-plan behavior. */
-  scope?: 'full' | 'retained-cleanup' | 'secrets';
+  scope?: 'full' | 'retained-cleanup' | 'secrets' | 'database-credential-aliases';
   /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
   serviceFilter?: string[];
   /** One-off env var overrides merged over spec.envVars, frozen (encrypted) into the plan. */
@@ -159,7 +160,7 @@ export interface EnvironmentPlan {
   webhookReadiness?: WebhookReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
-  scope: 'full' | 'secrets' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
+  scope: 'full' | 'secrets' | 'database-credential-aliases' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
   backupReadiness?: BackupReadiness;
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
@@ -1653,6 +1654,12 @@ export class PlanService {
       return { error: providerValidation.message };
     }
     const scope = options?.scope ?? 'full';
+    if (scope === 'database-credential-aliases' || scope === 'full') {
+      const aliases = await planDatabaseCredentialAliases({ project: projectWithSpecGitRemoteUrl(project, specResult.spec),
+        spec: specResult.spec, revision: specResult.revision, environmentName,
+        ...(scope === 'full' ? { onlyIfNeeded: true } : { options }) });
+      if (aliases) return aliases;
+    }
     if (scope === 'secrets') return this.planSecrets(projectWithSpecGitRemoteUrl(project, specResult.spec), environmentName, specResult, options!);
     if (scope === 'retained-cleanup') {
       const incompatibleInputs = [
