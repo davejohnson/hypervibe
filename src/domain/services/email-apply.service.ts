@@ -1,5 +1,4 @@
 import { applyInboundSigningKey, inboundSigningTargetBlock, INBOUND_SIGNING_KEY_OPERATION } from './email-inbound-signing.service.js';
-import { createHash } from 'crypto';
 import { applyEventSigning, EMAIL_SIGNING_OPERATIONS } from './email-signing.service.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
@@ -158,12 +157,10 @@ function senderRuntimeVars(environmentSpec: EnvironmentSpec): Record<string, str
 
 function runtimeVarsForService(
   environmentSpec: EnvironmentSpec,
-  serviceName: string,
-  apiKey: string
+  serviceName: string
 ): Record<string, string> {
   const inbound = environmentSpec.email.inbound;
   return {
-    SENDGRID_API_KEY: apiKey,
     ...senderRuntimeVars(environmentSpec),
     ...(inbound?.service === serviceName
       ? {
@@ -192,26 +189,6 @@ async function applyRuntime(params: {
     return staleAction('Runtime targets or configuration changed.');
   }
 
-  const sendgrid = verifiedSendGridAdapter(params.project, params.environmentSpec);
-  if ('error' in sendgrid) {
-    return { success: false, status: 'blocked', message: 'SendGrid connection unavailable', error: sendgrid.error };
-  }
-  const credentialHash = createHash('sha256')
-    .update(sendgrid.credentials.apiKey, 'utf8')
-    .digest('hex');
-  if (stringValue(metadata, 'credentialHash') !== credentialHash) {
-    return staleAction('The reviewed SendGrid runtime credential changed.');
-  }
-  const scopes = assessSendGridScopes(await sendgrid.adapter.getScopes());
-  if (!scopes.hasMailSend) {
-    return {
-      success: false,
-      status: 'blocked',
-      message: 'SendGrid runtime key cannot send mail',
-      error: `Missing SendGrid scope(s): ${scopes.missingScopes.mailSend.join(', ')}`,
-    };
-  }
-
   const runtimeBinding = asRecord(currentEmailBindings(params.environment).runtime);
   const previousKeys = asRecord(runtimeBinding?.perServiceKeys);
   const perServiceKeys: Record<string, string[]> = {};
@@ -226,27 +203,31 @@ async function applyRuntime(params: {
       break;
     }
     const desiredKeys = emailRuntimeKeysForService(params.environmentSpec, serviceName);
-    const synced = await syncHostingEnvVars({
-      project: params.project,
-      environment: params.environment,
-      service,
-      vars: runtimeVarsForService(params.environmentSpec, serviceName, sendgrid.credentials.apiKey),
-      deferDeployment: params.environmentSpec.deploy?.strategy === 'branch'
-        && params.environmentSpec.deploy.trigger === 'ci',
-    });
-    if (!synced.success) {
-      failures.push(`${serviceName}: ${synced.error ?? synced.message}`);
-      break;
-    }
-    const syncedData = asRecord(synced.data);
-    deploymentDeferred ||= syncedData?.deploymentDeferred === true;
-    runtimeRolloutRequired ||= syncedData?.runtimeRolloutRequired === true;
-    if (syncedData?.runtimeRolloutRequired === true && syncedData.rolloutBaseline) {
-      rolloutBaselines[serviceName] = syncedData.rolloutBaseline;
+    if (desiredKeys.length > 0) {
+      const synced = await syncHostingEnvVars({
+        project: params.project,
+        environment: params.environment,
+        service,
+        vars: runtimeVarsForService(params.environmentSpec, serviceName),
+        deferDeployment: params.environmentSpec.deploy?.strategy === 'branch'
+          && params.environmentSpec.deploy.trigger === 'ci',
+      });
+      if (!synced.success) {
+        failures.push(`${serviceName}: ${synced.error ?? synced.message}`);
+        break;
+      }
+      const syncedData = asRecord(synced.data);
+      deploymentDeferred ||= syncedData?.deploymentDeferred === true;
+      runtimeRolloutRequired ||= syncedData?.runtimeRolloutRequired === true;
+      if (syncedData?.runtimeRolloutRequired === true && syncedData.rolloutBaseline) {
+        rolloutBaselines[serviceName] = syncedData.rolloutBaseline;
+      }
     }
 
     const obsoleteKeys = stringArray(previousKeys, serviceName)
-      .filter((key) => !desiredKeys.includes(key));
+      // Legacy email bindings included the setup key. Ownership now belongs
+      // to the application's secret slot; transferring it must not delete it.
+      .filter((key) => key !== 'SENDGRID_API_KEY' && !desiredKeys.includes(key));
     if (obsoleteKeys.length > 0) {
       const removed = await removeHostingEnvVars({
         project: params.project,
@@ -271,7 +252,7 @@ async function applyRuntime(params: {
   if (failures.length > 0) {
     return {
       success: false,
-      message: 'Failed to sync declarative SendGrid runtime configuration',
+      message: 'Failed to sync email sender and inbound settings',
       error: failures.join('; '),
       data: { services: expectedServices, keys: [...new Set(Object.values(perServiceKeys).flat())].sort() },
     };
@@ -279,14 +260,13 @@ async function applyRuntime(params: {
 
   updateEmailBinding(params.environment, 'runtime', {
     configHash: emailRuntimeConfigHash(params.environmentSpec),
-    credentialHash,
     services: expectedServices,
     perServiceKeys,
     updatedAt: new Date().toISOString(),
   });
   return {
     success: true,
-    message: `Synced SendGrid runtime configuration to ${expectedServices.length} service(s)`,
+    message: `Synced email sender and inbound settings to ${expectedServices.length} service(s)`,
     data: {
       services: expectedServices,
       keys: [...new Set(Object.values(perServiceKeys).flat())].sort(),

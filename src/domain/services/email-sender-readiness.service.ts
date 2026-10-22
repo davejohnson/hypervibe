@@ -67,7 +67,7 @@ export async function inspectEmailSenderReadiness(params: {
         const credentials = getSecretStore().decryptObject<{ apiKey: string }>(connection.credentialsEncrypted);
         // A globally connected account cannot certify another application's key.
         const sendingServices = live.filter(service => service.envVarKeys.includes('SENDGRID_API_KEY'));
-        if (spec.email.enabled || (sendingServices.length > 0 && sendingServices.every(service => service.envVarHashes.SENDGRID_API_KEY === hash(credentials.apiKey)))) apiKey = credentials.apiKey;
+        if (sendingServices.length > 0 && sendingServices.every(service => service.envVarHashes.SENDGRID_API_KEY === hash(credentials.apiKey))) apiKey = credentials.apiKey;
       }
     } catch {
       // Local credential reads can fail too. Never expose decrypted inputs or errors.
@@ -96,7 +96,7 @@ export async function inspectEmailSenderReadiness(params: {
     ? 'unverified' : result.senders.some(item => item.status === 'unknown') || result.replyTo.some(item => item.status === 'unknown') ? 'unknown' : 'verified';
   if (result.status !== 'verified') result.guidance = !apiKey
     ? 'Sender verification needs the application’s exact SendGrid credential through its private deploy inputs, or a verified connection whose key matches the observed runtime. Do not paste the key into chat.'
-    : 'Hypervibe requires both From and Reply-To to match an exact authenticated domain or verified single sender in the application’s SendGrid account. Unknown means values or read permissions were insufficient; it is not verification. Configure sender authorization through reviewed email desired state before treating app email as ready.';
+    : 'Hypervibe requires both From and Reply-To to match an exact authenticated domain or verified single sender in the application’s SendGrid account. Unknown means values or read permissions were insufficient; it is not verification. A sending-only key may be valid while identity reads remain unknown; do not widen its permissions for this check. Configure sender authorization through reviewed email desired state before treating app email as ready.';
   if (result.dns && result.dns.status !== 'configured') {
     result.guidance = [result.guidance, result.dns.guidance].filter(Boolean).join(' ');
   }

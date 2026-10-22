@@ -127,6 +127,31 @@ export interface EnvironmentMaintenanceObservation {
   database: ObservedMaintenanceDatabase;
 }
 
+export type CredentialAlignmentComparison =
+  | { result: 'match' | 'mismatch' }
+  | { result: 'unknown'; reason: 'missing' | 'malformed' | 'unresolved_reference' | 'read_failed' | 'scope_unverified' | 'unsupported_url_options' };
+
+/** Configuration equality only; neither database authentication nor deployed runtime evidence. */
+export interface DatabaseCredentialAlignment {
+  basis: 'configured-variable-values';
+  authentication: 'unverified';
+  issuer: {
+    comparisons: Array<{
+      source: string;
+      against: string;
+      comparison: CredentialAlignmentComparison;
+    }>;
+  };
+  consumers: Array<{
+    name: string;
+    externalId: string;
+    source: string;
+    issuerSource: string;
+    credentialComparison: CredentialAlignmentComparison;
+    target: CredentialAlignmentComparison;
+  }>;
+}
+
 export interface ObservedDatabase {
   provider: string;
   engine: string;
@@ -135,6 +160,8 @@ export interface ObservedDatabase {
   providerScope?: Record<string, string>;
   name?: string;
   status: 'running' | 'stopped' | 'provisioning' | 'error' | 'unknown';
+  /** Value-free comparisons; never raw credentials, connection URLs or credential hashes. */
+  credentialAlignment?: DatabaseCredentialAlignment;
   resilience?: {
     checkpointSource?: DatabaseCheckpointSource;
     availability?: 'zonal' | 'regional' | 'unknown';

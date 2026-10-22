@@ -17,6 +17,7 @@ import {
   emailAuthorizationConfigHash,
   emailDnsConfigHash,
   emailInboundConfigHash,
+  emailIntegrationFingerprint,
   emailRuntimeConfigHash,
   planEmail,
   resolveEmailIntegrationState,
@@ -125,7 +126,6 @@ function observed(keys: string[] = []): ObservedState {
 
 function state(overrides: Partial<EmailIntegrationState> = {}): EmailIntegrationState {
   return {
-    runtimeKey: { status: 'known', hash: 'runtime-key-hash' },
     domainAuthentications: { status: 'known', items: [] },
     verifiedSenders: { status: 'known', items: [] },
     inboundRoutes: { status: 'known', items: [] },
@@ -156,6 +156,27 @@ const domainAuthentication = {
 };
 
 describe('planEmail', () => {
+  it.each([undefined, { perServiceKeys: { api: ['SENDGRID_API_KEY'] } }])('does not plan empty runtime writes for email setup alone: %j', async (runtime) => {
+    const desired = environmentSpecSchema.parse({ hosting: { provider: 'railway' }, services: { api: {} }, email: { enabled: true } });
+    const result = await planEmail({ project, environmentName: 'production', environmentSpec: desired,
+      environment: environment(runtime ? { runtime } : {}), observed: observed(), integrationState: state() });
+    expect(result.actions.find(action => action.id === 'email:runtime')).toMatchObject({ type: 'noop', verified: true });
+  });
+
+  it('leaves application-key absence to its delegated secret owner', async () => {
+    const desired = spec();
+    const result = await planEmail({ project, environmentName: 'production', environmentSpec: desired,
+      environment: environment({ runtime: { configHash: emailRuntimeConfigHash(desired) } }),
+      observed: observed(['SENDGRID_FROM_EMAIL', 'SENDGRID_FROM_NAME', 'SENDGRID_REPLY_TO',
+        'SENDGRID_INBOUND_HOSTNAME', 'SENDGRID_INBOUND_ALIASES']),
+      integrationState: state(),
+    });
+    const runtime = result.actions.find(action => action.id === 'email:runtime');
+    expect(runtime).toMatchObject({ type: 'noop', verified: true });
+    expect(runtime?.metadata).not.toHaveProperty('credentialHash');
+    expect(runtime?.metadata?.managedKeys).not.toContain('SENDGRID_API_KEY');
+  });
+
   it('plans explicit runtime, authorization, DNS, inbound, and verification actions', async () => {
     const result = await planEmail({
       project,
@@ -436,6 +457,20 @@ describe('email provider scope resolution', () => {
     vi.restoreAllMocks();
     SqliteAdapter.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('does not make a setup-key rotation part of the runtime contract', async () => {
+    const environmentSpec = environmentSpecSchema.parse({ hosting: { provider: 'railway' },
+      services: { api: {} }, email: { enabled: true } });
+    const before = await resolveEmailIntegrationState({ project, environmentSpec });
+    const connections = new ConnectionRepository();
+    const connection = connections.findByProvider('sendgrid')!;
+    connections.updateCredentials(connection.id, getSecretStore().encryptObject({ apiKey: 'SG.replacement-setup-only' }));
+    connections.updateStatus(connection.id, 'verified');
+    const after = await resolveEmailIntegrationState({ project, environmentSpec });
+
+    expect(emailIntegrationFingerprint(after)).toBe(emailIntegrationFingerprint(before));
+    expect(after).not.toHaveProperty('runtimeKey');
   });
 
   it('observes a staging email domain through its parent-zone Cloudflare connection', async () => {

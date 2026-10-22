@@ -658,6 +658,46 @@ consume.
 
 Secrets never cross output boundaries. Secret values may be accepted through `credentialsRef`, encrypted into plans, or stored as verified connections, but they must not be printed in tool output, committed specs, warnings, logs, receipts, or test snapshots.
 
+Railway PostgreSQL observation can report `credentialAlignment` from privately
+compared provider configuration. Issuer URL passwords are compared with
+`POSTGRES_PASSWORD`; each exact bound application's `DATABASE_URL` is compared
+with the issuer's `DATABASE_URL` credentials and literal hostname/port/database.
+The report contains outcomes, fixed labels and bound service identities, never
+credential values. Issuer `comparisons` entries carry variable names as `source`
+and `against` labels beside a `comparison` outcome; consumers expose a
+`credentialComparison` outcome. These value-free objects pass through the same
+public response redaction as other command results. Different private/public endpoints can reach the same physical
+database, so a target mismatch alone does not establish the wrong database.
+Missing or unreadable variables,
+malformed URLs and unresolved references remain unknown. This does not test SQL
+authentication or inspect a running container's environment: an administrative
+proxy query may use a different credential source from the application's URL.
+The diagnostic does not change passwords, variables or deployment state.
+
+Existing database aliases can opt into `database.credentialAliases.mode =
+"issuer-references"`. Its isolated `database-credential-aliases` plan scope
+authorizes only the bound database's reference repair, through an explicit
+adapter capability. Private raw/resolved evidence stays encrypted; apply
+revalidates identity and values, records intent before writing, and verifies
+raw references plus resolved values without rotating the SQL password or
+deploying. An uncertain write is recovered by readback only. Full planning
+treats unconverged aliases as a prerequisite. See the
+[provider contract](docs/database-credential-aliases.md) for coverage and limits.
+
+Start with ordinary `hv_plan`. If a legacy database lacks durable provider scope,
+that plan first offers the existing, independently verified `database-bindings`
+action. Apply it, then plan again for alias repair. Neither stage carries
+deployment overrides or secret inputs; supply those again when ordinary planning
+resumes. An explicit alias-only scope requires complete bindings. Unknown,
+partial or malformed scope, unsupported capabilities and pending credential work
+remain blocked; they never fall through into unrelated full-plan actions.
+
+New Railway PostgreSQL bootstrap configurations keep `POSTGRES_PASSWORD` as
+the canonical value and use same-service references in `PGPASSWORD` and both
+database URL password segments. Railway's documented password regeneration
+updates the database and `POSTGRES_PASSWORD`; dependent references then follow
+that value. This bootstrap behavior does not repair existing literal aliases.
+
 `hv_cloud_connections` / `hypervibe cloud connections` is an explicit hosted
 provider-access handoff, not infrastructure deployment. Its separate browser
 purpose issues revocable, expiring project access without expanding reporting
@@ -1201,6 +1241,17 @@ per environment. The inbound route names a public web service and relative path;
 its provider URL is derived from that service's durable hosting binding. Alias
 local parts are application routing intent because SendGrid delivers all mail
 for one parse hostname to one endpoint.
+
+The SendGrid connection is a management credential, conventionally supplied as
+`HYPERVIBE_SENDGRID_API_KEY`. Supply the application's separate `SENDGRID_API_KEY`
+as a delegated runtime secret, issuing it with `mail.send` only. Legacy explicit
+runtime inputs remain supported; Hypervibe does not validate the sending key's
+scopes. Email runtime actions own sender
+and routing metadata, never the sending key; historical email bindings cannot
+authorize overwriting or deleting that key. Setup verification does not require
+Mail Send permission. Enabling email alone neither supplies a runtime credential
+nor proves its account identity. Sender-readiness observation may use a connected
+credential only when its hash matches the observed application credential.
 
 Read-only plan/status sender readiness also detects existing SendGrid env
 configuration. Both From and Reply-To require exact-domain or individual sender

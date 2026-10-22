@@ -1,6 +1,6 @@
 # SendGrid sender readiness
 
-Plan and status report `emailSenderReadiness` whenever SendGrid is declared under
+Full plan and status report `emailSenderReadiness` whenever SendGrid is declared under
 `email`, or `SENDGRID_API_KEY` is present in resolved deploy inputs or observed
 runtime key names. Both From and Reply-To must be verified for the report to say
 `verified`. Requiring Reply-To verification is Hypervibe policy.
@@ -11,9 +11,9 @@ apps can retain environment variables ending in `FROM_EMAIL`, `FROM_ADDRESS`,
 `REPLY_TO_EMAIL`, or `REPLY_TO_ADDRESS`, including prefixed names such as
 `TRANSACTIONAL_EMAIL_FROM`. Display-name mailbox syntax is accepted.
 
-Checks use the private application credential. A connected account is used for
-managed email, or when its credential hash matches every observed sending
-service. A different connected SendGrid account cannot certify an existing app.
+Checks use the private application credential. A connected account is used only
+when its credential hash matches every observed sending service. Enabling managed
+email does not prove that the app uses that account's credential.
 Values and provider error bodies are excluded from the readiness report.
 
 Each address needs its exact domain authenticated or its own verified single
@@ -33,6 +33,55 @@ This is a read-only readiness check, not a deployment gate or send-time filter.
 Infrastructure `inSync` is separate from email readiness; human plan/status output
 highlights `EMAIL NOT READY`. Checks do not send invitations, create identities,
 or change DNS. Configuration changes remain in reviewed spec/plan/apply actions.
+
+### Application sending key permissions
+
+For an application that only sends email through `POST /v3/mail/send`, create a
+SendGrid API key with only the `mail.send` scope:
+
+1. Open [SendGrid Settings > API Keys](https://app.sendgrid.com/settings/api_keys)
+   and select **Create API Key**.
+2. Name it for the application and environment, for example
+   `billforge-production-mail`. Use a distinct key for each project/environment.
+3. Select **Restricted Access** (called **Custom Access** in some documentation).
+4. Expand **Mail Send** and set the **Mail Send** permission to **Full Access**.
+5. Leave **Scheduled Sends** and every other permission at **No Access**. Avoid
+   the top-level **Full Access** preset, which grants account-wide API access.
+6. Supply the new key privately as the application's `SENDGRID_API_KEY`, then
+   deploy every consuming service. Keep revoked keys revoked during recovery.
+
+The From address still needs an authenticated domain or verified sender identity.
+Creating a replacement API key does not require recreating that identity.
+These settings follow the official [sending quickstart](https://www.twilio.com/docs/sendgrid/for-developers/sending-email/quickstart-nodejs#create-and-store-a-sendgrid-api-key)
+and [API key permissions](https://www.twilio.com/docs/sendgrid/api-reference/api-key-permissions).
+
+Hypervibe management and diagnostic connections have separate permission needs
+for sender/domain setup, webhooks, or delivery-log reads. Keep those credentials
+out of application runtime and request only the scopes needed for the selected
+operation. A sending-only key does not satisfy Hypervibe's setup-connection
+requirements. It can also leave sender-readiness observation `unknown` because
+it cannot read sender/domain configuration; that is not proof that sending is
+unauthorized. Do not grant extra runtime permissions merely to clear that report.
+
+Save the management key as `HYPERVIBE_SENDGRID_API_KEY` and connect that exact
+private dotenv reference with `hv_connections provider="sendgrid"`. Setup needs
+the permissions for the selected sender/domain operations; it does not require
+`mail.send`. Declare the separate application `SENDGRID_API_KEY` under delegated
+`secrets`, naming each intended runtime environment. Pass its private dotenv
+reference to `hv_plan` through `secretRefs`, review the resulting destinations,
+then apply the plan. Initial setup uses a full plan. For an existing managed-CI
+environment with verified hosting bindings and support for deferred secret
+updates, use `scope="secrets"` and `includeEnvFile=false` to update only the named
+keys. That scoped plan does not check sender readiness. A deferred runtime write
+requires a deployment before the running application uses it.
+
+`email.enabled` manages sender authentication and email metadata. It never
+installs the connected management key into runtime. Existing runtime sending
+keys are preserved when older email bindings list them, including when email
+metadata is retired; deleting or replacing a sending key is a separate secret
+operation. An enabled-email configuration without a runtime key does not gain
+one automatically. Declare the delegated key as required to make missing input
+visible during secret planning.
 
 ### DNS readiness
 
