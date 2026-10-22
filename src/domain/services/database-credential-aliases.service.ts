@@ -15,6 +15,7 @@ import { databaseCredentialAliasTargetSchema, databaseCredentialAliasesInspectio
 import type { EnvironmentSpec, ProjectSpec } from '../spec/spec.schema.js';
 import { adapterFactory } from './adapter.factory.js';
 import { bindingIdentityFingerprint } from './binding-identity.js';
+import { currentDatabaseScopeComponent, planDatabaseScopeBinding } from './database-scope-binding.service.js';
 
 export const DATABASE_CREDENTIAL_ALIASES_OPERATION = 'databaseCredentialAliasesRepair';
 const namesSchema = z.array(z.string().regex(/^[A-Z][A-Z0-9_]*$/));
@@ -54,6 +55,10 @@ function pending(component: Component) {
   if (!parsed.success) throw new AliasPrerequisite('Credential alias recovery state is invalid; it was preserved.');
   return parsed.data;
 }
+function activeRotation(component: Component): boolean {
+  return Boolean(component.bindings.credentialRotation
+    && (component.bindings.credentialRotation as { phase?: string }).phase !== 'installed');
+}
 function load(project: Project, environmentName: string, spec: EnvironmentSpec) {
   const environment = environments.findByProjectAndName(project.id, environmentName);
   const candidates = environment ? components.findByEnvironmentId(environment.id).filter(c => c.type === spec.database?.engine) : [];
@@ -65,8 +70,7 @@ function load(project: Project, environmentName: string, spec: EnvironmentSpec) 
   }
   const scope = z.record(z.string().min(1), z.string().min(1)).safeParse(component.bindings.providerScope);
   if (!scope.success || !Object.keys(scope.data).length) throw new AliasPrerequisite('Credential alias repair requires complete database provider scope.');
-  if (components.findByEnvironmentId(environment.id).some(c => c.bindings.credentialRotation
-    && (c.bindings.credentialRotation as { phase?: string }).phase !== 'installed')) {
+  if (components.findByEnvironmentId(environment.id).some(activeRotation)) {
     throw new AliasPrerequisite('Recover the active database password rotation before repairing aliases.');
   }
   for (const otherProject of new ProjectRepository().findAll()) for (const otherEnvironment of environments.findByProjectId(otherProject.id)) {
@@ -127,6 +131,33 @@ export async function planDatabaseCredentialAliases(params: { project: Project; 
   const blocked: EnvironmentPlan['blocked'] = []; const actions: PlanAction[] = [];
   let metadata: Metadata | undefined; let encrypted: string | undefined;
   try {
+    if (params.onlyIfNeeded) {
+      const context = { project: params.project, spec, environment,
+        components: components.findByEnvironmentId(environment.id), adapterFactory };
+      const component = currentDatabaseScopeComponent(context);
+      // A legacy binding needs the existing independently verified, local-only
+      // normalization first. Never fall through to unrelated full-plan actions.
+      // Explicit partial/malformed scope and pending credential work stay blocked.
+      if (component && !Object.hasOwn(component.bindings, 'providerScope')
+        && !context.components.some(entry => entry.bindings.credentialAliasRepair !== undefined || activeRotation(entry))) {
+        const provider = await adapterFactory.getDatabaseAdapter(spec.database.provider, params.project);
+        if (!provider.success || !provider.adapter?.credentialAliases) {
+          throw new AliasPrerequisite(`Credential alias repair is unsupported or unavailable for ${spec.database.provider}.`);
+        }
+        const binding = await planDatabaseScopeBinding(context);
+        if (binding.actions.length) {
+          const document = { kind: 'hv_plan', scope: 'database-bindings' as const,
+            environmentName: params.environmentName, specRevision: params.revision,
+            observedFingerprint: null, actions: binding.actions, warnings: binding.warnings };
+          const runs = new RunRepository();
+          const run = runs.create({ projectId: params.project.id, environmentId: environment.id, type: 'plan', plan: document });
+          runs.updateStatus(run.id, 'succeeded');
+          return { planRunId: run.id, scope: 'database-bindings', specRevision: params.revision,
+            environmentName: params.environmentName, verified: true, observed: null,
+            actions: binding.actions, warnings: binding.warnings, blocked: [], unmanaged: [], inputRequired: [] };
+        }
+      }
+    }
     const current = load(params.project, params.environmentName, spec);
     const resolved = await adapterFactory.getDatabaseAdapter(spec.database.provider, params.project);
     const capability = resolved.adapter?.credentialAliases;

@@ -684,6 +684,14 @@ deploying. An uncertain write is recovered by readback only. Full planning
 treats unconverged aliases as a prerequisite. See the
 [provider contract](docs/database-credential-aliases.md) for coverage and limits.
 
+Start with ordinary `hv_plan`. If a legacy database lacks durable provider scope,
+that plan first offers the existing, independently verified `database-bindings`
+action. Apply it, then plan again for alias repair. Neither stage carries
+deployment overrides or secret inputs; supply those again when ordinary planning
+resumes. An explicit alias-only scope requires complete bindings. Unknown,
+partial or malformed scope, unsupported capabilities and pending credential work
+remain blocked; they never fall through into unrelated full-plan actions.
+
 New Railway PostgreSQL bootstrap configurations keep `POSTGRES_PASSWORD` as
 the canonical value and use same-service references in `PGPASSWORD` and both
 database URL password segments. Railway's documented password regeneration
