@@ -12,6 +12,7 @@ import type { Receipt, TemporaryDatabaseAccess, VerifyResult } from '../../../do
 import type {
   IDatabaseAdapter,
   DatabaseCapabilities,
+  DatabaseTargetOptions,
   ProvisionResult,
   ProvisionableType,
 } from '../../../domain/ports/database.port.js';
@@ -246,6 +247,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
   };
 
   private credentials: CloudSqlCredentials | null = null;
+  private targetRegion: string | undefined;
   private serviceAccountCreds: ServiceAccountCredentials | null = null;
   private accessToken: string | null = null;
   private tokenExpiry: Date | null = null;
@@ -253,11 +255,20 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
 
   async connect(credentials: unknown): Promise<void> {
     this.credentials = credentials as CloudSqlCredentials;
+    this.targetRegion = undefined;
     try {
       this.serviceAccountCreds = JSON.parse(this.credentials.credentials);
     } catch {
       throw new Error('Invalid service account JSON');
     }
+  }
+
+  configureTarget(target: DatabaseTargetOptions): void {
+    // Placement applies to new instances only. Existing component scopes and
+    // the connection's fallback region must survive configuration of another env.
+    this.targetRegion = target.region === undefined
+      ? undefined
+      : z.string().trim().min(1, 'GCP region is required').parse(target.region);
   }
 
   async verify(): Promise<VerifyResult> {
@@ -313,6 +324,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     }
     this.temporaryConnectors.clear();
     this.credentials = null;
+    this.targetRegion = undefined;
     this.serviceAccountCreds = null;
     this.accessToken = null;
     this.tokenExpiry = null;
@@ -359,7 +371,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     try {
       const token = await this.getAccessToken();
       const { projectId, region } = this.credentials;
-      const targetRegion = options?.region?.trim() || region;
+      const targetRegion = options?.region?.trim() || this.targetRegion || region;
 
       const instanceName = this.sanitizeName(options?.resourceName || environmentResourceName(type, environment));
       requestedInstanceName = instanceName;
