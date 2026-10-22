@@ -35,6 +35,7 @@ export async function railwayHttpFixture(options: {
   dropBackupCreateResponse?: boolean; backupWorkflowId?: string | null;
   dropScheduleUpdateResponse?: boolean; ignoreScheduleUpdate?: boolean;
   dropVariableResponse?: boolean;
+  dropRegistryResponse?: boolean;
   responseOverride?: (request: { query: string; variables: Record<string, any> }) => Response | undefined;
 } = {}) {
   let projectExists = options.projectExists !== false;
@@ -55,6 +56,7 @@ export async function railwayHttpFixture(options: {
   const backupSchedules = new Map<string, Array<Record<string, unknown>>>();
   let nextVolumeId = 0;
   const variables = new Map<string, Record<string, string>>();
+  const registryCredentials = new Map<string, { username: string; password: string }>();
   const mutations: Array<{ field: string; args: Record<string, any> }> = [];
   const requests: Array<{ query: string; variables: Record<string, any> }> = [];
   const contractErrors: string[] = [];
@@ -197,6 +199,11 @@ export async function railwayHttpFixture(options: {
       return instance;
     },
     variables: ({ serviceId, environmentId }) => variables.get(`${serviceId}/${environmentId}`) ?? {},
+    serviceInstanceUpdate: ({ serviceId, environmentId, input }) => {
+      expect(services.get(serviceId)?.instances.has(environmentId)).toBe(true);
+      if (input.registryCredentials) registryCredentials.set(`${serviceId}/${environmentId}`, input.registryCredentials);
+      return true;
+    },
     environmentCreate: ({ input }) => {
       expect(input.projectId).toBe(projectId);
       const environment = { id: stagingId, name: input.name, config: {} };
@@ -267,7 +274,7 @@ export async function railwayHttpFixture(options: {
       return 'bucket-deployment';
     },
   };
-  for (const field of ['projectCreate', 'environmentCreate', 'serviceCreate', 'variableCollectionUpsert', 'volumeCreate', 'serviceInstanceRedeploy', 'serviceDelete', 'serviceDomainCreate', 'bucketCreate', 'environmentPatchCommit']) {
+  for (const field of ['projectCreate', 'environmentCreate', 'serviceCreate', 'variableCollectionUpsert', 'volumeCreate', 'serviceInstanceUpdate', 'serviceInstanceRedeploy', 'serviceDelete', 'serviceDomainCreate', 'bucketCreate', 'environmentPatchCommit']) {
     const resolve = root[field];
     root[field] = (args) => {
       if (!['projectCreate', 'environmentCreate', 'bucketCreate'].includes(field)) {
@@ -319,6 +326,9 @@ export async function railwayHttpFixture(options: {
     if (options.dropVariableResponse && request.query.includes('mutation UpsertVariables')) {
       throw new TypeError('Synthetic connection reset after variable update committed');
     }
+    if (options.dropRegistryResponse && request.query.includes('mutation RepairRegistryCredentials')) {
+      throw new TypeError('Synthetic connection reset after registry credential update committed');
+    }
     return Response.json(result);
   }));
   const adapter = new RailwayAdapter();
@@ -329,5 +339,5 @@ export async function railwayHttpFixture(options: {
     createdAt: new Date(), updatedAt: new Date(),
   };
   return { adapter, environment, services, environments, buckets, volumes, addService, addVolume,
-    mutations, requests, variables, contractErrors, backups, backupWorkflows, backupSchedules };
+    mutations, requests, variables, registryCredentials, contractErrors, backups, backupWorkflows, backupSchedules };
 }

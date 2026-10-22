@@ -1,4 +1,5 @@
 import { scheduleActivationActionMetadataSchema } from '../services/schedule-activation.service.js';
+import { isRegistryRepairAction } from './registry-credentials.js';
 import { INBOUND_SIGNING_KEY_OPERATION } from '../services/email-inbound-signing.service.js';
 import { databaseCheckpointIdentitySchema } from '../services/database-checkpoint.js';
 import { backupPolicyActionId, backupPolicyActionMetadataSchema, DAILY_BACKUP_OPERATION } from '../services/backup-policy-plan.service.js';
@@ -90,6 +91,7 @@ import {
 } from '../services/managed-code-repository.contract.js';
 
 export type PlanMutationCapability =
+  | 'hosting.registry-credentials.repair'
   | 'database.scope.bind'
   | 'backup-policy.configure'
   | 'api.policy.accept'
@@ -482,6 +484,9 @@ export function resolvePlanActionAuthority(
   action: PlanAction
 ): PlanActionAuthority | null {
   if (action.type === 'noop') return null;
+  if (action.metadata?.operation === 'registryCredentialsRepair') {
+    return isRegistryRepairAction(action) ? authority(action, 'hosting.registry-credentials.repair') : null;
+  }
   if (!action.id.trim() || !action.resource.name.trim() || !action.resource.provider.trim()) {
     return null;
   }

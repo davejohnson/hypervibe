@@ -8,6 +8,15 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+The [registry credential repair contract](../../docs/registry-credential-repairs.md)
+reviews all seven hosting and both code-host providers. Its ordinary acceptance
+tests pin the complete roster, execute Railway's serialized credential-only
+update against the official schema, and exercise plan/apply isolation, frozen
+inputs, uncertain writes and explicit retry confirmation. GHCR tests intercept
+only HTTP transport and validate bounded, redirect-free token/manifest requests.
+Accepted non-retrievable credentials remain pending; these offline checks do not
+establish that the next production cron execution succeeds.
+
 The [scoped secret contract](../../docs/scoped-secret-updates.md) reviews all
 seven hosting providers and distinguishes native capabilities from implemented
 admission. `scoped-secret-provider-contracts.test.ts` pins that roster and the

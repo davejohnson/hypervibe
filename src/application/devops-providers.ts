@@ -13,6 +13,7 @@ import {
 import { gitLabCiLifecycle } from '../adapters/providers/gitlab/gitlab-ci.lifecycle.js';
 import { executeGitLabCiRollback } from '../adapters/providers/gitlab/gitlab-ci.rollback.js';
 import { devOpsProviderRegistry } from '../domain/registry/devops.registry.js';
+import { githubRegistryCredentials } from '../adapters/providers/github/registry-credentials.js';
 import {
   applyGitHubActionsAppliedSpecHash,
   applyGitHubActionsDeploy,
@@ -22,6 +23,7 @@ import {
 
 devOpsProviderRegistry.registerCodeHost({
   id: 'github',
+  registryCredentials: githubRegistryCredentials,
   connectionProvider: 'github',
   suggestedCiProvider: 'github-actions',
   create(credentials: unknown) {

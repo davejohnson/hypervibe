@@ -51,6 +51,7 @@ import {
   isManagedCiBindingRoot,
   isBackupProvisioningAction,
   isBackupProgramPublicationAction,
+  planRunDocumentSchema,
   orderActions,
   type PlanRunDocument,
 } from './converge.executor.js';
@@ -119,6 +120,7 @@ import { planEmail } from '../services/email-plan.service.js';
 import { inspectDomainSecurity, type DomainSecurityReadiness } from '../services/domain-security.service.js';
 import { inspectWebhookReadiness, type WebhookReadiness } from '../services/webhook-readiness.service.js';
 import { reservedRuntimeEnvError } from '../services/runtime-env-policy.js';
+import { assertRegistryRepairBinding, registryRepairAttempt } from './registry-credentials.js';
 import { inspectEmailSenderReadiness, type EmailSenderReadiness } from '../services/email-sender-readiness.service.js';
 import { planTwilioMessaging } from '../services/twilio-messaging.service.js';
 import {
@@ -138,7 +140,7 @@ import {
 
 export interface PlanOptions {
   /** Restrict the plan to one lifecycle stage. Omission preserves full-plan behavior. */
-  scope?: 'full' | 'retained-cleanup' | 'secrets';
+  scope?: 'full' | 'retained-cleanup' | 'secrets' | 'registry-credentials';
   /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
   serviceFilter?: string[];
   /** One-off env var overrides merged over spec.envVars, frozen (encrypted) into the plan. */
@@ -159,7 +161,7 @@ export interface EnvironmentPlan {
   webhookReadiness?: WebhookReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
-  scope: 'full' | 'secrets' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
+  scope: 'full' | 'secrets' | 'registry-credentials' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
   backupReadiness?: BackupReadiness;
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
@@ -1637,6 +1639,57 @@ export class PlanService {
       observed, actions, unmanaged: [], warnings, inputRequired: [], blocked: [] };
   }
 
+  private async planRegistryCredentials(project: Project, environmentName: string, specResult: SpecResult, options: PlanOptions): Promise<EnvironmentPlan | { error: string }> {
+    const spec = specResult.spec;
+    const envSpec = spec.environments[environmentName];
+    const name = options.serviceFilter?.[0];
+    if (!envSpec || !name || options.serviceFilter?.length !== 1 || !envSpec.services[name]
+      || options.envVarOverrides !== undefined || options.envFile !== undefined
+      || options.secretRefs !== undefined || options.includeEnvFile === true) {
+      return { error: 'scope="registry-credentials" requires exactly one existing spec service and accepts no deployment or secret inputs.' };
+    }
+    const environment = this.envRepo.findByProjectAndName(project.id, environmentName);
+    if (!environment) return { error: 'Registry repair requires an existing bound environment.' };
+    let persistedPlanId: string | undefined;
+    try {
+      assertRegistryRepairBinding(environment, envSpec.hosting.provider, name);
+      const previous = registryRepairAttempt(environment, name);
+      const code = resolveDevOpsSelection(spec)?.code;
+      const registration = code && devOpsProviderRegistry.codeHost(code.provider);
+      if (!code || !registration?.registryCredentials) return { error: 'The selected code host does not support registry credential repair.' };
+      const connection = this.connectionRepo.findBestVerifiedMatch(registration.connectionProvider, code.scope);
+      if (!connection) return { error: 'Connect package-read credentials for the selected repository before planning a registry repair.' };
+      const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, project);
+      const port = result.adapter?.registryCredentialRepair;
+      if (!result.success || result.adapter?.name !== envSpec.hosting.provider || !port) return { error: 'The hosting provider does not support credential-only registry repair.' };
+      const target = await port.observe(environment, name);
+      const credentials = registration.registryCredentials.resolve(getSecretStore().decryptObject(connection.credentialsEncrypted));
+      await registration.registryCredentials.validate(target.image, credentials);
+      const actions: PlanAction[] = [{ id: `registry-credentials:${name}`, type: 'update',
+        resource: { kind: 'service', provider: envSpec.hosting.provider, name }, verified: true,
+        reason: `Repair image-pull credentials for ${name}, preserving its existing image and configuration`,
+        ...(previous ? { requiresConfirm: true } : {}),
+        metadata: { operation: 'registryCredentialsRepair', target, codeHost: code,
+          ...(previous ? { previousAttemptPlanId: previous.planId } : {}) } }];
+      const warnings = ['This plan only repairs image-pull credentials. Backup settings, image, schedule and deployment acceptance remain unchanged. The next scheduled execution still needs verification.',
+        ...(previous ? ['A prior repair was attempted. Confirm this exact action only if you intend to submit credentials again after inspecting that attempt.'] : [])];
+      const document: PlanRunDocument = { kind: 'hv_plan', scope: 'registry-credentials', environmentName,
+        specRevision: specResult.revision, observedFingerprint: null, actions, warnings,
+        overrides: { registryCredentialsEncrypted: getSecretStore().encryptObject(credentials) } };
+      planRunDocumentSchema.parse(document);
+      const run = this.runRepo.create({ projectId: project.id, environmentId: environment.id, type: 'plan',
+        plan: document as unknown as Record<string, unknown> });
+      persistedPlanId = run.id;
+      this.runRepo.updateStatus(run.id, 'succeeded');
+      return { planRunId: run.id, scope: 'registry-credentials', specRevision: specResult.revision,
+        specSource: specResult.source ?? { kind: 'local' }, environmentName, verified: true, observed: null,
+        actions, unmanaged: [], warnings, inputRequired: [], blocked: [] };
+    } catch {
+      if (persistedPlanId) return { error: `Registry repair plan ${persistedPlanId} was saved but could not be finalized. Do not apply it; check local plan storage and re-plan. No hosting update was attempted.` };
+      return { error: 'Registry repair could not verify the existing service or package-read access. Check the exact service binding and repository connection; no plan or hosting update was created.' };
+    }
+  }
+
   async plan(
     project: Project,
     environmentName: string,
@@ -1653,6 +1706,7 @@ export class PlanService {
       return { error: providerValidation.message };
     }
     const scope = options?.scope ?? 'full';
+    if (scope === 'registry-credentials') return this.planRegistryCredentials(projectWithSpecGitRemoteUrl(project, specResult.spec), environmentName, specResult, options!);
     if (scope === 'secrets') return this.planSecrets(projectWithSpecGitRemoteUrl(project, specResult.spec), environmentName, specResult, options!);
     if (scope === 'retained-cleanup') {
       const incompatibleInputs = [
@@ -2275,7 +2329,7 @@ export class PlanService {
       return { error: 'A service-filtered plan cannot skip database binding reconciliation. Run hv_plan without services to review the local scope repair.' };
     }
     if (backupPolicyStageActive && serviceFilter) {
-      return { error: 'A service-filtered plan cannot skip pending daily backup policy configuration. Run hv_plan without services to review the isolated backup policy stage.' };
+      return { error: 'This service-filtered deployment requires pending daily backup policy configuration. For an image-pull credential repair that preserves the existing image, use hv_plan scope="registry-credentials" with exactly one service. For deployment, run hv_plan without services to review the backup policy stage.' };
     }
     const blocked: EnvironmentPlan['blocked'] = maintenance.pending
       ? this.providerPreflight(maintenance.providers)
@@ -3014,7 +3068,7 @@ export class PlanService {
       storage.warnings.push('This plan is limited to the current filesystem component stage. Apply and re-plan to review dependent resources and deployment; no application code is deployed by this stage.');
     } else if (!providerSafetyStageActive && !backupReadiness.ready) {
       if (serviceFilter) {
-        return { error: 'A service-filtered plan cannot bypass backup readiness. Run hv_plan without services to review protection for every persistent resource.' };
+        return { error: 'This service-filtered deployment requires backup readiness. For an image-pull credential repair that preserves the existing image, use hv_plan scope="registry-credentials" with exactly one service. For deployment, run hv_plan without services to review protection for every persistent resource.' };
       }
       const unbound = backupObservation.policy.resources.filter(resource => resource.bindingState === 'unbound');
       const backupDestination = resolveBackupStrategy(environmentSpec).destination;

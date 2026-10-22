@@ -188,6 +188,7 @@ export interface VerifyResult {
 }
 
 export interface IProviderAdapter {
+  readonly registryCredentialRepair?: import('./registry-credentials.port.js').RegistryCredentialRepairPort;
   readonly serviceVolumes?: import('./service-volume.port.js').IServiceVolumes;
   readonly name: string;
 

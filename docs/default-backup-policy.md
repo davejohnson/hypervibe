@@ -1,5 +1,10 @@
 # Daily backup defaults
 
+Existing image-pull credentials can be repaired independently with
+`hv_plan scope="registry-credentials" services=["cron"]`. That operation preserves
+the current image and does not deploy, configure backups or advance deployment
+acceptance. See [registry credential repairs](registry-credential-repairs.md).
+
 Hypervibe's default is daily backup protection for an environment's databases,
 persistent service volumes and object buckets. This is desired state, not a
 claim that every provider adapter has implemented it or that a backup has run.

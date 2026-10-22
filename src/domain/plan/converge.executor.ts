@@ -10,6 +10,7 @@ import { resolvePlanActionAuthority } from './action-authority.js';
 import type { PlanAction } from './plan.types.js';
 import { isManagedCiCredentialAction } from './plan-stage.js';
 import { isScopedSecretAction } from './scoped-secrets.js';
+import { isRegistryRepairAction } from './registry-credentials.js';
 
 /**
  * Converge executor: applies a previously persisted plan (terraform
@@ -215,6 +216,7 @@ export const planRunDocumentSchema = z.object({
   scope: z.enum([
     'full',
     'secrets',
+    'registry-credentials',
     'api-policy',
     'retained-cleanup',
     'managed-ci-bindings',
@@ -249,8 +251,21 @@ export const planRunDocumentSchema = z.object({
     envVarsEncrypted: z.string().optional(),
     delegatedSecretKeys: z.array(z.string()).optional(),
     delegatedSecretVarsEncrypted: z.string().optional(),
+    registryCredentialsEncrypted: z.string().min(1).optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'registry-credentials') {
+    if (document.actions.length !== 1 || !document.actions.every(isRegistryRepairAction)
+      || document.observedFingerprint !== null || !document.overrides?.registryCredentialsEncrypted
+      || Object.keys(document.overrides).some(key => key !== 'registryCredentialsEncrypted')
+      || document.sourceCommitSha || document.integrationFingerprints || document.lockEnvironmentIds?.length || document.inputRequired?.length) {
+      ctx.addIssue({ code: 'custom', message: 'Registry repair authorizes only one exact credential update with encrypted input and no deployment inputs.' });
+    }
+    return;
+  }
+  if (document.actions.some(action => action.metadata?.operation === 'registryCredentialsRepair')) {
+    ctx.addIssue({ code: 'custom', message: 'Registry credential repairs require their isolated scope.' });
+  }
   if (document.scope === 'secrets') {
     const keys = document.overrides?.delegatedSecretKeys ?? [];
     if (!keys.length || new Set(keys).size !== keys.length || document.actions.length !== keys.length
