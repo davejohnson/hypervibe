@@ -117,7 +117,7 @@ function seedConnection(options: { promotion?: boolean; api?: boolean; newerServ
   const run = (id: number) => ({
     id, name: 'release', status: 'completed', conclusion: 'success',
     path: id === 101 ? contract.workflow.path : id === 103 ? sourceContract.workflow.path : `.github/workflows/hypervibe-ios-release-${sourceEnvironment}.yml`,
-    created_at: '2026-07-01T00:00:00Z', updated_at: '2026-07-01T00:10:00Z',
+    created_at: '2026-07-01T00:00:00Z', updated_at: '2026-07-01T00:10:00Z', run_started_at: '2026-07-01T00:00:00Z',
     // The dispatched program is newer than its deliberately selected release.
     head_sha: 'b'.repeat(40), head_branch: 'main', event: 'workflow_dispatch', run_attempt: 1,
     repository: { full_name: 'davejohnson/example' }, head_repository: { full_name: 'davejohnson/example' },
@@ -165,6 +165,24 @@ function seedConnection(options: { promotion?: boolean; api?: boolean; newerServ
     expired: false, created_at: '2026-07-01T00:05:00Z', updated_at: '2026-07-01T00:05:00Z',
     workflow_run: { id, repository_id: 1, head_repository_id: 1, head_branch: 'main', head_sha: 'b'.repeat(40) },
   });
+  // Reconstructed GitHub attempt-job response; only this new lookup uses HTTP.
+  // Endpoint scope establishes the attempt when optional job.run_attempt is absent.
+  const jobs = new Map([101, 102, 103].map(id => [id, {
+    total_count: 1,
+    jobs: [{ id: id + 1000, run_id: id, head_sha: 'b'.repeat(40),
+      name: id === 102 ? 'release' : 'deploy', status: 'completed', conclusion: 'success',
+      started_at: '2026-07-01T00:01:00Z', completed_at: '2026-07-01T00:09:00Z' }],
+  }]));
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+    const url = new URL(String(input));
+    const match = url.pathname.match(/^\/repos\/davejohnson\/example\/actions\/runs\/([1-9][0-9]*)\/attempts\/([1-9][0-9]*)\/jobs$/);
+    if (url.origin !== 'https://api.github.com' || !match || url.search !== '?per_page=100') {
+      throw new Error('Unexpected GitHub attempt request');
+    }
+    return new Response(JSON.stringify(jobs.get(Number(match[1]))), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
+  });
   vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockImplementation(async (_owner, _repo, workflow) => ({ total_count: 1, workflow_runs: [run(String(workflow).includes('ios-release') ? 102 : 101)] }));
   vi.spyOn(GitHubAdapter.prototype, 'getWorkflowRun').mockImplementation(async (_owner, _repo, id) => run(id));
   vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunArtifacts').mockImplementation(async (_owner, _repo, id) => {
@@ -179,7 +197,7 @@ function seedConnection(options: { promotion?: boolean; api?: boolean; newerServ
   vi.spyOn(GitHubAdapter.prototype, 'readArtifactFiles').mockImplementation(async (_owner, _repo, id) => id >= 300 ? {
     'hypervibe-api-release.json': encode(id === 301 ? targetApi : sourceApi), 'contracts/v1.json': snapshot,
   } : { [id === 202 ? 'hypervibe-ios-release.json' : 'hypervibe-server-release.json']: encode(id === 202 ? mobile : id === 201 ? server : sourceServer) });
-  return { project, spec, contract, mobile, server, sourceServer, sourceApi, targetApi, snapshot, run, artifact, workflows };
+  return { project, spec, contract, mobile, server, sourceServer, sourceApi, targetApi, snapshot, run, artifact, workflows, jobs };
 
 }
 
@@ -344,6 +362,91 @@ describe('hv_appstore_submit', () => {
     await t.close();
   });
 
+  it.each([
+    ['target server', 101], ['beta release', 102], ['original beta server', 103],
+  ] as const)('rejects a previous-attempt artifact for the %s', async (_role, id) => {
+    const fixture = seedConnection({ promotion: true, api: true, newerServer: true });
+    stubSubmittableVersion();
+    vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, selected) => ({
+      ...fixture.run(selected), ...(selected === id ? { run_attempt: 2, run_started_at: '2026-07-01T00:06:00Z' } : {}),
+    }));
+    fixture.jobs.get(id)!.jobs[0].started_at = '2026-07-01T00:06:00Z';
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview');
+    const t = await makeClient();
+    const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(result.error?.code).toBe('VALIDATION');
+    expect(submit).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it.each([['target server', 101], ['beta release', 102]] as const)(
+    'rejects a successful run with a skipped %s job', async (_role, id) => {
+      const fixture = seedConnection();
+      stubSubmittableVersion();
+      fixture.jobs.get(id)!.jobs[0].conclusion = 'skipped';
+      const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview');
+      const t = await makeClient();
+      const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+      expect(result.error?.code).toBe('VALIDATION');
+      expect(submit).not.toHaveBeenCalled();
+      await t.close();
+    }
+  );
+
+  it('allows a successful current rerun with fresh artifacts and omitted optional job attempt', async () => {
+    const fixture = seedConnection();
+    stubSubmittableVersion();
+    vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => ({
+      ...fixture.run(id), run_attempt: 2, run_started_at: '2026-07-01T00:00:30Z',
+    }));
+    const t = await makeClient();
+    const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(result.error?.code).toBe('CONFIRM_REQUIRED');
+    await t.close();
+  });
+
+  it.each([['target server', 101], ['beta release', 102], ['original beta server', 103]] as const)(
+    'rechecks the %s job immediately before Apple mutation', async (_role, id) => {
+      const fixture = seedConnection({ promotion: true, api: true, newerServer: true });
+      stubSubmittableVersion();
+      const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview').mockResolvedValue({
+        reviewSubmission: { id: 'review-1', state: 'WAITING_FOR_REVIEW', platform: 'IOS' }, reusedExistingSubmission: false,
+      });
+      const t = await makeClient();
+      const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+      expect(preview.error?.code).toBe('CONFIRM_REQUIRED');
+      vi.mocked(AppStoreConnectAdapter.prototype.getAppStoreVersionBuild).mockImplementation(async () => {
+        fixture.jobs.get(id)!.jobs[0].conclusion = 'skipped';
+        return { id: 'build-1', version: '42' };
+      });
+      const result = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
+      expect(result.error?.code).toBe('VALIDATION');
+      expect(submit).not.toHaveBeenCalled();
+      await t.close();
+    }
+  );
+
+  it('rechecks exact artifact identity immediately before Apple mutation', async () => {
+    const fixture = seedConnection();
+    stubSubmittableVersion();
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview').mockResolvedValue({
+      reviewSubmission: { id: 'review-1', state: 'WAITING_FOR_REVIEW', platform: 'IOS' }, reusedExistingSubmission: false,
+    });
+    const t = await makeClient();
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(preview.error?.code).toBe('CONFIRM_REQUIRED');
+    vi.mocked(AppStoreConnectAdapter.prototype.getAppStoreVersionBuild).mockImplementation(async () => {
+      vi.mocked(GitHubAdapter.prototype.listWorkflowRunArtifacts).mockImplementation(async (_owner, _repo, id) => ({
+        total_count: 1, artifacts: [{ ...fixture.artifact(Number(id)), id: Number(id) + 1000 }],
+      }));
+      return { id: 'build-1', version: '42' };
+    });
+    const result = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
+    expect(result.error?.code).toBe('VALIDATION');
+    expect(submit).not.toHaveBeenCalled();
+    await t.close();
+  });
+
   it('does not use a matching artifact name as proof for a different attached Apple build', async () => {
     seedConnection();
     stubSubmittableVersion();
@@ -378,11 +481,35 @@ describe('hv_appstore_submit', () => {
     await t.close();
   });
 
+  it('rejects an attempt that changes while its release manifest is downloaded', async () => {
+    const fixture = seedConnection();
+    stubSubmittableVersion();
+    const read = vi.mocked(GitHubAdapter.prototype.readArtifactFiles).getMockImplementation()!;
+    vi.mocked(GitHubAdapter.prototype.readArtifactFiles).mockImplementation(async (...args) => {
+      const files = await read(...args);
+      if (args[2] === 201) {
+        vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => ({
+          ...fixture.run(id), ...(id === 101 ? { run_attempt: 2 } : {}),
+        }));
+      }
+      return files;
+    });
+    const t = await makeClient();
+    const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(result.error?.code).toBe('VALIDATION');
+    await t.close();
+  });
+
   it('accepts an unchanged beta workflow when only the server workflow changed afterward', async () => {
     const fixture = seedConnection();
     stubSubmittableVersion();
     vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => ({
       ...fixture.run(id), head_sha: (id === 101 ? 'c' : 'b').repeat(40),
+    }));
+    fixture.jobs.get(101)!.jobs[0].head_sha = 'c'.repeat(40);
+    vi.mocked(GitHubAdapter.prototype.listWorkflowRunArtifacts).mockImplementation(async (_owner, _repo, id) => ({
+      total_count: 1, artifacts: [{ ...fixture.artifact(Number(id)),
+        workflow_run: { ...fixture.artifact(Number(id)).workflow_run, head_sha: (Number(id) === 101 ? 'c' : 'b').repeat(40) } }],
     }));
     vi.mocked(GitHubAdapter.prototype.getFileContent).mockImplementation(async (_owner, _repo, file, ref) => {
       if (file === '.hypervibe/spec.json') return JSON.stringify(fixture.spec);
@@ -432,6 +559,59 @@ describe('hv_appstore_submit', () => {
     expect(submit).not.toHaveBeenCalled();
     await t.close();
   });
+
+  it('requires a new preview if the original beta server proof changes attempt and artifact', async () => {
+    const fixture = seedConnection({ promotion: true, api: true, newerServer: true });
+    stubSubmittableVersion();
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview').mockResolvedValue({
+      reviewSubmission: { id: 'review-1', state: 'WAITING_FOR_REVIEW', platform: 'IOS' }, reusedExistingSubmission: false,
+    });
+    const t = await makeClient();
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(preview.error?.code).toBe('CONFIRM_REQUIRED');
+    vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => ({
+      ...fixture.run(id), ...(id === 103 ? { run_attempt: 2, run_started_at: '2026-07-01T00:00:30Z' } : {}),
+    }));
+    const list = vi.mocked(GitHubAdapter.prototype.listWorkflowRunArtifacts).getMockImplementation()!;
+    vi.mocked(GitHubAdapter.prototype.listWorkflowRunArtifacts).mockImplementation(async (...args) => {
+      const result = await list(...args);
+      return { ...result, artifacts: result.artifacts.map(artifact => artifact.id === 203 ? { ...artifact, id: 204 } : artifact) };
+    });
+    // Provider artifact id 204 carries the same independently checked server bytes.
+    const result = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
+    expect(result.error?.message).toContain('selection changed');
+    expect(submit).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it.each([['successful release with deleted artifact', false, false], ['proven relevance skip', true, false], ['skip attempt changes during observation', true, true]] as const)(
+    'handles latest beta run with no artifact: %s', async (_label, relevanceSkip, race) => {
+      const fixture = seedConnection();
+      stubSubmittableVersion();
+      const latestRun = { ...fixture.run(104), created_at: '2026-07-02T00:00:00Z', updated_at: '2026-07-02T00:10:00Z',
+        run_started_at: '2026-07-02T00:00:00Z' };
+      vi.mocked(GitHubAdapter.prototype.listWorkflowRuns).mockImplementation(async (_owner, _repo, workflow) => (
+        String(workflow).includes('ios-release')
+          ? { total_count: 2, workflow_runs: [latestRun, fixture.run(102)] }
+          : { total_count: 1, workflow_runs: [fixture.run(101)] }
+      ));
+      let latestReads = 0;
+      vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => id === 104
+        ? { ...latestRun, run_attempt: race && ++latestReads > 1 ? 2 : 1 } : fixture.run(id));
+      vi.mocked(GitHubAdapter.prototype.listWorkflowRunArtifacts).mockImplementation(async (_owner, _repo, id) => (
+        Number(id) === 104 ? { total_count: 0, artifacts: [] } : { total_count: 1, artifacts: [fixture.artifact(Number(id))] }
+      ));
+      fixture.jobs.set(104, { total_count: 4, jobs: ['eligibility', 'prepare', 'build', 'release'].map((name, index) => ({
+        id: 1104 + index, run_id: 104, head_sha: 'b'.repeat(40), name, status: 'completed',
+        conclusion: relevanceSkip && name !== 'eligibility' ? 'skipped' : 'success',
+        started_at: '2026-07-02T00:01:00Z', completed_at: '2026-07-02T00:09:00Z',
+      })) });
+      const t = await makeClient();
+      const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+      expect(result.error?.code).toBe(relevanceSkip && !race ? 'CONFIRM_REQUIRED' : 'VALIDATION');
+      await t.close();
+    },
+  );
 
   it('requires a new preview if an artifact is replaced after confirmation was prepared', async () => {
     const fixture = seedConnection();

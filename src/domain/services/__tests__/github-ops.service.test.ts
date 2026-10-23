@@ -1390,25 +1390,33 @@ describe('github tools', () => {
     const provenanceScript = extractGitHubScript(releaseWorkflow, 'Resolve release provenance');
     const serverRun = {
       id: 91,
+      status: 'completed',
       conclusion: 'success',
       head_sha: releaseSha,
       path: workflow.path,
+      run_attempt: 2,
+      run_started_at: new Date(Date.parse(evidence.verifiedAt) - 60_000).toISOString(),
     };
     const serverArtifact = {
       id: 72,
       name: expectedServerRelease.artifactPrefix + releaseSha,
       expired: false,
+      created_at: evidence.verifiedAt,
       workflow_run: { id: serverRun.id, head_sha: releaseSha },
     };
+    const serverJob = {id: 41, run_id: serverRun.id, head_sha: releaseSha, name: 'deploy', status: 'completed', conclusion: 'success',
+      started_at: serverRun.run_started_at, completed_at: new Date(Date.parse(evidence.verifiedAt) + 60_000).toISOString()};
     const provenanceCase = (options: {
       run?: Record<string, unknown>;
       artifacts?: Array<Record<string, unknown>>;
       eventName?: string;
       inputs?: Record<string, string>;
+      job?: Record<string, unknown>;
     } = {}) => {
       const getWorkflowRun = vi.fn(async () => ({ data: options.run ?? serverRun }));
       const artifacts = options.artifacts ?? [serverArtifact];
       const listWorkflowRunArtifacts = vi.fn(async () => ({data: {total_count: artifacts.length, artifacts}}));
+      const listJobsForWorkflowRunAttempt = vi.fn(async () => ({data: {total_count: 1, jobs: [options.job ?? serverJob]}}));
       const outputs = new Map<string, string>();
       const result = new AsyncFunction(
         'github',
@@ -1417,7 +1425,7 @@ describe('github tools', () => {
         'core',
         provenanceScript
       )(
-        { rest: { actions: { getWorkflowRun, listWorkflowRunArtifacts } } },
+        { rest: { actions: { getWorkflowRun, listWorkflowRunArtifacts, listJobsForWorkflowRunAttempt } } },
         {
           eventName: options.eventName ?? 'workflow_dispatch',
           payload: options.eventName === 'workflow_run'
@@ -1425,7 +1433,7 @@ describe('github tools', () => {
             : { inputs: options.inputs ?? { commit_sha: releaseSha, server_run_id: String(serverRun.id) } },
           repo: { owner: 'owner', repo: 'repo' },
         },
-        { env: { HYPERVIBE_EXPECTED_SERVER_RELEASE: JSON.stringify(expectedServerRelease) } },
+        { env: parsedRelease.jobs.eligibility.env },
         { setOutput: (name: string, value: string) => outputs.set(name, value) }
       );
       return { getWorkflowRun, listWorkflowRunArtifacts, outputs, result };
@@ -1447,9 +1455,15 @@ describe('github tools', () => {
     expect(Object.fromEntries(provenance.outputs)).toEqual({
       artifact_id: String(serverArtifact.id),
       server_run_id: String(serverRun.id),
+      server_run_attempt: '2',
       sha: releaseSha,
     });
     await expect(provenanceCase({ eventName: 'workflow_run' }).result).resolves.toBeUndefined();
+    for (const eventName of ['workflow_run', 'workflow_dispatch']) {
+      const retained = {...serverArtifact, created_at: new Date(Date.parse(serverRun.run_started_at) - 86_400_000).toISOString()};
+      await expect(provenanceCase({eventName, artifacts: [retained]}).result).rejects.toThrow('current workflow attempt');
+      await expect(provenanceCase({eventName, job: {...serverJob, conclusion: 'skipped'}}).result).rejects.toThrow('current workflow attempt');
+    }
 
     for (const run of [
       { ...serverRun, path: '.github/workflows/not-managed.yml' },

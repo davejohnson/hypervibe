@@ -925,11 +925,26 @@ export class GitHubAdapter {
 
   async getWorkflowRun(owner: string, repo: string, runId: number): Promise<{
     id: number; path: string; status: string; conclusion: string | null;
-    head_sha: string; head_branch: string; event: string; run_attempt: number;
+    head_sha: string; head_branch: string; event: string; run_attempt: number; run_started_at?: string;
     repository: { full_name: string }; head_repository: { full_name: string };
   }> {
     if (!Number.isSafeInteger(runId) || runId <= 0) throw new Error('Invalid workflow run id.');
     return this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${runId}`);
+  }
+
+  /** Exact-attempt endpoint; callers must reject incomplete or unsuccessful evidence. */
+  async listWorkflowRunAttemptJobs(owner: string, repo: string, runId: number, attempt: number): Promise<{
+    total_count: number;
+    jobs: Array<{
+      id: number; run_id: number; run_attempt?: number; head_sha: string;
+      name: string; status: string; conclusion: string | null;
+      started_at: string; completed_at: string | null;
+    }>;
+  }> {
+    if (!Number.isSafeInteger(runId) || runId <= 0 || !Number.isSafeInteger(attempt) || attempt <= 0) {
+      throw new Error('Invalid workflow run id or attempt.');
+    }
+    return this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100`);
   }
 
   /** Authenticated redirect discovery, then credential-free bounded ZIP read. */
