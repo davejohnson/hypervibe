@@ -1400,6 +1400,16 @@ TestFlight upload, or TestFlight distribution commands.
 - A successful server deploy writes an artifact whose name and JSON body carry
   the environment, repository, exact full Git SHA, and deployed service set.
   The artifact is emitted only after provider deployment steps succeed.
+- A successful GitHub run does not prove that a retained artifact belongs to
+  its latest attempt. iOS eligibility, beta-baseline discovery and App Store
+  submission require the exact attempt's successful `deploy` or `release` job
+  and artifact creation within that job and attempt. Missing timestamps or
+  incomplete job listings fail closed. The shared validator keeps workflow
+  source SHA separate from deployed source SHA; a final run read rejects an
+  intervening rerun. TestFlight upload and App Store submission recheck pinned
+  artifact/attempt identities immediately before their Apple mutation. These
+  GitHub reads are not atomic and timestamp correlation is not cryptographic
+  attempt attestation; no live rerun compatibility is implied by offline tests.
 - The iOS workflow uses an app-scoped concurrency key independent of server
   deployments. An environment-free eligibility job validates the exact deployed
   source and skips protected jobs when complete evidence proves mobile inputs

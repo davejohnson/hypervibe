@@ -114,6 +114,26 @@ Neon's release schema URL is mutable; tests consume only its checked-in snapshot
 
 ## Evidence boundary
 
+The iOS workflow gates and App Store submission share `templates/ios/release-attempt.cjs`.
+Their reconstructed GitHub evidence follows the official
+[OpenAPI at `755ee33b4a81d51f6f07a902cce26cbec3b822f2`](https://github.com/github/rest-api-description/blob/755ee33b4a81d51f6f07a902cce26cbec3b822f2/descriptions/api.github.com/api.github.com.json)
+and [attempt-scoped jobs API](https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run-attempt).
+`run_started_at` resets on rerun; it and `run_attempt` are optional upstream,
+so omission cannot authorize release. Artifact creation time is nullable and
+does not carry an attempt ID; fresh `updated_at` cannot rescue an old artifact.
+The exact attempt endpoint permits omitted `job.run_attempt`, while a supplied
+contradictory attempt is rejected. Tests execute the emitted gates, the real
+GitHub adapter over serialized HTTP, and ordinary MCP submission. Listings over
+100 jobs or incomplete pages block instead of assuming completeness. This is
+GitHub-specific existing iOS release behavior, not a new cross-provider capability.
+The attempt-job transport fixtures are checked against the pinned endpoint and
+response-schema subset under `github/`; generated-gate and MCP fixtures are
+reconstructed, not live recordings. Timestamp correlation and final
+re-observation do not make provider reads atomic.
+The unchanged job schema marks `conclusion` nullable but omits null from its
+enum. The contract test records that mismatch separately from schema-valid
+fixtures and preserves unfinished/null responses for fail-closed authorization.
+
 The Railway fixture executes requests against the official schema in memory;
 only `fetch` is intercepted. It is synthetic state, not a captured server.
 The missing-service-instance error reconstructs the message, extension code,
