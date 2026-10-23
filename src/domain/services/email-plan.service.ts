@@ -275,11 +275,15 @@ export async function resolveEmailIntegrationState(params: {
     if (wantsInbound) {
       try {
         inboundRoutes = known(await sendgrid.adapter.listInboundParseWebhooks());
-        if (environmentSpec.email.inbound?.signatureVerification !== undefined || Object.keys(inboundSigningBinding(params.environment ?? null)).length) {
-          inboundSigning = await observeInboundSigning(sendgrid.adapter, environmentSpec.email.inbound!.hostname.toLowerCase());
-          if (inboundSigning.status === 'known') {
-            const exact = inboundSigning.route;
-            inboundRoutes.items = inboundRoutes.items.map(route => route.hostname.toLowerCase() === exact.hostname.toLowerCase() ? exact : route);
+        const hostname = environmentSpec.email.inbound!.hostname.toLowerCase();
+        const wantsSigning = environmentSpec.email.inbound?.signatureVerification !== undefined
+          || Object.keys(inboundSigningBinding(params.environment ?? null)).length > 0;
+        if (wantsSigning) inboundSigning = { status: 'unknown' };
+        if (inboundRoutes.items.filter(route => route.hostname.toLowerCase() === hostname).length === 1) {
+          const exact = await sendgrid.adapter.getInboundParseWebhook(hostname);
+          inboundRoutes.items = inboundRoutes.items.map(route => route.hostname.toLowerCase() === hostname ? exact : route);
+          if (wantsSigning) {
+            inboundSigning = await observeInboundSigning(sendgrid.adapter, hostname, exact);
           }
         }
       } catch (error) {

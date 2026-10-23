@@ -38,9 +38,10 @@ function expectedUrl(environment: Environment | null, spec: EnvironmentSpec): st
 }
 
 /** Missing association/signature fields are unknown, never evidence of an unsigned route. */
-export async function observeInboundSigning(adapter: SendGridAdapter, hostname: string): Promise<InboundSigningState> {
+export async function observeInboundSigning(adapter: SendGridAdapter, hostname: string, observedRoute?: SendGridInboundParseWebhook): Promise<InboundSigningState> {
   try {
-    const route = await adapter.getInboundParseWebhook(hostname);
+    const route = observedRoute ?? await adapter.getInboundParseWebhook(hostname);
+    if (route.hostname.toLowerCase() !== hostname.toLowerCase()) return { status: 'unknown' };
     if (!route.security_policy) return { status: 'unknown' };
     const policy = await adapter.getInboundParseSecurityPolicy(route.security_policy);
     return { status: 'known', route, policy };

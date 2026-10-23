@@ -1310,6 +1310,14 @@ attachment is preserved by an exact-hostname PATCH with the complete reviewed
 route settings; unknown attachment evidence blocks changes instead of deleting
 and recreating the route. Alias-only changes record local bindings with read
 permission; route PATCH requires read and update permissions.
+For one uniquely listed desired hostname, ordinary route observation reads its
+exact setting through the existing SendGrid adapter, independently of managed
+signing intent. This exact route replaces the list summary; failed, malformed
+or wrong-host reads remain unknown and never grant list-based write authority.
+An omitted association stays unknown. A positive policy ID can be preserved
+without assuming it is a signing policy; ordinary observation never reads or
+selects a policy definition. Declared signing separately reads the associated
+policy using that same validated route observation.
 Plan diagnostics may expose one exactly matched route's safe HTTPS URL and
 boolean flags, plus whether its policy association was positively observed;
 omitted policy evidence remains unknown. They exclude userinfo, query strings,

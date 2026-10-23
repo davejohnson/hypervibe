@@ -26,6 +26,20 @@ This change preserves the existing unknown-policy replacement block. Sanitized
 plan evidence reports a safe observed URL/flags and known/unknown association,
 without exposing policy objects or private URL fields.
 
+Ordinary inbound observation additionally performs the documented
+[exact-hostname GET](https://www.twilio.com/docs/sendgrid/api-reference/settings-inbound-parse/retrieve-a-specific-parse-setting)
+after one unique list match. Its HTTP-boundary resolver/planner regression first
+failed 10 cases before the fix: a list summary could omit positive association
+evidence, or remain incorrectly authoritative when the exact read omitted the
+association, failed, or returned malformed/unexpected identity. Exact reads now
+replace that summary; errors remain unknown and duplicates are never selected.
+Policy IDs are preserved independently of signature intent, so ordinary
+observation does not require or infer signature material for OAuth policies.
+The [update reference](https://www.twilio.com/docs/sendgrid/api-reference/settings-inbound-parse/update-a-parse-setting)
+does not guarantee association preservation when the ID is omitted; that case
+continues to block updates. These reconstructed responses test client/lifecycle
+behavior, not whether a live exact read will return the missing association.
+
 The Railway custom-domain HTTP suite reconstructs a shared service whose
 production instance precedes staging in a paginated response. It executes the
 real `graphql-request` client against the pinned official SDL and verifies exact
