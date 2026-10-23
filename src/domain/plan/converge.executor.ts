@@ -1,3 +1,6 @@
+import { databaseCredentialAliasesActionSchema, databaseCredentialAliasesMetadataSchema,
+  DATABASE_CREDENTIAL_ALIASES_OPERATION } from '../services/database-credential-aliases.service.js';
+import { isDeepStrictEqual } from 'node:util';
 import { API_POLICY_OPERATION } from '../services/api-policy.js';
 import { DATABASE_SCOPE_BIND_OPERATION, isDatabaseScopeBindingAction } from '../services/database-scope-binding.service.js';
 import { createHash } from 'crypto';
@@ -221,6 +224,7 @@ export const planRunDocumentSchema = z.object({
     'hosting-bindings',
     'service-volumes',
     'database-checkpoint',
+    'database-credential-aliases',
     'database-bindings',
     'backup-policy',
     'backup-provisioning',
@@ -230,6 +234,8 @@ export const planRunDocumentSchema = z.object({
     'managed-ci-credentials',
   ]).optional(),
   environmentName: z.string().min(1),
+  databaseCredentialAliasesReady: z.boolean().optional(),
+  databaseCredentialAliasesVerification: databaseCredentialAliasesMetadataSchema.optional(),
   specRevision: z.number().int().nonnegative(),
   /** Immutable application revision reviewed with this deployment plan. */
   sourceCommitSha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
@@ -247,10 +253,25 @@ export const planRunDocumentSchema = z.object({
     envFileVarsEncrypted: z.string().optional(),
     envVarKeys: z.array(z.string()).optional(),
     envVarsEncrypted: z.string().optional(),
+    databaseCredentialAliasesEncrypted: z.string().min(1).optional(),
     delegatedSecretKeys: z.array(z.string()).optional(),
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'database-credential-aliases') {
+    const m = document.databaseCredentialAliasesVerification;
+    if (document.actions.length > 1 || document.actions.some(action => !databaseCredentialAliasesActionSchema.safeParse(action).success
+      || !isDeepStrictEqual(action.metadata, m)) || document.databaseCredentialAliasesReady === true
+        && (!m || !document.overrides?.databaseCredentialAliasesEncrypted || (m.changeNames.length > 0) !== (document.actions.length === 1))
+      || document.overrides && Object.keys(document.overrides).some(key => key !== 'databaseCredentialAliasesEncrypted')
+      || document.inputRequired?.length || document.lockEnvironmentIds?.length || document.sourceCommitSha || document.integrationFingerprints
+      || document.observedFingerprint !== null) {
+      ctx.addIssue({ code: 'custom', message: 'Credential alias plans require one exact database action or verified noop and encrypted private evidence only.' });
+    }
+  } else if (document.databaseCredentialAliasesReady !== undefined || document.databaseCredentialAliasesVerification
+    || document.overrides?.databaseCredentialAliasesEncrypted || document.actions.some(action => action.metadata?.operation === DATABASE_CREDENTIAL_ALIASES_OPERATION)) {
+    ctx.addIssue({ code: 'custom', message: 'Credential alias repair requires its isolated scope.' });
+  }
   if (document.scope === 'secrets') {
     const keys = document.overrides?.delegatedSecretKeys ?? [];
     if (!keys.length || new Set(keys).size !== keys.length || document.actions.length !== keys.length

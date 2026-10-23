@@ -121,6 +121,14 @@ describe('RailwayAdapter observe', () => {
           DATABASE_URL: 'postgres://user:hunter2@db.internal:5432/app',
           API_KEY: 'value',
         },
+      })
+      // One issuer read supplies value-free configuration comparisons.
+      .mockResolvedValueOnce({
+        variables: {
+          POSTGRES_PASSWORD: 'issuer-password',
+          DATABASE_URL: 'postgresql://postgres:issuer-password@db.internal:5432/app',
+          DATABASE_PRIVATE_URL: 'postgresql://postgres:issuer-password@db.internal:5432/app',
+        },
       });
 
     const adapter = new RailwayAdapter();
@@ -169,6 +177,14 @@ describe('RailwayAdapter observe', () => {
         providerScope: { projectId: 'rail-project-1', environmentId: 'env-prod' },
         name: 'postgres-db',
         status: 'running',
+        credentialAlignment: {
+          basis: 'configured-variable-values', authentication: 'unverified',
+          issuer: { comparisons: [
+            { source: 'DATABASE_URL', against: 'POSTGRES_PASSWORD', comparison: { result: 'match' } },
+            { source: 'DATABASE_PRIVATE_URL', against: 'POSTGRES_PASSWORD', comparison: { result: 'match' } },
+          ] },
+          consumers: [],
+        },
       },
     ]);
     expect(result.caches).toEqual([
