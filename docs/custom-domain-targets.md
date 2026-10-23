@@ -80,6 +80,25 @@ domain ID on the same service; a different ID blocks instead of adoption. For
 that same attachment, later DNS failures must retain earlier confirmed record
 IDs rather than replace them with an empty receipt.
 
+`mergeRepoPlatformBindings` in `repo-bindings-file.ts` preserves those domain
+recovery identities when command resolution hydrates an older repository export.
+It retains acknowledged creation, consumed recreation revisions and existing DNS
+record IDs; additional IDs require complete matching hosting, attachment and zone
+ownership. Conflicting owners, scopes or data for one DNS ID fail before replacing
+that environment's retained domain bindings. Ordinary verified lifecycle updates
+remain responsible for clearing recovery state. This exception does not change
+other public metadata merge rules.
+An absent local domain still supports reconstruction from a repository export;
+without a durable teardown tombstone, absence alone cannot distinguish a fresh
+machine from a completed deletion with a stale export. Keep the completed cleanup
+export current instead of inferring that distinction.
+
+Resolver regressions reproduced lost acknowledgement/record evidence and a second
+synthetic attach invocation after an old-owner export replaced a new-owner
+acknowledgement. They do not establish that a live provider accepted a duplicate
+resource. These regressions and explicit merge-conflict cases run in ordinary
+`npm test`.
+
 Required regressions run under ordinary `npm test` and the existing Hypervibe
 acceptance workflow. The provider roster must remain explicit when a hosting
 adapter is added. Synthetic HTTP evidence covers serialized requests and pinned

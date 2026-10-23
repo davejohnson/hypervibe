@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
@@ -8,12 +8,13 @@ import { SpecStore } from '../../domain/spec/spec.store.js';
 import { PlanService } from '../../domain/plan/plan.service.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import * as domainSecurity from '../../domain/services/domain-security.service.js';
-import { setupCustomDomain } from '../../domain/services/domain.service.js';
+import { setupCustomDomain, teardownCustomDomain } from '../../domain/services/domain.service.js';
 import type { ObservedState } from '../../domain/ports/observe.port.js';
 import type { PlanAction } from '../../domain/plan/plan.types.js';
 import { providerRegistry } from '../../domain/registry/provider.registry.js';
 import { createCommandContext, type CommandContext } from '../context.js';
 import { executePlanApply } from '../apply-plan.js';
+import { runWithWorkspaceDirectories } from '../../lib/workspace-context.js';
 import '../providers.js';
 
 // Synthetic shared-provider contract: the reviewed environment has one public
@@ -130,6 +131,100 @@ describe('custom domain desired service plan/apply boundary', () => {
     };
     return { project, environment, spec, observed, attach, detach, deleteDns, upsertDns, plan, apply, adapter };
   }
+
+  async function resolveWithStaleExport(f: ReturnType<typeof fixture>, bindings: Record<string, unknown>) {
+    const checkout = path.join(dir, f.project.name);
+    mkdirSync(path.join(checkout, '.git'), { recursive: true });
+    mkdirSync(path.join(checkout, '.hypervibe'), { recursive: true });
+    writeFileSync(path.join(checkout, '.hypervibe', 'spec.json'), JSON.stringify(f.spec.spec));
+    writeFileSync(path.join(checkout, '.hypervibe', 'bindings.json'), JSON.stringify({
+      version: 1, project: f.project.name, environments: { staging: { platformBindings: bindings } },
+    }));
+    const disabled = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+    try {
+      return await runWithWorkspaceDirectories([checkout], async () =>
+        ctx.resolveProjectOrThrow({ project: f.project.name }));
+    } finally {
+      if (disabled === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = disabled;
+    }
+  }
+
+  // Repository exports can lag a successful provider acknowledgement (for
+  // example, local SQLite was updated before an export write failed). Resolving
+  // the next command must retain ownership evidence before planning any retry.
+  it('does not repeat acknowledged creation after resolver hydration from a legacy partial export', async () => {
+    const f = fixture();
+    f.attach.mockResolvedValueOnce({ success: false, message: 'Create acknowledged; exact readback unavailable', data: {
+      phase: 'customDomainCreateVerification', creationAcknowledged: true, customDomainId: 'domain-web',
+      projectId: 'project-id', environmentId: 'staging-id', serviceId: 'service-web', domain: hostname,
+    } } as never);
+    await f.apply((await f.plan()).action);
+    await resolveWithStaleExport(f, { ...f.environment.platformBindings,
+      domainDns: { name: hostname, proxied: false } });
+    const retry = await f.plan();
+    await f.apply(retry.action);
+    expect(f.attach).toHaveBeenCalledTimes(1);
+    expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings.domainDns)
+      .toMatchObject({ providerDomainId: 'domain-web', creationAcknowledged: true,
+        serviceId: 'service-web', environmentId: 'staging-id', records: [] });
+  });
+
+  it('retains confirmed DNS IDs when resolver hydration reads an older known-empty record set', async () => {
+    const f = fixture();
+    await f.apply((await f.plan()).action);
+    const local = ctx.repos.environments.findById(f.environment.id)!.platformBindings;
+    await resolveWithStaleExport(f, { ...local,
+      domainDns: { ...(local.domainDns as Record<string, unknown>), records: [] } });
+    expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings.domainDns)
+      .toMatchObject({ providerDomainId: 'domain-web', zoneId: 'zone-id',
+        records: [{ id: 'dns-new', name: hostname, type: 'CNAME', target: 'web.example.net' }] });
+    expect(f.attach).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an older conflicting owner export without replacing retained local recovery identities', async () => {
+    const f = fixture({ owner: 'cron', boundDomain: true });
+    const stale = structuredClone(f.environment.platformBindings);
+    await f.apply((await f.plan()).action);
+    const local = ctx.repos.environments.findById(f.environment.id)!.platformBindings;
+    await expect(resolveWithStaleExport(f, stale)).rejects.toThrow(/domain.*conflict|conflict.*domain/i);
+    expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings).toEqual(local);
+    expect(f.attach).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows verified lifecycle cleanup to clear records retained during repository hydration', async () => {
+    const f = fixture({ owner: 'cron', boundDomain: true });
+    await resolveWithStaleExport(f, { ...f.environment.platformBindings,
+      domainDns: { ...oldDomain, records: [] } });
+    const current = ctx.repos.environments.findById(f.environment.id)!;
+    expect(current.platformBindings.domainDns).toMatchObject({ records: oldDomain.records });
+    const cleanup = await teardownCustomDomain({ project: f.project, environment: current, domain: hostname });
+    expect(cleanup.success).toBe(true);
+    expect(f.detach).toHaveBeenCalledTimes(1);
+    expect(f.deleteDns).toHaveBeenCalledWith('zone-id', 'dns-old');
+    ctx.repos.environments.updatePlatformBindings(f.environment.id, { domainDns: undefined });
+    expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings).not.toHaveProperty('domainDns');
+  });
+
+  it('does not repeat creation when an old-owner export is resolved after a new-owner acknowledgement', async () => {
+    const f = fixture({ owner: 'cron', boundDomain: true });
+    const stale = structuredClone(f.environment.platformBindings);
+    f.attach.mockResolvedValueOnce({ success: false, message: 'Create acknowledged; exact readback unavailable', data: {
+      phase: 'customDomainCreateVerification', creationAcknowledged: true, customDomainId: 'domain-web',
+      projectId: 'project-id', environmentId: 'staging-id', serviceId: 'service-web', domain: hostname,
+    } } as never);
+    await f.apply((await f.plan()).action);
+    try {
+      await resolveWithStaleExport(f, stale);
+      await f.apply((await f.plan()).action);
+    } catch (error) {
+      expect(String(error)).toMatch(/domain.*conflict|conflict.*domain/i);
+    }
+    expect(f.attach).toHaveBeenCalledTimes(1);
+    expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings.domainDns)
+      .toMatchObject({ providerDomainId: 'domain-web', creationAcknowledged: true });
+  });
 
   it.each([['cron', 'worker', 'web'], ['worker', 'web', 'cron'], ['web', 'cron', 'worker']])(
     'pins and applies the desired public web service with binding order %j', async (...order) => {
