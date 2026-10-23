@@ -64,6 +64,7 @@ export interface DomainSetupResult {
   service?: string;
   customDomainAttached?: boolean;
   customDomainId?: string;
+  creationAcknowledged?: boolean;
   recreated?: boolean;
   providerVerified?: boolean;
   customDomainError?: string;
@@ -118,6 +119,11 @@ export async function setupCustomDomain(params: {
     };
   }
 
+  const domainBinding = parseHostingBindings(environment).domainDns;
+  if (domainBinding?.name === domain && domainBinding.zoneId && domainBinding.zoneId !== zone.id) {
+    return { success: false, error: `Cloudflare zone identity changed for ${domain}; no provider or DNS mutation was attempted. Restore the reviewed zone binding before retrying.` };
+  }
+
   const result: DomainSetupResult = {
     success: false,
     zone: { id: zone.id, name: zone.name, status: zone.status },
@@ -126,7 +132,7 @@ export async function setupCustomDomain(params: {
   // Step 2: Attach the custom domain on the hosting provider when supported.
   const bindings = (environment.platformBindings ?? {}) as HostingBindings;
   const services = bindings.services ?? {};
-  const serviceName = params.serviceName ?? Object.keys(services)[0];
+  const serviceName = params.serviceName;
   const binding = serviceName ? services[serviceName] : undefined;
   const provider = hostingProviderForEnvironment(project, environment);
   result.hostingProvider = provider;
@@ -149,6 +155,7 @@ export async function setupCustomDomain(params: {
               environmentId: bindings.environmentId,
               domain,
               dnsZone: zone.name,
+              ...(domainBinding?.providerDomainId ? { customDomainId: domainBinding.providerDomainId } : {}),
             })
           : await callCustomDomainAttach(adapter, {
               projectId: bindings.projectId,
@@ -156,6 +163,7 @@ export async function setupCustomDomain(params: {
               environmentId: bindings.environmentId,
               domain,
               dnsZone: zone.name,
+              ...(domainBinding?.providerDomainId ? { customDomainId: domainBinding.providerDomainId } : {}),
             });
         if (receipt.success) {
           result.customDomainAttached = true;
@@ -174,6 +182,16 @@ export async function setupCustomDomain(params: {
         } else {
           result.customDomainAttached = false;
           result.customDomainError = receipt.error || receipt.message;
+          if (receipt.data?.creationAcknowledged === true
+            && receipt.data.phase === 'customDomainCreateVerification'
+            && typeof receipt.data.customDomainId === 'string' && receipt.data.customDomainId.trim()
+            && receipt.data.projectId === bindings.projectId
+            && receipt.data.environmentId === bindings.environmentId
+            && receipt.data.serviceId === binding.serviceId
+            && receipt.data.domain === domain) {
+            result.creationAcknowledged = true;
+            result.customDomainId = receipt.data.customDomainId;
+          }
         }
       } catch (error) {
         result.customDomainAttached = false;
@@ -220,7 +238,7 @@ export async function setupCustomDomain(params: {
           );
           dnsResults.push({
             id: upsert.record.id,
-            name: first.name,
+            name: normalizeDomainName(upsert.record.name),
             type: first.type,
             target: values[0]!,
             action: upsert.action,
@@ -237,7 +255,7 @@ export async function setupCustomDomain(params: {
         for (const record of ensured.records) {
           dnsResults.push({
             id: record.id,
-            name: first.name,
+            name: normalizeDomainName(record.name),
             type: first.type,
             target: record.content,
             action: ensured.created.includes(record.content) ? 'created' : 'updated',
@@ -278,9 +296,9 @@ export async function setupCustomDomain(params: {
       ? { providerVerified: result.providerVerified }
       : {}),
   };
-  result.pending = result.dnsConfigured === true
+  result.pending = result.creationAcknowledged === true || (result.dnsConfigured === true
     && result.customDomainAttached === true
-    && result.providerVerified !== true;
+    && result.providerVerified !== true);
   result.success = result.dnsConfigured === true && result.pending !== true;
   return result;
 }
@@ -337,6 +355,7 @@ export async function teardownCustomDomain(params: {
 
   const recordsByType = new Map<string, Awaited<ReturnType<CloudflareAdapter['listDnsRecords']>>>();
   const existingRecordIds: string[] = [];
+  let legacyZoneName: string | undefined;
   for (const expected of binding.records) {
     const type = expected.type.toUpperCase();
     let records = recordsByType.get(type);
@@ -346,10 +365,32 @@ export async function teardownCustomDomain(params: {
     }
     const observed = records.find((record) => record.id === expected.id);
     if (!observed) continue;
+    const observedName = normalizeDomainName(observed.name);
+    const expectedName = normalizeDomainName(expected.name);
+    const typeAndContentMatch = observed.type.toUpperCase() === type
+      && dnsTargetMatches(type, observed.content, expected.target);
+    let nameMatches = observedName === expectedName;
+    if (!nameMatches && typeAndContentMatch) {
+      // Older bindings retained provider-relative labels. Cloudflare returns
+      // full names; expand a legacy label only within its exact verified zone.
+      if (!legacyZoneName) {
+        const zone = (await cfAdapter.findZoneByName(domain))
+          ?? (await cfAdapter.findZoneByName(dnsZoneScopeForDomain(domain)));
+        if (!zone || zone.id !== binding.zoneId) {
+          return {
+            success: false,
+            error: `Cloudflare zone identity for ${domain} no longer matches the recorded zone; no provider or DNS mutation was attempted.`,
+          };
+        }
+        legacyZoneName = normalizeDomainName(zone.name);
+      }
+      nameMatches = observedName === (expectedName === '@'
+        ? legacyZoneName
+        : `${expectedName}.${legacyZoneName}`);
+    }
     if (
-      normalizeDomainName(observed.name) !== normalizeDomainName(expected.name)
-      || observed.type.toUpperCase() !== type
-      || !dnsTargetMatches(type, observed.content, expected.target)
+      !nameMatches
+      || !typeAndContentMatch
     ) {
       return {
         success: false,

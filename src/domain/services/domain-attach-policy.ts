@@ -1,7 +1,44 @@
 import type { Receipt } from '../ports/provider.port.js';
+import type { EnvironmentSpec } from '../spec/spec.schema.js';
+import type { ObservedState, ObservedService } from '../ports/observe.port.js';
+import { z } from 'zod';
 
 export const DOMAIN_DETACH_OPERATION = 'customDomainDetach';
 export const DOMAIN_ADOPT_OPERATION = 'customDomainAdopt';
+export const DOMAIN_RETARGET_OPERATION = 'customDomainRetarget';
+
+/** The reviewed spec, never a binding's insertion order, owns public traffic. */
+export function desiredDomainServiceName(spec: Pick<EnvironmentSpec, 'services'>): string | undefined {
+  const candidates = Object.entries(spec.services).filter(([, service]) => (
+    service.workloadKind === 'web' && service.public !== false
+  ));
+  return candidates.length === 1 ? candidates[0]![0] : undefined;
+}
+
+export const domainRetargetBindingSchema = z.object({
+  name: z.string().min(1),
+  providerDomainId: z.string().min(1),
+  serviceName: z.string().min(1),
+  serviceId: z.string().min(1),
+  environmentId: z.string().min(1),
+  zoneId: z.string().min(1),
+  records: z.array(z.object({
+    id: z.string().min(1), name: z.string().min(1), type: z.string().min(1), target: z.string().min(1),
+  }).strict()),
+}).passthrough();
+
+/** A complete scoped observation must identify one exact bound service. */
+export function observedDomainService(
+  observed: ObservedState | null | undefined,
+  target: { projectId?: string; environmentId?: string; serviceName?: string; serviceId?: string }
+): ObservedService | undefined {
+  if (!observed || observed.partial || observed.completeness?.services === 'unknown'
+    || !target.projectId || !target.environmentId || !target.serviceName || !target.serviceId
+    || observed.projectId !== target.projectId || observed.environmentId !== target.environmentId) return undefined;
+  const matches = observed.services.filter(service => service.name === target.serviceName || service.externalId === target.serviceId);
+  return matches.length === 1 && matches[0]!.name === target.serviceName && matches[0]!.externalId === target.serviceId
+    ? matches[0] : undefined;
+}
 
 export type DomainAttachParams = {
   projectId?: string;
@@ -9,15 +46,17 @@ export type DomainAttachParams = {
   environmentId: string;
   domain: string;
   dnsZone?: string;
-};
-
-export type DomainDetachParams = DomainAttachParams & {
+  /** A bound attachment refresh must not create or adopt a replacement identity. */
   customDomainId?: string;
 };
 
+export type DomainDetachParams = DomainAttachParams;
+
+export type DomainRecreateParams = DomainAttachParams;
+
 export type DomainAttachCapableAdapter = {
   attachCustomDomain?: (params: DomainAttachParams) => Promise<Receipt>;
-  recreateCustomDomain?: (params: DomainAttachParams) => Promise<Receipt>;
+  recreateCustomDomain?: (params: DomainRecreateParams) => Promise<Receipt>;
   detachCustomDomain?: (params: DomainDetachParams) => Promise<Receipt>;
 };
 
@@ -26,7 +65,7 @@ export type DomainAttachAdapter = DomainAttachCapableAdapter & {
 };
 
 export type DomainRecreateAdapter = DomainAttachCapableAdapter & {
-  recreateCustomDomain: (params: DomainAttachParams) => Promise<Receipt>;
+  recreateCustomDomain: (params: DomainRecreateParams) => Promise<Receipt>;
 };
 
 export type DomainDetachAdapter = DomainAttachCapableAdapter & {
@@ -62,7 +101,7 @@ export function supportsCustomDomainRecreate(adapter: unknown): adapter is Domai
 
 export async function callCustomDomainRecreate(
   adapter: DomainAttachCapableAdapter,
-  params: DomainAttachParams
+  params: DomainRecreateParams
 ): Promise<Receipt> {
   if (!supportsCustomDomainRecreate(adapter)) {
     return {

@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from '../domain/services/database-credential-aliases.service.js';
 import { applyScheduleActivation } from '../domain/services/schedule-activation.service.js';
 import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js';
@@ -84,6 +85,10 @@ import { setupCustomDomain, teardownCustomDomain } from '../domain/services/doma
 import {
   DOMAIN_ADOPT_OPERATION,
   DOMAIN_DETACH_OPERATION,
+  DOMAIN_RETARGET_OPERATION,
+  desiredDomainServiceName,
+  domainRetargetBindingSchema,
+  observedDomainService,
 } from '../domain/services/domain-attach-policy.js';
 import {
   credentialFieldsFromSchema,
@@ -2745,7 +2750,7 @@ async function applyDomain(
   environmentSpec: EnvironmentSpec,
   action: PlanAction
 ): Promise<ActionResult> {
-  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  let environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
   if (!environment) {
     return {
       success: false,
@@ -2825,6 +2830,90 @@ async function applyDomain(
     };
   }
   const metadata = asRecord(action.metadata);
+  const serviceName = desiredDomainServiceName(environmentSpec);
+  let bindings = parseHostingBindings(environment);
+  const target = {
+    projectId: stringField(metadata, 'projectId'),
+    environmentId: stringField(metadata, 'environmentId'),
+    serviceName: stringField(metadata, 'serviceName'),
+    serviceId: stringField(metadata, 'serviceId'),
+  };
+  const retarget = metadata?.operation === DOMAIN_RETARGET_OPERATION;
+  if (!serviceName || target.serviceName !== serviceName || !target.serviceId || !target.projectId || !target.environmentId
+    || bindings.provider !== action.resource.provider || bindings.projectId !== target.projectId
+    || bindings.environmentId !== target.environmentId || bindings.services?.[serviceName]?.serviceId !== target.serviceId) {
+    return { success: false, status: 'blocked', message: `Domain target ${action.id} changed or is not yet bound`,
+      error: 'The reviewed unique public web service and its exact project/environment/service identities are required. Re-run hv_plan after service creation or binding changes.' };
+  }
+  if (retarget && (action.type !== 'replace' || action.requiresConfirm !== true
+    || providerRegistry.getMetadata(action.resource.provider)?.lifecycle?.hosting?.customDomainRetarget !== 'managed')) {
+    return { success: false, status: 'blocked', message: `Domain retarget is not authorized for ${action.resource.provider}`,
+      error: 'This provider does not admit the reviewed, confirmation-gated service-to-service domain operation.' };
+  }
+  if (!retarget && bindings.domainDns?.providerDomainId
+    && stringField(metadata, 'providerDomainId') !== bindings.domainDns.providerDomainId) {
+    return { success: false, status: 'blocked', message: `Reviewed provider-domain identity changed for ${action.resource.name}`,
+      error: 'The current domain binding no longer matches the reviewed provider-domain ID. Re-run hv_plan.' };
+  }
+  const adapterResult = await ctx.adapterFactory.getProviderAdapter(action.resource.provider, project);
+  const adapter = adapterResult.adapter as IProviderAdapter | undefined;
+  if (!adapterResult.success || !adapter?.capabilities.supportsObserve || typeof adapter.observe !== 'function') {
+    return { success: false, status: 'blocked', message: `Cannot verify the exact service for ${action.resource.name}`,
+      error: adapterResult.error ?? 'Live service observation is required before domain changes.' };
+  }
+  let observed;
+  try {
+    await adapter.configureTarget?.({ region: environmentSpec.hosting.region });
+    observed = await adapter.observe(environment);
+  } catch (error) {
+    return { success: false, status: 'blocked', message: `Cannot re-observe ${action.resource.name}`,
+      error: error instanceof Error ? error.message : String(error) };
+  }
+  const targetService = observedDomainService(observed, target);
+  const owners = observed.services.filter(service => service.customDomains.includes(action.resource.name));
+  const sameServiceRecreateAbsent = !retarget && action.type === 'replace' && action.requiresConfirm === true
+    && environmentSpec.domainRecreateRevision
+    && stringField(metadata, 'domainRecreateRevision') === environmentSpec.domainRecreateRevision
+    && bindings.domainDns?.recreateRevision !== environmentSpec.domainRecreateRevision
+    && bindings.domainDns?.creationAcknowledged !== true && owners.length === 0;
+  if (!targetService || owners.length > 1) {
+    return { success: false, status: 'blocked', message: `Domain target ${action.id} is unknown or ambiguous`,
+      error: 'The exact public service was not observed in the reviewed scope, or multiple services own the hostname. No mutation was attempted.' };
+  }
+  if (retarget) {
+    const previous = domainRetargetBindingSchema.safeParse(metadata?.previousDomain);
+    const previousService = previous.success ? observedDomainService(observed, {
+      projectId: target.projectId, ...previous.data,
+    }) : undefined;
+    if (!previous.success || !isDeepStrictEqual(metadata?.previousDomain, bindings.domainDns)
+      || previous.data.name !== action.resource.name || previous.data.environmentId !== target.environmentId
+      || bindings.services?.[previous.data.serviceName]?.serviceId !== previous.data.serviceId
+      || previous.data.serviceId === target.serviceId || !previousService
+      || (owners.length === 1 && (owners[0] !== previousService
+        || owners[0].customDomainStatus?.[action.resource.name]?.providerDomainId !== previous.data.providerDomainId))) {
+      return { success: false, status: 'blocked', message: `Domain retarget ${action.id} no longer matches reviewed ownership`,
+        error: 'The old domain/DNS snapshot, current owner, or destination identity changed. No mutation was attempted; re-run hv_plan.' };
+    }
+    const result = await teardownCustomDomain({ project, environment, domain: action.resource.name });
+    if (!result.success) return { success: false, message: `Domain retarget cleanup failed for ${action.resource.name}`,
+      error: result.error ?? 'Exact provider/DNS cleanup was not completed; the old binding remains for recovery.' };
+    const services = { ...(bindings.services ?? {}) };
+    const oldService = services[previous.data.serviceName]!;
+    services[previous.data.serviceName] = { ...oldService,
+      customDomains: (oldService.customDomains ?? []).filter(domain => domain !== action.resource.name) };
+    ctx.repos.environments.updatePlatformBindings(environment.id, { services, domainDns: undefined });
+    environment = ctx.repos.environments.findById(environment.id)!;
+    bindings = parseHostingBindings(environment);
+  } else if ((owners.length === 1 && owners[0] !== targetService)
+    || (bindings.domainDns && (bindings.domainDns.name !== action.resource.name
+      || bindings.domainDns.serviceName !== serviceName || bindings.domainDns.serviceId !== target.serviceId
+      || bindings.domainDns.environmentId !== target.environmentId
+      || !bindings.domainDns.providerDomainId
+      || (!sameServiceRecreateAbsent && (owners.length !== 1
+        || owners[0]?.customDomainStatus?.[action.resource.name]?.providerDomainId !== bindings.domainDns.providerDomainId))))) {
+    return { success: false, status: 'blocked', message: `Domain ${action.resource.name} belongs to a different target`,
+      error: 'The exact bound provider-domain ID must be observed before retrying. Ordinary attach and recreate cannot adopt a replacement or repeat an unverified create.' };
+  }
   if (metadata?.operation === DOMAIN_ADOPT_OPERATION) {
     const providerDomainId = stringField(metadata, 'providerDomainId');
     const projectId = stringField(metadata, 'projectId');
@@ -2854,62 +2943,6 @@ async function applyDomain(
       };
     }
 
-    const adapterResult = await ctx.adapterFactory.getProviderAdapter(
-      action.resource.provider,
-      project
-    );
-    if (!adapterResult.success || !adapterResult.adapter) {
-      return {
-        success: false,
-        status: 'blocked',
-        message: `Cannot re-observe ${action.resource.name} for adoption`,
-        error: adapterResult.error ?? `No ${action.resource.provider} adapter is available.`,
-      };
-    }
-    const adapter = adapterResult.adapter as IProviderAdapter;
-    try {
-      await adapter.configureTarget?.({ region: environmentSpec.hosting.region });
-    } catch (error) {
-      return {
-        success: false,
-        status: 'blocked',
-        message: `Cannot configure ${action.resource.provider} observation for domain adoption`,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-    if (!adapter.capabilities.supportsObserve || typeof adapter.observe !== 'function') {
-      return {
-        success: false,
-        status: 'blocked',
-        message: `Cannot verify ${action.resource.name} for adoption`,
-        error: `${action.resource.provider} does not support the live observation required for local-only domain adoption.`,
-      };
-    }
-
-    let observed;
-    try {
-      observed = await adapter.observe(environment);
-    } catch (error) {
-      return {
-        success: false,
-        status: 'blocked',
-        message: `Cannot re-observe ${action.resource.name} for adoption`,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-    if (
-      observed.partial
-      || observed.completeness?.services === 'unknown'
-      || observed.projectId !== projectId
-      || observed.environmentId !== environmentId
-    ) {
-      return {
-        success: false,
-        status: 'blocked',
-        message: `Cannot prove the exact provider identity for ${action.resource.name}`,
-        error: 'Provider service observation is partial, unknown, or no longer targets the reviewed environment. No binding was changed.',
-      };
-    }
     const normalizedDomain = action.resource.name.toLowerCase();
     const matches = observed.services.filter((service) => (
       service.name === serviceName
@@ -2971,7 +3004,7 @@ async function applyDomain(
       },
     };
   }
-  const recreateRequested = action.type === 'replace';
+  const recreateRequested = action.type === 'replace' && !retarget;
   const reviewedRecreateRevision = stringField(asRecord(action.metadata), 'domainRecreateRevision');
   if (
     recreateRequested
@@ -2996,18 +3029,28 @@ async function applyDomain(
     project,
     environment,
     domain: action.resource.name,
+    serviceName,
     trafficProxied: effectiveDomainProxy,
     recreate: recreateRequested,
   });
   if (
-    result.customDomainAttached
+    (result.customDomainAttached || result.creationAcknowledged)
     && result.customDomainId
   ) {
     const bindings = parseHostingBindings(environment);
     const serviceName = result.service;
     const serviceBinding = serviceName ? bindings.services?.[serviceName] : undefined;
+    const sameAttachment = bindings.domainDns?.name === action.resource.name
+      && bindings.domainDns.providerDomainId === result.customDomainId
+      && bindings.domainDns.serviceId === serviceBinding?.serviceId
+      && bindings.domainDns.environmentId === bindings.environmentId
+      && bindings.domainDns.zoneId === result.zone?.id;
+    const records = new Map((sameAttachment ? bindings.domainDns?.records ?? [] : []).map(record => [record.id, record]));
+    for (const record of result.dnsRecords ?? []) records.set(record.id, {
+      id: record.id, name: record.name, type: record.type, target: record.target,
+    });
     ctx.repos.environments.updatePlatformBindings(environment.id, {
-      ...(serviceName && serviceBinding
+      ...(result.customDomainAttached && serviceName && serviceBinding
         ? {
           services: {
             ...(bindings.services ?? {}),
@@ -3025,17 +3068,13 @@ async function applyDomain(
         name: action.resource.name,
         proxied: effectiveDomainProxy,
         ...(result.customDomainId ? { providerDomainId: result.customDomainId } : {}),
+        ...(result.creationAcknowledged ? { creationAcknowledged: true } : {}),
         ...(serviceName ? { serviceName } : {}),
         ...(serviceBinding?.serviceId ? { serviceId: serviceBinding.serviceId } : {}),
         ...(bindings.environmentId ? { environmentId: bindings.environmentId } : {}),
         ...(result.zone?.id ? { zoneId: result.zone.id } : {}),
-        records: (result.dnsRecords ?? []).map((record) => ({
-          id: record.id,
-          name: record.name,
-          type: record.type,
-          target: record.target,
-        })),
-        ...(environmentSpec.domainRecreateRevision
+        records: [...records.values()],
+        ...(!retarget && environmentSpec.domainRecreateRevision
           ? { recreateRevision: environmentSpec.domainRecreateRevision }
           : {}),
       },
@@ -3045,7 +3084,9 @@ async function applyDomain(
     return {
       success: true,
       status: 'pending',
-      message: `Configured DNS for ${action.resource.name}; ${action.resource.provider} domain verification is pending`,
+      message: result.creationAcknowledged
+        ? `Creation acknowledged for ${action.resource.name}; exact provider identity verification is pending and DNS was not changed`
+        : `Configured DNS for ${action.resource.name}; ${action.resource.provider} domain verification is pending`,
       data: result as unknown as Record<string, unknown>,
     };
   }

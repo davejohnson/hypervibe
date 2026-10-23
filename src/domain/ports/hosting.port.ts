@@ -319,6 +319,8 @@ export const hostingBindingsSchema = z.object({
     proxied: z.boolean().optional(),
     recreateRevision: z.string().optional(),
     providerDomainId: z.string().optional(),
+    /** Create acknowledged, but this exact provider identity has not yet been observed. */
+    creationAcknowledged: z.boolean().optional(),
     serviceName: z.string().optional(),
     serviceId: z.string().optional(),
     environmentId: z.string().optional(),

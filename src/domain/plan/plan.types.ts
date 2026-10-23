@@ -55,6 +55,7 @@ export interface LocalSnapshot {
       proxied?: boolean;
       recreateRevision?: string;
       providerDomainId?: string;
+      creationAcknowledged?: boolean;
       serviceName?: string;
       serviceId?: string;
       environmentId?: string;

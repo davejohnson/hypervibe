@@ -453,6 +453,26 @@ it must not collapse a successful inventory containing differently named
 instances into `null`, select one by convention, or silently adopt it. Exact
 adoption or retained cleanup is a separate explicit `hv_import` decision.
 
+An environment custom domain targets the sole desired public web workload,
+using the service schema's defaults; binding insertion order never selects its
+owner. Plan, apply, status and hosted inspection share this decision. Missing
+or ambiguous targets block domain mutation. Existing targets are pinned by
+their provider project, environment and service identities and rechecked before
+apply; provisioning a missing service requires fresh planning before attachment.
+The owning selection and recovery rules are documented in
+[the custom-domain target contract](docs/custom-domain-targets.md).
+
+A bound domain on a different service is not convergence or an adoption
+candidate. Only providers explicitly admitted by the hosting registry may plan
+a confirmation-gated `customDomainRetarget` replacement. The reviewed action
+pins the old provider/domain/zone/full DNS record identities and the new service.
+Apply proves the destination exists before detaching the exact old domain,
+verifies provider absence, and removes only the reviewed DNS records. It keeps
+the old binding until all cleanup succeeds, then clears it before attachment.
+New attachment identity and confirmed DNS writes survive pending verification
+or partial failure. Retrying after completed cleanup must not delete again.
+Unknown provider reads never establish absence or authorize dependent DNS work.
+
 When an attached Railway domain remains provider-unverified, the reviewed
 domain update first calls Railway's non-destructive `customDomainUpdate` for
 the same environment to refresh provider verification before rewriting DNS.

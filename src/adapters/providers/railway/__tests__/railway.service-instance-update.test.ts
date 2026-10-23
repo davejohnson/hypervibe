@@ -15,6 +15,23 @@ function serviceEnvironmentInstance(serviceId: string, environmentId: string) {
   };
 }
 
+// Complete selected fields from the official custom-domain query. The HTTP
+// contract suite separately exercises malformed and missing provider fields.
+function customDomainsResponse(domains: Array<{ id: string; domain: string; status?: Record<string, any> }>) {
+  return { service: { id: 'svc-web', projectId: 'rail-project-1', serviceInstances: {
+    pageInfo: { hasNextPage: false, endCursor: null },
+    edges: [{ node: { id: 'instance-svc-web-env-prod', serviceId: 'svc-web', environmentId: 'env-prod',
+      domains: { customDomains: domains.map(domain => ({ ...domain, status: {
+        verified: false, certificateStatus: 'CERTIFICATE_STATUS_TYPE_ISSUING',
+        verificationDnsHost: null, verificationToken: null, ...domain.status,
+        dnsRecords: (domain.status?.dnsRecords ?? []).map((record: Record<string, unknown>) => ({
+          currentValue: '', hostlabel: '@', purpose: 'DNS_RECORD_PURPOSE_TRAFFIC_ROUTE', zone: 'usebillforge.com', ...record,
+        })),
+      } })) },
+    } }],
+  } } };
+}
+
 describe('RailwayAdapter service instance updates', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -131,20 +148,7 @@ describe('RailwayAdapter service instance updates', () => {
       // ensureServiceInstanceForEnvironment
       .mockResolvedValueOnce(serviceEnvironmentInstance('svc-web', 'env-prod'))
       // getCustomDomainStatus before create
-      .mockResolvedValueOnce({
-        service: {
-          serviceInstances: {
-            edges: [{
-              node: {
-                environmentId: 'env-prod',
-                domains: {
-                  customDomains: [],
-                },
-              },
-            }],
-          },
-        },
-      })
+      .mockResolvedValueOnce(customDomainsResponse([]))
       // customDomainCreate
       .mockResolvedValueOnce({
         customDomainCreate: {
@@ -153,14 +157,7 @@ describe('RailwayAdapter service instance updates', () => {
         },
       })
       // getCustomDomainStatus after create
-      .mockResolvedValueOnce({
-        service: {
-          serviceInstances: {
-            edges: [{
-              node: {
-                environmentId: 'env-prod',
-                domains: {
-                  customDomains: [{
+      .mockResolvedValueOnce(customDomainsResponse([{
                     id: 'cd_123',
                     domain: 'usebillforge.com',
                     status: {
@@ -168,21 +165,15 @@ describe('RailwayAdapter service instance updates', () => {
                       dnsRecords: [{
                         fqdn: 'usebillforge.com',
                         hostlabel: '@',
-                        recordType: 'CNAME',
+                        recordType: 'DNS_RECORD_TYPE_CNAME',
                         requiredValue: 'web-production.up.railway.app',
-                        status: 'DNS_RECORD_STATUS_PENDING',
+                        status: 'DNS_RECORD_STATUS_REQUIRES_UPDATE',
                         zone: 'usebillforge.com',
                       }],
                       verificationDnsHost: '_railway.usebillforge.com',
                       verificationToken: 'verify-token',
                     },
-                  }],
-                },
-              },
-            }],
-          },
-        },
-      });
+                  }]));
 
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
@@ -233,7 +224,7 @@ describe('RailwayAdapter service instance updates', () => {
         dnsRecords: [{
           fqdn: 'usebillforge.com',
           hostlabel: '@',
-          recordType: 'CNAME',
+          recordType: 'DNS_RECORD_TYPE_CNAME',
           requiredValue: 'web-production.up.railway.app',
           currentValue: 'web-production.up.railway.app',
           status: 'DNS_RECORD_STATUS_PROPAGATED',
@@ -243,18 +234,7 @@ describe('RailwayAdapter service instance updates', () => {
         verificationToken: 'railway-verify=verify-token',
       },
     };
-    const domainObservation = {
-      service: {
-        serviceInstances: {
-          edges: [{
-            node: {
-              environmentId: 'env-prod',
-              domains: { customDomains: [pendingDomain] },
-            },
-          }],
-        },
-      },
-    };
+    const domainObservation = customDomainsResponse([pendingDomain]);
     const request = vi.fn()
       // ensureServiceInstanceForEnvironment
       .mockResolvedValueOnce(serviceEnvironmentInstance('svc-web', 'env-prod'))
@@ -298,24 +278,11 @@ describe('RailwayAdapter service instance updates', () => {
   it('does not refresh an existing verified custom domain', async () => {
     const request = vi.fn()
       .mockResolvedValueOnce(serviceEnvironmentInstance('svc-web', 'env-prod'))
-      .mockResolvedValueOnce({
-        service: {
-          serviceInstances: {
-            edges: [{
-              node: {
-                environmentId: 'env-prod',
-                domains: {
-                  customDomains: [{
+      .mockResolvedValueOnce(customDomainsResponse([{
                     id: 'cd_verified',
                     domain: 'usebillforge.com',
-                    status: { verified: true, certificateStatus: 'CERTIFICATE_STATUS_TYPE_ISSUED' },
-                  }],
-                },
-              },
-            }],
-          },
-        },
-      });
+                    status: { verified: true, certificateStatus: 'CERTIFICATE_STATUS_TYPE_VALID' },
+                  }]));
 
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
@@ -336,21 +303,9 @@ describe('RailwayAdapter service instance updates', () => {
   it('detaches the exact Railway custom domain and verifies terminal absence', async () => {
     const existingDomain = { id: 'cd_exact', domain: 'usebillforge.com', status: { verified: true } };
     const request = vi.fn()
-      .mockResolvedValueOnce({
-        service: {
-          serviceInstances: {
-            edges: [{ node: { environmentId: 'env-prod', domains: { customDomains: [existingDomain] } } }],
-          },
-        },
-      })
+      .mockResolvedValueOnce(customDomainsResponse([existingDomain]))
       .mockResolvedValueOnce({ customDomainDelete: true })
-      .mockResolvedValueOnce({
-        service: {
-          serviceInstances: {
-            edges: [{ node: { environmentId: 'env-prod', domains: { customDomains: [] } } }],
-          },
-        },
-      });
+      .mockResolvedValueOnce(customDomainsResponse([]));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
@@ -371,18 +326,7 @@ describe('RailwayAdapter service instance updates', () => {
   });
 
   it('blocks custom-domain deletion when the reviewed Railway id changed', async () => {
-    const request = vi.fn().mockResolvedValueOnce({
-      service: {
-        serviceInstances: {
-          edges: [{
-            node: {
-              environmentId: 'env-prod',
-              domains: { customDomains: [{ id: 'cd_other', domain: 'usebillforge.com' }] },
-            },
-          }],
-        },
-      },
-    });
+    const request = vi.fn().mockResolvedValueOnce(customDomainsResponse([{ id: 'cd_other', domain: 'usebillforge.com' }]));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
@@ -399,13 +343,7 @@ describe('RailwayAdapter service instance updates', () => {
   });
 
   it('treats an already-absent Railway custom domain as a successful retry', async () => {
-    const request = vi.fn().mockResolvedValueOnce({
-      service: {
-        serviceInstances: {
-          edges: [{ node: { environmentId: 'env-prod', domains: { customDomains: [] } } }],
-        },
-      },
-    });
+    const request = vi.fn().mockResolvedValueOnce(customDomainsResponse([]));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
@@ -431,46 +369,17 @@ describe('RailwayAdapter service instance updates', () => {
       // ensureServiceInstanceForEnvironment
       .mockResolvedValueOnce(serviceEnvironmentInstance('svc-web', 'env-prod'))
       // getCustomDomainStatus before delete
-      .mockResolvedValueOnce({
-        service: {
-          serviceInstances: {
-            edges: [{
-              node: {
-                environmentId: 'env-prod',
-                domains: { customDomains: [existingDomain] },
-              },
-            }],
-          },
-        },
-      })
+      .mockResolvedValueOnce(customDomainsResponse([existingDomain]))
       // customDomainDelete
       .mockResolvedValueOnce({ customDomainDelete: true })
       // getCustomDomainStatus verifies terminal absence before replacement
-      .mockResolvedValueOnce({
-        service: {
-          serviceInstances: {
-            edges: [{
-              node: {
-                environmentId: 'env-prod',
-                domains: { customDomains: [] },
-              },
-            }],
-          },
-        },
-      })
+      .mockResolvedValueOnce(customDomainsResponse([]))
       // customDomainCreate
       .mockResolvedValueOnce({
         customDomainCreate: { id: 'cd_new', domain: 'usebillforge.com' },
       })
       // getCustomDomainStatus after create
-      .mockResolvedValueOnce({
-        service: {
-          serviceInstances: {
-            edges: [{
-              node: {
-                environmentId: 'env-prod',
-                domains: {
-                  customDomains: [{
+      .mockResolvedValueOnce(customDomainsResponse([{
                     id: 'cd_new',
                     domain: 'usebillforge.com',
                     status: {
@@ -478,20 +387,14 @@ describe('RailwayAdapter service instance updates', () => {
                       certificateStatus: 'CERTIFICATE_STATUS_TYPE_ISSUING',
                       dnsRecords: [{
                         fqdn: 'usebillforge.com',
-                        recordType: 'CNAME',
+                        recordType: 'DNS_RECORD_TYPE_CNAME',
                         requiredValue: 'new-target.up.railway.app',
-                        status: 'DNS_RECORD_STATUS_PENDING',
+                        status: 'DNS_RECORD_STATUS_REQUIRES_UPDATE',
                       }],
                       verificationDnsHost: '_railway-verify.usebillforge.com',
                       verificationToken: 'railway-verify=new-token',
                     },
-                  }],
-                },
-              },
-            }],
-          },
-        },
-      });
+                  }]));
 
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
@@ -533,18 +436,7 @@ describe('RailwayAdapter service instance updates', () => {
     const duplicate = (id: string) => ({ id, domain: 'usebillforge.com', status: { verified: false } });
     const request = vi.fn()
       .mockResolvedValueOnce(serviceEnvironmentInstance('svc-web', 'env-prod'))
-      .mockResolvedValueOnce({
-        service: {
-          serviceInstances: {
-            edges: [{
-              node: {
-                environmentId: 'env-prod',
-                domains: { customDomains: [duplicate('cd-1'), duplicate('cd-2')] },
-              },
-            }],
-          },
-        },
-      });
+      .mockResolvedValueOnce(customDomainsResponse([duplicate('cd-1'), duplicate('cd-2')]));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
@@ -567,21 +459,9 @@ describe('RailwayAdapter service instance updates', () => {
     const existingDomain = { id: 'cd-old', domain: 'usebillforge.com', status: { verified: false } };
     const request = vi.fn()
       .mockResolvedValueOnce(serviceEnvironmentInstance('svc-web', 'env-prod'))
-      .mockResolvedValueOnce({
-        service: {
-          serviceInstances: {
-            edges: [{ node: { environmentId: 'env-prod', domains: { customDomains: [existingDomain] } } }],
-          },
-        },
-      })
+      .mockResolvedValueOnce(customDomainsResponse([existingDomain]))
       .mockResolvedValueOnce({ customDomainDelete: true })
-      .mockResolvedValueOnce({
-        service: {
-          serviceInstances: {
-            edges: [{ node: { environmentId: 'env-prod', domains: { customDomains: [existingDomain] } } }],
-          },
-        },
-      });
+      .mockResolvedValueOnce(customDomainsResponse([existingDomain]));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 

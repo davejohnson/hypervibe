@@ -2211,6 +2211,7 @@ export class PlanService {
           ? 'project'
           : undefined,
       customDomainManagement: hostingMetadata?.lifecycle?.hosting?.customDomains,
+      customDomainRetarget: hostingMetadata?.lifecycle?.hosting?.customDomainRetarget,
       customDomainTrafficProxy: hostingMetadata?.lifecycle?.hosting?.domainTrafficProxy,
       expectedSource: this.expectedDeploySource(projectForPlan, environmentName, environmentSpec),
       managedDatabaseEnvVars,

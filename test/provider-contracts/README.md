@@ -8,6 +8,33 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+The Railway custom-domain HTTP suite reconstructs a shared service whose
+production instance precedes staging in a paginated response. It executes the
+real `graphql-request` client against the pinned official SDL and verifies exact
+staging lookup/deletion, complete pagination, unknown malformed observations,
+terminal deletion readback, and exact attachment/replacement/refresh readback.
+Missing destination instances are negative controls: existing inspection already
+refused to provision them. Refresh false acknowledgements and vanished/replaced
+identities were separately observed failing before their fix. The
+recreation race regression also failed when a different same-host attachment
+replaced the reviewed ID; it now blocks deletion while terminal-absence recovery
+still permits the explicitly requested recreation. Ordinary attachment also
+rejects an absent or replaced reviewed ID before any create or refresh; those
+race regressions failed before the matching guard was added. The
+regressions first failed when the adapter treated missing selected fields or a
+first page as absence; runtime changes then passed the affected suite. Synthetic
+responses establish this boundary, not live DNS, certificate issuance or Railway
+availability. `railway.custom-domain.api-contract.test.ts` runs in ordinary
+`npm test`; the isolated command is `npx vitest run
+src/adapters/providers/railway/__tests__/railway.custom-domain.api-contract.test.ts`.
+An acknowledged create followed by unknown, absent or conflicting readback stops
+without repeating the write and returns the validated acknowledgement ID and
+exact target scope for the shared lifecycle's pending-ownership marker. Invalid
+acknowledgements never authorize that marker. Provider tests cover the receipt
+handoff; durable marker persistence and retry admission belong to the separate
+application lifecycle regressions. A transport failure without an acknowledged
+identity does not establish creation ownership or successful cleanup.
+
 The [scoped secret contract](../../docs/scoped-secret-updates.md) reviews all
 seven hosting providers and distinguishes native capabilities from implemented
 admission. `scoped-secret-provider-contracts.test.ts` pins that roster and the

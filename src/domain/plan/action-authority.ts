@@ -68,6 +68,8 @@ import { MESSAGING_OPERATIONS } from '../services/twilio-messaging.service.js';
 import {
   DOMAIN_ADOPT_OPERATION,
   DOMAIN_DETACH_OPERATION,
+  DOMAIN_RETARGET_OPERATION,
+  domainRetargetBindingSchema,
 } from '../services/domain-attach-policy.js';
 import {
   DATA_MIGRATION_OPERATIONS,
@@ -1316,6 +1318,19 @@ export function resolvePlanActionAuthority(
     && metadataString(action, 'serviceName')
     && metadataString(action, 'serviceId')
     && metadataString(action, 'environmentId')
+  ) {
+    return authority(action, 'domain.configure');
+  }
+  if (
+    exactResource(action, 'domain')
+    && action.type === 'replace'
+    && action.requiresConfirm === true
+    && action.metadata?.operation === DOMAIN_RETARGET_OPERATION
+    && metadataString(action, 'projectId')
+    && metadataString(action, 'serviceName')
+    && metadataString(action, 'serviceId')
+    && metadataString(action, 'environmentId')
+    && domainRetargetBindingSchema.safeParse(action.metadata.previousDomain).success
   ) {
     return authority(action, 'domain.configure');
   }

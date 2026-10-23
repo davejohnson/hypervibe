@@ -1897,7 +1897,7 @@ describe('diffEnvironment — domain and workload', () => {
       observed: observed({
         services: [observedWeb({
           customDomains: ['myapp.dev'],
-          customDomainStatus: { 'myapp.dev': { providerVerified: true, dnsConfigured: true } },
+          customDomainStatus: { 'myapp.dev': { providerDomainId: 'provider-domain-1', providerVerified: true, dnsConfigured: true } },
         })],
       }),
       local: localWithDomain(),
@@ -1980,8 +1980,8 @@ describe('diffEnvironment — domain and workload', () => {
 
     expect(result.actions.find((action) => action.id === 'domain:myapp.dev')).toMatchObject({
       type: 'update',
-      metadata: { blockedReason: 'domain_binding_missing' },
-      reason: expect.stringContaining('hv_import'),
+      metadata: { blockedReason: 'domain_target_identity_unknown' },
+      reason: expect.stringContaining('refresh bindings'),
     });
   });
 
@@ -2100,7 +2100,7 @@ describe('diffEnvironment — domain and workload', () => {
         provider: 'vercel',
         services: [observedWeb({
           customDomains: ['myapp.dev'],
-          customDomainStatus: { 'myapp.dev': { dnsConfigured: true } },
+          customDomainStatus: { 'myapp.dev': { providerDomainId: 'provider-domain-1', dnsConfigured: true } },
         })],
       }),
       local: local(),
@@ -2123,7 +2123,7 @@ describe('diffEnvironment — domain and workload', () => {
       observed: observed({
         services: [observedWeb({
           customDomains: ['myapp.dev'],
-          customDomainStatus: { 'myapp.dev': { providerVerified: true, dnsConfigured: true } },
+          customDomainStatus: { 'myapp.dev': { providerDomainId: 'provider-domain-1', providerVerified: true, dnsConfigured: true } },
         })],
       }),
       local: localWithDomain({ proxied: false }),
@@ -2146,7 +2146,7 @@ describe('diffEnvironment — domain and workload', () => {
       observed: observed({
         services: [observedWeb({
           customDomains: ['myapp.dev'],
-          customDomainStatus: { 'myapp.dev': { providerVerified: true, dnsConfigured: true } },
+          customDomainStatus: { 'myapp.dev': { providerDomainId: 'provider-domain-1', providerVerified: true, dnsConfigured: true } },
         })],
       }),
       local: localWithDomain({ proxied: false }),
@@ -2158,13 +2158,14 @@ describe('diffEnvironment — domain and workload', () => {
 
   it('uses DNS-only traffic as effective desired state when the provider requires it', () => {
     const result = diffEnvironment({
-      spec: spec({ domain: 'myapp.dev', domainProxy: true }),
+      spec: spec({ hosting: { provider: 'cloudrun' }, domain: 'myapp.dev', domainProxy: true }),
       envName: 'production',
       observed: observed({
+        provider: 'cloudrun', projectId: 'gcp-project', environmentId: 'us-central1',
         services: [observedWeb({
           customDomains: ['myapp.dev'],
           customDomainStatus: {
-            'myapp.dev': { providerVerified: true, dnsConfigured: true },
+            'myapp.dev': { providerDomainId: 'provider-domain-1', providerVerified: true, dnsConfigured: true },
           },
         })],
       }),
@@ -2191,7 +2192,7 @@ describe('diffEnvironment — domain and workload', () => {
         services: [observedWeb({
           customDomains: ['myapp.dev'],
           customDomainStatus: {
-            'myapp.dev': {
+            'myapp.dev': { providerDomainId: 'provider-domain-1',
               providerVerified: true,
               certificateStatus: 'VALID',
               dnsConfigured: false,
@@ -2218,7 +2219,7 @@ describe('diffEnvironment — domain and workload', () => {
         services: [observedWeb({
           customDomains: ['myapp.dev'],
           customDomainStatus: {
-            'myapp.dev': {
+            'myapp.dev': { providerDomainId: 'provider-domain-1',
               providerVerified: true,
               certificateStatus: 'PENDING',
               dnsConfigured: false,
@@ -2241,7 +2242,9 @@ describe('diffEnvironment — domain and workload', () => {
     const result = diffEnvironment({
       spec: withDomain,
       envName: 'production',
-      observed: observed({ services: [observedWeb({ customDomains: ['myapp.dev'] })] }),
+      observed: observed({ services: [observedWeb({ customDomains: ['myapp.dev'],
+        customDomainStatus: { 'myapp.dev': { providerDomainId: 'provider-domain-1' } },
+      })] }),
       local: localWithDomain(),
       customDomainManagement: 'managed',
     });
@@ -2260,7 +2263,7 @@ describe('diffEnvironment — domain and workload', () => {
         services: [observedWeb({
           customDomains: ['myapp.dev'],
           customDomainStatus: {
-            'myapp.dev': {
+            'myapp.dev': { providerDomainId: 'provider-domain-1',
               dnsConfigured: false,
               dnsRecords: [
                 {
@@ -2295,7 +2298,7 @@ describe('diffEnvironment — domain and workload', () => {
         services: [observedWeb({
           customDomains: ['myapp.dev'],
           customDomainStatus: {
-            'myapp.dev': {
+            'myapp.dev': { providerDomainId: 'provider-domain-1',
               providerVerified: false,
               dnsConfigured: true,
             },
@@ -2325,7 +2328,7 @@ describe('diffEnvironment — domain and workload', () => {
         services: [observedWeb({
           customDomains: ['myapp.dev'],
           customDomainStatus: {
-            'myapp.dev': { providerVerified: false, dnsConfigured: true },
+            'myapp.dev': { providerDomainId: 'provider-domain-1', providerVerified: false, dnsConfigured: true },
           },
         })],
       }),
@@ -2357,7 +2360,7 @@ describe('diffEnvironment — domain and workload', () => {
         services: [observedWeb({
           customDomains: ['myapp.dev'],
           customDomainStatus: {
-            'myapp.dev': { providerVerified: false, dnsConfigured: true },
+            'myapp.dev': { providerDomainId: 'provider-domain-1', providerVerified: false, dnsConfigured: true },
           },
         })],
       }),

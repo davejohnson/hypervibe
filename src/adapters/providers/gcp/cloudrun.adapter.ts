@@ -6541,7 +6541,7 @@ providerRegistry.register({
       hosting: {
         workloadKinds: ['web', 'worker', 'cron'],
         serviceVolumes: { workloadKinds: ['web', 'worker'], retention: 'retain-only', attachmentTiming: 'service-update' },
-        customDomains: 'managed',
+        customDomains: 'managed', customDomainRetarget: 'unsupported',
         domainTrafficProxy: 'dns-only',
         maintenance: 'managed',
         teardownBoundary: 'services',
