@@ -299,7 +299,7 @@ jobs:
     needs: prepare
     runs-on: macos-26
     timeout-minutes: 60
-    environment: @@ENVIRONMENT@@
+    environment: @@BUILD_ENVIRONMENT@@
     outputs:
       sha: ${{ needs.prepare.outputs.sha }}
       server_artifact_id: ${{ needs.prepare.outputs.server_artifact_id }}
