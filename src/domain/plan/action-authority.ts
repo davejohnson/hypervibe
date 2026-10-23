@@ -1,3 +1,4 @@
+import { databaseCredentialAliasesActionSchema, DATABASE_CREDENTIAL_ALIASES_OPERATION } from '../services/database-credential-aliases.service.js';
 import { scheduleActivationActionMetadataSchema } from '../services/schedule-activation.service.js';
 import { INBOUND_SIGNING_KEY_OPERATION } from '../services/email-inbound-signing.service.js';
 import { databaseCheckpointIdentitySchema } from '../services/database-checkpoint.js';
@@ -90,6 +91,7 @@ import {
 } from '../services/managed-code-repository.contract.js';
 
 export type PlanMutationCapability =
+  | 'database.credential-aliases.repair'
   | 'database.scope.bind'
   | 'backup-policy.configure'
   | 'api.policy.accept'
@@ -484,6 +486,11 @@ export function resolvePlanActionAuthority(
   if (action.type === 'noop') return null;
   if (!action.id.trim() || !action.resource.name.trim() || !action.resource.provider.trim()) {
     return null;
+  }
+
+  if (action.metadata?.operation === DATABASE_CREDENTIAL_ALIASES_OPERATION) {
+    return databaseCredentialAliasesActionSchema.safeParse(action).success
+      ? authority(action, 'database.credential-aliases.repair') : null;
   }
 
   if (action.metadata?.operation === DATABASE_SCOPE_BIND_OPERATION) {

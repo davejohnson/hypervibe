@@ -764,7 +764,43 @@ function rollbackPresentation(data: DataRecord): CommandPresentation {
     summary: 'Read-only evidence inspection. No workflow dispatched; restoration remains unverified.' };
 }
 
+function inspectionPresentation(data: DataRecord): CommandPresentation {
+  const presentation = commandPresentation('hv_inspect', data);
+  const databases = arrayValue(record(data.observed)?.databases);
+  const lines: string[] = [];
+  const comparisonLabel = (value: unknown): string => {
+    const comparison = record(value);
+    if (comparison?.result === 'match' || comparison?.result === 'mismatch') return comparison.result;
+    const reason = stringValue(comparison?.reason);
+    return reason && ['missing', 'malformed', 'unresolved_reference', 'read_failed', 'scope_unverified', 'unsupported_url_options'].includes(reason)
+      ? `unknown (${reason})` : 'unknown';
+  };
+  for (const database of databases.slice(0, 25)) {
+    const item = record(database);
+    const alignment = record(item?.credentialAlignment);
+    if (!alignment) continue;
+    lines.push(`${stringValue(item?.name) ?? stringValue(item?.externalId) ?? 'Database'}: configured-variable-values; authentication unverified`);
+    const comparisons = arrayValue(record(alignment.issuer)?.comparisons);
+    for (const value of comparisons.slice(0, 25)) {
+      const comparison = record(value);
+      lines.push(`  ${stringValue(comparison?.source) ?? 'Source'} vs ${stringValue(comparison?.against) ?? 'issuer'}: ${comparisonLabel(comparison?.comparison)}`);
+    }
+    const consumers = arrayValue(alignment.consumers);
+    for (const value of consumers.slice(0, 25)) {
+      const consumer = record(value);
+      lines.push(`  ${stringValue(consumer?.name) ?? 'Consumer'} ${stringValue(consumer?.source) ?? 'source'} vs issuer ${stringValue(consumer?.issuerSource) ?? 'source'}: credentials ${comparisonLabel(consumer?.credentialComparison)}; target ${comparisonLabel(consumer?.target)}`);
+    }
+    if (comparisons.length > 25 || consumers.length > 25) lines.push('  Additional comparisons are available in the structured result.');
+  }
+  if (lines.length > 0) {
+    if (databases.length > 25) lines.push('Additional database comparisons are available in the structured result.');
+    presentation.sections.push({ title: 'DATABASE CONFIGURATION COMPARISONS', lines });
+  }
+  return presentation;
+}
+
 const PRESENTERS: Record<string, (data: DataRecord) => CommandPresentation> = {
+  hv_inspect: inspectionPresentation,
   hv_rollback: rollbackPresentation,
   hv_spec: specPresentation,
   hv_plan: planPresentation,

@@ -176,7 +176,7 @@ describe('hosting env var tools', () => {
     'user.email.update',
   ];
 
-  it('SendGrid setup syncs the API key through the Cloud Run hosting adapter when setup-ready', async () => {
+  it('writes an explicitly supplied SendGrid environment value through the Cloud Run hosting adapter', async () => {
     const { project, environment, service } = await setupCloudRunProject();
     const { setEnvCalls } = stubCloudRunHostingAdapter();
     stubSendGridScopes(sendGridSetupScopes);
@@ -330,6 +330,23 @@ describe('hosting env var tools', () => {
     expect(payload.canAuthorizeSenderEmail).toBe(true);
     expect(payload.canManageSenderVerification).toBe(true);
     expect(payload.canManageDomainAuthentication).toBe(false);
+  });
+
+  it.each([false, true])('SendGrid setup diagnostics keep sending permissions separate (webhook required: %s)', async requireWebhook => {
+    const { project } = await setupCloudRunProject();
+    // Twilio documents domain-authentication scopes independently of mail.send.
+    stubSendGridScopes(['whitelabel.read', 'whitelabel.create', 'whitelabel.update']);
+
+    const sg = getSendGridAdapter(getProjectScopeHints(project));
+    if ('error' in sg) throw new Error(sg.error);
+    const permissions = assessSendGridScopes(await sg.adapter.getScopes());
+    const payload = sendGridPermissionPayload(permissions, requireWebhook);
+
+    expect(payload).toMatchObject({ setupReady: !requireWebhook, hasMailSend: false });
+    expect(payload.missingScopes).toEqual(requireWebhook
+      ? { eventWebhook: ['user.webhooks.event.settings.read', 'user.webhooks.event.settings.update'] }
+      : {});
+    expect(payload.requiredScopes).not.toHaveProperty('mailSend');
   });
 
   it('syncHostingEnvVars writes vars through the Cloud Run hosting adapter', async () => {

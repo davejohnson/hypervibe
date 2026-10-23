@@ -1,3 +1,4 @@
+import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from '../domain/services/database-credential-aliases.service.js';
 import { applyScheduleActivation } from '../domain/services/schedule-activation.service.js';
 import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js';
 import { applyApiPolicy, planApiPolicy } from '../domain/services/api-policy.js';
@@ -872,6 +873,28 @@ export async function executePlanApply(ctx: CommandContext, params: {
     ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
     : project;
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  const pendingDatabaseAliases = environment ? ctx.repos.components.findByEnvironmentId(environment.id)
+    .some(component => component.bindings.credentialAliasRepair !== undefined) : false;
+  if (pendingDatabaseAliases && planScope !== 'database-credential-aliases') {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'A database reference repair needs readback verification. Recover its isolated plan before other mutations.' }] };
+  }
+  if (planScope === 'database-credential-aliases') {
+    if (loaded.document.databaseCredentialAliasesReady !== true || !environment || loaded.run.projectId !== project.id
+      || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'Credential alias repair requires its ready plan and exact existing environment; it cannot deploy.' }] };
+    }
+    if (!loaded.document.actions.length && !await verifyDatabaseCredentialAliases({ project: projectForPreflight,
+      spec: envSpec, environmentName: envName, metadata: loaded.document.databaseCredentialAliasesVerification })) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'Database reference configuration changed or could not be verified. Re-plan; no repair was attempted.' }] };
+    }
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
+      handler: action => applyDatabaseCredentialAliases({ project: projectForPreflight, spec: envSpec, environmentName: envName,
+        action, confirmed: new Set(params.confirmActions), encrypted: loaded.document.overrides?.databaseCredentialAliasesEncrypted }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Database reference configuration is separate from SQL authentication, application use and runtime rollout.'] };
+  }
   if (secretsOnly && (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
     || envSpec.deploy?.strategy !== 'branch' || envSpec.deploy.trigger !== 'ci' || params.alwaysRunBootstrap)) {
     return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',

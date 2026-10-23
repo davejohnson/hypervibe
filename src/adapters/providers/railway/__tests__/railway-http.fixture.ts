@@ -25,6 +25,14 @@ const limitedConnection = (nodes: unknown[], { first }: { first?: number }) => {
   return connection(nodes.slice(0, count), nodes.length > count, nodes.length > count ? String(count) : null);
 };
 
+// Only the documented same-service examples needed by these contracts. This
+// deliberately does not purport to implement Railway's complete template DSL.
+function renderVariables(raw: Record<string, string>): Record<string, string> {
+  const resolve = (value: string, seen: Set<string>): string => value.replace(/\$\{\{\s*([A-Z_][A-Z0-9_]*)\s*\}\}/g, (token, key: string) =>
+    !seen.has(key) && raw[key] !== undefined ? resolve(raw[key], new Set([...seen, key])) : token);
+  return Object.fromEntries(Object.entries(raw).map(([key, value]) => [key, resolve(value, new Set([key]))]));
+}
+
 /** Synthetic provider state, executed by the official schema, not a recorded live lifecycle. */
 export async function railwayHttpFixture(options: {
   projectTokenScope?: { projectId: string; environmentId: string };
@@ -35,6 +43,8 @@ export async function railwayHttpFixture(options: {
   dropBackupCreateResponse?: boolean; backupWorkflowId?: string | null;
   dropScheduleUpdateResponse?: boolean; ignoreScheduleUpdate?: boolean;
   dropVariableResponse?: boolean;
+  /** Synthetic reference interpolation, per the official variable API examples. */
+  renderVariableReferences?: boolean;
   responseOverride?: (request: { query: string; variables: Record<string, any> }) => Response | undefined;
 } = {}) {
   let projectExists = options.projectExists !== false;
@@ -196,7 +206,12 @@ export async function railwayHttpFixture(options: {
       }
       return instance;
     },
-    variables: ({ serviceId, environmentId }) => variables.get(`${serviceId}/${environmentId}`) ?? {},
+    variables: ({ serviceId, environmentId, unrendered }) => {
+      const raw = variables.get(`${serviceId}/${environmentId}`) ?? {};
+      return options.renderVariableReferences && !unrendered ? renderVariables(raw) : raw;
+    },
+    variablesForServiceDeployment: ({ serviceId, environmentId }) =>
+      renderVariables(variables.get(`${serviceId}/${environmentId}`) ?? {}),
     environmentCreate: ({ input }) => {
       expect(input.projectId).toBe(projectId);
       const environment = { id: stagingId, name: input.name, config: {} };

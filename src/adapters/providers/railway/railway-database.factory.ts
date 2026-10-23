@@ -22,6 +22,7 @@ import type {
 } from './railway.adapter.js';
 
 interface RailwayHostingOps {
+  railwayCredentialAliases?: import('../../../domain/ports/database-credential-aliases.port.js').IDatabaseCredentialAliases;
   railwayDailyBackups?: IDailyBackupPolicy<RailwayDailyBackupTarget>;
   observeDatabaseCheckpointSource?: (target: { projectId: string; environmentId: string; serviceId: string }) => Promise<DatabaseCheckpointSource>;
   createDatabaseCheckpoint?: (source: DatabaseCheckpointIdentity, label: string) => Promise<{ workflowId: string | null }>;
@@ -394,6 +395,7 @@ export function createRailwayDatabaseAdapter(params: {
 
   return {
     name: 'railway',
+    ...(railway.railwayCredentialAliases ? { credentialAliases: railway.railwayCredentialAliases } : {}),
     ...(railway.railwayDailyBackups ? { dailyBackups: {
       observe: async (input: DatabaseBackupTarget) => {
         try { return await railway.railwayDailyBackups!.observe(dailyBackupTarget(input)); }

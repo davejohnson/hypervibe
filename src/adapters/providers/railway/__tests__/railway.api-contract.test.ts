@@ -92,6 +92,35 @@ describe('pinned provider API contract', () => {
     expect(fixture.contractErrors).toEqual([]);
   });
 
+  it('references the issuer password in every PostgreSQL bootstrap alias', async () => {
+    const fixture = await railwayHttpFixture();
+    const result = await fixture.adapter.ensureComponent('postgres', fixture.environment);
+    expect(result.receipt.success).toBe(true);
+    const writes = fixture.requests.filter(({ query }) => query.includes('mutation UpsertVariables'));
+    expect(writes).toHaveLength(1);
+    expect(writes[0].variables).toMatchObject({ projectId, environmentId: stagingId, serviceId: 'staging-postgres-db' });
+    const variables = writes[0].variables.variables as Record<string, string>;
+
+    // Independent Railway contracts: same-service references and the password
+    // regeneration guide require aliases to follow POSTGRES_PASSWORD.
+    // https://docs.railway.com/variables#referencing-variables-in-the-same-service
+    // https://blog.railway.com/p/security-disclosure-recommendation-rotate-postgresql-database-credentials
+    // This validates serialized expressions through the pinned GraphQL schema;
+    // the synthetic provider does not prove live Railway reference resolution.
+    expect(variables).toMatchObject({
+      PGPASSWORD: '${{POSTGRES_PASSWORD}}',
+      DATABASE_URL: 'postgresql://postgres:${{POSTGRES_PASSWORD}}@postgres-db.railway.internal:5432/postgres',
+      DATABASE_PRIVATE_URL: 'postgresql://postgres:${{POSTGRES_PASSWORD}}@postgres-db.railway.internal:5432/postgres',
+      POSTGRES_USER: 'postgres', POSTGRES_DB: 'postgres',
+      PGHOST: 'postgres-db.railway.internal', PGPORT: '5432', PGUSER: 'postgres', PGDATABASE: 'postgres',
+      PGDATA: '/var/lib/postgresql/data/pgdata',
+    });
+    expect(variables.POSTGRES_PASSWORD).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(Object.entries(variables).filter(([, value]) => value.includes(variables.POSTGRES_PASSWORD))
+      .map(([key]) => key)).toEqual(['POSTGRES_PASSWORD']);
+    expect(fixture.contractErrors).toEqual([]);
+  });
+
   it.each(['Web', 'web-', 'w'.repeat(80)])('uses the shared collision-safe policy in serialized service creation: %s', async (name) => {
     const fixture = await railwayHttpFixture();
     const service: Service = { id: 'local-web', projectId: 'local-project', name,

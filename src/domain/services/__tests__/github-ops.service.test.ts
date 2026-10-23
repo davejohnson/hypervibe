@@ -796,6 +796,8 @@ describe('github tools', () => {
       { env: 'production', branch: 'main', autoDeployOnPush: false, promoteFromEnvironment: 'staging', runtime: { kind: 'node', version: '24' } },
     ]);
 
+    expect(targets[1].promoteFromBranch).toBe('main');
+
     const stagingWorkflow = buildBranchDeployWorkflow('railway', targets[0], { includeStep: false });
     expect(stagingWorkflow.content).toContain('push:');
     expect(stagingWorkflow.content).toContain('branches: [main]');
@@ -811,6 +813,26 @@ describe('github tools', () => {
     expect(productionWorkflow.content).toContain('workflow_dispatch:');
     expect(productionWorkflow.content).toContain('commit_sha:');
     expect(productionWorkflow.content).toContain('ref: ${{ steps.deploy.outputs.sha }}');
+  });
+
+  it('resolves promotion trust from the source branch rather than the destination branch', () => {
+    const project = new ProjectRepository().create({
+      name: 'source-branch', defaultPlatform: 'railway', gitRemoteUrl: 'https://github.com/davejohnson/source-branch',
+    });
+    for (const name of ['staging', 'production']) new EnvironmentRepository().create({ projectId: project.id, name });
+    new SpecStore().replace(project, {
+      version: 1, project: project.name,
+      environments: {
+        staging: { hosting: { provider: 'railway' }, services: { web: {} }, deploy: { strategy: 'branch', trigger: 'ci', branch: 'accepted' } },
+        production: { hosting: { provider: 'railway' }, services: { web: {} }, deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' } },
+      },
+    });
+    const { targets } = resolveBranchDeployTargets(project);
+    const production = targets.find(target => target.environmentName === 'production')!;
+    expect(production.branch).toBe('main');
+    expect(production.promoteFromBranch).toBe('accepted');
+    expect(buildBranchDeployWorkflow('railway', production, { includeStep: false }).content)
+      .toContain('HYPERVIBE_PROMOTE_FROM_BRANCH: "accepted"');
   });
 
   it('embeds Railway environment and service ids from stored specs when available', () => {

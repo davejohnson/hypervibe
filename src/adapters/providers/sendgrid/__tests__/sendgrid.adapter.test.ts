@@ -51,6 +51,34 @@ describe('SendGridAdapter observations', () => {
   });
 });
 
+// Twilio lists Domain Authentication and Mail Send as independent API-key scopes:
+// https://www.twilio.com/docs/sendgrid/api-reference/api-key-permissions
+// These reconstructed scope responses exercise the real GET /scopes transport.
+describe('SendGrid setup credential permissions', () => {
+  it.each([
+    ['domain authentication', ['whitelabel.read', 'whitelabel.create', 'whitelabel.update']],
+    ['sender verification', ['user.email.read', 'user.email.create', 'user.email.update']],
+  ])('accepts %s setup without mail.send', async (_label, scopes) => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(response({ scopes }));
+
+    await expect(connectedAdapter().verify()).resolves.toMatchObject({
+      success: true,
+      permissions: { setupReady: true, hasMailSend: false },
+    });
+    expect(fetch).toHaveBeenCalledExactlyOnceWith('https://api.sendgrid.com/v3/scopes',
+      expect.objectContaining({ method: 'GET' }));
+  });
+
+  it('does not accept an application sending-only key as a setup credential', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(response({ scopes: ['mail.send'] }));
+
+    await expect(connectedAdapter().verify()).resolves.toMatchObject({
+      success: false,
+      permissions: { setupReady: false, hasMailSend: true },
+    });
+  });
+});
+
 // Official scope names: https://www.twilio.com/docs/sendgrid/api-reference/api-key-permissions
 // Wildcards exercise Hypervibe's existing scope matcher, not a live provider grant.
 describe('SendGrid Inbound Parse update permissions', () => {
