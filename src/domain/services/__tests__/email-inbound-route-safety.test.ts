@@ -16,8 +16,8 @@ import { emailInboundConfigHash, EMAIL_OPERATIONS } from '../email-plan.service.
 // https://www.twilio.com/docs/sendgrid/for-developers/parsing-email/securing-your-parse-webhooks
 const hostname = 'inbound.example.com';
 const policyId = 'dd677638-a16d-4e19-95ea-20231c35511b';
-const oldUrl = 'https://api.example.com/old';
-const newUrl = 'https://api.example.com/new';
+const oldUrl = 'https://example.com/old';
+const newUrl = 'https://example.com/new';
 const providerKey = 'test-private-sendgrid-key';
 type Route = { hostname: string; url: string; spam_check: boolean; send_raw: boolean; security_policy?: string };
 const originalRoute = (): Route => ({hostname, url: oldUrl, spam_check: true, send_raw: false, security_policy: policyId});
@@ -49,6 +49,7 @@ describe('Inbound route action safety through real SendGrid HTTP transport', () 
     project = new ProjectRepository().create({name: 'route-safety', defaultPlatform: 'railway'});
     new EnvironmentRepository().create({projectId: project.id, name: 'production', platformBindings: {
       provider: 'railway', projectId: 'project-id', environmentId: 'production-id', services: {api: {serviceId: 'api-id', url: 'https://api.example.com'}},
+      domainDns: {name: 'example.com', providerDomainId: 'domain-id', serviceName: 'api', serviceId: 'api-id', environmentId: 'production-id'},
     }});
     const connection = new ConnectionRepository().create({provider: 'sendgrid', credentialsEncrypted: getSecretStore().encryptObject({apiKey: providerKey})});
     new ConnectionRepository().updateStatus(connection.id, 'verified');

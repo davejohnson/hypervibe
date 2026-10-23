@@ -195,6 +195,7 @@ function compareHosting(input: {
     local: { projectExists: true, environmentExists: true, services: [], components: [], bindings },
     providerBehavior: metadata?.orchestration?.diff,
     customDomainManagement: metadata?.lifecycle?.hosting?.customDomains,
+    customDomainRetarget: metadata?.lifecycle?.hosting?.customDomainRetarget,
     customDomainTrafficProxy: metadata?.lifecycle?.hosting?.domainTrafficProxy,
     // Runtime and deploy provenance are deliberately excluded: current engine
     // may derive them from local records rather than provider-observed values.

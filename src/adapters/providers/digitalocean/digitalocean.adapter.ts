@@ -2216,7 +2216,7 @@ providerRegistry.register({
     },
     lifecycle: {
       hosting: {
-        workloadKinds: ['web', 'worker', 'cron'], customDomains: 'managed', maintenance: 'managed', teardownBoundary: 'project',
+        workloadKinds: ['web', 'worker', 'cron'], customDomains: 'managed', customDomainRetarget: 'unsupported', maintenance: 'managed', teardownBoundary: 'project',
         serviceVolumesUnsupported: {
           reason: 'DigitalOcean App Platform does not support persistent filesystem mounts; its instance filesystem is ephemeral.',
           documentationUrl: 'https://docs.digitalocean.com/products/app-platform/how-to/store-data/',

@@ -8,6 +8,10 @@ import { buildDatabaseAliasEnvVars } from '../services/database-env.js';
 import {
   DOMAIN_ADOPT_OPERATION,
   DOMAIN_DETACH_OPERATION,
+  DOMAIN_RETARGET_OPERATION,
+  desiredDomainServiceName,
+  domainRetargetBindingSchema,
+  observedDomainService,
 } from '../services/domain-attach-policy.js';
 import {
   bindingIdentityFingerprint,
@@ -201,6 +205,7 @@ export function diffEnvironment(input: {
   hostingServiceDeleteScope?: 'environment' | 'project';
   /** Provider-declared environment custom-domain lifecycle. Omission fails closed. */
   customDomainManagement?: 'managed' | 'unsupported';
+  customDomainRetarget?: 'managed' | 'unsupported';
   customDomainTrafficProxy?: 'supported' | 'dns-only';
   /** Repo/branch services should be linked to when spec.deploy.strategy is "branch". */
   expectedSource?: { repo: string; branch: string };
@@ -1451,35 +1456,52 @@ export function diffEnvironment(input: {
   const boundDomainDns = local.bindings?.domainDns;
   if (spec.domain && !spec.loadBalancer) {
     const id = `domain:${spec.domain}`;
+    const serviceName = desiredDomainServiceName(spec);
+    const serviceId = serviceName ? localServiceBindings[serviceName]?.serviceId : undefined;
+    const target = { projectId: local.bindings?.projectId, environmentId: local.bindings?.environmentId, serviceName, serviceId };
+    const targetService = observedDomainService(observed, target);
     const attachedServices = observed
       ? observed.services.filter((service) => service.customDomains.includes(spec.domain!))
       : [];
     const attachedService = attachedServices.length === 1 ? attachedServices[0] : undefined;
-    const attached = observed
-      ? attachedServices.length > 0
-      : Object.values(localServiceBindings).some((b) => b.customDomains?.includes(spec.domain!));
+    const attached = attachedServices.length > 0;
     const domainStatus = attachedService?.customDomainStatus?.[spec.domain];
+    const exactTargetAttachment = Boolean(targetService && attachedService === targetService);
     const domainBindingPresent = boundDomainDns?.name === spec.domain
-      && Boolean(
-        boundDomainDns.providerDomainId
-        && boundDomainDns.serviceId
-        && boundDomainDns.environmentId
-      );
-    const legacyServiceBinding = attachedService
-      ? localServiceBindings[attachedService.name]
-      : undefined;
+      && Boolean(boundDomainDns.providerDomainId && boundDomainDns.serviceId && boundDomainDns.environmentId);
+    const exactTargetBinding = domainBindingPresent && boundDomainDns?.serviceName === serviceName
+      && boundDomainDns.serviceId === serviceId && boundDomainDns.environmentId === target.environmentId
+      && boundDomainDns.providerDomainId === domainStatus?.providerDomainId;
+    const oldBinding = domainRetargetBindingSchema.safeParse(boundDomainDns);
+    const retargetNeeded = Boolean(domainBindingPresent
+      && (boundDomainDns?.serviceName !== serviceName || boundDomainDns?.serviceId !== serviceId));
+    const oldService = oldBinding.success ? observedDomainService(observed, {
+      projectId: target.projectId, ...oldBinding.data,
+    }) : undefined;
+    const retargetReady = Boolean(retargetNeeded && serviceName && targetService && oldBinding.success
+      && oldBinding.data.name === spec.domain && oldBinding.data.environmentId === target.environmentId
+      && localServiceBindings[oldBinding.data.serviceName]?.serviceId === oldBinding.data.serviceId
+      && oldService && (attachedServices.length === 0 || (attachedServices.length === 1
+        && attachedService === oldService && domainStatus?.providerDomainId === oldBinding.data.providerDomainId)));
     const boundServiceDomainAdoption = Boolean(
-      observed
-      && attachedServices.length === 1
-      && !domainBindingPresent
+      exactTargetAttachment && !domainBindingPresent
       && (!boundDomainDns?.name || boundDomainDns.name === spec.domain)
-      && domainStatus?.providerDomainId
-      && domainStatus.providerVerified === true
-      && local.bindings?.projectId === observed.projectId
-      && observed.environmentId
-      && local.bindings?.environmentId === observed.environmentId
-      && legacyServiceBinding?.serviceId === attachedService?.externalId
+      && domainStatus?.providerDomainId && domainStatus.providerVerified === true
     );
+    const targetMissingForBootstrap = Boolean(serviceName && !serviceId && observed && !observed.partial
+      && observed.completeness?.services !== 'unknown'
+      && !observed.services.some(service => service.name === serviceName));
+    const sameServiceRecreateAbsent = Boolean(!retargetNeeded && targetService && domainBindingPresent
+      && attachedServices.length === 0 && boundDomainDns?.creationAcknowledged !== true
+      && spec.domainRecreateRevision && spec.domainRecreateRevision !== boundDomainDns?.recreateRevision);
+    const targetBlockedReason = !serviceName ? 'domain_target_ambiguous'
+      : !targetService && !targetMissingForBootstrap ? 'domain_target_identity_unknown'
+      : retargetNeeded && input.customDomainRetarget !== 'managed' ? 'domain_retarget_unsupported'
+      : retargetNeeded && !retargetReady && !targetMissingForBootstrap ? 'domain_retarget_identity_unknown'
+      : !retargetNeeded && domainBindingPresent && !exactTargetBinding && !sameServiceRecreateAbsent
+        ? boundDomainDns?.creationAcknowledged === true ? 'domain_attachment_observation_pending' : 'domain_attachment_identity_changed'
+      : attached && !exactTargetAttachment && !retargetReady && !targetMissingForBootstrap ? 'domain_target_owner_mismatch'
+      : undefined;
     const ambiguousDomainAttachment = attachedServices.length > 1;
     const dnsConfigured = domainStatus?.dnsConfigured;
     const desiredDomainProxy = input.customDomainTrafficProxy === 'dns-only'
@@ -1504,16 +1526,20 @@ export function diffEnvironment(input: {
     const domainDnsConfigured = dnsConfigured !== false || providerDnsIsProxyOpaque;
     const customDomainsManaged = input.customDomainManagement === 'managed';
     const configured = customDomainsManaged
-      && attached
-      && domainBindingPresent
+      && !targetBlockedReason
+      && exactTargetAttachment
+      && exactTargetBinding
+      && boundDomainDns?.creationAcknowledged !== true
       && domainDnsConfigured
       && (domainStatus?.providerVerified === true
         || (domainStatus?.providerVerified === undefined && dnsConfigured === true))
       && !domainProxyDrift;
     actions.push({
       id,
-      type: !customDomainsManaged
+      type: !customDomainsManaged || targetBlockedReason
         ? 'update'
+        : retargetReady
+          ? 'replace'
         : domainRecreateNeeded
           ? 'replace'
           : configured
@@ -1523,6 +1549,10 @@ export function diffEnvironment(input: {
       verified: customDomainsManaged && verified,
       reason: !customDomainsManaged
         ? `${provider} does not implement managed environment custom domains; DNS will not be changed for ${spec.domain}`
+        : targetBlockedReason
+          ? `Domain ${spec.domain} cannot target a unique, exact public web service (${targetBlockedReason}); refresh bindings or resolve the declared service ownership before applying`
+        : retargetReady
+          ? `Move domain ${spec.domain} from ${boundDomainDns!.serviceName} to the desired public ${serviceName} service`
         : domainRecreateNeeded
         ? `Domain ${spec.domain} has an unapplied recreate revision`
         : ambiguousDomainAttachment
@@ -1542,17 +1572,22 @@ export function diffEnvironment(input: {
                 ? `Domain ${spec.domain} is attached on ${provider}, but provider verification status was not observed`
                 : 'Domain attached'
         : `Domain ${spec.domain} is not attached to any service`,
-      dependsOn: !customDomainsManaged || configured ? undefined : projectDep,
-      ...(customDomainsManaged && domainRecreateNeeded ? { requiresConfirm: true } : {}),
+      dependsOn: !customDomainsManaged || configured ? undefined
+        : [...(projectDep ?? []), ...(targetMissingForBootstrap ? [`service:${serviceName}`] : [])],
+      ...(customDomainsManaged && (retargetReady || domainRecreateNeeded) && !targetBlockedReason ? { requiresConfirm: true } : {}),
       ...(domainProxyDrift
         ? { diff: [{ field: 'dns:proxied', from: String(appliedDomainProxy), to: String(desiredDomainProxy) }] }
         : {}),
       metadata: {
+        ...target,
+        ...(boundDomainDns?.providerDomainId ? { providerDomainId: boundDomainDns.providerDomainId } : {}),
         ...(!customDomainsManaged ? { blockedReason: 'custom_domain_unsupported' } : {}),
+        ...(targetBlockedReason ? { blockedReason: targetBlockedReason } : {}),
+        ...(retargetReady && !targetBlockedReason ? { operation: DOMAIN_RETARGET_OPERATION, previousDomain: boundDomainDns } : {}),
         ...(customDomainsManaged && ambiguousDomainAttachment
           ? { blockedReason: 'ambiguous_domain_identity' }
           : {}),
-        ...(customDomainsManaged && boundServiceDomainAdoption
+        ...(customDomainsManaged && boundServiceDomainAdoption && !targetBlockedReason
           ? {
             operation: DOMAIN_ADOPT_OPERATION,
             providerDomainId: domainStatus!.providerDomainId,
@@ -1562,7 +1597,7 @@ export function diffEnvironment(input: {
             environmentId: observed!.environmentId,
           }
           : {}),
-        ...(customDomainsManaged && attached && !domainBindingPresent && !boundServiceDomainAdoption && !ambiguousDomainAttachment
+        ...(customDomainsManaged && attached && !domainBindingPresent && !boundServiceDomainAdoption && !ambiguousDomainAttachment && !targetBlockedReason
           ? { blockedReason: 'domain_binding_missing' }
           : {}),
         ...(domainStatus?.dnsRecords ? { dnsRecords: domainStatus.dnsRecords } : {}),

@@ -5485,6 +5485,7 @@ export class RailwayAdapter implements
   }
 
   async getCustomDomainStatus(params: {
+    projectId?: string;
     serviceId: string;
     environmentId: string;
     domain: string;
@@ -5494,12 +5495,16 @@ export class RailwayAdapter implements
     }
 
     const query = gql`
-      query GetServiceCustomDomains($id: String!) {
+      query GetServiceCustomDomains($id: String!, $after: String) {
         service(id: $id) {
           id
-          serviceInstances {
+          projectId
+          serviceInstances(first: 100, after: $after) {
+            pageInfo { hasNextPage endCursor }
             edges {
               node {
+                id
+                serviceId
                 environmentId
                 domains {
                   customDomains {
@@ -5531,29 +5536,66 @@ export class RailwayAdapter implements
     `;
 
     try {
-      const result = await this.client.request<{
-        service?: {
-          serviceInstances?: {
-            edges?: Array<{
-              node?: {
-                environmentId?: string;
-                domains?: {
-                  customDomains?: RailwayCustomDomain[];
-                };
-              };
-            }>;
-          };
-        };
-      }>(query, { id: params.serviceId });
-
-      const matches = (result.service?.serviceInstances?.edges ?? [])
-        .filter((edge) => edge.node?.environmentId === params.environmentId)
-        .flatMap((edge) => edge.node?.domains?.customDomains ?? [])
-        .filter((domain) => domain.domain.toLowerCase() === params.domain.toLowerCase());
-      if (matches.length > 1) {
-        throw new Error(`Multiple Railway custom-domain attachments match ${params.domain} in environment ${params.environmentId}.`);
+      let after: string | undefined;
+      const cursors = new Set<string>();
+      const environments = new Set<string>();
+      const domainIds = new Set<string>();
+      const matches: RailwayCustomDomain[] = [];
+      for (let page = 0; page < 1000; page++) {
+        const result = await this.client.request<unknown>(query, {
+          id: params.serviceId, ...(after ? { after } : {}),
+        });
+        if (!isRecord(result) || !isRecord(result.service)
+          || result.service.id !== params.serviceId
+          || typeof result.service.projectId !== 'string' || !result.service.projectId
+          || (params.projectId && result.service.projectId !== params.projectId)) {
+          throw new Error('Railway custom-domain service identity is missing or changed.');
+        }
+        const connection = result.service.serviceInstances;
+        if (!isRecord(connection) || !Array.isArray(connection.edges) || connection.edges.length > 100
+          || !isRecord(connection.pageInfo) || typeof connection.pageInfo.hasNextPage !== 'boolean'
+          || (connection.pageInfo.endCursor !== null && typeof connection.pageInfo.endCursor !== 'string')) {
+          throw new Error('Railway custom-domain instance pagination is incomplete.');
+        }
+        for (const edge of connection.edges) {
+          const node = isRecord(edge) ? edge.node : undefined;
+          if (!isRecord(node) || typeof node.id !== 'string' || !node.id
+            || node.serviceId !== params.serviceId || typeof node.environmentId !== 'string' || !node.environmentId
+            || environments.has(node.environmentId) || !isRecord(node.domains)
+            || !Array.isArray(node.domains.customDomains)) {
+            throw new Error('Railway custom-domain instance identity or domain inventory is incomplete or duplicated.');
+          }
+          environments.add(node.environmentId);
+          for (const item of node.domains.customDomains) {
+            const status = isRecord(item) ? item.status : undefined;
+            if (!isRecord(item) || typeof item.id !== 'string' || !item.id || domainIds.has(item.id)
+              || typeof item.domain !== 'string' || !item.domain || !isRecord(status)
+              || typeof status.verified !== 'boolean' || typeof status.certificateStatus !== 'string'
+              || !Array.isArray(status.dnsRecords)
+              || status.dnsRecords.some(record => !isRecord(record)
+                || ['currentValue', 'fqdn', 'hostlabel', 'purpose', 'recordType', 'requiredValue', 'status', 'zone']
+                  .some(key => typeof record[key] !== 'string'))
+              || ['verificationDnsHost', 'verificationToken'].some(key => status[key] !== null && typeof status[key] !== 'string')) {
+              throw new Error('Railway custom-domain identity or verification status is incomplete or duplicated.');
+            }
+            domainIds.add(item.id);
+            if (node.environmentId === params.environmentId && item.domain.toLowerCase() === params.domain.toLowerCase()) {
+              matches.push(item as unknown as RailwayCustomDomain);
+            }
+          }
+        }
+        if (matches.length > 1) {
+          throw new Error(`Multiple Railway custom-domain attachments match ${params.domain} in environment ${params.environmentId}.`);
+        }
+        if (!connection.pageInfo.hasNextPage) return matches[0] ?? null;
+        const next = connection.pageInfo.endCursor;
+        if (typeof next !== 'string' || !next || next === after || cursors.has(next)) {
+          throw new Error('Railway custom-domain pagination cursor is missing or repeated.');
+        }
+        cursors.add(next);
+        after = next;
       }
-      return matches[0] ?? null;
+      throw new Error('Railway custom-domain observation exceeded its page limit.');
     } catch (error) {
       throw new Error(`Failed to observe Railway custom domain ${params.domain}: ${this.describeError(error)}`);
     }
@@ -5564,6 +5606,7 @@ export class RailwayAdapter implements
     serviceId: string;
     environmentId: string;
     domain: string;
+    customDomainId?: string;
   }): Promise<Receipt> {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
@@ -5595,6 +5638,13 @@ export class RailwayAdapter implements
     }
 
     const existing = await this.getCustomDomainStatus(params);
+    if (params.customDomainId && existing?.id !== params.customDomainId) {
+      return {
+        success: false,
+        message: 'Failed to attach Railway custom domain',
+        error: `Reviewed custom-domain id ${params.customDomainId} is absent or changed for ${params.domain}.`,
+      };
+    }
     if (existing) {
       let current = existing;
       let refreshed = false;
@@ -5605,12 +5655,19 @@ export class RailwayAdapter implements
           }
         `;
         try {
-          await this.client.request<{ customDomainUpdate: boolean }>(mutation, {
+          const receipt = await this.client.request<{ customDomainUpdate: boolean }>(mutation, {
             id: existing.id,
             environmentId: params.environmentId,
           });
+          if (receipt.customDomainUpdate !== true) {
+            throw new Error('Railway did not acknowledge custom-domain refresh.');
+          }
+          const observed = await this.getCustomDomainStatus(params);
+          if (!observed || observed.id !== existing.id) {
+            throw new Error('Railway did not confirm the exact refreshed custom-domain attachment.');
+          }
           refreshed = true;
-          current = await this.getCustomDomainStatus(params) ?? existing;
+          current = observed;
         } catch (error) {
           return {
             success: false,
@@ -5654,6 +5711,7 @@ export class RailwayAdapter implements
       }
     `;
 
+    let acknowledgedDomainId: string | undefined;
     try {
       const result = await this.client.request<{
         customDomainCreate: {
@@ -5669,7 +5727,11 @@ export class RailwayAdapter implements
         },
       });
 
+      acknowledgedDomainId = this.customDomainAcknowledgementId(result.customDomainCreate, params.domain);
       const current = await this.getCustomDomainStatus(params);
+      if (!current || current.id !== acknowledgedDomainId) {
+        throw new Error('Railway did not confirm the exact created custom-domain attachment.');
+      }
       return {
         success: true,
         message: 'Railway custom domain attached',
@@ -5691,8 +5753,21 @@ export class RailwayAdapter implements
         success: false,
         message: 'Failed to attach Railway custom domain',
         error: this.describeError(error),
+        ...(acknowledgedDomainId ? { data: {
+          phase: 'customDomainCreateVerification', creationAcknowledged: true,
+          customDomainId: acknowledgedDomainId, projectId: params.projectId,
+          serviceId: params.serviceId, environmentId: params.environmentId, domain: params.domain,
+        } } : {}),
       };
     }
+  }
+
+  private customDomainAcknowledgementId(value: unknown, domain: string): string {
+    if (!isRecord(value) || typeof value.id !== 'string' || !value.id.trim()
+      || typeof value.domain !== 'string' || value.domain.toLowerCase() !== domain.toLowerCase()) {
+      throw new Error('Railway returned an invalid custom-domain creation acknowledgement.');
+    }
+    return value.id;
   }
 
   async detachCustomDomain(params: {
@@ -5773,6 +5848,7 @@ export class RailwayAdapter implements
     serviceId: string;
     environmentId: string;
     domain: string;
+    customDomainId?: string;
   }): Promise<Receipt> {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
@@ -5817,6 +5893,14 @@ export class RailwayAdapter implements
           environmentId: params.environmentId,
           domain: params.domain,
         },
+      };
+    }
+
+    if (existing && params.customDomainId && existing.id !== params.customDomainId) {
+      return {
+        success: false,
+        message: 'Failed to recreate Railway custom domain',
+        error: `Reviewed custom-domain id ${params.customDomainId} does not match observed id ${existing.id} for ${params.domain}.`,
       };
     }
 
@@ -5892,6 +5976,7 @@ export class RailwayAdapter implements
       }
     `;
 
+    let acknowledgedDomainId: string | undefined;
     try {
       const created = await this.client.request<{
         customDomainCreate: {
@@ -5906,7 +5991,11 @@ export class RailwayAdapter implements
           domain: params.domain,
         },
       });
+      acknowledgedDomainId = this.customDomainAcknowledgementId(created.customDomainCreate, params.domain);
       const current = await this.getCustomDomainStatus(params);
+      if (!current || current.id !== acknowledgedDomainId) {
+        throw new Error('Railway did not confirm the exact replacement custom-domain attachment.');
+      }
 
       return {
         success: true,
@@ -5934,8 +6023,12 @@ export class RailwayAdapter implements
         message: 'Failed to recreate Railway custom domain',
         error: this.describeError(error),
         data: {
-          phase: 'customDomainCreate',
+          phase: acknowledgedDomainId ? 'customDomainCreateVerification' : 'customDomainCreate',
           domain: params.domain,
+          ...(acknowledgedDomainId ? {
+            creationAcknowledged: true, customDomainId: acknowledgedDomainId,
+            projectId: params.projectId, serviceId: params.serviceId, environmentId: params.environmentId,
+          } : {}),
           ...(existing ? { deletedCustomDomainId: existing.id } : {}),
         },
       };
@@ -7736,7 +7829,7 @@ providerRegistry.register({
       },
     },
     lifecycle: {
-      hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'managed', maintenance: 'managed', teardownBoundary: 'environment',
+      hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'managed', customDomainRetarget: 'managed', maintenance: 'managed', teardownBoundary: 'environment',
         environmentTasks: { variableMode: 'references', execution: 'temporary-workload', status: 'ready-for-live' },
         recoveryTasks: { variableMode: 'references', execution: 'temporary-workload', status: 'ready-for-live', databaseProviders: ['railway'] },
         serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only' } },

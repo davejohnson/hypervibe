@@ -2006,7 +2006,7 @@ providerRegistry.register({
       hosting: {
         workloadKinds: ['web'],
         serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only' },
-        customDomains: 'managed',
+        customDomains: 'managed', customDomainRetarget: 'unsupported',
         domainTrafficProxy: 'dns-only',
         maintenance: 'unsupported',
         teardownBoundary: 'project',

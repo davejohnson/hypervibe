@@ -453,6 +453,26 @@ it must not collapse a successful inventory containing differently named
 instances into `null`, select one by convention, or silently adopt it. Exact
 adoption or retained cleanup is a separate explicit `hv_import` decision.
 
+An environment custom domain targets the sole desired public web workload,
+using the service schema's defaults; binding insertion order never selects its
+owner. Plan, apply, status and hosted inspection share this decision. Missing
+or ambiguous targets block domain mutation. Existing targets are pinned by
+their provider project, environment and service identities and rechecked before
+apply; provisioning a missing service requires fresh planning before attachment.
+The owning selection and recovery rules are documented in
+[the custom-domain target contract](docs/custom-domain-targets.md).
+
+A bound domain on a different service is not convergence or an adoption
+candidate. Only providers explicitly admitted by the hosting registry may plan
+a confirmation-gated `customDomainRetarget` replacement. The reviewed action
+pins the old provider/domain/zone/full DNS record identities and the new service.
+Apply proves the destination exists before detaching the exact old domain,
+verifies provider absence, and removes only the reviewed DNS records. It keeps
+the old binding until all cleanup succeeds, then clears it before attachment.
+New attachment identity and confirmed DNS writes survive pending verification
+or partial failure. Retrying after completed cleanup must not delete again.
+Unknown provider reads never establish absence or authorize dependent DNS work.
+
 When an attached Railway domain remains provider-unverified, the reviewed
 domain update first calls Railway's non-destructive `customDomainUpdate` for
 the same environment to refresh provider verification before rewriting DNS.
@@ -1237,8 +1257,20 @@ scope, retention, permissions, and offline verification limits.
 
 SendGrid email configuration lives under each environment's `email` desired
 state. It owns one optional sender identity and one optional Inbound Parse route
-per environment. The inbound route names a public web service and relative path;
-its provider URL is derived from that service's durable hosting binding. Alias
+per environment. The inbound route names a public web service and relative path.
+`email-callback-target.ts` owns callback selection for inbound parsing, delivery
+events, their signing/key lifecycles and webhook readiness. When the receiver is
+the desired unique public web service, prefer the declared HTTPS domain only
+with exact durable provider/environment/service/domain ownership. Missing,
+ambiguous, wrong-owner or creation-pending domain evidence defers the callback;
+it never proposes replacing the route with the provider hostname. This is
+ownership evidence, not TLS or DNS readiness: the actual non-noop domain action
+is a callback prerequisite, suppresses callback replacement/confirmation, and
+requires a fresh plan after convergence. Without a selected service-owned
+domain, retain that receiver's safe durable provider URL. Load-balancer domains
+remain owned by their existing lifecycle. Relative callback paths must preserve
+the selected origin and may not contain credentials, query or fragment data.
+Alias
 local parts are application routing intent because SendGrid delivers all mail
 for one parse hostname to one endpoint.
 
@@ -1278,6 +1310,18 @@ attachment is preserved by an exact-hostname PATCH with the complete reviewed
 route settings; unknown attachment evidence blocks changes instead of deleting
 and recreating the route. Alias-only changes record local bindings with read
 permission; route PATCH requires read and update permissions.
+For one uniquely listed desired hostname, ordinary route observation reads its
+exact setting through the existing SendGrid adapter, independently of managed
+signing intent. This exact route replaces the list summary; failed, malformed
+or wrong-host reads remain unknown and never grant list-based write authority.
+An omitted association stays unknown. A positive policy ID can be preserved
+without assuming it is a signing policy; ordinary observation never reads or
+selects a policy definition. Declared signing separately reads the associated
+policy using that same validated route observation.
+Plan diagnostics may expose one exactly matched route's safe HTTPS URL and
+boolean flags, plus whether its policy association was positively observed;
+omitted policy evidence remains unknown. They exclude userinfo, query strings,
+fragments and provider policy/key objects.
 Matching unmanaged provider identities are explicit adoption actions;
 duplicates and observation failures block instead of selecting or creating.
 

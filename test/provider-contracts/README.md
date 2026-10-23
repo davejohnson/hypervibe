@@ -8,6 +8,65 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+Email callback selection is a Hypervibe lifecycle policy, not a new SendGrid API
+capability. The staging counterexample had an existing public-domain route while
+the provider service binding retained its Railway hostname; using that hostname
+would propose an unnecessary replacement. Shared planner/resolver regressions
+cover exact domain ownership, pending domain prerequisites and fresh-plan
+adoption. Signing and readiness tests use the real SendGrid client with synthetic
+HTTP responses, and deliberately stale ownership must cause zero provider/key
+writes. The initial planner cases (7), helper cases (23) and signing/readiness
+cases (8) were observed failing before their fixes. These tests run in ordinary
+`npm test`; they do not establish live domain/TLS readiness or mail delivery.
+
+The [Inbound Parse security guide](https://www.twilio.com/docs/sendgrid/for-developers/parsing-email/securing-your-parse-webhooks)
+documents an attached `security_policy` ID. The general GET/list/PATCH schemas
+do not establish that an omitted association is unsigned or safe to remove.
+This change preserves the existing unknown-policy replacement block. Sanitized
+plan evidence reports a safe observed URL/flags and known/unknown association,
+without exposing policy objects or private URL fields.
+
+Ordinary inbound observation additionally performs the documented
+[exact-hostname GET](https://www.twilio.com/docs/sendgrid/api-reference/settings-inbound-parse/retrieve-a-specific-parse-setting)
+after one unique list match. Its HTTP-boundary resolver/planner regression first
+failed 10 cases before the fix: a list summary could omit positive association
+evidence, or remain incorrectly authoritative when the exact read omitted the
+association, failed, or returned malformed/unexpected identity. Exact reads now
+replace that summary; errors remain unknown and duplicates are never selected.
+Policy IDs are preserved independently of signature intent, so ordinary
+observation does not require or infer signature material for OAuth policies.
+The [update reference](https://www.twilio.com/docs/sendgrid/api-reference/settings-inbound-parse/update-a-parse-setting)
+does not guarantee association preservation when the ID is omitted; that case
+continues to block updates. These reconstructed responses test client/lifecycle
+behavior, not whether a live exact read will return the missing association.
+
+The Railway custom-domain HTTP suite reconstructs a shared service whose
+production instance precedes staging in a paginated response. It executes the
+real `graphql-request` client against the pinned official SDL and verifies exact
+staging lookup/deletion, complete pagination, unknown malformed observations,
+terminal deletion readback, and exact attachment/replacement/refresh readback.
+Missing destination instances are negative controls: existing inspection already
+refused to provision them. Refresh false acknowledgements and vanished/replaced
+identities were separately observed failing before their fix. The
+recreation race regression also failed when a different same-host attachment
+replaced the reviewed ID; it now blocks deletion while terminal-absence recovery
+still permits the explicitly requested recreation. Ordinary attachment also
+rejects an absent or replaced reviewed ID before any create or refresh; those
+race regressions failed before the matching guard was added. The
+regressions first failed when the adapter treated missing selected fields or a
+first page as absence; runtime changes then passed the affected suite. Synthetic
+responses establish this boundary, not live DNS, certificate issuance or Railway
+availability. `railway.custom-domain.api-contract.test.ts` runs in ordinary
+`npm test`; the isolated command is `npx vitest run
+src/adapters/providers/railway/__tests__/railway.custom-domain.api-contract.test.ts`.
+An acknowledged create followed by unknown, absent or conflicting readback stops
+without repeating the write and returns the validated acknowledgement ID and
+exact target scope for the shared lifecycle's pending-ownership marker. Invalid
+acknowledgements never authorize that marker. Provider tests cover the receipt
+handoff; durable marker persistence and retry admission belong to the separate
+application lifecycle regressions. A transport failure without an acknowledged
+identity does not establish creation ownership or successful cleanup.
+
 The [scoped secret contract](../../docs/scoped-secret-updates.md) reviews all
 seven hosting providers and distinguishes native capabilities from implemented
 admission. `scoped-secret-provider-contracts.test.ts` pins that roster and the

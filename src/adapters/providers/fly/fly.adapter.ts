@@ -1577,7 +1577,7 @@ providerRegistry.register({
       hosting: {
         workloadKinds: ['web', 'worker'],
         serviceVolumes: { workloadKinds: ['web', 'worker'], retention: 'retain-only', attachmentTiming: 'workload-create' },
-        customDomains: 'managed',
+        customDomains: 'managed', customDomainRetarget: 'unsupported',
         domainTrafficProxy: 'supported',
         maintenance: 'unsupported',
         teardownBoundary: 'services',

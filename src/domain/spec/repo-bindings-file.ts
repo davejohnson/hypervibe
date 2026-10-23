@@ -12,6 +12,7 @@ import { databaseCheckpointBindings } from '../services/database-checkpoint.js';
 import { backupPolicyAttempts, mergeBackupPolicyAttempts } from '../services/backup-policy-attempts.js';
 import { projectRecoveryDatabases, recoveryDatabaseBindings } from '../services/recovery-database-bindings.js';
 import type { Component } from '../entities/component.entity.js';
+import { parseHostingBindings } from '../ports/hosting.port.js';
 
 // Bindings are the inverse of the spec's source-of-truth contract: the DB
 // column `environments.platform_bindings` is authoritative (it holds data the
@@ -78,6 +79,50 @@ function mergeVolumeRecovery<T extends ServiceVolumeComponentBinding>(previous: 
   return rank[next.state] >= rank[previous.state] ? next : previous;
 }
 
+/** Repository metadata cannot discard or reassign retained provider/DNS ownership. */
+function retainDomainRecovery(
+  existing: Record<string, unknown>,
+  incoming: Record<string, unknown>,
+  merged: Record<string, unknown>
+): void {
+  const local = parseHostingBindings({ platformBindings: { domainDns: existing.domainDns } }).domainDns;
+  const next = parseHostingBindings({ platformBindings: { domainDns: incoming.domainDns } }).domainDns;
+  if (!local) return; // An absent local identity may still be reconstructed from its export.
+  const conflict = () => new Error('Repository domain recovery identity conflicts with retained local state.');
+  for (const key of ['provider', 'projectId', 'environmentId'] as const) {
+    if (existing[key] !== undefined && incoming[key] !== undefined && existing[key] !== incoming[key]) throw conflict();
+  }
+  const identityKeys = ['name', 'providerDomainId', 'serviceName', 'serviceId', 'environmentId', 'zoneId', 'recreateRevision'] as const;
+  for (const key of identityKeys) {
+    if (local[key] !== undefined && next?.[key] !== undefined && local[key] !== next[key]) throw conflict();
+  }
+  const incomingService = local.serviceName ? asRecord(asRecord(incoming.services)?.[local.serviceName]) : null;
+  if (local.serviceId && incomingService?.serviceId !== undefined && incomingService.serviceId !== local.serviceId) throw conflict();
+
+  const retained = { ...asRecord(merged.domainDns) };
+  for (const key of identityKeys) {
+    if (local[key] !== undefined) retained[key] = local[key];
+  }
+  if (local.creationAcknowledged === true) retained.creationAcknowledged = true;
+  if (local.records !== undefined || next?.records !== undefined) {
+    const localIds = new Set((local.records ?? []).map(record => record.id));
+    const ownsRecovery = Boolean(local.providerDomainId || local.creationAcknowledged || localIds.size);
+    const exactOwner = ['provider', 'projectId', 'environmentId'].every(key =>
+      typeof existing[key] === 'string' && existing[key] && existing[key] === incoming[key])
+      && ['name', 'providerDomainId', 'serviceName', 'serviceId', 'environmentId', 'zoneId'].every(key =>
+        typeof local[key] === 'string' && local[key] && local[key] === next?.[key]);
+    const records = new Map<string, NonNullable<typeof local.records>[number]>();
+    for (const record of [...(local.records ?? []), ...(next?.records ?? [])]) {
+      if (!localIds.has(record.id) && ownsRecovery && !exactOwner) throw conflict();
+      const previous = records.get(record.id);
+      if (previous && (previous.name !== record.name || previous.type !== record.type || previous.target !== record.target)) throw conflict();
+      records.set(record.id, record);
+    }
+    retained.records = [...records.values()];
+  }
+  merged.domainDns = retained;
+}
+
 /**
  * Overlay the sanitized repository export onto authoritative local bindings.
  * Top-level bindings absent from the export retain the historical merge
@@ -141,6 +186,7 @@ export function mergeRepoPlatformBindings(
       merged[key] = mergeSanitizedBindingObject(existingRecord, repoRecord);
     }
   }
+  retainDomainRecovery(existing, repoBindings, merged);
   if (!parseServiceVolumeBindings({ platformBindings: merged })) {
     throw new Error('Malformed or duplicate merged service-volume identity; refusing to overwrite recovery state.');
   }

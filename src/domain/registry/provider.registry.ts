@@ -213,6 +213,8 @@ export interface ProviderMetadata {
       serviceVolumesUnsupported?: { reason: string; documentationUrl: string };
       /** Environment custom domains are either fully managed or explicitly unsupported. */
       customDomains: 'managed' | 'unsupported';
+      /** Exact service-to-service domain moves need a separately reviewed native contract. */
+      customDomainRetarget?: 'managed' | 'unsupported';
       /** Whether traffic DNS may be proxied or must remain directly resolvable. */
       domainTrafficProxy?: 'supported' | 'dns-only';
       /** Provider-owned direct-origin and background-workload suspension. */

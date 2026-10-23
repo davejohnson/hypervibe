@@ -72,6 +72,35 @@ describe('SendGrid signing lifecycle through real HTTP client and shared hosting
   });
   afterEach(() => { vi.restoreAllMocks(); SqliteAdapter.resetInstance(); fs.rmSync(dir, {recursive: true, force: true}); });
 
+  it('signs the managed public endpoint even when the provider URL differs', async () => {
+    const spec = environmentSpecSchema.parse({...desired(), domain: 'api.example.com'});
+    new EnvironmentRepository().updatePlatformBindings(envId, {
+      services: {api: {serviceId: 'api-id', url: 'https://provider.example.net'}},
+      domainDns: {name: 'api.example.com', providerDomainId: 'domain-id', serviceName: 'api', serviceId: 'api-id', environmentId: 'prod-id'},
+    });
+    const first = await plan(spec);
+    expect(first.actions[0].metadata?.blockedReason).toBeUndefined();
+    expect(first.actions[0].metadata?.expectedUrl).toBe(url);
+    expect((await apply(first.actions[0], spec)).success).toBe(true);
+    expect((await apply((await plan(spec)).actions[1], spec)).success).toBe(true);
+    expect(writes).toHaveLength(1);
+    expect(setEnv).toHaveBeenCalledTimes(1);
+  });
+  it.each(['wrong-owner', 'creation-pending'])('blocks changed managed domain %s before signing or key writes', async condition => {
+    const spec = environmentSpecSchema.parse({...desired(), domain: 'api.example.com'});
+    const domain = {name: 'api.example.com', providerDomainId: 'domain-id', serviceName: 'api', serviceId: 'api-id', environmentId: 'prod-id'};
+    new EnvironmentRepository().updatePlatformBindings(envId, {domainDns: domain});
+    const action = (await plan(spec)).actions[0];
+    new EnvironmentRepository().updatePlatformBindings(envId, {domainDns: {...domain,
+      ...(condition === 'wrong-owner' ? {serviceId: 'other-service'} : {creationAcknowledged: true})}});
+    expect(await apply(action, spec)).toMatchObject({success: false, status: 'blocked'});
+    const blocked = (await plan(spec)).actions[0];
+    expect(blocked.metadata?.blockedReason).toBeTruthy();
+    expect(blocked.requiresConfirm).not.toBe(true);
+    expect(writes).toEqual([]);
+    expect(setEnv).not.toHaveBeenCalled();
+  });
+
   it('stages exact confirmed signing before key publication, then becomes mutation-free noop', async () => {
     const first = await plan(); expect(first.actions).toHaveLength(1);
     expect((await apply(first.actions[0], desired(), false)).success).toBe(false);

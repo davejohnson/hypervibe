@@ -93,6 +93,7 @@ describe('declarative email apply', () => {
         projectId: 'rail-project',
         environmentId: 'rail-environment',
         services: { api: { serviceId: 'rail-service', url: 'https://api.example.com' } },
+        domainDns: {name: 'example.com', providerDomainId: 'domain-id', serviceName: 'api', serviceId: 'rail-service', environmentId: 'rail-environment'},
       },
     });
     const connection = new ConnectionRepository().create({
@@ -292,9 +293,13 @@ describe('declarative email apply', () => {
   });
 
   it('creates the dedicated CI inbound route without provider-managed local parts', async () => {
+    const boundEnvironment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    new EnvironmentRepository().updatePlatformBindings(boundEnvironment.id, {domainDns: {
+      name: 'staging.example.com', providerDomainId: 'domain-id', serviceName: 'api', serviceId: 'rail-service', environmentId: 'rail-environment',
+    }});
     const route = {
       hostname: 'ci-mail.staging.example.com',
-      url: 'https://api.example.com/api/webhooks/canary-email-receipts',
+      url: 'https://staging.example.com/api/webhooks/canary-email-receipts',
       spam_check: true,
       send_raw: false,
     };
@@ -319,7 +324,7 @@ describe('declarative email apply', () => {
         spamCheck: true,
         sendRaw: false,
         configHash: emailInboundConfigHash(spec),
-        expectedUrl: 'https://api.example.com/api/webhooks/canary-email-receipts',
+        expectedUrl: 'https://staging.example.com/api/webhooks/canary-email-receipts',
       },
     };
 
@@ -341,7 +346,7 @@ describe('declarative email apply', () => {
     });
     expect(create).toHaveBeenCalledWith(
       'ci-mail.staging.example.com',
-      'https://api.example.com/api/webhooks/canary-email-receipts',
+      'https://staging.example.com/api/webhooks/canary-email-receipts',
       { spam_check: true, send_raw: false }
     );
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
@@ -470,7 +475,7 @@ describe('declarative email apply', () => {
   it('creates and verifies the exact service-targeted inbound parse route', async () => {
     const route = {
       hostname: 'inbound.example.com',
-      url: 'https://api.example.com/webhooks/sendgrid/inbound',
+      url: 'https://example.com/webhooks/sendgrid/inbound',
       spam_check: true,
       send_raw: false,
     };
@@ -495,7 +500,7 @@ describe('declarative email apply', () => {
         spamCheck: true,
         sendRaw: false,
         configHash: emailInboundConfigHash(spec),
-        expectedUrl: 'https://api.example.com/webhooks/sendgrid/inbound',
+        expectedUrl: 'https://example.com/webhooks/sendgrid/inbound',
       },
     };
 
@@ -509,7 +514,7 @@ describe('declarative email apply', () => {
     expect(result.success).toBe(true);
     expect(create).toHaveBeenCalledWith(
       'inbound.example.com',
-      'https://api.example.com/webhooks/sendgrid/inbound',
+      'https://example.com/webhooks/sendgrid/inbound',
       { spam_check: true, send_raw: false }
     );
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
@@ -577,7 +582,7 @@ describe('declarative email apply', () => {
       click: false,
       dropped: false,
     };
-    const enabled = { ...disabled, enabled: true, url: 'https://api.example.com/webhooks/sendgrid/events', bounce: true, delivered: true };
+    const enabled = { ...disabled, enabled: true, url: 'https://example.com/webhooks/sendgrid/events', bounce: true, delivered: true };
     vi.spyOn(SendGridAdapter.prototype, 'getEventWebhookSettings')
       .mockResolvedValueOnce(disabled)
       .mockResolvedValueOnce(enabled);
@@ -598,14 +603,14 @@ describe('declarative email apply', () => {
           path: '/webhooks/sendgrid/events',
           events: ['bounce', 'delivered'],
           configHash: emailDeliveryEventsConfigHash(spec),
-          expectedUrl: 'https://api.example.com/webhooks/sendgrid/events',
+          expectedUrl: 'https://example.com/webhooks/sendgrid/events',
         },
       },
     });
     expect(result.success).toBe(true);
     expect(update).toHaveBeenCalledWith(expect.objectContaining({
       enabled: true,
-      url: 'https://api.example.com/webhooks/sendgrid/events',
+      url: 'https://example.com/webhooks/sendgrid/events',
       bounce: true,
       delivered: true,
       click: false,
