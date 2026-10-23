@@ -90,4 +90,15 @@ describe('webhook readiness', () => {
     expect(result).toMatchObject({ status: 'unknown', webhooks: [{ provider: 'sendgrid', https: 'configured', signingMaterial: { status: 'not_managed' } }] });
     expect(JSON.stringify(result)).not.toContain('private-api');
   });
+  it.each(['missing', 'wrong-owner', 'creation-pending'])('does not report managed callback HTTPS ready with %s domain ownership', condition => {
+    const environmentSpec = spec({domain: 'example.com', email: {enabled: true, deliveryEvents: {service: 'web'}}});
+    const environment = bound('https://provider.example.net');
+    environment.platformBindings = {provider: 'railway', projectId: 'project-id', environmentId: 'prod-id',
+      services: {web: {serviceId: 'web-id', url: 'https://provider.example.net'}},
+      ...(condition === 'missing' ? {} : {domainDns: {name: 'example.com', providerDomainId: 'domain-id', serviceName: 'web',
+        serviceId: condition === 'wrong-owner' ? 'another-service' : 'web-id', environmentId: 'prod-id',
+        ...(condition === 'creation-pending' ? {creationAcknowledged: true} : {})}})};
+    const result = inspectWebhookReadiness({environmentSpec, environment, observed: null});
+    expect(result?.webhooks[0]).toMatchObject({https: 'unknown', urlEvidence: 'unavailable'});
+  });
 });

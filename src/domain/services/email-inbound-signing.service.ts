@@ -10,7 +10,7 @@ import { parseHostingBindings } from '../ports/hosting.port.js';
 import { SENDGRID_INBOUND_PUBLIC_KEY, type EnvironmentSpec } from '../spec/spec.schema.js';
 import { redactExactValues } from '../../utils/redact-exact-values.js';
 import { observeHosting, runtimeKey, type EventSigningReadiness } from './email-signing.service.js';
-import { serviceBindingFor } from './spec.service.js';
+import { resolveEmailCallbackTarget } from './email-callback-target.js';
 import { syncHostingEnvVars } from './hosting-env.service.js';
 import { parseRuntimeRolloutBindings } from './runtime-rollout.service.js';
 
@@ -33,11 +33,8 @@ function hostingIdentity(environment: Environment | null, service: string | unde
 }
 function expectedUrl(environment: Environment | null, spec: EnvironmentSpec): string | undefined {
   const target = spec.email.inbound;
-  const base = environment && target ? serviceBindingFor(environment, target.service)?.url : undefined;
-  try {
-    const url = new URL(target!.path, String(base));
-    return url.protocol === 'https:' && !url.username && !url.password ? url.toString() : undefined;
-  } catch { return undefined; }
+  const url = target ? resolveEmailCallbackTarget(environment, spec, target).url : undefined;
+  return url?.startsWith('https://') ? url : undefined;
 }
 
 /** Missing association/signature fields are unknown, never evidence of an unsigned route. */
@@ -79,7 +76,7 @@ export function planInboundSigning(params: {
   const blockedReason = inboundSigningTargetBlock(params.environment, params.spec)
     ?? (target?.signatureVerification !== true ? 'Disabling or detaching Inbound Parse policies is not supported by a verified provider contract; existing policy and runtime keys are preserved.'
       : !params.routeReady ? 'Converge the exact Inbound Parse route, then re-plan its verification key.'
-      : !url ? 'The receiving service needs a durable HTTPS URL.'
+      : !url ? 'The receiving service needs a durable HTTPS callback URL; converge its domain or service, then re-plan.'
       : !live || live.route.url !== url ? 'An attached signed policy could not be verified. Missing security fields remain unknown; automatic policy creation or attachment is not supported.'
       : binding.policyId && binding.policyId !== live.policy.id ? 'The managed inbound security policy changed. Restore the reviewed attachment before publishing a key.'
       : binding.status === 'pending' && binding.keyHash !== keyHash ? 'The provider key changed while publication was pending. Restore the reviewed key before reconciling its write.'
@@ -94,7 +91,7 @@ export function planInboundSigning(params: {
     actions: [{ id: actionId, type: noop ? 'noop' : 'update', resource: {kind: 'email', name: 'inbound-key', provider: params.spec.hosting.provider},
       reason: noop ? 'Inbound Parse verification-key configuration is in sync' : 'Adopt the observed signed policy and publish its public key to the receiving service',
       ...(target ? {dependsOn: [`email:sendgrid:inbound:${target.hostname.toLowerCase()}`]} : {}),
-      verified: !blockedReason, ...(!noop ? {requiresConfirm: true} : {}),
+      verified: !blockedReason, ...(!noop && !blockedReason ? {requiresConfirm: true} : {}),
       metadata: {operation: INBOUND_SIGNING_KEY_OPERATION, environmentId: params.environment?.id, hostname: target?.hostname.toLowerCase(), service: target?.service,
         hostingHash: hostingIdentity(params.environment, target?.service), expectedUrl: url, key: SENDGRID_INBOUND_PUBLIC_KEY,
         policyId: live?.policy.id, expectedHash: keyHash, stateHash: live ? hashEnvValue(JSON.stringify(inboundSigningFingerprint(live))) : undefined,

@@ -8,6 +8,7 @@ import { SpecStore } from '../../domain/spec/spec.store.js';
 import { PlanService } from '../../domain/plan/plan.service.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import * as domainSecurity from '../../domain/services/domain-security.service.js';
+import * as emailPlan from '../../domain/services/email-plan.service.js';
 import { setupCustomDomain, teardownCustomDomain } from '../../domain/services/domain.service.js';
 import type { ObservedState } from '../../domain/ports/observe.port.js';
 import type { PlanAction } from '../../domain/plan/plan.types.js';
@@ -53,12 +54,15 @@ describe('custom domain desired service plan/apply boundary', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  function fixture(options: { services?: Record<string, unknown>; owner?: string; boundDomain?: boolean; order?: string[]; recreateRevision?: string } = {}) {
+  function fixture(options: { services?: Record<string, unknown>; owner?: string; boundDomain?: boolean; order?: string[]; recreateRevision?: string; email?: boolean } = {}) {
     const project = ctx.repos.projects.create({ name: 'domain-target', defaultPlatform: 'railway' });
     const spec = new SpecStore().replace(project, {
       version: 1, project: project.name,
       environments: { staging: { hosting: { provider: 'railway' }, envFile: { mode: 'off' },
         services: options.services ?? desiredServices, domain: hostname, domainProxy: false,
+        ...(options.email ? { email: { enabled: true, inbound: {
+          hostname: `inbound.${hostname}`, service: 'web', path: '/webhooks/inbound',
+        } } } : {}),
         ...(options.recreateRevision ? { domainRecreateRevision: options.recreateRevision } : {}) } },
     });
     const order = options.order ?? ['cron', 'worker', 'web'];
@@ -131,6 +135,50 @@ describe('custom domain desired service plan/apply boundary', () => {
     };
     return { project, environment, spec, observed, attach, detach, deleteDns, upsertDns, plan, apply, adapter };
   }
+
+  it.each(['retarget', 'verification-pending', 'converged'])('uses the real domain action as the callback prerequisite: %s', async stage => {
+    const f = fixture({ owner: stage === 'retarget' ? 'cron' : 'web', boundDomain: true, email: true });
+    if (stage !== 'retarget') {
+      ctx.repos.environments.updatePlatformBindings(f.environment.id, { domainDns: {
+        ...oldDomain, serviceName: 'web', serviceId: 'service-web', providerDomainId: 'domain-web',
+      } });
+      if (stage === 'verification-pending') f.observed.services.find(service => service.name === 'web')!
+        .customDomainStatus![hostname]!.providerVerified = false;
+    }
+    // Supply synthetic read-only email observations while retaining the real
+    // PlanService, domain planner, email planner and dependency assembly.
+    const realPlanEmail = emailPlan.planEmail;
+    vi.spyOn(emailPlan, 'planEmail').mockImplementation(params => realPlanEmail({ ...params,
+      integrationState: {
+        domainAuthentications: { status: 'known', items: [] }, verifiedSenders: { status: 'known', items: [] },
+        inboundRoutes: { status: 'known', items: [{ hostname: `inbound.${hostname}`,
+          url: `https://${hostname}/webhooks/inbound`, spam_check: true, send_raw: false }] },
+        dnsRecords: { status: 'known', items: [] }, deliveryEvents: { status: 'unknown', error: 'not requested' },
+        forwardingSettings: { status: 'unknown', error: 'not requested' },
+        forwardingDestinations: { status: 'known', items: [] }, forwardingRules: { status: 'known', items: [] },
+        forwardingCatchAll: { status: 'unknown', error: 'not requested' }, warnings: [],
+      },
+    }));
+    const { result, action } = await f.plan();
+    const inbound = result.actions.find(candidate => candidate.id === `email:sendgrid:inbound:inbound.${hostname}`);
+    expect(inbound).toBeDefined();
+    expect(inbound?.requiresConfirm).not.toBe(true);
+    if (stage === 'converged') {
+      expect(action.type).toBe('noop');
+      expect(inbound?.metadata).toMatchObject({ operation: emailPlan.EMAIL_OPERATIONS.inboundAdopt,
+        expectedUrl: `https://${hostname}/webhooks/inbound` });
+      expect(inbound?.metadata?.blockedReason).toBeUndefined();
+      expect(inbound?.dependsOn ?? []).not.toContain(action.id);
+    } else {
+      expect(action.type).not.toBe('noop');
+      expect(inbound).toMatchObject({ type: 'update', metadata: { blockedReason: 'email_callback_domain_pending' } });
+      expect(inbound?.metadata?.expectedUrl).toBeUndefined();
+      expect(inbound?.dependsOn).toContain(action.id);
+    }
+    expect(f.attach).not.toHaveBeenCalled();
+    expect(f.detach).not.toHaveBeenCalled();
+    expect(f.upsertDns).not.toHaveBeenCalled();
+  });
 
   async function resolveWithStaleExport(f: ReturnType<typeof fixture>, bindings: Record<string, unknown>) {
     const checkout = path.join(dir, f.project.name);

@@ -2431,6 +2431,9 @@ export class PlanService {
             .map((action) => action.id),
         ],
         domainDependencies: domainRegistration.action ? [domainRegistration.action.id] : [],
+        callbackDomainDependencies: actions
+          .filter(action => action.resource.kind === 'domain' && action.type !== 'noop')
+          .map(action => action.id),
       });
     const webhookReadiness = inspectWebhookReadiness({ environmentSpec, environment, observed, runtimeValues: specForDiff.envVars, eventSigningReadiness: 'eventSigningReadiness' in email ? email.eventSigningReadiness : undefined, inboundSigningReadiness: 'inboundSigningReadiness' in email ? email.inboundSigningReadiness : undefined });
     actions.push(...email.actions);

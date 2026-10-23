@@ -1257,8 +1257,20 @@ scope, retention, permissions, and offline verification limits.
 
 SendGrid email configuration lives under each environment's `email` desired
 state. It owns one optional sender identity and one optional Inbound Parse route
-per environment. The inbound route names a public web service and relative path;
-its provider URL is derived from that service's durable hosting binding. Alias
+per environment. The inbound route names a public web service and relative path.
+`email-callback-target.ts` owns callback selection for inbound parsing, delivery
+events, their signing/key lifecycles and webhook readiness. When the receiver is
+the desired unique public web service, prefer the declared HTTPS domain only
+with exact durable provider/environment/service/domain ownership. Missing,
+ambiguous, wrong-owner or creation-pending domain evidence defers the callback;
+it never proposes replacing the route with the provider hostname. This is
+ownership evidence, not TLS or DNS readiness: the actual non-noop domain action
+is a callback prerequisite, suppresses callback replacement/confirmation, and
+requires a fresh plan after convergence. Without a selected service-owned
+domain, retain that receiver's safe durable provider URL. Load-balancer domains
+remain owned by their existing lifecycle. Relative callback paths must preserve
+the selected origin and may not contain credentials, query or fragment data.
+Alias
 local parts are application routing intent because SendGrid delivers all mail
 for one parse hostname to one endpoint.
 
@@ -1298,6 +1310,10 @@ attachment is preserved by an exact-hostname PATCH with the complete reviewed
 route settings; unknown attachment evidence blocks changes instead of deleting
 and recreating the route. Alias-only changes record local bindings with read
 permission; route PATCH requires read and update permissions.
+Plan diagnostics may expose one exactly matched route's safe HTTPS URL and
+boolean flags, plus whether its policy association was positively observed;
+omitted policy evidence remains unknown. They exclude userinfo, query strings,
+fragments and provider policy/key objects.
 Matching unmanaged provider identities are explicit adoption actions;
 duplicates and observation failures block instead of selecting or creating.
 

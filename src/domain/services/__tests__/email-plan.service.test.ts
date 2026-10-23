@@ -86,14 +86,18 @@ function specWithRouting() {
   });
 }
 
-function environment(email: Record<string, unknown> = {}): Environment {
+function environment(email: Record<string, unknown> = {}, domain = 'example.com'): Environment {
   return {
     id: 'environment-1',
     projectId: project.id,
     name: 'production',
     platformBindings: {
       provider: 'railway',
+      projectId: 'project-id',
+      environmentId: 'native-environment-id',
       services: { api: { serviceId: 'service-1', url: 'https://api.example.com' } },
+      domainDns: { name: domain, providerDomainId: 'domain-id', serviceName: 'api', serviceId: 'service-1',
+        environmentId: 'native-environment-id', zoneId: 'zone-id', records: [] },
       ...(Object.keys(email).length > 0 ? { email } : {}),
     },
     createdAt: new Date(),
@@ -156,6 +160,115 @@ const domainAuthentication = {
 };
 
 describe('planEmail', () => {
+  it('adopts the unchanged inbound route on its exact bound public domain instead of replacing it with the provider URL', async () => {
+    const desired = ciInboxSpec();
+    const env = environment();
+    env.platformBindings = { ...env.platformBindings, projectId: 'project-id', environmentId: 'staging-id',
+      services: { api: { serviceId: 'service-1', url: 'https://provider.example.net', customDomains: [desired.domain] } },
+      domainDns: { name: desired.domain, providerDomainId: 'domain-id', serviceName: 'api', serviceId: 'service-1',
+        environmentId: 'staging-id', zoneId: 'zone-id', records: [] } };
+    const live = observed();
+    live.projectId = 'project-id'; live.environmentId = 'staging-id';
+    live.services[0].customDomains = [desired.domain!];
+    live.services[0].customDomainStatus = { [desired.domain!]: { providerDomainId: 'domain-id', providerVerified: true, dnsConfigured: true } };
+    const route = { hostname: desired.email.inbound!.hostname,
+      url: `https://${desired.domain}${desired.email.inbound!.path}`, spam_check: true, send_raw: false };
+    const result = await planEmail({ project, environmentName: 'staging', environmentSpec: desired,
+      environment: env, observed: live, integrationState: state({ inboundRoutes: { status: 'known', items: [route] } }) });
+    const inbound = result.actions.find(action => action.id.includes(':inbound:'));
+    expect(inbound).toMatchObject({ type: 'update', metadata: { operation: EMAIL_OPERATIONS.inboundAdopt, expectedUrl: route.url } });
+    expect(inbound?.requiresConfirm).not.toBe(true);
+    expect(inbound?.metadata?.blockedReason).toBeUndefined();
+  });
+
+  it('defers an inbound URL decision while its declared public domain belongs to another workload', async () => {
+    const desired = ciInboxSpec();
+    const env = environment();
+    env.platformBindings = { ...env.platformBindings, projectId: 'project-id', environmentId: 'staging-id',
+      domainDns: { name: desired.domain, providerDomainId: 'old-domain', serviceName: 'cron', serviceId: 'cron-id',
+        environmentId: 'staging-id', zoneId: 'zone-id', records: [] } };
+    const result = await planEmail({ project, environmentName: 'staging', environmentSpec: desired,
+      environment: env, observed: observed(), integrationState: state({ inboundRoutes: { status: 'known', items: [{
+        hostname: desired.email.inbound!.hostname, url: `https://${desired.domain}${desired.email.inbound!.path}`,
+        spam_check: true, send_raw: false,
+      }] } }) });
+    const inbound = result.actions.find(action => action.id.includes(':inbound:'));
+    expect(inbound?.type).not.toBe('replace');
+    expect(inbound?.requiresConfirm).not.toBe(true);
+    expect(inbound?.metadata).toMatchObject({ blockedReason: 'email_callback_domain_pending' });
+    expect(inbound?.metadata?.expectedUrl).toBeUndefined();
+  });
+
+  it('waits for the domain action even when durable callback ownership already matches', async () => {
+    const desired = environmentSpecSchema.parse({ ...spec(), email: { ...spec().email,
+      deliveryEvents: { service: 'api', events: ['delivered'] } } });
+    const result = await planEmail({ project, environmentName: 'production', environmentSpec: desired,
+      environment: environment(), observed: observed(), callbackDomainDependencies: ['domain:example.com'],
+      integrationState: state({ inboundRoutes: { status: 'known', items: [{
+        hostname: 'inbound.example.com', url: 'https://example.com/webhooks/sendgrid/inbound',
+        spam_check: true, send_raw: false,
+      }] } }) });
+    for (const id of ['email:sendgrid:inbound:inbound.example.com', 'email:sendgrid:delivery-events']) {
+      const callback = result.actions.find(action => action.id === id);
+      expect(callback).toMatchObject({ type: 'update', metadata: { blockedReason: 'email_callback_domain_pending' } });
+      expect(callback?.requiresConfirm).not.toBe(true);
+      expect(callback?.metadata?.expectedUrl).toBeUndefined();
+      expect(callback?.dependsOn).toContain('domain:example.com');
+    }
+  });
+
+  it('retains a provider callback when the declared domain belongs to the load balancer', async () => {
+    const desired = environmentSpecSchema.parse({ ...spec(), services: { api: {}, web: {} },
+      loadBalancer: { provider: 'cloudflare', services: ['api', 'web'] } });
+    const result = await planEmail({ project, environmentName: 'production', environmentSpec: desired,
+      environment: environment(), observed: observed(), callbackDomainDependencies: ['domain:example.com'],
+      integrationState: state({ inboundRoutes: { status: 'known', items: [{
+        hostname: 'inbound.example.com', url: 'https://api.example.com/webhooks/sendgrid/inbound',
+        spam_check: true, send_raw: false,
+      }] } }) });
+    const inbound = result.actions.find(action => action.id.includes(':inbound:'));
+    expect(inbound?.metadata).toMatchObject({ operation: EMAIL_OPERATIONS.inboundAdopt,
+      expectedUrl: 'https://api.example.com/webhooks/sendgrid/inbound' });
+    expect(inbound?.metadata?.blockedReason).toBeUndefined();
+    expect(inbound?.dependsOn).not.toContain('domain:example.com');
+  });
+
+  it('retains a provider delivery-event callback without a declared domain', async () => {
+    const desired = environmentSpecSchema.parse({ hosting: { provider: 'railway' }, services: { api: {} },
+      email: { enabled: true, deliveryEvents: { service: 'api', events: ['delivered'] } } });
+    const result = await planEmail({ project, environmentName: 'production', environmentSpec: desired,
+      environment: environment(), observed: observed(), callbackDomainDependencies: ['domain:example.com'],
+      integrationState: state() });
+    const delivery = result.actions.find(action => action.id === 'email:sendgrid:delivery-events');
+    expect(delivery?.metadata?.expectedUrl).toBe('https://api.example.com/webhooks/sendgrid/events');
+    expect(delivery?.metadata?.blockedReason).toBe('email_delivery_events_observation_unknown');
+    expect(delivery?.dependsOn ?? []).not.toContain('domain:example.com');
+  });
+
+  it.each([undefined, 'observed-policy-id'])('reports value-safe observed route evidence without inferring omitted policy absence (%s)', async securityPolicy => {
+    const desired = spec();
+    const result = await planEmail({ project, environmentName: 'production', environmentSpec: desired,
+      environment: environment(), observed: observed(), integrationState: state({ inboundRoutes: { status: 'known', items: [{
+        hostname: 'inbound.example.com', url: 'https://old.example.com/parse', spam_check: false, send_raw: true,
+        ...(securityPolicy ? { security_policy: securityPolicy } : {}),
+      }] } }) });
+    expect(result.actions.find(action => action.id.includes(':inbound:'))?.metadata?.observedRoute).toEqual({
+      url: 'https://old.example.com/parse', spamCheck: false, sendRaw: true,
+      policyAssociation: securityPolicy ? 'known' : 'unknown',
+    });
+  });
+
+  it.each(['https://user:private@old.example.com/parse', 'https://old.example.com/parse?private=value', 'https://old.example.com/parse#private'])
+    ('does not publish unsafe observed route URLs: %s', async url => {
+      const desired = spec();
+      const result = await planEmail({ project, environmentName: 'production', environmentSpec: desired,
+        environment: environment(), observed: observed(), integrationState: state({ inboundRoutes: { status: 'known', items: [{
+          hostname: 'inbound.example.com', url, spam_check: true, send_raw: false,
+        }] } }) });
+      const evidence = result.actions.find(action => action.id.includes(':inbound:'))?.metadata?.observedRoute;
+      expect(evidence).toEqual({ spamCheck: true, sendRaw: false, policyAssociation: 'unknown' });
+    });
+
   it.each([undefined, { perServiceKeys: { api: ['SENDGRID_API_KEY'] } }])('does not plan empty runtime writes for email setup alone: %j', async (runtime) => {
     const desired = environmentSpecSchema.parse({ hosting: { provider: 'railway' }, services: { api: {} }, email: { enabled: true } });
     const result = await planEmail({ project, environmentName: 'production', environmentSpec: desired,
@@ -208,7 +321,7 @@ describe('planEmail', () => {
       project,
       environmentName: 'staging',
       environmentSpec: ciInboxSpec(),
-      environment: environment(),
+      environment: environment({}, 'staging.example.com'),
       observed: observed(),
       serviceDependencies: ['service:api'],
       integrationState: state(),
@@ -237,7 +350,7 @@ describe('planEmail', () => {
           service: 'api',
           path: '/api/webhooks/canary-email-receipts',
           aliases: [],
-          expectedUrl: 'https://api.example.com/api/webhooks/canary-email-receipts',
+          expectedUrl: 'https://staging.example.com/api/webhooks/canary-email-receipts',
         },
       });
   });
@@ -255,7 +368,7 @@ describe('planEmail', () => {
           status: 'known',
           items: [{
             hostname: 'inbound.example.com',
-            url: 'https://api.example.com/webhooks/sendgrid/inbound',
+            url: 'https://example.com/webhooks/sendgrid/inbound',
             spam_check: true,
             send_raw: false,
           }],
@@ -310,7 +423,8 @@ describe('planEmail', () => {
     expect(inbound).toMatchObject({
       type: 'replace',
       requiresConfirm: true,
-      metadata: { operation: EMAIL_OPERATIONS.inboundReplace },
+      metadata: { operation: EMAIL_OPERATIONS.inboundReplace,
+        blockedReason: expect.stringContaining('Inbound policy association is unknown') },
     });
   });
 

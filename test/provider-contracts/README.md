@@ -8,6 +8,24 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+Email callback selection is a Hypervibe lifecycle policy, not a new SendGrid API
+capability. The staging counterexample had an existing public-domain route while
+the provider service binding retained its Railway hostname; using that hostname
+would propose an unnecessary replacement. Shared planner/resolver regressions
+cover exact domain ownership, pending domain prerequisites and fresh-plan
+adoption. Signing and readiness tests use the real SendGrid client with synthetic
+HTTP responses, and deliberately stale ownership must cause zero provider/key
+writes. The initial planner cases (7), helper cases (23) and signing/readiness
+cases (8) were observed failing before their fixes. These tests run in ordinary
+`npm test`; they do not establish live domain/TLS readiness or mail delivery.
+
+The [Inbound Parse security guide](https://www.twilio.com/docs/sendgrid/for-developers/parsing-email/securing-your-parse-webhooks)
+documents an attached `security_policy` ID. The general GET/list/PATCH schemas
+do not establish that an omitted association is unsigned or safe to remove.
+This change preserves the existing unknown-policy replacement block. Sanitized
+plan evidence reports a safe observed URL/flags and known/unknown association,
+without exposing policy objects or private URL fields.
+
 The Railway custom-domain HTTP suite reconstructs a shared service whose
 production instance precedes staging in a paginated response. It executes the
 real `graphql-request` client against the pinned official SDL and verifies exact
