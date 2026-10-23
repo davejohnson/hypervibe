@@ -7,7 +7,7 @@ import { getSecretStore } from '../../secrets/secret-store.js';
  */
 export function githubConnectionRank(scope: string | null, repo?: string): number | null {
   if (!repo) {
-    return scope === null ? 0 : 1;
+    return scope === null ? 0 : null;
   }
   if (scope === repo) {
     return 0;

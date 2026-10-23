@@ -8,6 +8,18 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+`src/application/__tests__/seed-registry-scope.api-contract.test.ts` exercises
+database seed dispatch through real encrypted connection selection and Railway
+HTTP serialization. Its synthetic responses execute against the pinned official
+Railway SDL, including `ServiceInstanceUpdateInput.registryCredentials`.
+[Railway's private-registry contract](https://docs.railway.com/builds/private-registries)
+requires service image-pull credentials; Hypervibe's project-isolation contract
+determines which saved credential may be supplied. Exact repository, matching
+wildcard, intentional global fallback, missing/non-GitHub context, and failed-task
+reapply are covered in normal `npm test`. This validates selection and wire
+compatibility, not live token permissions, image boot, or the cause of an observed
+customer task failure.
+
 The [scoped secret contract](../../docs/scoped-secret-updates.md) reviews all
 seven hosting providers and distinguishes native capabilities from implemented
 admission. `scoped-secret-provider-contracts.test.ts` pins that roster and the

@@ -2,6 +2,7 @@ import { GraphQLClient, gql } from 'graphql-request';
 import { randomBytes } from 'crypto';
 import { z } from 'zod';
 import { resourceName } from '../../../domain/services/resource-names.js';
+import { parseGitHubRepoFromRemote } from '../../../lib/git-remote.js';
 import type {
   IProviderAdapter,
   Receipt,
@@ -4200,7 +4201,9 @@ export class RailwayAdapter implements
       const pull = declaredTask
         ? declaredTask.registryCredentials ?? null
         : image.startsWith('ghcr.io/')
-          ? (await import('../github/package-pull.js')).githubPackagePullCredentials() : null;
+          ? (await import('../github/package-pull.js')).githubPackagePullCredentials({
+            githubRepo: parseGitHubRepoFromRemote(options?.gitRemoteUrl) ?? undefined,
+          }) : null;
       // The sentinel is the exit-code source of truth: Railway deployment
       // statuses have no run-to-completion value for a NEVER-restart service.
       const startCommand = buildTaskStartCommand(command);
