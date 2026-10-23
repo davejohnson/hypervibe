@@ -39,7 +39,7 @@ function iosBuildContractFingerprint(ios, runtime) {
     capabilities: [...(ios.capabilities ?? [])].sort(),
     build: {workingDirectory: build.workingDirectory ?? '.', command: build.command,
       ipaPath: build.ipaPath, inputs: iosReleaseBuildInputs(ios), requiredSecrets: [...(build.requiredSecrets ?? [])].sort(),
-      expectedInfoPlist: build.expectedInfoPlist},
+      credentialsEnvironment: build.credentialsEnvironment, expectedInfoPlist: build.expectedInfoPlist},
     signing: signing.provider === 'match' ? {...signing, gitBranch: signing.gitBranch ?? 'main'} : signing,
     testflight: {groups: [...testflight.groups].sort(), usesNonExemptEncryption: testflight.usesNonExemptEncryption ?? false,
       submitForBetaReview: testflight.submitForBetaReview ?? false, scriptPath: testflight.scriptPath},

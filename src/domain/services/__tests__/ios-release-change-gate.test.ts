@@ -36,6 +36,118 @@ function runScript(script: string, github: unknown, context: unknown, env: Recor
   return {result, outputs, core};
 }
 
+// Reconstructed from GitHub's workflow-run, job and artifact REST contracts.
+// A rerun retains its run id; artifact metadata has no attempt identifier.
+// https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run-attempt
+// https://docs.github.com/en/rest/actions/artifacts#list-workflow-run-artifacts
+function releaseAttemptFixture() {
+  const workflow = generated();
+  const expected = JSON.parse(workflow.jobs.eligibility.env.HYPERVIBE_EXPECTED_SERVER_RELEASE);
+  const run = {id: 55, status: 'completed', conclusion: 'success', path: expected.workflowPath,
+    head_sha: DISPATCH_REF_SHA, run_attempt: 2, run_started_at: '2026-10-22T11:00:00Z',
+    repository: {full_name: 'owner/app'}, head_repository: {full_name: 'owner/app'}};
+  const artifact = {id: 90, expired: false, name: expected.artifactPrefix + SHA,
+    created_at: '2026-10-22T11:02:00Z', updated_at: '2026-10-22T11:02:00Z',
+    workflow_run: {id: 55, head_sha: DISPATCH_REF_SHA}};
+  const job = {id: 70, run_id: 55, run_attempt: 2, head_sha: DISPATCH_REF_SHA, name: 'deploy', status: 'completed', conclusion: 'success',
+    started_at: '2026-10-22T11:01:00Z', completed_at: '2026-10-22T11:03:00Z'};
+  const jobs = {total_count: 1, jobs: [job]};
+  const github = {rest: {actions: {
+    getWorkflowRun: vi.fn(async () => ({data: run})),
+    listWorkflowRunArtifacts: vi.fn(async () => ({data: {total_count: 1, artifacts: [artifact]}})),
+    listJobsForWorkflowRunAttempt: vi.fn(async () => ({data: jobs})),
+  }}};
+  const execute = (eventName: string) => runScript(step(workflow, 'Resolve release provenance').with.script, github,
+    {eventName, repo: {owner: 'owner', repo: 'app'}, payload: {workflow_run: run, inputs: {commit_sha: SHA, server_run_id: '55'}}},
+    workflow.jobs.eligibility.env);
+  return {workflow, run, artifact, job, jobs, github, execute};
+}
+
+describe.each(['workflow_dispatch', 'workflow_run'])('current server attempt (%s)', eventName => {
+  it.each(['skipped deploy with retained artifact', 'successful deploy with retained artifact'])('rejects %s', async kind => {
+    const f = releaseAttemptFixture();
+    f.artifact.created_at = '2026-10-21T11:02:00Z';
+    if (kind.startsWith('skipped')) f.job.conclusion = 'skipped';
+    const execution = f.execute(eventName);
+    await expect(execution.result).rejects.toThrow();
+    expect(execution.outputs).toEqual({});
+  });
+  it('accepts a fresh completed deployment of source A by workflow B', async () => {
+    const f = releaseAttemptFixture();
+    const execution = f.execute(eventName);
+    await execution.result;
+    expect(execution.outputs.sha).toBe(SHA);
+    expect(execution.outputs.artifact_id).toBe('90');
+    expect(execution.outputs.server_run_attempt).toBe('2');
+    expect(f.github.rest.actions.listJobsForWorkflowRunAttempt).toHaveBeenCalledWith({
+      owner: 'owner', repo: 'app', run_id: 55, attempt_number: 2, per_page: 100,
+    });
+  });
+  it('accepts an omitted optional job attempt within the exact attempt endpoint', async () => {
+    const f = releaseAttemptFixture();
+    delete (f.job as Partial<typeof f.job>).run_attempt;
+    await f.execute(eventName).result;
+  });
+  it('rejects a rerun started between provenance reads', async () => {
+    const f = releaseAttemptFixture();
+    f.github.rest.actions.getWorkflowRun.mockResolvedValueOnce({data: f.run})
+      .mockResolvedValue({data: {...f.run, run_attempt: 3}});
+    const execution = f.execute(eventName);
+    await expect(execution.result).rejects.toThrow(/attempt changed/);
+    expect(execution.outputs).toEqual({});
+  });
+  it('keeps an unknown job observation from authorizing release', async () => {
+    const f = releaseAttemptFixture();
+    f.github.rest.actions.listJobsForWorkflowRunAttempt.mockRejectedValue(new Error('Unavailable'));
+    const execution = f.execute(eventName);
+    await expect(execution.result).rejects.toThrow();
+    expect(execution.outputs).toEqual({});
+  });
+  it.each([
+    ['skipped current deploy', (f: ReturnType<typeof releaseAttemptFixture>) => { f.job.conclusion = 'skipped'; }],
+    ['missing deploy', f => { f.jobs.jobs = []; f.jobs.total_count = 0; }],
+    ['duplicate deploy', f => { f.jobs.jobs.push({...f.job, id: 71}); f.jobs.total_count = 2; }],
+    ['incomplete jobs', f => { f.jobs.total_count = 101; }],
+    ['old job attempt', f => { f.job.run_attempt = 1; }],
+    ['wrong job run', f => { f.job.run_id = 56; }],
+    ['omitted job source', f => { delete (f.job as Partial<typeof f.job>).head_sha; }],
+    ['missing latest start', f => { delete (f.run as Partial<typeof f.run>).run_started_at; }],
+    ['null artifact creation time', f => { f.artifact.created_at = null as never; }],
+    ['artifact from before deploy job', f => { f.artifact.created_at = '2026-10-22T11:00:30Z'; }],
+    ['artifact from after deploy job', f => { f.artifact.created_at = '2026-10-22T11:04:00Z'; }],
+  ] satisfies Array<[string, (f: ReturnType<typeof releaseAttemptFixture>) => void]>)('rejects %s without release outputs', async (_name, corrupt) => {
+    const f = releaseAttemptFixture(); corrupt(f);
+    const execution = f.execute(eventName);
+    await expect(execution.result).rejects.toThrow();
+    expect(execution.outputs).toEqual({});
+  });
+});
+
+describe('emitted recheck immediately before TestFlight release', () => {
+  function recheck(f: ReturnType<typeof releaseAttemptFixture>) {
+    const steps = f.workflow.jobs.release.steps;
+    const check = steps.find((entry: any) => entry.name === 'Recheck server release attempt');
+    expect(steps.indexOf(check)).toBe(steps.findIndex((entry: any) => entry.name === 'Run Hypervibe-managed TestFlight release') - 1);
+    return runScript(check.with.script, f.github, {repo: {owner: 'owner', repo: 'app'}}, {
+      ...f.workflow.jobs.release.env, HYPERVIBE_SERVER_RUN_ID: '55', HYPERVIBE_SERVER_RUN_ATTEMPT: '2',
+      HYPERVIBE_SERVER_ARTIFACT_ID: '90', HYPERVIBE_RELEASE_SHA: SHA,
+    });
+  }
+  it('accepts the same current run and artifact identity', async () => {
+    const f = releaseAttemptFixture(); await f.execute('workflow_run').result;
+    await recheck(f).result;
+  });
+  it.each(['rerun', 'replacement', 'skipped', 'stale artifact', 'expired'])('blocks %s after eligibility', async kind => {
+    const f = releaseAttemptFixture(); await f.execute('workflow_run').result;
+    if (kind === 'rerun') f.run.run_attempt = 3;
+    if (kind === 'replacement') f.artifact.id = 91;
+    if (kind === 'skipped') f.job.conclusion = 'skipped';
+    if (kind === 'stale artifact') f.artifact.created_at = '2026-10-21T11:02:00Z';
+    if (kind === 'expired') f.artifact.expired = true;
+    await expect(recheck(f).result).rejects.toThrow();
+  });
+});
+
 describe('executed iOS change gate before protected jobs', () => {
   it('has an environment-free gate and excludes skipped iOS jobs from environment approvals', () => {
     const workflow = generated();
@@ -54,14 +166,7 @@ describe('executed iOS change gate before protected jobs', () => {
     expect(staging.concurrency['cancel-in-progress']).toBe(false);
   });
   it('resolves the deployed artifact SHA when a dispatched run at ref B deployed source A', async () => {
-    const workflow = generated();
-    const provenance = step(workflow, 'Resolve release provenance');
-    const expected = JSON.parse(workflow.jobs.eligibility.env.HYPERVIBE_EXPECTED_SERVER_RELEASE);
-    const github = {rest: {actions: {
-      getWorkflowRun: vi.fn(async () => ({data: {id: 55, conclusion: 'success', path: expected.workflowPath, head_sha: DISPATCH_REF_SHA}})),
-      listWorkflowRunArtifacts: vi.fn(async () => ({data: {total_count: 1, artifacts: [{id: 90, expired: false, name: expected.artifactPrefix + SHA, workflow_run: {id: 55, head_sha: DISPATCH_REF_SHA}}]}})),
-    }}};
-    const execution = runScript(provenance.with.script, github, {eventName: 'workflow_dispatch', repo: {owner: 'owner', repo: 'app'}, payload: {inputs: {commit_sha: SHA, server_run_id: '55'}}}, workflow.jobs.eligibility.env);
+    const execution = releaseAttemptFixture().execute('workflow_dispatch');
     await execution.result;
     expect(execution.outputs.sha).toBe(SHA);
     expect(execution.outputs.artifact_id).toBe('90');
@@ -145,28 +250,47 @@ describe('executed comparison from the last completed beta', () => {
   });
 });
 
-function baseline(options: {changedWorkflow?: boolean; expired?: boolean; incomplete?: boolean; error?: boolean; retry?: boolean; missingCompletedArtifact?: boolean} = {}) {
+function baseline(options: {changedWorkflow?: boolean; expired?: boolean; incomplete?: boolean; error?: boolean; retry?: boolean; missingCompletedArtifact?: boolean;
+  staleArtifact?: boolean; skippedRelease?: boolean; attemptChanged?: boolean; wrongSkippedAttempt?: boolean; omittedJobAttempt?: boolean; omittedSkippedJobSha?: boolean} = {}) {
   const workflow = generated();
   const env = {...workflow.jobs.eligibility.env, GITHUB_RUN_ID: '99', GITHUB_WORKFLOW_SHA: DISPATCH_REF_SHA, GITHUB_WORKFLOW_REF: 'owner/app/.github/workflows/hypervibe-ios-release-staging.yml@refs/heads/main'};
-  const runs = [{id: 12, created_at: '2026-09-26T02:00:00Z', updated_at: '2026-09-26T02:10:00Z', head_sha: DISPATCH_REF_SHA, conclusion: 'success', path: env.HYPERVIBE_IOS_WORKFLOW_PATH},
-    {id: 11, created_at: '2026-09-26T01:00:00Z', updated_at: '2026-09-26T01:10:00Z', head_sha: BASE, conclusion: 'success', path: env.HYPERVIBE_IOS_WORKFLOW_PATH}];
-  if (options.retry) runs[1].updated_at = '2026-09-26T03:10:00Z';
+  // GitHub workflow-run/job/artifact shapes reconstructed from the official REST
+  // contract: attempt-scoped jobs may omit run_attempt, artifacts have no attempt.
+  // https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run-attempt
+  const runs = [{id: 12, status: 'completed', run_attempt: 1, run_started_at: '2026-09-26T02:00:00Z', created_at: '2026-09-26T02:00:00Z', updated_at: '2026-09-26T02:10:00Z', head_sha: DISPATCH_REF_SHA, conclusion: 'success', path: env.HYPERVIBE_IOS_WORKFLOW_PATH},
+    {id: 11, status: 'completed', run_attempt: 1, run_started_at: '2026-09-26T01:00:00Z', created_at: '2026-09-26T01:00:00Z', updated_at: '2026-09-26T01:10:00Z', head_sha: BASE, conclusion: 'success', path: env.HYPERVIBE_IOS_WORKFLOW_PATH}];
+  if (options.retry || options.staleArtifact) Object.assign(runs[1], {run_attempt: 2, run_started_at: '2026-09-26T03:00:00Z', updated_at: '2026-09-26T03:10:00Z'});
+  const releaseHour = options.retry || options.staleArtifact ? '03' : '01';
+  const artifact = {id: 80, name: 'hypervibe-ios-release-staging-' + BASE, expired: options.expired ?? false,
+    created_at: `2026-09-26T${options.staleArtifact ? '01' : releaseHour}:05:00Z`, updated_at: `2026-09-26T${releaseHour}:05:00Z`, workflow_run: {id: 11, head_sha: BASE}};
   const listArtifacts = vi.fn(async ({run_id}: {run_id: number}) => ({data: {total_count: run_id === 12 ? 0 : 1, artifacts: run_id === 12 ? [] : [
-    {id: 80, name: 'hypervibe-ios-release-staging-' + BASE, expired: options.expired ?? false, workflow_run: {id: 11, head_sha: BASE}},
+    artifact,
   ]}}));
   const getContent = vi.fn(async ({ref}: {ref: string}) => ({data: {type: 'file', encoding: 'base64', content: Buffer.from(options.changedWorkflow && ref === BASE ? 'old managed workflow' : 'same managed workflow').toString('base64')}}));
   const listRuns = vi.fn(async () => {
     if (options.error) throw new Error('Forbidden');
     return {data: {total_count: options.incomplete ? 1000 : 2, workflow_runs: runs}};
   });
+  const listJobs = vi.fn(async ({run_id}: {run_id: number; attempt_number?: number}) => {
+    const run = runs.find(item => item.id === run_id)!;
+    const hour = run_id === 12 ? '02' : releaseHour;
+    return {data: {total_count: 4, jobs: ['eligibility', 'prepare', 'build', 'release'].map((name, index) => ({
+      id: run_id * 10 + index, run_id, ...(options.omittedSkippedJobSha && run_id === 12 ? {} : {head_sha: run.head_sha}),
+      ...(options.omittedJobAttempt ? {} : {run_attempt: options.wrongSkippedAttempt && run_id === 12 ? 2 : run.run_attempt}),
+      name, status: 'completed', conclusion: (run_id === 12 && name !== 'eligibility' && !options.missingCompletedArtifact)
+        || (run_id === 11 && name === 'release' && options.skippedRelease) ? 'skipped' : 'success',
+      started_at: `2026-09-26T${hour}:01:00Z`, completed_at: `2026-09-26T${hour}:09:00Z`,
+    }))}};
+  });
+  const getRun = vi.fn(async ({run_id}: {run_id: number}) => {
+    const run = runs.find(item => item.id === run_id)!;
+    return {data: options.attemptChanged && run_id === 11 ? {...run, run_attempt: run.run_attempt + 1} : run};
+  });
   const result = runScript(step(workflow, 'Find last successful beta').with.script,
     {rest: {actions: {listWorkflowRuns: listRuns, listWorkflowRunArtifacts: listArtifacts,
-      listJobsForWorkflowRun: vi.fn(async () => ({data: {total_count: 4, jobs: [
-        {id: 1, run_id: 12, name: 'eligibility', status: 'completed', conclusion: 'success'},
-        ...['prepare', 'build', 'release'].map((name, index) => ({id: index + 2, run_id: 12, name, status: 'completed', conclusion: options.missingCompletedArtifact ? 'success' : 'skipped'})),
-      ]}}))}, repos: {getContent}}},
+      getWorkflowRun: getRun, listJobsForWorkflowRun: listJobs, listJobsForWorkflowRunAttempt: listJobs}, repos: {getContent}}},
     {repo: {owner: 'owner', repo: 'app'}}, env);
-  return {...result, listArtifacts, getContent, listRuns};
+  return {...result, listArtifacts, getContent, listRuns, listJobs, getRun};
 }
 describe('executed successful beta discovery', () => {
   it('does not advance the baseline for a successful skipped run without a beta artifact', async () => {
@@ -184,6 +308,17 @@ describe('executed successful beta discovery', () => {
     const result = baseline({retry: true}); await result.result;
     expect(result.listArtifacts.mock.calls[0][0].run_id).toBe(11);
     expect(result.outputs.sha).toBe(BASE);
+  });
+  it.each([
+    {staleArtifact: true}, {skippedRelease: true}, {attemptChanged: true}, {wrongSkippedAttempt: true}, {omittedSkippedJobSha: true},
+  ])('builds instead of trusting a previous attempt or changing history (%j)', async options => {
+    const result = baseline(options); await result.result;
+    expect(result.outputs).toEqual({});
+  });
+  it('accepts attempt-scoped jobs that omit their optional attempt field', async () => {
+    const result = baseline({omittedJobAttempt: true}); await result.result;
+    expect(result.outputs.sha).toBe(BASE);
+    expect(result.listJobs).toHaveBeenCalledWith({owner: 'owner', repo: 'app', run_id: 11, attempt_number: 1, per_page: 100});
   });
   it.each([{changedWorkflow: true}, {expired: true}, {incomplete: true}, {error: true}])('keeps uncertain history out of the skip decision (%j)', async options => {
     const result = baseline(options); await result.result;

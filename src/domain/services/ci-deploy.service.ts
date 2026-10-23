@@ -23,6 +23,7 @@ import {
   IOS_RELEASE_REQUIRED_SECRETS,
   MATCH_SIGNING_REQUIRED_SECRETS,
   iosReleaseWorkflowPath,
+  iosBuildCredentialsEnvironment,
 } from './ios-release-workflow.service.js';
 import { getVerifiedAppStoreConnectCredentials } from './appstore-ops.service.js';
 import { proposeGitHubInfrastructureFiles } from './github-infrastructure.service.js';
@@ -447,6 +448,55 @@ function requiredIosBuildSecrets(environmentSpec: EnvironmentSpec): string[] {
   ];
 }
 
+interface IosBuildCredentialsSource {
+  id: number;
+  name: string;
+  requiredSecretNames: string[];
+  presentSecretNames: string[];
+}
+
+function alternateIosBuildCredentialsEnvironment(environmentSpec: EnvironmentSpec, environmentName: string): string | undefined {
+  if (!environmentSpec.ios?.release || environmentSpec.ios.release.promoteFrom) return undefined;
+  const source = iosBuildCredentialsEnvironment(environmentSpec.ios, environmentName);
+  return source.toLowerCase() === environmentName.toLowerCase() ? undefined : source;
+}
+
+function iosBuildCredentialsNotice(environmentName: string, source: string): string {
+  return `${environmentName} iOS builds use secrets and protection rules from the GitHub environment "${source}". Secret names prove presence only, not valid credentials.`;
+}
+
+async function observeIosBuildCredentialsSource(params: {
+  adapter: GitHubAdapter; owner: string; repo: string; environmentSpec: EnvironmentSpec; environmentName: string;
+}): Promise<{ source?: IosBuildCredentialsSource; error?: string }> {
+  const name = alternateIosBuildCredentialsEnvironment(params.environmentSpec, params.environmentName);
+  if (name === undefined) return {};
+  const requiredSecretNames = [...new Set(requiredIosBuildSecrets(params.environmentSpec))].sort();
+  try {
+    const observed = await params.adapter.observeBuildCredentialsEnvironment(params.owner, params.repo, name, requiredSecretNames);
+    const source = { id: observed.id, name: observed.name, requiredSecretNames,
+      presentSecretNames: presentManagedSecretNames(requiredSecretNames, observed.secretNames) };
+    if (observed.customProtectionRuleIds.length > 0) {
+      return { source, error: `The iOS build credentials environment "${name}" has custom deployment protection rules, which are unsupported for a build job without a deployment.` };
+    }
+    const missing = requiredSecretNames.filter(key => !source.presentSecretNames.includes(key));
+    if (missing.length > 0) {
+      return { source, error: `The iOS build credentials environment "${name}" is missing required secret names: ${missing.join(', ')}.` };
+    }
+    return { source };
+  } catch {
+    return { error: `Cannot verify the existing iOS build credentials environment "${name}". Re-run hv_plan after its identity, secret names and protection rules can be read.` };
+  }
+}
+
+function sameIosBuildCredentialsSource(reviewed: unknown, current: IosBuildCredentialsSource): boolean {
+  const record = asRecord(reviewed);
+  const required = reviewedSecretNames(record?.requiredSecretNames);
+  const present = reviewedSecretNames(record?.presentSecretNames);
+  return record?.id === current.id && typeof record?.name === 'string' && record.name.toLowerCase() === current.name.toLowerCase()
+    && required !== null && present !== null
+    && sameStringLists(required, current.requiredSecretNames) && sameStringLists(present, current.presentSecretNames);
+}
+
 async function resolveManagedWorkflowSecrets(params: {
   project: Project;
   environmentName: string;
@@ -511,6 +561,7 @@ function buildAction(params: {
   staleEnvironmentSecrets?: string[];
   retiredPaths?: string[];
   workflowPublicationRequired?: boolean;
+  iosBuildCredentialsSource?: IosBuildCredentialsSource;
   dependsOn?: string[];
 }): PlanAction {
   return {
@@ -518,10 +569,13 @@ function buildAction(params: {
     type: params.type,
     resource: { kind: 'ci', name: `deploy-branch:${params.workflow.environment}`, provider: 'github' },
     verified: params.verified,
-    reason: params.reason,
+    reason: params.iosBuildCredentialsSource
+      ? `${params.reason}. ${iosBuildCredentialsNotice(params.workflow.environment, params.iosBuildCredentialsSource.name)}`
+      : params.reason,
     ...(params.dependsOn?.length ? { dependsOn: params.dependsOn } : {}),
     metadata: {
       operation: OPERATION,
+      ...(params.iosBuildCredentialsSource ? { iosBuildCredentialsSource: params.iosBuildCredentialsSource } : {}),
       ...(params.workflowPublicationRequired ? { workflowPublicationRequired: true } : {}),
       repository: params.repo,
       provider: params.provider,
@@ -668,6 +722,7 @@ export async function planGitHubActionsDeploy(params: {
   const bindingHasInputContract = Boolean(binding?.inputHash);
   const inputContractNeedsAdoption = !bindingHasInputContract;
   const inputContractChanged = bindingHasInputContract && binding?.inputHash !== inputHash;
+  let iosBuildCredentialsSource: IosBuildCredentialsSource | undefined;
   const unverifiedPublication = (warning: string) => {
     warnings.push(warning);
     return {
@@ -677,6 +732,7 @@ export async function planGitHubActionsDeploy(params: {
         repo,
         workflow,
         inputHash,
+        iosBuildCredentialsSource,
         reason: `Cannot verify the live GitHub Actions deploy workflow ${workflow.path}`,
         verified: false,
         workflowPublicationRequired: true,
@@ -692,6 +748,14 @@ export async function planGitHubActionsDeploy(params: {
     return unverifiedPublication(
       `Cannot observe GitHub Actions workflow for ${repo}: ${adapterResult.error}`
     );
+  }
+
+  const alternateSource = alternateIosBuildCredentialsEnvironment(environmentSpec, environmentName);
+  if (alternateSource !== undefined) {
+    warnings.push(iosBuildCredentialsNotice(environmentName, alternateSource));
+    const observed = await observeIosBuildCredentialsSource({ adapter: adapterResult.adapter, owner, repo: repoName, environmentSpec, environmentName });
+    iosBuildCredentialsSource = observed.source;
+    if (observed.error) return unverifiedPublication(observed.error);
   }
 
   let observation: Awaited<ReturnType<typeof observeManagedWorkflowFiles>>;
@@ -726,6 +790,7 @@ export async function planGitHubActionsDeploy(params: {
         repo,
         workflow,
         inputHash,
+        iosBuildCredentialsSource,
         reason,
         verified: true,
         workflowPublicationRequired: true,
@@ -780,7 +845,8 @@ export async function planGitHubActionsDeploy(params: {
   const staleProviderSecrets = requiredProviderSecrets.filter(needsSync);
   const staleDatabaseSecrets = requiredDatabaseSecrets.filter(needsSync);
   const staleEnvironmentSecrets = Object.keys(availableSecretHashes).filter(needsSync);
-  const missingEnvironmentSecrets = requiredBuildSecrets.filter((name) => !environmentSecretNames.includes(name));
+  const buildSecretNames = iosBuildCredentialsSource?.presentSecretNames ?? environmentSecretNames;
+  const missingEnvironmentSecrets = requiredBuildSecrets.filter((name) => !buildSecretNames.includes(name));
   const missingSecretSync = missingProviderSecrets.length > 0
     || missingDatabaseSecrets.length > 0
     || Boolean(appStoreError)
@@ -816,6 +882,7 @@ export async function planGitHubActionsDeploy(params: {
       repo,
       workflow,
       inputHash,
+      iosBuildCredentialsSource,
       reason,
       verified: environmentSecretsObserved,
       missingProviderSecrets,
@@ -825,7 +892,7 @@ export async function planGitHubActionsDeploy(params: {
       desiredEnvironmentSecretHashes: availableSecretHashes,
       reviewedEnvironmentSecrets: environmentSecretsObserved
         ? presentManagedSecretNames(
-            [...Object.keys(availableSecretHashes), ...requiredProviderSecrets, ...requiredDatabaseSecrets, ...requiredBuildSecrets],
+            [...Object.keys(availableSecretHashes), ...requiredProviderSecrets, ...requiredDatabaseSecrets, ...(iosBuildCredentialsSource ? [] : requiredBuildSecrets)],
             environmentSecretNames
           )
         : undefined,
@@ -844,6 +911,9 @@ export async function applyGitHubActionsDeploy(params: {
   action: PlanAction;
   authority?: 'publication-only' | 'secret-sync';
 }): Promise<{ success: boolean; status?: 'pending' | 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
+  if (params.action.type === 'noop') {
+    return { success: true, message: 'No GitHub Actions workflow or secret changes were requested.', data: { skipped: true, reason: 'noop' } };
+  }
   const { project, environmentName, environmentSpec } = params;
   const authority = params.authority ?? (
     params.action.metadata?.workflowPublicationRequired === true
@@ -896,6 +966,17 @@ export async function applyGitHubActionsDeploy(params: {
     };
   }
   const { acceptance } = observation;
+  const buildCredentials = await observeIosBuildCredentialsSource({ adapter, owner, repo: repoName, environmentSpec, environmentName });
+  const iosBuildCredentialsSource = buildCredentials.source;
+  if (buildCredentials.error || (iosBuildCredentialsSource
+      ? !sameIosBuildCredentialsSource(params.action.metadata?.iosBuildCredentialsSource, iosBuildCredentialsSource)
+      : params.action.metadata?.iosBuildCredentialsSource !== undefined)) {
+    return {
+      success: false, status: 'blocked', message: 'The reviewed iOS build credentials source changed or cannot be verified',
+      error: buildCredentials.error ?? 'The iOS build credentials environment identity or required secret names changed after planning. Re-run hv_plan before any workflow or secret write.',
+    };
+  }
+
   if (authority === 'publication-only') {
     if (acceptance !== 'drift') {
       return {
@@ -936,6 +1017,7 @@ export async function applyGitHubActionsDeploy(params: {
                 'Installs existing Match assets read-only when managed signing is selected.',
                 'Revalidates the IPA before sending it to the declared TestFlight groups.',
                 'Does not submit the app to the App Store automatically.',
+                ...(iosBuildCredentialsSource ? [iosBuildCredentialsNotice(environmentName, iosBuildCredentialsSource.name)] : []),
               ],
               mergeEffect: workflow.autoDeployOnPush
                 ? `This release workflow waits for a successful ${environmentName} server deployment; merging it does not bypass that check.`
@@ -1004,7 +1086,7 @@ export async function applyGitHubActionsDeploy(params: {
     };
   }
   const currentEnvironmentSecrets = presentManagedSecretNames(
-    [...Object.keys(availableSecretHashes), ...requiredProviderSecrets, ...requiredDatabaseSecrets, ...requiredIosBuildSecrets(environmentSpec)],
+    [...Object.keys(availableSecretHashes), ...requiredProviderSecrets, ...requiredDatabaseSecrets, ...(iosBuildCredentialsSource ? [] : requiredIosBuildSecrets(environmentSpec))],
     environmentSecretNames
   );
   if (!sameStringLists(currentEnvironmentSecrets, reviewedEnvironmentSecrets)) {
@@ -1033,7 +1115,7 @@ export async function applyGitHubActionsDeploy(params: {
   if (environmentSpec.ios?.release) {
     const requiredBuildSecrets = requiredIosBuildSecrets(environmentSpec);
     const missingBuildSecrets = requiredBuildSecrets
-      .filter((name) => !environmentSecretNames.includes(name));
+      .filter((name) => !(iosBuildCredentialsSource?.presentSecretNames ?? environmentSecretNames).includes(name));
     if (missingBuildSecrets.length > 0) {
       return {
         success: false,

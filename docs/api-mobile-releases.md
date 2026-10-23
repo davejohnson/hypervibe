@@ -137,7 +137,8 @@ Each app needs its own existing App Store Connect app record. The current
 Hypervibe lifecycle registers bundle IDs but stops with guidance when the app
 record is missing. Match signing installs existing assets read-only; provision
 the certificates/profiles for both bundle IDs before releasing. Existing Match
-credentials belong in the corresponding GitHub environment. App Store Connect
+credentials belong in the corresponding GitHub environment unless the build
+explicitly selects an existing credential environment as described below. App Store Connect
 credentials are coordinated through the reviewed workflow lifecycle. Declaring
 these blocks does not establish that either app record or signing asset exists.
 
@@ -167,6 +168,51 @@ The staging bundle cannot be promoted to the production bundle with
 `ios.release.promoteFrom`: that path preserves one exact Apple binary and
 requires the same bundle ID and build settings. Build a separate production IPA
 from the selected code when the bundle ID or embedded backend differs.
+
+## Reuse build credentials
+
+For a staging app that shares existing signing assets, select their GitHub
+environment in staging's `ios.release.build` declaration:
+
+```json
+{
+  "workingDirectory": "ios-app",
+  "command": "bundle exec fastlane build",
+  "ipaPath": "build/App.ipa",
+  "credentialsEnvironment": "production",
+  "requiredSecrets": [
+    "MATCH_GIT_URL",
+    "MATCH_PASSWORD",
+    "MATCH_GIT_BASIC_AUTHORIZATION"
+  ]
+}
+```
+
+This example uses project-owned signing. With Hypervibe's
+`signing.provider: "match"`, omit these three names from `requiredSecrets`; the managed signing
+step receives them separately. Declare only credentials the build actually
+needs. App Store Connect keys remain reserved for the isolated preparation and
+release jobs.
+
+Omitting `credentialsEnvironment` keeps build credentials in the app's logical
+environment. An alternate source applies only to the build job: staging still
+uses its staging bundle ID, backend configuration, release credentials and
+evidence. Hypervibe references the source secrets without copying their values
+or writing to that source environment. The source selection is part of the
+reviewed workflow and mobile build fingerprint.
+
+The source must already exist and contain every required key. Plan records its
+identity and key presence; apply checks them again before publishing a workflow
+proposal or syncing destination secrets. Missing keys, inaccessible or incomplete
+observations, and a deleted/recreated source block the operation. Key presence
+does not verify credential validity or compatible signing assets.
+
+GitHub's [environment without deployment](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/control-deployments#using-environments-without-deployments)
+mode gives the build access without recording a production deployment. Existing
+reviewers, wait timers and branch restrictions still govern that job. Sources
+with enabled custom protection-app rules are blocked because GitHub does not
+support those rules in this mode. These checks are separate reads; a later
+source change can still cause the workflow to fail.
 
 ## Declare supported API versions
 

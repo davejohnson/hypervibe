@@ -11,6 +11,7 @@ import { resolveManagedWorkflowContract, workflowFiles, workflowFilesContentHash
 import { environmentDeploymentContractHash } from '../domain/services/deployment-contract.service.js';
 import { managedCiReleaseArtifactPrefix, MANAGED_CI_RELEASE_EVIDENCE_VERSION } from '../domain/services/managed-ci-evidence.js';
 import { iosBuildContractFingerprint, IOS_RELEASE_EVIDENCE_VERSION } from '../domain/services/ios-release-evidence.js';
+import { assertCurrentReleaseAttempt, assertSkippedIosReleaseAttempt, assertSameReleaseAttempt } from '../domain/services/ios-release-attempt.js';
 import { iosReleaseWorkflowPath } from '../domain/services/ios-release-workflow.service.js';
 import { canonicalJsonSha256 } from '../lib/canonical-json.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
@@ -50,7 +51,7 @@ export type ServerSubmissionManifest = z.infer<typeof serverManifestSchema>;
 type Contract = Extract<ReturnType<typeof resolveManagedWorkflowContract>, { ok: true }>;
 type Run = Awaited<ReturnType<GitHubAdapter['getWorkflowRun']>>;
 type Artifact = Awaited<ReturnType<GitHubAdapter['listWorkflowRunArtifacts']>>['artifacts'][number];
-type SelectedEvidence = { run: Run; artifact: Artifact; body: unknown; sha: string; sha256: string };
+type SelectedEvidence = { run: Run; artifact: Artifact; body: unknown; sha: string; sha256: string; jobName: 'deploy' | 'release' };
 
 export interface AppStoreSubmitInput {
   project?: string; environment: string; appIdentifier: string; platform?: 'IOS' | 'MAC_OS' | 'TV_OS';
@@ -111,7 +112,7 @@ async function completeReleaseRuns(github: GitHubAdapter, owner: string, repo: s
 
 async function selectEvidence(params: {
   github: GitHubAdapter; owner: string; repo: string; repository: string; workflow: string;
-  prefix: string; filename: string; runId?: string; contract: Contract;
+  prefix: string; filename: string; runId?: string; contract: Contract; jobName: 'deploy' | 'release';
   /** The trusted beta manifest already names this exact original server run. */
   originalBetaServer?: boolean;
 }): Promise<SelectedEvidence> {
@@ -134,12 +135,27 @@ async function selectEvidence(params: {
       invalid('Release artifact listing is incomplete. Select a run with complete observable evidence.');
     }
     const matching = listed.artifacts.filter((artifact) => artifact.name.startsWith(params.prefix));
-    if (matching.length === 0 && !params.runId) continue; // A relevance-gated run can succeed without releasing a build.
+    if (matching.length === 0 && !params.runId && params.jobName === 'release') {
+      // Missing evidence permits fallback only when this exact attempt proves
+      // eligibility succeeded and every protected release job was skipped.
+      const jobs = await github.listWorkflowRunAttemptJobs(owner, repo, id, run.run_attempt);
+      try { assertSkippedIosReleaseAttempt(run, jobs); }
+      catch { invalid('Missing beta release evidence cannot prove a relevance skip.'); }
+      const freshRun = await github.getWorkflowRun(owner, repo, id);
+      validateRun(freshRun, params.repository, params.workflow, id);
+      try { assertSameReleaseAttempt(run, freshRun); }
+      catch { invalid('The skipped beta workflow attempt changed during observation.'); }
+      continue;
+    }
     if (matching.length !== 1) invalid('Expected one release manifest in the selected workflow run.');
     const artifact = matching[0];
     const releaseSha = artifact.name.slice(params.prefix.length);
     if (!sha.safeParse(releaseSha).success || artifact.expired !== false || artifact.workflow_run?.id !== id
         || !Number.isSafeInteger(artifact.id) || artifact.id <= 0) invalid('The selected release artifact is expired or has invalid provenance.');
+
+    const jobs = await github.listWorkflowRunAttemptJobs(owner, repo, id, run.run_attempt);
+    try { assertCurrentReleaseAttempt(run, artifact, jobs, params.jobName); }
+    catch { invalid('Release evidence must come from the successful job in the current workflow attempt.'); }
 
     // The run head proves which program executed, not which commit that program deployed.
     const desiredFiles = workflowFiles(params.contract.workflow);
@@ -159,9 +175,40 @@ async function selectEvidence(params: {
     const files = await github.readArtifactFiles(owner, repo, artifact.id);
     const content = files[params.filename];
     if (Object.keys(files).length !== 1 || typeof content !== 'string') invalid('The release artifact must contain exactly its named manifest.');
-    return { run, artifact, sha: releaseSha, body: JSON.parse(content), sha256: createHash('sha256').update(content, 'utf8').digest('hex') };
+    const freshRun = await github.getWorkflowRun(owner, repo, id);
+    validateRun(freshRun, params.repository, params.workflow, id);
+    try { assertSameReleaseAttempt(run, freshRun); }
+    catch { invalid('The selected workflow attempt changed while verifying release evidence.'); }
+    return { run, artifact, sha: releaseSha, body: JSON.parse(content), sha256: createHash('sha256').update(content, 'utf8').digest('hex'), jobName: params.jobName };
   }
   invalid('No successful managed release with a manifest was found. Select exact run IDs with hv_ci_status.');
+}
+
+/** Reobserve each exact artifact and job after selection and before Apple mutation. */
+async function recheckEvidence(github: GitHubAdapter, owner: string, repo: string, evidence: SelectedEvidence): Promise<void> {
+  try {
+    const run = await github.getWorkflowRun(owner, repo, evidence.run.id);
+    validateRun(run, evidence.run.repository.full_name, evidence.run.path, evidence.run.id);
+    assertSameReleaseAttempt(evidence.run, run);
+    const [listed, jobs] = await Promise.all([
+      github.listWorkflowRunArtifacts(owner, repo, run.id),
+      github.listWorkflowRunAttemptJobs(owner, repo, run.id, run.run_attempt),
+    ]);
+    if (!Array.isArray(listed.artifacts) || listed.total_count !== listed.artifacts.length) {
+      invalid('Release artifact listing changed or became incomplete before submission.');
+    }
+    const matches = listed.artifacts.filter(artifact => artifact.id === evidence.artifact.id);
+    if (matches.length !== 1 || matches[0].name !== evidence.artifact.name || matches[0].created_at !== evidence.artifact.created_at) {
+      invalid('The selected release artifact changed before submission.');
+    }
+    assertCurrentReleaseAttempt(run, matches[0], jobs, evidence.jobName);
+    const freshRun = await github.getWorkflowRun(owner, repo, run.id);
+    validateRun(freshRun, evidence.run.repository.full_name, evidence.run.path, evidence.run.id);
+    assertSameReleaseAttempt(run, freshRun);
+  } catch (error) {
+    if (error instanceof HvError) throw error;
+    invalid('The selected release attempt or its evidence changed or could not be verified before submission.');
+  }
 }
 
 async function historicalSpec(github: GitHubAdapter, owner: string, repo: string, commit: string): Promise<{ raw: ProjectSpec; spec: ProjectSpec }> {
@@ -276,9 +323,9 @@ async function executeAppStoreRelease(ctx: CommandContext, input: AppStoreSubmit
   try {
     [mobileEvidence, serverEvidence] = await Promise.all([
       selectEvidence({ github, owner, repo, repository, contract: sourceContract, runId: input.iosRunId,
-        workflow: iosReleaseWorkflowPath(sourceEnvironment), prefix: `hypervibe-ios-release-${sourceEnvironment.toLowerCase().replace(/[^a-z0-9-]+/g, '-')}-`, filename: 'hypervibe-ios-release.json' }),
+        workflow: iosReleaseWorkflowPath(sourceEnvironment), prefix: `hypervibe-ios-release-${sourceEnvironment.toLowerCase().replace(/[^a-z0-9-]+/g, '-')}-`, filename: 'hypervibe-ios-release.json', jobName: 'release' }),
       selectEvidence({ github, owner, repo, repository, contract: targetContract, runId: input.serverRunId,
-        workflow: targetContract.workflow.path, prefix: managedCiReleaseArtifactPrefix(input.environment), filename: 'hypervibe-server-release.json' }),
+        workflow: targetContract.workflow.path, prefix: managedCiReleaseArtifactPrefix(input.environment), filename: 'hypervibe-server-release.json', jobName: 'deploy' }),
     ]);
     [sourceHistory, targetHistory] = await Promise.all([
       historicalSpec(github, owner, repo, mobileEvidence.sha), historicalSpec(github, owner, repo, serverEvidence.sha),
@@ -312,14 +359,16 @@ async function executeAppStoreRelease(ctx: CommandContext, input: AppStoreSubmit
       || target.ios.release.services.some((name) => !resources.some((resource) => resource.logicalName === name))) {
     invalid('The target server manifest does not prove the exact reviewed deployment and source contract.');
   }
+  let originalServerEvidence: SelectedEvidence | undefined;
   let sourceApi: ApiReleaseEvidenceManifest | undefined;
   let targetApi: ApiReleaseEvidenceManifest | undefined;
   if (mobile.mobile.sha !== server.source.sha) {
     try {
       const originalServer = await selectEvidence({
         github, owner, repo, repository, contract: sourceContract, runId: mobile.server.workflowRunId,
-        workflow: sourceContract.workflow.path, prefix: managedCiReleaseArtifactPrefix(sourceEnvironment), filename: 'hypervibe-server-release.json', originalBetaServer: true,
+        workflow: sourceContract.workflow.path, prefix: managedCiReleaseArtifactPrefix(sourceEnvironment), filename: 'hypervibe-server-release.json', originalBetaServer: true, jobName: 'deploy',
       });
+      originalServerEvidence = originalServer;
       const original = serverManifestSchema.safeParse(originalServer.body);
       if (!original.success || original.data.environment !== sourceEnvironment || original.data.provider !== source.hosting.provider
           || original.data.source.repository !== repository || original.data.source.sha !== mobile.server.sha || originalServer.sha !== mobile.server.sha
@@ -358,6 +407,9 @@ async function executeAppStoreRelease(ctx: CommandContext, input: AppStoreSubmit
   };
   const releaseFingerprint = canonicalJsonSha256({
     releaseGate, mobile, server, sourceRunAttempt: mobileEvidence.run.run_attempt, targetRunAttempt: serverEvidence.run.run_attempt,
+    originalServerProof: originalServerEvidence ? {
+      runId: originalServerEvidence.run.id, runAttempt: originalServerEvidence.run.run_attempt, artifactId: originalServerEvidence.artifact.id,
+    } : null,
     desired: canonicalJsonSha256(desired), sourceApi: sourceApi ?? null, targetApi: targetApi ?? null,
   });
   const retryInput = { confirm: true, iosRunId: releaseGate.iosRunId, serverRunId: releaseGate.serverRunId, releaseFingerprint };
@@ -368,17 +420,14 @@ async function executeAppStoreRelease(ctx: CommandContext, input: AppStoreSubmit
     };
   }
   if (input.releaseFingerprint !== releaseFingerprint) invalid('The reviewed release selection changed. Preview and confirm the current exact build again.');
-  // Reobserve the attached identity and both successful run attempts immediately
-  // before any Apple mutation; a preview never authorizes a different build.
-  const [freshBuild, freshMobile, freshServer] = await Promise.all([
-    apple.adapter.getAppStoreVersionBuild(version.id), github.getWorkflowRun(owner, repo, mobileEvidence.run.id), github.getWorkflowRun(owner, repo, serverEvidence.run.id),
-  ]);
-  validateRun(freshMobile, repository, iosReleaseWorkflowPath(sourceEnvironment), mobileEvidence.run.id);
-  validateRun(freshServer, repository, targetContract.workflow.path, serverEvidence.run.id);
-  if (freshBuild?.id !== build.id || freshBuild.version !== build.version
-      || freshMobile.run_attempt !== mobileEvidence.run.run_attempt || freshServer.run_attempt !== serverEvidence.run.run_attempt) {
+  // Reobserve the attached identity, exact artifacts and successful jobs immediately
+  // before any Apple mutation; a preview never authorizes a different attempt.
+  const freshBuild = await apple.adapter.getAppStoreVersionBuild(version.id);
+  if (freshBuild?.id !== build.id || freshBuild.version !== build.version) {
     invalid('The attached build or selected release run changed before submission.');
   }
+  await Promise.all([mobileEvidence, serverEvidence, ...(originalServerEvidence ? [originalServerEvidence] : [])]
+    .map(evidence => recheckEvidence(github, owner, repo, evidence)));
   await verifyCurrentServerRun(github, owner, repo, targetContract.workflow.path, serverEvidence.run.id);
   const { reviewSubmission, reusedExistingSubmission } = await apple.adapter.submitForReview({ appId: app.id, appStoreVersionId: version.id, platform: version.platform });
   ctx.repos.audit.create({ action: 'appstore.submit', resourceType: 'appstore', resourceId: app.id,
