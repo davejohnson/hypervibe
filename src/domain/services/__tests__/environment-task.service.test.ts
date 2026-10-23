@@ -93,7 +93,9 @@ describe('environment-task.service', () => {
       jobId: 'task-1',
       status: 'completed',
     });
-    expect(runJob).toHaveBeenCalledWith(environment, expect.objectContaining({ name: web.name }), 'npm run db:seed');
+    expect(runJob).toHaveBeenCalledWith(environment, expect.objectContaining({ name: web.name }), 'npm run db:seed', {
+      gitRemoteUrl: project.gitRemoteUrl,
+    });
   });
 
   it('does not mark a task complete when the provider only reports it as running', async () => {

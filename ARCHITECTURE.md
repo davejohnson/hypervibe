@@ -2202,6 +2202,8 @@ appropriate.
 
 Fresh-environment seed/bootstrap data belongs in desired state as `database.seedCommand`. It should plan a visible one-shot seed action, run through the provider-neutral environment task runner during `hv_apply`, and record completion on the database component only after terminal success. In a managed-CI environment, a non-noop seed has an explicit dependency on a verified exact-SHA release of the desired commit. If that release remains in progress, apply stops pending before the seed; it never runs the older image or races newly issued integration credentials.
 
+`runEnvironmentTask` carries the authoritative `Project.gitRemoteUrl` through the shared `EnvironmentTaskOptions` port. Railway uses the existing GitHub remote parser and package-credential selector for private GHCR task images: exact repository, matching organization wildcard, then verified global fallback. Missing or non-GitHub repository context permits only global credentials, never an unrelated scoped connection or a guess from the image name or current directory. Named CI tasks and managed recovery retain their explicitly supplied registry credentials. The seed transport regression covers these choices and a failed task followed by reapply; completion is still recorded only after terminal success.
+
 `hv_db_migrate` must not exist in the command registry, MCP surface, or CLI.
 Provider-to-provider data moves are lifecycle operations modeled as explicit
 `dataMigration` spec/plan/apply actions with dependency edges, data-bearing

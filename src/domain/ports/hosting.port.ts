@@ -78,6 +78,8 @@ export interface ManagedRecoveryTaskOptions {
 
 /** A reviewed named CI task; its application layer owns execution authority. */
 export interface EnvironmentTaskOptions {
+  /** Authoritative project repository context for image credential selection. */
+  gitRemoteUrl?: string;
   timeoutMs?: number;
   pollIntervalMs?: number;
   declaredTask?: {

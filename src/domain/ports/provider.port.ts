@@ -1,6 +1,7 @@
 import type { Environment } from '../entities/environment.entity.js';
 import type { Service } from '../entities/service.entity.js';
 import type { Component, ComponentType } from '../entities/component.entity.js';
+import type { EnvironmentTaskOptions } from './hosting.port.js';
 
 export interface Receipt {
   success: boolean;
@@ -263,7 +264,8 @@ export interface IProviderAdapter {
   runJob?(
     environment: Environment,
     service: Service,
-    command: string
+    command: string,
+    options?: EnvironmentTaskOptions
   ): Promise<JobResult>;
 
   /**
