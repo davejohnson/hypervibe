@@ -1397,6 +1397,22 @@ TestFlight upload, or TestFlight distribution commands.
   scoped to that preparation step and cannot also be declared as build-command
   secrets. Certificate/profile creation, rotation, and revocation never happen
   during deploys; they require a separate explicit lifecycle design.
+- `ios.release.build.credentialsEnvironment` optionally selects an existing
+  GitHub environment for build-only credentials; omission uses the logical
+  release environment. An alternate source changes only the build job's
+  environment, with `deployment: false`. Preparation, upload, app identity,
+  backend configuration and release evidence retain the logical environment.
+  Only declared build secret names and managed signing inputs are referenced;
+  App Store Connect credentials remain isolated in preparation/release jobs.
+  Plan records the source environment's exact identity and required key presence
+  before proposing workflow publication, and apply rechecks them before writes.
+  Missing, unknown, replaced or incomplete sources block; enabled custom
+  protection-app rules are unsupported. Existing source reviewers, wait timers
+  and branch restrictions still apply. Hypervibe neither copies source values
+  nor creates or changes the source environment. Presence does not prove signing
+  validity, and these separate reads cannot guarantee unchanged state when a
+  later workflow runs. This capability is limited to the existing GitHub Actions
+  iOS path; GitLab CI remains explicitly unsupported for managed iOS releases.
 - A successful server deploy writes an artifact whose name and JSON body carry
   the environment, repository, exact full Git SHA, and deployed service set.
   The artifact is emitted only after provider deployment steps succeed.

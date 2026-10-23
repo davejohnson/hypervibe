@@ -1044,6 +1044,11 @@ export const iosReleaseSpecSchema = z.object({
     ),
     /** Existing GitHub environment secret names needed only by the project build command. */
     requiredSecrets: z.array(runtimeEnvVarNameSchema).default([]),
+    /** Existing GitHub environment used only by the build job for its declared credentials. */
+    credentialsEnvironment: z.string().min(1).max(255).refine(
+      (value) => value.trim().length > 0 && value === value.trim() && !/[\u0000-\u001f\u007f-\u009f]/.test(value) && !value.includes('${{'),
+      'credentialsEnvironment must be a nonblank static name without outer whitespace, control characters or GitHub expressions'
+    ).optional(),
   }).strict(),
   signing: iosReleaseSigningSpecSchema.default({ provider: 'project' }),
   testflight: z.object({
@@ -1106,7 +1111,7 @@ export const iosSpecSchema = z.object({
     }
   }
 
-  const buildSecretNames = new Set(ios.release?.build.requiredSecrets ?? []);
+  const buildSecretNames = new Set((ios.release?.build.requiredSecrets ?? []).map(name => name.toUpperCase()));
   const reservedSecretNames = [
     ...appStoreReleaseSecretNames,
     'HYPERVIBE_BUILD_NUMBER',

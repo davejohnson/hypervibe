@@ -1,7 +1,53 @@
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 import { iosSpecSchema, environmentSpecSchema, projectSpecSchema } from '../spec.schema.js';
+import { buildIosReleaseWorkflow } from '../../services/ios-release-workflow.service.js';
+
+function renderedBuildSecretEnvironment(name: string, signing: 'project' | 'match'): Record<string, string> {
+  const ios = iosSpecSchema.parse({
+    bundleId: 'com.example.staging', testflight: { groups: { beta: {} } },
+    release: {
+      services: ['web'], signing: { provider: signing }, testflight: { groups: ['beta'] },
+      build: { command: 'make ipa', ipaPath: 'App.ipa', credentialsEnvironment: 'production', requiredSecrets: [name] },
+    },
+  });
+  const rendered = buildIosReleaseWorkflow({
+    provider: 'railway', providerName: 'Railway', serverWorkflowPath: '.github/workflows/deploy-staging.yml', ios,
+    target: {
+      environmentName: 'staging', kind: 'staging', branch: 'main', autoDeployOnPush: true,
+      serviceNames: ['web'], providerServiceIds: ['web-id'], programFingerprint: 'a'.repeat(64),
+      releaseTarget: {
+        scope: { providerProjectId: 'project', providerEnvironmentId: 'staging' }, bindingsFingerprint: 'b'.repeat(64),
+        resources: [{ logicalName: 'web', workloadKind: 'web', providerResourceType: 'service', providerResourceId: 'web-id' }],
+      },
+    },
+  })!;
+  return parse(rendered.files[0].content).jobs.build.steps.find((step: { name?: string }) => step.name === 'Build signed IPA').env;
+}
 
 describe('iosSpecSchema', () => {
+  // GitHub references secret names case-insensitively, including environment secrets.
+  // https://docs.github.com/en/actions/reference/security/secrets
+  const reservedBuildKeys = [
+    'APP_STORE_CONNECT_KEY_ID', 'APP_STORE_CONNECT_ISSUER_ID', 'APP_STORE_CONNECT_PRIVATE_KEY',
+    'MATCH_GIT_URL', 'MATCH_PASSWORD', 'MATCH_GIT_BASIC_AUTHORIZATION',
+  ];
+  it.each(reservedBuildKeys.flatMap(key => [key.toLowerCase(), key.slice(0, 1) + key.slice(1).toLowerCase()]))(
+    'rejects reserved key %s before rendering a build with production credentials', name => {
+      expect(() => renderedBuildSecretEnvironment(name, 'match')).toThrow('reserved for the Hypervibe-managed release boundary');
+    }
+  );
+
+  it.each(['MATCH_GIT_URL', 'MATCH_PASSWORD', 'MATCH_GIT_BASIC_AUTHORIZATION'].flatMap(key => [key, key.toLowerCase()]))(
+    'keeps explicitly requested project-owned signing key %s available to the build', name => {
+      expect(renderedBuildSecretEnvironment(name, 'project')).toEqual({ [name]: '${{ secrets.' + name + ' }}' });
+    }
+  );
+
+  it('preserves ordinary mixed-case build secret names', () => {
+    expect(renderedBuildSecretEnvironment('Build_token', 'match')).toEqual({ Build_token: '${{ secrets.Build_token }}' });
+  });
+
   it('reserves the managed build-number handoff against project secret overrides', () => {
     const result = iosSpecSchema.safeParse({
       bundleId: 'com.example.app',
@@ -221,5 +267,25 @@ describe('iOS release selection and promotion', () => {
     expect(projectSpecSchema.safeParse(value).success).toBe(true);
     value.environments.staging.ios.bundleId = 'com.example.other';
     expect(projectSpecSchema.safeParse(value).success).toBe(false);
+  });
+});
+
+describe('iOS build credential environment', () => {
+  const declaration = (credentialsEnvironment?: unknown) => ({
+    bundleId: 'com.example.app', testflight: { groups: { beta: {} } },
+    release: {
+      services: ['web'],
+      build: { command: 'make ipa', ipaPath: 'App.ipa', ...(credentialsEnvironment === undefined ? {} : { credentialsEnvironment }) },
+      testflight: { groups: ['beta'] },
+    },
+  });
+  it('preserves omission rather than introducing a source environment default', () => {
+    expect(iosSpecSchema.parse(declaration()).release?.build).not.toHaveProperty('credentialsEnvironment');
+  });
+  it.each(['production', 'Apple signing / shared', 'a'.repeat(255)])('accepts the static environment %s', name => {
+    expect(iosSpecSchema.parse(declaration(name)).release?.build).toHaveProperty('credentialsEnvironment', name);
+  });
+  it.each(['', '   ', ' leading', 'trailing ', 'a'.repeat(256), '${{ github.ref }}', 'prefix-${{ vars.ENV }}', 'line\nfeed', 'tab\tname', 'nul\0name', 'delete\x7fname', 'control\x85name', null, 123])('rejects an invalid environment %#', name => {
+    expect(iosSpecSchema.safeParse(declaration(name)).success).toBe(false);
   });
 });

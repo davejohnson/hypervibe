@@ -623,6 +623,73 @@ export class GitHubAdapter {
     }
   }
 
+  /** Read-only, value-free evidence for an existing alternate iOS build scope. */
+  async observeBuildCredentialsEnvironment(
+    owner: string,
+    repo: string,
+    environmentName: string,
+    requiredSecretNames: readonly string[]
+  ): Promise<{ id: number; name: string; secretNames: string[]; customProtectionRuleIds: number[] }> {
+    const failure = 'Cannot verify the existing GitHub build credentials environment.';
+    try {
+      const key = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
+      const requested = z.array(key).max(1000).parse(requiredSecretNames);
+      if (typeof environmentName !== 'string' || !environmentName.trim() || environmentName.length > 255
+          || environmentName !== environmentName.trim() || /[\u0000-\u001f\u007f]/.test(environmentName)
+          || environmentName.includes('${{')) throw new Error(failure);
+      const positiveId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+      const identity = z.object({id: positiveId, name: z.string().min(1)});
+      const endpoint = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/environments/${encodeURIComponent(environmentName)}`;
+      const environment = identity.parse(await this.request('GET', endpoint));
+      if (environment.name.toLowerCase() !== environmentName.toLowerCase()) throw new Error(failure);
+
+      const pageSchema = z.object({
+        total_count: z.number().int().min(0).max(1000),
+        secrets: z.array(z.object({name: key, created_at: z.string().datetime({offset: true}), updated_at: z.string().datetime({offset: true})})).max(100),
+      });
+      const observed = new Set<string>();
+      let total: number | undefined;
+      for (let page = 1; page <= 10; page++) {
+        const listed = pageSchema.parse(await this.request('GET', `${endpoint}/secrets?per_page=100&page=${page}`));
+        if (total !== undefined && total !== listed.total_count) throw new Error(failure);
+        total = listed.total_count;
+        for (const secret of listed.secrets) {
+          const name = secret.name.toUpperCase();
+          if (observed.has(name)) throw new Error(failure);
+          observed.add(name);
+        }
+        if (observed.size > total) throw new Error(failure);
+        if (observed.size === total) break;
+        if (listed.secrets.length < 100) throw new Error(failure);
+      }
+      if (observed.size !== total) throw new Error(failure);
+
+      // This endpoint lists enabled custom rules only; the ordinary environment
+      // protection_rules field covers built-in rules and may be omitted.
+      const custom = z.object({
+        total_count: z.number().int().min(0).max(100),
+        custom_deployment_protection_rules: z.array(z.object({
+          id: positiveId, node_id: z.string().min(1), enabled: z.literal(true),
+          app: z.object({id: positiveId, node_id: z.string().min(1), slug: z.string().min(1), integration_url: z.string().url()}),
+        })).max(100),
+      }).parse(await this.request('GET', `${endpoint}/deployment_protection_rules`));
+      const customProtectionRuleIds = custom.custom_deployment_protection_rules.map(rule => rule.id).sort((a, b) => a - b);
+      if (custom.total_count !== customProtectionRuleIds.length || new Set(customProtectionRuleIds).size !== customProtectionRuleIds.length) throw new Error(failure);
+      const current = identity.parse(await this.request('GET', endpoint));
+      if (current.id !== environment.id || current.name.toLowerCase() !== environment.name.toLowerCase()) throw new Error(failure);
+      return {
+        id: environment.id,
+        name: environment.name,
+        secretNames: [...new Set(requested)].filter(name => observed.has(name.toUpperCase())).sort(),
+        customProtectionRuleIds,
+      };
+    } catch {
+      // Provider errors and malformed observations may contain credentials or
+      // unrelated names. Only this fixed, value-free failure crosses the port.
+      throw new Error(failure);
+    }
+  }
+
   /**
    * Create or update an Actions secret scoped to a GitHub environment.
    */

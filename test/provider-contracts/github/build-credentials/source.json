@@ -1,0 +1,12 @@
+{
+  "sourceUrl": "https://raw.githubusercontent.com/github/rest-api-description/755ee33b4a81d51f6f07a902cce26cbec3b822f2/descriptions/api.github.com/api.github.com.json",
+  "sourceCommit": "755ee33b4a81d51f6f07a902cce26cbec3b822f2",
+  "sourceSha256": "3177ad6a86ca04c57a9bef3fc24e28a339efb8eb040c6f950af3d3ed2fee7fa3",
+  "schemaFile": "environment.openapi.json",
+  "schemaSha256": "d6d78831db7f3c79ffe417e818d972df572baf55f0130443ee9ae480568e2190",
+  "extraction": "Three unmodified GET operations with recursive local component-reference closure. Fixtures reconstructed from official examples; no live observations.",
+  "docs": [
+    "https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/control-deployments#using-environments-without-deployments",
+    "https://docs.github.com/en/rest/deployments/protection-rules#get-all-deployment-protection-rules-for-an-environment"
+  ]
+}

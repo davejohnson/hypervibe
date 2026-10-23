@@ -114,6 +114,41 @@ Neon's release schema URL is mutable; tests consume only its checked-in snapshot
 
 ## Evidence boundary
 
+### iOS build credential environments
+
+The shared desired-state field `ios.release.build.credentialsEnvironment`
+separates build credential scope from logical release identity. The affected CI
+registry contains the following named providers; native capabilities do not
+imply implemented Hypervibe support:
+
+| CI provider | Native contract and prerequisites | Hypervibe boundary |
+| --- | --- | --- |
+| `github-actions` | An existing repository environment has a durable numeric ID and case-insensitive name. [Jobs without deployments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/control-deployments#using-environments-without-deployments) can access its secrets while retaining reviewers, wait timers and branch restrictions; custom protection-app rules are incompatible. Reads require environment/secret metadata access. | Alternate build environment implemented for the existing managed iOS path. Exact identity, complete required-key presence and enabled custom rules are observed before publication and rechecked at apply. Unknown state or identity replacement blocks; no source writes, secret retrieval or recovery by same-name recreation. Offline contract coverage only. |
+| `gitlab-ci` | [Environment-scoped variables](https://docs.gitlab.com/ci/environments/#limit-the-environment-scope-of-a-cicd-variable) use exact or wildcard scope matching. These variables are not a GitHub environment identity/protection contract. | Managed iOS releases and this selector are unsupported; the registered lifecycle explicitly rejects this CI combination before workflow generation. No GitLab adapter or live compatibility is claimed. |
+
+`github/build-credentials/` pins the official environment, environment-secret
+and enabled protection-rule endpoints. The real adapter's reconstructed HTTP
+fixtures cover identity, complete bounded pagination, missing fields, API
+failures, encoded paths and identity replacement during observation. Lifecycle
+tests exercise real planning/apply and serialized source observation before
+mocked publication/destination writes. Emitted workflow/source-contract tests
+check isolated job scopes and credential-source fingerprinting. The provider
+roster check keeps future CI registrations visible in ordinary `npm test`.
+GitHub [secret references are case-insensitive](https://docs.github.com/en/actions/reference/security/secrets).
+Schema-to-renderer regressions therefore reject lower/mixed-case reserved App
+Store and managed Match names while preserving project-owned signing inputs.
+
+The counterexample to assuming the logical release environment owns every build
+credential is a staging app whose three Match keys exist only in production.
+Referencing an unverified source is also unsafe: GitHub can create a missing
+named environment automatically, without the intended secrets or protections.
+Tests were observed failing before implementation. No live GitHub job, signing,
+Apple upload or source protection enforcement was exercised. Key presence does
+not establish credential validity; plan/apply observations are not atomic with
+each other or with later job execution.
+
+### Current-attempt release evidence
+
 The iOS workflow gates and App Store submission share `templates/ios/release-attempt.cjs`.
 Their reconstructed GitHub evidence follows the official
 [OpenAPI at `755ee33b4a81d51f6f07a902cce26cbec3b822f2`](https://github.com/github/rest-api-description/blob/755ee33b4a81d51f6f07a902cce26cbec3b822f2/descriptions/api.github.com/api.github.com.json)
