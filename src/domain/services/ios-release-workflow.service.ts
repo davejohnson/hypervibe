@@ -5,6 +5,7 @@ import type { BranchDeployTarget } from '../ports/ci-deploy.port.js';
 import type { IosSpec } from '../spec/spec.schema.js';
 import { getManagedIosReleaseRuntimeBase64 } from './ios-release-template.service.js';
 import { HYPERVIBE_MANAGED_NODE_VERSION } from './managed-runtime.js';
+import { iosReleaseAttemptRuntimeBase64 } from './ios-release-attempt.js';
 import {
   MANAGED_CI_RELEASE_EVIDENCE_VERSION,
   MANAGED_CI_DEPLOYMENT_CONTRACT_RUNTIME_SOURCE,
@@ -12,7 +13,7 @@ import {
 } from './managed-ci-evidence.js';
 
 // Bump for intentional migrations of the generated iOS release contract.
-export const IOS_RELEASE_WORKFLOW_RENDERER_REVISION = 3;
+export const IOS_RELEASE_WORKFLOW_RENDERER_REVISION = 6;
 
 export const IOS_RELEASE_REQUIRED_SECRETS = [
   'APP_STORE_CONNECT_KEY_ID',
@@ -25,6 +26,10 @@ export const MATCH_SIGNING_REQUIRED_SECRETS = [
   'MATCH_PASSWORD',
   'MATCH_GIT_BASIC_AUTHORIZATION',
 ] as const;
+
+export function iosBuildCredentialsEnvironment(ios: IosSpec | undefined, environmentName: string): string {
+  return ios?.release?.build.credentialsEnvironment ?? environmentName;
+}
 
 export function iosReleaseWorkflowPath(environmentName: string): string {
   const safeEnvironment = environmentName.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
@@ -103,6 +108,7 @@ export function buildIosReleaseWorkflow(params: {
   }
 
   const environmentName = params.target.environmentName;
+  const credentialsEnvironment = iosBuildCredentialsEnvironment(params.ios, environmentName);
   const safeEnvironment = environmentName.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
   const workflowPath = iosReleaseWorkflowPath(environmentName);
   const automaticTrigger = release.trigger === 'after-server-deploy'
@@ -126,8 +132,12 @@ export function buildIosReleaseWorkflow(params: {
 
   const content = renderTemplate(readFileSync(workflowTemplateUrl, 'utf8'), {
     ENVIRONMENT: environmentName,
+    BUILD_ENVIRONMENT: credentialsEnvironment.toLowerCase() === environmentName.toLowerCase()
+      ? environmentName
+      : JSON.stringify({ name: credentialsEnvironment, deployment: false }),
     SERVER_CONTRACT_RUNTIME_JSON: JSON.stringify(Buffer.from(MANAGED_CI_DEPLOYMENT_CONTRACT_RUNTIME_SOURCE).toString('base64')),
     IOS_BUILD_CONTRACT_RUNTIME_JSON: JSON.stringify(iosBuildContractRuntimeBase64()),
+    IOS_RELEASE_ATTEMPT_RUNTIME_JSON: JSON.stringify(iosReleaseAttemptRuntimeBase64()),
     IOS_EVIDENCE_VERSION: String(IOS_RELEASE_EVIDENCE_VERSION),
     IOS_BUILD_FINGERPRINT_JSON: JSON.stringify(iosBuildContractFingerprint(params.ios, params.target.runtime)),
     IOS_INPUT_PATHS_JSON: JSON.stringify(JSON.stringify([...iosReleaseBuildInputs(params.ios), workflowPath])),
