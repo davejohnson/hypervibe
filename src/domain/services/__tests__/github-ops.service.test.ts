@@ -24,6 +24,7 @@ import { cloudRunContainerBuildStartCommand } from '../../../adapters/providers/
 import type { BranchDeployTarget } from '../../ports/ci-deploy.port.js';
 import { MANAGED_CI_RELEASE_EVIDENCE_VERSION } from '../managed-ci-evidence.js';
 import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
+import { iosBuildContractFingerprint } from '../ios-release-evidence.js';
 import {
   extractGitHubScript,
   extractWorkflowShell,
@@ -1226,6 +1227,12 @@ describe('github tools', () => {
     expect(githubActionsWorkflowInputHash(input)).toBe(canonicalJsonSha256(previousContract));
     expect(githubActionsWorkflowInputHash({ ...input, ios })).not.toBe(canonicalJsonSha256({
       ...previousContract, ios: { bundleId: ios.bundleId, release: ios.release },
+    }));
+    // Revision 2 validates only bundle/build identity. Keep this historical
+    // contract pinned so the added IPA configuration gate must be published.
+    expect(githubActionsWorkflowInputHash({ ...input, ios })).not.toBe(canonicalJsonSha256({
+      ...previousContract,
+      ios: { rendererRevision: 2, buildContractFingerprint: iosBuildContractFingerprint(ios), bundleId: ios.bundleId, release: ios.release },
     }));
   });
 

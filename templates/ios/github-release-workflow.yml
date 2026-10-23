@@ -335,6 +335,8 @@ jobs:
         shell: bash
         env:
           HYPERVIBE_BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+          HYPERVIBE_BUNDLE_ID: @@BUNDLE_ID_JSON@@
+          HYPERVIBE_EXPECTED_INFO_PLIST: @@EXPECTED_INFO_PLIST_JSON@@
         run: |
           python3 - <<'PY'
           import hashlib, os, pathlib, plistlib, stat, zipfile
@@ -352,6 +354,7 @@ jobs:
               if len(plists) != 1:
                   raise SystemExit("expected exactly one Payload/*.app/Info.plist")
               info = plistlib.loads(archive.read(plists[0]))
+@@INFO_PLIST_VALIDATION@@
           if info.get("CFBundleIdentifier") != os.environ["HYPERVIBE_BUNDLE_ID"]:
               raise SystemExit("IPA bundle identifier does not match desired ios.bundleId")
           version = str(info.get("CFBundleShortVersionString", ""))
@@ -412,6 +415,9 @@ jobs:
       - name: Verify release IPA identity
         id: ipa
         shell: bash
+        env:
+          HYPERVIBE_BUNDLE_ID: @@BUNDLE_ID_JSON@@
+          HYPERVIBE_EXPECTED_INFO_PLIST: @@EXPECTED_INFO_PLIST_JSON@@
         run: |
           python3 - <<'PY'
           import hashlib, os, pathlib, plistlib, stat, zipfile
@@ -430,6 +436,7 @@ jobs:
               if len(plists) != 1:
                   raise SystemExit("expected exactly one Payload/*.app/Info.plist")
               info = plistlib.loads(archive.read(plists[0]))
+@@INFO_PLIST_VALIDATION@@
           if info.get("CFBundleIdentifier") != os.environ["HYPERVIBE_BUNDLE_ID"]:
               raise SystemExit("release IPA bundle identifier changed after build validation")
           if str(info.get("CFBundleShortVersionString", "")) != os.environ["HYPERVIBE_MARKETING_VERSION"]:

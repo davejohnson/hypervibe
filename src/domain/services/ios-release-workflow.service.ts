@@ -40,6 +40,7 @@ const matchSigningStepTemplateUrl = new URL(
   '../../../templates/ios/match-signing-step.yml',
   import.meta.url
 );
+const infoPlistValidationTemplateUrl = new URL('../../../templates/ios/validate-info-plist.py', import.meta.url);
 
 function projectRuntimeSetup(target: BranchDeployTarget): string {
   const runtime = target.runtime;
@@ -60,14 +61,12 @@ function projectRuntimeSetup(target: BranchDeployTarget): string {
 }
 
 function renderTemplate(content: string, replacements: Record<string, string>): string {
-  for (const [name, value] of Object.entries(replacements)) {
-    content = content.split('@@' + name + '@@').join(value);
-  }
-  const unresolved = content.match(/@@[A-Z0-9_]+@@/g);
-  if (unresolved) {
-    throw new Error('Unresolved iOS release workflow placeholders: ' + unresolved.join(', '));
-  }
-  return content;
+  // Replace only markers in the template, never marker-like literal app values.
+  return content.replace(/@@([A-Z0-9_]+)@@/g, (marker, name: string) => {
+    const value = replacements[name];
+    if (value === undefined) throw new Error('Unresolved iOS release workflow placeholder: ' + marker);
+    return value;
+  });
 }
 
 function managedMatchSigningStep(gitBranch: string): string {
@@ -150,6 +149,9 @@ export function buildIosReleaseWorkflow(params: {
     PROJECT_RUNTIME_SETUP: projectRuntimeSetup(params.target),
     MANAGED_NODE_VERSION: HYPERVIBE_MANAGED_NODE_VERSION,
     BUNDLE_ID_JSON: JSON.stringify(params.ios.bundleId),
+    EXPECTED_INFO_PLIST_JSON: JSON.stringify(JSON.stringify(release.build.expectedInfoPlist ?? {})),
+    INFO_PLIST_VALIDATION: readFileSync(infoPlistValidationTemplateUrl, 'utf8').trimEnd()
+      .split('\n').map((line) => '          ' + line).join('\n'),
     WORKING_DIRECTORY_JSON: JSON.stringify(release.build.workingDirectory),
     IPA_PATH_JSON: JSON.stringify(release.build.ipaPath),
     TESTFLIGHT_GROUPS_JSON: JSON.stringify(JSON.stringify(release.testflight.groups)),
