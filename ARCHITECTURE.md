@@ -1448,6 +1448,18 @@ TestFlight upload, or TestFlight distribution commands.
   Materializers decode step-local Base64 data so runtime growth cannot breach
   GitHub's 21,000-character `run` script limit; acceptance tests execute the
   emitted materializer and enforce that limit.
+- Optional `ios.release.build.expectedInfoPlist` declares bounded, nonempty
+  exact strings for the finished main app's root `Info.plist`. Both build and
+  isolated release validation check those values against the reviewed workflow;
+  missing, non-string or unequal values block before upload without exposing
+  values. The map participates in the mobile build fingerprint and promotion
+  build equivalence; omission preserves the previous fingerprint and checks.
+  This verifies embedded metadata, not application network behavior, localized
+  names, platform/device overrides or rendered icons. Projects must consume the
+  same configuration they embed. Separate staging/production bundle IDs build
+  separately with project-owned Release-quality schemes; exact-binary promotion
+  cannot cross those identities. App Store app records and Match signing assets
+  remain prerequisites. See [staging app configuration](docs/api-mobile-releases.md#build-a-separate-staging-app).
 - The iOS artifact records separate `mobile.repository`/`mobile.sha` and
   `server.repository`/`server.sha` fields. V1 is monorepo-first and therefore
   requires those repositories and SHAs to match at the workflow gate, while the

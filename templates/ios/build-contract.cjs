@@ -30,7 +30,7 @@ function iosBuildContractFingerprint(ios, runtime) {
   const canonical = value => Array.isArray(value) ? value.map(canonical)
     : value && typeof value === 'object'
       ? Object.fromEntries(Object.entries(value).filter(([, child]) => child !== undefined)
-        .sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => [key, canonical(child)]))
+        .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, child]) => [key, canonical(child)]))
       : value;
   // Normalize the same optional defaults for both parsed desired state and raw
   // historical source. Only this trusted module defines fingerprint semantics.
@@ -39,7 +39,7 @@ function iosBuildContractFingerprint(ios, runtime) {
     capabilities: [...(ios.capabilities ?? [])].sort(),
     build: {workingDirectory: build.workingDirectory ?? '.', command: build.command,
       ipaPath: build.ipaPath, inputs: iosReleaseBuildInputs(ios), requiredSecrets: [...(build.requiredSecrets ?? [])].sort(),
-      credentialsEnvironment: build.credentialsEnvironment},
+      credentialsEnvironment: build.credentialsEnvironment, expectedInfoPlist: build.expectedInfoPlist},
     signing: signing.provider === 'match' ? {...signing, gitBranch: signing.gitBranch ?? 'main'} : signing,
     testflight: {groups: [...testflight.groups].sort(), usesNonExemptEncryption: testflight.usesNonExemptEncryption ?? false,
       submitForBetaReview: testflight.submitForBetaReview ?? false, scriptPath: testflight.scriptPath},
