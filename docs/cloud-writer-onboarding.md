@@ -197,8 +197,16 @@ This feature is not release-ready while the dependency audit reports high
 findings. Compatible repairs updated Vitest/coverage to 4.1.12, Vite to 8.3.5,
 body-parser to 2.4.0 and fast-uri to 3.1.9. A fresh
 `npm ci --ignore-scripts --no-audit`, actual in-memory SQLite connection and
-`npx tsc --noEmit` passed. The writer/access/provider-matrix suites passed all
-27 tests on that fresh installation. The audit fell from nine affected packages (five high,
+`npx tsc --noEmit` passed. The normal full suite with `--maxWorkers=2` passed
+6,148 tests in 399 files, with the existing three skipped files, five skipped
+tests and one todo; no exclusions or new skips were introduced. Final setup
+command regressions passed 29/29. The writer/access/provider-matrix suites passed
+27/27 on that fresh installation. Hypercloud's normal package import passed
+96 affected HTTP/PostgreSQL/Chromium cases and 69 focused unit cases against the
+packed development candidate, with no source override. These counts overlap
+other focused evidence and must not be added together.
+
+The audit fell from nine affected packages (five high,
 four moderate) to three high packages: `zod`, `@azure/msal-node`, and its parent
 `@azure/identity`. No audit suppression, dependency override or downgrade was
 applied.
