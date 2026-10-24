@@ -1,4 +1,5 @@
 import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from '../domain/services/database-credential-aliases.service.js';
+import { applySecretReference, assertDeploymentSecretReferences } from './apply-secret-references.js';
 import { applyScheduleActivation } from '../domain/services/schedule-activation.service.js';
 import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js';
 import { applyApiPolicy, planApiPolicy } from '../domain/services/api-policy.js';
@@ -1200,7 +1201,10 @@ export async function executePlanApply(ctx: CommandContext, params: {
   }
   const confirmedActionIds = new Set(params.confirmActions);
   const buildDeployBootstrapParams = async () => {
+    const referenceAuthority = await assertDeploymentSecretReferences({ ctx, project: applyProject, spec, environmentName: envName,
+      actions: loaded.document.actions, confirmed: confirmedActionIds });
     let bootstrapParams = specToBootstrapParams(applyProject.name, envName, envSpec, spec.runtime);
+    if (referenceAuthority.creationOnlyServices.length) bootstrapParams.creationOnlyServices = referenceAuthority.creationOnlyServices;
     if (loaded.document.sourceCommitSha) {
       bootstrapParams = {
         ...bootstrapParams,
@@ -1282,9 +1286,10 @@ export async function executePlanApply(ctx: CommandContext, params: {
     const existing = serviceBootstraps.get(serviceName);
     if (existing) return existing;
     const base = await buildDeployBootstrapParams();
+    const referenceCreation = base.creationOnlyServices?.includes(serviceName) === true;
     const result = await executeBootstrap({ ...scopeBootstrapParamsToService(base, serviceName),
-      ...(serviceIdentityOnly ? { provisionOnly: true } : {}),
-      ...(requireNewWorkload ? { requireNewWorkload: true } : {}),
+      ...(serviceIdentityOnly || referenceCreation ? { provisionOnly: true } : {}),
+      ...(requireNewWorkload || referenceCreation ? { requireNewWorkload: true } : {}),
     });
     serviceBootstraps.set(serviceName, result);
     return result;
@@ -1293,6 +1298,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const ensureDeployBootstrap = async () => {
     if (!deployBootstrap) {
       let bootstrapParams = await buildDeployBootstrapParams();
+      if (bootstrapParams.creationOnlyServices?.length) throw new Error('Initial native references require separate reviewed service creation actions before a whole-environment deployment.');
       bootstrapParams = applyOverridesToBootstrapParams(bootstrapParams, {
         services: overrides?.services,
       });
@@ -1667,7 +1673,13 @@ export async function executePlanApply(ctx: CommandContext, params: {
     if (capability === 'storage.mutate') {
       return applyStorageAction({ project: applyProject, envName, environmentSpec: envSpec, action });
     }
+    if (capability === 'hosting.secret-reference.sync') {
+      return applySecretReference({ ctx, project: applyProject, spec, environmentName: envName,
+        action, confirmed: confirmedActionIds, applyRunId: executionContext.applyRunId });
+    }
     if (capability === 'hosting.delegated-secret.sync') {
+      if (envSpec.secretDestinations?.[action.resource.name])
+        return blockedActionIdentity(action, 'Native secret destinations cannot consume legacy plaintext plan inputs.');
       const key = action.resource.name;
       const value = delegatedSecretEnvVars?.[key];
       const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
@@ -2349,13 +2361,14 @@ export async function executePlanApply(ctx: CommandContext, params: {
       result = { ...result, success: false, receipts: [...result.receipts,
         { actionId: 'backup-readiness', status: 'blocked', message }] };
     } else {
-      const forced = await ensureDeployBootstrap();
-      if (!forced.success) {
-      result = {
-        ...result,
-        success: false,
-        error: String(forced.summary.error ?? 'Deploy failed'),
-      };
+      try {
+        const forced = await ensureDeployBootstrap();
+        if (!forced.success) result = { ...result, success: false, error: String(forced.summary.error ?? 'Deploy failed') };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Deployment preflight failed.';
+        ctx.repos.runs.updateStatus(result.applyRunId!, 'blocked', message);
+        ctx.repos.runs.addReceipt(result.applyRunId!, { step: 'deployment-preflight', status: 'blocked', result: { message }, timestamp: new Date().toISOString() });
+        result = { ...result, success: false, error: message, receipts: [...result.receipts, { actionId: 'deployment-preflight', status: 'blocked', message }] };
       }
     }
   }

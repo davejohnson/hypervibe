@@ -17,6 +17,8 @@ import type {
  * Used to determine what features are available for a given platform.
  */
 export interface HostingCapabilities {
+  /** Missing capability means unsupported; each destination is checked separately. */
+  runtimeSecretReferenceProviders?: Array<import('./secret-destination.port.js').SecretDestination['provider']>;
   /** Build methods the platform supports */
   supportedBuilders: Array<'nixpacks' | 'dockerfile' | 'buildpack' | 'static'>;
 

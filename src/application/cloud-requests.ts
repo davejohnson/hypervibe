@@ -5,7 +5,8 @@ import { z } from 'zod';
 import type { CommandRegistrar } from './commands.js';
 import type { CommandContext } from './context.js';
 import { createHypervibeCloudPairingClient, normalizeHypervibeCloudBaseUrl } from './cloud-pairing.js';
-import { createCloudRequestClient, fieldSchema, type CredentialRequest } from './cloud-request-client.js';
+import { createCloudRequestClient, fieldSchema, destinationMapSchema, sameDestinations, type CredentialRequest } from './cloud-request-client.js';
+import { secretDestinationIdentity } from '../domain/ports/secret-destination.port.js';
 import { resolveCredentialPlanHandoff } from './credential-plan-handoff.js';
 import { CloudHttpError } from './cloud-http.js';
 import { commandSuccess, HvError, wrapCommandHandler } from './results.js';
@@ -18,7 +19,7 @@ const PROVIDER = 'hypervibe-cloud-requests';
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 const email = z.string().trim().toLowerCase().email().max(320);
 const inputShape = {
-  action: z.enum(['create', 'list', 'resume', 'replace', 'revoke', 'authorize']).optional().describe('Default: prepare a request; confirm sends it. Resume finds ready requests and private import calls without IDs. Replace explicitly re-requests terminal credentials. List reads history, revoke cancels one request, authorize opens browser access.'),
+  action: z.enum(['environments', 'create', 'list', 'resume', 'reconcile', 'replace', 'revoke', 'authorize']).optional().describe('Start with environments for a read-only inventory of every environment and separate approval steps. Default: prepare one invitation; confirm sends it. Resume returns direct secret version receipts or legacy private import calls. Reconcile checks uncertain direct delivery metadata without sending values again. Authorize grants access to one environment.'),
   env: z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/).optional().describe('Defaults to staging, or the only declared environment.'),
   planId: z.string().uuid().optional().describe('For create/replace, select only unsupplied required runtime inputs from this fresh persisted plan. Resume treats this as a continuity hint, never deployment approval; a fresh plan is required after import.'),
   ownerEmail: email.optional().describe('Usually inferred from secret principal="email:owner@example.com". Supply only when the spec does not name an email owner, or to select one of several declared owners.'),
@@ -36,6 +37,7 @@ const environment = z.object({ id: z.string().uuid(), key: z.string(), name: z.s
 const proposalSchema = z.object({
   recipientEmail: email, title: inputShape.title.unwrap(), fields: z.array(fieldSchema).min(1).max(16),
   sourceBranch: branch, expectedSourceRevision: z.string().regex(/^[a-f0-9]{40}$/), expectedSourceDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  deliveryMode: z.literal('secret-manager').optional(), destinations: destinationMapSchema.optional(),
 });
 type Proposal = z.infer<typeof proposalSchema>;
 const reviewSchema = z.object({
@@ -59,7 +61,7 @@ function checkout(input: Input) {
     || (document.spec.gitRemoteUrl && normalizeGitRemoteIdentity(document.spec.gitRemoteUrl) !== remote))
     throw new HvError('VALIDATION', 'Use the intended GitHub checkout with its Hypervibe spec. Initialize missing desired state with hv_spec.');
   const names = Object.keys(document.spec.environments);
-  const env = input.env ?? (names.includes('staging') ? 'staging' : names.length === 1 ? names[0] : undefined);
+  const env = input.env ?? (input.action === 'environments' ? names[0] : names.includes('staging') ? 'staging' : names.length === 1 ? names[0] : undefined);
   if (!env || !document.spec.environments[env]) throw new HvError('VALIDATION', 'Select a declared environment; there is no unambiguous staging default.');
   return { root, spec: document.spec, repository: remote.slice('github.com/'.length), env };
 }
@@ -74,8 +76,9 @@ function committedSource(input: Input, scope: ReturnType<typeof checkout>) {
 
 function intent(input: Input, scope: ReturnType<typeof checkout>, requiredKeys?: string[]): Proposal | null {
   const slots = Object.entries(scope.spec.secrets ?? {}).filter(([, slot]) => slot.ownership === 'delegated' && slot.environments.includes(scope.env));
+  const bindings = scope.spec.environments[scope.env].secretDestinations ?? {};
   const declaredEmail = (principal: string) => email.safeParse(principal.startsWith('email:') ? principal.slice(6) : principal);
-  const selected: NonNullable<Input['fields']> = input.fields ?? slots.filter(([key, slot]) => (requiredKeys === undefined || requiredKeys.includes(key)) && slot.ownership === 'delegated' && slot.required !== false
+  const selected: NonNullable<Input['fields']> = input.fields ?? slots.filter(([key, slot]) => !bindings[key]?.version && (requiredKeys === undefined || requiredKeys.includes(key)) && slot.ownership === 'delegated' && slot.required !== false
     && (!input.ownerEmail || slot.ownership !== 'delegated' || !declaredEmail(slot.principal).success || declaredEmail(slot.principal).data === input.ownerEmail)).map(([key]) => ({ key }));
   if (!selected.length && !input.fields && !input.ownerEmail) return null;
   if (!selected.length || selected.length > 16 || new Set(selected.map(f => f.key)).size !== selected.length)
@@ -84,6 +87,7 @@ function intent(input: Input, scope: ReturnType<typeof checkout>, requiredKeys?:
   for (const field of selected) {
     const slot = slots.find(([key]) => key === field.key)?.[1];
     if (!slot || slot.ownership !== 'delegated') throw new HvError('VALIDATION', 'Every selected field must be a delegated secret in this environment.');
+    if (bindings[field.key]?.version) throw new HvError('VALIDATION', 'A pinned secret version is already declared for this key. Collection preserves existing versions; rotation requires a separate review.');
     if (requiredKeys && !requiredKeys.includes(field.key)) throw new HvError('VALIDATION', 'Select only unsupplied required runtime inputs from the reviewed plan; other declared keys are not missing inputs for that plan.');
     const parsed = declaredEmail(slot.principal);
     if (parsed.success) owners.add(parsed.data);
@@ -93,29 +97,40 @@ function intent(input: Input, scope: ReturnType<typeof checkout>, requiredKeys?:
     throw new HvError('VALIDATION', 'The selected keys have different declared email ownership. Select one owner’s keys, or review an ownership change through hv_spec first.');
   const recipientEmail = input.ownerEmail ?? [...owners][0];
   if (!recipientEmail) throw new HvError('VALIDATION', 'Supply the credential owner’s email; never supply credential values here.');
+  const directKeys = selected.filter(field => bindings[field.key]);
+  if (directKeys.length && directKeys.length !== selected.length) throw new HvError('VALIDATION', 'Select direct secret-manager keys separately from local-import keys. Use action="environments" for the per-owner collection groups.');
   return proposalSchema.parse({
     recipientEmail, title: input.title ?? `${scope.spec.project.slice(0, 108)} credentials`,
     fields: selected.map(f => ({ key: f.key, label: f.label ?? f.key.replaceAll('_', ' ').slice(0, 120), inputType: f.inputType ?? 'password' as const })),
     ...committedSource(input, scope),
+    ...(directKeys.length ? { deliveryMode: 'secret-manager', destinations: Object.fromEntries(directKeys.map(field => [field.key, bindings[field.key].destination])) } : {}),
   });
 }
 
 function matchesProposal(request: CredentialRequest, proposal: Proposal, exactTitle = false) {
   return request.authentication === 'email' && request.recipient === proposal.recipientEmail
+    && request.deliveryMode === (proposal.deliveryMode ?? 'local-import') && sameDestinations(request.destinations, proposal.destinations)
     && (!exactTitle || request.title === proposal.title)
     && request.sourceRevision === proposal.expectedSourceRevision && request.sourceBranch === proposal.sourceBranch
     && JSON.stringify(request.fields) === JSON.stringify(proposal.fields)
     && request.keys.slice().sort().join(',') === proposal.fields.map(field => field.key).sort().join(',');
 }
 
+function publicRequest(request: CredentialRequest) {
+  const { destinations, ...safe } = request;
+  // An array keeps metadata readable through the shared response redactor:
+  // a literal CLIENT_SECRET property must remain sensitive everywhere else.
+  return { ...safe, ...(destinations ? { destinationTargets: Object.entries(destinations).map(([key, destination]) => ({ key, destination })) } : {}) };
+}
+
 export function registerCloudRequestCommands(commands: CommandRegistrar, context: CommandContext): void {
   commands.register('hv_cloud_requests',
-    'Collect declared credentials with browser-approved access. Infer repository, staging, branch, delegated keys and email owner. Review an invitation before confirm=true sends it. Resume lists current readiness and exact-source private import calls without request IDs; it never imports, deploys or wakes an agent automatically. Matching requests are reused, including consumed requests; replace explicitly reviews a new request after consumption, expiry or revocation. List reads history and revoke confirms cancellation. Values stay in the secure form and separately approved hv_cloud_secrets import.',
+    'Collect declared credentials with browser-approved access. Start with action=environments to inventory every environment, including generated secrets and existing version pins; each environment keeps its own grant and invitation review. Source-declared destinations deliver directly to secret managers and return immutable references, never local plaintext. Resume returns generation review links and delivery receipts; reconciliation reads uncertain delivery metadata without resending values. Legacy non-destination keys retain separately approved private import. This command never deploys.',
     inputShape, wrapCommandHandler(async input => {
       const action = input.action ?? 'create';
-      if (['revoke', 'replace'].includes(action) && !input.requestId) throw new HvError('VALIDATION', 'Select the requestId from list or resume for this action.');
+      if (['revoke', 'replace', 'reconcile'].includes(action) && !input.requestId) throw new HvError('VALIDATION', 'Select the requestId from list or resume for this action.');
       const invitationOptions = ['ownerEmail', 'fields', 'sourceBranch', 'title', 'confirm', 'planId'];
-      const allowed: Record<typeof action, string[]> = { create: invitationOptions, replace: [...invitationOptions, 'requestId'], resume: ['sourceBranch', 'planId'], list: ['page', 'sort'], revoke: ['requestId', 'confirm'], authorize: ['sourceBranch'] };
+      const allowed: Record<typeof action, string[]> = { environments: ['sourceBranch'], create: invitationOptions, replace: [...invitationOptions, 'requestId'], resume: ['sourceBranch', 'planId'], reconcile: ['requestId', 'sourceBranch'], list: ['page', 'sort'], revoke: ['requestId', 'confirm'], authorize: ['sourceBranch'] };
       if (Object.entries(input).some(([key, value]) => value !== undefined && !['action', 'env', 'baseUrl', ...allowed[action]].includes(key))) throw new HvError('VALIDATION', 'Use only options for the selected request action.');
       const scope = checkout(input);
       let selectedBaseUrl = input.baseUrl;
@@ -128,6 +143,34 @@ export function registerCloudRequestCommands(commands: CommandRegistrar, context
         }
       }
       const baseUrl = normalizeHypervibeCloudBaseUrl(selectedBaseUrl);
+      if (action === 'environments') {
+        if (input.env) throw new HvError('VALIDATION', 'The environments inventory covers every declared environment; omit env.');
+        const source = committedSource(input, scope);
+        const environments = Object.entries(scope.spec.environments).map(([env, configuration]) => {
+          const slots = Object.entries(scope.spec.secrets ?? {}).filter(([, slot]) => slot.environments.includes(env));
+          const bindings = configuration.secretDestinations ?? {};
+          const groups = new Map<string, { deliveryMode: 'local-import' | 'secret-manager'; principal: string; keys: string[] }>();
+          for (const [key, slot] of slots) {
+            if (slot.ownership !== 'delegated' || slot.required === false || bindings[key]?.version) continue;
+            const deliveryMode = bindings[key] ? 'secret-manager' as const : 'local-import' as const;
+            const identity = `${deliveryMode}|${slot.principal}`;
+            const group = groups.get(identity) ?? { deliveryMode, principal: slot.principal, keys: [] };
+            group.keys.push(key); groups.set(identity, group);
+          }
+          const command = (action: string) => ({ command: 'hv_cloud_requests', input: { action, env, baseUrl, sourceBranch: source.sourceBranch } });
+          return { environment: env, status: 'not_observed', pinnedKeys: slots.filter(([key]) => bindings[key]?.version).map(([key]) => key),
+            generatedKeys: slots.filter(([key, slot]) => slot.ownership === 'hypervibe' && !bindings[key]?.version).map(([key]) => key),
+            generatedDelivery: slots.filter(([key, slot]) => slot.ownership === 'hypervibe' && !bindings[key]?.version).map(([key]) => ({ key, deliveryMode: bindings[key] ? 'secret-manager' : 'local-managed' })),
+            groups: [...groups.values()].flatMap(group => Array.from({ length: Math.ceil(group.keys.length / 16) }, (_, index) => {
+              const keys = group.keys.slice(index * 16, (index + 1) * 16);
+              return { ...group, keys, review: { command: 'hv_cloud_requests', input: { action: 'create', env, baseUrl, sourceBranch: source.sourceBranch, fields: keys.map(key => ({ key })) } } };
+            })),
+            authorize: command('authorize'), resume: command('resume') };
+        });
+        return commandSuccess({ status: 'environment_review_required', repository: scope.repository, sourceRevision: source.expectedSourceRevision, environments }, {
+          hint: 'Inventory only: readiness has not been observed and no invitations were sent. Approve each environment separately, then review each owner’s invitation. Resume supplies owner browser actions for unpinned generated destination keys. Pinned versions are preserved.',
+        });
+      }
       const connectionScope = `${baseUrl}|${scope.repository}|${scope.env}`;
       let stored = context.repos.connections.findByProviderAndScope(PROVIDER, connectionScope);
       let state: State | undefined;
@@ -196,13 +239,19 @@ export function registerCloudRequestCommands(commands: CommandRegistrar, context
       if (state.status !== 'verified') throw new HvError('INTERNAL', 'Browser access was not established.');
       let grant = state;
       const client = createCloudRequestClient({ baseUrl, token: grant.token, projectId: grant.project.id, environmentId: grant.environment.id });
+      const bindings = scope.spec.environments[scope.env].secretDestinations ?? {};
+      const targetMatches = (request: CredentialRequest) => request.deliveryMode === 'secret-manager'
+        ? request.keys.every(key => bindings[key] && sameDestinations({ [key]: bindings[key].destination }, { [key]: request.destinations![key] }))
+        : request.keys.every(key => !bindings[key]);
+      const canImport = (request: CredentialRequest) => request.deliveryMode === 'local-import' && targetMatches(request) && request.status === 'ready';
       const importCall = (request: CredentialRequest) => ({ command: 'hv_cloud_secrets', input: { requestId: request.id, env: scope.env, baseUrl } });
       const replacementCall = (request: CredentialRequest) => ({ command: 'hv_cloud_requests', input: { action: 'replace', requestId: request.id, env: scope.env, baseUrl } });
-      const receipt = (request: CredentialRequest, extras: Record<string, unknown> = {}, offerImport = true) => commandSuccess({ applied: 0, skipped: 1, request,
-        ...(offerImport && request.status === 'ready' ? { import: importCall(request) } : {}),
+      const receipt = (request: CredentialRequest, extras: Record<string, unknown> = {}, offerImport = true) => commandSuccess({ applied: 0, skipped: 1, request: publicRequest(request),
+        ...(offerImport && canImport(request) ? { import: importCall(request) } : {}),
         ...(['consumed', 'expired', 'revoked'].includes(request.status) ? { replacement: replacementCall(request) } : {}), ...extras,
       }, {
-        hint: offerImport && request.status === 'ready' ? 'Ready means values were supplied, not validated. Use hv_cloud_secrets for browser-approved private import, then prepare a fresh plan.' : 'No new invitation was sent. Resume checks current source eligibility. Re-requesting terminal credentials requires a separately confirmed replacement.', next: offerImport && request.status === 'ready' ? ['hv_cloud_secrets'] : ['hv_cloud_requests'],
+        hint: request.deliveryMode === 'secret-manager' ? 'Secret-manager receipts contain immutable references only. Review the delivered versions with hv_spec and prepare a fresh plan. Unknown delivery requires metadata reconciliation; never resubmit a value automatically.'
+          : offerImport && canImport(request) ? 'Ready means values were supplied, not validated. Use hv_cloud_secrets for browser-approved private import, then prepare a fresh plan.' : 'No new invitation was sent. Resume checks current source eligibility. Re-requesting terminal credentials requires a separately confirmed replacement.', next: offerImport && canImport(request) ? ['hv_cloud_secrets'] : ['hv_cloud_requests'],
       });
       const listAll = async () => {
         const requests: CredentialRequest[] = [];
@@ -228,7 +277,10 @@ export function registerCloudRequestCommands(commands: CommandRegistrar, context
       let writeAttempted = false;
       try {
         if (action === 'authorize') return commandSuccess({ status: 'connected', repository: scope.repository, environment: scope.env });
-        if (action === 'list') return commandSuccess(await client.list(input.page, input.sort), { hint: 'Presence-only status; no values are returned. Ready requests can be imported with hv_cloud_secrets using this environment and server.' });
+        if (action === 'list') {
+          const result = await client.list(input.page, input.sort);
+          return commandSuccess({ ...result, requests: result.requests.map(publicRequest) }, { hint: 'Metadata only. Direct deliveries expose immutable secret-manager references; legacy ready requests require separate private import. Resume checks current source eligibility.' });
+        }
         let requests: CredentialRequest[] | undefined;
         let recovery: { status: 'reconciled'; requestId: string } | undefined;
         if (grant.review?.pendingWrite) {
@@ -252,6 +304,22 @@ export function registerCloudRequestCommands(commands: CommandRegistrar, context
           // mutation. Resume may continue read-only; everything else stops here.
           if (action !== 'resume') return receipt(recovered, { recovery }, false);
         }
+        if (action === 'reconcile') {
+          const request = await client.show(input.requestId!);
+          const source = committedSource(input, scope);
+          if (request.deliveryMode !== 'secret-manager' || !targetMatches(request) || request.sourceRevision !== source.expectedSourceRevision
+            || (request.sourceBranch !== null && request.sourceBranch !== source.sourceBranch)) throw new HvError('VALIDATION', 'Reconciliation requires a direct request matching this exact committed source and environment.');
+          // A web request can bind the default branch. Verify that default
+          // independently, exactly as resume does; a different branch retaining
+          // the old commit cannot authorize recovery after the default moves.
+          const discovered = await client.fields(request.sourceBranch === null ? '' : source.sourceBranch);
+          if (discovered.source?.revision !== source.expectedSourceRevision || discovered.source.digest !== source.expectedSourceDigest)
+            throw new HvError('VALIDATION', 'The hosted source changed; inspect the original delivery before proceeding.');
+          const observed = await client.reconcile(request.id);
+          if (observed.sourceRevision !== request.sourceRevision || observed.sourceBranch !== request.sourceBranch
+            || !sameDestinations(observed.destinations, request.destinations)) throw new HvError('PROVIDER_ERROR', 'The reconciliation returned a different delivery scope.');
+          return receipt(observed, { replanRequired: true }, false);
+        }
         if (action === 'resume') {
           requests ??= await listAll();
           const source = committedSource(input, scope);
@@ -271,19 +339,33 @@ export function registerCloudRequestCommands(commands: CommandRegistrar, context
               && (request.sourceBranch === null ? currentDefault : currentSource && request.sourceBranch === source.sourceBranch)
               && request.keys.every(key => {
                 const slot = scope.spec.secrets?.[key];
-                return slot?.ownership === 'delegated' && slot.environments.includes(scope.env) && discovered.availableFields.some(field => field.key === key);
-              });
-            const readiness = ['pending', 'ready'].includes(request.status) && !eligible ? 'stale_source' : request.status;
-            return { request, readiness,
-              ...(readiness === 'ready' ? { import: importCall(request) } : {}),
+                return slot?.environments.includes(scope.env) && (request.authentication === 'generated'
+                  ? slot.ownership === 'hypervibe' && Boolean(discovered.generatedSecrets?.[key])
+                  : slot.ownership === 'delegated' && discovered.availableFields.some(field => field.key === key));
+              }) && targetMatches(request);
+            const readiness = ['pending', 'ready'].includes(request.status) && !eligible ? 'stale_source'
+              : request.deliveryMode === 'secret-manager' && request.status === 'ready' ? 'delivered' : request.status;
+            return { request: publicRequest(request), readiness,
+              ...(readiness === 'ready' && canImport(request) ? { import: importCall(request) } : {}),
+              ...(eligible && request.deliveryMode === 'secret-manager' && request.receipts?.some(receipt => ['attempted', 'unknown'].includes(receipt.status))
+                ? { reconcile: { command: 'hv_cloud_requests', input: { action: 'reconcile', requestId: request.id, env: scope.env, baseUrl, sourceBranch: source.sourceBranch } } } : {}),
               ...(['consumed', 'expired', 'revoked'].includes(request.status) ? { replacement: replacementCall(request) } : {}),
             };
           });
+          const generatedKeys = Object.entries(scope.spec.secrets ?? {}).filter(([key, slot]) => slot.ownership === 'hypervibe'
+            && slot.environments.includes(scope.env) && bindings[key] && !bindings[key].version).map(([key]) => key);
+          const generatedSecrets = currentSource ? generatedKeys.map(key => {
+            const entry = discovered.generatedSecrets?.[key];
+            if (!entry || entry.version || !sameDestinations({ [key]: bindings[key].destination }, { [key]: entry.destination }))
+              throw new HvError('PROVIDER_ERROR', 'Hosted discovery did not verify the owner review action for a declared generated secret. No completed collection state has been inferred.');
+            return { key, destination: entry.destination, generateUrl: entry.generateUrl };
+          }) : [];
           const status = rows.some(row => row.readiness === 'ready') ? 'ready_for_import'
             : rows.some(row => row.readiness === 'pending') ? 'awaiting_credentials'
-              : rows.length ? 'recovery_required' : 'no_active_requests';
-          return commandSuccess({ status, environment: scope.env, requests: rows, history: { total: requests.length, shown: rows.length }, replanRequired: true, ...(input.planId ? { previousPlanId: input.planId } : {}), ...(recovery ? { recovery } : {}) }, {
-            hint: 'Presence-only status, not provider validation or deployment readiness. Import calls require separate browser approval. Check local import recovery before replacing consumed credentials; never repeat a one-time retrieval. Prepare a fresh plan after import. No background wake or deployment was started.',
+              : rows.some(row => row.readiness === 'delivered') ? 'ready_for_plan' : generatedSecrets.length ? 'generation_review_required'
+                : rows.length ? 'recovery_required' : 'no_active_requests';
+          return commandSuccess({ status, environment: scope.env, requests: rows, history: { total: requests.length, shown: rows.length }, generatedKeys, generatedSecrets, replanRequired: true, ...(input.planId ? { previousPlanId: input.planId } : {}), ...(recovery ? { recovery } : {}) }, {
+            hint: 'Delivery metadata is not application or deployment validation. Review direct immutable versions with hv_spec, then prepare a fresh plan. Generated destination keys require their owner browser review; no value is generated here. Legacy import calls require separate browser approval. Nothing was deployed.',
           });
         }
         if (action === 'revoke') {
@@ -298,7 +380,7 @@ export function registerCloudRequestCommands(commands: CommandRegistrar, context
           writeAttempted = true;
           const result = await client.revoke(request.id);
           save({ ...grant, review: undefined });
-          return commandSuccess(result, { hint: 'The server confirmed this revocation or terminal no-op. Previously imported credentials were not rotated.' });
+          return commandSuccess({ ...result, request: publicRequest(result.request) }, { hint: 'The server confirmed this revocation or terminal no-op. Previously delivered or imported credentials were not rotated.' });
         }
         let previous: CredentialRequest | undefined;
         let proposalInput = input;
@@ -314,7 +396,10 @@ export function registerCloudRequestCommands(commands: CommandRegistrar, context
         if (!proposal) return commandSuccess({ status: 'not_required', environment: scope.env });
         const discovered = await client.fields(proposal.sourceBranch);
         if (discovered.source?.revision !== proposal!.expectedSourceRevision || discovered.source.digest !== proposal!.expectedSourceDigest
-          || proposal!.fields.some(field => !discovered.availableFields.some(available => available.key === field.key)))
+          || proposal!.fields.some(field => !discovered.availableFields.some(available => available.key === field.key)
+            || (proposal!.deliveryMode === 'secret-manager' && (!discovered.secretDestinations?.[field.key]
+              || discovered.secretDestinations[field.key].version
+              || !sameDestinations({ [field.key]: proposal!.destinations![field.key] }, { [field.key]: discovered.secretDestinations[field.key].destination })))))
           throw new HvError('VALIDATION', 'The hosted branch does not match this committed spec and revision. Push or check out the reviewed source, then prepare again.');
         const fingerprint = hash(JSON.stringify({ action, projectId: grant.project.id, environmentId: grant.environment.id, planId: input.planId, ...(previous ? { previous } : {}), ...proposal }));
         requests ??= await listAll();
@@ -330,12 +415,16 @@ export function registerCloudRequestCommands(commands: CommandRegistrar, context
         const currentKeys = input.planId ? resolveCredentialPlanHandoff(context, { planId: input.planId, ...currentScope }).keys : undefined;
         const current = intent(proposalInput, currentScope, currentKeys);
         if (JSON.stringify(current) !== JSON.stringify(proposal)) throw new HvError('VALIDATION', 'The checkout changed during review. Prepare the invitation again.');
-        confirm(fingerprint, `${previous ? `Re-request credentials after ${previous.status} request ${previous.id}. This sends a new invitation, not another retrieval. ` : ''}Send ${proposal.title} to ${proposal.recipientEmail} for ${scope.spec.project}/${scope.env}? Fields: ${proposal.fields.map(f => `${f.key} (${f.label}, ${f.inputType})`).join(', ')}. Source: ${proposal.sourceBranch} at ${proposal.expectedSourceRevision}.`, proposal, priorRequestIds);
+        const deliveryReview = proposal.deliveryMode === 'secret-manager'
+          ? ` Deliver directly to ${Object.entries(proposal.destinations!).map(([key, destination]) => `${key}: ${secretDestinationIdentity(destination).resource}`).join('; ')}. Values will not be imported locally.` : ' Values require a separately approved local import.';
+        confirm(fingerprint, `${previous ? `Re-request credentials after ${previous.status} request ${previous.id}. This sends a new invitation, not another retrieval. ` : ''}Send ${proposal.title} to ${proposal.recipientEmail} for ${scope.spec.project}/${scope.env}? Fields: ${proposal.fields.map(f => `${f.key} (${f.label}, ${f.inputType})`).join(', ')}. Source: ${proposal.sourceBranch} at ${proposal.expectedSourceRevision}.${deliveryReview}`, proposal, priorRequestIds);
         grant = { ...grant, review: { ...grant.review!, proposal, priorRequestIds, pendingWrite: true } }; save(grant);
         writeAttempted = true;
         const result = await client.create(proposal!);
         save({ ...grant, review: undefined });
-        return commandSuccess({ ...result, ...(previous ? { replacesRequestId: previous.id } : {}) }, { hint: 'Invitation queued, not confirmed delivered. Values stay in the recipient’s secure form. Resume checks readiness and provides separately approved private import calls.', next: ['hv_cloud_requests'] });
+        return commandSuccess({ ...result, request: publicRequest(result.request), ...(previous ? { replacesRequestId: previous.id } : {}) }, { hint: proposal.deliveryMode === 'secret-manager'
+          ? 'Invitation queued. Values go from the secure form to the reviewed secret manager; resume reads immutable version receipts. No local values or deployment were produced.'
+          : 'Invitation queued, not confirmed delivered. Values stay in the recipient’s secure form. Resume checks readiness and provides separately approved private import calls.', next: ['hv_cloud_requests'] });
       } catch (error) {
         if (error instanceof HvError) {
           const rejected = z.object({ outcome: z.literal('rejected') }).safeParse(error.extras?.details).success;

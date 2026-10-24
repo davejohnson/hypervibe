@@ -1,4 +1,8 @@
 import { z } from 'zod';
+import { validateRuntimeSecretReferences, runtimeSecretReferenceIdentity } from '../../../domain/services/runtime-secret-references.js';
+import type { RuntimeSecretReference } from '../../../domain/ports/secret-destination.port.js';
+import { DestinationBudget } from '../secret-destination-http.js';
+import { assertGcpProjectIdentity } from './gcp-project-identity.js';
 import type {
   IProviderAdapter,
   Receipt,
@@ -461,6 +465,8 @@ export class CloudRunAdapter implements
   readonly name = 'cloudrun';
 
   readonly capabilities: ProviderCapabilities = {
+    runtimeSecretReferenceProviders: ['gcp-secret-manager'],
+    supportsCreateOnlyDeploy: true,
     supportedBuilders: ['dockerfile'],
     supportedComponents: [], // Cloud SQL is separate
     supportsAutoWiring: false, // Manual connection needed
@@ -731,6 +737,15 @@ export class CloudRunAdapter implements
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }
+    let secretVersionRefs: Record<string, RuntimeSecretReference>;
+    try { secretVersionRefs = this.validateSecretReferences(options, envVars); }
+    catch { return { serviceId: service.id, status: 'failed', receipt: { success: false, message: 'Invalid or conflicting runtime secret reference.' } }; }
+    const creationBinding = parseHostingBindings(environment).services?.[service.name];
+    if (options.requireNewWorkload && (options.deferDeployment !== true || creationBinding?.serviceId || creationBinding?.jobName)) {
+      return { serviceId: service.id, status: 'failed', receipt: { success: false, message: 'Creation-only deployment requires an unbound workload and deferred deployment.' } };
+    }
+    try { await this.verifySecretReferenceProjects(secretVersionRefs); }
+    catch { return { serviceId: service.id, status: 'failed', receipt: { success: false, message: 'The native secret reference project identity could not be verified.' } }; }
 
     const workloadKind = serviceWorkloadKind(service);
     const deferredTarget = options.deferDeployment
@@ -850,6 +865,7 @@ export class CloudRunAdapter implements
         deploymentDeferred,
         deferredExpectedImageUri: deferredImageUri,
         bootstrapDeployment,
+        secretVersionRefs,
       });
     }
 
@@ -888,7 +904,7 @@ export class CloudRunAdapter implements
       const runtimeVars = this.runtimeEnvVarsForService(service, envVars);
       const existingContainer = cloudRunService ? this.primaryContainer(cloudRunService) : undefined;
       const replaceManagedDatabaseVars = this.isManagedDatabaseEnvSync(runtimeVars);
-      const env = this.mergeEnvVars(existingContainer?.env, runtimeVars, { replaceManagedDatabaseVars });
+      const env = this.mergeEnvVars(existingContainer?.env, runtimeVars, { replaceManagedDatabaseVars, secretVersionRefs });
       const cloudSqlNames = replaceManagedDatabaseVars
         ? this.cloudSqlConnectionNamesFromEnv(runtimeVars)
         : Array.from(new Set([
@@ -1125,6 +1141,9 @@ export class CloudRunAdapter implements
       );
       this.assertVpcAccess(serviceInfo, vpcAccess, `Cloud Run service ${serviceName}`);
       this.assertPreservedFilesystem(cloudRunService, serviceInfo);
+      if (this.unappliedRuntimeEnvKeys(this.primaryContainer(serviceInfo), {}, secretVersionRefs).length) {
+        throw new Error('Cloud Run did not verify the requested runtime secret references.');
+      }
       const url = serviceInfo?.uri;
       const publicAccess = this.shouldAllowUnauthenticated(service);
       const publicInvokerBindingUpdated = publicAccess
@@ -1247,6 +1266,7 @@ export class CloudRunAdapter implements
     deploymentDeferred?: boolean;
     deferredExpectedImageUri?: string;
     bootstrapDeployment?: boolean;
+    secretVersionRefs?: Record<string, RuntimeSecretReference>;
   }): Promise<DeployResult> {
     const {
       service,
@@ -1313,7 +1333,7 @@ export class CloudRunAdapter implements
       );
       const currentJobContainer = currentJob ? this.primaryJobContainer(currentJob) : undefined;
       const replaceManagedDatabaseVars = this.isManagedDatabaseEnvSync(runtimeVars);
-      const env = this.mergeEnvVars(currentJobContainer?.env, runtimeVars, { replaceManagedDatabaseVars });
+      const env = this.mergeEnvVars(currentJobContainer?.env, runtimeVars, { replaceManagedDatabaseVars, secretVersionRefs: params.secretVersionRefs });
       const labels = {
         'infraprint-environment': this.labelValue(environment.name),
         'infraprint-service': this.labelValue(service.name),
@@ -1690,13 +1710,42 @@ export class CloudRunAdapter implements
     }
   }
 
-  private unappliedRuntimeEnvKeys(container: CloudRunContainer | undefined, vars: Record<string, string>): string[] {
+  private validateSecretReferences(options: DeploymentMutationOptions, vars: Record<string, string>) {
+    return validateRuntimeSecretReferences(options.secretVersionRefs, vars, (destination) =>
+      destination.provider === 'gcp-secret-manager' && destination.projectId === this.credentials?.projectId);
+  }
+
+  private async verifySecretReferenceProjects(references: Record<string, RuntimeSecretReference>): Promise<void> {
+    if (!Object.keys(references).length) return;
+    const budget = new DestinationBudget();
+    try {
+      const token = await budget.wait(this.getAccessToken());
+      const verified = new Set<string>();
+      for (const reference of Object.values(references)) {
+        const destination = reference.destination;
+        if (destination.provider !== 'gcp-secret-manager') throw new Error('Invalid native secret provider.');
+        if (verified.has(destination.projectNumber)) continue;
+        await assertGcpProjectIdentity({ request: fetch, budget, token,
+          projectId: this.credentials!.projectId, projectNumber: destination.projectNumber });
+        verified.add(destination.projectNumber);
+      }
+    } finally { budget.close(); }
+  }
+
+  private unappliedRuntimeEnvKeys(container: CloudRunContainer | undefined, vars: Record<string, string>, refs: Record<string, RuntimeSecretReference> = {}): string[] {
     const observed = new Map(
       (container?.env ?? [])
         .filter((entry): entry is { name: string; value?: string } => typeof entry.name === 'string')
         .map((entry) => [entry.name, entry.value])
     );
-    return Object.entries(vars).filter(([key, value]) => observed.get(key) !== value).map(([key]) => key);
+    const missing = Object.entries(vars).filter(([key, value]) => observed.get(key) !== value).map(([key]) => key);
+    for (const [key, ref] of Object.entries(refs)) {
+      const expected = runtimeSecretReferenceIdentity(ref);
+      const entries = (container?.env ?? []).filter(entry => entry.name === key);
+      const native = (entries[0]?.valueSource as any)?.secretKeyRef;
+      if (entries.length !== 1 || entries[0]?.value !== undefined || native?.secret !== expected.resource || native?.version !== expected.version) missing.push(key);
+    }
+    return missing;
   }
 
   async setEnvVars(
@@ -1708,6 +1757,11 @@ export class CloudRunAdapter implements
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }
+    let secretVersionRefs: Record<string, RuntimeSecretReference>;
+    try { secretVersionRefs = this.validateSecretReferences(options, vars); }
+    catch { return { success: false, message: 'Invalid or conflicting runtime secret reference.' }; }
+    try { await this.verifySecretReferenceProjects(secretVersionRefs); }
+    catch { return { success: false, message: 'The native secret reference project identity could not be verified.' }; }
 
     const bindings = environment.platformBindings as {
       projectId?: string;
@@ -1726,7 +1780,7 @@ export class CloudRunAdapter implements
 
       if (isCron) {
         const runtimeVars = this.runtimeEnvVarsForService(service, vars);
-        if (Object.keys(runtimeVars).length === 0) {
+        if (Object.keys(runtimeVars).length === 0 && Object.keys(secretVersionRefs).length === 0) {
           return {
             success: true,
             message: 'No runtime environment variables to set',
@@ -1768,7 +1822,7 @@ export class CloudRunAdapter implements
         const jobSpec = this.cloudRunJobSpec({
           imageUri: currentContainer.image,
           command: this.requiredScheduledJobCommand(service),
-          env: this.mergeEnvVars(currentContainer.env, runtimeVars, { replaceManagedDatabaseVars }),
+          env: this.mergeEnvVars(currentContainer.env, runtimeVars, { replaceManagedDatabaseVars, secretVersionRefs }),
           resources: currentContainer.resources,
           serviceAccount: currentJob?.template?.template?.serviceAccount
             ?? currentJob?.template?.template?.serviceAccountName,
@@ -1792,7 +1846,7 @@ export class CloudRunAdapter implements
           vpcAccess,
           `Cloud Run job ${serviceName}`
         );
-        const unapplied = this.unappliedRuntimeEnvKeys(this.primaryJobContainer(readyJob), runtimeVars);
+        const unapplied = this.unappliedRuntimeEnvKeys(this.primaryJobContainer(readyJob), runtimeVars, secretVersionRefs);
         if (unapplied.length > 0) {
           return {
             success: false,
@@ -1834,7 +1888,7 @@ export class CloudRunAdapter implements
       );
 
       const runtimeVars = this.runtimeEnvVarsForService(service, vars);
-      if (Object.keys(runtimeVars).length === 0) {
+      if (Object.keys(runtimeVars).length === 0 && Object.keys(secretVersionRefs).length === 0) {
         return {
           success: true,
           message: 'No runtime environment variables to set',
@@ -1878,7 +1932,7 @@ export class CloudRunAdapter implements
         ...(currentContainer.livenessProbe ? { livenessProbe: currentContainer.livenessProbe } : {}),
         ...(currentContainer.resources ? { resources: currentContainer.resources } : {}),
         ...(volumeMounts && volumeMounts.length > 0 ? { volumeMounts } : {}),
-        env: this.mergeEnvVars(currentContainer.env, runtimeVars, { replaceManagedDatabaseVars }),
+        env: this.mergeEnvVars(currentContainer.env, runtimeVars, { replaceManagedDatabaseVars, secretVersionRefs }),
       };
       const templateUpdate: Record<string, unknown> = {
         containers: [containerSpec],
@@ -1922,7 +1976,7 @@ export class CloudRunAdapter implements
       const updatedService = await this.waitForCloudRunServiceReady(serviceName, token);
       this.assertVpcAccess(updatedService, vpcAccess, `Cloud Run service ${serviceName}`);
       this.assertPreservedFilesystem(currentService, updatedService);
-      const unapplied = this.unappliedRuntimeEnvKeys(this.primaryContainer(updatedService), runtimeVars);
+      const unapplied = this.unappliedRuntimeEnvKeys(this.primaryContainer(updatedService), runtimeVars, secretVersionRefs);
       if (unapplied.length > 0) {
         return {
           success: false,
@@ -4011,17 +4065,24 @@ export class CloudRunAdapter implements
   private observedEnvFromContainer(container: CloudRunContainer | undefined): {
     envVarKeys: string[];
     envVarHashes: Record<string, string>;
+    envVarSecretRefs: NonNullable<ObservedService['envVarSecretRefs']>;
   } {
     const envVarKeys: string[] = [];
     const envVarHashes: Record<string, string> = {};
+    const envVarSecretRefs: NonNullable<ObservedService['envVarSecretRefs']> = {};
     for (const entry of container?.env ?? []) {
       if (typeof entry.name !== 'string') continue;
       envVarKeys.push(entry.name);
       if (typeof entry.value === 'string') {
         envVarHashes[entry.name] = hashEnvValue(entry.value);
       }
+      const native = (entry.valueSource as any)?.secretKeyRef;
+      if (entry.value === undefined && typeof native?.secret === 'string' && /^projects\/\d+\/secrets\/[A-Za-z0-9_-]+$/.test(native.secret)
+        && typeof native.version === 'string' && /^[1-9]\d*$/.test(native.version)) {
+        envVarSecretRefs[entry.name] = { provider: 'gcp-secret-manager', resource: native.secret, version: native.version };
+      }
     }
-    return { envVarKeys, envVarHashes };
+    return { envVarKeys, envVarHashes, envVarSecretRefs };
   }
 
   private async observePublicInvoker(serviceName: string, token: string): Promise<boolean> {
@@ -6426,7 +6487,7 @@ export class CloudRunAdapter implements
   private mergeEnvVars(
     existing: Array<Record<string, unknown>> | undefined,
     updates: Record<string, string>,
-    options: { replaceManagedDatabaseVars?: boolean } = {}
+    options: { replaceManagedDatabaseVars?: boolean; secretVersionRefs?: Record<string, RuntimeSecretReference> } = {}
   ): Array<Record<string, unknown>> {
     const byName = new Map<string, Record<string, unknown>>();
     for (const entry of existing ?? []) {
@@ -6438,7 +6499,14 @@ export class CloudRunAdapter implements
       }
     }
     for (const [name, value] of Object.entries(updates)) {
+      if (byName.get(name)?.valueSource !== undefined) {
+        throw new Error('A literal environment update conflicts with an existing native secret reference.');
+      }
       byName.set(name, { name, value });
+    }
+    for (const [name, ref] of Object.entries(options.secretVersionRefs ?? {})) {
+      const native = runtimeSecretReferenceIdentity(ref);
+      byName.set(name, { name, valueSource: { secretKeyRef: { secret: native.resource, version: native.version } } });
     }
     return [...byName.values()];
   }
@@ -6522,6 +6590,8 @@ providerRegistry.register({
   metadata: {
     name: 'cloudrun',
     displayName: 'GCP Cloud Run',
+    runtimeSecretReferenceProviders: ['gcp-secret-manager'],
+    supportsCreateOnlyDeploy: true,
     category: 'deployment',
     credentialsSchema: CloudRunCredentialsSchema,
     setupHelpUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',

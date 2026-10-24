@@ -2024,11 +2024,16 @@ it('refuses to create a release job when neither it nor the existing service has
     (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
 
     let serviceCreated = false;
+    let createdServiceEnvironment: unknown[] = [];
     let migrationJobCreated = false;
     let migrationJobSpec: Record<string, unknown> | undefined;
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+
+      if (url === 'https://cloudresourcemanager.googleapis.com/v3/projects/123456789012' && method === 'GET') {
+        return Response.json({ name: 'projects/123456789012', projectId: 'gcp-project', state: 'ACTIVE' });
+      }
 
       if (url.includes('artifactregistry.googleapis.com') && method === 'GET') {
         return Response.json({
@@ -2096,13 +2101,14 @@ it('refuses to create a release job when neither it nor the existing service has
           annotations: {},
           template: {
             serviceAccount: EXPECTED_RUNTIME_SERVICE_ACCOUNT,
-            containers: [{ image: digestImageUri }],
+            containers: [{ image: digestImageUri, env: createdServiceEnvironment }],
           },
           terminalCondition: { type: 'Ready', state: 'CONDITION_SUCCEEDED' },
         });
       }
       if (url.includes('/services?serviceId=web-7e22b6c2dc') && method === 'POST') {
         serviceCreated = true;
+        createdServiceEnvironment = JSON.parse(String(init?.body)).template.containers[0].env;
         return Response.json({
           name: 'projects/gcp-project/locations/us-central1/operations/create-bootstrap-service',
           done: true,
@@ -2142,7 +2148,8 @@ it('refuses to create a release job when neither it nor the existing service has
       HYPERVIBE_SOURCE_REVISION: 'main',
       HYPERVIBE_GITHUB_TOKEN: 'private-repo-token',
       DATABASE_URL: 'postgres://example',
-    }, { deferDeployment: true, expectedSourceCommitSha: resolvedCommitSha });
+    }, { deferDeployment: true, requireNewWorkload: true, expectedSourceCommitSha: resolvedCommitSha,
+      secretVersionRefs: { API_TOKEN: { destination: { provider: 'gcp-secret-manager', projectId: 'gcp-project', projectNumber: '123456789012', secretId: 'staging-api' }, version: '7' } } });
 
     expect(result.status).toBe('configured');
     expect(result.receipt.success).toBe(true);
@@ -2176,6 +2183,7 @@ it('refuses to create a release job when neither it nor the existing service has
     expect(serviceBody.template.containers[0]).not.toHaveProperty('startupProbe');
     expect(serviceBody.template.containers[0]).not.toHaveProperty('livenessProbe');
     expect(serviceBody.template.serviceAccount).toBe(EXPECTED_RUNTIME_SERVICE_ACCOUNT);
+    expect(serviceBody.template.containers[0].env).toContainEqual({ name: 'API_TOKEN', valueSource: { secretKeyRef: { secret: 'projects/123456789012/secrets/staging-api', version: '7' } } });
     expect(serviceBody.annotations).toEqual({});
   });
 

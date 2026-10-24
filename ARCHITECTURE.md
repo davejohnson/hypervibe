@@ -829,8 +829,45 @@ Tests should fail if new provider guidance omits these basics. Update `src/domai
 for opaque application values a human should not choose; use delegated
 ownership only for a value issued or controlled outside Hypervibe.
 
+### Direct cloud secret destinations
+
+`environments.<name>.secretDestinations[KEY]` selects an exact existing cloud
+secret destination and, after delivery, its immutable `version`. The slot
+remains declared in `ProjectSpec.secrets`. AWS Secrets Manager, Google Secret
+Manager and Azure Key Vault use the shared destination port and hosted library;
+their existing value-reading secret-source adapters remain separate.
+
+Hosted Hypervibe authorizes the account, repository, environment, source and
+writer connection before claiming a durable delivery intent. Submitted values
+and fresh generated values exist only during that request. It stores native
+version references and outcomes, never values in its credential envelope or
+queues. Generation occurs after the durable claim, using cryptographic random
+bytes; retry reconciles metadata and does not regenerate. Monitoring access is
+not write authorization. Existing writer credentials retain their separate
+credential-vault policy; this feature does not erase those credentials.
+
+Local planning never resolves or derives values for destination-backed slots,
+never scaffolds them as local dotenv inputs, and rejects legacy `secretRefs`.
+Collection, committing a version pin, and runtime rollout remain distinct.
+Reference changes have explicit plan authority and exact replacement
+confirmation. Apply verifies current ownership, lifecycle policy, target
+services and native version metadata before writing and after readback. Native
+reference drift participates in plan fingerprints and missing input/unknown
+reference state cannot report `inSync`. Runtime IAM and actual external-key
+validity remain separate from reference configuration verification.
+
+Only declared provider capabilities admit native runtime references: Cloud Run
+consumes Google references, ECS consumes AWS references, and Azure Container
+Apps consumes Key Vault references. Other hosts block without materializing
+values. Current runtime references survive normal deployment, release and CI
+paths. All-environment collection returns separate reviewed child workflows;
+an environment grant cannot authorize invitations or writes in another.
+See [destination contracts and limitations](docs/secret-destination-delivery.md).
+
+### Legacy local value inputs
+
 Hypervibe-owned secrets declare a versioned generator, generation, and runtime
-environments. Planning derives strong, stable material from SecretStore's
+environments. For slots without a native destination, planning derives strong, stable material from SecretStore's
 private root key with project/environment/key/generator/generation domain
 separation, then stores the provider-ready value only in the existing encrypted
 plan override. The value is excluded from `secretRefs`, ordinary `envVars`,

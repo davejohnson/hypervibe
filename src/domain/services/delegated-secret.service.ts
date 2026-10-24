@@ -10,6 +10,7 @@ import type {
   ProjectSpec,
 } from '../spec/spec.schema.js';
 import { githubActionsCanonicalEnvironment } from '../spec/devops-selection.js';
+import { planSecretReference } from './secret-reference-plan.js';
 
 export const DELEGATED_SECRET_OPERATION = 'delegatedSecretSync';
 
@@ -421,6 +422,14 @@ export function planDelegatedSecrets(params: {
   const blockers: ManagedSecretBlocker[] = [];
 
   for (const [key, slot] of slots) {
+    if (params.spec.environments[params.environmentName]?.secretDestinations?.[key]) {
+      const reference = planSecretReference({ ...params, key, slot, suppliedValue: suppliedValues[key] });
+      actions.push(reference.action);
+      inputRequired.push(...reference.inputRequired);
+      blockers.push(...reference.blockers);
+      warnings.push(...reference.warnings);
+      continue;
+    }
     const binding = bindings.get(key);
     const suppliedValue = suppliedValues[key];
     const live = liveHashesForSecret(params.observed, serviceNames, key, {

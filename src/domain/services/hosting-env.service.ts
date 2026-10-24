@@ -8,6 +8,8 @@ import { providerRegistry } from '../registry/provider.registry.js';
 import { redactExactValues } from '../../utils/redact-exact-values.js';
 import { adapterFactory } from './adapter.factory.js';
 import { reservedRuntimeEnvError } from './runtime-env-policy.js';
+import { validateRuntimeSecretReferences } from './runtime-secret-references.js';
+import type { RuntimeSecretReference } from '../ports/secret-destination.port.js';
 
 export const HOSTING_ENV_REMOVE_OPERATION = 'hostingEnvRemove';
 
@@ -44,12 +46,15 @@ export async function syncHostingEnvVars(params: {
   environment: Environment;
   service: Service;
   vars: Record<string, string>;
+  secretVersionRefs?: Record<string, RuntimeSecretReference>;
   /** Keep exact-SHA CI as the next code release boundary when supported. */
   deferDeployment?: boolean;
   requireDeferredSecretUpdate?: boolean;
 }): Promise<Receipt & { provider?: string }> {
   const reservedError = reservedRuntimeEnvError(params.vars);
   if (reservedError) return { success: false, message: reservedError, error: reservedError };
+  try { validateRuntimeSecretReferences(params.secretVersionRefs, params.vars, () => true); }
+  catch { return { success: false, message: 'Invalid or conflicting runtime secret references.' }; }
   const provider = hostingProviderForEnvironment(params.project, params.environment);
   const displayName = providerDisplayName(provider);
 
@@ -73,6 +78,11 @@ export async function syncHostingEnvVars(params: {
   }
 
   const adapter = adapterResult.adapter as unknown as Partial<IHostingAdapter>;
+  let secretVersionRefs: Record<string, RuntimeSecretReference>;
+  try {
+    secretVersionRefs = validateRuntimeSecretReferences(params.secretVersionRefs, params.vars,
+      destination => adapter.capabilities?.runtimeSecretReferenceProviders?.includes(destination.provider) === true);
+  } catch { return { success: false, message: 'The hosting provider cannot install the declared native secret references.', provider }; }
   if (params.requireDeferredSecretUpdate && (params.deferDeployment !== true || adapter.capabilities?.supportsDeferredSecretUpdates !== true)) {
     return { success: false, message: 'This adapter cannot update selected secrets without restarting workloads.', provider };
   }
@@ -89,12 +99,13 @@ export async function syncHostingEnvVars(params: {
     && (params.requireDeferredSecretUpdate === true || adapter.capabilities?.supportsDeferredDeploy === true);
   const exactValues = Object.values(params.vars);
   try {
-    const receipt = deferDeployment
+    const referenceOptions = Object.keys(secretVersionRefs).length ? { secretVersionRefs } : {};
+    const receipt = deferDeployment || Object.keys(referenceOptions).length
       ? await adapter.setEnvVars(
         params.environment,
         params.service,
         params.vars,
-        { deferDeployment: true, ...(params.requireDeferredSecretUpdate ? { requireDeferredSecretUpdate: true } : {}) }
+        { ...(deferDeployment ? { deferDeployment: true } : {}), ...referenceOptions, ...(params.requireDeferredSecretUpdate ? { requireDeferredSecretUpdate: true } : {}) }
       )
       : await adapter.setEnvVars(
         params.environment,
@@ -108,7 +119,7 @@ export async function syncHostingEnvVars(params: {
         ...(receipt.data ?? {}),
         provider,
         service: params.service.name,
-        variableCount: Object.keys(params.vars).length,
+        variableCount: Object.keys(params.vars).length + Object.keys(secretVersionRefs).length,
         ...(deferDeployment ? { deploymentDeferred: true } : {}),
       },
     }, exactValues);

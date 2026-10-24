@@ -26,6 +26,8 @@ import { planQueues } from '../domain/services/queue-plan.service.js';
 import { planStorage } from '../domain/services/storage-plan.service.js';
 import { planServiceVolumes } from '../domain/services/service-volume.service.js';
 import { planDelegatedSecrets } from '../domain/services/delegated-secret.service.js';
+import { isSecretReferenceAction } from '../domain/services/secret-reference-plan.js';
+import { runtimeSecretReferenceSchema } from '../domain/ports/secret-destination.port.js';
 import { deriveHypervibeSecretValues } from '../domain/services/hypervibe-secret-value.js';
 import { withReceiptValidatedManagedSecretBindings } from '../domain/services/managed-secret-binding-receipts.js';
 import { runtimeRolloutRequirements } from '../domain/services/runtime-rollout.service.js';
@@ -755,7 +757,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_plan',
-    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. scope="database-credential-aliases" repairs declared database password references while preserving the canonical password and connection targets, without SQL changes or deployment. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Hypervibe-owned application secrets are generated automatically inside the encrypted plan boundary. Externally owned values are accepted only through secretRefs and are never returned. Optional services restricts a full plan to selected services.',
+    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. scope="database-credential-aliases" repairs declared database password references while preserving the canonical password and connection targets, without SQL changes or deployment. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Slots with secretDestinations use direct hosted collection or generation and immutable native version references; their values never enter a plan. Legacy Hypervibe-owned slots are generated inside the encrypted plan boundary; legacy delegated slots accept only safe secretRefs. Optional services restricts a full plan to selected services.',
     {
       project: projectField,
       env: envField,
@@ -764,7 +766,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       envVars: z.record(z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
       includeEnvFile: z.boolean().optional().describe('Set false to skip default repo .env deploy input and base-value syncing; the private .env.<env> scaffold is still prepared. Ignored for repository-only plans, which never load deploy env files.'),
-      secretRefs: z.record(z.string()).optional().describe('Chat-safe local/secret-manager references for delegated secret slots, keyed by declared env var name. Values are resolved locally and encrypted into this plan; never pass raw secrets here.'),
+      secretRefs: z.record(z.string()).optional().describe('Chat-safe local/secret-manager references only for legacy delegated slots without secretDestinations. Values are resolved locally and encrypted into this plan. Destination-backed slots use committed immutable version pins instead; never pass raw secrets here.'),
     },
     wrapCommandHandler(async ({ project: projectRef, env, scope, services, envVars, envFile, includeEnvFile, secretRefs }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
@@ -820,7 +822,11 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
       const confirmIds = result.actions.filter((a) => a.requiresConfirm).map((a) => a.id);
       const pending = result.actions.filter((a) => a.type !== 'noop');
-      const reviewActions = pending.map(({ metadata: _metadata, ...action }) => action);
+      const reviewActions = pending.map(({ metadata, ...action }) => {
+        const reference = isSecretReferenceAction({ ...action, metadata })
+          ? runtimeSecretReferenceSchema.safeParse(metadata?.reference) : undefined;
+        return { ...action, ...(reference?.success ? { reference: reference.data } : {}) };
+      });
       const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(result.blocked, result.actions);
       const connectBeforeApply = actionScopedBlocksRequiringConnectBeforeApply(actionScopedBlocked);
       const softActionScopedBlocked = actionScopedBlocksAllowedDuringApply(actionScopedBlocked);
@@ -870,8 +876,12 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           `${entry.reason} This blocks only the related action; independent service and CI actions can still be applied from this plan.`
         ),
       ];
-      const delegatedSecretRefs = localEnv && result.inputRequired.length > 0
-        ? Object.fromEntries(result.inputRequired.map((entry) => [
+      const managerRequirements = result.inputRequired.filter(entry => plannedEnvironmentSpec?.secretDestinations?.[entry.key]);
+      const localRequirements = result.inputRequired.filter(entry => !plannedEnvironmentSpec?.secretDestinations?.[entry.key]);
+      const managerHint = managerRequirements.length
+        ? `Deliver ${managerRequirements.map(entry => entry.key).join(', ')} directly to the declared secret manager through hv_cloud_requests, then commit only the returned immutable version references with hv_spec and re-plan. Generated keys use the owner generation action. Review all environments with hv_cloud_requests action="environments".` : '';
+      const delegatedSecretRefs = localEnv && localRequirements.length > 0
+        ? Object.fromEntries(localRequirements.map((entry) => [
           entry.key,
           `dotenv:${localEnv.path}#${entry.key}`,
         ]))
@@ -900,9 +910,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           after: 'Then re-run hv_plan and hv_apply. GitHub Actions push-to-deploy cannot converge until these credentials are available.',
         });
       } else if (result.inputRequired.length > 0) {
-        hint = delegatedSecretRefs
-          ? `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. Hypervibe prepared ${localEnv!.path}; if values are available there, re-run hv_plan with secretRefs=${JSON.stringify(delegatedSecretRefs)}. Do not paste raw values into chat.`
-          : `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. If values are already available here, re-run hv_plan with secretRefs mapping each key to env:, dotenv:, file:, or a secret-manager reference. Otherwise confirm who supplies these inputs. Do not paste raw values into chat.`;
+        hint = localRequirements.length ? delegatedSecretRefs
+          ? `Delegated secret input required: ${localRequirements.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. Hypervibe prepared ${localEnv!.path}; if values are available there, re-run hv_plan with secretRefs=${JSON.stringify(delegatedSecretRefs)}. Do not paste raw values into chat.`
+          : `Delegated secret input required: ${localRequirements.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. If values are already available here, re-run hv_plan with secretRefs mapping each key to env:, dotenv:, file:, or a secret-manager reference. Otherwise confirm who supplies these inputs. Do not paste raw values into chat.` : '';
+        hint = [hint, managerHint].filter(Boolean).join(' ');
         hint += hostedCredentialHint;
       } else if (pending.length === 0) {
         hint = result.scope === 'secrets'
@@ -923,7 +934,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       if (hardBlockRecovery) {
         next = hardBlockRecovery.next;
       } else if (result.inputRequired.length > 0) {
-        next = credentialRequest ? ['hv_cloud_requests', 'hv_plan'] : ['hv_plan'];
+        next = credentialRequest || managerRequirements.length ? ['hv_cloud_requests', 'hv_plan'] : ['hv_plan'];
       } else if (pending.length > 0) {
         next = connectBeforeApply.length > 0
           ? ['hv_connections', 'hv_plan']
@@ -957,6 +968,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           unmanaged: result.unmanaged,
           inputRequired: result.inputRequired.length > 0 ? result.inputRequired : undefined,
           ...(credentialRequest ? { credentialRequest } : {}),
+          ...(managerRequirements.length ? { secretManagerCollection: { command: 'hv_cloud_requests', input: { action: 'environments' }, requirements: managerRequirements } } : {}),
           blocked: hardBlocked,
           actionScopedBlocked: actionScopedBlocked.length > 0 ? actionScopedBlocked : undefined,
           ...(classifyPlanBlocks([...result.blocked, ...actionScopedBlocked]).connections.length > 0
@@ -976,7 +988,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             ? {
               agentInstruction: {
                 action: 'ask_user' as const,
-                message: (delegatedSecretRefs
+                message: (managerRequirements.length ? managerHint : delegatedSecretRefs
                   ? `Stop before apply. Hypervibe prepared ${localEnv!.path}; use the disclosed dotenv secretRefs only for values already available there. Otherwise confirm who should supply the inputs; never ask for values in chat.`
                   : 'Stop before apply. Use a safe local secretRef when the value is available here; otherwise confirm who should supply the inputs without asking for values in chat.') + hostedCredentialHint,
               },
@@ -1256,6 +1268,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         || queueDrift.length > 0
         || storageDrift.length > 0
         || delegatedSecretDrift.length > 0
+        || delegatedSecrets.inputRequired.length > 0
+        || delegatedSecrets.blockers.length > 0
         || stripeDrift.length > 0
         || emailDrift.length > 0
         || messagingDrift.length > 0;
@@ -1391,7 +1405,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
               : deployStrategy === 'branch' && deployTrigger === 'ci' && (ciNeedsSync || ciDeploy.error)
                 ? 'Run hv_plan and hv_apply to converge the selected managed CI provider; use hv_ci_status for runs after configuration is active.'
               : delegatedSecrets.inputRequired.length > 0
-                ? 'Use a safe local secretRef if the value is available here. Otherwise run hv_plan for this environment and offer its hv_cloud_requests handoff for externally owned runtime inputs. Confirm the recipient and secure invitation; do not paste values into chat or interpret unverified live state as absence.'
+                ? Object.keys(envSpec.secretDestinations ?? {}).length
+                  ? 'Run hv_cloud_requests action="environments" to review direct secret manager delivery for each environment. Commit returned immutable version references with hv_spec, then re-plan. Collection does not verify runtime access or external credential validity.'
+                  : 'Use a safe local secretRef if the value is available here. Otherwise run hv_plan for this environment and offer its hv_cloud_requests handoff for externally owned runtime inputs. Confirm the recipient and secure invitation; do not paste values into chat or interpret unverified live state as absence.'
               : delegatedSecrets.blockers.length > 0
                 ? `Resolve the managed-secret safety block before planning: ${delegatedSecrets.blockers.map((entry) => entry.reason).join('; ')}.`
               : databaseAliases?.state === 'unknown'

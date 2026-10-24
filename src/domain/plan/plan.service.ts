@@ -1590,6 +1590,9 @@ export class PlanService {
     const spec = specResult.spec;
     const environmentSpec = spec.environments[environmentName];
     const keys = Object.keys(options.secretRefs ?? {}).sort();
+    if (keys.some(key => environmentSpec?.secretDestinations?.[key])) {
+      return { error: 'Use direct delivery to the secret manager for destination-backed keys, then plan their committed version references.' };
+    }
     if (!keys.length || options.serviceFilter !== undefined || options.envVarOverrides !== undefined
       || options.envFile !== undefined || options.includeEnvFile === true) {
       return { error: 'scope="secrets" requires nonempty secretRefs and accepts no services, envVars, envFile or bulk env-file input.' };
@@ -1825,6 +1828,9 @@ export class PlanService {
     const hypervibeOwnedSecretRefs = Object.keys(requestedSecretRefs ?? {}).filter(
       (key) => managedSecretSlots.get(key)?.ownership === 'hypervibe'
     );
+    if (Object.keys(requestedSecretRefs ?? {}).some(key => environmentSpec.secretDestinations?.[key])) {
+      return { error: 'Use direct delivery to the secret manager for destination-backed keys; local secretRefs cannot supply these values.' };
+    }
     if (hypervibeOwnedSecretRefs.length > 0) {
       return {
         error: `secretRefs cannot supply Hypervibe-owned secret keys: ${hypervibeOwnedSecretRefs.join(', ')}. Hypervibe generates these values automatically; remove the references and re-run hv_plan.`,

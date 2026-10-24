@@ -53,6 +53,7 @@ export function deriveHypervibeSecretValues(
       .filter((entry): entry is [string, HypervibeSecretSpec] => (
         entry[1].ownership === 'hypervibe'
         && entry[1].environments.includes(environmentName)
+        && !spec.environments[environmentName]?.secretDestinations?.[entry[0]]
       ))
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, secret]) => [

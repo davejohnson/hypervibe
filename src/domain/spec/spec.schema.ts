@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { secretDestinationSchema, runtimeSecretReferenceSchema, secretDestinationIdentity } from '../ports/secret-destination.port.js';
 import { parse as parseDomain } from 'tldts';
 import { isReservedRuntimeEnvKey, RESERVED_RUNTIME_ENV_ERROR } from '../services/runtime-env-policy.js';
 import { canonicalizeJson } from '../../lib/canonical-json.js';
@@ -1587,6 +1588,16 @@ export const MESSAGING_MANAGED_ENV_KEYS = [
   'TWILIO_PHONE_NUMBER_SID',
 ] as const;
 
+export const secretDestinationBindingSchema = z.object({
+  destination: secretDestinationSchema,
+  /** Omit until direct delivery returns an immutable, value-free receipt. */
+  version: z.string().min(1).max(64).optional(),
+}).strict().superRefine((binding, ctx) => {
+  if (binding.version !== undefined && !runtimeSecretReferenceSchema.safeParse(binding).success) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Pin an immutable native secret version from a verified delivery receipt.', path: ['version'] });
+  }
+});
+
 export const environmentSpecSchema = z.object({
   hosting: z.object({
     /** Hosting provider name; validated against the adapter registry at spec_set time. */
@@ -1618,6 +1629,8 @@ export const environmentSpecSchema = z.object({
   email: emailSpecSchema.default({ enabled: false }),
   messaging: twilioMessagingSpecSchema.optional(),
   envVars: z.record(applicationEnvVarNameSchema, z.string()).default({}),
+  /** Reviewed native destinations and immutable references, never secret values. */
+  secretDestinations: z.record(applicationEnvVarNameSchema, secretDestinationBindingSchema).optional(),
   /** Explicitly documents that a shared runtime key does not apply here. */
   envVarExceptions: z.array(
     z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'exception keys must be valid environment variable names')
@@ -2521,6 +2534,28 @@ export const projectSpecSchema = z.object({
       path: spec.devops ? ['devops', 'ci'] : ['github'],
     });
   }
+  const destinationOwners = new Map<string, string>();
+  for (const [environmentName, environment] of Object.entries(spec.environments)) {
+    for (const [key, binding] of Object.entries(environment.secretDestinations ?? {})) {
+      const slot = spec.secrets[key];
+      if (!slot || !slot.environments.includes(environmentName)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Secret destinations require a declared runtime secret in this environment.',
+          path: ['environments', environmentName, 'secretDestinations', key] });
+      }
+      if (slot?.ownership === 'delegated' && (slot.githubActions?.repository || slot.githubActions?.environments.length)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Native secret references cannot also materialize this slot into CI secrets.',
+          path: ['environments', environmentName, 'secretDestinations', key] });
+      }
+      const identity = JSON.stringify(secretDestinationIdentity(binding.destination));
+      const owner = destinationOwners.get(identity);
+      if (owner) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Each environment and key requires its own native secret destination.',
+          path: ['environments', environmentName, 'secretDestinations', key] });
+      }
+      destinationOwners.set(identity, `${environmentName}/${key}`);
+    }
+  }
+
   for (const [key, secret] of Object.entries(spec.secrets)) {
     if (isReservedRuntimeEnvKey(key) && secret.environments.length > 0) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: RESERVED_RUNTIME_ENV_ERROR, path: ['secrets', key, 'environments'] });

@@ -159,7 +159,7 @@ describe('Cloud Run generated release runtime', () => {
           template: {
             containers: [{
               image: 'old-image',
-              env: [{ name: 'DATABASE_URL', valueSource: { secretKeyRef: { secret: 'database-url' } } }],
+              env: [{ name: 'DATABASE_URL', valueSource: { secretKeyRef: { secret: 'projects/123456789012/secrets/database-url', version: '7' } } }],
               resources: { limits: { cpu: '1', memory: '512Mi' }, cpuIdle: true },
               volumeMounts: [{ name: 'cloudsql', mountPath: '/cloudsql' }],
             }],
@@ -181,7 +181,7 @@ describe('Cloud Run generated release runtime', () => {
                 image: 'us-central1-docker.pkg.dev/gcp-project/infraprint/app@sha256:' + 'b'.repeat(64),
                 command: ['/bin/sh'],
                 args: ['-lc', 'npm run db:migrate'],
-                env: [{ name: 'DATABASE_URL', valueSource: { secretKeyRef: { secret: 'database-url' } } }],
+                env: [{ name: 'DATABASE_URL', valueSource: { secretKeyRef: { secret: 'projects/123456789012/secrets/database-url', version: '7' } } }],
                 resources: { limits: { cpu: '1', memory: '512Mi' } },
                 volumeMounts: [{ name: 'cloudsql', mountPath: '/cloudsql' }],
               }],
@@ -222,6 +222,7 @@ describe('Cloud Run generated release runtime', () => {
       resources: { limits: { cpu: '1', memory: '512Mi' } },
     });
     expect(body.template.template.containers[0].resources).not.toHaveProperty('cpuIdle');
+    expect(body.template.template.containers[0].env).toContainEqual({ name: 'DATABASE_URL', valueSource: { secretKeyRef: { secret: 'projects/123456789012/secrets/database-url', version: '7' } } });
     expect(body.template.template).toMatchObject({
       serviceAccount: 'runtime@gcp-project.iam.gserviceaccount.com',
       maxRetries: 1,

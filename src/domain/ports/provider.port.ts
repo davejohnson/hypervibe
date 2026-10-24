@@ -11,6 +11,8 @@ export interface Receipt {
 }
 
 export interface DeploymentMutationOptions {
+  /** Immutable provider references only; never resolved into local secret values. */
+  secretVersionRefs?: Record<string, import('./secret-destination.port.js').RuntimeSecretReference>;
   /**
    * Apply service configuration and environment changes without independently
    * sourcing or building new application code. A later exact-SHA CI deploy is
@@ -81,6 +83,8 @@ export interface HostingTargetOptions {
  * Used to determine what features are available and how to configure deployments.
  */
 export interface ProviderCapabilities {
+  /** Native, immutable runtime references supported without payload resolution. */
+  runtimeSecretReferenceProviders?: Array<import('./secret-destination.port.js').SecretDestination['provider']>;
   /** Build methods the platform supports */
   supportedBuilders: Array<'nixpacks' | 'dockerfile' | 'buildpack' | 'static'>;
 

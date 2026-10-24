@@ -18,6 +18,8 @@ import {
 } from './spec.service.js';
 import { buildDeploySourceEnvVars, resolveGitDeploySource } from './deploy-source.js';
 import { reservedRuntimeEnvError } from './runtime-env-policy.js';
+import { validateRuntimeSecretReferences } from './runtime-secret-references.js';
+import type { RuntimeSecretReference } from '../ports/secret-destination.port.js';
 
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
@@ -82,6 +84,7 @@ export async function executeBootstrap(params: {
   verifyHttpHealth?: boolean;
   queueEnvVars?: Record<string, string>;
   envVarsByService?: Record<string, Record<string, string>>;
+  secretVersionRefs?: Record<string, RuntimeSecretReference>;
   ensureHostingProject?: boolean;
   /** Internal reviewed hosting-identity stage: configure an empty service, never deploy code. */
   provisionOnly?: boolean;
@@ -94,6 +97,11 @@ export async function executeBootstrap(params: {
   }
   const reservedError = reservedRuntimeEnvError(params.envVars, params.queueEnvVars, ...Object.values(params.envVarsByService ?? {}));
   if (reservedError) return { success: false, summary: { blocked: true, error: reservedError } };
+  let secretVersionRefs: Record<string, RuntimeSecretReference>;
+  try {
+    secretVersionRefs = validateRuntimeSecretReferences(params.secretVersionRefs,
+      Object.assign({}, params.envVars, params.queueEnvVars, ...Object.values(params.envVarsByService ?? {})), () => true);
+  } catch { return { success: false, summary: { blocked: true, error: 'Invalid or conflicting runtime secret references.' } }; }
   const tx = new InfraTransaction();
   const project = resolveProject({ projectName: params.projectName });
   if (!project) {
@@ -269,6 +277,10 @@ export async function executeBootstrap(params: {
       },
     };
   }
+  if (Object.values(secretVersionRefs).some(ref => !hostingAdapter.capabilities.runtimeSecretReferenceProviders?.includes(ref.destination.provider))) {
+    const cleanup = await tx.rollback();
+    return { success: false, summary: { blocked: true, error: 'The hosting provider cannot install the declared native secret references.', rollback: cleanup } };
+  }
 
   if (params.requireNewWorkload && (hostingAdapter.capabilities.supportsCreateOnlyDeploy !== true
     || hostingAdapter.capabilities.supportsDeferredDeploy !== true)) {
@@ -335,6 +347,7 @@ export async function executeBootstrap(params: {
     services: workloads,
     envVars: Object.keys(deployEnvVars).length > 0 ? deployEnvVars : undefined,
     ...(params.envVarsByService ? { envVarsByService: params.envVarsByService } : {}),
+    ...(Object.keys(secretVersionRefs).length ? { secretVersionRefs } : {}),
     ...(params.verifyHttpHealth ? { verifyHttpHealth: true } : {}),
     ...(deferProviderDeployment ? { deferProviderDeployment: true } : {}),
     ...(params.requireNewWorkload ? { requireNewWorkload: true } : {}),

@@ -90,6 +90,53 @@ const SPEC = {
 };
 
 describe('bootstrap action receipt mapping', () => {
+  it('guides native secret inputs to direct collection without local secretRefs', async () => {
+    const t = await makeClient();
+    try {
+      const project = new ProjectRepository().create({ name: 'native-inputs', defaultPlatform: 'cloudrun' });
+      new SpecStore().replace(project, { version: 1, project: project.name,
+        secrets: { FLOW_KEY: { principal: 'email:owner@example.test', environments: ['staging'] } },
+        environments: { staging: { hosting: { provider: 'cloudrun' }, services: { web: {} }, email: { enabled: false },
+          secretDestinations: { FLOW_KEY: { destination: { provider: 'gcp-secret-manager', projectId: 'synthetic-project',
+            projectNumber: '123456789012', secretId: 'staging-flow' } } } } } });
+      const connection = new ConnectionRepository().create({ provider: 'cloudrun',
+        credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'synthetic-project', credentials: '{}' }) });
+      new ConnectionRepository().updateStatus(connection.id, 'verified');
+      vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter: {
+        name: 'cloudrun', capabilities: { supportsObserve: false },
+      } as never });
+      const result = await t.call('hv_plan', { project: project.name, env: 'staging', includeEnvFile: false });
+      expect(result.ok).toBe(true);
+      expect(result.data.inputRequired).toEqual([expect.objectContaining({ key: 'FLOW_KEY' })]);
+      expect(result.hint).toContain('secret manager');
+      expect(result.hint).not.toContain('dotenv:');
+      expect(result.agentInstruction.message).not.toContain('local secretRef');
+      const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'staging')!;
+      new EnvironmentRepository().updatePlatformBindings(environment.id, {
+        provider: 'cloudrun', projectId: 'synthetic-project', services: { web: { serviceId: 'web-id' } } });
+      if (!new ServiceRepository().findByProjectAndName(project.id, 'web'))
+        new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+      vi.mocked(adapterFactory.getProviderAdapter).mockResolvedValue({ success: true, adapter: {
+        name: 'cloudrun', capabilities: { supportsObserve: true }, observe: async () => ({
+          provider: 'cloudrun', observedAt: new Date().toISOString(), projectExists: true, projectId: 'synthetic-project',
+          partial: false, warnings: [], databases: [], services: [{ name: 'web', externalId: 'web-id',
+            workloadKind: 'web', status: 'running', config: {}, customDomains: [], envVarKeys: [], envVarHashes: {} }],
+        }),
+      } as never });
+      const status = await t.call('hv_status', { project: project.name, env: 'staging' });
+      expect(status.ok).toBe(true);
+      expect(status.data.inputRequired).toEqual([expect.objectContaining({ key: 'FLOW_KEY' })]);
+      expect(status.data.drift).toEqual([]);
+      expect(status.data.inSync).toBe(false);
+      const pinned = new SpecStore().get(project)!.spec;
+      pinned.environments.staging.secretDestinations!.FLOW_KEY.version = '7';
+      new SpecStore().replace(project, pinned);
+      const referencePlan = await t.call('hv_plan', { project: project.name, env: 'staging', includeEnvFile: false });
+      expect(referencePlan.ok).toBe(true);
+      expect(referencePlan.data.actions.find((action: PlanAction) => action.id === 'secret:FLOW_KEY'))
+        .toMatchObject({ reference: { destination: pinned.environments.staging.secretDestinations!.FLOW_KEY.destination, version: '7' } });
+    } finally { await t.close(); }
+  });
   it('fails domain actions when bootstrap records domain attachment or DNS errors', () => {
     const result = bootstrapActionResultFromSummary(
       {

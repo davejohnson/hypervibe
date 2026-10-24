@@ -28,3 +28,5 @@ export {
   type CommittedProjectMonitoringInputV1, type CommittedProjectMonitoringReceiptV1, type CommittedMonitoringEndpointV1,
 } from './application/hosted/committed-project-monitoring.js';
 export { MAX_PUBLIC_ENDPOINTS, type HostedPublicEndpointV1 } from './application/hosted/public-endpoints.js';
+export * from './hosted-secret-destinations.js';
+export { generateHostedSecretValueV1 } from './application/hosted/secret-generation.js';

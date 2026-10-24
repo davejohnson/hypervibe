@@ -60,6 +60,13 @@ export interface ObservedService {
   envVarKeys: string[];
   /** sha256 hex of each env var value, for drift comparison without exposure. */
   envVarHashes: Record<string, string>;
+  /** Native version metadata, without reading secret payloads. Missing entries
+   * are not evidence that an opaque or mutable provider reference is absent. */
+  envVarSecretRefs?: Record<string, {
+    provider: 'aws-secrets' | 'gcp-secret-manager' | 'azure-key-vault';
+    resource: string;
+    version: string;
+  }>;
   /** 'empty' = the service exists but has never deployed (no source/code). */
   status: 'running' | 'failed' | 'empty' | 'unknown';
   /** Provider confirms an owned namespace exists but its workload does not yet exist. */

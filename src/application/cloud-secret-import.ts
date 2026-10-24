@@ -441,12 +441,13 @@ export function createCloudSecretImport({
       new Set(metadata.keys).size !== metadata.keys.length ||
       metadata.keys.some((key) => {
         const slot = scope.spec.secrets?.[key];
-        return !slot || slot.ownership !== 'delegated' || !slot.environments.includes(input.env);
+        return !slot || slot.ownership !== 'delegated' || !slot.environments.includes(input.env)
+          || Boolean(scope.spec.environments[input.env].secretDestinations?.[key]);
       })
     )
       throw new HvError(
         'VALIDATION',
-        'The approved request does not match this committed repository, environment, and delegated key set.'
+        'The approved request does not match this committed repository, environment, and locally imported delegated key set. Secret-manager destinations cannot be imported into env files.'
       );
     // A crash after rename but before the receipt must not cause another fetch
     // or mistake our completed write for an owner-supplied value to overwrite.

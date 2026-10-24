@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { validateRuntimeSecretReferences, runtimeSecretReferenceIdentity } from '../../../domain/services/runtime-secret-references.js';
+import type { RuntimeSecretReference } from '../../../domain/ports/secret-destination.port.js';
 import { resolve4, resolveCname, resolveTxt } from 'node:dns/promises';
 import { z } from 'zod';
 import type { ComponentType } from '../../../domain/entities/component.entity.js';
@@ -106,6 +108,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
   readonly serviceVolumes = new AzureServiceVolumes(() => this.connected().client);
 
   readonly capabilities: ProviderCapabilities = {
+    runtimeSecretReferenceProviders: ['azure-key-vault'],
     supportedBuilders: ['dockerfile'],
     supportedComponents: [],
     supportsAutoWiring: false,
@@ -267,6 +270,13 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     envVars: Record<string, string>,
     options: DeploymentMutationOptions = {}
   ): Promise<DeployResult> {
+    let secretVersionRefs: Record<string, RuntimeSecretReference>;
+    try {
+      secretVersionRefs = validateRuntimeSecretReferences(options.secretVersionRefs, envVars, (destination) =>
+        destination.provider === 'azure-key-vault'
+        && destination.tenantId.toLowerCase() === this.connected().credentials.tenantId.toLowerCase()
+        && destination.subscriptionId.toLowerCase() === this.connected().credentials.subscriptionId.toLowerCase());
+    } catch { return this.failedDeploy(service, 'Invalid or conflicting runtime secret reference.'); }
     if (serviceWorkloadKind(service) !== 'web') {
       return this.failedDeploy(service, 'Azure Container Apps Jobs and workers require distinct lifecycle resources and are not yet supported.');
     }
@@ -318,6 +328,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
           project,
           service,
           envVars,
+          secretVersionRefs,
         }));
         attemptedApp = app;
         createdService = true;
@@ -327,17 +338,20 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       this.assertAppEnvironment(app, project.environmentId);
       const principalId = app.identity?.principalId;
       if (!principalId) throw new Error(`Container App ${app.id} did not return its system-assigned identity.`);
-      await this.ensureRoleAssignment(project.registryId, principalId, ACR_PULL_ROLE, 'ServicePrincipal');
-      app = await this.connected().client.request<AzureResource>('PATCH', app.id, CONTAINER_APPS_API, this.appBody({
+      const desiredBody = this.appBody({
         app,
         environment,
         environmentId: project.environmentId,
         project,
         service,
         envVars,
-      }));
+        secretVersionRefs,
+      });
+      await this.ensureRoleAssignment(project.registryId, principalId, ACR_PULL_ROLE, 'ServicePrincipal');
+      app = await this.connected().client.request<AzureResource>('PATCH', app.id, CONTAINER_APPS_API, desiredBody);
       app = await this.waitForProvisioning(app.id, CONTAINER_APPS_API);
       app = await this.waitForContainerAppRevision(app.id, previousReadyRevision);
+      this.assertSecretReferences(app, secretVersionRefs);
       if (azureVolumeFingerprint(app.properties?.template) !== expectedVolumes) throw new Error('Azure volume mounts changed during runtime configuration.');
       const url = this.appUrl(app);
       return {
@@ -390,16 +404,10 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
         : undefined;
       const container = this.container(app);
       const expectedVolumes = azureVolumeFingerprint(app.properties?.template);
-      const secrets = await this.listAppSecrets(appId);
-      const secretRefs = new Set(
-        (container?.env ?? []).filter((item: any) => retired.has(item.name)).map((item: any) => item.secretRef).filter(Boolean)
-      );
       await this.connected().client.request('PATCH', appId, CONTAINER_APPS_API, {
         properties: {
-          configuration: {
-            ...app.properties?.configuration,
-            secrets: secrets.filter((secret: any) => !secretRefs.has(secret.name)),
-          },
+          // Retiring a variable removes its use, not an independently retained
+          // secret definition. Never read secret payloads to reconstruct it.
           template: {
             ...app.properties?.template,
             containers: [{
@@ -701,8 +709,10 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
         continue;
       }
       const container = this.container(app);
+      const definitions = app.properties?.configuration?.secrets ?? [];
+      const hasExternalReferences = definitions.some((item: any) => typeof item.keyVaultUrl === 'string');
       const secretValues = Object.fromEntries(
-        (await this.listAppSecrets(app.id)).filter((item: any) => typeof item.name === 'string' && typeof item.value === 'string')
+        (hasExternalReferences ? [] : await this.listAppSecrets(app.id)).filter((item: any) => typeof item.name === 'string' && typeof item.value === 'string')
           .map((item: any) => [item.name, item.value])
       );
       const envValues = Object.fromEntries(
@@ -712,6 +722,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
         ]).filter((entry: any[]) => typeof entry[0] === 'string' && typeof entry[1] === 'string')
       ) as Record<string, string>;
       const visible = Object.entries(envValues).filter(([key]) => !INTERNAL_ENV_KEYS.has(key));
+      const envVarSecretRefs = this.observedSecretReferences(app);
       const customDomains = this.azureCustomDomains(app).map((domain) => domain.name).filter(Boolean) as string[];
       services.push({
         name,
@@ -726,8 +737,9 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
           public: app.properties?.configuration?.ingress?.external === true,
         },
         sourceState: 'disconnected',
-        envVarKeys: visible.map(([key]) => key).sort(),
+        envVarKeys: [...new Set<string>((container?.env ?? []).flatMap((entry: any) => typeof entry.name === 'string' && !INTERNAL_ENV_KEYS.has(entry.name) ? [entry.name] : []))].sort(),
         envVarHashes: Object.fromEntries(visible.map(([key, value]) => [key, hashEnvValue(value)])),
+        envVarSecretRefs,
         status: app.properties?.provisioningState === 'Succeeded'
           ? (container?.image === BOOTSTRAP_IMAGE ? 'empty' : 'running')
           : app.properties?.provisioningState === 'Failed' ? 'failed' : 'unknown',
@@ -1007,6 +1019,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     project: AzureProject;
     service: Service;
     envVars: Record<string, string>;
+    secretVersionRefs?: Record<string, RuntimeSecretReference>;
   }): Record<string, unknown> {
     const currentContainer = this.container(params.app);
     const currentImage = currentContainer?.image ?? BOOTSTRAP_IMAGE;
@@ -1017,14 +1030,44 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       value,
     }));
     const configuration = params.app?.properties?.configuration ?? {};
+    const { secrets: previousSecrets, ...retainedConfiguration } = configuration;
+    const definitions = new Map<string, Record<string, unknown>>();
+    for (const entry of previousSecrets ?? []) {
+      if (!entry || typeof entry.name !== 'string' || definitions.has(entry.name)) throw new Error('Azure returned ambiguous secret configuration.');
+      definitions.set(entry.name, { ...entry });
+    }
+    const env = new Map<string, Record<string, unknown>>();
+    for (const entry of currentContainer?.env ?? []) {
+      if (!entry || typeof entry.name !== 'string' || env.has(entry.name)) throw new Error('Azure returned ambiguous environment configuration.');
+      env.set(entry.name, { ...entry });
+    }
+    for (const { key, name, value } of secretEntries) {
+      const existingRef = env.get(key)?.secretRef;
+      if (typeof existingRef === 'string' && definitions.get(existingRef)?.keyVaultUrl) throw new Error('A literal environment update conflicts with an existing native secret reference.');
+      definitions.set(name, { name, value });
+      env.set(key, { name: key, secretRef: name });
+    }
+    for (const [key, reference] of Object.entries(params.secretVersionRefs ?? {})) {
+      const native = runtimeSecretReferenceIdentity(reference);
+      const name = this.secretName(key);
+      definitions.set(name, { name, keyVaultUrl: `${native.resource}/${native.version}`, identity: 'system' });
+      env.set(key, { name: key, secretRef: name });
+    }
+    const changeSecrets = secretEntries.length > 0 || Object.keys(params.secretVersionRefs ?? {}).length > 0;
+    if (changeSecrets && [...definitions.values()].some(entry => typeof entry.value !== 'string' && !(typeof entry.keyVaultUrl === 'string' && typeof entry.identity === 'string'))) {
+      throw new Error('Azure secret configuration contains an opaque existing secret; reference-only updates cannot safely replace its definition.');
+    }
+    if (params.service.buildConfig.startCommand) env.set(START_COMMAND_KEY, { name: START_COMMAND_KEY, value: params.service.buildConfig.startCommand });
+    else env.delete(START_COMMAND_KEY);
+    env.set(HEALTH_CHECK_PATH_KEY, { name: HEALTH_CHECK_PATH_KEY, value: params.service.buildConfig.healthCheckPath ?? '/' });
     const template = params.app?.properties?.template ?? {};
     return {
       location: params.app?.location ?? this.connected().credentials.location,
-      identity: { type: 'SystemAssigned' },
+      identity: params.app?.identity ?? { type: 'SystemAssigned' },
       properties: {
         managedEnvironmentId: params.environmentId,
         configuration: {
-          ...configuration,
+          ...retainedConfiguration,
           activeRevisionsMode: 'Single',
           ingress: {
             ...configuration.ingress,
@@ -1036,7 +1079,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
           registries: params.app
             ? [{ server: params.project.registryServer, identity: 'system' }]
             : (configuration.registries ?? []),
-          secrets: secretEntries.map(({ name, value }) => ({ name, value })),
+          ...(changeSecrets ? { secrets: [...definitions.values()] } : {}),
         },
         template: {
           ...template,
@@ -1044,11 +1087,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
             ...currentContainer,
             name: 'main',
             image: currentImage,
-            env: [
-              ...secretEntries.map(({ key, name }) => ({ name: key, secretRef: name })),
-              ...(params.service.buildConfig.startCommand ? [{ name: START_COMMAND_KEY, value: params.service.buildConfig.startCommand }] : []),
-              { name: HEALTH_CHECK_PATH_KEY, value: params.service.buildConfig.healthCheckPath ?? '/' },
-            ],
+            env: [...env.values()],
             resources: { cpu: 0.25, memory: '0.5Gi' },
             ...(bootstrap
               ? { command: ['node'], args: ['-e', BOOTSTRAP_SCRIPT], probes: undefined }
@@ -1072,6 +1111,31 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       },
       tags: params.app?.tags ?? this.tags(params.environment),
     };
+  }
+
+  private observedSecretReferences(app: AzureResource): NonNullable<ObservedService['envVarSecretRefs']> {
+    const definitions: any[] = app.properties?.configuration?.secrets ?? [];
+    const refs: NonNullable<ObservedService['envVarSecretRefs']> = {};
+    for (const entry of this.container(app)?.env ?? []) {
+      if (typeof entry.name !== 'string' || entry.value !== undefined || INTERNAL_ENV_KEYS.has(entry.name)) continue;
+      const matches = definitions.filter(def => def.name === entry.secretRef);
+      const match = matches.length === 1 && typeof matches[0]?.keyVaultUrl === 'string'
+        ? matches[0].keyVaultUrl.match(/^(https:\/\/[a-z][a-z0-9-]{1,22}[a-z0-9]\.vault\.azure\.net\/secrets\/[A-Za-z0-9-]{1,127})\/([a-f0-9]{32})$/) : null;
+      if (match) refs[entry.name] = { provider: 'azure-key-vault', resource: match[1].toLowerCase(), version: match[2] };
+    }
+    return refs;
+  }
+
+  private assertSecretReferences(app: AzureResource, refs: Record<string, RuntimeSecretReference>): void {
+    const observed = this.observedSecretReferences(app);
+    for (const [key, ref] of Object.entries(refs)) {
+      const expected = runtimeSecretReferenceIdentity(ref);
+      const entries = (this.container(app)?.env ?? []).filter((entry: any) => entry.name === key);
+      const definition = app.properties?.configuration?.secrets?.find((entry: any) => entry.name === entries[0]?.secretRef);
+      if (entries.length !== 1 || observed[key]?.resource !== expected.resource || observed[key]?.version !== expected.version || definition?.identity !== 'system') {
+        throw new Error('Azure did not verify the requested runtime secret references.');
+      }
+    }
   }
 
   private async waitForProvisioning(id: string, apiVersion: string): Promise<AzureResource> {
@@ -1360,6 +1424,7 @@ providerRegistry.register({
   metadata: {
     name: 'azure-container-apps',
     displayName: 'Azure Container Apps',
+    runtimeSecretReferenceProviders: ['azure-key-vault'],
     category: 'deployment',
     credentialsSchema: AzureContainerAppsCredentialsSchema,
     setupHelpUrl: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',

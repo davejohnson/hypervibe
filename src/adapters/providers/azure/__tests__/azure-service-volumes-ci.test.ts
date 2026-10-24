@@ -11,9 +11,9 @@ const digest = `sha256:${'b'.repeat(64)}`;
 const registry = `${azureRegistryName(group)}.azurecr.io`;
 
 async function execute(kind: 'github' | 'portable', loseMount: boolean) {
-  let app: any = { id: appId, properties: { provisioningState: 'Succeeded', latestRevisionName: 'ready', latestReadyRevisionName: 'ready', configuration: { ingress: { fqdn: 'web.example.test' } }, template: {
+  let app: any = { id: appId, properties: { provisioningState: 'Succeeded', latestRevisionName: 'ready', latestReadyRevisionName: 'ready', configuration: { secrets: [{ name: 'api-token', keyVaultUrl: 'https://vault.vault.azure.net/secrets/token/' + 'c'.repeat(32), identity: 'system' }], ingress: { fqdn: 'web.example.test' } }, template: {
     volumes: [{ name: 'hypervibe-data', storageType: 'AzureFile', storageName: 'web' }],
-    containers: [{ name: 'main', image: 'old@' + digest, env: [], volumeMounts: [{ volumeName: 'hypervibe-data', mountPath: '/data' }] }],
+    containers: [{ name: 'main', image: 'old@' + digest, env: [{ name: 'API_TOKEN', secretRef: 'api-token' }], volumeMounts: [{ volumeName: 'hypervibe-data', mountPath: '/data' }] }],
   } } };
   const mutations: any[] = [];
   const fetch = async (input: string, init?: RequestInit) => {
@@ -27,6 +27,8 @@ async function execute(kind: 'github' | 'portable', loseMount: boolean) {
       mutations.push(payload);
       expect(payload.properties.template.volumes).toEqual(app.properties.template.volumes);
       expect(payload.properties.template.containers[0].volumeMounts).toEqual(app.properties.template.containers[0].volumeMounts);
+      expect(payload.properties.template.containers[0].env).toContainEqual({ name: 'API_TOKEN', secretRef: 'api-token' });
+      expect(payload.properties).not.toHaveProperty('configuration');
       app = { ...app, properties: { ...app.properties, template: payload.properties.template } };
       if (loseMount) app.properties.template.containers[0].volumeMounts = [];
     }

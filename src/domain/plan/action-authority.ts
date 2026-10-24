@@ -1,4 +1,5 @@
 import { databaseCredentialAliasesActionSchema, DATABASE_CREDENTIAL_ALIASES_OPERATION } from '../services/database-credential-aliases.service.js';
+import { secretReferenceActionMetadataSchema, SECRET_REFERENCE_OPERATION } from '../services/secret-reference-plan.js';
 import { scheduleActivationActionMetadataSchema } from '../services/schedule-activation.service.js';
 import { INBOUND_SIGNING_KEY_OPERATION } from '../services/email-inbound-signing.service.js';
 import { databaseCheckpointIdentitySchema } from '../services/database-checkpoint.js';
@@ -127,6 +128,7 @@ export type PlanMutationCapability =
   | 'load-balancer.pool.mutate'
   | 'load-balancer.mutate'
   | 'hosting.delegated-secret.sync'
+  | 'hosting.secret-reference.sync'
   | 'stripe.hosting-env.sync'
   | 'stripe.catalog.mutate'
   | 'stripe.webhook.mutate'
@@ -486,6 +488,14 @@ export function resolvePlanActionAuthority(
   if (action.type === 'noop') return null;
   if (!action.id.trim() || !action.resource.name.trim() || !action.resource.provider.trim()) {
     return null;
+  }
+
+  if (action.metadata?.operation === SECRET_REFERENCE_OPERATION) {
+    const parsed = secretReferenceActionMetadataSchema.safeParse(action.metadata);
+    return action.type === 'update' && action.verified === true && action.resource.kind === 'secret'
+      && action.id === `secret:${action.resource.name}` && parsed.success
+      && providerRegistry.getMetadata(action.resource.provider)?.runtimeSecretReferenceProviders?.includes(parsed.data.reference.destination.provider)
+      ? authority(action, 'hosting.secret-reference.sync') : null;
   }
 
   if (action.metadata?.operation === DATABASE_CREDENTIAL_ALIASES_OPERATION) {

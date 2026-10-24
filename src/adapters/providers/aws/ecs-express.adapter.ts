@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { validateRuntimeSecretReferences, runtimeSecretReferenceIdentity } from '../../../domain/services/runtime-secret-references.js';
+import type { RuntimeSecretReference } from '../../../domain/ports/secret-destination.port.js';
 import { EFSClient } from '@aws-sdk/client-efs';
 import { EcsServiceVolumes } from './ecs-service-volumes.js';
 import { ecsTaskDefinitionWriter } from './ecs-task-definition-writer.js';
@@ -193,6 +195,8 @@ export class EcsExpressAdapter implements IProviderAdapter {
   readonly serviceVolumes = new EcsServiceVolumes(() => ({ clients: this.connected().clients, region: this.connected().credentials.region }), () => this.resolveAccountId());
 
   readonly capabilities: ProviderCapabilities = {
+    runtimeSecretReferenceProviders: ['aws-secrets'],
+    supportsCreateOnlyDeploy: true,
     supportedBuilders: ['dockerfile'],
     supportedComponents: [],
     supportsAutoWiring: false,
@@ -398,6 +402,10 @@ export class EcsExpressAdapter implements IProviderAdapter {
     envVars: Record<string, string>,
     options: DeploymentMutationOptions = {}
   ): Promise<DeployResult> {
+    const creationBinding = parseHostingBindings(environment).services?.[service.name];
+    if (options.requireNewWorkload && (options.deferDeployment !== true || creationBinding?.serviceId || creationBinding?.jobName)) {
+      return this.failedDeploy(service, 'Creation-only deployment requires an unbound workload and deferred deployment.');
+    }
     if (serviceWorkloadKind(service) !== 'web') {
       return this.failedDeploy(service, 'AWS ECS Express Mode currently supports public web services only.');
     }
@@ -408,6 +416,14 @@ export class EcsExpressAdapter implements IProviderAdapter {
     if (!clusterArn) {
       return this.failedDeploy(service, 'No bound AWS ECS project exists. The project action must complete first.');
     }
+    let secretVersionRefs: Record<string, RuntimeSecretReference>;
+    try {
+      const scope = this.parseClusterArn(clusterArn);
+      secretVersionRefs = validateRuntimeSecretReferences(options.secretVersionRefs, envVars, (destination) =>
+        destination.provider === 'aws-secrets' && destination.accountId === scope.accountId
+        && destination.region === this.connected().credentials.region
+        && (!this.accountId || destination.accountId === this.accountId));
+    } catch { return this.failedDeploy(service, 'Invalid or conflicting runtime secret reference.'); }
 
     let attemptedServiceId: string | undefined;
     let createdService = false;
@@ -436,7 +452,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
         }
         const usingBootstrap = runtime.container.image === BOOTSTRAP_IMAGE;
         const { output, taskDefinitionArn } = await this.updateRuntimeConfiguration(binding, config, {
-          environment: environmentValues,
+          ...this.mergeRuntimeEnvironment(runtime.container, environmentValues, secretVersionRefs),
           ...(usingBootstrap || !service.buildConfig.startCommand
             ? { command: usingBootstrap ? BOOTSTRAP_COMMAND : undefined }
             : { command: ['sh', '-lc', service.buildConfig.startCommand] }),
@@ -486,6 +502,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
               containerPort: 8080,
               command: BOOTSTRAP_COMMAND,
               environment: environmentValues,
+              secrets: this.nativeSecretReferences(secretVersionRefs),
             },
             networkConfiguration: this.expressNetworkConfiguration(workloadNetwork),
             scalingTarget: { minTaskCount: 1, maxTaskCount: 4 },
@@ -501,6 +518,14 @@ export class EcsExpressAdapter implements IProviderAdapter {
       }
 
       const serviceArn = express.serviceArn!;
+      const finalRuntime = await this.runtimeConfiguration(this.currentConfiguration(express), serviceArn);
+      for (const expected of this.nativeSecretReferences(secretVersionRefs)) {
+        const matches = (finalRuntime.container.secrets ?? []).filter((entry: any) => entry.name === expected.name);
+        if (matches.length !== 1 || matches[0].valueFrom !== expected.valueFrom
+          || (finalRuntime.container.environment ?? []).some((entry: any) => entry.name === expected.name)) {
+          throw new Error('AWS ECS did not verify the requested runtime secret references.');
+        }
+      }
       const url = this.expressUrl(express);
       return {
         serviceId: service.id,
@@ -566,7 +591,10 @@ export class EcsExpressAdapter implements IProviderAdapter {
       const retired = new Set(keys);
       const environmentValues = (runtime.container.environment ?? [])
         .filter((item: { name?: string }) => item.name && !retired.has(item.name));
-      const { taskDefinitionArn } = await this.updateRuntimeConfiguration(serviceArn, config, { environment: environmentValues }, {
+      const { taskDefinitionArn } = await this.updateRuntimeConfiguration(serviceArn, config, {
+        environment: environmentValues,
+        secrets: (runtime.container.secrets ?? []).filter((item: { name?: string }) => item.name && !retired.has(item.name)),
+      }, {
         serviceArn,
         executionRoleArn: config.executionRoleArn,
         cpu: config.cpu,
@@ -832,6 +860,15 @@ export class EcsExpressAdapter implements IProviderAdapter {
           .map((item) => [item.name, item.value])
       );
       const visible = Object.entries(values).filter(([key]) => !INTERNAL_ENV_KEYS.has(key));
+      const envVarSecretRefs: NonNullable<ObservedService['envVarSecretRefs']> = {};
+      const secretKeys: string[] = [];
+      for (const entry of runtime.container.secrets ?? []) {
+        if (typeof entry.name !== 'string' || INTERNAL_ENV_KEYS.has(entry.name)) continue;
+        secretKeys.push(entry.name);
+        const match = typeof entry.valueFrom === 'string'
+          ? entry.valueFrom.match(/^(arn:aws:secretsmanager:[a-z0-9-]+:\d{12}:secret:[A-Za-z0-9/_+=.@-]+):::(\S{32,64})$/) : null;
+        if (match && /^[A-Za-z0-9-]+$/.test(match[2]!)) envVarSecretRefs[entry.name] = { provider: 'aws-secrets', resource: match[1]!, version: match[2]! };
+      }
       const customDomains = binding.customDomains ?? [];
       services.push({
         name,
@@ -850,8 +887,9 @@ export class EcsExpressAdapter implements IProviderAdapter {
           public: true,
         },
         sourceState: 'disconnected',
-        envVarKeys: visible.map(([key]) => key).sort(),
+        envVarKeys: [...new Set([...visible.map(([key]) => key), ...secretKeys])].sort(),
         envVarHashes: Object.fromEntries(visible.map(([key, value]) => [key, hashEnvValue(value)])),
+        envVarSecretRefs,
         status: express.status?.statusCode === 'ACTIVE'
           ? (runtime.container.image === BOOTSTRAP_IMAGE ? 'empty' : 'running')
           : express.status?.statusCode === 'INACTIVE' ? 'failed' : 'unknown',
@@ -1563,6 +1601,25 @@ export class EcsExpressAdapter implements IProviderAdapter {
     throw new Error(`ECS Express service ${serviceArn} did not become active.`);
   }
 
+  private nativeSecretReferences(refs: Record<string, RuntimeSecretReference>) {
+    return Object.entries(refs).map(([name, ref]) => {
+      const native = runtimeSecretReferenceIdentity(ref);
+      return { name, valueFrom: `${native.resource}:::${native.version}` };
+    });
+  }
+
+  private mergeRuntimeEnvironment(container: any, updates: KeyValuePair[], refs: Record<string, RuntimeSecretReference>) {
+    const environment = new Map<string, KeyValuePair>((container.environment ?? []).filter((entry: any) => typeof entry.name === 'string').map((entry: KeyValuePair) => [entry.name!, entry]));
+    const secrets = new Map<string, { name: string; valueFrom: string }>((container.secrets ?? []).filter((entry: any) => typeof entry.name === 'string').map((entry: any) => [entry.name, entry]));
+    for (const entry of updates) {
+      if (!entry.name) continue;
+      if (secrets.has(entry.name)) throw new Error('A literal environment update conflicts with an existing native secret reference.');
+      environment.set(entry.name, entry);
+    }
+    for (const entry of this.nativeSecretReferences(refs)) { environment.delete(entry.name); secrets.set(entry.name, entry); }
+    return { environment: [...environment.values()], secrets: [...secrets.values()] };
+  }
+
   private containerEnvironment(service: Service, vars: Record<string, string>): KeyValuePair[] {
     return Object.entries({
       ...vars,
@@ -1973,6 +2030,8 @@ providerRegistry.register({
   metadata: {
     name: 'ecs',
     displayName: 'AWS ECS Express Mode',
+    runtimeSecretReferenceProviders: ['aws-secrets'],
+    supportsCreateOnlyDeploy: true,
     category: 'deployment',
     credentialsSchema: EcsExpressCredentialsSchema,
     setupHelpUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
