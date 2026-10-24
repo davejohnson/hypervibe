@@ -21,7 +21,7 @@ const pairingStartSchema = z.object({
   repository: z.string().min(3),
   userCode: z.string().regex(/^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$/),
   verificationUrl: z.string().url(),
-  purpose: z.enum(['provider-connections', 'credential-requests']).optional(),
+  purpose: z.enum(['provider-connections', 'credential-requests', 'secret-destinations']).optional(),
   environment: z.string().min(1).max(80).optional(),
 }).strict();
 
@@ -42,7 +42,7 @@ const pairingCompleteSchema = z.object({
   project: z.object({ id: z.string().min(1), name: z.string().min(1) }).strict(),
   skipped: z.number().int().min(0),
   status: z.literal('completed'),
-  purpose: z.enum(['provider-connections', 'credential-requests']).optional(),
+  purpose: z.enum(['provider-connections', 'credential-requests', 'secret-destinations']).optional(),
   environment: z.string().min(1).max(80).optional(),
 }).strict().superRefine((value, context) => {
   if (value.applied !== value.credentials.length) {
@@ -136,7 +136,7 @@ export function createHypervibeCloudPairingClient(options: {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   purpose?: 'provider-connections';
-  grant?: { purpose: 'credential-requests'; environment: string };
+  grant?: { purpose: 'credential-requests' | 'secret-destinations'; environment: string };
 } = {}): HypervibeCloudPairingClient {
   if (options.purpose && options.grant) throw new HvError('VALIDATION', 'Select one browser-access purpose.');
   const purpose = options.grant?.purpose ?? options.purpose;

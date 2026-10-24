@@ -157,6 +157,8 @@ function credentialSchemaKeys(schema: z.ZodTypeAny): Set<string> | null {
 }
 
 export interface ProviderMetadata {
+  /** Explicit empty-container setup; delivery and runtime reference support are separate. */
+  secretDestinationSetupProviders?: Array<import('../ports/secret-destination.port.js').SecretDestination['provider']>;
   runtimeSecretReferenceProviders?: Array<import('../ports/secret-destination.port.js').SecretDestination['provider']>;
   /** Provider final mutation refuses any already-existing workload. */
   supportsCreateOnlyDeploy?: boolean;

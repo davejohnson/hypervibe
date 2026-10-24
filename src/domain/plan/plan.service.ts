@@ -1,4 +1,5 @@
 import { planDatabaseCredentialAliases } from '../services/database-credential-aliases.service.js';
+import { planSecretContainers } from '../services/secret-container-setup.js';
 import { planScheduleActivations, SCHEDULE_ACTIVATION_OPERATION } from '../services/schedule-activation.service.js';
 import { scopedSecretObservation } from './scoped-secrets.js';
 import { planApiPolicy } from '../services/api-policy.js';
@@ -53,6 +54,7 @@ import {
   isBackupProvisioningAction,
   isBackupProgramPublicationAction,
   orderActions,
+  planRunDocumentSchema,
   type PlanRunDocument,
 } from './converge.executor.js';
 import {
@@ -139,7 +141,7 @@ import {
 
 export interface PlanOptions {
   /** Restrict the plan to one lifecycle stage. Omission preserves full-plan behavior. */
-  scope?: 'full' | 'retained-cleanup' | 'secrets' | 'database-credential-aliases';
+  scope?: 'full' | 'retained-cleanup' | 'secrets' | 'database-credential-aliases' | 'secret-destinations';
   /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
   serviceFilter?: string[];
   /** One-off env var overrides merged over spec.envVars, frozen (encrypted) into the plan. */
@@ -160,7 +162,7 @@ export interface EnvironmentPlan {
   webhookReadiness?: WebhookReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
-  scope: 'full' | 'secrets' | 'database-credential-aliases' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
+  scope: 'full' | 'secrets' | 'database-credential-aliases' | 'secret-destinations' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
   backupReadiness?: BackupReadiness;
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
@@ -1641,6 +1643,30 @@ export class PlanService {
       observed, actions, unmanaged: [], warnings, inputRequired: [], blocked: [] };
   }
 
+  private async planSecretDestinations(project: Project, environmentName: string, specResult: SpecResult, options: PlanOptions): Promise<EnvironmentPlan | { error: string }> {
+    if (['serviceFilter', 'envVarOverrides', 'envFile', 'includeEnvFile', 'secretRefs'].some(key => Object.hasOwn(options, key)))
+      return { error: 'scope="secret-destinations" accepts no deploy or credential-value inputs.' };
+    const desired = specResult.spec.environments[environmentName];
+    if (!desired) return { error: `Declare environment ${environmentName} with hv_spec before preparing destinations.` };
+    const environment = this.envRepo.findByProjectAndName(project.id, environmentName)
+      ?? this.envRepo.create({ projectId: project.id, name: environmentName, platformBindings: { provider: desired.hosting.provider } });
+    const missing = Object.values(desired.secretDestinations ?? {}).some(value => value.version === undefined);
+    const blocked = missing ? this.providerPreflight([desired.hosting.provider]) : [];
+    if (blocked.length) return { error: blocked.map(block => block.reason).join(' ') };
+    try {
+      const actions = await planSecretContainers({ project, spec: specResult.spec, environment });
+      const warnings = ['This isolated plan prepares empty secret containers only. Writer authorization, credential delivery and application deployment require separate reviewed steps.'];
+      const document: PlanRunDocument = { kind: 'hv_plan', scope: 'secret-destinations', environmentName,
+        specRevision: specResult.revision, observedFingerprint: null, actions, warnings };
+      planRunDocumentSchema.parse(document);
+      const run = this.runRepo.create({ projectId: project.id, environmentId: environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
+      this.runRepo.updateStatus(run.id, 'succeeded');
+      return { planRunId: run.id, scope: 'secret-destinations', specRevision: specResult.revision,
+        specSource: specResult.source ?? { kind: 'local' }, environmentName, verified: true,
+        observed: null, actions, unmanaged: [], warnings, inputRequired: [], blocked: [] };
+    } catch (error) { return { error: error instanceof Error ? error.message : 'Secret containers could not be verified.' }; }
+  }
+
   async plan(
     project: Project,
     environmentName: string,
@@ -1657,6 +1683,7 @@ export class PlanService {
       return { error: providerValidation.message };
     }
     const scope = options?.scope ?? 'full';
+    if (scope === 'secret-destinations') return this.planSecretDestinations(projectWithSpecGitRemoteUrl(project, specResult.spec), environmentName, specResult, options!);
     if (scope === 'database-credential-aliases' || scope === 'full') {
       const aliases = await planDatabaseCredentialAliases({ project: projectWithSpecGitRemoteUrl(project, specResult.spec),
         spec: specResult.spec, revision: specResult.revision, environmentName,

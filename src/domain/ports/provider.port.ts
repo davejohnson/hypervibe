@@ -193,6 +193,7 @@ export interface VerifyResult {
 }
 
 export interface IProviderAdapter {
+  readonly secretDestinationSetup?: import('./secret-destination-lifecycle.port.js').SecretDestinationSetup;
   readonly serviceVolumes?: import('./service-volume.port.js').IServiceVolumes;
   readonly name: string;
 

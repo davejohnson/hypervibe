@@ -8,6 +8,17 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+`secret-container-setup.test.ts` and the application/service suites with the same
+prefix enforce the [empty container setup contract](../../docs/secret-destination-delivery.md#empty-container-setup).
+The named matrix admits only GCP setup while preserving separate AWS/Azure
+delivery and runtime-reference capabilities. Independent Secret Manager and CRM
+contracts drive real synthetic REST requests; command tests use migrated SQLite
+and the real planner/executor. Initial regressions failed because the new scope
+fell through to ordinary deployment planning, discovery was absent, confirmation
+review omitted destination identities, and pre-create checks accepted changed
+local scope/source. The corrected tests run in normal `npm test`; no live
+provider call or credential value is involved.
+
 `src/application/__tests__/seed-registry-scope.api-contract.test.ts` exercises
 database seed dispatch through real encrypted connection selection and Railway
 HTTP serialization. Its synthetic responses execute against the pinned official

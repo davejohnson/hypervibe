@@ -218,6 +218,7 @@ export const planRunDocumentSchema = z.object({
   scope: z.enum([
     'full',
     'secrets',
+    'secret-destinations',
     'api-policy',
     'retained-cleanup',
     'managed-ci-bindings',
@@ -258,6 +259,15 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'secret-destinations') {
+    if (document.actions.some(action => resolvePlanActionAuthority(action)?.capability !== 'secret.destination.prepare')
+      || document.overrides || document.inputRequired?.length || document.sourceCommitSha || document.integrationFingerprints
+      || document.lockEnvironmentIds?.length || document.observedFingerprint !== null)
+      ctx.addIssue({ code: 'custom', message: 'Secret destination setup admits only exact container actions without value or deployment inputs.' });
+    return;
+  }
+  if (document.actions.some(action => action.metadata?.operation === 'secretDestinationPrepare'))
+    ctx.addIssue({ code: 'custom', message: 'Secret container preparation requires its isolated scope.' });
   if (document.scope === 'database-credential-aliases') {
     const m = document.databaseCredentialAliasesVerification;
     if (document.actions.length > 1 || document.actions.some(action => !databaseCredentialAliasesActionSchema.safeParse(action).success

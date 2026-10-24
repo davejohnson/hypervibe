@@ -38,6 +38,50 @@ or inspection credentials do not become a write grant. The library has no ambien
 credential fallback. A metadata read does not prove write permission. No delivery
 driver creates a project, vault, IAM binding or AWS/GCP secret container.
 
+## Empty container setup
+
+Container setup uses a separate lifecycle port and exact reviewed
+`hv_plan {project, env, scope: "secret-destinations"}` / `hv_apply` operation.
+It accepts no deploy inputs or secret values and can run before the first
+workload exists. Missing required versions still block ordinary deployment.
+Read-only discovery can suggest destination declarations from the connected
+provider's verified scope; proposals are not creation authority.
+
+| Hosting provider | Empty destination setup |
+| --- | --- |
+| Cloud Run | Google Secret Manager only: verify connected project ID and number; create an absent secret with automatic replication and scoped ownership labels; read back exact native name, `createTime`, labels and empty version metadata. |
+| ECS Express | AWS runtime references and direct delivery are supported separately; automatic empty-container setup is unsupported. |
+| Azure Container Apps | Key Vault runtime references and direct delivery are supported separately; automatic vault/container setup is unsupported. |
+| Railway, Fly.io, DigitalOcean App Platform, Vercel | Setup unsupported; no fallback to provider variables or local values. |
+
+The creation intent binds canonical repository identity, environment, key,
+destination and random attempt. It is durable before POST and exported through
+strict value-free repository bindings, so another machine can reconcile it.
+Ready bindings additionally pin the server's creation timestamp. A preexisting
+unowned or populated lookalike blocks automatic adoption; pinned destinations
+are preserved without setup writes. Existing ready owned containers may later
+contain delivered versions without losing their ownership record.
+
+A lost creation response is never permission to POST again. A matching empty
+container can be accepted through a newly reviewed metadata-only reconciliation
+plan; absence, unknown metadata, mismatched labels or lifetime remain blocked.
+There is no automatic reset, deletion, replacement or adoption workflow in this
+increment. Writer IAM preparation must freshly verify this owned lifetime at
+its final mutation boundary. Container verification alone says nothing about
+writer permissions, runtime access or external credential validity.
+
+Independent contracts:
+[CRM v1 project ID lookup](https://docs.cloud.google.com/resource-manager/reference/rest/v1/projects/get),
+[CRM v3 numeric identity lookup](https://docs.cloud.google.com/resource-manager/reference/rest/v3/projects/get),
+[Secret creation](https://docs.cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/create),
+and [Secret identity and labels](https://docs.cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets).
+The provider has no create request-token field; correlation is explicit labels
+plus retained intent, and native lifetime is verified on readback. Synthetic
+REST tests cover serialized methods, names, metadata and denied/unknown states;
+real persisted command tests cover confirmation, no-value/no-deploy isolation,
+scope changes, lifecycle recovery and cross-device exports. They do not establish
+live API enablement, IAM grants, billing availability or deployment success.
+
 ## Hosting reference matrix
 
 All seven registered hosting providers are accounted for. Native support does

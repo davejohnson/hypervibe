@@ -1,4 +1,4 @@
-import type { GcpSecretDestination, SecretDestinationDriver, SecretDestination, SecretDestinationObservation } from '../../../domain/ports/secret-destination.port.js';
+import type { GcpSecretDestination, SecretDestinationDriver, SecretDestination, SecretDestinationObservation, SecretDestinationCallOptions, SecretWriterAccess } from '../../../domain/ports/secret-destination.port.js';
 import { authorizeDestinationWrite, bounded, delivered, deliveryFailure, DestinationBoundaryError, DestinationBudget, destinationJson,
   failureCode, parseAttempt, parseDestination } from '../secret-destination-http.js';
 import { assertGcpProjectIdentity } from './gcp-project-identity.js';
@@ -10,9 +10,12 @@ export interface GcpSecretDestinationAuthentication {
   getAccessToken: (signal: AbortSignal) => Promise<string>;
 }
 export interface GcpSecretDestinationOptions { fetch?: typeof fetch }
+export interface GcpSecretDestinationDriver extends SecretDestinationDriver {
+  verifyWriteAccess(destination: SecretDestination, options?: SecretDestinationCallOptions): Promise<SecretWriterAccess>;
+}
 
 export function createGcpSecretDestinationDriver(authentication: GcpSecretDestinationAuthentication,
-  options: GcpSecretDestinationOptions = {}): SecretDestinationDriver {
+  options: GcpSecretDestinationOptions = {}): GcpSecretDestinationDriver {
   const request = options.fetch ?? fetch;
   const scope = (input: SecretDestination): GcpSecretDestination => {
     const destination = parseDestination(input);
@@ -54,6 +57,25 @@ export function createGcpSecretDestinationDriver(authentication: GcpSecretDestin
     throw new DestinationBoundaryError('invalid_response');
   };
   return {
+    async verifyWriteAccess(input, callOptions) {
+      return bounded<SecretWriterAccess>(callOptions, async budget => {
+        const destination = scope(input);
+        const token = await budget.wait(authentication.getAccessToken(budget.signal));
+        await inspect(destination, budget, token);
+        const permissions = ['secretmanager.secrets.get', 'secretmanager.versions.list', 'secretmanager.versions.add'];
+        const result = await destinationJson(request, budget,
+          `https://secretmanager.googleapis.com/v1/${name(destination)}:testIamPermissions`, token,
+          { method: 'POST', body: JSON.stringify({ permissions }) });
+        if (result.permissions !== undefined && (!Array.isArray(result.permissions)
+          || !result.permissions.every(item => typeof item === 'string'))) throw new DestinationBoundaryError('invalid_response');
+        if (!permissions.every(permission => (result.permissions as string[] | undefined)?.includes(permission))) {
+          throw new DestinationBoundaryError('access_denied');
+        }
+        // Google defines testIamPermissions as a UI hint that may fail open.
+        // Actual delivery still uses current host authority and native IAM.
+        return { status: 'ready' };
+      }, error => ({ status: 'unavailable', code: failureCode(error) }));
+    },
     async observe(input, callOptions) {
       return bounded<SecretDestinationObservation>(callOptions, async budget => {
         const destination = scope(input);

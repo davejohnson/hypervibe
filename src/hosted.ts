@@ -30,3 +30,4 @@ export {
 export { MAX_PUBLIC_ENDPOINTS, type HostedPublicEndpointV1 } from './application/hosted/public-endpoints.js';
 export * from './hosted-secret-destinations.js';
 export { generateHostedSecretValueV1 } from './application/hosted/secret-generation.js';
+export { cloudSecretSetupSchema, cloudSecretSetupReceiptSchema, type CloudSecretSetup } from './application/cloud-secret-setup-contract.js';

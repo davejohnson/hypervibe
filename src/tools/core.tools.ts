@@ -28,6 +28,7 @@ import { planServiceVolumes } from '../domain/services/service-volume.service.js
 import { planDelegatedSecrets } from '../domain/services/delegated-secret.service.js';
 import { isSecretReferenceAction } from '../domain/services/secret-reference-plan.js';
 import { runtimeSecretReferenceSchema } from '../domain/ports/secret-destination.port.js';
+import { secretContainerActionMetadataSchema } from '../domain/ports/secret-destination-lifecycle.port.js';
 import { deriveHypervibeSecretValues } from '../domain/services/hypervibe-secret-value.js';
 import { withReceiptValidatedManagedSecretBindings } from '../domain/services/managed-secret-binding-receipts.js';
 import { runtimeRolloutRequirements } from '../domain/services/runtime-rollout.service.js';
@@ -761,7 +762,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
     {
       project: projectField,
       env: envField,
-      scope: z.enum(['full', 'retained-cleanup', 'secrets', 'database-credential-aliases']).optional().describe('Default full. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
+      scope: z.enum(['full', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'secret-destinations']).optional().describe('Default full. secret-destinations prepares reviewed missing empty native secret containers without values, IAM or workload deployment. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
       envVars: z.record(z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
@@ -770,7 +771,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
     },
     wrapCommandHandler(async ({ project: projectRef, env, scope, services, envVars, envFile, includeEnvFile, secretRefs }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
-      if (scope === 'retained-cleanup') {
+      if (scope === 'retained-cleanup' || scope === 'secret-destinations') {
         const incompatibleInputs = [
           services !== undefined ? 'services' : null,
           envVars !== undefined ? 'envVars' : null,
@@ -781,9 +782,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         if (incompatibleInputs.length > 0) {
           return commandError(
             'VALIDATION',
-            `scope="retained-cleanup" does not accept deploy inputs: ${incompatibleInputs.join(', ')}.`,
+            `scope="${scope}" does not accept deploy inputs: ${incompatibleInputs.join(', ')}.`,
             {
-              hint: 'Remove deploy inputs so the plan can authorize only retained infrastructure teardown actions.',
+              hint: 'Remove deploy inputs so the plan authorizes only its isolated lifecycle operation.',
               next: ['hv_plan'],
             }
           );
@@ -797,7 +798,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       // its git-safety and filesystem boundary before PlanService persists an
       // executable plan, so an unsafe tracked .env cannot leave an undisclosed
       // authorization record behind.
-      const preparedLocalEnv = currentSpec && scope !== 'secrets' && scope !== 'database-credential-aliases'
+      const preparedLocalEnv = currentSpec && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'secret-destinations'
         ? ensureProjectLocalEnv({
           source: currentSpecResult?.source,
           projectName: project.name,
@@ -825,7 +826,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const reviewActions = pending.map(({ metadata, ...action }) => {
         const reference = isSecretReferenceAction({ ...action, metadata })
           ? runtimeSecretReferenceSchema.safeParse(metadata?.reference) : undefined;
-        return { ...action, ...(reference?.success ? { reference: reference.data } : {}) };
+        const container = secretContainerActionMetadataSchema.safeParse(metadata);
+        return { ...action, ...(reference?.success ? { reference: reference.data } : {}),
+          ...(container.success ? { destination: container.data.destination, owner: container.data.owner,
+            mode: container.data.mode, ...(container.data.attemptId ? { attemptId: container.data.attemptId } : {}) } : {}) };
       });
       const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(result.blocked, result.actions);
       const connectBeforeApply = actionScopedBlocksRequiringConnectBeforeApply(actionScopedBlocked);
@@ -837,7 +841,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         : undefined;
       let localEnv: RepoEnvFileWrite | undefined;
       try {
-        localEnv = scope === 'secrets' ? undefined : mergeLocalEnvWrites(
+        localEnv = scope === 'secrets' || scope === 'secret-destinations' ? undefined : mergeLocalEnvWrites(
           preparedLocalEnv,
           ensureProjectLocalEnv({
             source: currentSpecResult?.source,
@@ -879,7 +883,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const managerRequirements = result.inputRequired.filter(entry => plannedEnvironmentSpec?.secretDestinations?.[entry.key]);
       const localRequirements = result.inputRequired.filter(entry => !plannedEnvironmentSpec?.secretDestinations?.[entry.key]);
       const managerHint = managerRequirements.length
-        ? `Deliver ${managerRequirements.map(entry => entry.key).join(', ')} directly to the declared secret manager through hv_cloud_requests, then commit only the returned immutable version references with hv_spec and re-plan. Generated keys use the owner generation action. Review all environments with hv_cloud_requests action="environments".` : '';
+        ? `For missing empty containers, first review hv_plan with project="${project.name}", env="${plannedEnvironment}", scope="secret-destinations" and apply that isolated plan. Then authorize the hosted writer and deliver ${managerRequirements.map(entry => entry.key).join(', ')} directly to the declared secret manager through hv_cloud_requests. Commit only the returned immutable version references with hv_spec and re-plan. Generated keys use the owner generation action. Review all environments with hv_cloud_requests action="environments".` : '';
       const delegatedSecretRefs = localEnv && localRequirements.length > 0
         ? Object.fromEntries(localRequirements.map((entry) => [
           entry.key,
@@ -968,7 +972,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           unmanaged: result.unmanaged,
           inputRequired: result.inputRequired.length > 0 ? result.inputRequired : undefined,
           ...(credentialRequest ? { credentialRequest } : {}),
-          ...(managerRequirements.length ? { secretManagerCollection: { command: 'hv_cloud_requests', input: { action: 'environments' }, requirements: managerRequirements } } : {}),
+          ...(managerRequirements.length ? { secretManagerCollection: { command: 'hv_cloud_requests', input: { action: 'environments' }, requirements: managerRequirements }, secretDestinationSetup: { command: 'hv_plan', input: { project: project.name, env: plannedEnvironment, scope: 'secret-destinations' } } } : {}),
           blocked: hardBlocked,
           actionScopedBlocked: actionScopedBlocked.length > 0 ? actionScopedBlocked : undefined,
           ...(classifyPlanBlocks([...result.blocked, ...actionScopedBlocked]).connections.length > 0

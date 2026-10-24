@@ -19,4 +19,10 @@ describe('secret destination provider review completeness', () => {
       expect(secretDestinationSchema.safeParse({ provider, path: 'scope/secret' }).success).toBe(false);
     }
   });
+  it('keeps named onboarding support and unsupported provider routes explicit', () => {
+    const evidence = readFileSync('docs/cloud-writer-onboarding.md', 'utf8');
+    for (const name of ['GCP Secret Manager', 'AWS Secrets Manager', 'Azure Key Vault']) expect(evidence).toContain(`| ${name} |`);
+    expect(evidence.match(/Automatic writer installation unsupported/g)).toHaveLength(2);
+    expect(evidence).toContain('not live IAM acceptance');
+  });
 });

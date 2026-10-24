@@ -1,5 +1,6 @@
 import { databaseCredentialAliasesActionSchema, DATABASE_CREDENTIAL_ALIASES_OPERATION } from '../services/database-credential-aliases.service.js';
 import { secretReferenceActionMetadataSchema, SECRET_REFERENCE_OPERATION } from '../services/secret-reference-plan.js';
+import { secretContainerActionMetadataSchema, SECRET_DESTINATION_PREPARE } from '../ports/secret-destination-lifecycle.port.js';
 import { scheduleActivationActionMetadataSchema } from '../services/schedule-activation.service.js';
 import { INBOUND_SIGNING_KEY_OPERATION } from '../services/email-inbound-signing.service.js';
 import { databaseCheckpointIdentitySchema } from '../services/database-checkpoint.js';
@@ -129,6 +130,7 @@ export type PlanMutationCapability =
   | 'load-balancer.mutate'
   | 'hosting.delegated-secret.sync'
   | 'hosting.secret-reference.sync'
+  | 'secret.destination.prepare'
   | 'stripe.hosting-env.sync'
   | 'stripe.catalog.mutate'
   | 'stripe.webhook.mutate'
@@ -490,6 +492,14 @@ export function resolvePlanActionAuthority(
     return null;
   }
 
+  if (action.metadata?.operation === SECRET_DESTINATION_PREPARE) {
+    const parsed = secretContainerActionMetadataSchema.safeParse(action.metadata);
+    return parsed.success && action.verified === true && action.resource.kind === 'secret'
+      && action.id === `secret-destination:${action.resource.name}` && parsed.data.owner.key === action.resource.name
+      && (parsed.data.mode === 'create' ? action.type === 'create' && action.requiresConfirm === true && action.billable === true : action.type === 'update')
+      && providerRegistry.getMetadata(action.resource.provider)?.secretDestinationSetupProviders?.includes(parsed.data.destination.provider)
+      ? authority(action, 'secret.destination.prepare') : null;
+  }
   if (action.metadata?.operation === SECRET_REFERENCE_OPERATION) {
     const parsed = secretReferenceActionMetadataSchema.safeParse(action.metadata);
     return action.type === 'update' && action.verified === true && action.resource.kind === 'secret'

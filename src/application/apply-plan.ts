@@ -1,4 +1,5 @@
 import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from '../domain/services/database-credential-aliases.service.js';
+import { applySecretContainer, assertReadySecretContainers } from '../domain/services/secret-container-setup.js';
 import { applySecretReference, assertDeploymentSecretReferences } from './apply-secret-references.js';
 import { applyScheduleActivation } from '../domain/services/schedule-activation.service.js';
 import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js';
@@ -895,6 +896,30 @@ export async function executePlanApply(ctx: CommandContext, params: {
       handler: action => applyDatabaseCredentialAliases({ project: projectForPreflight, spec: envSpec, environmentName: envName,
         action, confirmed: new Set(params.confirmActions), encrypted: loaded.document.overrides?.databaseCredentialAliasesEncrypted }) });
     return { kind: 'executed', envName, result, actionScopedWarnings: ['Database reference configuration is separate from SQL authentication, application use and runtime rollout.'] };
+  }
+  if (planScope === 'secret-destinations') {
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'Container setup requires the exact reviewed environment and cannot deploy workloads.' }] };
+    }
+    const blocked = loaded.document.actions.length ? planService.providerPreflight([envSpec.hosting.provider]) : [];
+    if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
+    if (!loaded.document.actions.length) {
+      const keys = Object.entries(envSpec.secretDestinations ?? {}).filter(([, value]) => value.version === undefined).map(([key]) => key);
+      try {
+        if (keys.length) await assertReadySecretContainers({ project: projectForPreflight, spec, environment, keys });
+      } catch {
+        return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: envSpec.hosting.provider,
+          reason: 'Current container ownership or lifetime could not be verified. Re-plan; no setup write was attempted.' }] };
+      }
+    }
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision,
+      confirmActions: params.confirmActions, handler: action => {
+        if (resolvePlanActionAuthority(action)?.capability !== 'secret.destination.prepare')
+          return Promise.resolve({ success: false, status: 'blocked' as const, message: 'This plan can only prepare its reviewed empty secret containers.' });
+        return applySecretContainer({ ctx, project: projectForPreflight, spec, environmentName: envName, action });
+      } });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Container verification does not verify writer access, credential delivery or runtime access.'] };
   }
   if (secretsOnly && (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
     || envSpec.deploy?.strategy !== 'branch' || envSpec.deploy.trigger !== 'ci' || params.alwaysRunBootstrap)) {

@@ -113,11 +113,16 @@ export interface SecretDestinationDeliveryOptions extends SecretDestinationCallO
   beforeWrite?: (signal: AbortSignal) => Promise<void>;
 }
 export interface SecretDestinationDriver {
+  /** Optional native readiness hint, never a replacement for mutation authorization. */
+  verifyWriteAccess?(destination: SecretDestination, options?: SecretDestinationCallOptions): Promise<SecretWriterAccess>;
   observe(destination: SecretDestination, options?: SecretDestinationCallOptions): Promise<SecretDestinationObservation>;
   /** Host must durably claim this attempt before calling once. Never retry this method. */
   deliver(attempt: SecretDeliveryAttempt, transientValue: string, options?: SecretDestinationDeliveryOptions): Promise<SecretDeliveryResult>;
   /** Read-only recovery. Unknown never authorizes replay of deliver. */
   reconcile(attempt: SecretDeliveryAttempt, options?: SecretDestinationCallOptions): Promise<SecretDeliveryResult>;
 }
+
+export type SecretWriterAccess = { status: 'ready' }
+  | { status: 'unavailable'; code: SecretDestinationFailureCode };
 
 export const MAX_DELIVERY_SECRET_BYTES = 16_384;

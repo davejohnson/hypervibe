@@ -12,6 +12,8 @@ import { databaseCheckpointBindings } from '../services/database-checkpoint.js';
 import { backupPolicyAttempts, mergeBackupPolicyAttempts } from '../services/backup-policy-attempts.js';
 import { projectRecoveryDatabases, recoveryDatabaseBindings } from '../services/recovery-database-bindings.js';
 import type { Component } from '../entities/component.entity.js';
+import { secretContainerBindings } from '../ports/secret-destination-lifecycle.port.js';
+import { isDeepStrictEqual } from 'node:util';
 
 // Bindings are the inverse of the spec's source-of-truth contract: the DB
 // column `environments.platform_bindings` is authoritative (it holds data the
@@ -106,6 +108,19 @@ export function mergeRepoPlatformBindings(
     );
   }
   for (const [key, repoValue] of Object.entries(repoBindings)) {
+    if (key === 'secretDestinationContainers') {
+      const retained = secretContainerBindings(existing[key]);
+      for (const [name, incoming] of Object.entries(secretContainerBindings(repoValue))) {
+        const previous = retained[name];
+        if (previous && (previous.attemptId !== incoming.attemptId || !isDeepStrictEqual(previous.owner, incoming.owner)
+          || !isDeepStrictEqual(previous.destination, incoming.destination)
+          || previous.state === 'ready' && incoming.state === 'ready' && (previous.resource !== incoming.resource || previous.createTime !== incoming.createTime)))
+          throw new Error(`Repository secret container identity conflicts with retained state for ${name}.`);
+        if (!previous || previous.state !== 'ready') retained[name] = incoming;
+      }
+      merged[key] = retained;
+      continue;
+    }
     if (key === 'databaseCheckpoints' || key === 'backupPolicyAttempts') continue;
     if (key === 'serviceVolumes' && existing[key] !== undefined) {
       const retained = { ...incomingVolumes, ...localVolumes };
@@ -183,6 +198,7 @@ function presentStorageInstanceScopes(platformBindings: Record<string, unknown>)
 
 function sanitizePlatformBindings(raw: Record<string, unknown>): Record<string, unknown> {
   const sanitized = sanitize(raw) as Record<string, unknown>;
+  if (raw.secretDestinationContainers !== undefined) sanitized.secretDestinationContainers = secretContainerBindings(raw.secretDestinationContainers);
   if (raw.recoveryDatabases !== undefined) sanitized.recoveryDatabases = recoveryDatabaseBindings(raw.recoveryDatabases);
   if (raw.backupPolicyAttempts !== undefined) {
     // Strict value-free identities remain recoverable even for secret-shaped names.

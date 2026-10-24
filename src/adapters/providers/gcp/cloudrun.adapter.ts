@@ -3,6 +3,7 @@ import { validateRuntimeSecretReferences, runtimeSecretReferenceIdentity } from 
 import type { RuntimeSecretReference } from '../../../domain/ports/secret-destination.port.js';
 import { DestinationBudget } from '../secret-destination-http.js';
 import { assertGcpProjectIdentity } from './gcp-project-identity.js';
+import { createGcpSecretContainerSetup } from './gcp-secret-container.js';
 import type {
   IProviderAdapter,
   Receipt,
@@ -1708,6 +1709,10 @@ export class CloudRunAdapter implements
         error: this.formatError(error),
       };
     }
+  }
+
+  get secretDestinationSetup() {
+    return createGcpSecretContainerSetup({ projectId: this.credentials?.projectId ?? '', getAccessToken: () => this.getAccessToken() });
   }
 
   private validateSecretReferences(options: DeploymentMutationOptions, vars: Record<string, string>) {
@@ -6590,6 +6595,7 @@ providerRegistry.register({
   metadata: {
     name: 'cloudrun',
     displayName: 'GCP Cloud Run',
+    secretDestinationSetupProviders: ['gcp-secret-manager'],
     runtimeSecretReferenceProviders: ['gcp-secret-manager'],
     supportsCreateOnlyDeploy: true,
     category: 'deployment',

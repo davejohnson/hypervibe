@@ -831,11 +831,28 @@ ownership only for a value issued or controlled outside Hypervibe.
 
 ### Direct cloud secret destinations
 
-`environments.<name>.secretDestinations[KEY]` selects an exact existing cloud
+`environments.<name>.secretDestinations[KEY]` selects an exact cloud
 secret destination and, after delivery, its immutable `version`. The slot
 remains declared in `ProjectSpec.secrets`. AWS Secrets Manager, Google Secret
 Manager and Azure Key Vault use the shared destination port and hosted library;
 their existing value-reading secret-source adapters remain separate.
+
+Empty container preparation is a separate lifecycle capability. An explicit
+`hv_plan scope="secret-destinations"` admits only reviewed container actions,
+even while required credential values remain undelivered. The ordinary plan
+and deployment gates remain blocked. Cloud Run's setup adapter can discover
+its verified GCP project number and suggest scoped names, then create absent
+Google Secret Manager containers after exact confirmation. It cannot create
+values, grant IAM, deploy workloads, adopt lookalikes or delete secrets. AWS
+and Azure container setup remain explicitly unsupported.
+
+Before creation, persist the canonical repository/environment/key, destination
+and random attempt in local and exportable value-free bindings. Native labels
+correlate that attempt and `createTime` pins the accepted resource lifetime.
+Unknown POST outcomes permit metadata-only reconciliation, never automatic
+replay. Ready ownership is reverified before separate writer preparation;
+deletion, recreation or changed labels cannot silently authorize a new grant.
+The same prerequisite works before any hosting workload exists.
 
 Hosted Hypervibe authorizes the account, repository, environment, source and
 writer connection before claiming a durable delivery intent. Submitted values
