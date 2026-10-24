@@ -240,6 +240,12 @@ gate: cross-project-capable authentication could write a manually pinned foreign
 numeric parent, and missing/inactive/mismatched project evidence was ignored.
 The shared delivery/runtime provider helper now enforces the same CRM contract;
 correct project ID/number pairs retain successful service and job updates.
+The shared creation-only admission matrix now covers Railway, Fly, Cloud Run
+and ECS, with Azure Container Apps, DigitalOcean and Vercel still rejected.
+GCP/ECS positive controls require references in the guarded creation payload
+and prohibit an environment pre-sync. All supported adapters retain negative
+controls for missing capability, missing provisioning intent and non-deferred
+deployment; native transport tests separately reject existing workloads.
 
 ## Collection across environments
 
