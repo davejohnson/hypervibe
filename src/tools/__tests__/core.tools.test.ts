@@ -454,7 +454,7 @@ describe('hv_spec', () => {
   // This exercises local Git, filesystem permission checks, and multiple MCP
   // requests. Under the full serial suite it can exceed the global 10-second
   // unit-test budget without a product failure; retain a finite local deadline.
-  it('keeps delegated base values out of the environment scaffold while syncing explicit deploy inputs', async () => {
+  it('keeps base values out of the environment scaffold and loads only explicitly shared deploy inputs', async () => {
     const oldCwd = process.cwd();
     const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
     const repoDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'hypervibe-environment-secret-inputs-')));
@@ -593,26 +593,38 @@ describe('hv_spec', () => {
         { cwd: repoDir }
       )).toEqual(Buffer.alloc(0));
 
-      const syncPlan = await t.call('hv_plan', {
+      const isolatedPlan = await t.call('hv_plan', {
         project: projectName,
         env: 'staging',
         includeEnvFile: true,
       });
-      expect(syncPlan.ok).toBe(true);
-      expect(syncPlan.warnings).toContainEqual(expect.stringContaining(
-        `Updated environment-specific deploy env file ${stagingPath} with 1 key(s) copied from base`
-      ));
-      expect(syncPlan.warnings).toContainEqual(expect.stringContaining(
+      expect(isolatedPlan.ok).toBe(true);
+      expect(readFileSync(stagingPath, 'utf8')).not.toContain('shared-runtime-value');
+      const storedIsolatedPlan = new RunRepository().findById(isolatedPlan.data.planId)!.plan as Record<string, unknown>;
+      const isolatedOverrides = storedIsolatedPlan.overrides as Record<string, unknown> | undefined;
+      expect(isolatedOverrides?.envFileKeys ?? []).toEqual([]);
+
+      writeFileSync(stagingPath, `${readFileSync(stagingPath, 'utf8')}PORTABLE_RUNTIME_VALUE=dotenv:./.env#PORTABLE_RUNTIME_VALUE\n`, { mode: 0o600 });
+      const referencePlan = await t.call('hv_plan', {
+        project: projectName,
+        env: 'staging',
+        includeEnvFile: true,
+      });
+      expect(referencePlan.ok).toBe(true);
+      expect(referencePlan.warnings).toContainEqual(expect.stringContaining(
         `Loaded 1 deploy env var(s) from ${stagingPath}`
       ));
       expect(readFileSync(stagingPath, 'utf8'))
-        .toContain('PORTABLE_RUNTIME_VALUE=shared-runtime-value');
-      const storedSyncPlan = new RunRepository().findById(syncPlan.data.planId)!.plan as Record<string, unknown>;
-      const overrides = storedSyncPlan.overrides as Record<string, unknown>;
+        .toContain('PORTABLE_RUNTIME_VALUE=dotenv:./.env#PORTABLE_RUNTIME_VALUE');
+      expect(readFileSync(stagingPath, 'utf8')).not.toContain('shared-runtime-value');
+      const storedReferencePlan = new RunRepository().findById(referencePlan.data.planId)!.plan as Record<string, unknown>;
+      const overrides = storedReferencePlan.overrides as Record<string, unknown>;
       expect(overrides.envFileKeys).toEqual(['PORTABLE_RUNTIME_VALUE']);
       expect(getSecretStore().decryptObject(overrides.envFileVarsEncrypted as string)).toEqual({
         PORTABLE_RUNTIME_VALUE: 'shared-runtime-value',
       });
+      expect(JSON.stringify(storedReferencePlan)).not.toContain('shared-runtime-value');
+      expect(JSON.stringify(referencePlan)).not.toContain('shared-runtime-value');
 
       // An explicit input is already known to this plan and must not trigger a
       // second request merely because its delegated declaration still exists.

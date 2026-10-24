@@ -118,10 +118,10 @@ describe('deploy-env-file', () => {
       localValueKeys: [],
       emptyKeys: [],
     });
-    expect(defaultDeployEnvFilePath(path.join(root, 'app'), 'bad/env')).toBe(basePath);
+    expect(() => defaultDeployEnvFilePath(path.join(root, 'app'), 'bad/env')).toThrow(/Invalid environment name/);
   });
 
-  it('removes group and world access from existing base and environment-specific files', () => {
+  it('removes group and world access from the selected environment file only', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-deploy-env-permissions-'));
     initRepo(root);
     mkdirSync(path.join(root, 'app'));
@@ -147,7 +147,7 @@ describe('deploy-env-file', () => {
       localValueKeys: [],
       emptyKeys: [],
     });
-    expect(statSync(basePath).mode & 0o777).toBe(0o600);
+    expect(statSync(basePath).mode & 0o777).toBe(0o644);
     expect(statSync(productionPath).mode & 0o777).toBe(0o600);
 
     const second = loadDeployEnvFile({
@@ -155,7 +155,7 @@ describe('deploy-env-file', () => {
       envName: 'production',
     });
     expect(second).not.toHaveProperty('permissionsUpdated');
-    expect(statSync(basePath).mode & 0o777).toBe(0o600);
+    expect(statSync(basePath).mode & 0o777).toBe(0o644);
     expect(statSync(productionPath).mode & 0o777).toBe(0o600);
   });
 
@@ -175,7 +175,7 @@ describe('deploy-env-file', () => {
     expect(statSync(explicitPath).mode & 0o777).toBe(0o644);
   });
 
-  it('creates an environment-specific env file from base .env when it is missing', () => {
+  it('creates an empty private environment file without inheriting base values', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-deploy-env-fallback-'));
     initRepo(root);
     mkdirSync(path.join(root, 'app'));
@@ -183,15 +183,12 @@ describe('deploy-env-file', () => {
     const stagingPath = path.join(root, '.env.staging');
     writeFileSync(basePath, 'SENDGRID_API_KEY=SG.base\n', { mode: 0o600 });
 
-    expect(defaultDeployEnvFilePath(path.join(root, 'app'), 'staging')).toBe(basePath);
+    expect(defaultDeployEnvFilePath(path.join(root, 'app'), 'staging')).toBe(stagingPath);
+    expect(existsSync(stagingPath)).toBe(false);
     expect(loadDeployEnvFile({ startDir: path.join(root, 'app'), envName: 'staging' })).toEqual({
       path: stagingPath,
-      baseEnvPath: basePath,
       createdEnvSpecificPath: stagingPath,
-      syncedFromBaseKeys: ['SENDGRID_API_KEY'],
-      vars: {
-        SENDGRID_API_KEY: 'SG.base',
-      },
+      vars: {},
       ignoredKeys: [],
       skippedKeys: [],
       excludedKeys: [],
@@ -199,16 +196,16 @@ describe('deploy-env-file', () => {
       emptyKeys: [],
     });
     expect(existsSync(stagingPath)).toBe(true);
-    expect(readFileSync(stagingPath, 'utf-8')).toBe('SENDGRID_API_KEY=SG.base\n');
+    expect(readFileSync(stagingPath, 'utf-8')).toBe('');
     expect(statSync(stagingPath).mode & 0o777).toBe(0o600);
-    expect(isIgnored(root, '.env')).toBe(true);
+    expect(isIgnored(root, '.env')).toBe(false);
     expect(isIgnored(root, '.env.staging')).toBe(true);
     expect(isIgnored(root, '.env.example')).toBe(false);
     expect(isIgnored(root, '.env.test.example')).toBe(false);
     expect(isIgnored(root, '.env.defaults')).toBe(false);
   });
 
-  it('copies only policy-selected portable values into a new environment-specific file', () => {
+  it('does not import even portable base values without an explicit reference', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-deploy-env-portable-'));
     initRepo(root);
     mkdirSync(path.join(root, 'app'));
@@ -228,15 +225,14 @@ describe('deploy-env-file', () => {
       excludeKeys: ['OWNER_ONLY_SECRET'],
     })!;
 
-    expect(result.vars).toEqual({ PUBLIC_LABEL: 'Shared label' });
-    expect(result.syncedFromBaseKeys).toEqual(['PUBLIC_LABEL']);
-    expect(result.ignoredKeys).toEqual(['CUSTOM_WORKER_FLAG']);
-    expect(result.localValueKeys).toEqual(['APP_BASE_URL']);
-    expect(result.skippedKeys).toEqual(['RAILWAY_TOKEN']);
-    expect(readFileSync(stagingPath, 'utf8')).toBe('PUBLIC_LABEL=Shared label\n');
+    expect(result.vars).toEqual({});
+    expect(result.ignoredKeys).toEqual([]);
+    expect(result.localValueKeys).toEqual([]);
+    expect(result.skippedKeys).toEqual([]);
+    expect(readFileSync(stagingPath, 'utf8')).toBe('');
   });
 
-  it('syncs portable base values cleanly into an existing empty environment file', () => {
+  it('preserves an explicitly empty environment file', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-deploy-env-empty-target-'));
     initRepo(root);
     const stagingPath = path.join(root, '.env.staging');
@@ -245,12 +241,8 @@ describe('deploy-env-file', () => {
 
     const result = loadDeployEnvFile({ startDir: root, envName: 'staging' })!;
 
-    expect(result.syncedFromBaseKeys).toEqual(['PUBLIC_LABEL']);
-    expect(readFileSync(stagingPath, 'utf8')).toBe([
-      '# Copied from .env by Hypervibe. Review before deploying if values should differ.',
-      'PUBLIC_LABEL=Shared label',
-      '',
-    ].join('\n'));
+    expect(result.vars).toEqual({});
+    expect(readFileSync(stagingPath, 'utf8')).toBe('');
   });
 
   it('refuses a symlinked environment-specific env file without changing its external target', () => {
@@ -277,7 +269,7 @@ describe('deploy-env-file', () => {
     }
   });
 
-  it('copies newly added base .env keys into an existing environment-specific file', () => {
+  it('does not append new base keys or replace existing environment-specific assignments', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-deploy-env-sync-'));
     initRepo(root);
     mkdirSync(path.join(root, 'app'));
@@ -305,24 +297,20 @@ describe('deploy-env-file', () => {
       excludeKeys: ['OWNER_MANAGED_SECRET'],
     })).toEqual({
       path: stagingPath,
-      baseEnvPath: basePath,
-      syncedFromBaseKeys: ['STRIPE_SECRET_KEY'],
-      divergentFromBaseKeys: ['SENDGRID_API_KEY'],
       vars: {
         SENDGRID_API_KEY: 'SG.staging',
         SESSION_SECRET: 'session-base',
-        STRIPE_SECRET_KEY: 'stripe-base',
       },
-      ignoredKeys: ['CUSTOM_WORKER_FLAG'],
-      skippedKeys: ['RAILWAY_TOKEN'],
+      ignoredKeys: [],
+      skippedKeys: [],
       excludedKeys: [],
-      localValueKeys: ['APP_BASE_URL'],
+      localValueKeys: [],
       emptyKeys: [],
     });
     const staging = readFileSync(stagingPath, 'utf-8');
     expect(staging).toContain('SENDGRID_API_KEY=SG.staging');
-    expect(staging).toContain('STRIPE_SECRET_KEY=stripe-base');
-    expect(staging).toContain('Copied from .env by Hypervibe');
+    expect(staging).not.toContain('STRIPE_SECRET_KEY');
+    expect(staging).not.toContain('Copied from .env by Hypervibe');
     expect(staging).not.toContain('APP_BASE_URL');
     expect(staging).not.toContain('CUSTOM_WORKER_FLAG');
     expect(staging).not.toContain('OWNER_MANAGED_SECRET');
@@ -400,19 +388,17 @@ describe('deploy-env-file', () => {
     const productionFile = readFileSync(path.join(root, '.env.production'), 'utf8');
 
     expect(productionFile).not.toContain('owner-key');
-    expect(productionFile).toContain('SENDGRID_API_KEY=sendgrid-key');
-    expect(result.vars).toEqual({ SENDGRID_API_KEY: 'sendgrid-key' });
-    expect(result.syncedFromBaseKeys).toEqual(['SENDGRID_API_KEY']);
+    expect(productionFile).not.toContain('SENDGRID_API_KEY');
+    expect(result.vars).toEqual({});
     expect(result.emptyKeys).toEqual([]);
   });
 
-  it('does not deploy or copy blank placeholders and provider-only Hypervibe credentials', () => {
+  it('does not deploy blank placeholders or provider-only credentials from the selected file', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-deploy-env-placeholders-'));
     initRepo(root);
     mkdirSync(path.join(root, 'app'));
-    const basePath = path.join(root, '.env');
     const productionPath = path.join(root, '.env.production');
-    writeFileSync(basePath, [
+    writeFileSync(productionPath, [
       '# Hypervibe: required application secret.',
       'SESSION_SECRET=',
       '# Hypervibe: GitHub API connection.',
@@ -432,7 +418,6 @@ describe('deploy-env-file', () => {
     const production = readFileSync(productionPath, 'utf8');
 
     expect(result.vars).toEqual({ SENDGRID_API_KEY: 'SG.runtime' });
-    expect(result.syncedFromBaseKeys).toEqual(['SENDGRID_API_KEY']);
     expect(result.emptyKeys).toEqual(['SESSION_SECRET']);
     expect(result.skippedKeys).toEqual([
       'HYPERVIBE_GITHUB_TOKEN',
@@ -440,11 +425,11 @@ describe('deploy-env-file', () => {
       'NODE_AUTH_TOKEN',
     ]);
     expect(production).toContain('SENDGRID_API_KEY=SG.runtime');
-    expect(production).not.toContain('SESSION_SECRET=');
-    expect(production).not.toContain('HYPERVIBE_');
-    expect(production).not.toContain('NODE_AUTH_TOKEN');
-    expect(production).not.toContain('GitHub API connection');
-    expect(production).not.toContain('Railway connection');
+    expect(production).toContain('SESSION_SECRET=');
+    expect(production).toContain('HYPERVIBE_');
+    expect(production).toContain('NODE_AUTH_TOKEN');
+    expect(production).toContain('GitHub API connection');
+    expect(production).toContain('Railway connection');
     expect(statSync(productionPath).mode & 0o777).toBe(0o600);
   });
 

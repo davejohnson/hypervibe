@@ -691,9 +691,22 @@ The value is resolved on Alice's machine, encrypted into that specific plan, inj
 
 If a machine or local Hypervibe database is lost, recloning the committed `.hypervibe/spec.json` and `.hypervibe/bindings.json` restores the desired shape and non-secret provider identities. Accepted managed-secret hashes, provider connections, and in-flight plans must be recreated locally; no runtime secret value or verifier is recoverable from the repo.
 
-### Deploy env from `.env`
+### Explicit environment files
 
-For every declared target, `hv_plan` prepares a private, gitignored `.env.<environment>` file even when env-file loading is disabled. When loading is enabled, the target file wins over repo `.env`; existing target values are preserved, and newly eligible base values are appended. Hypervibe does **not** blindly copy or publish every key. The default policy is `envFile.mode: "runtime"`: Hypervibe syncs high-confidence app runtime keys such as `SENDGRID_API_KEY`, `SESSION_SECRET`, `*_URL`, `*_TOKEN`, `*_SECRET`, `APP_*`, `VITE_*`, and similar names; it treats blank assignments as missing; it skips delegated secrets, generated or infrastructure-managed values, provider/control-plane credentials such as `HYPERVIBE_*`, `RAILWAY_API_TOKEN`, `GITHUB_TOKEN`, and `CLOUDFLARE_API_TOKEN`; it skips local-looking runtime values such as `localhost`, `127.0.0.1`, `0.0.0.0`, `host.docker.internal`, `.local`, and `.internal`; and it reports affected key names in the plan. `envFile.mode: "off"` or `includeEnvFile: false` leaves the target scaffold in place but copies no ordinary base values.
+For every declared target, `hv_plan` prepares a private, gitignored `.env.<environment>` file even when input loading is disabled. A staging plan reads `.env.staging`; a production plan reads `.env.production`. Missing files or assignments never inherit values from the general `.env`, and Hypervibe never copies base values into those files. An explicit `envFile` argument remains an intentional alternative file selection.
+
+The default `envFile.mode: "runtime"` selects application keys such as `APP_*`, `*_URL`, `*_TOKEN` and `*_SECRET`. Blank assignments are missing inputs. Provider/control-plane keys, delegated secrets and infrastructure-managed values remain excluded; local-only addresses remain excluded in runtime mode. `envFile.mode: "off"` or `includeEnvFile: false` leaves the scaffold in place without loading its values.
+
+To share one value deliberately, put a whole-value reference in the selected environment file:
+
+```dotenv
+# .env.staging — explicit sharing of an application credential
+APP_SERVICE_TOKEN=dotenv:./.env#SHARED_APP_SERVICE_TOKEN
+```
+
+Paths resolve relative to the file containing each reference, including chained references. This syntax works through ordinary deploy inputs, `hv_plan secretRefs`, and `hv_connections credentialsRef`/`credentialsMap`. Files are not rewritten with resolved values. Missing or blank targets, cycles, excessive depth and non-regular files fail before importing the input; shell commands and variable interpolation are never executed. Runtime references cannot rename control-plane keys to bypass the provider-credential exclusion. Delegated secrets still require explicit `secretRefs`; a file reference does not change who owns a runtime slot.
+
+Previously copied or deployed values are preserved. Review them when adopting this behavior; this change neither identifies their intended account nor rotates or removes them automatically. For a deliberately shared application key, retain one source and add explicit references only where sharing is intended. Use separate provider-issued credentials for environment-specific reCAPTCHA keys, payment sandboxes and email sending whenever isolation is required.
 
 When a spec is written from its matching checkout, Hypervibe non-destructively prepares both `.env` and `.env.example` with the exact delegated-secret and `envFile.include` names declared by that project—for example, `RECAPTCHA_V3_SITE_KEY=` and `RECAPTCHA_V3_SECRET_KEY=`. Hypervibe-owned generated secrets are deliberately omitted because there is nothing for the user to fill in. Every input slot gets a short comment; existing values, owner comments, and ordering are preserved, while stale Hypervibe-owned comments are refreshed. The tracked `.env.example` stays value-free and points people to the private file. Actual missing connections add only their provider-declared local inputs, such as `HYPERVIBE_RAILWAY_TOKEN`, rather than every credential Hypervibe supports. Hypervibe first proves each exact private path is a regular, untracked, repository-ignored file (adding root rules such as `/.env` or `/.env.production`, plus `!/.env.example` only when needed), refuses symlinks and tracked secret files, creates new private env files with mode `0600`, and removes group/world access from an existing private file without adding owner permissions. The receipt reports when permissions changed.
 
@@ -714,23 +727,36 @@ Modes are `runtime` (default), `all`, `explicit`, and `off`. Values loaded from 
 ### Stripe environments and hosting env sync
 
 Use a separate scoped Stripe connection for each named Stripe sandbox and for
-production. The connection scope is the stable mapping between a Hypervibe
-environment and Stripe; it defaults to the Hypervibe environment name.
+production. The connection scope selects a stored connection; it defaults to the
+Hypervibe environment name. Scopes are shared across local projects, so use an
+explicit project-specific scope such as `my-app-staging` and set that same value
+in `payments.stripe.environment` to avoid selecting another project's bare
+`staging` connection. Passing `project` to `hv_connections` alone does not change
+credential scope.
+
+A `credentialsRef` is a one-time import into Hypervibe's encrypted connection
+store, not a watched file. After changing a source value, repeat the exact scoped
+`hv_connections` import and verify the returned account ID before planning any
+runtime changes. Account verification uses the server key; matching test/live
+prefixes alone do not prove its publishable key belongs to the same account.
+Keep both keys from the intended sandbox together. Separate env files do not
+replace this provider identity check.
 
 For an existing Stripe dotenv file:
 
 ```text
-hv_connections provider="stripe" scope="staging" credentialsRef="dotenv:/absolute/path/.env.stripe-sync.staging" credentialsMap={"secretKey":"STRIPE_SECRET_KEY"}
+hv_connections provider="stripe" scope="my-app-staging" credentialsRef="dotenv:/absolute/path/.env.stripe-sync.staging" credentialsMap={"secretKey":"STRIPE_SECRET_KEY"}
 ```
 
 If the file also contains a publishable key:
 
 ```text
-hv_connections provider="stripe" scope="staging" credentialsRef="dotenv:/absolute/path/.env.stripe-sync.staging" credentialsMap={"secretKey":"STRIPE_SECRET_KEY","publishableKey":"STRIPE_PUBLISHABLE_KEY"}
+hv_connections provider="stripe" scope="my-app-staging" credentialsRef="dotenv:/absolute/path/.env.stripe-sync.staging" credentialsMap={"secretKey":"STRIPE_SECRET_KEY","publishableKey":"STRIPE_PUBLISHABLE_KEY"}
 ```
 
-Repeat with `scope="development"` for a development sandbox and
-`scope="production"` for Stripe live mode. Sandbox keys begin with `sk_test_`
+Repeat with `scope="my-app-development"` for a development sandbox and
+`scope="my-app-production"` for Stripe live mode, selecting the matching scope
+in each environment’s payment declaration. Sandbox keys begin with `sk_test_`
 or `rk_test_` and `pk_test_`; production server keys begin with `sk_live_` or
 `rk_live_`. Restricted `rk_` keys are preferred and are accepted in the
 `secretKey` connection field. Open the intended sandbox before revealing its

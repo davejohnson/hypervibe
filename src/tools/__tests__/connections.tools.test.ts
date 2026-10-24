@@ -72,6 +72,7 @@ async function makeClient() {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   return {
+    client,
     async call(name: string, args: Record<string, unknown>) {
       const result = await client.callTool({ name, arguments: args });
       return parseToolEnvelope(result) as Record<string, any>;
@@ -510,6 +511,71 @@ describe('hv_connections', () => {
     expect(decrypted.apiToken).toBe('gh-api-token');
     expect(decrypted.packageReadToken).toBe('gh-package-token');
     await t.close();
+  });
+
+  it.each(['missing', 'cycle'])('rejects a %s dotenv reference before saving or verifying a connection', async kind => {
+    const envPath = path.join(tempDir, '.env.staging');
+    writeFileSync(path.join(tempDir, '.env'), [
+      'UNRELATED_SECRET=never-publish-this-value',
+      'SHARED_TOKEN=dotenv:./.env.staging#HYPERVIBE_RAILWAY_TOKEN',
+      '',
+    ].join('\n'), { mode: 0o600 });
+    writeFileSync(envPath, kind === 'cycle'
+      ? 'HYPERVIBE_RAILWAY_TOKEN=dotenv:./.env#SHARED_TOKEN\n'
+      : 'HYPERVIBE_RAILWAY_TOKEN=dotenv:./.env#PrivateCredentialValue123\n', { mode: 0o600 });
+    const connect = vi.spyOn(RailwayAdapter.prototype, 'connect').mockResolvedValue();
+    const verify = vi.spyOn(RailwayAdapter.prototype, 'verify').mockResolvedValue({ success: true });
+    const t = await makeClient();
+
+    try {
+      const response = await t.client.callTool({
+        name: 'hv_connections',
+        arguments: {
+          provider: 'railway',
+          scope: 'owner/environment-inputs',
+          credentialsRef: `dotenv:${envPath}#HYPERVIBE_RAILWAY_TOKEN`,
+        },
+      });
+      expect(parseToolEnvelope(response)).toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+      expect(JSON.stringify(response)).not.toContain('never-publish-this-value');
+      expect(JSON.stringify(response.content)).not.toContain('never-publish-this-value');
+      // Reference fragments are input values too: a valid identifier can itself
+      // be secret material, so neither response channel may echo one.
+      expect(JSON.stringify(response.structuredContent)).not.toContain('PrivateCredentialValue123');
+      expect(JSON.stringify(response.content)).not.toContain('PrivateCredentialValue123');
+      expect(new ConnectionRepository().findAll()).toEqual([]);
+      expect(new AuditRepository().findByAction('connection.created')).toEqual([]);
+      expect(connect).not.toHaveBeenCalled();
+      expect(verify).not.toHaveBeenCalled();
+    } finally {
+      await t.close();
+    }
+  });
+
+  it('imports an explicitly shared credential without claiming that later file changes update it', async () => {
+    const sharedPath = path.join(tempDir, '.env');
+    const environmentPath = path.join(tempDir, '.env.staging');
+    writeFileSync(sharedPath, 'SHARED_PROVIDER_TOKEN=first-imported-value\n', { mode: 0o600 });
+    writeFileSync(environmentPath, 'HYPERVIBE_RAILWAY_TOKEN=dotenv:./.env#SHARED_PROVIDER_TOKEN\n', { mode: 0o600 });
+    vi.spyOn(RailwayAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(RailwayAdapter.prototype, 'verify').mockResolvedValue({ success: true });
+    const t = await makeClient();
+
+    try {
+      const result = await t.call('hv_connections', {
+        provider: 'railway', scope: 'owner/environment-inputs',
+        credentialsRef: `dotenv:${environmentPath}#HYPERVIBE_RAILWAY_TOKEN`,
+      });
+      expect(result.ok).toBe(true);
+      expect(JSON.stringify(result)).not.toContain('first-imported-value');
+      const connection = new ConnectionRepository().findByProviderAndScope('railway', 'owner/environment-inputs')!;
+      expect(getSecretStore().decryptObject(connection.credentialsEncrypted)).toMatchObject({ apiToken: 'first-imported-value' });
+      writeFileSync(sharedPath, 'SHARED_PROVIDER_TOKEN=changed-file-value\n', { mode: 0o600 });
+      const saved = new ConnectionRepository().findByProviderAndScope('railway', 'owner/environment-inputs')!;
+      expect(getSecretStore().decryptObject(saved.credentialsEncrypted)).toMatchObject({ apiToken: 'first-imported-value' });
+    } finally {
+      await t.close();
+    }
   });
 
   it('accepts NODE_AUTH_TOKEN when a GitHub credentials ref names another supported alias', async () => {

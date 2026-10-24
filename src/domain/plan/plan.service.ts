@@ -1970,7 +1970,6 @@ export class PlanService {
         mode: envFilePolicy?.mode,
         includeKeys: envFilePolicy?.include,
         excludeKeys: excludedEnvKeys,
-        syncExcludeKeys: [...declaredInfrastructureManagedEnvKeys],
         envName: environmentName,
       });
     } catch (error) {
@@ -3118,16 +3117,8 @@ export class PlanService {
       const shadowedByManaged = Object.keys(envFile.vars)
         .filter((key) => managedEnvKeys.has(key))
         .sort();
-      if (envFile.createdEnvSpecificPath && envFile.baseEnvPath) {
-        envFileWarnings.push(`Created environment-specific deploy env file at ${envFile.createdEnvSpecificPath} from base ${envFile.baseEnvPath} for environment "${environmentName}". Review it if these values should differ before apply.`);
-      } else if (envFile.syncedFromBaseKeys && envFile.syncedFromBaseKeys.length > 0 && envFile.baseEnvPath) {
-        envFileWarnings.push(`Updated environment-specific deploy env file ${envFile.path} with ${envFile.syncedFromBaseKeys.length} key(s) copied from base ${envFile.baseEnvPath}: ${envFile.syncedFromBaseKeys.join(', ')}.`);
-      }
-      if (envFile.divergentFromBaseKeys && envFile.divergentFromBaseKeys.length > 0 && envFile.baseEnvPath) {
-        envFileWarnings.push(`Preserved ${envFile.divergentFromBaseKeys.length} environment-specific .env key(s) in ${envFile.path} that differ from base ${envFile.baseEnvPath}: ${envFile.divergentFromBaseKeys.join(', ')}.`);
-      }
-      if (envFile.usedBaseEnvFallback && envFile.missingEnvSpecificPath) {
-        envFileWarnings.push(`No environment-specific deploy env file found at ${envFile.missingEnvSpecificPath}; using base ${envFile.path} for environment "${environmentName}" and copying selected runtime keys into the plan. Create ${envFile.missingEnvSpecificPath} or adjust envFile.mode/include/exclude if these values should differ.`);
+      if (envFile.createdEnvSpecificPath) {
+        envFileWarnings.push(`Created empty environment-specific deploy env file at ${envFile.createdEnvSpecificPath} for environment "${environmentName}". Add environment values or explicit dotenv references; base .env values are not inherited.`);
       }
       if (loadedKeys.length > 0) {
         envFileWarnings.push(`Loaded ${loadedKeys.length} deploy env var(s) from ${envFile.path}.`);

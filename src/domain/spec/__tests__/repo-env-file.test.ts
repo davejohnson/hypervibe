@@ -286,10 +286,18 @@ describe('repo local env file', () => {
         const repeated = writeRepoSpecFile(document, root)!;
         expect(repeated.environmentEnvFiles.every((entry) => !entry.addedKeys.length && !entry.commentedKeys.length)).toBe(true);
         expect(readFileSync(path.join(root, '.env.production'), 'utf8')).toBe(before);
-        // Documentation must not mask a later explicit portable base input.
+        // A base value is not inherited; sharing requires an explicit reference
+        // in the selected environment, beside the value-free documentation.
         writeFileSync(path.join(root, '.env'), 'CONTACT_EMAIL=local-override@example.test\n', { mode: 0o600 });
         expect(loadDeployEnvFile({ startDir: root, envName: 'staging', mode: 'all', excludeKeys: ['APP_SIGNING_KEY'] })?.vars)
+          .toEqual({});
+        const stagingPath = path.join(root, '.env.staging');
+        const reference = 'CONTACT_EMAIL=dotenv:./.env#CONTACT_EMAIL\n';
+        writeFileSync(stagingPath, `${readFileSync(stagingPath, 'utf8')}${reference}`, { mode: 0o600 });
+        expect(loadDeployEnvFile({ startDir: root, envName: 'staging', mode: 'all', excludeKeys: ['APP_SIGNING_KEY'] })?.vars)
           .toEqual({ CONTACT_EMAIL: 'local-override@example.test' });
+        expect(readFileSync(stagingPath, 'utf8')).toContain(reference);
+        expect(readFileSync(stagingPath, 'utf8')).not.toContain('local-override@example.test');
         expect(JSON.parse(readFileSync(path.join(root, '.hypervibe/spec.json'), 'utf8')).secrets.APP_SIGNING_KEY.environments).toEqual(['staging']);
       } finally {
         vi.unstubAllEnvs();

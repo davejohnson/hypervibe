@@ -1,5 +1,5 @@
 import { readFileSync } from 'fs';
-import { parseEnvFile } from '../../utils/env-parser.js';
+import { resolveDotenvValue } from '../../utils/dotenv-value.js';
 import { splitFragment } from '../../utils/split-fragment.js';
 import { parseSecretRef } from '../ports/secretmanager.port.js';
 import { SecretResolver } from './secret.resolver.js';
@@ -37,11 +37,11 @@ export async function resolveSecretValueRef(
     if (!fragment) {
       throw new HvError('VALIDATION', 'secretRef dotenv: references must include #ENV_VAR.');
     }
-    const values = parseEnvFile(filePath);
-    if (!(fragment in values)) {
-      throw new HvError('VALIDATION', `.env variable "${fragment}" was not found.`);
+    try {
+      return resolveDotenvValue(filePath, fragment);
+    } catch (error) {
+      throw new HvError('VALIDATION', error instanceof Error ? error.message : 'Failed to resolve dotenv reference.');
     }
-    return values[fragment];
   }
 
   if (trimmed.startsWith('file:')) {

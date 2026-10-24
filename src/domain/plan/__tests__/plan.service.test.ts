@@ -3765,7 +3765,7 @@ describe('PlanService.plan', () => {
       });
     });
 
-    it('creates the environment-specific env file from base .env before loading deploy vars', async () => {
+    it('keeps base credentials out of named-environment plans until explicitly referenced', async () => {
       const oldCwd = process.cwd();
       const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-env-fallback-plan-'));
       mkdirSync(path.join(root, 'app'));
@@ -3816,14 +3816,28 @@ describe('PlanService.plan', () => {
         const result = await new PlanService().plan(project, 'staging', { includeEnvFile: true });
         const plan = result as Exclude<typeof result, { error: string }>;
 
-        expect(plan.warnings).toContainEqual(expect.stringContaining(`Created environment-specific deploy env file at ${stagingEnvFile}`));
-        expect(plan.warnings).toContainEqual(expect.stringContaining(`from base ${baseEnvFile}`));
-        expect(existsSync(stagingEnvFile)).toBe(true);
-        expect(readFileSync(stagingEnvFile, 'utf8')).toBe('SENDGRID_API_KEY=SG.base\n');
+        if (existsSync(stagingEnvFile)) {
+          expect(readFileSync(stagingEnvFile, 'utf8')).not.toContain('SG.base');
+          expect(readFileSync(stagingEnvFile, 'utf8')).not.toContain('production-only');
+        }
         const doc = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
-        const overrides = doc.overrides as Record<string, unknown>;
-        expect(overrides.envFilePath).toBe(stagingEnvFile);
-        expect(overrides.envFileKeys).toEqual(['SENDGRID_API_KEY']);
+        const overrides = doc.overrides as Record<string, unknown> | undefined;
+        expect(overrides?.envFileKeys ?? []).toEqual([]);
+        const web = plan.actions.find(action => action.id === 'service:web');
+        expect(web?.diff?.some(entry => entry.field === 'env:SENDGRID_API_KEY')).not.toBe(true);
+
+        const reference = 'SENDGRID_API_KEY=dotenv:./.env#SENDGRID_API_KEY\n';
+        writeFileSync(stagingEnvFile, reference, { mode: 0o600 });
+        const shared = await new PlanService().plan(project, 'staging', { includeEnvFile: true });
+        expect(shared).not.toHaveProperty('error');
+        const sharedPlan = shared as Exclude<typeof shared, { error: string }>;
+        const sharedDoc = new RunRepository().findById(sharedPlan.planRunId)!.plan as Record<string, unknown>;
+        const sharedOverrides = sharedDoc.overrides as Record<string, unknown>;
+        expect(sharedOverrides.envFilePath).toBe(stagingEnvFile);
+        expect(sharedOverrides.envFileKeys).toEqual(['SENDGRID_API_KEY']);
+        expect(getSecretStore().decryptObject(sharedOverrides.envFileVarsEncrypted as string)).toEqual({ SENDGRID_API_KEY: 'SG.base' });
+        expect(JSON.stringify(sharedDoc)).not.toContain('SG.base');
+        expect(readFileSync(stagingEnvFile, 'utf8')).toBe(reference);
       } finally {
         process.chdir(oldCwd);
       }

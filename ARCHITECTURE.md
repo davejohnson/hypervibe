@@ -658,6 +658,23 @@ consume.
 
 Secrets never cross output boundaries. Secret values may be accepted through `credentialsRef`, encrypted into plans, or stored as verified connections, but they must not be printed in tool output, committed specs, warnings, logs, receipts, or test snapshots.
 
+A local `credentialsRef` imports a snapshot, not a live file binding. File edits
+require a new explicit scoped import and provider verification; they do not
+change stored connections, accepted plans or deployed workloads. A connection's
+logical scope and verified provider account are separate from the requested
+Hypervibe project/environment. For Stripe, use a project-specific explicit
+`payments.stripe.environment` when multiple projects have the same environment
+names. No new scope migration or account reassignment occurs from dotenv loading.
+
+Provider evidence must describe its actual attribution. Stripe sandboxes have
+separate keys and object identities. SendGrid sending keys can still belong to
+one shared account: diagnostics retain `provider-account` scope and unverified
+environment attribution unless independent message/resource evidence establishes
+it. Separate reCAPTCHA keys and allowed domains need provider configuration;
+Hypervibe has no reCAPTCHA diagnostic adapter. File separation alone proves none
+of these provider boundaries and never licenses production changes.
+
+
 Railway PostgreSQL observation can report `credentialAlignment` from privately
 compared provider configuration. Issuer URL passwords are compared with
 `POSTGRES_PASSWORD`; each exact bound application's `DATABASE_URL` is compared
@@ -966,11 +983,28 @@ In the no-service model, `principal` is declarative attribution, not authenticat
 
 Local `.env` files are deploy input candidates, not a raw publish list. Every
 plan for a declared environment prepares and maintains the exact private
-`.env.<environment>` file, including when deploy-env loading is disabled. When
-the environment policy permits deploy-env loading, Hypervibe copies only
-policy-selected portable values from `.env`; it never clones the base file as a
-whole. Existing environment-specific assignments always win, while newly added
-eligible base keys are appended without overwriting that divergence.
+`.env.<environment>` file, including when deploy-env loading is disabled. Named
+environments load only that file by default. Missing files or assignments never
+fall back to `.env`, and no base values are copied or appended. An explicit
+`envFile` argument remains an owner-selected alternative input file.
+
+Intentional sharing uses a whole-value reference such as
+`APP_TOKEN=dotenv:./.env#SHARED_APP_TOKEN`. The shared dotenv resolver resolves
+relative paths against the file containing each reference, without rewriting
+either file. The deploy loader, connection `credentialsRef` importer, and
+delegated `secretRefs` resolver all use that boundary. Raw parsing for scaffolding
+does not resolve values. Only selected keys are resolved; excluded/delegated
+slots and ignored keys never trigger reference reads. Missing/blank values,
+cycles, excessive depth and non-regular referenced files fail with value-free
+errors. Runtime references cannot rename provider/control-plane source keys to
+evade the deploy boundary. References do not permit ordinary deploy inputs to
+write delegated or infrastructure-owned slots, and do not execute shell syntax.
+
+Changing this default does not erase values previously copied into an environment
+file or installed on a provider. Review those existing values explicitly; absence
+from a file still does not authorize deleting a hosted variable. The
+`environment-file-isolation.test.ts` counterexamples and composed connection,
+plan and scaffold regressions run in the normal `npm test` acceptance gate.
 
 Spec writes in the matching checkout use one shared, non-destructive updater for
 the private `.env`, every declared `.env.<environment>`, and value-free `.env.example`.
@@ -984,8 +1018,8 @@ inputs. Ordinary `envVars` and Hypervibe-owned secret names appear as commented,
 empty documentation entries, with comments explaining spec or generator
 ownership. A key declared only for a related environment is documented as not
 managed here; that entry does not adopt a live value or extend the secret's
-target environments. Commented entries do not shadow a later policy-selected
-base input. Each managed assignment has an immediately
+target environments. Commented entries do not become selected input values.
+Each managed assignment has an immediately
 preceding purpose comment; missing assignments are empty, existing values and
 ordering are preserved, and an empty commented placeholder may be activated in
 the private `.env` without activating a commented example value.
@@ -1001,7 +1035,7 @@ publish its contents. Values from the base `.env` are never copied into those
 delegated slots. Generated secret values never enter local files, and
 connection or control-plane requirements remain in the base `.env` rather than
 being added by this environment scaffolding. `envFile.mode: "off"` and
-`includeEnvFile: false` suppress ordinary base-value synchronization without
+`includeEnvFile: false` suppress ordinary deploy-input loading without
 suppressing the safe environment-file scaffold.
 Before any repo-backed write, Hypervibe proves the checkout belongs to the
 selected project from its committed spec or normalized repository identity.
@@ -1018,7 +1052,7 @@ Keep env-file handling policy-driven through the environment spec (`envFile.mode
 
 - default to high-confidence runtime keys,
 - treat blank selected assignments as missing rather than deployable values,
-- skip provider/control-plane credentials, including all `HYPERVIBE_*` connection inputs, when creating or syncing `.env.<environment>`,
+- skip provider/control-plane credentials, including all `HYPERVIBE_*` connection inputs and reference source keys, when loading runtime values,
 - skip local-looking values such as `localhost`, `127.0.0.1`, `0.0.0.0`, `host.docker.internal`, `.local`, and `.internal`,
 - warn with key names for missing, ignored, excluded, or skipped keys,
 - surface the env file path in plan previews,

@@ -3,16 +3,17 @@ import { providerRegistry } from '../domain/registry/provider.registry.js';
 import { secretManagerRegistry } from '../domain/registry/secretmanager.registry.js';
 import { SecretResolver } from '../domain/services/secret.resolver.js';
 import { parseSecretRef } from '../domain/ports/secretmanager.port.js';
-import { parseEnvFile } from '../utils/env-parser.js';
+import { readDotenvValues, resolveDotenvValue } from '../utils/dotenv-value.js';
 import { splitFragment } from '../utils/split-fragment.js';
 
 function resolveEnvironmentCredential(
   provider: string,
   requestedName: string,
-  values: Record<string, string | undefined>
+  values: Record<string, string | undefined>,
+  resolve?: (name: string) => string
 ): string | undefined {
-  if (values[requestedName] !== undefined) {
-    return values[requestedName];
+  if (Object.prototype.hasOwnProperty.call(values, requestedName) && values[requestedName] !== undefined) {
+    return resolve ? resolve(requestedName) : values[requestedName];
   }
 
   const aliasGroup = providerRegistry
@@ -25,8 +26,8 @@ function resolveEnvironmentCredential(
   }
 
   const candidates = aliasGroup
-    .filter((name) => values[name] !== undefined)
-    .map((name) => ({ name, value: values[name]! }));
+    .filter((name) => Object.prototype.hasOwnProperty.call(values, name) && values[name] !== undefined)
+    .map((name) => ({ name, value: resolve ? resolve(name) : values[name]! }));
   if (candidates.length === 0) {
     return undefined;
   }
@@ -122,7 +123,7 @@ function parseDotenvCredentialRef(
   credentialsKey?: string,
   credentialsMap?: Record<string, string>
 ): Record<string, unknown> {
-  const raw = ref.slice('dotenv:'.length).trim();
+  const raw = ref.trim().slice('dotenv:'.length).trim();
   const { target: filePath, fragment } = splitFragment(raw);
   if (!filePath) {
     throw new Error('credentialsRef dotenv: reference is missing the .env file path.');
@@ -131,11 +132,12 @@ function parseDotenvCredentialRef(
     throw new Error('Pass either credentialsMap or a dotenv #KEY fragment, not both.');
   }
 
-  const values = parseEnvFile(filePath);
+  const values = readDotenvValues(filePath);
+  const resolve = (name: string) => resolveDotenvValue(filePath, name, { values });
   if (credentialsMap) {
     const output: Record<string, unknown> = {};
     for (const [providerKey, envKey] of Object.entries(credentialsMap)) {
-      const value = resolveEnvironmentCredential(provider, envKey, values);
+      const value = resolveEnvironmentCredential(provider, envKey, values, resolve);
       if (value === undefined) {
         throw new Error(`credentialsMap key "${providerKey}" references missing .env variable "${envKey}".`);
       }
@@ -147,7 +149,7 @@ function parseDotenvCredentialRef(
   if (!fragment) {
     throw new Error('credentialsRef dotenv: references must include #ENV_VAR, or pass credentialsMap for multiple values.');
   }
-  const value = resolveEnvironmentCredential(provider, fragment, values);
+  const value = resolveEnvironmentCredential(provider, fragment, values, resolve);
   if (value === undefined) {
     throw new Error(`.env variable "${fragment}" was not found.`);
   }
