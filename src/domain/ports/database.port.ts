@@ -13,6 +13,12 @@ export type DatabaseType = 'postgres';
  */
 export type ProvisionableType = DatabaseType;
 
+/** Value-free selection of a provider-owned runtime URL variable on an exact
+ * bound database. The fingerprint covers identity and key presence, never values. */
+export type DatabaseRuntimeReferenceBindingObservation =
+  | { state: 'known'; directUrlVariable: string; evidenceFingerprint: string }
+  | { state: 'unknown'; reason: string };
+
 /**
  * Capabilities that a database provider supports.
  */
@@ -199,6 +205,11 @@ export interface IDatabaseAdapter {
   readonly name: string;
   readonly credentialAliases?: import('./database-credential-aliases.port.js').IDatabaseCredentialAliases;
   readonly dailyBackups?: import('./daily-backup.port.js').IDailyBackupPolicy<import('./daily-backup.port.js').DatabaseBackupTarget>;
+
+  /** Optional read-only metadata normalization; absence means unsupported. */
+  observeRuntimeReferenceBinding?(
+    environment: Environment, component: Component
+  ): Promise<DatabaseRuntimeReferenceBindingObservation>;
 
   /** Provider capabilities */
   readonly capabilities: DatabaseCapabilities;

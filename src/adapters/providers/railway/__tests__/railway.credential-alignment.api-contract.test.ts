@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { projectId, productionId, stagingId, railwayHttpFixture } from './railway-http.fixture.js';
+import { projectId, productionId, stagingId, railwayHttpFixture, postgresTemplate } from './railway-http.fixture.js';
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
@@ -47,6 +47,101 @@ async function inspect(fixture: Awaited<ReturnType<typeof setup>>) {
 // EnvironmentVariables is opaque: credential values below are synthetic
 // counterexamples, not recorded Railway responses or proof of SQL authentication.
 describe('Railway configured database credential alignment', () => {
+  it('reports independently stale issuer PGPASSWORD and DIRECT_URL and app DIRECT_URL values', async () => {
+    const fixture = await setup();
+    fixture.variables.set(`staging-db/${stagingId}`, {
+      POSTGRES_PASSWORD: password, DATABASE_URL: uri(), DATABASE_PRIVATE_URL: uri(),
+      PGPASSWORD: stalePassword, DIRECT_URL: uri(stalePassword),
+    });
+    fixture.variables.set(`staging-web/${stagingId}`, { DATABASE_URL: uri(), DIRECT_URL: uri() });
+    const { alignment } = await inspect(fixture);
+    expect(alignment.issuer.comparisons).toEqual([
+      { source: 'DATABASE_URL', against: 'POSTGRES_PASSWORD', comparison: { result: 'match' } },
+      { source: 'DATABASE_PRIVATE_URL', against: 'POSTGRES_PASSWORD', comparison: { result: 'match' } },
+      { source: 'PGPASSWORD', against: 'POSTGRES_PASSWORD', comparison: { result: 'mismatch' } },
+      { source: 'DIRECT_URL', against: 'POSTGRES_PASSWORD', comparison: { result: 'mismatch' } },
+    ]);
+    expect(alignment.consumers).toEqual([
+      { name: 'web', externalId: 'staging-web', source: 'DATABASE_URL', issuerSource: 'DATABASE_URL',
+        credentialComparison: { result: 'match' }, target: { result: 'match' } },
+      { name: 'web', externalId: 'staging-web', source: 'DIRECT_URL', issuerSource: 'DIRECT_URL',
+        credentialComparison: { result: 'mismatch' }, target: { result: 'match' } },
+    ]);
+    expect(fixture.requests.filter(request => request.query.includes('query GetVariables'))).toHaveLength(2);
+  });
+
+  it.each(['DATABASE_PRIVATE_URL', 'DATABASE_URL'])('compares app DIRECT_URL against the available issuer %s', async source => {
+    const fixture = await setup();
+    fixture.variables.set(`staging-db/${stagingId}`, {
+      POSTGRES_PASSWORD: password, DATABASE_URL: uri(password, 'public.example'),
+      ...(source === 'DATABASE_PRIVATE_URL' ? { DATABASE_PRIVATE_URL: uri() } : {}),
+    });
+    fixture.variables.set(`staging-web/${stagingId}`, {
+      DATABASE_URL: uri(password, 'public.example'),
+      DIRECT_URL: source === 'DATABASE_PRIVATE_URL' ? uri() : uri(password, 'public.example'),
+    });
+    const { alignment } = await inspect(fixture);
+    expect(alignment.consumers[1]).toEqual({
+      name: 'web', externalId: 'staging-web', source: 'DIRECT_URL', issuerSource: source,
+      credentialComparison: { result: 'match' }, target: { result: 'match' },
+    });
+    expect(alignment.issuer.comparisons.map(item => item.source)).toEqual(
+      source === 'DATABASE_PRIVATE_URL' ? ['DATABASE_URL', 'DATABASE_PRIVATE_URL'] : ['DATABASE_URL']
+    );
+  });
+
+  it('does not require optional aliases absent from the official native template', async () => {
+    // The recorded public Postgres template has PGPASSWORD and DATABASE_URL,
+    // but neither DATABASE_PRIVATE_URL nor DIRECT_URL. Rendered values here are synthetic.
+    const nativeVariables = (Object.values(postgresTemplate.serializedConfig.services)[0] as {
+      variables: Record<string, unknown>;
+    }).variables;
+    expect(nativeVariables).toHaveProperty('PGPASSWORD');
+    expect(nativeVariables).toHaveProperty('DATABASE_URL');
+    expect(nativeVariables).not.toHaveProperty('DATABASE_PRIVATE_URL');
+    expect(nativeVariables).not.toHaveProperty('DIRECT_URL');
+    const fixture = await setup();
+    fixture.variables.set(`staging-db/${stagingId}`, { POSTGRES_PASSWORD: password, PGPASSWORD: password, DATABASE_URL: uri() });
+    const { alignment } = await inspect(fixture);
+    expect(alignment.issuer.comparisons).toEqual([
+      { source: 'DATABASE_URL', against: 'POSTGRES_PASSWORD', comparison: { result: 'match' } },
+      { source: 'PGPASSWORD', against: 'POSTGRES_PASSWORD', comparison: { result: 'match' } },
+    ]);
+    expect(alignment.consumers.map(item => item.source)).toEqual(['DATABASE_URL']);
+  });
+
+  it('keeps present unresolved optional aliases unknown instead of falling back or exposing inputs', async () => {
+    const fixture = await setup();
+    fixture.variables.set(`staging-db/${stagingId}`, {
+      POSTGRES_PASSWORD: password, DATABASE_URL: uri(),
+      PGPASSWORD: '${{POSTGRES_PASSWORD}}', DIRECT_URL: '${{DATABASE_URL}}',
+    });
+    fixture.variables.set(`staging-web/${stagingId}`, { DATABASE_URL: uri(), DIRECT_URL: uri() });
+    const { alignment } = await inspect(fixture);
+    expect(alignment.issuer.comparisons.slice(1)).toEqual([
+      { source: 'PGPASSWORD', against: 'POSTGRES_PASSWORD', comparison: { result: 'unknown', reason: 'unresolved_reference' } },
+      { source: 'DIRECT_URL', against: 'POSTGRES_PASSWORD', comparison: { result: 'unknown', reason: 'unresolved_reference' } },
+    ]);
+    expect(alignment.consumers[1]).toMatchObject({ source: 'DIRECT_URL', issuerSource: 'DIRECT_URL',
+      credentialComparison: { result: 'unknown', reason: 'unresolved_reference' },
+      target: { result: 'unknown', reason: 'unresolved_reference' },
+    });
+  });
+
+  it.each([
+    ['', 'missing'],
+    ['${{postgres-db.DATABASE_URL}}', 'unresolved_reference'],
+    ['not-a-database-url', 'malformed'],
+    [uri() + '?sslmode=require', 'unsupported_url_options'],
+  ])('keeps unusable app DIRECT_URL unknown (%s)', async (value, reason) => {
+    const fixture = await setup();
+    fixture.variables.set(`staging-web/${stagingId}`, { DATABASE_URL: uri(), DIRECT_URL: value });
+    const { alignment } = await inspect(fixture);
+    expect(alignment.consumers[1]).toMatchObject({ source: 'DIRECT_URL', issuerSource: 'DATABASE_PRIVATE_URL',
+      credentialComparison: { result: 'unknown', reason }, target: { result: 'unknown', reason },
+    });
+  });
+
   it('distinguishes stale issuer URLs from consumers that match those stale URLs', async () => {
     const fixture = await setup();
     fixture.variables.set(`staging-db/${stagingId}`, {
@@ -68,7 +163,7 @@ describe('Railway configured database credential alignment', () => {
       { projectId, serviceId: 'staging-web', environmentId: stagingId },
       { projectId, serviceId: 'staging-db', environmentId: stagingId },
     ]);
-    expect(fixture.requests).toHaveLength(4);
+    expect(fixture.requests).toHaveLength(6);
     expect(fixture.requests.some(request => request.variables.environmentId === productionId)).toBe(false);
   });
 
@@ -171,6 +266,6 @@ describe('Railway configured database credential alignment', () => {
     });
     expect(fixture.requests.filter(request => request.query.includes('query GetVariables'))
       .map(request => request.variables.serviceId).sort()).toEqual(['staging-db', 'staging-web', 'staging-worker']);
-    expect(fixture.requests).toHaveLength(6);
+    expect(fixture.requests).toHaveLength(8);
   });
 });

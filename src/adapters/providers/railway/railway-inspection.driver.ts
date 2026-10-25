@@ -1,6 +1,7 @@
 import type { ComponentType } from '../../../domain/entities/component.entity.js';
 import type { ProviderInspectionRequest } from '../../../domain/registry/provider.registry.js';
 import type { RailwayAdapter, RailwayProjectDetails } from './railway.adapter.js';
+import { railwayDatabaseReferences, selectRailwayDatabaseDirectUrlVariable } from './railway-postgres-template.js';
 
 export interface ImportCandidate {
   name: string;
@@ -44,6 +45,38 @@ export interface RailwayProjectInspection {
   envVarNames: string[];
   autoDetected: Record<string, string>;
   needsMapping: string[];
+}
+
+/** Exact confirmed import targets only; provider values never leave this helper. */
+export async function inspectRailwayDatabaseImportReferences(
+  adapter: RailwayAdapter,
+  inspection: RailwayProjectInspection,
+  databaseMappings: Record<string, 'postgres'>,
+  environmentMappings: Record<string, string>
+): Promise<Record<string, Record<string, 'DIRECT_URL' | 'DATABASE_PRIVATE_URL' | 'DATABASE_URL'>>> {
+  const references: Record<string, Record<string, 'DIRECT_URL' | 'DATABASE_PRIVATE_URL' | 'DATABASE_URL'>> = {};
+  for (const serviceId of Object.keys(databaseMappings)) {
+    const matches = inspection.services.filter(service => service.railwayId === serviceId);
+    if (matches.length !== 1) throw new Error('Railway database import service identity is ambiguous or unavailable.');
+    for (const name of Object.keys(environmentMappings)) {
+      const environments = inspection.environments.filter(environment => environment.name === name);
+      if (environments.length !== 1) throw new Error('Railway database import environment identity is ambiguous or unavailable.');
+      const environmentId = environments[0].railwayId;
+      if (!matches[0].instancesByEnv[environmentId]) continue;
+      let directUrlVariable: ReturnType<typeof selectRailwayDatabaseDirectUrlVariable>;
+      try {
+        const variables = await adapter.getServiceVariables(inspection.details.id, serviceId, environmentId);
+        directUrlVariable = selectRailwayDatabaseDirectUrlVariable(variables);
+      } catch {
+        throw new Error('Unable to verify Railway database runtime reference keys for the selected import scope.');
+      }
+      if (!directUrlVariable) throw new Error('Railway database import requires usable DATABASE_URL and direct URL reference keys.');
+      railwayDatabaseReferences(matches[0].name, directUrlVariable);
+      references[serviceId] ??= {};
+      references[serviceId][environmentId] = directUrlVariable;
+    }
+  }
+  return references;
 }
 
 function mapPluginToComponentType(pluginName: string): ComponentType {
