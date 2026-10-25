@@ -10,6 +10,7 @@ const record = (value: unknown): Record<string, unknown> => value && typeof valu
 const text = (value: unknown): string | undefined => typeof value === 'string' && value.length ? value : undefined;
 
 import { replaceDatabasePassword } from '../../../domain/services/database-credential-value.js';
+import { isExternallyUsableDatabaseUrl } from '../../../domain/services/database-ops.service.js';
 export { replaceDatabasePassword, replaceDatabaseCredentialBindings } from '../../../domain/services/database-credential-value.js';
 
 type NativeOptions = {
@@ -67,7 +68,11 @@ export function createPostgresCredentialLifecycle(adapterFor: () => IDatabaseAda
       if (adapter.capabilities.supportsTemporaryDatabaseAccess && adapter.acquireTemporaryDatabaseAccess && adapter.releaseTemporaryDatabaseAccess) {
         access = await adapter.acquireTemporaryDatabaseAccess(environment, component, 5432);
       }
-      const url = access?.connectionUrl ?? text(component.bindings.directUrl) ?? (native.connectionUrl ? await native.connectionUrl(environment, component) : await adapter.getConnectionUrl(component));
+      const explicit = text(component.bindings.directUrl);
+      let url = access?.connectionUrl ?? explicit ?? (native.connectionUrl ? await native.connectionUrl(environment, component) : await adapter.getConnectionUrl(component));
+      if (!access && !explicit && !isExternallyUsableDatabaseUrl(url) && adapter.getExistingExternalConnectionUrl) {
+        url = await adapter.getExistingExternalConnectionUrl(environment, component) ?? url;
+      }
       if (!url) throw new Error('Database connection unavailable.');
       return await operation(url);
     } finally {

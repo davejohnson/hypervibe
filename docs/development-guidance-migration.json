@@ -277,8 +277,9 @@
       "summary": "The `hypervibe` CLI is safe to use because it shares Hypervibe state and reconciliation",
       "originalSha256": "1dbdb0768206b3d72c9021eed7990165c7232e2188ef352c1a4452f58fd346f6",
       "destination": "docs/development-guidance-connections.md#dg-034",
-      "destinationSha256": "1dbdb0768206b3d72c9021eed7990165c7232e2188ef352c1a4452f58fd346f6",
-      "transformation": "verbatim"
+      "destinationSha256": "18ce0e40ced5d4e0d3ea6efd7cd1d60090d0a97552374946acdc18992f7cc965",
+      "transformation": "explicit-user-requested-policy-exception",
+      "policyChange": "Permit explicitly authorized operator-managed Railway private SSH diagnostics only; no automated provider CLI dependency, public TCP proxy creation, implicit key registration or infrastructure/data mutation. Preserve recorded-access cleanup and secret output boundaries."
     },
     {
       "id": "DG-035",
@@ -1024,8 +1025,9 @@
       "summary": "Do not introduce dependencies on provider CLIs for infrastructure operations",
       "originalSha256": "ece90e56383c0e25edce2c794466992656a18e02e22be87ba1767732c9b25f55",
       "destination": "docs/development-guidance-connections.md#dg-115",
-      "destinationSha256": "ece90e56383c0e25edce2c794466992656a18e02e22be87ba1767732c9b25f55",
-      "transformation": "verbatim"
+      "destinationSha256": "eb39c134dda555121eed0b2429895cf4bbf6e56c4554645a4715f2753ddb6a0a",
+      "transformation": "explicit-user-requested-policy-exception",
+      "policyChange": "Permit explicitly authorized operator-managed Railway private SSH diagnostics only; no automated provider CLI dependency, public TCP proxy creation, implicit key registration or infrastructure/data mutation. Preserve recorded-access cleanup and secret output boundaries."
     },
     {
       "id": "DG-116",

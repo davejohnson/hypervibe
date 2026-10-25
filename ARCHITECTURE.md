@@ -690,6 +690,18 @@ authentication or inspect a running container's environment: an administrative
 proxy query may use a different credential source from the application's URL.
 The diagnostic does not change passwords, variables or deployment state.
 
+Railway database operations never create public TCP proxies. An existing reachable
+endpoint may be used; an earlier operation's recorded proxy remains eligible for
+exact-identity cleanup. Without a reachable endpoint or a verified private
+connection, automation reports unsupported access instead of opening a public
+port. Explicitly authorized operators may use Railway CLI private SSH in their own
+terminal, with exact project/environment scope and the independently verified
+service name. This is a narrow diagnostic access exception, not a Hypervibe runtime
+CLI dependency or authority for key registration, SQL mutations, deployment or
+credential rotation. CLI authentication and SQL authentication remain separate
+from Hypervibe's verified connections and application-runtime evidence. See the
+[installed recovery guidance](skills/hypervibe/references/deployment-and-recovery.md#diagnose-inspect-and-adopt).
+
 Existing database aliases can opt into `database.credentialAliases.mode =
 "issuer-references"`. Its isolated `database-credential-aliases` plan scope
 authorizes only the bound database's reference repair, through an explicit
@@ -2375,3 +2387,7 @@ the requested capability return explicit `UNSUPPORTED`. Contract tests scan the
 registered command surface for these regressions.
 
 Do not introduce dependencies on provider CLIs for infrastructure operations. Hypervibe should use its provider adapters and recorded connections so state, audit history, and drift detection stay coherent. When an MCP client already has Hypervibe tools, agents should call them directly rather than spawning the Hypervibe CLI.
+
+The explicitly authorized operator-managed Railway private SSH exception in
+[Connections And Secrets](#connections-and-secrets) permits a private diagnostic
+connection only; it does not add an automated provider CLI path.
