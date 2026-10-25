@@ -82,12 +82,12 @@ old-password rejection, and lost COMMIT recovery. The wire regression first expo
 an unhandled client connection-loss event; the fixed operation now reports unknown
 without crashing. The peer does not execute a real PostgreSQL server.
 
-`src/application/__tests__/database-authentication.test.ts` also runs the native
+`src/adapters/providers/database/__tests__/database-credential.postgres.test.ts` also runs the native
 rotation port against a disposable local PostgreSQL server with SCRAM. It proves
 that editing the configured password leaves authentication unchanged; an actual
 role password update accepts the replacement and rejects the old password for
 new connections, while an existing authenticated session remains usable. The
-seven real-engine tests passed. This checks PostgreSQL behavior independently of
+retained real-engine lifecycle test passes. This checks PostgreSQL behavior independently of
 the synthetic transport fixtures; it does not establish cloud account access.
 
 The initial provider roster and native-update tests failed because the ports and

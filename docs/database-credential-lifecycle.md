@@ -47,15 +47,13 @@ native/managed replacement deployments provides activation evidence. Complete
 active deployment coverage is required; routing or revision coverage alone does
 not prove all old processes retired. Neither path establishes SQL authentication.
 
-`hv_db_verify_auth` / `hypervibe db verify auth` accepts a private
-`credentialsRef`, `driver: "node-postgres"`, `expectedUsername`,
-`expectedDatabase`, and a caller-declared `configurationSource` of `configured`
-or `deployed`. The private input is the exact application URL or supported JSON
-connection configuration. It uses a fresh connection, fixed read-only identity
-SQL, explicit timeouts and value-free results. It does not substitute passwords,
-create access paths, change TLS settings, or fall back to an administrator URL.
-Caller-declared provenance is not independently verified. Unsupported drivers,
-configuration options, private routing and missing evidence remain explicit.
+Database authentication is an internal verification step of the reviewed
+credential lifecycle. The native probe checks the intended replacement against
+the bound role and database; it does not establish application connection
+compatibility, deployed provenance or business operation. Those remain separate
+checks. For separately authorized read-only diagnostics, `hv_db_query` can inspect
+session identity through its existing connection and access lifecycle; see
+[authentication evidence](database-authentication.md) for its limits.
 
 See [rotation](database-password-rotation.md) for the dedicated resumable
 spec/plan/apply path and database provider matrix, and
@@ -74,10 +72,10 @@ The rollout tests independently failed when a different successful deployment
 could discharge a stale or unproven configuration. Pinned-SDL transport tests
 exercise the actual Railway client and independently selected deployment snapshot.
 
-The disposable real PostgreSQL test establishes SCRAM authentication compatibility
-for the supported node-postgres boundary: matching configured values and valid
-references coexist with a stale URL rejected as `28P01`; the intended URL opens
-a new session in the intended database. Synthetic provider/lifecycle fixtures
+The disposable real PostgreSQL test exercises the native lifecycle against
+SCRAM: editing a configured password leaves authentication unchanged; actual
+rotation admits the intended replacement and rejects the old password for new
+connections, while an existing session remains usable. Synthetic provider/lifecycle fixtures
 exercise orchestration, not live cloud provider compatibility.
 
 These tests are included by ordinary `npm test`. Both the committed
