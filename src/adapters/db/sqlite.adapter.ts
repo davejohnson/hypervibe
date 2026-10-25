@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { validateMigrationIdentities, type AppliedMigration } from './historical-migrations.js';
 import { getSecretStore } from '../secrets/secret-store.js';
 import path from 'path';
 import {
@@ -13,6 +14,70 @@ export interface Migration {
   up: string;
   /** Optional JS data migration, run in the same transaction after `up`. */
   run?: (db: Database.Database) => void;
+}
+
+const applySerializationIndexes = {
+  idx_runs_succeeded_apply_plan: `CREATE UNIQUE INDEX idx_runs_succeeded_apply_plan
+    ON runs (
+      CASE
+        WHEN json_valid(plan) AND json_type(plan, '$.planRunId') = 'text'
+          THEN json_extract(plan, '$.planRunId')
+        ELSE NULL
+      END
+    )
+    WHERE type = 'apply' AND status = 'succeeded'`,
+  idx_runs_running_apply_environment: `CREATE UNIQUE INDEX idx_runs_running_apply_environment
+    ON runs (environment_id)
+    WHERE type = 'apply' AND status = 'running'`,
+};
+
+function validateApplySerializationIndexes(db: Database.Database, required: boolean): void {
+  const normalize = (sql: string): string => sql.trim().replace(/\s+/g, ' ');
+  for (const [name, expected] of Object.entries(applySerializationIndexes)) {
+    const object = db.prepare('SELECT type, sql FROM sqlite_master WHERE name = ?').get(name) as
+      { type: string; sql: string | null } | undefined;
+    if ((!object && required) || (object && (object.type !== 'index' || !object.sql || normalize(object.sql) !== normalize(expected)))) {
+      throw new Error(`Incompatible or missing apply serialization index ${name}. Preserve the database and inspect its schema before upgrading.`);
+    }
+  }
+}
+
+function installApplySerialization(db: Database.Database): void {
+  validateApplySerializationIndexes(db, false);
+  const duplicatePlan = db.prepare(`
+    SELECT json_extract(plan, '$.planRunId') AS planRunId, COUNT(*) AS applyCount
+    FROM runs
+    WHERE type = 'apply'
+      AND status = 'succeeded'
+      AND json_valid(plan)
+      AND json_type(plan, '$.planRunId') = 'text'
+    GROUP BY json_extract(plan, '$.planRunId')
+    HAVING COUNT(*) > 1
+    LIMIT 1
+  `).get() as { planRunId: string; applyCount: number } | undefined;
+  if (duplicatePlan) {
+    throw new Error(
+      `Cannot install apply serialization: plan ${duplicatePlan.planRunId} has ${duplicatePlan.applyCount} successful apply runs. Inspect the conflicting run history before upgrading.`
+    );
+  }
+
+  const duplicateEnvironment = db.prepare(`
+    SELECT environment_id AS environmentId, COUNT(*) AS applyCount
+    FROM runs
+    WHERE type = 'apply' AND status = 'running'
+    GROUP BY environment_id
+    HAVING COUNT(*) > 1
+    LIMIT 1
+  `).get() as { environmentId: string; applyCount: number } | undefined;
+  if (duplicateEnvironment) {
+    throw new Error(
+      `Cannot install apply serialization: environment ${duplicateEnvironment.environmentId} has ${duplicateEnvironment.applyCount} running apply records. Inspect the conflicting runs before upgrading.`
+    );
+  }
+
+  for (const [name, sql] of Object.entries(applySerializationIndexes)) {
+    if (!db.prepare('SELECT 1 FROM sqlite_master WHERE name = ?').get(name)) db.exec(sql);
+  }
 }
 
 const migrations: Migration[] = [
@@ -325,57 +390,15 @@ const migrations: Migration[] = [
     version: 11,
     name: 'serialize_plan_applies',
     up: '-- Apply serialization indexes are installed after legacy-conflict checks.',
-    run: (db) => {
-      const duplicatePlan = db.prepare(`
-        SELECT json_extract(plan, '$.planRunId') AS planRunId, COUNT(*) AS applyCount
-        FROM runs
-        WHERE type = 'apply'
-          AND status = 'succeeded'
-          AND json_valid(plan)
-          AND json_type(plan, '$.planRunId') = 'text'
-        GROUP BY json_extract(plan, '$.planRunId')
-        HAVING COUNT(*) > 1
-        LIMIT 1
-      `).get() as { planRunId: string; applyCount: number } | undefined;
-      if (duplicatePlan) {
-        throw new Error(
-          `Cannot install apply serialization: plan ${duplicatePlan.planRunId} has ${duplicatePlan.applyCount} successful apply runs. Inspect the conflicting run history before upgrading.`
-        );
-      }
-
-      const duplicateEnvironment = db.prepare(`
-        SELECT environment_id AS environmentId, COUNT(*) AS applyCount
-        FROM runs
-        WHERE type = 'apply' AND status = 'running'
-        GROUP BY environment_id
-        HAVING COUNT(*) > 1
-        LIMIT 1
-      `).get() as { environmentId: string; applyCount: number } | undefined;
-      if (duplicateEnvironment) {
-        throw new Error(
-          `Cannot install apply serialization: environment ${duplicateEnvironment.environmentId} has ${duplicateEnvironment.applyCount} running apply records. Inspect the conflicting runs before upgrading.`
-        );
-      }
-
-      // A persisted plan may succeed at most once, and only one apply may
-      // actively mutate an environment at a time. Guard malformed legacy JSON
-      // by excluding it from the expression index.
-      db.exec(`
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_succeeded_apply_plan
-        ON runs (
-          CASE
-            WHEN json_valid(plan) AND json_type(plan, '$.planRunId') = 'text'
-              THEN json_extract(plan, '$.planRunId')
-            ELSE NULL
-          END
-        )
-        WHERE type = 'apply' AND status = 'succeeded';
-
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_running_apply_environment
-        ON runs (environment_id)
-        WHERE type = 'apply' AND status = 'running';
-      `);
-    },
+    run: installApplySerialization,
+  },
+  {
+    // Both 11 and 12 were used by different released/development histories. This
+    // monotonic bridge preserves their identities and additive objects unchanged.
+    version: 13,
+    name: 'reconcile_historical_apply_serialization',
+    up: '-- Install the shared apply safety invariants after validating historical identities.',
+    run: installApplySerialization,
   },
 ];
 
@@ -441,12 +464,8 @@ export class SqliteAdapter {
     try {
       this.ensureMigrationsTable();
 
-      const appliedVersions = new Set(
-        this.db
-          .prepare('SELECT version FROM schema_migrations')
-          .all()
-          .map((row: unknown) => (row as { version: number }).version)
-      );
+      const applied = this.db.prepare('SELECT version, name FROM schema_migrations').all() as AppliedMigration[];
+      const appliedVersions = new Set(applied.map((row) => row.version));
 
       const supportedVersion = Math.max(...migrations.map((migration) => migration.version));
       const newestAppliedVersion = Math.max(0, ...appliedVersions);
@@ -456,6 +475,9 @@ export class SqliteAdapter {
           + 'Update Hypervibe before opening this state; do not delete the database or migration history.'
         );
       }
+
+      validateMigrationIdentities(this.db, applied, migrations);
+      validateApplySerializationIndexes(this.db, appliedVersions.has(13));
 
       const appliedNow: Migration[] = [];
       for (const migration of migrations) {
