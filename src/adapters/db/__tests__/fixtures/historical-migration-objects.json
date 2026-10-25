@@ -1,0 +1,217 @@
+{
+  "evidence": {
+    "companion": "Read-only sqlite_master schema metadata observed 2026-10-25; no database rows, credentials, or customer identities exported.",
+    "rotation": "git b4efbb9 src/adapters/db/sqlite.adapter.ts migration12 rotation_workflow_snapshots (also 77c39f6)",
+    "login": "git 6f536cf src/adapters/db/sqlite.adapter.ts migration12 provider_login_sessions"
+  },
+  "companion": [
+    {
+      "type": "table",
+      "name": "companion_dirty_sources",
+      "tableName": "companion_dirty_sources",
+      "sql": "CREATE TABLE companion_dirty_sources (\n        source_table TEXT NOT NULL,\n        source_id TEXT NOT NULL,\n        operation TEXT NOT NULL,\n        changed_at TEXT NOT NULL,\n        PRIMARY KEY (source_table, source_id)\n      )"
+    },
+    {
+      "type": "table",
+      "name": "companion_environments",
+      "tableName": "companion_environments",
+      "sql": "CREATE TABLE companion_environments (\n        environment_id TEXT UNIQUE REFERENCES environments(id) ON DELETE SET NULL,\n        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,\n        project_name TEXT NOT NULL,\n        environment_name TEXT NOT NULL,\n        provider TEXT,\n        spec_revision INTEGER,\n        spec_source_kind TEXT CHECK (spec_source_kind IN ('repo', 'local')),\n        observation_coverage TEXT NOT NULL DEFAULT 'none'\n          CHECK (observation_coverage IN ('none', 'complete', 'partial', 'unobservable', 'failed')),\n        latest_attempt_at TEXT,\n        latest_attempt_outcome TEXT,\n        latest_complete_at TEXT,\n        latest_complete_spec_revision INTEGER,\n        observed_fingerprint TEXT,\n        drift_fingerprint TEXT,\n        latest_attempt_json TEXT NOT NULL DEFAULT '{}'\n          CHECK (json_valid(latest_attempt_json)),\n        latest_complete_json TEXT NOT NULL DEFAULT '{}'\n          CHECK (json_valid(latest_complete_json)),\n        updated_at TEXT NOT NULL,\n        PRIMARY KEY (project_id, environment_name)\n      )"
+    },
+    {
+      "type": "table",
+      "name": "companion_meta",
+      "tableName": "companion_meta",
+      "sql": "CREATE TABLE companion_meta (\n        id INTEGER PRIMARY KEY CHECK (id = 1),\n        schema_version INTEGER NOT NULL,\n        min_reader_schema_version INTEGER NOT NULL,\n        max_reader_schema_version INTEGER NOT NULL,\n        writer_version TEXT NOT NULL,\n        projection_revision INTEGER NOT NULL DEFAULT 0,\n        projection_dirty INTEGER NOT NULL DEFAULT 1 CHECK (projection_dirty IN (0, 1)),\n        dirty_reason TEXT,\n        source_changed_at TEXT,\n        updated_at TEXT NOT NULL\n      )"
+    },
+    {
+      "type": "table",
+      "name": "companion_plans",
+      "tableName": "companion_plans",
+      "sql": "CREATE TABLE companion_plans (\n        plan_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,\n        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,\n        environment_id TEXT NOT NULL REFERENCES environments(id) ON DELETE CASCADE,\n        environment_name TEXT NOT NULL,\n        preview_schema_version INTEGER NOT NULL,\n        applicability TEXT NOT NULL\n          CHECK (applicability IN (\n            'awaiting_apply', 'empty', 'blocked', 'expired',\n            'spec_superseded', 'live_state_changed', 'claimed',\n            'applied', 'consumed', 'unsupported_legacy'\n          )),\n        is_latest_for_environment INTEGER NOT NULL DEFAULT 1\n          CHECK (is_latest_for_environment IN (0, 1)),\n        spec_revision INTEGER NOT NULL,\n        observed_fingerprint TEXT,\n        expires_at TEXT NOT NULL,\n        claimed_at TEXT,\n        apply_run_id TEXT,\n        apply_outcome TEXT,\n        preview_json TEXT NOT NULL CHECK (json_valid(preview_json)),\n        created_at TEXT NOT NULL,\n        updated_at TEXT NOT NULL\n      )"
+    },
+    {
+      "type": "table",
+      "name": "companion_runs",
+      "tableName": "companion_runs",
+      "sql": "CREATE TABLE companion_runs (\n        run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,\n        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,\n        environment_id TEXT NOT NULL REFERENCES environments(id) ON DELETE CASCADE,\n        source_plan_id TEXT,\n        run_type TEXT NOT NULL,\n        status TEXT NOT NULL,\n        projection_complete INTEGER NOT NULL DEFAULT 1\n          CHECK (projection_complete IN (0, 1)),\n        completed_actions INTEGER NOT NULL DEFAULT 0,\n        total_actions INTEGER,\n        progress_json TEXT NOT NULL DEFAULT '{}'\n          CHECK (json_valid(progress_json)),\n        error_code TEXT,\n        error_message TEXT,\n        started_at TEXT,\n        completed_at TEXT,\n        created_at TEXT NOT NULL,\n        updated_at TEXT NOT NULL\n      )"
+    },
+    {
+      "type": "index",
+      "name": "idx_companion_plans_applicability",
+      "tableName": "companion_plans",
+      "sql": "CREATE INDEX idx_companion_plans_applicability\n        ON companion_plans(applicability)"
+    },
+    {
+      "type": "index",
+      "name": "idx_companion_plans_environment",
+      "tableName": "companion_plans",
+      "sql": "CREATE INDEX idx_companion_plans_environment\n        ON companion_plans(environment_id, created_at DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_companion_runs_environment",
+      "tableName": "companion_runs",
+      "sql": "CREATE INDEX idx_companion_runs_environment\n        ON companion_runs(environment_id, created_at DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_companion_runs_status",
+      "tableName": "companion_runs",
+      "sql": "CREATE INDEX idx_companion_runs_status\n        ON companion_runs(status)"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_components_delete",
+      "tableName": "components",
+      "sql": "CREATE TRIGGER companion_dirty_components_delete\n      AFTER DELETE ON components BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('components', OLD.id, 'delete', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET projection_revision = projection_revision + 1,\n          projection_dirty = 1, dirty_reason = 'source:components',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_components_insert",
+      "tableName": "components",
+      "sql": "CREATE TRIGGER companion_dirty_components_insert\n      AFTER INSERT ON components BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('components', NEW.id, 'insert', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET projection_revision = projection_revision + 1,\n          projection_dirty = 1, dirty_reason = 'source:components',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_components_update",
+      "tableName": "components",
+      "sql": "CREATE TRIGGER companion_dirty_components_update\n      AFTER UPDATE ON components BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('components', NEW.id, 'update', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET projection_revision = projection_revision + 1,\n          projection_dirty = 1, dirty_reason = 'source:components',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_connections_delete",
+      "tableName": "connections",
+      "sql": "CREATE TRIGGER companion_dirty_connections_delete\n      AFTER DELETE ON connections BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('connections', OLD.id, 'delete', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET projection_revision = projection_revision + 1,\n          projection_dirty = 1, dirty_reason = 'source:connections',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_connections_insert",
+      "tableName": "connections",
+      "sql": "CREATE TRIGGER companion_dirty_connections_insert\n      AFTER INSERT ON connections BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('connections', NEW.id, 'insert', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET projection_revision = projection_revision + 1,\n          projection_dirty = 1, dirty_reason = 'source:connections',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_connections_update",
+      "tableName": "connections",
+      "sql": "CREATE TRIGGER companion_dirty_connections_update\n      AFTER UPDATE ON connections BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('connections', NEW.id, 'update', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET projection_revision = projection_revision + 1,\n          projection_dirty = 1, dirty_reason = 'source:connections',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_environments_delete",
+      "tableName": "environments",
+      "sql": "CREATE TRIGGER companion_dirty_environments_delete\n      AFTER DELETE ON environments BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('environments', OLD.id, 'delete', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET projection_revision = projection_revision + 1,\n          projection_dirty = 1, dirty_reason = 'source:environments',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_environments_insert",
+      "tableName": "environments",
+      "sql": "CREATE TRIGGER companion_dirty_environments_insert\n      AFTER INSERT ON environments BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('environments', NEW.id, 'insert', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET projection_revision = projection_revision + 1,\n          projection_dirty = 1, dirty_reason = 'source:environments',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_environments_update",
+      "tableName": "environments",
+      "sql": "CREATE TRIGGER companion_dirty_environments_update\n      AFTER UPDATE ON environments BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('environments', NEW.id, 'update', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET projection_revision = projection_revision + 1,\n          projection_dirty = 1, dirty_reason = 'source:environments',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_project_specs_delete",
+      "tableName": "project_specs",
+      "sql": "CREATE TRIGGER companion_dirty_project_specs_delete\n      AFTER DELETE ON project_specs BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('project_specs', OLD.id, 'delete', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET projection_revision = projection_revision + 1,\n          projection_dirty = 1, dirty_reason = 'source:project_specs',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_project_specs_insert",
+      "tableName": "project_specs",
+      "sql": "CREATE TRIGGER companion_dirty_project_specs_insert\n      AFTER INSERT ON project_specs BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('project_specs', NEW.id, 'insert', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET projection_revision = projection_revision + 1,\n          projection_dirty = 1, dirty_reason = 'source:project_specs',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_project_specs_update",
+      "tableName": "project_specs",
+      "sql": "CREATE TRIGGER companion_dirty_project_specs_update\n      AFTER UPDATE ON project_specs BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('project_specs', NEW.id, 'update', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET projection_revision = projection_revision + 1,\n          projection_dirty = 1, dirty_reason = 'source:project_specs',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_projects_delete",
+      "tableName": "projects",
+      "sql": "CREATE TRIGGER companion_dirty_projects_delete\n      AFTER DELETE ON projects BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('projects', OLD.id, 'delete', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET\n          projection_revision = projection_revision + 1,\n          projection_dirty = 1,\n          dirty_reason = 'source:projects',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')\n        WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_projects_insert",
+      "tableName": "projects",
+      "sql": "CREATE TRIGGER companion_dirty_projects_insert\n      AFTER INSERT ON projects BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('projects', NEW.id, 'insert', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET\n          projection_revision = projection_revision + 1,\n          projection_dirty = 1,\n          dirty_reason = 'source:projects',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')\n        WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_projects_update",
+      "tableName": "projects",
+      "sql": "CREATE TRIGGER companion_dirty_projects_update\n      AFTER UPDATE ON projects BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('projects', NEW.id, 'update', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET\n          projection_revision = projection_revision + 1,\n          projection_dirty = 1,\n          dirty_reason = 'source:projects',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')\n        WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_runs_delete",
+      "tableName": "runs",
+      "sql": "CREATE TRIGGER companion_dirty_runs_delete\n      AFTER DELETE ON runs BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('runs', OLD.id, 'delete', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET projection_revision = projection_revision + 1,\n          projection_dirty = 1, dirty_reason = 'source:runs',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_runs_insert",
+      "tableName": "runs",
+      "sql": "CREATE TRIGGER companion_dirty_runs_insert\n      AFTER INSERT ON runs BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('runs', NEW.id, 'insert', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET projection_revision = projection_revision + 1,\n          projection_dirty = 1, dirty_reason = 'source:runs',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_runs_update",
+      "tableName": "runs",
+      "sql": "CREATE TRIGGER companion_dirty_runs_update\n      AFTER UPDATE ON runs BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('runs', NEW.id, 'update', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET projection_revision = projection_revision + 1,\n          projection_dirty = 1, dirty_reason = 'source:runs',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_services_delete",
+      "tableName": "services",
+      "sql": "CREATE TRIGGER companion_dirty_services_delete\n      AFTER DELETE ON services BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('services', OLD.id, 'delete', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET projection_revision = projection_revision + 1,\n          projection_dirty = 1, dirty_reason = 'source:services',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_services_insert",
+      "tableName": "services",
+      "sql": "CREATE TRIGGER companion_dirty_services_insert\n      AFTER INSERT ON services BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('services', NEW.id, 'insert', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET projection_revision = projection_revision + 1,\n          projection_dirty = 1, dirty_reason = 'source:services',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "companion_dirty_services_update",
+      "tableName": "services",
+      "sql": "CREATE TRIGGER companion_dirty_services_update\n      AFTER UPDATE ON services BEGIN\n        INSERT INTO companion_dirty_sources(source_table, source_id, operation, changed_at)\n        VALUES ('services', NEW.id, 'update', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n        ON CONFLICT(source_table, source_id) DO UPDATE SET\n          operation = excluded.operation, changed_at = excluded.changed_at;\n        UPDATE companion_meta SET projection_revision = projection_revision + 1,\n          projection_dirty = 1, dirty_reason = 'source:services',\n          source_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),\n          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1;\n      END"
+    }
+  ],
+  "rotation": [
+    {
+      "type": "table",
+      "name": "rotation_workflows",
+      "tableName": "rotation_workflows",
+      "sql": "CREATE TABLE rotation_workflows (\n        id TEXT PRIMARY KEY,\n        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,\n        mode TEXT NOT NULL,\n        spec_revision INTEGER NOT NULL,\n        scope_fingerprint TEXT NOT NULL,\n        recorded_environments TEXT NOT NULL,\n        connections TEXT NOT NULL,\n        created_at TEXT NOT NULL,\n        project_git_remote_url TEXT,\n        UNIQUE(project_id, mode, spec_revision, scope_fingerprint)\n      )"
+    },
+    {
+      "type": "index",
+      "name": "idx_rotation_workflows_project_created",
+      "tableName": "rotation_workflows",
+      "sql": "CREATE INDEX idx_rotation_workflows_project_created ON rotation_workflows(project_id, created_at DESC)"
+    }
+  ],
+  "login": [
+    {
+      "type": "table",
+      "name": "provider_login_sessions",
+      "tableName": "provider_login_sessions",
+      "sql": "CREATE TABLE provider_login_sessions (\n        id TEXT PRIMARY KEY,\n        provider TEXT NOT NULL,\n        scope TEXT,\n        state_encrypted TEXT NOT NULL,\n        lease_id TEXT,\n        lease_until INTEGER,\n        created_at INTEGER NOT NULL\n      )"
+    },
+    {
+      "type": "index",
+      "name": "idx_provider_login_scope",
+      "tableName": "provider_login_sessions",
+      "sql": "CREATE INDEX idx_provider_login_scope ON provider_login_sessions(provider, scope, created_at)"
+    }
+  ]
+}
