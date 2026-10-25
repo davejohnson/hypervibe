@@ -2590,6 +2590,11 @@ export const projectSpecSchema = z.object({
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Native secret references cannot also materialize this slot into CI secrets.',
           path: ['environments', environmentName, 'secretDestinations', key] });
       }
+      if (slot?.credential) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom,
+          message: 'Native secret destinations cannot also declare credential lifecycle authority. Keep the native version reference; credential source reads and rotation are unsupported for this slot.',
+          path: ['environments', environmentName, 'secretDestinations', key] });
+      }
       const identity = JSON.stringify(secretDestinationIdentity(binding.destination));
       const owner = destinationOwners.get(identity);
       if (owner) {

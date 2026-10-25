@@ -102,6 +102,25 @@ function fixture(options: { tokenUid?: string; accountUid?: string; projectNumbe
 }
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 describe('Cloud Run deployment access through native token and identity contracts', () => {
+  it('does not treat hosted deployment access as authority to inspect, rotate or recover registry credentials', async () => {
+    const f = fixture({ installedRuntime: true, existingService: true });
+    const adapter = await f.create();
+    const now = new Date();
+    const environment = { id: 'local-env', projectId: 'app-a', name: 'production', createdAt: now, updatedAt: now,
+      platformBindings: { provider: 'cloudrun', projectId, environmentId: 'us-central1', services: { web: { serviceId: 'web' } } } };
+    const target = { provider: 'cloudrun', projectId, environmentId: 'us-central1', serviceId: `projects/${projectId}/locations/us-central1/services/web`,
+      instanceId: f.serviceUid, image: f.imageUri, registry: `projects/${projectId}/locations/us-central1/repositories/images`,
+      credentialReference: `projects/${projectId}/secrets/pull`, activation: 'deferred' as const };
+    f.request.mockClear(); f.getAccessToken.mockClear();
+    await expect(adapter.registryCredentialLifecycle.inspect(environment, 'web')).rejects.toThrow('cannot be verified');
+    expect(await adapter.registryCredentialLifecycle.update(environment, 'web', target, { username: 'reader', token: 'synthetic-candidate' }))
+      .toMatchObject({ success: false, data: { mutationAttempted: false } });
+    expect(await adapter.registryCredentialLifecycle.reconcile!(environment, 'web', target, { username: 'reader', token: 'synthetic-candidate' }, { operationId: 'a'.repeat(64) }))
+      .toMatchObject({ success: false, data: { mutationAttempted: false } });
+    expect(f.request).not.toHaveBeenCalled();
+    expect(f.getAccessToken).not.toHaveBeenCalled();
+  });
+
   it('uses a short-lived opaque token without a private key, ambient ADC, or required email claim', async () => {
     const f = fixture(); const adapter = await f.create();
     expect(await adapter.inspectArtifactResources({ resource: 'artifact', region: 'us-central1', limit: 1 })).toMatchObject({ artifacts: [], partial: false });

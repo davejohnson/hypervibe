@@ -13,7 +13,7 @@ import '../azure-container-apps.adapter.js';
 // https://learn.microsoft.com/en-us/rest/api/container-registry/registries/get?view=rest-container-registry-2025-11-01
 // https://learn.microsoft.com/en-us/rest/api/registry-dataplane/authentication/exchange-aad-access-token-for-acr-refresh-token?view=rest-registry-dataplane-2021-07-01
 // https://github.com/Azure/acr/blob/main/docs/AAD-OAuth.md
-// Synthetic retained deployment receipt; Azure native first-create is still blocked.
+// Synthetic retained deployment receipt; prepared first releases have separate native contract coverage.
 function target() {
   const value = brokerTarget(), connection = value.deploymentAccess!.connection;
   const subscriptionId = '12345678-1234-4678-8678-123456789012', tenantId = '22345678-1234-4678-8678-123456789012';

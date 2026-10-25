@@ -16,6 +16,11 @@ inventory, adoption/provenance, and rotation acceptance surfaces.
    exact `{environment, service, variable}` coordinates; every runtime alias must
    be covered. Without that selection, runtime slots apply to the environment's
    declared services. The plan reviews their exact bound service IDs.
+   A slot with `environments.<name>.secretDestinations` cannot also declare
+   `credential`: native version references do not authorize reading a source,
+   copying its value, or credential rotation. Keep the native reference and
+   collect a new immutable version through its separately authorized delivery
+   flow. A combined declaration is rejected before source reads and at apply.
 3. Use `hv_plan project="app" env="production" scope="credentials"
    credential="application-api" intent="adopt"`. Adoption only accepts matching
    existing runtime values; it never writes provider values. Write-only values
@@ -30,6 +35,22 @@ inventory, adoption/provenance, and rotation acceptance surfaces.
    Verify a declared business operation with `hv_health credential="application-api"`;
    see [application operation verification](credential-operation-verification.md)
    for HTTP receipts and existing approved environment tasks.
+
+Merge boundary evidence: the independent requirements are exact credential
+consumer scope and reference-only collaborative delivery. A web-only credential
+combined with a native destination previously planned the reference for both
+web and worker, bypassed credential review, and allowed a saved reference action
+to apply. Separate credential planning also read its source. The schema cases
+for AWS, Azure and GCP, planner case, SQLite-backed apply case, and source-read
+case were observed failing before the rejection above, then passing. Existing
+standalone reference and credential checks remain in ordinary `npm test`.
+
+Hosted deployment credentials also do not authorize registry-credential
+rotation. The real Cloud Run adapter's serialized transport regression observed
+six workload/registry requests across inspection, update and recovery before
+the authorization guard; all three operations now fail before token acquisition
+or HTTP calls. This validates the offline authority boundary, not live IAM
+compatibility or completed native-reference credential rotation.
 
 For example, a partial `hv_spec` patch can contain:
 

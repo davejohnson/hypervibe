@@ -72,7 +72,10 @@ export function planSecretReference(input: {
     verified: false, reason: '', metadata };
   let required = false;
   let blocked = false;
-  if (!providerRegistry.getMetadata(input.hostingProvider)?.runtimeSecretReferenceProviders?.includes(binding.destination.provider)) {
+  if (slot.credential) {
+    action.reason = 'Native secret destinations cannot also declare credential lifecycle authority; preserve the reference and remove the unsupported credential declaration.';
+    blocked = true;
+  } else if (!providerRegistry.getMetadata(input.hostingProvider)?.runtimeSecretReferenceProviders?.includes(binding.destination.provider)) {
     action.reason = `${input.hostingProvider} cannot consume ${binding.destination.provider} references; select supported native hosting`;
     blocked = true;
   } else if (input.suppliedValue !== undefined) {

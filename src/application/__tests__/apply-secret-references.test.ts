@@ -72,6 +72,15 @@ describe('native references at the persisted apply boundary', () => {
       expect.objectContaining({ name: 'web' }), {}, expect.objectContaining({ secretVersionRefs: { FLOW_KEY: reference } }));
     expect(f.ctx.repos.runs.findById(run.id)!.plan).not.toHaveProperty('overrides');
   });
+  it('rejects a saved native reference action after the slot acquires credential authority', async () => {
+    const f = fixture(); const run = f.run();
+    f.spec.secrets.FLOW_KEY.credential = { role: 'external-api', label: 'External API', purpose: 'Web requests', kind: 'opaque',
+      source: 'env:PRIVATE_INPUT', runtimeConsumers: [{ environment: 'staging', service: 'web', variable: 'FLOW_KEY' }] };
+    const result = await executePlanApply(f.ctx, { project: f.project, spec: f.spec, specRevision: 1, planId: run.id, confirmActions: [] });
+    expect(result).toMatchObject({ kind: 'executed', result: { success: false } });
+    expect(f.setEnvVars).not.toHaveBeenCalled();
+    expect(f.ctx.repos.environments.findById(f.environment.id)!.platformBindings.secretVersionBindings).toBeUndefined();
+  });
   it.each(['destination', 'owner', 'services'] as const)('rejects changed %s before any provider mutation', async field => {
     const f = fixture();
     if (field === 'destination') f.action.metadata!.reference = { destination: { ...destination, secretId: 'production-flow' }, version: '7' };

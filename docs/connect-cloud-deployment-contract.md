@@ -187,6 +187,33 @@ The affected adapter, installed-runtime and legacy-runtime suites pass together 
 tests). These fixtures use reconstructed metadata and synthetic retained installation
 receipts. The later native installer evidence is recorded separately; neither suite establishes live compatibility.
 
+The integration with main `3bfe9b98d5d262741de01ef4d6cb8e0c5a0703a1` preserves
+its credential deployment receipts, exact active ECS configuration selection, and native
+identity/drain evidence. The earlier `7fcb852` legacy byte baseline above is historical:
+all three legacy emitters now match an independently executed, unmodified archive of the
+new main under the same Vitest transform (including main's renderer revisions).
+
+Two merge assumptions were falsified at real boundaries before runtime fixes:
+
+- A hosted ECS adapter has no local keys. Registry rotation nevertheless called the real
+  secret-manager connection boundary with undefined keys in both update and reconciliation,
+  which admits the machine's default credential chain. The user-required separation of
+  deployment and secret management authority forbids that fallback. The observed failing
+  regression now passes with explicit hosted denial before secret-store connection; existing
+  local registry rotation retains its separately authorized path.
+- Azure's prepared branch skipped the new credential rollout receipt. Executing its generated
+  script against independently authored native responses returned an empty receipt for both
+  first deployment and a same-image credential operation (two observed failures). It now
+  verifies the operation-specific native revision and emits that exact deployment ID. A lost
+  acknowledgment produces no receipt in that execution; subsequent readback recovers the
+  accepted revision with no second write. This follows main's rotation evidence contract and
+  Azure's revision/readback contract cited in [prepared hosting evidence](connect-cloud-azure-prepared.md).
+
+The focused AWS/Azure, credential lifecycle, prepared release and legacy compatibility
+regressions pass together (166 tests in 16 files) after a clean dependency install. They
+remain in ordinary `npm test` discovery and the committed acceptance workflow. They validate application/SDK/emitted-program behavior against reconstructed transport;
+none establishes live federation or a successful cloud deployment.
+
 No offline result proves live trust, available billing, RBAC propagation, first deployment,
 or CI release compatibility. Each provider still needs the approved no-local-credentials
 walkthrough: separate developer/admin/contributor, connect, synthetic secret submission,

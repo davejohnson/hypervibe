@@ -506,6 +506,7 @@ export class CloudRunAdapter implements
   IDeploySourceCredentialAdapter {
   readonly name = 'cloudrun';
   readonly registryCredentialLifecycle = createCloudRunRegistryCredentialLifecycle(async (environment, service) => {
+    if (this.transientAuthentication) throw new Error('Registry credential rotation requires separately reviewed authority.');
     if (!this.credentials) throw new Error();
     const binding = parseHostingBindings(environment); const workload = binding.services?.[service];
     if (binding.provider !== this.name || binding.projectId !== this.credentials.projectId || binding.environmentId !== this.credentials.region || !workload) throw new Error();

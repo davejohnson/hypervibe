@@ -74,7 +74,14 @@ async function fixture(options: { opaque?: boolean; corrupt?: boolean; environme
     if (path === appId && method === 'GET') return Response.json(live);
     if (path === appId && method === 'PATCH') {
       const body = JSON.parse(String(init?.body)); writes.push(body); revision += 1;
-      live = { ...live, ...body, identity: { ...live.identity, ...body.identity }, properties: { ...live.properties, ...body.properties, configuration: { ...live.properties.configuration, ...body.properties.configuration }, latestRevisionName: 'rev-' + revision, latestReadyRevisionName: 'rev-' + revision } };
+      // ARM accepts empty assignment objects, but native readback supplies the
+      // independently assigned principal/client IDs; request bodies are not responses.
+      const userAssignedIdentities = body.identity?.userAssignedIdentities && Object.fromEntries(Object.entries(body.identity.userAssignedIdentities).map(([id, value]) => {
+        expect(value).toEqual({});
+        expect(Object.hasOwn(live.identity.userAssignedIdentities, id)).toBe(true);
+        return [id, { principalId: readerPrincipal, clientId: readerClient }];
+      }));
+      live = { ...live, ...body, identity: { ...live.identity, ...body.identity, ...(userAssignedIdentities ? { userAssignedIdentities } : {}) }, properties: { ...live.properties, ...body.properties, configuration: { ...live.properties.configuration, ...body.properties.configuration }, latestRevisionName: 'rev-' + revision, latestReadyRevisionName: 'rev-' + revision } };
       if (options.corrupt) live.properties.configuration.secrets = [existingSecret];
       return Response.json(live);
     }
@@ -82,7 +89,7 @@ async function fixture(options: { opaque?: boolean; corrupt?: boolean; environme
   });
   vi.stubGlobal('fetch', request);
   if (options.deployment) {
-    // Synthetic retained broker receipt. New Azure installation remains blocked.
+    // Synthetic retained broker receipt. Prepared installation has separate native coverage.
     const native = (name: string, digit: string) => ({ kind: 'azure-managed-identity' as const, tenantId, subscriptionId,
       clientId: `${digit.repeat(8)}-${digit.repeat(4)}-4${digit.repeat(3)}-8${digit.repeat(3)}-${digit.repeat(12)}`,
       principalId: '55555555-5555-4555-8555-555555555555', identityResourceId: `${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${name}` });

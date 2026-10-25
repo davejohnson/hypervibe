@@ -970,6 +970,12 @@ secret destination and, after delivery, its immutable `version`. The slot
 remains declared in `ProjectSpec.secrets`. AWS Secrets Manager, Google Secret
 Manager and Azure Key Vault use the shared destination port and hosted library;
 their existing value-reading secret-source adapters remain separate.
+Native destination slots cannot also declare `credential` lifecycle authority.
+That lifecycle reads a source and synchronizes reviewed consumers; its rotation
+contract does not cover native references. Schema validation rejects the
+combination, native planning/apply revalidation blocks it, and credential role
+selection refuses it before reading a source. Preserve the native reference
+instead of widening its consumer scope or materializing the value.
 
 Empty container preparation is a separate lifecycle capability. An explicit
 `hv_plan scope="secret-destinations"` admits only reviewed container actions,

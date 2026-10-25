@@ -24,6 +24,18 @@ function setup(version?: string, observedVersion?: string) {
 }
 
 describe('reference-only secret planning', () => {
+  it('blocks a credential role instead of installing its native reference in unreviewed services', () => {
+    const input = setup('7');
+    input.spec.environments.staging.services.worker = { ...input.spec.environments.staging.services.web };
+    input.spec.secrets.FLOW_KEY.credential = { role: 'external-api', label: 'External API', purpose: 'Web requests', kind: 'opaque',
+      source: 'env:PRIVATE_INPUT', runtimeConsumers: [{ environment: 'staging', service: 'web', variable: 'FLOW_KEY' }] };
+    input.observed!.services.push({ ...input.observed!.services[0], name: 'worker', externalId: 'worker-id' });
+    const result = planDelegatedSecrets(input);
+    expect(result.blockers).toEqual([expect.objectContaining({ key: 'FLOW_KEY', reason: expect.stringMatching(/credential.*native|native.*credential/i) })]);
+    expect(result.actions.every(action => action.type === 'noop' && !action.verified)).toBe(true);
+    expect(result.desiredEnvVars).toEqual({});
+  });
+
   it('accepts an exact observed reference without requesting, hashing or materializing a value', () => {
     const result = planDelegatedSecrets(setup('7', '7'));
     expect(result.inputRequired).toEqual([]);
