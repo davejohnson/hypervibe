@@ -6,7 +6,7 @@ export const deployInputSchema = z.object({
   environmentName: z.string().min(1).optional(),
   environmentId: z.string().uuid().optional(),
   services: z.array(z.string()).optional(),
-  envVars: z.record(z.string()).optional(),
+  envVars: z.record(z.string(), z.string()).optional(),
 }).refine(
   (data) => data.projectName || data.projectId,
   { message: 'Either projectName or projectId must be provided' }

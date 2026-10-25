@@ -5,7 +5,7 @@ export const environmentNameSchema = z.enum(['local', 'staging', 'production']).
 export const createEnvironmentSchema = z.object({
   projectId: z.string().uuid(),
   name: environmentNameSchema,
-  platformBindings: z.record(z.unknown()).optional(),
+  platformBindings: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const updateEnvironmentSchema = createEnvironmentSchema.partial().omit({ projectId: true });

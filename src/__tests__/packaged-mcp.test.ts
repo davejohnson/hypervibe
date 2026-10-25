@@ -36,9 +36,20 @@ describe('fresh npm package over stdio', () => {
       }
       run(process.execPath, [path.join(root, 'scripts/build-agent-packages.mjs'),
         '--output', path.join(staging, 'dist/agent-plugins')]);
+      // npm pack must see real directories for the reviewed bundled closure;
+      // symlinking node_modules makes npm compute paths outside the package.
+      const lock = JSON.parse(readFileSync(path.join(root, 'package-lock.json'), 'utf8')) as {
+        packages: Record<string, { inBundle?: boolean }>;
+      };
+      for (const [location, dependency] of Object.entries(lock.packages)) {
+        if (!dependency.inBundle) continue;
+        const destination = path.join(staging, location);
+        if (!existsSync(destination)) cpSync(path.join(root, location), destination, { recursive: true });
+      }
       const [packed] = JSON.parse(run('npm', ['pack', '--json', '--ignore-scripts', '--pack-destination', directory], staging));
       expect(packed.files.map((file: { path: string }) => file.path)).toEqual(expect.arrayContaining([
         'dist/mcp.js', 'skills/hypervibe/SKILL.md',
+        'node_modules/@azure/identity/package.json', 'node_modules/@azure/msal-node/package.json',
         'dist/agent-plugins/codex/plugin.json', 'dist/agent-plugins/codex/mcp.json',
         'dist/agent-plugins/claude/.claude-plugin/plugin.json', 'dist/agent-plugins/claude/.mcp.json',
       ]));
@@ -48,7 +59,15 @@ describe('fresh npm package over stdio', () => {
       const installed = path.join(directory, 'package');
       // Reuse installed dependencies without network installation; all Hypervibe
       // application code and package metadata come from the extracted tarball.
-      symlinkSync(path.join(root, 'node_modules'), path.join(installed, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
+      // Keep the tarball's bundled security dependencies intact. Link only
+      // non-bundled direct dependencies to the already installed local tree.
+      mkdirSync(path.join(installed, 'node_modules'), { recursive: true });
+      for (const name of Object.keys(metadata.dependencies)) {
+        const destination = path.join(installed, 'node_modules', name);
+        if (existsSync(destination)) continue;
+        mkdirSync(path.dirname(destination), { recursive: true });
+        symlinkSync(path.join(root, 'node_modules', name), destination, process.platform === 'win32' ? 'junction' : 'dir');
+      }
       const report = JSON.parse(run(process.execPath, [path.join(root, 'scripts/smoke-mcp-package.mjs'), installed]));
       expect(report.kind).toBe('sdk-stdio-contract');
       expect(report.version).toBe(metadata.version);

@@ -13,7 +13,7 @@ export const databaseCredentialAliasesInspectionSchema = z.object({
   checkedNames: z.array(z.string().regex(/^[A-Z][A-Z0-9_]*$/)).min(1),
   changeNames: z.array(z.string().regex(/^[A-Z][A-Z0-9_]*$/)),
   /** Private provider evidence; encrypt before persistence and never render. */
-  privateState: z.record(z.unknown()),
+  privateState: z.record(z.string(), z.unknown()),
 }).strict().superRefine((value, ctx) => {
   if (!Object.keys(value.target.providerScope).length
     || new Set(value.checkedNames).size !== value.checkedNames.length

@@ -87,11 +87,12 @@ export interface CredentialFieldDescriptor {
   description?: string;
 }
 
-function unwrapSchema(schema: z.ZodTypeAny): z.ZodTypeAny {
+function unwrapSchema(schema: z.core.$ZodType): z.core.$ZodType {
   let current = schema;
   while (true) {
-    if (current instanceof z.ZodEffects) {
-      current = current.innerType();
+    if (current instanceof z.ZodPipe) {
+      // Refinements and brands retain their schema in v4; transforms use pipes.
+      current = current.in instanceof z.ZodTransform ? current.out : current.in;
       continue;
     }
     if (
@@ -99,12 +100,10 @@ function unwrapSchema(schema: z.ZodTypeAny): z.ZodTypeAny {
       || current instanceof z.ZodNullable
       || current instanceof z.ZodDefault
       || current instanceof z.ZodCatch
+      || current instanceof z.ZodPrefault
+      || current instanceof z.ZodReadonly
     ) {
-      current = current._def.innerType;
-      continue;
-    }
-    if (current instanceof z.ZodBranded) {
-      current = current._def.type;
+      current = current.unwrap();
       continue;
     }
     return current;
@@ -138,13 +137,9 @@ function isSensitiveCredentialField(name: string): boolean {
   return /(token|key|secret|password|credential|private|connection(?:url|string))/i.test(name);
 }
 
-function enumOptions(schema: z.ZodTypeAny): string[] | undefined {
+function enumOptions(schema: z.core.$ZodType): string[] | undefined {
   if (schema instanceof z.ZodEnum) {
-    return [...schema.options];
-  }
-  if (schema instanceof z.ZodNativeEnum) {
-    const options = Object.values(schema.enum).filter((value): value is string => typeof value === 'string');
-    return [...new Set(options)];
+    return [...new Set(schema.options.filter((value): value is string => typeof value === 'string'))];
   }
   return undefined;
 }
@@ -165,7 +160,7 @@ export function credentialFieldsFromSchema(
 
   const excluded = new Set(options.exclude ?? []);
   return Object.entries(objectSchema.shape).filter(([name]) => !excluded.has(name)).map(([name, rawField]) => {
-    const field = rawField as z.ZodTypeAny;
+    const field = rawField as z.core.$ZodType;
     const unwrapped = unwrapSchema(field);
     const options = enumOptions(unwrapped);
     const sensitive = isSensitiveCredentialField(name);
@@ -176,12 +171,12 @@ export function credentialFieldsFromSchema(
         : sensitive
           ? 'secret'
           : 'text';
-    const description = field.description ?? unwrapped.description;
+    const description = z.globalRegistry.get(field)?.description ?? z.globalRegistry.get(unwrapped)?.description;
 
     return {
       name,
       label: credentialFieldLabel(name),
-      required: !field.safeParse(undefined).success,
+      required: !z.safeParse(field, undefined).success,
       sensitive,
       inputKind,
       ...(options ? { options } : {}),

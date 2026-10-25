@@ -158,7 +158,7 @@ export interface HostingServiceCreateRecovery {
 }
 
 const nonEmptyHostingBindingString = z.string().trim().min(1);
-const hostingProviderScopeSchema = z.record(nonEmptyHostingBindingString)
+const hostingProviderScopeSchema = z.record(z.string(), nonEmptyHostingBindingString)
   .refine(
     (scope) => Object.keys(scope).length > 0
       && Object.keys(scope).every((key) => key.trim().length > 0),
@@ -270,19 +270,19 @@ const hostingServiceBindingSchema = z.object({
   }).passthrough().optional(),
 }).passthrough();
 
-const hostingServicesSchema = z.record(hostingServiceBindingSchema)
+const hostingServicesSchema = z.record(z.string(), hostingServiceBindingSchema)
   .refine(
     (services) => Object.keys(services).every((name) => name.trim().length > 0),
     'Service binding names must not be empty.'
   );
 
-const serviceCreateRecoveryMapSchema = z.record(hostingServiceCreateRecoverySchema)
+const serviceCreateRecoveryMapSchema = z.record(z.string(), hostingServiceCreateRecoverySchema)
   .refine(
     (recoveries) => Object.keys(recoveries).every((name) => name.trim().length > 0),
     'Service-create recovery names must not be empty.'
   );
 
-const retainedProviderScopeSchema = z.record(nonEmptyHostingBindingString)
+const retainedProviderScopeSchema = z.record(z.string(), nonEmptyHostingBindingString)
   .refine(
     (scope) => Object.keys(scope).length > 0 && Object.keys(scope).every((key) => key.trim().length > 0),
     'Retained provider scope must contain non-empty keys and values.'
@@ -332,7 +332,7 @@ export const hostingBindingsSchema = z.object({
       target: z.string(),
     }).strict()).optional(),
   }).passthrough().optional(),
-  maintenance: z.record(z.unknown()).optional(),
+  maintenance: z.record(z.string(), z.unknown()).optional(),
 }).passthrough().default({});
 
 export type ParsedHostingBindings = z.infer<typeof hostingBindingsSchema>;

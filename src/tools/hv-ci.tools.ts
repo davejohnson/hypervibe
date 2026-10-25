@@ -568,7 +568,7 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
       workflow: z.string().optional().describe('Deprecated alias for definition; retained for GitHub compatibility. Omit when definition is supplied.'),
       ref: z.string().optional().describe('Git ref to run on (default: the observed repository default branch).'),
       sha: z.string().regex(/^[0-9a-f]{40}$/i).optional().describe('Exact reviewed commit SHA. Required by GitLab and supported only by canonical devops bindings; legacy GitHub workflow dispatch is ref-only.'),
-      inputs: z.record(z.string()).optional().describe('Typed, non-secret CI inputs as key-value pairs. Values are not written to audit output.'),
+      inputs: z.record(z.string(), z.string()).optional().describe('Typed, non-secret CI inputs as key-value pairs. Values are not written to audit output.'),
     },
     wrapCommandHandler(async ({ project: projectRef, repo: repoOverride, definition, workflow, ref, sha, inputs }) => {
       if (definition && workflow && definition !== workflow) {

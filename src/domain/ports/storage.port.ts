@@ -90,7 +90,7 @@ export const storageCreateRecoverySchema = z.object({
   provider: nonEmptyStorageRecoveryString,
   operation: z.literal('create'),
   resourceName: nonEmptyStorageRecoveryString,
-  providerScope: z.record(nonEmptyStorageRecoveryString).refine(
+  providerScope: z.record(z.string(), nonEmptyStorageRecoveryString).refine(
     (scope) => Object.keys(scope).length > 0
       && Object.keys(scope).every((key) => key.trim().length > 0),
     'Storage create recovery requires a non-empty provider scope.'
@@ -158,7 +158,7 @@ export function parseStorageCreateRecovery(value: unknown): StorageCreateRecover
   return parsed.success ? parsed.data : null;
 }
 
-export const storageCreateRecoveryMapSchema = z.record(storageCreateRecoverySchema)
+export const storageCreateRecoveryMapSchema = z.record(z.string(), storageCreateRecoverySchema)
   .superRefine((recoveries, ctx) => {
     for (const [name, recovery] of Object.entries(recoveries)) {
       if (!name.trim() || recovery.resourceName !== name) {
