@@ -1,6 +1,8 @@
 import { observeRuntimeAccess, planRuntimeAccess, projectRuntimeAccessInput } from '../services/runtime-access.service.js';
 import { planDatabaseCredentialAliases } from '../services/database-credential-aliases.service.js';
 import { planSecretContainers } from '../services/secret-container-setup.js';
+import { localCloudScopeRequired, planLocalCloudScope } from '../services/local-cloud-scope.service.js';
+import type { CloudInstallationReview } from '../ports/cloud-installation.port.js';
 import { planScheduleActivations, SCHEDULE_ACTIVATION_OPERATION } from '../services/schedule-activation.service.js';
 import { scopedSecretObservation } from './scoped-secrets.js';
 import { planApiPolicy } from '../services/api-policy.js';
@@ -159,6 +161,7 @@ export interface PlanOptions {
 }
 
 export interface EnvironmentPlan {
+  cloudScopeReview?: CloudInstallationReview;
   backupCoverage?: Awaited<ReturnType<typeof observeBackupPolicy>> & {
     complete: boolean;
   } & ReturnType<typeof backupEvidenceSummary>;
@@ -166,7 +169,7 @@ export interface EnvironmentPlan {
   webhookReadiness?: WebhookReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
-  scope: 'full' | 'secrets' | 'database-credential-aliases' | 'secret-destinations' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'hosting-prepared-bindings' | 'service-volumes' | 'runtime-access' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
+  scope: 'full' | 'secrets' | 'database-credential-aliases' | 'secret-destinations' | 'cloud-scope' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'hosting-prepared-bindings' | 'service-volumes' | 'runtime-access' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
   backupReadiness?: BackupReadiness;
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
@@ -1705,11 +1708,28 @@ export class PlanService {
     if (!specResult) {
       return { error: `Project "${project.name}" has no spec. Set one with hv_spec.` };
     }
+    const scope = options?.scope ?? 'full';
+    try {
+      if (scope !== 'full' && await localCloudScopeRequired(project, environmentName, specResult.spec)) {
+        return { error: `scope="${scope}" cannot allocate or recover a cloud project. Run hv_plan with scope="full" to review the separate cloud prerequisite; the requested narrow scope was preserved.` };
+      }
+      const prepared = scope === 'full' ? await planLocalCloudScope({ project, environmentName, specResult, options }) : undefined;
+      if (prepared) {
+        const document: PlanRunDocument = { kind: 'hv_plan', scope: 'cloud-scope', environmentName,
+          specRevision: specResult.revision, observedFingerprint: null, actions: prepared.actions,
+          cloudScope: prepared.cloudScope, warnings: prepared.warnings };
+        planRunDocumentSchema.parse(document);
+        const run = this.runRepo.create({ projectId: project.id, environmentId: prepared.environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
+        this.runRepo.updateStatus(run.id, 'succeeded');
+        return { planRunId: run.id, scope: 'cloud-scope', specRevision: specResult.revision, specSource: specResult.source ?? { kind: 'local' },
+          environmentName, verified: true, observed: null, actions: prepared.actions, cloudScopeReview: prepared.review,
+          unmanaged: [], warnings: prepared.warnings, inputRequired: [], blocked: [] };
+      }
+    } catch { return { error: 'Cloud project preparation could not be verified. Preserve any saved allocation and its exact native operation; no hosting or replacement project is authorized.' }; }
     const providerValidation = firstProviderSpecValidationFailure(specResult.spec);
     if (providerValidation) {
       return { error: providerValidation.message };
     }
-    const scope = options?.scope ?? 'full';
     if (scope === 'secret-destinations') return this.planSecretDestinations(projectWithSpecGitRemoteUrl(project, specResult.spec), environmentName, specResult, options!);
     if (scope === 'database-credential-aliases' || scope === 'full') {
       const aliases = await planDatabaseCredentialAliases({ project: projectWithSpecGitRemoteUrl(project, specResult.spec),

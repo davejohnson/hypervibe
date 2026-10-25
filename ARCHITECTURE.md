@@ -46,6 +46,15 @@ Desired infrastructure state is repo-backed when Hypervibe runs inside a git wor
 
 Do not treat cached local state as proof of convergence when live observation is available.
 
+Local cloud scope preparation is an isolated `cloud-scope` prerequisite in the
+ordinary plan/apply loop, before deployment connection lookup. A declared provider
+capability may authorize exactly one reviewed empty-project allocation; the shared
+installation kernel records its nonsecret attempts in SQLite with transactional
+revision protection. Native unknown reads remain unknown. This stage never grants
+billing, connection, hosting or deployment-marker authority. See
+[local scope preparation](docs/local-cloud-scope-preparation.md) for the explicit
+GCP-only admission, native proof, historical recovery and live-evidence limits.
+
 Administrator-prepared hosting resources use an explicit metadata handoff before
 runtime convergence. A provider-declared `preparedHosting` capability verifies the
 installation receipt and native lifetimes; the isolated `hosting-prepared-bindings`

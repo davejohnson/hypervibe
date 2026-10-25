@@ -7,6 +7,7 @@ import { DATABASE_SCOPE_BIND_OPERATION, isDatabaseScopeBindingAction } from '../
 import { HOSTING_PREPARED_OPERATION, isPreparedHostingAction } from '../services/hosting-prepared.service.js';
 import { createHash } from 'crypto';
 import { z } from 'zod';
+import { isLocalCloudScopeAction, LOCAL_CLOUD_SCOPE_OPERATION, localCloudScopePlanSchema } from '../ports/local-cloud-scope.port.js';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import type { Run, RunReceipt } from '../entities/run.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
@@ -223,6 +224,7 @@ export const planRunDocumentSchema = z.object({
     'full',
     'secrets',
     'secret-destinations',
+    'cloud-scope',
     'api-policy',
     'retained-cleanup',
     'managed-ci-bindings',
@@ -241,6 +243,7 @@ export const planRunDocumentSchema = z.object({
     'managed-ci-credentials',
   ]).optional(),
   environmentName: z.string().min(1),
+  cloudScope: localCloudScopePlanSchema.optional(),
   databaseCredentialAliasesReady: z.boolean().optional(),
   databaseCredentialAliasesVerification: databaseCredentialAliasesMetadataSchema.optional(),
   specRevision: z.number().int().nonnegative(),
@@ -265,6 +268,18 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'cloud-scope') {
+    const proof = document.cloudScope;
+    if (!proof || document.actions.length > 1 || (proof.mode === 'verified') !== (document.actions.length === 0)
+      || document.actions.some(action => !isLocalCloudScopeAction(action)
+        || !isDeepStrictEqual(Object.fromEntries(Object.keys(proof).map(key => [key, action.metadata?.[key]])), proof))
+      || document.overrides || document.inputRequired?.length || document.sourceCommitSha || document.integrationFingerprints
+      || document.lockEnvironmentIds?.length || document.observedFingerprint !== null)
+      ctx.addIssue({ code: 'custom', message: 'Cloud scope preparation requires one exact allocation or read-only recovery action and no deployment inputs.' });
+    return;
+  }
+  if (document.cloudScope || document.actions.some(action => action.metadata?.operation === LOCAL_CLOUD_SCOPE_OPERATION))
+    ctx.addIssue({ code: 'custom', message: 'Cloud scope preparation requires its isolated plan stage.' });
   if (document.scope === 'secret-destinations') {
     if (document.actions.some(action => resolvePlanActionAuthority(action)?.capability !== 'secret.destination.prepare')
       || document.overrides || document.inputRequired?.length || document.sourceCommitSha || document.integrationFingerprints

@@ -8,6 +8,15 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+`gcp-local-project-allocation.test.ts` and `gcp-local-project-journal.test.ts`
+exercise the reviewed local empty-project capability through reconstructed CRM v3
+transport. The latter composes the shared lifecycle with real SQLite to distinguish
+historical native success from current permission/lifetime drift, preserve exact
+operation evidence and prevent a second POST after restart. Local command and
+provider-roster tests run in ordinary `npm test` too. See the
+[contract and observed RED/GREEN evidence](../../docs/local-cloud-scope-preparation.md);
+these are offline checks, not live GCP allocation or all-cloud onboarding proof.
+
 `hosting-prepared-provider-roster.test.ts` pins the seven hosting providers against
 the [prepared hosting handoff](../../docs/connect-cloud-prepared-hosting.md).
 Shared receipt, repository replay and real SQLite plan/apply regressions run in normal

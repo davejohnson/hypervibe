@@ -1,4 +1,5 @@
 import { planScheduleActivations } from '../domain/services/schedule-activation.service.js';
+import { inspectLocalCloudScope, localCloudScopeRequired } from '../domain/services/local-cloud-scope.service.js';
 import { classifyPlanBlocks } from '../domain/plan/plan-block.js';
 import { planApiPolicy } from '../domain/services/api-policy.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
@@ -792,13 +793,14 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       }
       const currentSpecResult = specStore.get(project);
       const currentSpec = currentSpecResult?.spec;
-      if (currentSpec) validateInstalledProviders(currentSpec);
       const plannedEnvironment = currentSpec ? commandEnvironment(currentSpec, env) : env?.trim() || 'staging';
+      const cloudScopeOnly = await localCloudScopeRequired(project, plannedEnvironment, currentSpec);
+      if (currentSpec && !cloudScopeOnly) validateInstalledProviders(currentSpec);
       // Local dotenv preparation is part of the hv_plan contract. Establish
       // its git-safety and filesystem boundary before PlanService persists an
       // executable plan, so an unsafe tracked .env cannot leave an undisclosed
       // authorization record behind.
-      const preparedLocalEnv = currentSpec && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'secret-destinations'
+      const preparedLocalEnv = currentSpec && !cloudScopeOnly && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'secret-destinations'
         ? ensureProjectLocalEnv({
           source: currentSpecResult?.source,
           projectName: project.name,
@@ -841,7 +843,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         : undefined;
       let localEnv: RepoEnvFileWrite | undefined;
       try {
-        localEnv = scope === 'secrets' || scope === 'secret-destinations' ? undefined : mergeLocalEnvWrites(
+        localEnv = result.scope === 'cloud-scope' || scope === 'secrets' || scope === 'secret-destinations' ? undefined : mergeLocalEnvWrites(
           preparedLocalEnv,
           ensureProjectLocalEnv({
             source: currentSpecResult?.source,
@@ -920,7 +922,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         hint = [hint, managerHint].filter(Boolean).join(' ');
         hint += hostedCredentialHint;
       } else if (pending.length === 0) {
-        hint = result.scope === 'secrets'
+        hint = result.scope === 'cloud-scope'
+          ? 'The exact empty cloud project is allocated. Billing, API enablement and hosting still require separate reviewed plans.'
+          : result.scope === 'secrets'
           ? 'The selected secrets already match. This does not verify deployment or other environment settings.'
           : result.backupCoverage && !result.backupCoverage.complete
           ? 'No executable changes are available, but daily backup coverage has gaps. Review backupCoverage; unsupported protection requires an adapter implementation and unknown protection requires a verified provider observation.'
@@ -953,6 +957,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           ...(result.domainSecurity ? { domainSecurity: result.domainSecurity } : {}),
           ...(result.webhookReadiness ? { webhookReadiness: result.webhookReadiness } : {}),
           scope: result.scope,
+          ...(result.cloudScopeReview ? { cloudScopeReview: result.cloudScopeReview } : {}),
           ...(result.backupCoverage ? { backupCoverage: result.backupCoverage } : {}),
           ...(result.backupReadiness ? { backupReadiness: result.backupReadiness } : {}),
           ...(result.emailSenderReadiness ? { emailSenderReadiness: result.emailSenderReadiness } : {}),
@@ -1008,7 +1013,17 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
     'Show desired vs observed infrastructure state for an environment: drift, unmanaged resources, blocked connections, managed database-variable attachment, pending runtime rollouts, and observed service endpoints. inSync requires a provider-observed post-configuration deployment whenever the provider reports that activation is still pending; runtimeHealth remains unverified until hv_health or worker log/error evidence is checked. Uses repo-backed .hypervibe/spec.json/.hypervibe/bindings.json when present. Read-only; does not persist a plan.',
     { project: projectField, env: envField },
     wrapCommandHandler(async ({ project: projectRef, env }) => {
-      const project = ctx.resolveProjectOrThrow({ project: projectRef });
+      const project = ctx.resolveProjectOrThrow({ project: projectRef, readOnly: true });
+      let inspectionSpec;
+      try { inspectionSpec = specStore.getForInspection(project); }
+      catch (error) { if (!env?.trim()) throw error; }
+      const inspectionEnvironment = inspectionSpec ? commandEnvironment(inspectionSpec.spec, env) : env?.trim() || 'staging';
+      const cloudScope = await inspectLocalCloudScope(project, inspectionEnvironment);
+      if (cloudScope) return commandSuccess(cloudScope, {
+        hint: cloudScope.allocationComplete ? 'The exact empty cloud project is allocated. Billing and hosting have not been configured by this stage.'
+          : 'The saved cloud project allocation still needs review or exact operation recovery. Run hv_plan; no replacement project is authorized.',
+        next: ['hv_plan'],
+      });
       const specResult = specStore.get(project);
       if (!specResult) {
         return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { hint: 'Define one with hv_spec.' });
@@ -1449,7 +1464,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       if (!specResult) {
         return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { hint: 'hv_spec, then hv_plan.' });
       }
-      validateInstalledProviders(specResult.spec);
+      // The application revalidates this exact persisted plan before execution.
+      // Historical cloud-scope recovery must not depend on today's provider selection.
+      if (asRecord(ctx.repos.runs.findById(planId)?.plan)?.scope !== 'cloud-scope') validateInstalledProviders(specResult.spec);
 
       const outcome = await executePlanApply(ctx, {
         project,
@@ -1491,6 +1508,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
       const { result, envName } = outcome;
       const secretOnly = asRecord(ctx.repos.runs.findById(planId)?.plan)?.scope === 'secrets';
+      const cloudScopeOnly = asRecord(ctx.repos.runs.findById(planId)?.plan)?.scope === 'cloud-scope';
       const skipped = result.receipts.filter((r) => r.status === 'skipped_requires_confirm');
       const pending = result.receipts.filter((r) => r.status === 'pending');
       const blockedReceipts = result.receipts.filter((r) => r.status === 'blocked');
@@ -1526,7 +1544,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
               : pending.length > 0
                 ? `Apply has pending provider workflows: ${pending.map((r) => r.actionId).join(', ')}. Re-run hv_plan and hv_apply after they progress.`
             : result.success
-              ? secretOnly
+              ? cloudScopeOnly
+                ? 'The exact empty cloud project is allocated. Billing, API enablement and hosting still require separate reviewed plans.'
+                : secretOnly
                 ? 'The selected secrets are saved. They take effect after the managed CI deployment; select its workflow with hv_ci_status, then use hv_ci_trigger.'
                 : 'Apply complete. Check hv_status to verify convergence.'
               : 'Apply failed; compensations ran where registered. Inspect receipts and re-run hv_plan.',

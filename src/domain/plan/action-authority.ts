@@ -12,6 +12,7 @@ import { providerRegistry } from '../registry/provider.registry.js';
 import { API_POLICY_OPERATION } from '../services/api-policy.js';
 import { EMAIL_SIGNING_OPERATIONS } from '../services/email-signing.service.js';
 import type { PlanAction, PlanResourceKind } from './plan.types.js';
+import { isLocalCloudScopeAction } from '../ports/local-cloud-scope.port.js';
 export { hasExactPlanActionConfirmationAuthority } from './action-confirmation.js';
 import { HOSTING_ENVIRONMENT_ENSURE_OPERATION } from './plan.service.js';
 import {
@@ -96,6 +97,7 @@ import {
 } from '../services/managed-code-repository.contract.js';
 
 export type PlanMutationCapability =
+  | 'cloud.scope.prepare'
   | 'database.credential-aliases.repair'
   | 'database.scope.bind'
   | 'hosting.prepared.bind'
@@ -488,6 +490,7 @@ export function resolvePlanActionAuthority(
   if (!action.id.trim() || !action.resource.name.trim() || !action.resource.provider.trim()) {
     return null;
   }
+  if (isLocalCloudScopeAction(action)) return authority(action, 'cloud.scope.prepare');
 
   if (action.metadata?.operation === SECRET_DESTINATION_PREPARE) {
     const parsed = secretContainerActionMetadataSchema.safeParse(action.metadata);

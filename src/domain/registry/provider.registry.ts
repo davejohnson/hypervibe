@@ -9,6 +9,7 @@ import type { WorkloadKind } from '../entities/service.entity.js';
 import type { Receipt } from '../ports/provider.port.js';
 import type { HostedObservationCapability } from '../ports/hosted-observation.port.js';
 import type { CloudDeploymentAdapterCapabilityV1, CloudDeploymentAdapterInputV1 } from '../ports/cloud-deployment.port.js';
+import type { LocalCloudScopePreparationCapability } from '../ports/cloud-installation.port.js';
 import { CloudDeploymentAccessError, validateCloudDeploymentAdapterInputV1 } from '../services/cloud-deployment-authentication.js';
 
 export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'messaging' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
@@ -336,6 +337,8 @@ export interface RegisteredProvider {
   factory: (credentials: unknown) => unknown | Promise<unknown>;
   /** Separate callback-only deployment authority; never falls back to a credential factory. */
   transientAuthentication?: CloudDeploymentAdapterCapabilityV1;
+  /** Explicit local scope allocation only; independent from hosting credentials or deployment. */
+  localScopePreparation?: LocalCloudScopePreparationCapability;
   /** Optional hook to install CLI tools or other dependencies when a connection is created. */
   ensureDependencies?: () => Promise<{ installed: string[]; errors: string[] }>;
   /** Optional provider-owned raw forensic reads used by hv_inspect. */
@@ -890,6 +893,10 @@ export class ProviderRegistry {
    */
   getMetadata(name: string): ProviderMetadata | undefined {
     return this.providers.get(name)?.metadata;
+  }
+
+  getLocalScopePreparation(name: string): LocalCloudScopePreparationCapability | undefined {
+    return this.providers.get(name)?.localScopePreparation;
   }
 }
 

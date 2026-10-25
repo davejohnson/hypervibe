@@ -49,6 +49,7 @@ export { createAwsFederatedCredentialProvider } from './adapters/providers/aws/a
 export { createAzureCloudInstallationDriver } from './adapters/providers/azure/azure-cloud-installation.js';
 export { createAzureFederatedTokenProvider } from './adapters/providers/azure/azure-federated-auth.js';
 export { createGcpCloudInstallationDriver } from './adapters/providers/gcp/gcp-cloud-installation.js';
+export { createGcpLocalProjectAllocationCapability } from './adapters/providers/gcp/gcp-local-project-allocation.js';
 export { cloudInstallationDriverFactories } from './application/hosted/cloud-installation-providers.js';
 
 /** Canonical reviewed program hash, including all managed companion files. */

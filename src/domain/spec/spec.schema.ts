@@ -1604,6 +1604,12 @@ export const environmentSpecSchema = z.object({
     provider: z.string().min(1),
     /** Optional desired placement. Omit to use the provider's sensible default. */
     region: z.string().trim().min(1).optional(),
+    /** Isolated cloud allocation intent; native fields are validated by the selected provider. */
+    scopePreparation: z.object({
+      schemaVersion: z.literal(1),
+      authentication: z.literal('local-default'),
+      nativeScope: z.record(z.string().min(1).max(100), z.string().min(1).max(1024)),
+    }).strict().optional(),
   }).strict(),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),

@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { CloudInstallationBoundaryError, type CloudInstallationAction, type CloudInstallationAttempt,
   type CloudInstallationDriver, type CloudInstallationEvidence, type CloudInstallationIntent,
   type CloudInstallationObservation, type CloudInstallationProviderContext, type CloudInstallationReason,
+  type CloudInstallationExecutableIntent, type LocalCloudScopePreparationIntent,
 } from '../../../domain/ports/cloud-installation.port.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
 import { DestinationBoundaryError, DestinationBudget, destinationJson } from '../secret-destination-http.js';
@@ -19,6 +20,9 @@ export const gcpProjectPreparationScopeSchema = z.object({ scopeKind: z.literal(
   parent: PARENT.optional(), billingAccountName: BILLING,
   allocationMode: z.literal('create-exclusive-v1').optional(),
   assignmentMode: z.literal('initial-reviewed-v1').optional() }).strict();
+export const gcpLocalProjectAllocationScopeSchema = gcpProjectPreparationScopeSchema.omit({ billingAccountName: true, assignmentMode: true }).extend({
+  scopeKind: z.literal('project-allocation'), allocationMode: z.literal('create-exclusive-v1'),
+}).strict();
 const proofSchema = z.object({ resources: z.array(z.object({ kind: z.literal('project'), id: z.string().regex(/^projects\/[1-9]\d{5,29}$/),
   identity: z.object({ projectId: PROJECT, projectNumber: NUMBER, createTime: z.string().datetime(), parent: z.union([PARENT, z.literal('none')]),
     owner: z.string().regex(/^[a-f0-9]{64}$/), attemptId: z.string().guid() }).strict() }).strict()).max(1),
@@ -26,7 +30,7 @@ const proofSchema = z.object({ resources: z.array(z.object({ kind: z.literal('pr
     attemptId: z.string().guid().optional(), operationName: z.string().regex(/^operations\/[A-Za-z0-9._~-]{1,255}$/).optional(),
     operationCompleted: z.literal(true).optional(),
     billingAccountName: BILLING.optional() }).strict() }).strict();
-type Context = CloudInstallationProviderContext;
+type Context = CloudInstallationProviderContext<CloudInstallationExecutableIntent>;
 type ActionContext = Context & { action: CloudInstallationAction; attempt?: CloudInstallationAttempt };
 class ScopeError extends CloudInstallationBoundaryError {}
 function errorReason(error: unknown): CloudInstallationReason {
@@ -38,14 +42,22 @@ function errorReason(error: unknown): CloudInstallationReason {
   if (error instanceof DestinationBoundaryError && error.code === 'deadline_exceeded') return 'timeout';
   return 'provider_error';
 }
-function scope(intent: CloudInstallationIntent) {
+function scope(intent: CloudInstallationExecutableIntent) {
   if (intent.provider !== 'gcp' || intent.stage !== 'scope-preparation' || intent.mode !== 'connect') throw new ScopeError('identity_mismatch');
+  if ('execution' in intent) {
+    if (intent.hostingProvider !== 'cloudrun') throw new ScopeError('identity_mismatch');
+    return { ...gcpLocalProjectAllocationScopeSchema.parse(intent.nativeScope), billingAccountName: undefined, assignmentMode: undefined };
+  }
   return gcpProjectPreparationScopeSchema.parse(intent.nativeScope);
 }
-function owner(intent: CloudInstallationIntent) {
+function billingAccount(target: ReturnType<typeof scope>): string {
+  if (!target.billingAccountName) throw new ScopeError('identity_mismatch');
+  return target.billingAccountName;
+}
+function owner(intent: CloudInstallationExecutableIntent) {
   return createHash('sha256').update(JSON.stringify([intent.customerId, intent.appId, intent.environment, intent.installationId])).digest('hex');
 }
-function actions(intent: CloudInstallationIntent): CloudInstallationAction[] {
+function actions(intent: CloudInstallationExecutableIntent): CloudInstallationAction[] {
   const target = scope(intent);
   return [{ id: 'gcp:project', type: 'create', resource: { kind: 'project', name: target.projectId, provider: 'gcp' }, verified: true,
     requiresConfirm: true, billable: true, reason: target.allocationMode
@@ -53,7 +65,7 @@ function actions(intent: CloudInstallationIntent): CloudInstallationAction[] {
       : 'Create the reviewed application project; retain it if later setup is blocked.',
     metadata: { operation: 'create-project', category: 'scope', execution: 'api', native: target.allocationMode ? { allocationMode: target.allocationMode } : {} } }];
 }
-function parseEvidence(value: unknown, intent: CloudInstallationIntent): CloudInstallationEvidence {
+function parseEvidence(value: unknown, intent: CloudInstallationExecutableIntent): CloudInstallationEvidence {
   const parsed = proofSchema.parse(value); const target = scope(intent); const expectedOwner = owner(intent);
   if (parsed.native.installationId !== intent.installationId || parsed.native.owner !== expectedOwner) throw new ScopeError('ownership_mismatch');
   if (target.allocationMode && parsed.resources.length && (!parsed.native.operationName || !parsed.native.operationCompleted)
@@ -63,7 +75,7 @@ function parseEvidence(value: unknown, intent: CloudInstallationIntent): CloudIn
       || resource.identity.owner !== expectedOwner || target.parent && resource.identity.parent !== target.parent
       || parsed.native.operation === 'create-project' && parsed.native.attemptId !== resource.identity.attemptId) throw new ScopeError('identity_mismatch');
   }
-  if (parsed.native.operation === 'verify-billing' && (parsed.resources.length !== 1 || parsed.native.billingAccountName !== target.billingAccountName)) throw new ScopeError('identity_mismatch');
+  if (parsed.native.operation === 'verify-billing' && (parsed.resources.length !== 1 || parsed.native.billingAccountName !== billingAccount(target))) throw new ScopeError('identity_mismatch');
   return parsed;
 }
 function proof(context: ActionContext, project?: GcpBootstrapProject, operationName?: string, operationCompleted?: true): CloudInstallationEvidence {
@@ -77,11 +89,17 @@ function proof(context: ActionContext, project?: GcpBootstrapProject, operationN
   } }] : [], native: { operation: context.action.metadata.operation, installationId: context.intent.installationId, owner: expectedOwner,
     ...(context.attempt ? { attemptId: context.attempt.id } : {}), ...(operationName ? { operationName } : {}),
     ...(operationCompleted ? { operationCompleted } : {}),
-    ...(context.action.metadata.operation === 'verify-billing' ? { billingAccountName: target.billingAccountName } : {}) } }, context.intent);
+    ...(context.action.metadata.operation === 'verify-billing' ? { billingAccountName: billingAccount(target) } : {}) } }, context.intent);
 }
 
 /** Creates only the reviewed project; its actual parent is reviewed before billing. */
 export function createGcpProjectPreparationDriver(options: { fetch?: typeof fetch } = {}): CloudInstallationDriver {
+  return createProjectDriver<CloudInstallationIntent>(options, false);
+}
+export function createGcpLocalProjectAllocationDriver(options: { fetch?: typeof fetch } = {}): CloudInstallationDriver<LocalCloudScopePreparationIntent> {
+  return createProjectDriver<LocalCloudScopePreparationIntent>(options, true);
+}
+function createProjectDriver<I extends CloudInstallationExecutableIntent>(options: { fetch?: typeof fetch }, local: boolean): CloudInstallationDriver<I> {
   const request = options.fetch ?? fetch;
   async function withClient<T>(context: Context, work: (client: GcpBootstrapClient, json: (url: string, init?: RequestInit) => Promise<Record<string, unknown>>) => Promise<T>): Promise<T> {
     scope(context.intent);
@@ -106,11 +124,13 @@ export function createGcpProjectPreparationDriver(options: { fetch?: typeof fetc
   }
   async function authority(context: Context, json: (url: string, init?: RequestInit) => Promise<Record<string, unknown>>) {
     const target = scope(context.intent);
-    const account = await json(`https://cloudbilling.googleapis.com/v1/${target.billingAccountName}`);
-    if (account.name !== target.billingAccountName || account.open !== true) throw new ScopeError('insufficient_permissions');
+    if (target.scopeKind !== 'project-allocation') {
+      const account = await json(`https://cloudbilling.googleapis.com/v1/${billingAccount(target)}`);
+      if (account.name !== billingAccount(target) || account.open !== true) throw new ScopeError('insufficient_permissions');
+    }
     for (const [url, permissions] of [
-      [`https://cloudbilling.googleapis.com/v1/${target.billingAccountName}:testIamPermissions`, target.assignmentMode
-        ? ['billing.resourceAssociations.create', 'billing.accounts.get'] : ['billing.resourceAssociations.create', 'billing.accounts.getIamPolicy', 'billing.accounts.setIamPolicy']],
+      ...(target.scopeKind === 'project-allocation' ? [] : [[`https://cloudbilling.googleapis.com/v1/${billingAccount(target)}:testIamPermissions`, target.assignmentMode
+        ? ['billing.resourceAssociations.create', 'billing.accounts.get'] : ['billing.resourceAssociations.create', 'billing.accounts.getIamPolicy', 'billing.accounts.setIamPolicy']]]),
       ...(target.parent ? [[`https://cloudresourcemanager.googleapis.com/v3/${target.parent}:testIamPermissions`, ['resourcemanager.projects.create']]] : []),
     ] as Array<[string, string[]]>) {
       const result = await json(url, { method: 'POST', body: JSON.stringify({ permissions }) });
@@ -120,7 +140,7 @@ export function createGcpProjectPreparationDriver(options: { fetch?: typeof fetc
   }
   // This is an allocation preflight, not absence inference. Only the separately
   // reviewed exclusive POST contract permits a denied lookup to remain unknown.
-  async function allocationLookup(client: GcpBootstrapClient, intent: CloudInstallationIntent): Promise<'absent' | 'unknown'> {
+  async function allocationLookup(client: GcpBootstrapClient, intent: CloudInstallationExecutableIntent): Promise<'absent' | 'unknown'> {
     const target = scope(intent);
     let project: GcpBootstrapProject | null;
     try { project = await client.getProject(target.projectId); }
@@ -174,26 +194,29 @@ export function createGcpProjectPreparationDriver(options: { fetch?: typeof fetc
     if (context.action.metadata.operation === 'verify-billing') {
       if (!context.completed['gcp:project']) throw new ScopeError('ownership_mismatch');
       const billing = await client.getProjectBillingInfo(target.projectId);
-      if (billing?.billingAccountName && billing.billingAccountName !== target.billingAccountName) return { state: 'conflict', reason: 'ownership_mismatch' };
-      if (!billing?.billingEnabled || billing.billingAccountName !== target.billingAccountName) return { state: 'rejected', reason: 'billing_assignment_unverified' };
+      if (billing?.billingAccountName && billing.billingAccountName !== billingAccount(target)) return { state: 'conflict', reason: 'ownership_mismatch' };
+      if (!billing?.billingEnabled || billing.billingAccountName !== billingAccount(target)) return { state: 'rejected', reason: 'billing_assignment_unverified' };
     }
     return { state: 'satisfied', evidence: observed };
   }
-  const driver: CloudInstallationDriver = {
-    provider: 'gcp', parseScope: value => gcpProjectPreparationScopeSchema.parse(value), parseEvidence,
+  const driver: CloudInstallationDriver<I> = {
+    ...(local ? { localScopePreparation: { hostingProvider: 'cloudrun' } } : {}),
+    provider: 'gcp', parseScope: value => local ? gcpLocalProjectAllocationScopeSchema.parse(value) : gcpProjectPreparationScopeSchema.parse(value), parseEvidence,
     scopePreparation: { disconnectionIntent: () => null, continuationStage: () => 'scope-preparation', resolvedScope(record) {
       if (record.status !== 'scope-ready') throw new ScopeError('not_installed');
       const project = parseEvidence(record.completed['gcp:project'], record.intent).resources[0];
       if (!project) throw new ScopeError('identity_mismatch');
+      if (local) return { projectId: project.identity.projectId, projectNumber: project.identity.projectNumber,
+        projectCreateTime: project.identity.createTime, projectParent: project.identity.parent, projectInstallationId: record.intent.installationId, projectAttemptId: project.identity.attemptId };
       return { scopeKind: 'project-billing', projectId: project.identity.projectId, projectNumber: project.identity.projectNumber,
         projectCreateTime: project.identity.createTime, projectParent: project.identity.parent, projectInstallationId: record.intent.installationId,
-        projectAttemptId: project.identity.attemptId, billingAccountName: scope(record.intent).billingAccountName,
+        projectAttemptId: project.identity.attemptId, billingAccountName: billingAccount(scope(record.intent)),
         ...(scope(record.intent).assignmentMode ? { assignmentMode: scope(record.intent).assignmentMode! } : {}) };
     }, reviewResources(record) {
       const resolved = driver.scopePreparation!.resolvedScope(record);
       const project = parseEvidence(record.completed['gcp:project'], record.intent).resources[0];
       return [{ kind: 'project', name: resolved.projectId, scope: project.identity.parent === 'none' ? 'No organization (observed)' : project.identity.parent },
-        { kind: 'billing-account', name: scope(record.intent).billingAccountName, scope: `projects/${resolved.projectNumber}` }];
+        ...(local ? [] : [{ kind: 'billing-account', name: billingAccount(scope(record.intent)), scope: `projects/${resolved.projectNumber}` }])];
     } },
     parseAction(value, intent) {
       const action = actions(intent).find(item => item.id === (value as CloudInstallationAction)?.id);
@@ -209,17 +232,17 @@ export function createGcpProjectPreparationDriver(options: { fetch?: typeof fetc
         const target = scope(context.intent);
         return { actions: actions(context.intent), review: {
           resources: [{ kind: 'project', name: target.projectId, scope: target.parent ?? 'Google-selected parent, verified after creation' }],
-          permissions: [{ principal: 'Browser-authorized administrator', scope: target.parent ?? 'Google-selected parent', actions: ['resourcemanager.projects.create'], purpose: 'installation-verification' },
-            { principal: 'Browser-authorized administrator', scope: target.billingAccountName, actions: target.assignmentMode
-              ? ['billing.resourceAssociations.create', 'billing.accounts.get'] : ['billing.resourceAssociations.create', 'billing.accounts.getIamPolicy', 'billing.accounts.setIamPolicy'], purpose: 'installation-verification' }],
-          costs: [{ resource: target.projectId, description: 'Creating an empty project does not provision paid workloads. Enabling billing authorizes future resource usage charges; workloads need a separate review.', pricingUrl: 'https://cloud.google.com/pricing' }],
+          permissions: [{ principal: local ? 'Local user administrator (ADC)' : 'Browser-authorized administrator', scope: target.parent ?? 'Google-selected parent', actions: ['resourcemanager.projects.create'], purpose: 'installation-verification' },
+            ...(local ? [] : [{ principal: 'Browser-authorized administrator', scope: billingAccount(target), actions: target.assignmentMode
+              ? ['billing.resourceAssociations.create', 'billing.accounts.get'] : ['billing.resourceAssociations.create', 'billing.accounts.getIamPolicy', 'billing.accounts.setIamPolicy'], purpose: 'installation-verification' as const }])],
+          costs: [{ resource: target.projectId, description: local ? 'This operation creates only an empty project. No billing account is attached, APIs enabled or paid workloads provisioned.' : 'Creating an empty project does not provision paid workloads. Enabling billing authorizes future resource usage charges; workloads need a separate review.', pricingUrl: 'https://cloud.google.com/pricing' }],
           warnings: ['This stage creates only the reviewed project and retains it on partial setup; it does not create secret containers, writer identities or workloads.',
             ...(target.allocationMode ? [
               observation === 'unknown' ? 'The exact project lookup is unknown: Google denied access. This is not evidence that the ID is available.' : 'Google returned not-found for the exact project ID; creation still depends on native global ID availability.',
               'This review authorizes one exclusive CreateProject attempt for this exact ID. A collision fails without adopting, updating or renaming another project. A lost acknowledgment cannot be retried or replaced by a same-name lookup.',
               ...(target.parent ? [] : ['No explicit parent is selected, so parent-level project-creation authority is unverified until Google accepts the native allocation. Sign-in alone does not prove that permission.']),
             ] : []),
-            target.assignmentMode ? 'A separate review will show the actual project parent, selected billing account, costs and native initial-assignment behavior before billing is enabled.'
+            local ? 'This local stage stops after native project allocation. Billing, API setup, connections, identities and workloads require separate desired-state plans.' : target.assignmentMode ? 'A separate review will show the actual project parent, selected billing account, costs and native initial-assignment behavior before billing is enabled.'
               : 'A separate review will show the actual project parent, temporary billing identity, permissions and billing attachment before those operations can begin.',
             ...(target.parent ? [] : ['Google may automatically select an organization from the administrator’s domain. The actual parent is retained and verified before continuation.'])],
         } };

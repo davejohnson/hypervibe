@@ -169,6 +169,16 @@ export function validateProjectSpecProviders(spec: ProjectSpec): ProviderSpecIss
     });
   }
   for (const [environment, environmentSpec] of Object.entries(spec.environments)) {
+    if (environmentSpec.hosting.scopePreparation) {
+      const provider = environmentSpec.hosting.provider;
+      const capability = providerRegistry.getLocalScopePreparation(provider);
+      let valid = false;
+      try { valid = capability?.schemaVersion === 1 && Boolean(capability.parseScope(environmentSpec.hosting.scopePreparation.nativeScope)); } catch { /* Native parser errors must not echo submitted fields. */ }
+      if (!valid) issues.push({ environment, field: 'hosting.provider', provider, capability: 'hosting', available: [],
+        configuration: { path: `environments.${environment}.hosting.scopePreparation`,
+          message: 'The selected provider does not support this exact local cloud scope preparation intent.',
+          hint: 'Use a declared provider capability and its reviewed native fields. No resource was allocated.' } });
+    }
     if (!providerRegistry.supports(environmentSpec.hosting.provider, 'hosting')) {
       issues.push({
         environment,

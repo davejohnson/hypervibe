@@ -4,6 +4,7 @@ import type { CloudDeploymentAdapterInputV1, CloudDeploymentConnectionV1, CloudD
 import { validateCloudDeploymentAdapterInputV1 } from '../../../domain/services/cloud-deployment-authentication.js';
 import { GcpDeploymentAuthentication, gcpDeploymentScopeSchema } from './gcp-deployment-authentication.js';
 import { GcpLocalDefaultAuthentication } from './gcp-local-default-authentication.js';
+import { createGcpLocalProjectAllocationCapability } from './gcp-local-project-allocation.js';
 import { getGcpNativeAdminToken } from './gcp-runtime-client.js';
 import { validateRuntimeSecretReferences, runtimeSecretReferenceIdentity } from '../../../domain/services/runtime-secret-references.js';
 import type { RuntimeSecretReference } from '../../../domain/ports/secret-destination.port.js';
@@ -6806,6 +6807,7 @@ export class CloudRunAdapter implements
 
 // Self-register with provider registry
 providerRegistry.register({
+  localScopePreparation: createGcpLocalProjectAllocationCapability(),
   transientAuthentication: {
     provider: 'gcp', hostingProvider: 'cloudrun', parseScope: value => gcpDeploymentScopeSchema.parse(value), parsePreparedResources: parseGcpPreparedResources,
     createAdapter: async input => { const adapter = new CloudRunAdapter(); await adapter.connectDeployment(input); return adapter; },

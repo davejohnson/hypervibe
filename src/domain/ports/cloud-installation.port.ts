@@ -45,6 +45,36 @@ export interface CloudInstallationIntent {
   /** Exact previously verified resources for a separate disconnect review. */
   installed?: CloudInstallationEvidence[];
 }
+/** Local desired-state authority is not hosted federation or a source-code release. */
+export interface LocalCloudScopePreparationIntent extends Omit<CloudInstallationIntent,
+  'source' | 'hostIdentity' | 'purpose' | 'deployment' | 'mode' | 'stage' | 'scopePreparation' | 'keys' | 'migrationTargets' | 'installed'> {
+  execution: { kind: 'local-administrator'; authentication: 'google-user-adc' };
+  hostingProvider: string;
+  source: { kind: 'local-spec'; repository: string; specRevision: number; specDigest: string };
+  mode: 'connect';
+  stage: 'scope-preparation';
+  keys: [];
+  hostIdentity?: never;
+  purpose?: never;
+  deployment?: never;
+  scopePreparation?: never;
+  migrationTargets?: never;
+  installed?: never;
+}
+export type CloudInstallationExecutableIntent = CloudInstallationIntent | LocalCloudScopePreparationIntent;
+export interface LocalCloudScopePreparationAuthentication {
+  kind: 'local-administrator';
+  administrator: { getAccessToken(scope: string, signal: AbortSignal): Promise<string> };
+}
+export type CloudInstallationAuthenticationFor<I extends CloudInstallationExecutableIntent> =
+  I extends LocalCloudScopePreparationIntent ? LocalCloudScopePreparationAuthentication : CloudInstallationAuthentication;
+export interface LocalCloudScopePreparationCapability {
+  schemaVersion: 1;
+  parseScope(value: unknown): Record<string, string>;
+  parseRecord(value: unknown): CloudInstallationRecord<LocalCloudScopePreparationIntent>;
+  create(nativeScope: Record<string, string>, signal?: AbortSignal): Promise<{ driver: CloudInstallationDriver<LocalCloudScopePreparationIntent>;
+    authentication: LocalCloudScopePreparationAuthentication }>;
+}
 export interface CloudInstallationAction extends PlanAction {
   resource: PlanAction['resource'] & { provider: CloudInstallationProvider };
   metadata: {
@@ -104,9 +134,9 @@ export interface CloudInstallationAttempt {
   externalUrl?: string;
   reason?: CloudInstallationReason;
 }
-export interface CloudInstallationProviderContext {
-  intent: CloudInstallationIntent;
-  authentication: CloudInstallationAuthentication;
+export interface CloudInstallationProviderContext<I extends CloudInstallationExecutableIntent = CloudInstallationIntent> {
+  intent: I;
+  authentication: CloudInstallationAuthenticationFor<I>;
   signal: AbortSignal;
   /** Verified exact predecessor identities; name/tag matches cannot replace these. */
   completed: Readonly<Record<string, CloudInstallationEvidence>>;
@@ -122,7 +152,9 @@ export interface CloudInstallationScopeDiscovery {
   authority: 'not-verified';
   cursor?: string;
 }
-export interface CloudInstallationDriver {
+export interface CloudInstallationDriver<I extends CloudInstallationExecutableIntent = CloudInstallationIntent> {
+  /** Only a single empty-project action is admitted by the local kernel. */
+  readonly localScopePreparation?: { hostingProvider: string };
   readonly provider: CloudInstallationProvider;
   /** Explicit separate installation capability; collection support never implies deployment authority. */
   deployment?: {
@@ -142,33 +174,33 @@ export interface CloudInstallationDriver {
   };
   /** Optional provider-owned scope preparation; absence is explicitly unsupported. */
   readonly scopePreparation?: {
-    resolvedScope(record: CloudInstallationRecord): Record<string, string>;
+    resolvedScope(record: CloudInstallationRecord<I>): Record<string, string>;
     /** A prepared project may require one more reviewed billing scope before collection. */
     continuationStage?(record: CloudInstallationRecord): CloudInstallationStage;
     /** Native ownership/billing selected after bootstrap must be shown in the next review. */
-    reviewResources(record: CloudInstallationRecord): NonNullable<CloudInstallationReview['resources']>;
+    reviewResources(record: CloudInstallationRecord<I>): NonNullable<CloudInstallationReview['resources']>;
     /** Exact partial installation trust only; null proves that this stage installed no trust. */
-    disconnectionIntent?(record: CloudInstallationRecord, installationId: string): CloudInstallationIntent | null;
+    disconnectionIntent?(record: CloudInstallationRecord<I>, installationId: string): I | null;
   };
   /** All three parsers must reject unknown fields and credential/value payloads. */
   parseScope(value: unknown): Record<string, string>;
-  parseAction(value: unknown, intent: CloudInstallationIntent): CloudInstallationAction;
-  parseEvidence(value: unknown, intent: CloudInstallationIntent): CloudInstallationEvidence;
+  parseAction(value: unknown, intent: I): CloudInstallationAction;
+  parseEvidence(value: unknown, intent: I): CloudInstallationEvidence;
   /** Optional bounded native discovery; the host separately authorizes the app's setup session. */
   discoverScopes?(context: { authentication: CloudInstallationAuthentication; signal: AbortSignal; cursor?: string;
     sourceScope?: Pick<CloudInstallationIntent, 'customerId' | 'appId' | 'environment' | 'installationId'>;
     migrationTargets?: CloudInstallationIntent['migrationTargets'] }): Promise<CloudInstallationScopeDiscovery>;
-  plan(context: CloudInstallationProviderContext): Promise<{ actions: CloudInstallationAction[]; review: CloudInstallationReview;
+  plan(context: CloudInstallationProviderContext<I>): Promise<{ actions: CloudInstallationAction[]; review: CloudInstallationReview;
     /** Digest-bound provider prerequisite; confirmations cannot authorize any action in a blocked plan. */
     blockedReason?: CloudInstallationReason }>;
   /** Read-only. 'action-required' is legal only before an attempt exists. */
-  inspect(context: CloudInstallationProviderContext & { action: CloudInstallationAction }): Promise<CloudInstallationObservation>;
+  inspect(context: CloudInstallationProviderContext<I> & { action: CloudInstallationAction }): Promise<CloudInstallationObservation>;
   /** Exactly one reviewed action; no automatic write retries or unrelated prerequisites. */
-  mutate(context: CloudInstallationProviderContext & { action: CloudInstallationAction; attempt: CloudInstallationAttempt }): Promise<CloudInstallationMutation>;
+  mutate(context: CloudInstallationProviderContext<I> & { action: CloudInstallationAction; attempt: CloudInstallationAttempt }): Promise<CloudInstallationMutation>;
   /** Read-only, correlating the exact retained attempt. Absence alone never proves no effect. */
-  recover(context: CloudInstallationProviderContext & { action: CloudInstallationAction; attempt: CloudInstallationAttempt }): Promise<CloudInstallationObservation>;
+  recover(context: CloudInstallationProviderContext<I> & { action: CloudInstallationAction; attempt: CloudInstallationAttempt }): Promise<CloudInstallationObservation>;
   /** Pure projection of verified native evidence; no credentials and no provider calls. */
-  connections(record: CloudInstallationRecord): CloudInstallationConnection[];
+  connections(record: CloudInstallationRecord<I>): CloudInstallationConnection[];
 }
 export interface CloudInstallationConnection {
   key: string;
@@ -176,32 +208,32 @@ export interface CloudInstallationConnection {
   /** Provider's strict keyless authorization identifiers, never credential material. */
   writerAuthorization: Record<string, string>;
 }
-export interface CloudInstallationRecord {
+export interface CloudInstallationRecord<I extends CloudInstallationExecutableIntent = CloudInstallationIntent> {
   schemaVersion: 1;
   installationId: string;
   revision: number;
-  intent: CloudInstallationIntent;
+  intent: I;
   plan: { digest: string; actions: CloudInstallationAction[]; review: CloudInstallationReview; blockedReason?: CloudInstallationReason };
   status: 'review-required' | 'pending' | 'blocked' | 'scope-ready' | 'ready' | 'disconnected';
   attempts: CloudInstallationAttempt[];
   completed: Record<string, CloudInstallationEvidence>;
   reason?: CloudInstallationReason;
 }
-export interface CloudInstallationStore {
-  read(installationId: string): Promise<CloudInstallationRecord | null>;
+export interface CloudInstallationStore<I extends CloudInstallationExecutableIntent = CloudInstallationIntent> {
+  read(installationId: string): Promise<CloudInstallationRecord<I> | null>;
   /** Atomic create/update. False is a conflict; never continue provider writes. */
-  compareAndSwap(installationId: string, expectedRevision: number | null, next: CloudInstallationRecord): Promise<boolean>;
+  compareAndSwap(installationId: string, expectedRevision: number | null, next: CloudInstallationRecord<I>): Promise<boolean>;
 }
-export interface CloudInstallationContext {
-  driver: CloudInstallationDriver;
-  store: CloudInstallationStore;
-  authentication: CloudInstallationAuthentication;
+export interface CloudInstallationContext<I extends CloudInstallationExecutableIntent = CloudInstallationIntent> {
+  driver: CloudInstallationDriver<I>;
+  store: CloudInstallationStore<I>;
+  authentication: CloudInstallationAuthenticationFor<I>;
   /** Revalidate app membership/source/setup approval immediately before every provider call. */
-  authorize(input: { intent: CloudInstallationIntent; phase: 'plan' | 'inspect' | 'mutate' | 'recover'; planDigest?: string; actionId?: string }): Promise<boolean>;
+  authorize(input: { intent: I; phase: 'plan' | 'inspect' | 'mutate' | 'recover'; planDigest?: string; actionId?: string }): Promise<boolean>;
   signal?: AbortSignal;
   timeoutMs?: number;
 }
-export interface CloudInstallationApplyInput extends CloudInstallationContext {
+export interface CloudInstallationApplyInput<I extends CloudInstallationExecutableIntent = CloudInstallationIntent> extends CloudInstallationContext<I> {
   installationId: string;
   planDigest: string;
   confirmActions: string[];

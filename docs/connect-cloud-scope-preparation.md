@@ -19,6 +19,52 @@ boundary. [AWS account creation](https://docs.aws.amazon.com/organizations/lates
 and [Google billing contract](https://github.com/googleapis/googleapis/blob/master/google/cloud/billing/v1/cloud_billing.proto)
 are independent sources; this matrix does not claim live compatibility.
 
+## Local operator: empty-project allocation
+
+Hypercloud cannot use its own hosted identity before that host exists. The local
+operator path therefore has a separate, explicit administrator execution kind;
+it never invents a future service-account identity or turns local login into a
+collection or deployment credential. Its source is the exact local spec revision
+and digest, not a fabricated Git commit. Existing hosted intents and their digests
+retain their browser/host authentication contract.
+
+The desired `hosting.scopePreparation` contains `schemaVersion: 1`,
+`authentication: local-default`, and provider-owned `nativeScope`. CloudRun's
+strict native scope is `scopeKind: project-allocation`,
+`allocationMode: create-exclusive-v1`, exact `projectId`, `displayName`, and an
+optional explicit `parent`. Billing fields, existing scope coordinates, secret
+keys, hosted identities, deployment purpose and predecessor continuations are
+not accepted. AWS account creation and Azure subscription creation remain
+unsupported by this local capability; ordinary local authentication to their
+existing accounts is a different capability.
+
+The provider factory loads the real Google user ADC client, boundedly refreshes
+its transient token, and scopes native requests to the reviewed project. A quota
+project may supply the documented quota header; it never changes the resource
+target. Service-account and impersonated ADC sources are not silently substituted.
+Credentials, local credential-file contents and token responses are never part
+of the plan, journal, receipts or command result.
+
+The shared kernel admits exactly one project/scope/API action for this local
+execution kind. Normal plan/apply authority binds that same action to the local
+spec and durable operation, and the shared CAS attempt is written before the
+exclusive POST. No billing read or write, API enablement, identity grant,
+connection publication, database or workload belongs to this stage. A successful
+terminal operation and fresh lifetime proof produce `scope-ready`: **an empty
+project, not a configured host**. There is no automatic hosted continuation or
+deletion authority. Billing and other setup require separate desired-state plans.
+
+The local no-host counterexample failed three shared lifecycle tests before this
+execution contract. Four native transport cases then failed because the old
+project scope required billing; they passed with the project-only scope. The
+real ADC loader/OAuth/CRM boundary is tested using a temporary synthetic user
+credential file and reconstructed HTTP responses. An already-cancelled token
+request initially still started OAuth refresh; a separate regression now checks
+that cancellation prevents dispatch. These are offline contract checks, not a
+completed live project allocation or a claim that the full hosting budget is
+approved. The application integration additionally tests the ordinary persisted
+plan/apply and SQLite journal path.
+
 ## GCP project and billing behavior
 
 Browser discovery offers a proposed project with a deterministic native ID and

@@ -33,6 +33,8 @@ import {
 } from '../domain/spec/spec-bootstrap.js';
 import { executeBootstrap } from '../domain/services/bootstrap.service.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
+import { applyLocalCloudScope } from '../domain/services/local-cloud-scope.service.js';
+import { isDeepStrictEqual } from 'node:util';
 import {
   applyCloudflareDomainRegistration,
   isCloudflareDomainRegistrationAction,
@@ -812,6 +814,24 @@ export async function executePlanApply(ctx: CommandContext, params: {
   alwaysRunBootstrap?: boolean;
 }): Promise<PlanApplyOutcome> {
   const { project, spec, planId } = params;
+  const executor = new ConvergeExecutor();
+  const loaded = executor.loadPlan(planId);
+  if ('error' in loaded) return { kind: 'plan_not_found', error: loaded.error };
+  if (loaded.document.scope === 'cloud-scope') {
+    const envName = loaded.document.environmentName;
+    const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap)
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'Cloud project preparation requires its exact saved local scope and cannot deploy workloads.' }] };
+    const unchangedPlan = () => isDeepStrictEqual(ctx.repos.runs.findById(planId)?.plan, loaded.run.plan);
+    if (!loaded.document.actions.length) {
+      const verified = await applyLocalCloudScope({ project, environment, cloudScope: loaded.document.cloudScope, authorize: unchangedPlan });
+      if (!verified.success) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: verified.message }] };
+    }
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
+      handler: (action, execution) => applyLocalCloudScope({ project, environment, cloudScope: loaded.document.cloudScope, action,
+        authorize: () => ctx.repos.runs.findById(execution.applyRunId)?.status === 'running' && unchangedPlan() }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Only empty cloud project allocation was reviewed. Billing, API enablement, connections and hosting remain separate work.'] };
+  }
   const providerValidation = firstProviderSpecValidationFailure(spec);
   if (providerValidation) {
     return {
@@ -823,11 +843,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
   }
   const planService = new PlanService();
 
-  const executor = new ConvergeExecutor();
-  const loaded = executor.loadPlan(planId);
-  if ('error' in loaded) {
-    return { kind: 'plan_not_found', error: loaded.error };
-  }
   const envName = loaded.document.environmentName;
   const planScope = loaded.document.scope ?? 'full';
   const secretsOnly = planScope === 'secrets';
