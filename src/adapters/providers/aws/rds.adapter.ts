@@ -1,9 +1,12 @@
+import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
+import { AwsSecretsAdapter } from '../secretmanagers/aws-secrets.adapter.js';
 import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import {
   CreateDBInstanceCommand,
   DeleteDBInstanceCommand,
+  ModifyDBInstanceCommand,
   DescribeDBInstancesCommand,
   DescribeDBSubnetGroupsCommand,
   RDSClient,
@@ -148,6 +151,52 @@ function hypervibeTemporaryRule(
 
 export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
   readonly name = 'rds';
+
+  readonly credentialLifecycle = createPostgresCredentialLifecycle(() => this, {
+    identity: async component => {
+      const instance = component.externalId ? await this.describeInstance(component.externalId) : null;
+      if (!instance) throw new Error('The bound RDS instance is absent or unknown.');
+      const arn = instance.MasterUsername === component.bindings.username ? instance.MasterUserSecret?.SecretArn : undefined;
+      if (!arn) return { inputMode: 'supplied' };
+      const scope = component.bindings.providerScope as Record<string, unknown>;
+      if (!/^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:[^\s]+$/.test(arn)
+        || arn.split(':')[3] !== scope.region || arn.split(':')[4] !== scope.accountId) throw new Error('RDS master secret belongs to a different account or region.');
+      return { inputMode: 'provider-generated', providerScope: { masterUserSecretArn: arn } };
+    },
+    readCurrent: async (_component, target) => {
+      if (target.inputMode !== 'provider-generated') return null;
+      if (!this.credentials || !target.providerScope.masterUserSecretArn) throw new Error('The bound RDS master secret is unavailable.');
+      const secrets = new AwsSecretsAdapter();
+      await secrets.connect({ accessKeyId: this.credentials.accessKeyId, secretAccessKey: this.credentials.secretAccessKey, sessionToken: this.credentials.sessionToken, region: this.credentials.region });
+      const value = await secrets.readCredentialJson(target.providerScope.masterUserSecretArn);
+      if (value.username !== target.username || typeof value.password !== 'string' || !value.password) throw new Error('RDS master secret returned a different database user.');
+      return value.password;
+    },
+    rotate: async (_component, target, replacement) => {
+      if (!this.rds) return { state: 'blocked' };
+      const instance = await this.describeInstance(target.externalId);
+      if (!instance) return { state: 'blocked' };
+      if (instance.MasterUsername !== target.username) return undefined;
+      // ApplyImmediately also applies unrelated pending modifications. A scoped
+      // password plan has no authority to apply those changes.
+      if (Object.values(instance.PendingModifiedValues ?? {}).some(value => value !== undefined && (!Array.isArray(value) || value.length > 0))) return { state: 'blocked' };
+      if (target.inputMode === 'provider-generated') {
+        if (!this.credentials || instance.MasterUserSecret?.SecretArn !== target.providerScope.masterUserSecretArn) return { state: 'blocked' };
+        // A generated reset is not idempotent. Disable SDK transport retries;
+        // the encrypted plan recovers from the exact existing secret instead.
+        const resetClient = new RDSClient({ region: this.credentials.region, credentials: { accessKeyId: this.credentials.accessKeyId, secretAccessKey: this.credentials.secretAccessKey, ...(this.credentials.sessionToken ? { sessionToken: this.credentials.sessionToken } : {}) }, maxAttempts: 1 });
+        try {
+          const response = await resetClient.send(new ModifyDBInstanceCommand({ DBInstanceIdentifier: target.externalId, RotateMasterUserPassword: true, ApplyImmediately: true }));
+          return { state: response.DBInstance?.DBInstanceIdentifier === target.externalId ? 'acknowledged' : 'unknown' };
+        } finally { resetClient.destroy(); }
+      }
+      if (instance.MasterUserSecret || !replacement) return { state: 'blocked' };
+      const response = await this.rds.send(new ModifyDBInstanceCommand({
+        DBInstanceIdentifier: target.externalId, MasterUserPassword: replacement, ApplyImmediately: true,
+      }));
+      return { state: response.DBInstance?.DBInstanceIdentifier === target.externalId ? 'acknowledged' : 'unknown' };
+    },
+  });
 
   readonly capabilities: DatabaseCapabilities = {
     supportedDatabases: ['postgres'],

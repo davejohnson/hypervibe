@@ -51,6 +51,7 @@ describe('Fly.io exact-SHA workflow', () => {
         const body = JSON.parse(String(init.body));
         expect(body.config.mounts).toEqual(mounts);
         expect(body.current_version).toBe('version-1');
+        expect(body.min_secrets_version).toBe(42);
         machine = { ...machine, instance_id: 'version-2', config: body.config };
         if (dropMount) machine.config.mounts = [];
         return Response.json(machine);
@@ -61,6 +62,7 @@ describe('Fly.io exact-SHA workflow', () => {
       throw new Error(`Unexpected provider operation ${path}`);
     });
     const env = {
+      HYPERVIBE_CREDENTIAL_OPERATIONS: JSON.stringify({ web: { serviceId: deployTarget.providerServiceIds[0], operationId: 'reviewed-operation', configurationVersion: 42 } }),
       FLY_API_TOKEN: 'test-token', FLY_ORGANIZATION_SLUG: 'hypervibe-test',
       FLY_SERVICE_BINDINGS_JSON: JSON.stringify(deployTarget.providerServiceIds),
       FLY_REGISTRY_APP: 'hv-web-app', FLY_IMAGE_URI: image, DEPLOY_SHA: sha,
@@ -74,10 +76,11 @@ describe('Fly.io exact-SHA workflow', () => {
           .find((step) => step.name === 'Deploy immutable digest to existing Fly.io Machines')!.with!.script!;
     const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
     const run = new AsyncFunction('process', 'fetch', 'Buffer', 'AbortSignal', 'readFile', 'writeFile', 'execFileSync', 'core', source);
+    const core = { info: vi.fn(), setOutput: vi.fn() };
     const execution = run({ env }, fetchMock, Buffer, AbortSignal,
       async (path: string) => path === '.hypervibe-deploy-sha' ? sha : 'registry.example/image:tag',
       vi.fn(), (_path: string, args: string[]) => args[0] === 'image' ? JSON.stringify([image]) : '',
-      { info: vi.fn(), setOutput: vi.fn() });
+      core);
     if (dropMount) {
       await expect(execution).rejects.toThrow(/mount|filesystem/i);
       return;
@@ -86,6 +89,7 @@ describe('Fly.io exact-SHA workflow', () => {
     expect(fetchMock.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(1);
     expect(machine.config.mounts).toEqual(mounts);
     expect(machine.config.image).toBe(image);
+    if (kind === 'github') expect(core.setOutput).toHaveBeenCalledWith('credential_deployments', JSON.stringify([{ serviceId: deployTarget.providerServiceIds[0], deploymentIds: ['version-2'], configurationVersion: 42 }]));
   });
 
   it('updates only existing exact App and Machine identities to an immutable digest', () => {

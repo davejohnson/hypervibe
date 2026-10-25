@@ -860,6 +860,38 @@ Tests should fail if new provider guidance omits these basics. Update `src/domai
 
 ## Runtime Secrets
 
+Credential roles may explicitly link multiple existing secret slots using the same
+`credential` descriptor (role, purpose, source, intended identity and user evidence).
+`hv_plan scope="credentials" credential=<role> intent="adopt"|"rotate"` is an isolated,
+confirmation-gated stage of the same persisted plan/apply lifecycle. Adoption proves
+existing runtime values match and makes no provider writes. Rotation freezes one
+replacement in the existing encrypted plan, locks every affected environment, and
+records partial/uncertain progress in local-only environment bindings. Tracked
+sources cannot be overwritten by bulk dotenv or ordinary secret inputs. CI uses
+accepted frozen values for exact declared destinations. Registry-copy writes use
+an optional provider capability and preserve source/image/instance identity.
+Readback resolves uncertain runtime writes; write-only ambiguity requires explicit
+review before replay. Registered hosting capabilities distinguish deferred
+updates from native configuration rollouts and value readback from acknowledgement.
+Native database roles use confirmed authentication and issuer/consumer stages;
+endpoint-bound webhook roles preserve the exact endpoint and use the provider's
+supported same-endpoint signing-secret roll. Managed CI release evidence binds
+accepted operations to exact native deployments; traffic and instance coverage
+remain distinct. See
+[credential lifecycle](docs/credential-lifecycle.md) for schemas, provider limits,
+review, recovery, validation evidence and regression coverage.
+
+
+`hv_secrets view="inventory"` is a read-only application-layer projection of
+declared roles/references, local candidates, accepted bindings, action receipts,
+CI destinations and exact hosting observations. It does not adopt credentials or
+hydrate local state. Configuration equality, recorded synchronization, deployment
+identity, credential authentication and application operation remain distinct.
+Write-only values, missing source provenance, rotation/expiry, account identity
+and old-instance retirement remain explicitly unknown without supporting evidence.
+See [credential inventory](docs/credential-inventory.md) for the phase boundary,
+provider evidence and subsequent adoption/rotation work.
+
 `ProjectSpec.secrets` has two explicit ownership modes. Use Hypervibe ownership
 for opaque application values a human should not choose; use delegated
 ownership only for a value issued or controlled outside Hypervibe.
@@ -1128,8 +1160,14 @@ configuration write as non-secret rollout evidence.
 `hv_status` must report `restart_required` and must not report the environment
 in sync while that same deployment is still active. A later provider-observed
 successful deployment with a different exact
-identity satisfies the rollout; an absent, failed, or unobservable deployment
-does not. For CI-triggered environments, the status guidance points back to the
+identity can satisfy an ordinary rollout; an absent, failed, or unobservable
+one does not. Credential rollouts additionally require accepted selected-key
+coverage bound to the exact native or managed deployment, or a matching immutable
+configuration snapshot. Earlier active consumers keep activation pending. Traffic
+coverage and instance retirement remain distinct, and neither proves fresh SQL
+authentication or the application's operation. See
+[credential lifecycle](docs/credential-lifecycle.md) for the evidence contract.
+For CI-triggered environments, the status guidance points back to the
 managed CI trigger/status path instead of bypassing that release authority with
 a provider redeploy.
 

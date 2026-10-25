@@ -114,13 +114,14 @@ describe('database credential aliases in public status', () => {
 
   it('reports verified references separately from unchecked SQL authentication', async () => {
     const { envelope } = await statusFixture('verified');
-    expect(envelope.data.inSync).toBe(true);
+    expect(envelope.data.inSync).toBe(false);
     expect(envelope.data.databaseAliases).toMatchObject({ state: 'verified', checkedNames: names, changeNames: [], authentication: 'unchecked' });
+    expect(envelope.data.databaseConsumers).toEqual(expect.arrayContaining([expect.objectContaining({ resolvedConfiguration: 'unknown', authentication: 'unchecked' })]));
   });
 
   it('does not inspect aliases without a declaration', async () => {
     const { envelope, inspect } = await statusFixture('unknown', false);
-    expect(envelope.data.inSync, JSON.stringify(envelope.data)).toBe(true);
+    expect(envelope.data.inSync, JSON.stringify(envelope.data)).toBe(false);
     expect(envelope.data.databaseAliases).toBeUndefined();
     expect(inspect).not.toHaveBeenCalled();
   });

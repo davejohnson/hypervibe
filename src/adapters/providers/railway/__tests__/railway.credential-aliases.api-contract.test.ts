@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import pg from 'pg';
 import type { Component } from '../../../../domain/entities/component.entity.js';
 import { createRailwayDatabaseAdapter } from '../railway-database.factory.js';
 import { railwayHttpFixture, projectId, productionId, stagingId, postgresTemplate } from './railway-http.fixture.js';
@@ -29,6 +30,39 @@ async function fixture(options: Parameters<typeof railwayHttpFixture>[0] = {}) {
 // unrendered references, deployment rendering, additive upsert and skipDeploys.
 // This proves configuration reconciliation, not live SQL or running containers.
 describe('Railway database credential alias API contract', () => {
+  it('requires alias review before native rotation and refuses replacements that break authored URL references', async () => {
+    const f = await fixture();
+    vi.spyOn(f.database, 'observeDatabase').mockResolvedValue({ provider: 'railway', engine: 'postgres', externalId: 'staging-db', status: 'running' });
+    const port = f.database.credentialLifecycle!;
+    const selection = { environment: f.environment.name, component: f.component.id, username: 'postgres', database: 'synthetic-old-password' };
+    await expect(port.inspect(f.environment, f.component, selection)).rejects.toThrow('hv_plan scope="database-credential-aliases"');
+    const values = f.variables.get(`staging-db/${stagingId}`)!;
+    values.PGPASSWORD = ref; values.DATABASE_URL = uri(ref); values.DATABASE_PRIVATE_URL = uri(ref);
+    const target = await port.inspect(f.environment, f.component, selection);
+    const connect = vi.spyOn(pg.Client.prototype, 'connect');
+    expect(await port.rotate(f.environment, f.component, target, 'unsafe@password')).toEqual({ state: 'blocked' });
+    expect(connect).not.toHaveBeenCalled();
+    expect(f.mutations).toEqual([]);
+    expect(f.contractErrors).toEqual([]);
+  });
+  it('updates only the password issuer after SQL authentication, preserves references and refuses deleted environments', async () => {
+    const f = await fixture();
+    const values = f.variables.get(`staging-db/${stagingId}`)!;
+    values.PGPASSWORD = ref;
+    values.DATABASE_URL = uri(ref);
+    values.DATABASE_PRIVATE_URL = uri(ref);
+    const target = { projectId, environmentId: stagingId, serviceId: 'staging-db' };
+    await (f.adapter as any).synchronizeDatabasePasswordIssuer(target, 'synthetic-next-password');
+    expect(f.variables.get(`staging-db/${stagingId}`)).toEqual({ ...values, POSTGRES_PASSWORD: 'synthetic-next-password' });
+    expect(f.mutations).toEqual([{ field: 'variableCollectionUpsert', args: { input: {
+      ...target, variables: { POSTGRES_PASSWORD: 'synthetic-next-password' }, replace: false, skipDeploys: true,
+    } } }]);
+    await (f.adapter as any).synchronizeDatabasePasswordIssuer(target, 'synthetic-next-password');
+    expect(f.mutations).toHaveLength(1);
+    await expect((f.adapter as any).synchronizeDatabasePasswordIssuer({ ...target, environmentId: 'deleted-environment' }, 'another-password')).rejects.toThrow();
+    expect(f.mutations).toHaveLength(1);
+    expect(f.contractErrors).toEqual([]);
+  });
   it('accepts the recorded official template composed references without flattening them', async () => {
     const f = await fixture();
     const service = Object.values(postgresTemplate.serializedConfig.services)[0] as {

@@ -240,6 +240,7 @@ export class StripeAdapter {
     const fetchOptions: RequestInit = {
       method,
       headers,
+      redirect: 'error',
       signal: AbortSignal.timeout(STRIPE_REQUEST_TIMEOUT_MS),
     };
 
@@ -543,6 +544,26 @@ export class StripeAdapter {
       if (error instanceof StripeApiError && error.status === 404) return null;
       throw error;
     }
+  }
+
+  /** Read the actual account and exact endpoint. API-key prefixes do not prove
+   * account/sandbox ownership, and endpoint GET never proves a signing value. */
+  async inspectWebhookCredential(mode: StripeMode, endpointId: string): Promise<{
+    accountId: string; endpointId: string; livemode: boolean; url: string; events: string[]; status: 'enabled' | 'disabled';
+  }> {
+    if (!/^we_[A-Za-z0-9]+$/.test(endpointId)) throw new Error('A valid exact Stripe webhook endpoint ID is required.');
+    const [account, endpoint] = await Promise.all([
+      this.request<unknown>(mode, 'GET', '/account'),
+      this.request<unknown>(mode, 'GET', `/webhook_endpoints/${encodeURIComponent(endpointId)}`),
+    ]);
+    const accountResult = z.object({ id: z.string().regex(/^acct_[A-Za-z0-9]+$/), object: z.literal('account') }).safeParse(account);
+    const endpointResult = z.object({ id: z.string().regex(/^we_[A-Za-z0-9]+$/), object: z.literal('webhook_endpoint'),
+      livemode: z.boolean(), url: z.string().url(), enabled_events: z.array(z.string()), status: z.enum(['enabled', 'disabled']) }).safeParse(endpoint);
+    if (!accountResult.success || !endpointResult.success || endpointResult.data.id !== endpointId) {
+      throw new StripeApiError('Stripe webhook account or endpoint identity could not be verified.', 200, 'malformed_response');
+    }
+    return { accountId: accountResult.data.id, endpointId: endpointResult.data.id, livemode: endpointResult.data.livemode,
+      url: endpointResult.data.url, events: endpointResult.data.enabled_events, status: endpointResult.data.status };
   }
 
   async createWebhookEndpoint(

@@ -1,3 +1,4 @@
+import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
 import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { createHash, randomBytes } from 'crypto';
 import type { Component } from '../../../domain/entities/component.entity.js';
@@ -52,6 +53,17 @@ interface AzureResourceGroup {
 
 export class AzurePostgresAdapter implements IDatabaseAdapter {
   readonly name = PROVIDER;
+
+  readonly credentialLifecycle = createPostgresCredentialLifecycle(() => this, {
+    rotate: async (_component, target, replacement) => {
+      if (!this.client || !replacement) return { state: 'blocked' };
+      const server = await this.client.getServer(target.externalId);
+      if (!server) return { state: 'blocked' };
+      if (server.properties?.administratorLogin !== target.username) return undefined;
+      await this.client.updateAdministratorPassword(target.externalId, replacement);
+      return { state: 'acknowledged' };
+    },
+  });
 
   readonly capabilities: DatabaseCapabilities = {
     supportedDatabases: ['postgres'],

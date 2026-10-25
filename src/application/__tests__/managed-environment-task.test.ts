@@ -111,6 +111,30 @@ function fixture() {
 
 afterEach(() => vi.restoreAllMocks());
 describe('private task release authorization', () => {
+  it('binds a declared business-operation receipt to its reviewed rotation UUID and exact native deployment', async () => {
+    const { params, runJob, evidence } = fixture();
+    const operationId = '22222222-2222-4222-8222-222222222222';
+    const descriptor = { role: 'mail-delivery', label: 'Mail delivery', purpose: 'Deliver an application test message', kind: 'sendgrid', source: 'env:SENDGRID_KEY',
+      verification: [{ kind: 'environment-task', environment: 'staging', service: 'web', task: 'setup', operationIdInput: 'credential_operation', requiredCounts: { applied: 1 }, maxAgeSeconds: 900 }] };
+    const verificationTask = { ...task, inputs: { ...task.inputs, credential_operation: { type: 'string' as const, flag: '--credential-operation', description: 'Accepted rotation UUID', required: true, default: '' } } };
+    // Existing release authorization is intentionally unchanged; this task check
+    // only adds receipt binding after that same fixed workflow/image authority.
+    params.spec = projectSpecSchema.parse({ ...params.spec, secrets: { SENDGRID_API_KEY: { ownership: 'delegated', principal: 'user:owner', environments: ['staging'], credential: descriptor } }, github: { ...params.spec.github, actions: { setup: verificationTask } } });
+    params.rawSpec = structuredClone(params.spec) as any;
+    const runtime = { exports: {} };
+    new Function('require', 'module', 'exports', releaseEvidenceValidationRuntime())(createRequire(import.meta.url), runtime, runtime.exports);
+    evidence.deploymentContractFingerprint = (runtime.exports as { deploymentContractFingerprint(spec: unknown, environment: string): string }).deploymentContractFingerprint(params.rawSpec, 'staging');
+    params.inputs = { ...params.inputs, dry_run: false, credential_operation: operationId } as any;
+    runJob.mockResolvedValue({ jobId: 'job-1', receipt: { success: true }, status: 'completed', exitCode: 0,
+      output: '__HLS_TESTER_SETUP_RECEIPT:{"version":1,"mode":"applied","counts":{"applied":1,"skipped":0,"propertyCreated":0}}' });
+    const observe = vi.fn(async () => ({ provider: 'railway', projectExists: true, projectId: 'project-staging', environmentId: 'env-staging', observedAt: new Date().toISOString(), partial: false, warnings: [], completeness: { services: 'complete', serviceIdentities: 'complete' },
+      services: [{ name: 'web', externalId: 'web-staging', status: 'running', deployment: { id: 'native-deployment', activeDeploymentIds: ['native-deployment'], activeDeploymentCoverage: 'instances' } }] }));
+    vi.mocked(providerRegistry.createAdapter).mockResolvedValue({ runJob, observe } as any);
+    const result = await executeManagedEnvironmentTask(params);
+    expect(result).toMatchObject({ credentialOperations: [{ role: 'mail-delivery', operationId, deploymentId: 'native-deployment', status: 'passed', counts: { applied: 1 } }] });
+    expect(observe).toHaveBeenCalledTimes(2);
+  });
+
   it('executes the verified staging digest with typed literal argv and safe final counts', async () => {
     const { params, runJob, image } = fixture();
     const result = await executeManagedEnvironmentTask(params);

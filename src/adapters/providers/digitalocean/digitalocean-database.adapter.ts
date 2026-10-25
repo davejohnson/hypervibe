@@ -28,8 +28,22 @@ import { DigitalOceanCacheAdapter } from './digitalocean-cache.adapter.js';
 export { DigitalOceanCredentialsSchema } from './digitalocean.credentials.js';
 export type { DigitalOceanCredentials } from './digitalocean.credentials.js';
 
+import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
+
 export class DigitalOceanDatabaseAdapter implements IDatabaseAdapter {
   readonly name = 'digitalocean';
+  readonly credentialLifecycle = createPostgresCredentialLifecycle(() => this, {
+    inputMode: 'provider-generated',
+    readCurrent: async (_component, target) => {
+      if (!this.client) throw new Error('Database adapter is not connected.');
+      return (await this.client.getDatabaseUserCredentials(target.externalId, target.username)).password;
+    },
+    rotate: async (_component, target) => {
+      if (!this.client) return { state: 'blocked' };
+      const credentials = await this.client.resetDatabaseUserAuthentication(target.externalId, target.username);
+      return { state: 'acknowledged', replacement: credentials.password };
+    },
+  });
 
   readonly capabilities: DatabaseCapabilities = {
     supportedDatabases: ['postgres'],

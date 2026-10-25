@@ -116,6 +116,17 @@ function setup() {
 }
 
 describe('one-time project secret import', () => {
+  it('records receipt and import times explicitly without replacing them on repeat reads', async () => {
+    const f = setup();
+    await f.importer.run({ action: 'start', requestId, env: 'staging' });
+    await f.importer.run({ action: 'receive', requestId, env: 'staging', confirm: true });
+    const saved = f.context.repos.connections.findAllByProvider('hypervibe-secret-import')[0];
+    const state = f.context.secretStore.decryptObject<Record<string, unknown>>(saved.credentialsEncrypted);
+    expect(state).toMatchObject({ receivedAt: now().toISOString(), importedAt: now().toISOString() });
+    expect(state).not.toHaveProperty('received');
+    await f.importer.run({ action: 'receive', requestId, env: 'staging', confirm: true });
+    expect(f.context.repos.connections.findById(saved.id)?.credentialsEncrypted).toBe(saved.credentialsEncrypted);
+  });
   it.each(['repository', 'environment', 'sourceRevision', 'sourceDigest', 'keys'])(
     'rejects mismatched server %s before POST',
     async (field) => {

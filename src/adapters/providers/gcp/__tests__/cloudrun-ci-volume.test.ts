@@ -14,13 +14,14 @@ const image = `${region}-docker.pkg.dev/${project}/hypervibe/owner/app@sha256:${
 const credentials = { client_email: 'ci@example.test', private_key: crypto.generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) };
 const encoded = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64');
 
-function fixture(kind: 'github' | 'portable', fault?: string, rollback = false) {
+function fixture(kind: 'github' | 'portable', fault?: string, rollback = false, noVolumes = false) {
   const original: any = { name: resourceName, uid: 'stable-uid', etag: 'version-1', generation: '1', observedGeneration: '1', terminalCondition: { state: 'CONDITION_SUCCEEDED' }, template: {
     containers: [{ name: 'web', image: 'old-image', volumeMounts: [{ name: 'data', mountPath: '/data' }] }],
     volumes: [{ name: 'data', nfs: { server: '10.0.0.2', path: '/data', readOnly: false } }],
     serviceAccount: 'runtime@test-project.iam.gserviceaccount.com', executionEnvironment: 'EXECUTION_ENVIRONMENT_GEN2',
     vpcAccess: { networkInterfaces: [{ network: 'private', subnetwork: 'private-subnet' }], egress: 'PRIVATE_RANGES_ONLY' },
   } };
+  if (noVolumes) { delete original.template.volumes; delete original.template.containers[0].volumeMounts; delete original.template.vpcAccess; }
   if (fault === 'missing-etag') delete original.etag;
   let observed = structuredClone(original);
   const patches: any[] = [];
@@ -53,11 +54,15 @@ function fixture(kind: 'github' | 'portable', fault?: string, rollback = false) 
     throw new Error('Unexpected HTTP request ' + url);
   };
   const script = kind === 'portable' ? buildCloudRunPortableRuntime().replace(/^import .*;\n/gm, '') : extractGitHubScript('jobs:\n  deploy:\n    steps:\n' + buildCloudRunGitHubActionsSteps({ environmentName: 'staging', kind: 'staging', branch: 'main', autoDeployOnPush: true, serviceNames: ['web'], providerServiceIds: ['web'], providerScope: { projectId: project, region }, providerRegion: region }).steps, 'Deploy image to Cloud Run');
-  const run = () => new AsyncFunction('require', 'process', 'fetch', 'Buffer', 'core', 'createSign', 'execFileSync', 'readFile', 'writeFile', script)(() => crypto, { env, stdout: { write: vi.fn() } }, fetchImpl, Buffer, { info: vi.fn() }, crypto.createSign, (_file: string, args: string[]) => args[0] === 'push' ? 'digest: sha256:' + 'b'.repeat(64) : '', async (file: string) => file === '.hypervibe-deploy-sha' ? 'a'.repeat(40) : 'registry.example.test/source:tag', vi.fn());
+  const run = () => new AsyncFunction('require', 'process', 'fetch', 'Buffer', 'core', 'createSign', 'execFileSync', 'readFile', 'writeFile', script)(() => crypto, { env, stdout: { write: vi.fn() } }, fetchImpl, Buffer, { info: vi.fn(), setOutput: vi.fn() }, crypto.createSign, (_file: string, args: string[]) => args[0] === 'push' ? 'digest: sha256:' + 'b'.repeat(64) : '', async (file: string) => file === '.hypervibe-deploy-sha' ? 'a'.repeat(40) : 'registry.example.test/source:tag', vi.fn());
   return { run, patches, original };
 }
 
 describe.each(['github', 'portable'] as const)('%s Cloud Run filesystem release', (kind) => {
+  it('rejects a changed runtime principal even when the workload has no filesystem mounts', async () => {
+    const f = fixture(kind, 'principal', false, true);
+    await expect(f.run()).rejects.toThrow(/runtime|principal|identity/i); expect(f.patches).toHaveLength(1);
+  });
   it.each([false, true])('preserves existing storage and uses optimistic concurrency (rollback=%s)', async (rollback) => {
     const f = fixture(kind, undefined, rollback); await f.run();
     expect(f.patches).toHaveLength(1);

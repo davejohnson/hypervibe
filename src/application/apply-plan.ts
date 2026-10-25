@@ -1,3 +1,4 @@
+import { applyCredentialLifecycle, pendingCredentialUpdate } from '../domain/services/credential-lifecycle.service.js';
 import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from '../domain/services/database-credential-aliases.service.js';
 import { applyScheduleActivation } from '../domain/services/schedule-activation.service.js';
 import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js';
@@ -843,6 +844,24 @@ export async function executePlanApply(ctx: CommandContext, params: {
       requirements: loaded.document.inputRequired,
     };
   }
+  const projectForPreflight = spec.gitRemoteUrl
+    ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
+    : project;
+  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  const pendingDatabaseAliases = environment ? ctx.repos.components.findByEnvironmentId(environment.id)
+    .some(component => component.bindings.credentialAliasRepair !== undefined) : false;
+  if (pendingDatabaseAliases && planScope !== 'database-credential-aliases') {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'A database reference repair needs readback verification. Recover its isolated plan before other mutations.' }] };
+  }
+  if (planScope === 'credentials') {
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'Credential plans require the exact existing environment and cannot bootstrap.' }] };
+    const result = await applyCredentialLifecycle(ctx, { project: projectForPreflight, spec, specRevision: params.specRevision, planId, confirmActions: params.confirmActions });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Use the managed rollout, then status/health. Configuration, authentication, deployment and application operation are separate outcomes. Revocation remains pending.'] };
+  }
+  const pendingCredential = pendingCredentialUpdate(project.id);
+  if (pendingCredential) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: `Recover credential plan ${pendingCredential} before other lifecycle mutations.` }] };
+
   const rawEnvironmentSpec = spec.environments[envName];
   const envSpec = rawEnvironmentSpec ? withBackupStorageDefaults(rawEnvironmentSpec) : undefined;
   if (!envSpec) {
@@ -874,16 +893,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
       : { kind: 'env_missing', envName };
   }
 
-  const projectForPreflight = spec.gitRemoteUrl
-    ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
-    : project;
-  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
-  const pendingDatabaseAliases = environment ? ctx.repos.components.findByEnvironmentId(environment.id)
-    .some(component => component.bindings.credentialAliasRepair !== undefined) : false;
-  if (pendingDatabaseAliases && planScope !== 'database-credential-aliases') {
-    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
-      reason: 'A database reference repair needs readback verification. Recover its isolated plan before other mutations.' }] };
-  }
   if (planScope === 'database-credential-aliases') {
     if (loaded.document.databaseCredentialAliasesReady !== true || !environment || loaded.run.projectId !== project.id
       || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap) {

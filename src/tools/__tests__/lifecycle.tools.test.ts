@@ -80,6 +80,28 @@ async function makeFullClient() {
 }
 
 describe('hv_destroy', () => {
+  it.each(['database', 'aliases', 'credential', 'rollout'])('preserves %s credential recovery during local project, environment and service deletion', async kind => {
+    const project = new ProjectRepository().create({ name: `credential-delete-${kind}` });
+    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'production', platformBindings: {
+      services: { web: { serviceId: 'web-1' } },
+      ...(kind === 'credential' ? { credentialUpdates: { database: { state: 'pending', planId: 'reviewed-plan' } } } : {}),
+      ...(kind === 'rollout' ? { runtimeRollouts: [{ service: 'web', operationId: 'reviewed-plan' }] } : {}),
+    } });
+    if (kind === 'database' || kind === 'aliases') new ComponentRepository().create({ environmentId: environment.id, type: 'postgres', externalId: 'database-1', bindings: kind === 'database'
+      ? { credentialRotation: { phase: 'database-attempted', planId: 'reviewed-plan' } } : { credentialAliasRepair: { phase: 'attempted' } } });
+    new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {} });
+    const client = await makeClient();
+    try {
+      for (const selector of [{ scope: 'service', name: 'web' }, { scope: 'environment', env: 'production' }, { scope: 'project' }]) {
+        const result = await client.call('hv_destroy', { project: project.name, ...selector, confirm: true });
+        expect(result.ok).toBe(false);
+        expect(result.error.message).toMatch(/credential|activation/i);
+      }
+      expect(new EnvironmentRepository().findById(environment.id)).not.toBeNull();
+      expect(new ProjectRepository().findById(project.id)).not.toBeNull();
+    } finally { await client.close(); }
+  });
+
   it('reports retained volume drift in status even after volume intent is omitted', async () => {
     const { SpecStore } = await import('../../domain/spec/spec.store.js');
     const project = new ProjectRepository().create({ name: 'volume-status', defaultPlatform: 'railway' });
@@ -807,7 +829,7 @@ describe('hv_inspect / hv_import', () => {
         completeness: 'complete',
       },
     });
-    expect(observe).toHaveBeenCalledWith(environment);
+    expect(observe).toHaveBeenCalledWith(environment, { databaseEnvAliases: {} });
     await t.close();
   });
 

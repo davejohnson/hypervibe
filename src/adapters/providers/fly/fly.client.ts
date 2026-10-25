@@ -440,11 +440,12 @@ export class FlyClient {
     }
   }
 
-  async listSecrets(appName: string): Promise<FlyAppSecret[]> {
+  async listSecrets(appName: string, minVersion?: number): Promise<FlyAppSecret[]> {
+    if (minVersion !== undefined && (!Number.isSafeInteger(minVersion) || minVersion < 0)) throw new Error('Fly secrets version is invalid.');
     const response = await this.request<{ secrets?: FlyAppSecret[] }>(
       'GET',
       `/v1/apps/${encodeURIComponent(appName)}/secrets`,
-      { query: { show_secrets: false } }
+      { query: { show_secrets: false, ...(minVersion !== undefined ? { min_version: minVersion } : {}) } }
     );
     if (!Array.isArray(response.secrets)) {
       throw new Error(`Fly.io returned an invalid secret list for app ${appName}.`);
@@ -465,7 +466,8 @@ export class FlyClient {
       { body: { values } }
     );
     const version = Number(response.version);
-    const observed = new Set((await this.listSecrets(appName)).map((secret) => secret.name));
+    const minimumVersion = Number.isSafeInteger(version) && version >= 0 ? version : undefined;
+    const observed = new Set((await this.listSecrets(appName, minimumVersion)).map((secret) => secret.name));
     const unconverged = Object.entries(values).flatMap(([name, value]) => (
       value === null ? observed.has(name) : !observed.has(name)
     ) ? [name] : []);
@@ -474,7 +476,7 @@ export class FlyClient {
         `Fly.io secret update did not converge for app ${appName}: ${unconverged.join(', ')}.`
       );
     }
-    return Number.isInteger(version) && version >= 0 ? version : undefined;
+    return minimumVersion;
   }
 
   async listCertificates(appName: string): Promise<FlyCertificate[]> {
@@ -760,6 +762,17 @@ export class FlyClient {
       );
     }
     return { created: true };
+  }
+
+  async rotatePostgresUserPassword(clusterId: string, username: string): Promise<{ username: string; password: string }> {
+    // Official MPG v2 client deliberately does not retry this generated-password
+    // operation. The lifecycle recovers through the exact credentials GET.
+    const response = await this.request<{ data?: { username?: string; password?: string } }>(
+      'POST', `/v1/postgres/${encodeURIComponent(clusterId)}/users/${encodeURIComponent(username)}/rotate_password`,
+      { body: { kill_sessions: false } }
+    );
+    if (response.data?.username !== username || !response.data.password) throw new Error('Fly.io returned an unknown database credential update.');
+    return { username, password: response.data.password };
   }
 
   async getPostgresUserCredentials(

@@ -70,13 +70,14 @@ export class VaultAdapter implements ISecretManagerAdapter {
 
   async verify(): Promise<SecretManagerVerifyResult> {
     try {
-      const response = await this.request<{ data: { id: string; display_name: string } }>(
+      const response = await this.request<{ data: { display_name?: string } }>(
         'GET',
         '/auth/token/lookup-self'
       );
       return {
         success: true,
-        identity: response.data.display_name || response.data.id,
+        // lookup-self data.id is the authentication token, never a safe label.
+        ...(response.data.display_name ? { identity: response.data.display_name } : {}),
       };
     } catch (error) {
       return {

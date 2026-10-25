@@ -79,7 +79,7 @@ function reviewedTarget(
 it('requires a reviewed workflow migration for the shared backup receipt consumer', () => {
   // Revision 5 workflows reject current v2 backup health receipts. Their v1-only
   // success gate must not remain locked as current after installing this fix.
-  expect(GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION).toBe(6);
+  expect(GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION).toBe(7);
 });
 
 function executeDockerfileStep(workflowContent: string, directory: string): string {
@@ -301,7 +301,7 @@ describe('github tools', () => {
       }
       throw new Error(`Unexpected Railway operation: ${payload.query}`);
     });
-    const providerCore = { info: vi.fn(), warning: vi.fn() };
+    const providerCore = { info: vi.fn(), warning: vi.fn(), setOutput: vi.fn() };
     const deploy = new AsyncFunction(
       'fetch',
       'process',
@@ -608,7 +608,7 @@ describe('github tools', () => {
           },
         },
       }));
-    const core = { info: vi.fn(), warning: vi.fn() };
+    const core = { info: vi.fn(), warning: vi.fn(), setOutput: vi.fn() };
     const execute = new AsyncFunction('fetch', 'process', 'core', script);
     const execution = execute(fetch, {
       env: {

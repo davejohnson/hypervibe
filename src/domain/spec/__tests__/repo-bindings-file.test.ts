@@ -403,6 +403,8 @@ describe('repo bindings delegated metadata', () => {
           requiredAt: now.toISOString(),
           applyRunId: 'apply-1',
           actionIds: ['secret:OWNER_MANAGED_SECRET'],
+          operationId: 'database-rotation',
+          configurationExpectationEncrypted: 'private-encrypted-runtime-expectation',
         }],
       },
       createdAt: now,
@@ -434,14 +436,11 @@ describe('repo bindings delegated metadata', () => {
         instanceScope: { projectId: 'railway-project', environmentId: 'railway-production' },
       });
       expect(document.environments.production.platformBindings.delegatedEnvBindings).toBeUndefined();
-      expect(document.environments.production.platformBindings.runtimeRollouts).toEqual([
-        expect.objectContaining({
-          service: 'worker',
-          provider: 'railway',
-          baselineDeployment: { state: 'present', id: 'deployment-before-config' },
-          actionIds: ['secret:OWNER_MANAGED_SECRET'],
-        }),
-      ]);
+      expect(document.environments.production.platformBindings.runtimeRollouts).toBeUndefined();
+      expect(serialized).not.toContain('private-encrypted-runtime-expectation');
+      const imported = document.environments.production.platformBindings;
+      expect(mergeRepoPlatformBindings(environment.platformBindings, imported).runtimeRollouts).toEqual(environment.platformBindings.runtimeRollouts);
+      expect(() => mergeRepoPlatformBindings(environment.platformBindings, { ...imported, runtimeRollouts: [] })).toThrow(/local|private/i);
     } finally {
       if (oldDisable === undefined) {
         delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;

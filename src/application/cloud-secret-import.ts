@@ -65,6 +65,8 @@ const stateSchema = z
       .optional(),
     expiresAt: z.string().datetime(),
     received: receivedSchema.optional(),
+    receivedAt: z.string().datetime().optional(),
+    importedAt: z.string().datetime().optional(),
     keys: z.array(keySchema).optional(),
     fileDigest: z
       .string()
@@ -80,6 +82,19 @@ const stateSchema = z
         : Boolean(state.token)
   );
 type State = z.infer<typeof stateSchema>;
+/** Existing completed import receipts only; inventory never consumes a request. */
+export function importedCredentialProvenance(context: CommandContext, repository: string, environment: string) {
+  return context.repos.connections.findAllByProvider(PROVIDER).flatMap(connection => {
+    try {
+      const parsed = stateSchema.safeParse(context.secretStore.decryptObject(connection.credentialsEncrypted));
+      if (!parsed.success || parsed.data.status !== 'imported' || parsed.data.repository !== repository || parsed.data.environment !== environment) return [];
+      const state = parsed.data;
+      return (state.keys ?? []).map(key => ({ kind: 'approved-owner-request', requestId: state.requestId,
+        repository, environment, path: path.join(state.root, `.env.${environment}`), key,
+        receivedAt: state.receivedAt ?? null, importedAt: state.importedAt ?? null }));
+    } catch { return []; }
+  });
+}
 export interface SecretImportInput {
   action?: 'start' | 'receive';
   requestId: string;
@@ -457,6 +472,7 @@ export function createCloudSecretImport({
         save({
           ...state,
           status: 'imported',
+          importedAt: now().toISOString(),
           token: undefined,
           received: undefined,
           keys: metadata.keys,
@@ -491,6 +507,7 @@ export function createCloudSecretImport({
         save({
           ...state!,
           status: 'received',
+          receivedAt: now().toISOString(),
           token: undefined,
           received: parsed.data,
         });
@@ -513,6 +530,7 @@ export function createCloudSecretImport({
       save({
         ...state!,
         status: 'imported',
+        importedAt: now().toISOString(),
         token: undefined,
         received: undefined,
         keys: metadata.keys,

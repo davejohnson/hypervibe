@@ -15,6 +15,7 @@ import { ProjectSpecRepository } from '../../adapters/db/repositories/spec.repos
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import * as envParser from '../../utils/env-parser.js';
 // Importing adapters registers providers in the registry.
 import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
@@ -650,6 +651,9 @@ describe('hv_connections', () => {
       provider: 'railway',
       scope: null,
       credentialsSource: 'env',
+      credentialsRef: 'env:HV_TEST_RAILWAY_TOKEN',
+      credentialsKey: 'apiToken',
+      credentialsResolution: { apiToken: { resolvedRef: 'env:HV_TEST_RAILWAY_TOKEN', sourceKey: 'HV_TEST_RAILWAY_TOKEN' } },
     });
     await t.close();
   });
@@ -678,6 +682,7 @@ describe('hv_connections', () => {
     const connection = new ConnectionRepository().findByProvider('railway')!;
     const decrypted = getSecretStore().decryptObject<{ apiToken: string }>(connection.credentialsEncrypted);
     expect(decrypted.apiToken).toBe('token-from-dotenv-ref');
+    expect(new AuditRepository().findByAction('connection.created')[0]?.details).toMatchObject({ credentialsRef: `dotenv:${envPath}#HYPERVIBE_RAILWAY_TOKEN` });
     await t.close();
   });
 
@@ -736,10 +741,16 @@ describe('hv_connections', () => {
     }>(connection.credentialsEncrypted);
     expect(decrypted.apiToken).toBe('gh-combined-token');
     expect(decrypted.packageReadToken).toBe('gh-combined-token');
+    expect(new AuditRepository().findByAction('connection.created')[0]?.details).toMatchObject({
+      credentialsRef: 'env:HYPERVIBE_GITHUB_TOKEN',
+      credentialsResolution: { apiToken: { resolvedRef: 'env:NODE_AUTH_TOKEN', sourceKey: 'NODE_AUTH_TOKEN' } },
+    });
+    expect(result.data).not.toHaveProperty('credentialsResolution');
     await t.close();
   });
 
   it('maps both GitHub credential roles from one supported dotenv alias', async () => {
+    const readSource = vi.spyOn(envParser, 'parseEnvFile');
     const envPath = path.join(tempDir, '.env');
     writeFileSync(envPath, 'NODE_AUTH_TOKEN=gh-combined-dotenv-token\n');
     vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
@@ -767,6 +778,58 @@ describe('hv_connections', () => {
     }>(connection.credentialsEncrypted);
     expect(decrypted.apiToken).toBe('gh-combined-dotenv-token');
     expect(decrypted.packageReadToken).toBe('gh-combined-dotenv-token');
+    expect(readSource).toHaveBeenCalledTimes(1);
+    expect(new AuditRepository().findByAction('connection.created')[0]?.details).toMatchObject({
+      credentialsRef: `dotenv:${envPath}`,
+      credentialsMap: { apiToken: 'HYPERVIBE_GITHUB_TOKEN', packageReadToken: 'HYPERVIBE_GITHUB_PACKAGES_TOKEN' },
+      credentialsResolution: {
+        apiToken: { resolvedRef: `dotenv:${envPath}#NODE_AUTH_TOKEN`, sourceKey: 'NODE_AUTH_TOKEN' },
+        packageReadToken: { resolvedRef: `dotenv:${envPath}#NODE_AUTH_TOKEN`, sourceKey: 'NODE_AUTH_TOKEN' },
+      },
+    });
+    await t.close();
+  });
+
+  it('records the resolved dotenv fragment without replacing the declared alias', async () => {
+    const envPath = path.join(tempDir, '.env');
+    writeFileSync(envPath, 'NODE_AUTH_TOKEN=synthetic-alias-credential\n');
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, login: 'reader' });
+    const t = await makeClient();
+    const result = await t.call('hv_connections', { provider: 'github', credentialsRef: `dotenv:${envPath}#HYPERVIBE_GITHUB_TOKEN` });
+    expect(result.ok).toBe(true);
+    expect(new AuditRepository().findByAction('connection.created')[0]?.details).toMatchObject({
+      credentialsRef: `dotenv:${envPath}#HYPERVIBE_GITHUB_TOKEN`,
+      credentialsResolution: { apiToken: { resolvedRef: `dotenv:${envPath}#NODE_AUTH_TOKEN`, sourceKey: 'NODE_AUTH_TOKEN' } },
+    });
+    expect(JSON.stringify(result)).not.toContain('synthetic-alias-credential');
+    expect(JSON.stringify(new AuditRepository().findByAction('connection.created'))).not.toContain('synthetic-alias-credential');
+    await t.close();
+  });
+
+  it('does not expose malformed private JSON in credential-reference parse diagnostics', async () => {
+    process.env.HV_TEST_RAILWAY_TOKEN = '{private-malformed-json';
+    const t = await makeClient();
+    const result = await t.call('hv_connections', { provider: 'railway', credentialsRef: 'env:HV_TEST_RAILWAY_TOKEN' });
+    expect(result.ok).toBe(false);
+    expect(result.error.message).toBe('credentialsRef JSON must resolve to a valid object.');
+    expect(JSON.stringify(result)).not.toContain('private-malformed-json');
+    expect(new ConnectionRepository().findByProvider('railway')).toBeNull();
+    expect(new AuditRepository().findByAction('connection.created')).toEqual([]);
+    await t.close();
+  });
+
+  it('scrubs exact credential values from declared and resolved source metadata before auditing', async () => {
+    process.env.HV_TEST_RAILWAY_TOKEN = 'HV_TEST_RAILWAY_TOKEN';
+    vi.spyOn(RailwayAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(RailwayAdapter.prototype, 'verify').mockResolvedValue({ success: true });
+    const t = await makeClient();
+    const result = await t.call('hv_connections', { provider: 'railway', credentialsRef: 'env:HV_TEST_RAILWAY_TOKEN' });
+    expect(result.ok).toBe(true);
+    const details = new AuditRepository().findByAction('connection.created')[0]?.details;
+    expect(details).toMatchObject({ credentialsRef: 'env:[redacted]',
+      credentialsResolution: { apiToken: { resolvedRef: 'env:[redacted]', sourceKey: '[redacted]' } } });
+    expect(JSON.stringify(details)).not.toContain('HV_TEST_RAILWAY_TOKEN');
+    expect(JSON.stringify(result)).not.toContain('HV_TEST_RAILWAY_TOKEN');
     await t.close();
   });
 

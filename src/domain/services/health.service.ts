@@ -340,6 +340,8 @@ export async function runHttpCheck(params: {
   expectedStatusMin: number;
   expectedStatusMax: number;
   bodyPreviewBytes: number;
+  headers?: Record<string, string>;
+  maxResponseBytes?: number;
 }): Promise<HealthCheckResult> {
   const startedAt = Date.now();
   const controller = new AbortController();
@@ -350,10 +352,20 @@ export async function runHttpCheck(params: {
       method: params.method,
       redirect: params.followRedirects ? 'follow' : 'manual',
       signal: controller.signal,
+      ...(params.headers ? { headers: params.headers } : {}),
     });
     const latencyMs = Date.now() - startedAt;
     const setCookieHeaders = getSetCookieHeaders(fetchResponse.headers);
-    const body = params.method === 'HEAD' ? '' : await fetchResponse.text();
+    let body = '';
+    if (params.method !== 'HEAD') {
+      if (params.maxResponseBytes !== undefined && fetchResponse.body) {
+        const reader = fetchResponse.body.getReader(); const chunks: Uint8Array[] = []; let size = 0;
+        for (;;) { const chunk = await reader.read(); if (chunk.done) break; size += chunk.value.byteLength;
+          if (size > params.maxResponseBytes) { await reader.cancel(); throw new Error('Application receipt exceeded its bounded response size.'); }
+          chunks.push(chunk.value); }
+        body = Buffer.concat(chunks).toString('utf8');
+      } else body = await fetchResponse.text();
+    }
     const bodyPreview = body.slice(0, params.bodyPreviewBytes);
     const json = parseJsonPreview(body, fetchResponse.headers.get('content-type'));
     const ok = fetchResponse.status >= params.expectedStatusMin && fetchResponse.status <= params.expectedStatusMax;

@@ -61,8 +61,9 @@ Lifecycle maturity is reported by `hv_inspect {}` and `hv_connections {}`. Every
 - **Environment management** - Staging, production, PR previews
 - **Migration support** - Run Prisma, Drizzle, TypeORM migrations
 - **Local development** - Generate Docker Compose for local parity
-- **Secret rotation** - Rotate once, propagate to all environments
-- **Audit trail** - Track secret access across deploys
+- **Credential inventory** - Inspect sources, exact consumers, drift, and deployment evidence without exposing values or changing state
+- **Guided rotation** - Review one replacement, synchronize its selected destinations, and verify the affected deployments through the [existing lifecycle](docs/credential-lifecycle.md)
+- **Audit trail** - Keep source pickup, acceptance, validation, activation, and application-operation evidence distinct
 
 ## Quick Start
 

@@ -1445,7 +1445,7 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function parseGitHubDelegatedBindings(environment: Environment | null): GitHubDelegatedBinding[] {
+export function parseGitHubDelegatedBindings(environment: Environment | null): GitHubDelegatedBinding[] {
   const github = asObject(environment?.platformBindings.github);
   const raw = github?.delegatedActionsBindings;
   if (!Array.isArray(raw)) return [];

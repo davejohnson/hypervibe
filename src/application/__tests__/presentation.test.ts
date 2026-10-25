@@ -232,6 +232,14 @@ describe('command presentation', () => {
     expect(output).toContain('HTTP 200 · 84 ms · deployments healthy');
   });
 
+  it.each([['verified', 'VERIFIED'], ['failed', 'FAILED'], ['unknown', 'UNVERIFIED']])('renders credential operation %s without pretending it is an HTTP homepage check', (state, label) => {
+    const output = formatCommandResult('hv_health', commandSuccess({ role: 'document-extraction', state, reason: 'Declared invoice extraction receipt evidence.',
+      checks: [{ environment: 'production', service: 'web', state, counts: { invoiceExtracted: 1 } }] }));
+    expect(output).toContain(`APPLICATION OPERATION ${label}`);
+    expect(output).toContain('document-extraction');
+    expect(output).not.toContain('No HTTP result');
+  });
+
   it('gives every command a command-aware shared success presentation', () => {
     const output = formatCommandResult('hv_inspect', commandSuccess({
       provider: 'gitlab',
@@ -465,6 +473,7 @@ describe('command presentation', () => {
       'hv_cloud_secrets',
       'hv_connections',
       'hv_db_query',
+      'hv_db_verify_auth',
       'hv_deploy',
       'hv_destroy',
       'hv_health',

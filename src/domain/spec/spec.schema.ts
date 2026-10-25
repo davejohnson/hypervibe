@@ -1,3 +1,4 @@
+import { credentialTrackingSchema } from './credential.schema.js';
 import { z } from 'zod';
 import { parse as parseDomain } from 'tldts';
 import { isReservedRuntimeEnvKey, RESERVED_RUNTIME_ENV_ERROR } from '../services/runtime-env-policy.js';
@@ -842,6 +843,7 @@ export const envFileSpecSchema = z.object({
 }).strict().prefault({});
 
 export const delegatedSecretSpecSchema = z.object({
+  credential: credentialTrackingSchema.optional(),
   /** Delegated values are supplied explicitly at plan time and never stored in the spec. */
   ownership: z.literal('delegated').default('delegated'),
   /** Non-secret identity that documents who is responsible for supplying and rotating the value. */
@@ -860,6 +862,7 @@ export const delegatedSecretSpecSchema = z.object({
 }).strict().superRefine((secret, ctx) => {
   if (
     secret.environments.length === 0
+    && !(secret.credential?.kind === 'database-password' && secret.credential.database)
     && !secret.githubActions?.repository
     && (secret.githubActions?.environments.length ?? 0) === 0
   ) {
@@ -891,6 +894,7 @@ const generatedSecretConflictsSchema = z.array(environmentVariableNameSchema)
   .transform((keys) => [...keys].sort());
 
 export const hypervibeRandomSecretSpecSchema = z.object({
+  credential: credentialTrackingSchema.optional(),
   /** Hypervibe generates and owns this value; users never supply it. */
   ownership: z.literal('hypervibe'),
   /** Stable, opinionated generation contract. */
@@ -2225,6 +2229,20 @@ export const projectSpecSchema = z.object({
   ).default({}),
   environments: z.record(z.string().min(1), environmentSpecSchema),
 }).strict().superRefine((spec, ctx) => {
+  for (const [key, slot] of Object.entries(spec.secrets)) for (const [index, check] of (slot.credential?.verification ?? []).entries()) {
+    if (!spec.environments[check.environment]?.services[check.service]) ctx.addIssue({ code: z.ZodIssueCode.custom,
+      path: ['secrets', key, 'credential', 'verification', index], message: 'Credential operation checks must target a declared environment and service.' });
+    if (check.kind === 'http-receipt' && check.receiptService && !spec.environments[check.environment]?.services[check.receiptService]) ctx.addIssue({ code: z.ZodIssueCode.custom,
+      path: ['secrets', key, 'credential', 'verification', index, 'receiptService'], message: 'The receipt service must be declared in the checked consumer environment.' });
+    if (check.kind === 'environment-task') {
+      const task = spec.github?.actions[check.task];
+      if (task?.kind !== 'environment-task' || !task.enabled || task.environment !== check.environment || task.service !== check.service
+        || task.inputs[check.operationIdInput]?.type !== 'string' || !task.receiptPrefix || Object.keys(check.requiredCounts).some(name => !task.receiptCountKeys.includes(name))) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['secrets', key, 'credential', 'verification', index],
+          message: 'Credential verification must reference an enabled declared task with matching service, reviewed operation-ID input and numeric receipt counts.' });
+      }
+    }
+  }
   for (const [id, automation] of Object.entries(spec.github?.actions ?? {})) {
     if (automation.kind !== 'environment-task') continue;
     const target = Object.hasOwn(spec.environments, automation.environment)
@@ -2525,6 +2543,30 @@ export const projectSpecSchema = z.object({
     });
   }
   for (const [key, secret] of Object.entries(spec.secrets)) {
+    const descriptor = secret.credential;
+    if (descriptor?.runtimeConsumers) {
+      const coordinates = new Set<string>();
+      for (const [index, consumer] of descriptor.runtimeConsumers.entries()) {
+        const target = spec.secrets[consumer.variable];
+        const coordinate = JSON.stringify([consumer.environment, consumer.service, consumer.variable]);
+        if (!spec.environments[consumer.environment]?.services[consumer.service]
+          || target?.credential?.role !== descriptor.role
+          || !target.environments.includes(consumer.environment)
+          || consumer.format === 'database-url' && descriptor.kind !== 'database-password'
+          || coordinates.has(coordinate)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom,
+            message: 'Credential consumers require unique declared environment/service/alias coordinates for this role; database-url format requires a database-password role.',
+            path: ['secrets', key, 'credential', 'runtimeConsumers', index] });
+        }
+        coordinates.add(coordinate);
+      }
+      for (const environmentName of secret.environments) {
+        if (!descriptor.runtimeConsumers.some(consumer => consumer.environment === environmentName && consumer.variable === key)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Every declared runtime alias/environment needs an explicit consumer when runtimeConsumers is selected.',
+            path: ['secrets', key, 'credential', 'runtimeConsumers'] });
+        }
+      }
+    }
     if (isReservedRuntimeEnvKey(key) && secret.environments.length > 0) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: RESERVED_RUNTIME_ENV_ERROR, path: ['secrets', key, 'environments'] });
     }
@@ -2642,7 +2684,10 @@ export const projectSpecSchema = z.object({
           : []),
         ...Object.values(stripe?.webhooks ?? {}).map((webhook) => webhook.envVar),
       ]);
-      if (stripeManagedKeys.has(key)) {
+      const trackedWebhook = secret.ownership === 'delegated' && secret.credential?.kind === 'stripe-webhook'
+        && secret.credential.stripeWebhook?.environment === environmentName
+        && stripe?.webhooks?.[secret.credential.stripeWebhook.webhook]?.envVar === key;
+      if (stripeManagedKeys.has(key) && !trackedWebhook) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `${secretKind} "${key}" cannot also be managed by Stripe environment sync in "${environmentName}"`,

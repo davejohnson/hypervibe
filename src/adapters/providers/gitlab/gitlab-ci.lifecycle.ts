@@ -1,4 +1,5 @@
 import { buildGitLabBackupDeployGate } from '../../../domain/services/backup-deploy-gate.service.js';
+import { prepareGitLabCredentialRollout, observeGitLabCredentialRollout } from './gitlab-credential-activation.js';
 import { createHash } from 'crypto';
 import { ConnectionRepository } from '../../db/repositories/connection.repository.js';
 import { EnvironmentRepository } from '../../db/repositories/environment.repository.js';
@@ -40,7 +41,7 @@ export const GITLAB_DEPLOYMENT_GATE_PATH = '.gitlab/hypervibe/verify-deployment-
 export const GITLAB_DEPLOYMENT_CONTRACT_PATH = '.gitlab/hypervibe/verify-deployment-contract.cjs';
 export const GITLAB_PROMOTION_GATE_PATH = '.gitlab/hypervibe/verify-promotion-evidence.mjs';
 export const GITLAB_RELEASE_EVIDENCE_PATH = '.gitlab/hypervibe/finalize-release-evidence.mjs';
-const PROGRAM_VERSION = 2;
+const PROGRAM_VERSION = 3;
 const GITLAB_SAAS_RUNNER_TAG = 'saas-linux-small-amd64';
 
 type ManagedFile = { path: string; content: string; hash: string };
@@ -536,6 +537,26 @@ if (evidence.providerResources !== undefined && (!Array.isArray(evidence.provide
 if (evidence.deploymentContractFingerprint !== undefined && evidence.deploymentContractFingerprint !== process.env.HYPERVIBE_DEPLOYMENT_CONTRACT_FINGERPRINT) throw new Error('Provider release evidence has a different deployment contract');
 const imageUri = String(evidence.imageUri || '').trim().toLowerCase();
 if (process.env.HYPERVIBE_RELEASE_REQUIRES_IMMUTABLE_IMAGE === 'true' && !/^[^\\s@]+@sha256:[0-9a-f]{64}$/.test(imageUri)) throw new Error('Provider release evidence has no immutable image digest');
+// Activation belongs to this reviewed dispatch, never inherited provider data.
+delete evidence.credentialActivation;
+let credentialActivation;
+if (process.env.HYPERVIBE_CREDENTIAL_OPERATIONS && process.env.HYPERVIBE_CREDENTIAL_OPERATIONS !== '{}') {
+  const requested = object('HYPERVIBE_CREDENTIAL_OPERATIONS');
+  const operations = [];
+  for (const [service, request] of Object.entries(requested)) {
+    if (!services.includes(service) || !request || typeof request !== 'object' || Array.isArray(request)
+      || !['operationId,serviceId', 'configurationVersion,operationId,serviceId'].includes(Object.keys(request).sort().join(','))
+      || (request.configurationVersion !== undefined && (!Number.isSafeInteger(request.configurationVersion) || request.configurationVersion < 0))
+      || !/^[A-Za-z0-9_-]{1,200}$/.test(request.operationId || '')
+      || typeof request.serviceId !== 'string' || !request.serviceId || request.serviceId.length > 4096) throw new Error('Credential operation input is invalid');
+    const matches = evidence.deployments.filter(entry => entry?.serviceId === request.serviceId);
+    if (matches.some(entry => entry.configurationVersion !== request.configurationVersion)) throw new Error('Credential deployment configuration version differs');
+    const deploymentIds = [...new Set(matches.flatMap(entry => typeof entry.deploymentId === 'string' && entry.deploymentId ? [entry.deploymentId] : []))].sort();
+    if (deploymentIds.length) operations.push({ service, operationId: request.operationId, serviceId: request.serviceId, deploymentIds,
+      ...(request.configurationVersion !== undefined ? { configurationVersion: request.configurationVersion } : {}) });
+  }
+  credentialActivation = { version: 1, operations };
+}
 await writeFile('.hypervibe-release.json', JSON.stringify({
   ...evidence,
   version: 2,
@@ -545,6 +566,7 @@ await writeFile('.hypervibe-release.json', JSON.stringify({
   providerResources,
   deploymentContractFingerprint: process.env.HYPERVIBE_DEPLOYMENT_CONTRACT_FINGERPRINT,
   ...(imageUri ? { imageUri } : {}),
+  ...(credentialActivation ? { credentialActivation } : {}),
   ci: { projectId: process.env.CI_PROJECT_ID, pipelineId: process.env.CI_PIPELINE_ID, jobId: process.env.CI_JOB_ID },
   verifiedAt: new Date().toISOString(),
 }) + '\\n', { mode: 0o600 });
@@ -808,6 +830,9 @@ function renderEnvironmentJobs(
       type: string
     commit_sha:
       type: string
+    credential_operations:
+      type: string
+      default: '{}'
     rollback:
       type: string
       options: ['false', 'true']
@@ -914,9 +939,9 @@ ${container ? `  services:
       artifacts: true
     - job: ${buildJob}
       artifacts: true
-${container ? `  variables:
-    DOCKER_TLS_CERTDIR: "/certs"
-` : ''}  rules:
+  variables:
+    HYPERVIBE_CREDENTIAL_OPERATIONS_INPUT: '$[[ inputs.credential_operations ]]'
+${container ? `    DOCKER_TLS_CERTDIR: "/certs"\n` : ''}  rules:
 ${rules}
   before_script: []
   script:
@@ -926,6 +951,7 @@ ${rules}
       export HYPERVIBE_ENVIRONMENT=${gitLabShellLiteral(target.environmentName)}
       export HYPERVIBE_PROGRAM_FINGERPRINT=${gitLabShellLiteral(programFingerprint)}
       export HYPERVIBE_ROLLBACK="$[[ inputs.rollback ]]"
+      export HYPERVIBE_CREDENTIAL_OPERATIONS="$HYPERVIBE_CREDENTIAL_OPERATIONS_INPUT"
       export HYPERVIBE_SOURCE_ARTIFACT_ID="$[[ inputs.source_artifact_id ]]"
       export HYPERVIBE_SOURCE_PIPELINE_ID="$[[ inputs.source_pipeline_id ]]"
       export HYPERVIBE_EXPECTED_LATEST_RUN_ID="$[[ inputs.expected_latest_run_id ]]"
@@ -1069,6 +1095,9 @@ spec:
       type: string
     commit_sha:
       type: string
+    credential_operations:
+      type: string
+      default: '{}'
     rollback:
       type: string
       options: ['false', 'true']
@@ -1088,6 +1117,7 @@ ${deployFiles.map((file) => `  - local: '/${file.path}'
     inputs:
       environment: "$[[ inputs.environment ]]"
       commit_sha: "$[[ inputs.commit_sha ]]"
+      credential_operations: "$[[ inputs.credential_operations ]]"
       rollback: "$[[ inputs.rollback ]]"
       expected_latest_run_id: "$[[ inputs.expected_latest_run_id ]]"
       source_artifact_id: "$[[ inputs.source_artifact_id ]]"
@@ -1107,6 +1137,9 @@ ${environments.map((environment) => `        - ${yamlString(environment)}`).join
     commit_sha:
       type: string
       default: '$CI_COMMIT_SHA'
+    credential_operations:
+      type: string
+      default: '{}'
     rollback:
       type: string
       options: ['false', 'true']
@@ -1135,6 +1168,7 @@ include:
     inputs:
       environment: "$[[ inputs.environment ]]"
       commit_sha: "$[[ inputs.commit_sha ]]"
+      credential_operations: "$[[ inputs.credential_operations ]]"
       rollback: "$[[ inputs.rollback ]]"
       expected_latest_run_id: "$[[ inputs.expected_latest_run_id ]]"
       source_artifact_id: "$[[ inputs.source_artifact_id ]]"
@@ -2802,7 +2836,19 @@ export async function observeGitLabManagedProgram(params: {
   };
 }
 
+export async function verifyGitLabCredentialProducer(params: { project: Project; spec: ProjectSpec; program: Exclude<Awaited<ReturnType<typeof observeGitLabManagedProgram>>, { error: string }>; sha: string }): Promise<boolean> {
+  const rendered = renderManagedFilesSafely(params.project, params.spec, params.program.rootPath);
+  if ('error' in rendered || rendered.programHash !== params.program.programHash) return false;
+  for (const file of rendered.files) {
+    const source = await params.program.adapter.observeFile(params.program.repository, file.path, params.sha);
+    if (source.state !== 'present' || source.value.content !== file.content) return false;
+  }
+  return true;
+}
+
 export const gitLabCiLifecycle: CiLifecyclePort = {
+  prepareCredentialRollout: prepareGitLabCredentialRollout,
+  observeCredentialRollout: observeGitLabCredentialRollout,
   planDeploy,
   async applyDeploy(params) {
     if (params.action.metadata?.operation === CI_CONFIGURATION_SYNC_OPERATION) {

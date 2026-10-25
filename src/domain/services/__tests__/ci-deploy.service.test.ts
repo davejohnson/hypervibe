@@ -1,3 +1,4 @@
+import * as githubCredentialActivation from '../../../adapters/providers/github/github-credential-activation.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'crypto';
 import fs from 'fs';
@@ -43,6 +44,8 @@ import {
   MATCH_SIGNING_REQUIRED_SECRETS,
 } from '../ios-release-workflow.service.js';
 import type { PlanAction } from '../../plan/plan.types.js';
+import { RunRepository } from '../../../adapters/db/repositories/run.repository.js';
+import { credentialActionId, type CredentialTarget } from '../../plan/credential-plan.contract.js';
 
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -560,6 +563,32 @@ describe('ci-deploy.service', () => {
 
   describe('planGitHubActionsDeploy', () => {
     const environmentSpec = environmentSpecSchema.parse(CI_ENVIRONMENT_SPEC);
+
+    it('preserves the accepted role input instead of restoring an older connection token', async () => {
+      const { project, envRepo, environmentId } = seedProjectWithSpec();
+      seedVerifiedConnections();
+      const descriptor = { role: 'package-downloads', label: 'Package downloads', purpose: 'Read application images', kind: 'opaque', source: 'env:NEXT_UNACCEPTED_CANDIDATE' };
+      const store = new SpecStore();
+      store.replace(project, { ...store.get(project)!.spec, github: { repository: 'davejohnson/billforge', canonicalEnvironment: 'production' }, secrets: {
+        IMAGE_REGISTRY_TOKEN: { ownership: 'delegated', principal: 'user:owner', environments: [], githubActions: { environments: ['production'] }, credential: descriptor },
+      } });
+      const target: CredentialTarget = { kind: 'github', provider: 'github', environment: 'production', environmentId, repository: 'davejohnson/billforge', scope: 'production', scopeId: 17, key: 'IMAGE_REGISTRY_TOKEN' };
+      const runs = new RunRepository();
+      const accepted = runs.create({ projectId: project.id, environmentId, type: 'plan', plan: { overrides: { delegatedSecretVarsEncrypted: getSecretStore().encryptObject({ value: 'replacement-accepted-token', descriptor, reviewedActions: [{ metadata: { target } }] }) } } });
+      runs.updateStatus(accepted.id, 'succeeded');
+      envRepo.updatePlatformBindings(environmentId, { credentialUpdates: { 'package-downloads': { state: 'accepted', planId: accepted.id, descriptor, completed: [credentialActionId('package-downloads', target)] } } });
+      const workflow = expectedWorkflow(project);
+      const binding = syncedBinding(project, workflow.content);
+      binding.syncedEnvironmentSecretHashes.IMAGE_REGISTRY_TOKEN = sha256('superseded-sync-record');
+      acceptWorkflow(project, envRepo, environmentId, workflow, { binding });
+      const plan = await planGitHubActionsDeploy({ project, environmentName: 'production', environmentSpec, environment: envRepo.findById(environmentId) });
+      mockVerifiedGitHub();
+      const write = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret').mockResolvedValue();
+      const applied = await applyGitHubActionsDeploy({ project, environmentName: 'production', environmentSpec, action: plan.action!, authority: 'secret-sync' });
+      expect(applied).toMatchObject({ success: true });
+      expect(write).toHaveBeenCalledWith('davejohnson', 'billforge', 'production', 'IMAGE_REGISTRY_TOKEN', 'replacement-accepted-token');
+      expect(write.mock.calls.some(call => call[4] === 'pkg-token')).toBe(false);
+    });
 
     it('returns no action when the environment does not use GitHub Actions deploys', async () => {
       const { project, envRepo, environmentId } = seedProjectWithSpec();
@@ -2323,6 +2352,9 @@ describe('ci-deploy.service', () => {
 
     it('dispatches the exact commit and waits for verified release evidence', async () => {
       const release = seedAcceptedRelease();
+      const credentialInputs = { commit_sha: 'b'.repeat(40), credential_operations: JSON.stringify({ web: { serviceId: 's', operationId: 'op' } }) };
+      const prepare = vi.spyOn(githubCredentialActivation, 'prepareGitHubCredentialRollout').mockResolvedValue(credentialInputs);
+      const observe = vi.spyOn(githubCredentialActivation, 'observeGitHubCredentialRollout').mockResolvedValue([{ service: 'web', operationId: 'op', deploymentIds: ['new'] }]);
       const sha = 'b'.repeat(40);
       const run = {
         id: 42,
@@ -2372,12 +2404,13 @@ describe('ci-deploy.service', () => {
         success: true,
         data: { targetSha: sha, runId: 42, artifactId: 99 },
       });
+      expect(prepare).toHaveBeenCalled(); expect(observe).toHaveBeenCalled();
       expect(trigger).toHaveBeenCalledWith(
         'davejohnson',
         'billforge',
         '.github/workflows/deploy-railway-production.yml',
         'main',
-        { commit_sha: sha }
+        credentialInputs
       );
     });
 

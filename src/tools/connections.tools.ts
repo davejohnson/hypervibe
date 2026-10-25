@@ -1,4 +1,4 @@
-import { parseCredentialRef, resolveLocalSecretRef } from '../application/credential-reference.js';
+import { parseCredentialRef, resolveLocalSecretRef, type ResolvedCredentialSource } from '../application/credential-reference.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import {
@@ -454,11 +454,13 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         }
 
         let credentialsToSave: Record<string, unknown>;
+        const credentialsResolution: Record<string, ResolvedCredentialSource> = {};
         try {
           const projectForSecretRef = project ?? ctx.resolveProject({});
           credentialsToSave = credentialsRef
             ? await parseCredentialRef(provider, credentialsRef, credentialsKey, credentialsMap, {
               ...(projectForSecretRef ? { projectId: projectForSecretRef.id } : {}),
+              onResolved: (key, source) => { credentialsResolution[key] = source; },
             })
             : credentials ?? { authMode: 'default' };
         } catch (error) {
@@ -473,7 +475,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           : !credentials && nativeCliAuth
             ? 'native-cli'
             : 'inline';
-        const saved = await saveConnection(provider, credentialsToSave, scope, { credentialsSource });
+        const saved = await saveConnection(provider, credentialsToSave, scope, { credentialsSource, credentialsRef, credentialsKey, credentialsMap,
+          ...(Object.keys(credentialsResolution).length ? { credentialsResolution } : {}) });
         if (!saved.success) {
           return commandError('VALIDATION', saved.error!, {
             details: setupDetails(provider, guidanceContext),

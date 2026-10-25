@@ -71,6 +71,29 @@ usage, credential validity, monitoring access, or runtime health. A successful
 administrative database connection does not prove the application uses the same
 target or credential. Report supported alignment evidence and remaining gaps.
 
+For database credential incidents, distinguish raw references, resolved provider
+configuration, selected deployment configuration, fresh SQL authentication and
+application operation. `databaseConsumers` includes declared database aliases;
+unchanged reference strings do not mean a running workload has current values.
+Keep each affected workload pending until its intended deployment configuration
+is active and older deployments have drained. Unknown provider evidence is not
+proof of completion.
+
+Use `hv_db_verify_auth` with a private `credentialsRef`, the supported application
+driver and intended username/database to test a fresh connection without creating
+access paths. Preserve application connection/TLS settings; administrative access
+does not validate them. Its configured/deployed source label is caller-declared,
+and a successful result does not prove deployment provenance or application use.
+Database names and schemas are distinct. Do not rename either as a credential fix.
+
+Password rotation requires the dedicated reviewed database credential lifecycle
+through `hv_spec`, `hv_plan scope="credentials"`, and exact confirmed `hv_apply`
+actions. Updating an initialization variable alone does not change the actual
+database password. Resume an uncertain attempt with its retained plan and same
+encrypted replacement; do not generate another password or bypass an unsupported
+native capability. Production diagnosis does not authorize rotation, deployment,
+new access paths, session termination or data changes.
+
 ## Operational tasks and recovery
 
 Use supported Hypervibe commands and current action schemas for one-off database

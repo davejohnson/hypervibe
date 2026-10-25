@@ -319,6 +319,9 @@ describe('AzureContainerAppsAdapter lifecycle boundaries', () => {
         };
         return json(app);
       }
+      if (method === 'GET' && path.endsWith('/revisions')) {
+        return json({ value: [{ id: `${app!.id}/revisions/hv-web--${appRevision}`, name: `hv-web--${appRevision}`, properties: { active: true, replicas: 2, trafficWeight: 90 } }, { id: `${app!.id}/revisions/old`, name: 'old', properties: { active: true, replicas: 1, trafficWeight: 10 } }], nextLink: null });
+      }
       if (method === 'POST' && path.endsWith('/listSecrets')) {
         return json({
           value: (app?.properties?.configuration?.secrets ?? []).map(
@@ -375,6 +378,7 @@ describe('AzureContainerAppsAdapter lifecycle boundaries', () => {
     expect(serviceId.split('/').at(-1)).toBe('web');
     expect((app as Record<string, any> | null)?.id).toBe(serviceId);
     expect(roleAssignments.size).toBe(2);
+    (app as any).properties.template.containers[0].env.push({ name: 'VAULT', secretRef: 'key-vault' });
     const mutationCount = calls.filter(({ method }) => ['PUT', 'PATCH', 'DELETE'].includes(method)).length;
 
     await expect(adapter.observe({
@@ -387,7 +391,7 @@ describe('AzureContainerAppsAdapter lifecycle boundaries', () => {
       },
     })).resolves.toMatchObject({
       projectExists: true,
-      services: [{ name: 'web', externalId: serviceId, status: 'empty' }],
+      services: [{ name: 'web', externalId: serviceId, status: 'empty', envVarKeys: ['APP_MODE', 'VAULT'], envVarState: 'unknown', deployment: { id: `hv-web--${appRevision}`, activeDeploymentIds: [`hv-web--${appRevision}`, 'old'], activeDeploymentCoverage: 'instances' } }],
     });
     expect(calls.filter(({ method }) => ['PUT', 'PATCH', 'DELETE'].includes(method))).toHaveLength(mutationCount);
 

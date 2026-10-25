@@ -1,3 +1,5 @@
+import { DATABASE_PASSWORD_OPERATIONS, isDatabasePasswordPlan } from './database-password-plan.contract.js';
+import { isCredentialAction, CREDENTIAL_OPERATION } from './credential-plan.contract.js';
 import { databaseCredentialAliasesActionSchema, databaseCredentialAliasesMetadataSchema,
   DATABASE_CREDENTIAL_ALIASES_OPERATION } from '../services/database-credential-aliases.service.js';
 import { isDeepStrictEqual } from 'node:util';
@@ -218,6 +220,7 @@ export const planRunDocumentSchema = z.object({
   scope: z.enum([
     'full',
     'secrets',
+    'credentials',
     'api-policy',
     'retained-cleanup',
     'managed-ci-bindings',
@@ -258,6 +261,18 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'credentials') {
+    if (!document.actions.length || (!isDatabasePasswordPlan(document.actions) && document.actions.some(a => !isCredentialAction(a)))
+      || new Set(document.actions.map(a => a.id)).size !== document.actions.length
+      || !document.overrides?.delegatedSecretVarsEncrypted
+      || Object.keys(document.overrides).some(k => k !== 'delegatedSecretVarsEncrypted')
+      || !document.lockEnvironmentIds?.length || document.observedFingerprint !== null
+      || document.sourceCommitSha || document.integrationFingerprints || document.inputRequired?.length) {
+      ctx.addIssue({ code: 'custom', message: 'Credential plans contain only reviewed credential actions, exact environment locks and one encrypted replacement.' });
+    }
+  } else if (document.actions.some(a => a.metadata?.operation === CREDENTIAL_OPERATION || DATABASE_PASSWORD_OPERATIONS.includes(a.metadata?.operation as typeof DATABASE_PASSWORD_OPERATIONS[number]))) {
+    ctx.addIssue({ code: 'custom', message: 'Credential updates require their isolated scope.' });
+  }
   if (document.scope === 'database-credential-aliases') {
     const m = document.databaseCredentialAliasesVerification;
     if (document.actions.length > 1 || document.actions.some(action => !databaseCredentialAliasesActionSchema.safeParse(action).success

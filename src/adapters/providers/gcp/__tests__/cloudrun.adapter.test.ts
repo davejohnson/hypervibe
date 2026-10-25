@@ -743,6 +743,8 @@ it('maps environment-qualified services and scheduled jobs to logical names duri
       return Response.json({ services: [
         {
           name: 'projects/gcp-project/locations/us-central1/services/gcp-project-staging-web',
+          latestReadyRevision: 'projects/gcp-project/locations/us-central1/services/gcp-project-staging-web/revisions/new',
+          trafficStatuses: [{ revision: 'new', percent: 90 }, { revision: 'old', percent: 10 }, { revision: 'tagged', tag: 'debug', percent: 0 }],
           labels: { 'infraprint-environment': 'staging' },
           ingress: 'INGRESS_TRAFFIC_ALL',
           template: { containers: [{ image: EXPECTED_DEPLOY_IMAGE }] },
@@ -787,6 +789,10 @@ it('maps environment-qualified services and scheduled jobs to logical names duri
         },
       ] });
     }
+    if (url.hostname === 'run.googleapis.com' && url.pathname.endsWith('/executions')) {
+      const job = url.pathname.slice(4, -'/executions'.length);
+      return Response.json({ executions: [{ name: `${job}/executions/new`, job, createTime: '2026-10-25T12:00:00Z', startTime: '2026-10-25T12:00:01Z', runningCount: 1, template: { containers: [{ env: [{ name: 'API_KEY', value: 'replacement' }] }] } }, { name: `${job}/executions/old`, job, createTime: '2026-10-25T11:00:00Z', startTime: '2026-10-25T11:00:01Z', runningCount: 1, template: { containers: [{ env: [{ name: 'API_KEY', value: 'old' }] }] } }] });
+    }
     if (url.hostname === 'run.googleapis.com' && url.pathname.endsWith(':getIamPolicy')) {
       return Response.json({ bindings: [] });
     }
@@ -821,6 +827,8 @@ it('maps environment-qualified services and scheduled jobs to logical names duri
     { name: 'worker', externalId: 'gcp-project-staging-worker' },
     { name: 'cron', externalId: 'gcp-project-staging-cron-schedule' },
   ]);
+  expect(staging.services[0]?.deployment).toMatchObject({ id: 'projects/gcp-project/locations/us-central1/services/gcp-project-staging-web/revisions/new', activeDeploymentIds: ['projects/gcp-project/locations/us-central1/services/gcp-project-staging-web/revisions/new', 'projects/gcp-project/locations/us-central1/services/gcp-project-staging-web/revisions/old', 'projects/gcp-project/locations/us-central1/services/gcp-project-staging-web/revisions/tagged'], activeDeploymentCoverage: 'traffic' });
+  expect(staging.services[2]?.deployment).toMatchObject({ id: 'projects/gcp-project/locations/us-central1/jobs/gcp-project-staging-cron/executions/new', activeDeploymentIds: ['projects/gcp-project/locations/us-central1/jobs/gcp-project-staging-cron/executions/new', 'projects/gcp-project/locations/us-central1/jobs/gcp-project-staging-cron/executions/old'], activeDeploymentCoverage: 'instances', envVarHashes: { API_KEY: hashEnvValue('replacement') }, configurationState: 'resolved' });
   expect(production.services.map(({ name, externalId }) => ({ name, externalId }))).toEqual([
     { name: 'web', externalId: 'gcp-project-production-web' },
     { name: 'worker', externalId: 'gcp-project-production-worker' },

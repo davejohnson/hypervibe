@@ -164,6 +164,7 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
       - name: Verify Railway can read image
         run: docker buildx imagetools inspect "\${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}" >/dev/null
       - name: Deploy image to Railway
+        id: runtime_deploy
         uses: actions/github-script@v9
         env:
           RAILWAY_API_TOKEN: \${{ secrets.RAILWAY_API_TOKEN }}
@@ -175,6 +176,7 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
           DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
+            const credentialDeployments = [];
             const endpoint = 'https://backboard.railway.app/graphql/v2';
             const required = ['RAILWAY_API_TOKEN', 'RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN', 'IMAGE_URI', 'DEPLOY_SHA'];
             for (const key of required) {
@@ -405,7 +407,9 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
               });
               const deploymentId = requireString(deploymentData.serviceInstanceDeployV2, 'serviceInstanceDeployV2 deployment id');
               await waitForDeployment(deploymentId, serviceId);
+              credentialDeployments.push({ serviceId, deploymentIds: [deploymentId] });
             }
+            core.setOutput('credential_deployments', JSON.stringify(credentialDeployments));
 `,
     requiredSecrets: RAILWAY_CI_REQUIRED_SECRETS,
     requiredVariables,

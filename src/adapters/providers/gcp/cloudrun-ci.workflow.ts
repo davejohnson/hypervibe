@@ -205,6 +205,7 @@ ${buildDockerfileStep({ ...target, containerStartCommand: cloudRunContainerBuild
             const repository = tag.replace(/:[^/:]+$/, '');
             core.setOutput('image_uri', repository + '@' + digest);
       - name: Deploy image to Cloud Run
+        id: runtime_deploy
         uses: actions/github-script@v9
         env:
           GCP_SERVICE_ACCOUNT_JSON: \${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
@@ -219,6 +220,7 @@ ${buildDockerfileStep({ ...target, containerStartCommand: cloudRunContainerBuild
           IMAGE_URI: \${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}
         with:
           script: |
+            const credentialDeployments = [];
             const crypto = require('crypto');
 
             async function getAccessToken() {
@@ -434,7 +436,8 @@ ${releaseRuntime}
                 body: JSON.stringify({ ...(annotations ? { annotations } : {}), ...(filesystem.etag ? { etag: filesystem.etag } : {}), template }),
               }, 'Cloud Run service deployment for ' + serviceName);
               await waitOperation(operation, 'service ' + serviceName + ' deployment');
-              await waitReady(url, serviceName, 'service', process.env.IMAGE_URI, runtimeResource, filesystem);
+              const ready = await waitReady(url, serviceName, 'service', process.env.IMAGE_URI, runtimeResource, filesystem);
+              if (ready.latestReadyRevision) credentialDeployments.push({ serviceId: serviceName, deploymentIds: [ready.latestReadyRevision.includes('/') ? ready.latestReadyRevision : ready.name + '/revisions/' + ready.latestReadyRevision] });
             }
 
             for (const jobName of jobNames) {
@@ -458,6 +461,7 @@ ${releaseRuntime}
               await waitOperation(operation, 'job ' + jobName + ' deployment');
               await waitReady(url, jobName, 'job', process.env.IMAGE_URI, runtimeResource, filesystem);
             }
+            core.setOutput('credential_deployments', JSON.stringify(credentialDeployments));
 `,
     requiredSecrets: CLOUDRUN_CI_REQUIRED_SECRETS,
     requiredVariables,

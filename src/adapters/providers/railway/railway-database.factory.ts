@@ -11,6 +11,7 @@ import type { DatabaseRuntimeReferenceBindingObservation, IDatabaseAdapter, Prov
 import type { ObservedDatabase, ObservedState } from '../../../domain/ports/observe.port.js';
 import type { DatabaseBackupTarget, DailyBackupReview, IDailyBackupPolicy } from '../../../domain/ports/daily-backup.port.js';
 import type { RailwayDailyBackupTarget } from './railway-daily-backup.js';
+import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
 import { recoveryIdentityStringSchema } from '../../../domain/services/recovery-source.js';
 import { isRailwayPostgresImage, railwayDatabaseReferences, selectRailwayDatabaseDirectUrlVariable } from './railway-postgres-template.js';
 import { bindingIdentityFingerprint } from '../../../domain/services/binding-identity.js';
@@ -25,6 +26,7 @@ import type {
 } from './railway.adapter.js';
 
 interface RailwayHostingOps {
+  synchronizeDatabasePasswordIssuer?: (target: { projectId: string; environmentId: string; serviceId: string }, password: string) => Promise<void>;
   railwayCredentialAliases?: import('../../../domain/ports/database-credential-aliases.port.js').IDatabaseCredentialAliases;
   railwayDailyBackups?: IDailyBackupPolicy<RailwayDailyBackupTarget>;
   observeDatabaseCheckpointSource?: (target: { projectId: string; environmentId: string; serviceId: string }) => Promise<DatabaseCheckpointSource>;
@@ -439,8 +441,43 @@ export function createRailwayDatabaseAdapter(params: {
     } catch { return unknown; }
   };
 
-  return {
+  const databaseAdapter: IDatabaseAdapter & IDatabaseCheckpointAdapter = {
     name: 'railway',
+    get credentialLifecycle() {
+      return createPostgresCredentialLifecycle(() => databaseAdapter, {
+        rotate: async (_component, _target, password) => {
+          // Existing native aliases interpolate this issuer into URL password
+          // positions. Refuse characters that would alter URL structure before
+          // changing SQL authentication. Hypervibe's generator is base64url.
+          if (!password || !/^[A-Za-z0-9._~-]+$/.test(password)) return { state: 'blocked' };
+          return undefined;
+        },
+        validateInspection: async (environment, component) => {
+          if (!railway.railwayCredentialAliases) throw new Error('Database password issuer alias inspection is unavailable.');
+          const aliases = await railway.railwayCredentialAliases.inspect({ environment, component });
+          if (aliases.changeNames.length) throw new Error('Database password aliases must follow their issuer before rotation. Run hv_plan scope="database-credential-aliases", review hv_apply, then resume the credential rotation plan.');
+        },
+        connectionUrl: async (environment, component) => {
+          const target = dailyBackupTarget({ environment, component }).target;
+          if (!railway.getServiceVariables) throw new Error('Database credential inspection is unavailable.');
+          const variables = await railway.getServiceVariables(target.projectId, target.serviceId, target.environmentId);
+          const key = typeof component.bindings.directUrlVariable === 'string' ? component.bindings.directUrlVariable
+            : selectRailwayDatabaseDirectUrlVariable(variables);
+          return (key ? variables[key] : undefined) ?? variables.DATABASE_URL ?? null;
+        },
+        synchronizeIssuer: async (environment, component, password) => {
+          if (!railway.synchronizeDatabasePasswordIssuer) throw new Error('Database password issuer synchronization is unavailable.');
+          const target = dailyBackupTarget({ environment, component }).target;
+          await railway.synchronizeDatabasePasswordIssuer(target, password);
+        },
+        inspectIssuer: async (environment, component, password) => {
+          if (!railway.getServiceVariables) return 'unknown';
+          const target = dailyBackupTarget({ environment, component }).target;
+          const variables = await railway.getServiceVariables(target.projectId, target.serviceId, target.environmentId);
+          return variables.POSTGRES_PASSWORD === password ? 'match' : variables.POSTGRES_PASSWORD ? 'different' : 'unknown';
+        },
+      });
+    },
     ...(railway.getServiceVariables ? { observeRuntimeReferenceBinding } : {}),
     ...(railway.railwayCredentialAliases ? { credentialAliases: railway.railwayCredentialAliases } : {}),
     ...(railway.railwayDailyBackups ? { dailyBackups: {
@@ -858,4 +895,5 @@ export function createRailwayDatabaseAdapter(params: {
       };
     },
   };
+  return databaseAdapter;
 }

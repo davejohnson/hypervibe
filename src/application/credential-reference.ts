@@ -6,13 +6,20 @@ import { parseSecretRef } from '../domain/ports/secretmanager.port.js';
 import { parseEnvFile } from '../utils/env-parser.js';
 import { splitFragment } from '../utils/split-fragment.js';
 
+export interface ResolvedCredentialSource {
+  resolvedRef: string;
+  sourceKey?: string;
+  sourceField?: string;
+}
+type RecordResolution = (credentialKey: string, source: ResolvedCredentialSource) => void;
+
 function resolveEnvironmentCredential(
   provider: string,
   requestedName: string,
   values: Record<string, string | undefined>
-): string | undefined {
+): { name: string; value: string } | undefined {
   if (values[requestedName] !== undefined) {
-    return values[requestedName];
+    return { name: requestedName, value: values[requestedName] };
   }
 
   const aliasGroup = providerRegistry
@@ -36,30 +43,33 @@ function resolveEnvironmentCredential(
       + `(${aliasGroup.join(', ')}) contain different values. Set ${requestedName} explicitly.`
     );
   }
-  return candidates[0].value;
+  return candidates[0];
 }
 
-export function resolveLocalSecretRef(ref: string, provider?: string): string {
+export function resolveLocalSecretRef(ref: string, provider?: string, onResolved?: (source: ResolvedCredentialSource) => void): string {
   const trimmed = ref.trim();
   if (trimmed.startsWith('env:')) {
     const name = trimmed.slice('env:'.length).trim();
     if (!name) {
       throw new Error('credentialsRef env: reference is missing the environment variable name.');
     }
-    const value = provider
+    const resolved = provider
       ? resolveEnvironmentCredential(provider, name, process.env)
-      : process.env[name];
-    if (value === undefined) {
+      : process.env[name] === undefined ? undefined : { name, value: process.env[name] };
+    if (resolved === undefined) {
       throw new Error(`Environment variable ${name} is not set.`);
     }
-    return value;
+    onResolved?.({ resolvedRef: `env:${resolved.name}`, sourceKey: resolved.name });
+    return resolved.value;
   }
   if (trimmed.startsWith('file:')) {
     const filePath = trimmed.slice('file:'.length).trim();
     if (!filePath) {
       throw new Error('credentialsRef file: reference is missing the file path.');
     }
-    return readFileSync(filePath, 'utf8').trim();
+    const value = readFileSync(filePath, 'utf8').trim();
+    onResolved?.({ resolvedRef: `file:${filePath}` });
+    return value;
   }
   throw new Error('Unsupported credentialsRef. Use env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref like 1password://vault/item#field.');
 }
@@ -80,7 +90,9 @@ function scalarCredentialObject(provider: string, value: string, credentialsKey:
 function parseRawCredentialValue(provider: string, raw: string, credentialsKey: string | undefined, source: string): Record<string, unknown> {
   const trimmed = raw.trim();
   if (trimmed.startsWith('{')) {
-    const parsed = JSON.parse(trimmed) as unknown;
+    let parsed: unknown;
+    try { parsed = JSON.parse(trimmed); }
+    catch { throw new Error(`${source} JSON must resolve to a valid object.`); }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new Error(`${source} JSON must resolve to an object.`);
     }
@@ -120,7 +132,8 @@ function parseDotenvCredentialRef(
   provider: string,
   ref: string,
   credentialsKey?: string,
-  credentialsMap?: Record<string, string>
+  credentialsMap?: Record<string, string>,
+  onResolved?: RecordResolution
 ): Record<string, unknown> {
   const raw = ref.slice('dotenv:'.length).trim();
   const { target: filePath, fragment } = splitFragment(raw);
@@ -135,11 +148,12 @@ function parseDotenvCredentialRef(
   if (credentialsMap) {
     const output: Record<string, unknown> = {};
     for (const [providerKey, envKey] of Object.entries(credentialsMap)) {
-      const value = resolveEnvironmentCredential(provider, envKey, values);
-      if (value === undefined) {
+      const resolved = resolveEnvironmentCredential(provider, envKey, values);
+      if (resolved === undefined) {
         throw new Error(`credentialsMap key "${providerKey}" references missing .env variable "${envKey}".`);
       }
-      output[providerKey] = value;
+      output[providerKey] = resolved.value;
+      onResolved?.(providerKey, { resolvedRef: `dotenv:${filePath}#${resolved.name}`, sourceKey: resolved.name });
     }
     return output;
   }
@@ -147,11 +161,13 @@ function parseDotenvCredentialRef(
   if (!fragment) {
     throw new Error('credentialsRef dotenv: references must include #ENV_VAR, or pass credentialsMap for multiple values.');
   }
-  const value = resolveEnvironmentCredential(provider, fragment, values);
-  if (value === undefined) {
+  const resolved = resolveEnvironmentCredential(provider, fragment, values);
+  if (resolved === undefined) {
     throw new Error(`.env variable "${fragment}" was not found.`);
   }
-  return scalarCredentialObject(provider, value, credentialsKey, `dotenv:${filePath}#${fragment}`);
+  const output = scalarCredentialObject(provider, resolved.value, credentialsKey, `dotenv:${filePath}#${fragment}`);
+  for (const key of Object.keys(output)) onResolved?.(key, { resolvedRef: `dotenv:${filePath}#${resolved.name}`, sourceKey: resolved.name });
+  return output;
 }
 
 export async function parseCredentialRef(
@@ -159,10 +175,10 @@ export async function parseCredentialRef(
   ref: string,
   credentialsKey?: string,
   credentialsMap?: Record<string, string>,
-  context?: { projectId?: string }
+  context?: { projectId?: string; onResolved?: RecordResolution }
 ): Promise<Record<string, unknown>> {
   if (ref.trim().startsWith('dotenv:')) {
-    return parseDotenvCredentialRef(provider, ref, credentialsKey, credentialsMap);
+    return parseDotenvCredentialRef(provider, ref, credentialsKey, credentialsMap, context?.onResolved);
   }
 
   const secretRef = parseSecretRef(ref.trim());
@@ -171,17 +187,22 @@ export async function parseCredentialRef(
     if ('error' in resolved) {
       throw new Error(`Failed to resolve credentialsRef secret: ${resolved.error}`);
     }
-    if (credentialsMap) {
-      return mapStructuredCredentialValue(resolved.value, credentialsMap, 'credentialsRef secret');
-    }
-    return parseRawCredentialValue(provider, resolved.value, credentialsKey, 'credentialsRef secret');
+    const output = credentialsMap
+      ? mapStructuredCredentialValue(resolved.value, credentialsMap, 'credentialsRef secret')
+      : parseRawCredentialValue(provider, resolved.value, credentialsKey, 'credentialsRef secret');
+    for (const key of Object.keys(output)) context?.onResolved?.(key, { resolvedRef: secretRef.raw,
+      ...(credentialsMap ? { sourceField: credentialsMap[key] } : resolved.value.trim().startsWith('{') ? { sourceField: key } : {}) });
+    return output;
   }
 
   if (credentialsMap) {
     throw new Error('credentialsMap is supported with dotenv references or structured secret-manager references.');
   }
 
-  const raw = resolveLocalSecretRef(ref, provider);
-  return parseRawCredentialValue(provider, raw, credentialsKey, 'credentialsRef');
+  let source: ResolvedCredentialSource = { resolvedRef: ref.trim() };
+  const raw = resolveLocalSecretRef(ref, provider, resolved => { source = resolved; });
+  const output = parseRawCredentialValue(provider, raw, credentialsKey, 'credentialsRef');
+  for (const key of Object.keys(output)) context?.onResolved?.(key, { ...source, ...(raw.trim().startsWith('{') ? { sourceField: key } : {}) });
+  return output;
 }
 

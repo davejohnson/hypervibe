@@ -110,6 +110,12 @@ export class AzurePostgresClient {
     return server;
   }
 
+  async updateAdministratorPassword(resourceId: string, password: string): Promise<void> {
+    const identity = this.parseServerId(resourceId);
+    await this.arm.request('PATCH', this.serverResourceIdForIdentity(identity), AZURE_POSTGRES_API_VERSION,
+      { properties: { administratorLoginPassword: password } });
+  }
+
   async createServer(
     name: string,
     body: Record<string, unknown>

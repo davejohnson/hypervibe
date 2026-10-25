@@ -6,6 +6,12 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { projectSpecSchema } from '../../spec/spec.schema.js';
 import { compileManagedGitHubFiles, githubSpecNeedsOpenAI } from '../github-infrastructure.service.js';
+import { HYPERVIBE_VERSION } from '../../../version.js';
+import { ENVIRONMENT_TASK_RUNNER_PACKAGE_VERSION } from '../environment-task-workflow.service.js';
+
+it('pins the declared task helper to the same released code that validates its receipt contract', () => {
+  expect(ENVIRONMENT_TASK_RUNNER_PACKAGE_VERSION).toBe(HYPERVIBE_VERSION);
+});
 
 function spec(enabled = true) {
   return projectSpecSchema.parse({
@@ -76,7 +82,7 @@ describe('managed environment-task workflow compiler', () => {
       HYPERVIBE_TASK_RECEIPT_PATH: '${{ runner.temp }}/hypervibe-task-receipt.json',
     });
     const install = workflow.jobs.task.steps.find((step: { name?: string }) => step.name === 'Install pinned Hypervibe runner');
-    expect(install.run).toContain('@hypervibe/hypervibe@0.1.35');
+    expect(install.run).toContain(`@hypervibe/hypervibe@${HYPERVIBE_VERSION}`);
     expect(run.run).toContain('@hypervibe/hypervibe/ci/environment-task');
     for (const step of workflow.jobs.task.steps.filter((entry: { run?: string }) => entry.run)) {
       expect(step.run).not.toContain('${{');
@@ -129,7 +135,7 @@ describe('managed environment-task workflow compiler', () => {
         '#!/usr/bin/env node',
         'const fs = require("node:fs"); const path = require("node:path");',
         'const args = process.argv.slice(2);',
-        'if (!args.includes("@hypervibe/hypervibe@0.1.35")) process.exit(2);',
+        `if (!args.includes("@hypervibe/hypervibe@${HYPERVIBE_VERSION}")) process.exit(2);`,
         'const prefix = args[args.indexOf("--prefix") + 1];',
         'const pkg = path.join(prefix, "node_modules", "@hypervibe", "hypervibe");',
         'fs.mkdirSync(pkg, { recursive: true });',

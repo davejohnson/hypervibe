@@ -13,6 +13,7 @@ import { createCommandContext } from '../../application/context.js';
 import { createMcpCommandRegistrar } from '../../interfaces/mcp/adapter.js';
 import { registerLifecycleTools } from '../lifecycle.tools.js';
 import '../../application/providers.js';
+import { SpecStore } from '../../domain/spec/spec.store.js';
 
 let dir: string;
 beforeEach(() => {
@@ -31,7 +32,9 @@ afterEach(() => {
 // GraphQL client are exercised together. Only provider HTTP is intercepted by
 // the pinned-schema fixture; these are synthetic values, not live credentials.
 describe('Railway inspection public credential comparison contract', () => {
-  it.each(['environment', 'database'])('preserves comparisons through MCP %s inspection without exposing their inputs', async resource => {
+  it.each([
+    ['environment', false], ['database', false], ['environment', true], ['database', true],
+  ] as const)('preserves comparisons through MCP %s inspection with unavailable declarations=%s', async (resource, unavailableDeclarations) => {
     const wire = await railwayHttpFixture();
     const current = 'synthetic-current:p@ssword';
     const previous = 'synthetic-previous:p@ssword';
@@ -46,11 +49,17 @@ describe('Railway inspection public credential comparison contract', () => {
       wire.variables.set(`staging-${name}/${stagingId}`, {
         DATABASE_URL: name === 'cron' ? '${{postgres-db.DATABASE_URL}}' : url(name === 'web' ? previous : current),
         ...(name === 'web' ? { DIRECT_URL: url(previous) } : {}),
+        ...(name === 'web' ? { POSTGRES_DB_URL: url(current) } : {}),
       });
     }
 
     const ctx = createCommandContext();
     const project = ctx.repos.projects.create({ name: 'inspection-contract', defaultPlatform: 'railway' });
+    new SpecStore().replace(project, { version: 1, project: project.name, environments: {
+      staging: { hosting: { provider: 'railway' }, database: { provider: 'railway', engine: 'postgres' },
+        services: { web: { databaseEnvAliases: { POSTGRES_DB_URL: 'DATABASE_URL' } } } },
+    } });
+    if (unavailableDeclarations) vi.spyOn(SpecStore.prototype, 'getForInspection').mockImplementation(() => { throw new Error('private-spec-error'); });
     const environment = ctx.repos.environments.create({ projectId: project.id, name: 'staging', platformBindings: {
       provider: 'railway', projectId, environmentId: stagingId,
       services: Object.fromEntries(['web', 'worker', 'cron'].map(name => [name, { serviceId: `staging-${name}` }])),
@@ -76,6 +85,7 @@ describe('Railway inspection public credential comparison contract', () => {
       expect(envelope.ok, JSON.stringify(envelope)).toBe(true);
       expect(envelope.data.observed.databases[0].credentialAlignment).toEqual({
         basis: 'configured-variable-values', authentication: 'unverified',
+        rawReferences: 'unchecked', deployedConfiguration: 'unchecked', applicationOperation: 'unchecked',
         issuer: { comparisons: [
           { source: 'DATABASE_URL', against: 'POSTGRES_PASSWORD', comparison: { result: 'mismatch' } },
           { source: 'DATABASE_PRIVATE_URL', against: 'POSTGRES_PASSWORD', comparison: { result: 'match' } },
@@ -89,6 +99,8 @@ describe('Railway inspection public credential comparison contract', () => {
             credentialComparison: { result: 'match' }, target: { result: 'match' } },
           { name: 'web', externalId: 'staging-web', source: 'DIRECT_URL', issuerSource: 'DIRECT_URL',
             credentialComparison: { result: 'mismatch' }, target: { result: 'match' } },
+          ...(!unavailableDeclarations ? [{ name: 'web', externalId: 'staging-web', source: 'POSTGRES_DB_URL', issuerSource: 'DATABASE_URL',
+            credentialComparison: { result: 'mismatch' }, target: { result: 'match' } }] : []),
           { name: 'worker', externalId: 'staging-worker', source: 'DATABASE_URL', issuerSource: 'DATABASE_URL',
             credentialComparison: { result: 'mismatch' }, target: { result: 'match' } },
         ],
@@ -97,6 +109,9 @@ describe('Railway inspection public credential comparison contract', () => {
       const content = response.content as Array<{ type: string; text?: string }>;
       const text = content.filter(item => item.type === 'text').map(item => item.text ?? '').join('\n');
       expect(text).toContain('configured-variable-values; authentication unverified');
+      expect(text).toContain('Raw references, deployed configuration, and application operation: unchecked');
+      if (!unavailableDeclarations) expect(text).toContain('web POSTGRES_DB_URL vs issuer DATABASE_URL: credentials mismatch; target match');
+      else expect(envelope.data).toMatchObject({ databaseAliasCoverage: 'unknown' });
       expect(text).toContain('DATABASE_URL vs POSTGRES_PASSWORD: mismatch');
       expect(text).toContain('DATABASE_PRIVATE_URL vs POSTGRES_PASSWORD: match');
       expect(text).toContain('PGPASSWORD vs POSTGRES_PASSWORD: mismatch');
@@ -106,6 +121,7 @@ describe('Railway inspection public credential comparison contract', () => {
       expect(text).toContain('worker DATABASE_URL vs issuer DATABASE_URL: credentials mismatch; target match');
       expect(text).toContain('cron DATABASE_URL vs issuer DATABASE_URL: credentials unknown (unresolved_reference); target unknown (unresolved_reference)');
       const serialized = JSON.stringify(response);
+      expect(serialized).not.toContain('private-spec-error');
       for (const secret of [current, previous, url(current), url(previous), 'synthetic-contract-token',
         encodeURIComponent(current), encodeURIComponent(previous),
         createHash('sha256').update(url(current)).digest('hex'), createHash('sha256').update(url(previous)).digest('hex')]) {
