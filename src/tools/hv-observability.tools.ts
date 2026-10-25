@@ -35,6 +35,7 @@ import { parseEnvironmentMaintenanceBinding } from '../domain/services/environme
 import type { Environment } from '../domain/entities/environment.entity.js';
 import type { EnvironmentSpec } from '../domain/spec/spec.schema.js';
 import { ignoredOptionWarnings } from '../application/command-options.js';
+import { verifyCredentialOperations } from '../application/credential-operation-verification.js';
 
 function resolveEnvOrThrow(ctx: CommandContext, projectRef: string | undefined, envName: string | undefined) {
   const project = ctx.resolveProjectOrThrow({ project: projectRef });
@@ -254,7 +255,7 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
 
   commands.register(
     'hv_health',
-    'HTTP health-check a deployed service or an explicit URL. Project-backed checks also surface latest deployment failures for every current desired service across declared environments when provider connections are available; unknown provider observations never count as healthy.',
+    'HTTP health-check a deployed service or explicit URL. With credential=<role>, read declared application-operation receipts for the accepted credential update and exact deployments; this never runs a business operation or task. Project-backed health checks also surface latest deployment failures; unknown observations never count as healthy.',
     {
       project: projectField,
       env: envField,
@@ -262,8 +263,16 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
       url: z.string().url().optional().describe('Explicit URL to check instead of resolving project/env/service bindings; supplied binding selectors are ignored with a warning'),
       path: z.string().optional().describe('Path to check (defaults to the service healthCheckPath or /)'),
       timeoutMs: z.number().int().min(1000).max(60000).optional(),
+      credential: z.string().regex(/^[a-z][a-z0-9-]{0,79}$/).optional().describe('Read the declared application-operation receipts for this accepted credential role. Does not execute business operations or environment tasks.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, env, service, url, path, timeoutMs = 20000 }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, service, url, path, credential, timeoutMs = 20000 }) => {
+      if (credential) {
+        if (url || path || service) throw new HvError('VALIDATION', 'Credential operation verification uses only its reviewed app/task targets; omit url, path and service.');
+        const project = ctx.resolveProjectOrThrow({ project: projectRef });
+        const stored = new SpecStore().getForInspection(project);
+        if (!stored) throw new HvError('NOT_FOUND', 'Declare credential operation checks through hv_spec first.');
+        return commandSuccess(await verifyCredentialOperations(ctx, project, stored.spec, credential, timeoutMs));
+      }
       const optionWarnings = url
         ? ignoredOptionWarnings('hv_health', 'with explicit url', { project: projectRef, env, service })
         : undefined;

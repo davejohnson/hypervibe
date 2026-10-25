@@ -1,3 +1,4 @@
+import { vercelCredentialDeploymentMarkers } from './vercel-credential-runtime.js';
 import type {
   BranchDeployStepResult,
   BranchDeployTarget,
@@ -56,14 +57,17 @@ export function buildVercelGitHubActionsSteps(
     requiredSecrets: VERCEL_CI_REQUIRED_SECRETS,
     requiredVariables,
     steps: `      - name: Upload and deploy exact-SHA source to existing Vercel Projects
+        id: runtime_deploy
         uses: actions/github-script@v9
         env:
+          HYPERVIBE_CREDENTIAL_OPERATIONS: \${{ inputs.credential_operations || '{}' }}
           VERCEL_ACCESS_TOKEN: \${{ secrets.VERCEL_ACCESS_TOKEN }}
           VERCEL_SCOPE_BINDING: ${scopeValue}
           VERCEL_PROJECT_IDS_JSON: ${projectIdsValue}
           DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
+            const credentialDeployments = [];
             const fs = require('fs');
             const path = require('path');
             const crypto = require('crypto');
@@ -111,6 +115,11 @@ export function buildVercelGitHubActionsSteps(
             if (scopeKind === 'team' && !/^team_[A-Za-z0-9]+$/.test(scopeId)) {
               throw new Error('The bound Vercel team ID is invalid');
             }
+
+            const credentialMarkers = (${vercelCredentialDeploymentMarkers.toString().replace(/\n/g, '\n            ')})(
+              JSON.parse(process.env.HYPERVIBE_CREDENTIAL_OPERATIONS || '{}'), scopeBinding, projectIds,
+              (value) => crypto.createHash('sha256').update(value).digest('hex')
+            );
 
             function requestUrl(resource, query = {}) {
               const url = new URL(resource, endpoint);
@@ -301,30 +310,47 @@ export function buildVercelGitHubActionsSteps(
             );
 
             async function findExactDeployment(projectId) {
-              const response = await vercel('GET', '/v7/deployments', {
-                description: 'exact-SHA deployment reconciliation',
-                query: {
-                  projectId,
-                  target: 'production',
-                  limit: 100,
-                },
-              });
-              if (!Array.isArray(response?.deployments)) {
-                throw new Error(
-                  'Vercel deployment reconciliation returned an invalid response'
-                );
+              const matchesById = new Map();
+              let until;
+              const cursors = new Set();
+              for (let page = 0; ; page++) {
+                if (page >= 100) throw new Error('Complete Vercel deployment reconciliation exceeded its page limit');
+                const response = await vercel('GET', '/v7/deployments', {
+                  description: 'exact deployment operation reconciliation',
+                  query: { projectId, target: 'production', limit: 100, ...(until !== undefined ? { until } : {}) },
+                });
+                if (!Array.isArray(response?.deployments) || !response.pagination || typeof response.pagination !== 'object') throw new Error('Vercel deployment reconciliation returned an incomplete response');
+                for (const candidate of response.deployments) {
+                  if (candidate?.projectId !== projectId || candidate?.target !== 'production'
+                    || candidate?.meta?.hypervibeGitSha !== deploySha || candidate?.meta?.hypervibeRepository !== repository
+                    || credentialMarkers[projectId] && candidate?.meta?.hypervibeCredentialOperation !== credentialMarkers[projectId].identity) continue;
+                  const id = candidate.uid || candidate.id;
+                  if (typeof id !== 'string' || !id.trim()) throw new Error('Vercel deployment reconciliation returned no durable identity');
+                  matchesById.set(id, candidate);
+                }
+                const next = response.pagination.next;
+                if (next === undefined || next === null) break;
+                if (!Number.isSafeInteger(next) || next < 0 || cursors.has(next) || until !== undefined && next >= until) throw new Error('Vercel deployment reconciliation pagination is invalid');
+                cursors.add(next); until = next;
               }
-              const matches = response.deployments
-                .filter((candidate) =>
-                  candidate?.projectId === projectId
-                  && candidate?.target === 'production'
-                  && candidate?.meta?.hypervibeGitSha === deploySha
-                  && candidate?.meta?.hypervibeRepository === repository
-                )
-                .sort(
-                  (left, right) =>
-                    Number(right.createdAt || 0) - Number(left.createdAt || 0)
-                );
+              if (credentialMarkers[projectId]) {
+                const viable = [];
+                for (const deploymentId of matchesById.keys()) {
+                  const observed = await vercel('GET', '/v13/deployments/' + encodeURIComponent(deploymentId), { description: 'credential deployment retry verification' });
+                  if ((observed?.id || observed?.uid) !== deploymentId
+                    || observed?.projectId !== projectId || observed?.target !== 'production'
+                    || observed?.meta?.hypervibeGitSha !== deploySha || observed?.meta?.hypervibeRepository !== repository
+                    || observed?.meta?.hypervibeCredentialOperation !== credentialMarkers[projectId].identity) throw new Error('Vercel credential deployment retry provenance changed');
+                  // Only a direct, scoped observation of a terminal failed attempt
+                  // permits a replacement. List status alone is not sufficient.
+                  if (['ERROR', 'CANCELED'].includes(observed.readyState)) continue;
+                  if (!['READY', 'BUILDING', 'INITIALIZING', 'QUEUED'].includes(observed.readyState)) throw new Error('Vercel credential deployment retry is blocked or its state is unknown');
+                  viable.push(observed);
+                }
+                if (viable.length > 1) throw new Error('Multiple Vercel deployments claim the same accepted credential operation; reconciliation is ambiguous');
+                return viable[0] || null;
+              }
+              const matches = [...matchesById.values()].sort((left, right) => Number(right.createdAt || 0) - Number(left.createdAt || 0));
               const candidate = matches[0];
               if (!candidate) return null;
               const deploymentId = candidate.uid || candidate.id;
@@ -372,6 +398,7 @@ export function buildVercelGitHubActionsSteps(
                   deployment = await vercel('POST', '/v13/deployments', {
                     description: 'exact-SHA deployment creation',
                     retry: false,
+                    ...(credentialMarkers[projectId] ? { query: { forceNew: 1 } } : {}),
                     body: {
                       name: project.name,
                       project: project.id,
@@ -380,6 +407,7 @@ export function buildVercelGitHubActionsSteps(
                       meta: {
                         hypervibeGitSha: deploySha,
                         hypervibeRepository: repository,
+                        ...(credentialMarkers[projectId] ? { hypervibeCredentialOperation: credentialMarkers[projectId].identity } : {}),
                       },
                       gitMetadata: {
                         remoteUrl:
@@ -427,6 +455,7 @@ export function buildVercelGitHubActionsSteps(
                   || observed.meta?.hypervibeGitSha !== deploySha
                   || observed.meta?.hypervibeRepository
                     !== repository
+                  || credentialMarkers[projectId] && observed.meta?.hypervibeCredentialOperation !== credentialMarkers[projectId].identity
                 ) {
                   throw new Error(
                     'Vercel deployment provenance did not match the exact-SHA request'
@@ -461,11 +490,13 @@ export function buildVercelGitHubActionsSteps(
                   'Ready Vercel deployment did not report a URL'
                 );
               }
+              credentialDeployments.push({ serviceId: scopeBinding + ':' + projectId, deploymentIds: [deployment.id], ...(credentialMarkers[projectId]?.configurationVersion !== undefined ? { configurationVersion: credentialMarkers[projectId].configurationVersion } : {}) });
               core.info(
                 'Verified Vercel project ' + projectId + ' at https://'
                   + observed.url + ' for ' + deploySha
               );
             }
+            core.setOutput('credential_deployments', JSON.stringify(credentialDeployments));
 `,
   };
 }

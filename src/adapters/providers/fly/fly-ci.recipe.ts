@@ -34,7 +34,7 @@ const bindings = rawBindings.map((value) => {
   let parsed;
   try { parsed = JSON.parse(Buffer.from(value.slice('flyapp:v1:'.length), 'base64url').toString('utf8')); } catch { throw new Error('Invalid Fly.io service binding payload'); }
   if (parsed?.version !== 1 || parsed.organizationSlug !== organization || typeof parsed.appId !== 'string' || typeof parsed.appName !== 'string' || typeof parsed.machineId !== 'string') throw new Error('Fly.io service binding is outside the reviewed target');
-  return parsed;
+  return { ...parsed, serviceId: value };
 });
 if (new Set(bindings.map((binding) => binding.appId)).size !== bindings.length) throw new Error('Fly.io service bindings contain duplicate Apps');
 if (!bindings.some((binding) => binding.appName === registryApp)) throw new Error('FLY_REGISTRY_APP is not one of the reviewed App bindings');
@@ -73,17 +73,22 @@ async function fly(method, path, body, description) {
 }
 
 const deployments = [];
+const credentialOperations = JSON.parse(process.env.HYPERVIBE_CREDENTIAL_OPERATIONS || '{}');
+if (!credentialOperations || typeof credentialOperations !== 'object' || Array.isArray(credentialOperations)) throw new Error('Credential operations are malformed');
 for (const binding of bindings) {
   const app = await fly('GET', '/v1/apps/' + encodeURIComponent(binding.appName), undefined, 'App observation');
   if (app?.id !== binding.appId || app?.name !== binding.appName || app?.organization?.slug !== organization) throw new Error('Fly.io App identity changed for ' + binding.appName);
   const machines = await fly('GET', '/v1/apps/' + encodeURIComponent(binding.appName) + '/machines', undefined, 'Machine observation');
   const exact = Array.isArray(machines) ? machines.filter((machine) => machine?.id === binding.machineId && machine?.config?.metadata?.hypervibe_managed === 'true') : [];
   if (!Array.isArray(machines) || machines.length !== 1 || exact.length !== 1) throw new Error('Fly.io App ' + binding.appName + ' does not contain only the exact reviewed Hypervibe Machine');
+  const credentialOperation = Object.values(credentialOperations).find((entry) => entry?.serviceId === binding.serviceId);
+  const minimumSecretsVersion = credentialOperation?.configurationVersion;
+  if (credentialOperation && (!Number.isSafeInteger(minimumSecretsVersion) || minimumSecretsVersion < 0)) throw new Error('The accepted Fly secret version is required before credential deployment');
   const machine = exact[0];
   const expectedMounts = flyMountIdentity(machine.config);
   if (!machine.id || !machine.instance_id || !machine.config) throw new Error('Fly.io Machine identity or configuration is incomplete');
   const config = { ...machine.config, image, metadata: { ...(machine.config.metadata || {}), hypervibe_git_sha: sha, hypervibe_repository: process.env.HYPERVIBE_REPOSITORY } };
-  const updated = await fly('POST', '/v1/apps/' + encodeURIComponent(binding.appName) + '/machines/' + encodeURIComponent(machine.id), { config, current_version: machine.instance_id, skip_launch: false }, 'exact Machine update');
+  const updated = await fly('POST', '/v1/apps/' + encodeURIComponent(binding.appName) + '/machines/' + encodeURIComponent(machine.id), { config, current_version: machine.instance_id, skip_launch: false, ...(minimumSecretsVersion !== undefined ? { min_secrets_version: minimumSecretsVersion } : {}) }, 'exact Machine update');
   if (updated?.id !== machine.id) throw new Error('Fly.io updated an unexpected Machine identity');
   let observed;
   for (let attempt = 1; attempt <= 120; attempt++) {
@@ -99,7 +104,7 @@ for (const binding of bindings) {
   const observedDigest = String(observed?.image_ref?.digest || '').toLowerCase();
   if (flyMountIdentity(observed?.config) !== expectedMounts) throw new Error('Fly filesystem mount identity changed during deployment.');
   if (observed?.id !== machine.id || observed?.config?.metadata?.hypervibe_git_sha !== sha || observed?.config?.metadata?.hypervibe_repository !== process.env.HYPERVIBE_REPOSITORY || (observedDigest !== digest && observed?.config?.image !== image)) throw new Error('Fly.io Machine ' + machine.id + ' did not converge to the exact image digest');
-  deployments.push({ appId: app.id, machineId: machine.id, image, digest });
+  deployments.push({ appId: app.id, machineId: machine.id, serviceId: binding.serviceId, deploymentId: observed.instance_id, ...(minimumSecretsVersion !== undefined ? { configurationVersion: minimumSecretsVersion } : {}), image, digest });
 }
 await writeFile('.hypervibe-release.json', JSON.stringify({ version: 1, provider: 'fly', repository: process.env.HYPERVIBE_REPOSITORY, environment: process.env.HYPERVIBE_ENVIRONMENT, sha, programFingerprint: process.env.HYPERVIBE_PROGRAM_FINGERPRINT, deployments }) + '\\n', { mode: 0o600 });
 `;

@@ -888,6 +888,7 @@ describe('DigitalOceanAdapter', () => {
         },
         live_url: 'https://hv-app.ondigitalocean.app',
         active_deployment: { id: 'deploy-1', phase: 'ACTIVE' },
+        in_progress_deployment: { id: 'deploy-2', phase: 'DEPLOYING' },
       },
     }));
     vi.stubGlobal('fetch', fetchMock);
@@ -912,6 +913,7 @@ describe('DigitalOceanAdapter', () => {
         workloadKind: 'web',
         sourceState: 'disconnected',
         envVarKeys: ['NODE_ENV', 'SESSION_SECRET'],
+        deployment: { id: 'deploy-1', status: 'ACTIVE', activeDeploymentIds: ['deploy-1', 'deploy-2'], activeDeploymentCoverage: 'traffic' },
         status: 'running',
       }),
       expect.objectContaining({

@@ -193,6 +193,17 @@ describe('secret reads', () => {
     await client.close();
   });
 
+  it('reports a provider reference as present with unreadable value rather than not found', async () => {
+    const project = new ProjectRepository().create({ name: 'reference-app', defaultPlatform: 'cloudrun' });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'production', platformBindings: { provider: 'cloudrun', projectId: 'project-id', services: { web: { serviceId: 'web-id' } } } });
+    new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+    vi.spyOn(hostingEnv, 'readHostingEnvVars').mockResolvedValue({ success: true, provider: 'cloudrun', variables: {}, unresolvedKeys: ['API_KEY'] } as any);
+    const client = await makeClient();
+    const result = await client.call('hv_secrets', { project: project.name, env: 'production', service: 'web', key: 'API_KEY' });
+    expect(result).toMatchObject({ ok: true, data: { vars: { API_KEY: expect.any(String) }, unresolvedKeys: ['API_KEY'] } });
+    await client.close();
+  });
+
   it('fully redacts hosting values', async () => {
     const project = new ProjectRepository().create({ name: 'hosting-read-app', defaultPlatform: 'railway' });
     new EnvironmentRepository().create({ projectId: project.id, name: 'staging' });

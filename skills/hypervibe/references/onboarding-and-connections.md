@@ -92,12 +92,37 @@ Do not assume they should be invited to the provider or granted wider access.
 
 ## Application configuration
 
-For credential provenance, drift, or rotation requests, inspect the available
-read-only Hypervibe evidence. Keep local candidates, accepted configuration,
-deployment identity and application operation separate. Missing provenance or
-rotation dates remain unknown. Use `hv_spec` → `hv_plan` → `hv_apply` for reviewed
-changes, followed by managed rollout and verification. Do not revoke an old
-credential on one consumer's success.
+For credential adoption or rotation, first inspect `hv_secrets` with an explicit
+environment and `view="inventory"`. Declare a non-secret `credential` descriptor
+on each related `spec.secrets` alias: role, label, purpose, kind, one safe source
+reference, and intended account/sandbox when applicable. Every alias of a role
+must share that descriptor; its environments/GitHub scopes remain explicit.
+Use `hv_plan scope="credentials" credential=<role> intent="adopt"` to review
+value-preserving adoption, or `intent="rotate"` to freeze one replacement.
+Never put values in the spec, URLs, command arguments or conversation.
+
+Apply only the reviewed action IDs, then use managed CI rollout and status/health.
+For pending or uncertain writes, inspect receipts and resume the same plan;
+do not regenerate or replace the input. An uncertainty-specific retry confirmation
+is a separate review decision. Keep configuration, new deployment, authentication,
+business operation and old-instance retirement distinct. Use returned creation
+URLs without changing their supported prefills. The plan states whether each
+cloud stages the value or immediately starts a new revision. Database-password
+roles change native authentication and then synchronize exact issuer/reference
+consumers; never substitute an environment-only edit. For Stripe webhook roles,
+use the returned same-endpoint Dashboard roll instructions and a private source
+for the replacement, preserving account/sandbox and endpoint identity. Leave
+old-key revocation pending until all consumers and application operations have
+evidence. Exact runtime service selections use `credential.runtimeConsumers`.
+
+For credential provenance, drift, or rotation requests, start with
+`hv_secrets project="..." env="..." view="inventory"`. Explain each role's local
+candidates, exact consumers, recorded synchronization, deployment identity and
+missing evidence. The inventory does not adopt or update values. Keep unknown
+rotation dates unknown; a successful deployment or homepage is not proof of
+credential authentication, application operation, or retirement of old instances.
+Use existing `hv_spec` → `hv_plan` → `hv_apply` for reviewed changes, then managed
+rollout and verification. Do not revoke an old credential on one consumer's success.
 
 Declare application-owned opaque secrets with Hypervibe's supported versioned
 generator; users should not invent session keys or copy generated values.

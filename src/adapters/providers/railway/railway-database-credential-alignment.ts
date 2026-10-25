@@ -7,6 +7,7 @@ export interface DatabaseCredentialConsumer {
   name: string;
   externalId: string;
   evidence: DatabaseVariableEvidence;
+  aliases?: Record<string, 'DATABASE_URL' | 'DIRECT_URL'>;
 }
 
 function variable(evidence: DatabaseVariableEvidence, key: string): Evidence<string> {
@@ -61,6 +62,7 @@ export function compareDatabaseCredentials(
   const directSource = ['DIRECT_URL', 'DATABASE_PRIVATE_URL'].find(key => hasVariable(issuer, key)) ?? 'DATABASE_URL';
   return {
     basis: 'configured-variable-values', authentication: 'unverified',
+    rawReferences: 'unchecked', deployedConfiguration: 'unchecked', applicationOperation: 'unchecked',
     issuer: {
       comparisons: ['DATABASE_URL', 'DATABASE_PRIVATE_URL', 'PGPASSWORD', 'DIRECT_URL']
         .filter(source => source === 'DATABASE_URL' || hasVariable(issuer, source)).map(source => ({
@@ -70,9 +72,9 @@ export function compareDatabaseCredentials(
             : compare(databaseUrl(issuer, source), password, (url, secret) => url.password === secret),
         })),
     },
-    consumers: consumers.flatMap(consumer => ['DATABASE_URL', 'DIRECT_URL']
-      .filter(source => source === 'DATABASE_URL' || hasVariable(consumer.evidence, source)).map(source => {
-        const issuerSource = source === 'DIRECT_URL' ? directSource : 'DATABASE_URL';
+    consumers: consumers.flatMap(consumer => [...new Set(['DATABASE_URL', 'DIRECT_URL', ...Object.keys(consumer.aliases ?? {})])]
+      .filter(source => source === 'DATABASE_URL' || Object.hasOwn(consumer.aliases ?? {}, source) || hasVariable(consumer.evidence, source)).map(source => {
+        const issuerSource = (consumer.aliases?.[source] ?? source) === 'DIRECT_URL' ? directSource : 'DATABASE_URL';
         const issuerUrl = databaseUrl(issuer, issuerSource);
         const url = databaseUrl(consumer.evidence, source);
         return {

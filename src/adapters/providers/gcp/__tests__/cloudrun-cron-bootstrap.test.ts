@@ -56,6 +56,7 @@ async function fixture(options: {
   existingImage?: string;
   changedUid?: boolean;
   changedUidAfterPatch?: boolean;
+  changedPrincipalAfterPatch?: boolean;
   schedulerWriteTimeout?: boolean;
   schedulerReadUnknown?: boolean;
   wrongCommand?: boolean;
@@ -138,6 +139,7 @@ async function fixture(options: {
         const job = readyHoldingJob();
         job.template.template.containers[0]!.image = currentImage;
         if (options.changedUid || (options.changedUidAfterPatch && jobPatched)) job.uid = 'replacement-uid';
+        if (options.changedPrincipalAfterPatch && jobPatched) job.template.template.serviceAccount = 'other@gcp-project.iam.gserviceaccount.com';
         if (options.wrongCommand) job.template.template.containers[0]!.args = ['-lc', 'npm run unrelated'];
         if (options.jobMetadata) return Response.json({ ...job, ...retainedJobMetadata,
           labels: { ...job.labels, 'example-owner': 'operations' },
@@ -188,7 +190,7 @@ async function runCi(kind: 'github' | 'portable', fetchImpl: typeof fetch) {
   };
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
   await new AsyncFunction('require', 'process', 'fetch', 'Buffer', 'core', 'createSign', 'execFileSync', 'readFile', 'writeFile', script)(
-    () => crypto, { env, stdout: { write: vi.fn() } }, fetchImpl, Buffer, { info: vi.fn() }, crypto.createSign,
+    () => crypto, { env, stdout: { write: vi.fn() } }, fetchImpl, Buffer, { info: vi.fn(), setOutput: vi.fn() }, crypto.createSign,
     (_file: string, args: string[]) => args[0] === 'push' ? 'digest: sha256:' + 'e'.repeat(64) : '',
     async (file: string) => file === '.hypervibe-deploy-sha' ? 'a'.repeat(40) : 'registry.example.test/source:tag', vi.fn());
 }
@@ -235,7 +237,7 @@ describe('Cloud Run managed-CI cron bootstrap', () => {
       CLOUDRUN_SERVICE_NAMES: '', CLOUDRUN_JOB_NAMES: prepared.externalId, IMAGE_URI: candidateImage, DEPLOY_OPERATION: 'deploy',
       CLOUDRUN_RELEASE_COMMANDS_B64: Buffer.from('[]').toString('base64'),
       CLOUDRUN_RUNTIME_RESOURCES_B64: Buffer.from(JSON.stringify([{ logicalName: 'cron', workloadKind: 'cron', providerResourceType: 'job', providerResourceId: prepared.externalId!, startCommand: 'npm run cron', healthCheckPath: null }])).toString('base64'),
-    } }, fetchMock, Buffer, { info: vi.fn() });
+    } }, fetchMock, Buffer, { info: vi.fn(), setOutput: vi.fn() });
     const beforeActivation = fetchMock.mock.calls.filter(([url, init]) => String(url).includes('cloudscheduler.googleapis.com') && (init?.method ?? 'GET') !== 'GET');
     expect(beforeActivation).toHaveLength(0);
     expect((await adapter.activateSchedule(service, bound, { expectedImage: candidateImage, expectedJobUid: scheduleActivation.jobUid, sourceCommitSha: 'a'.repeat(40) })).receipt.success).toBe(true);
@@ -253,6 +255,13 @@ describe('Cloud Run managed-CI cron bootstrap', () => {
     const { fetchMock } = await fixture({ existingImage: holdingImage });
     await runCi(kind, fetchMock);
     expect(fetchMock.mock.calls.filter(([url, init]) => String(url).includes('run.googleapis.com') && (init?.method ?? 'GET') !== 'GET').map(([, init]) => init?.method)).toEqual(['PATCH']);
+  });
+
+  it.each(['github', 'portable'] as const)('%s CI rejects changed job runtime identity without any filesystem mounts', async (kind) => {
+    const { fetchMock } = await fixture({ existingImage: holdingImage, changedPrincipalAfterPatch: true });
+    await expect(runCi(kind, fetchMock)).rejects.toThrow(/runtime principal identity/i);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'PATCH')).toHaveLength(1);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith(':run'))).toBe(false);
   });
 
   it.each(['github', 'portable'] as const)('%s CI uses the Job PATCH contract and retains writable metadata', async (kind) => {

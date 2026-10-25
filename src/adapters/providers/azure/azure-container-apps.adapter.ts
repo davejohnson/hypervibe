@@ -1,3 +1,5 @@
+import type { ProviderEnvironmentVariablesRequest, ProviderEnvironmentVariablesResult } from '../../../domain/ports/provider-env-vars.port.js';
+import { createAzureRegistryCredentialLifecycle } from './azure-registry-credential.js';
 import { createHash } from 'node:crypto';
 import { resolve4, resolveCname, resolveTxt } from 'node:dns/promises';
 import { z } from 'zod';
@@ -37,6 +39,7 @@ import { buildAzureContainerAppsPortableRecipe } from './azure-container-apps-ci
 import { AzureResourceManagerClient } from './azure-resource-manager.client.js';
 import { AzureServiceVolumes } from './azure-service-volumes.js';
 import { azureVolumeFingerprint } from './azure-volume-runtime.js';
+import { azureRuntimeIdentityFingerprint } from './azure-runtime-identity.js';
 import {
   azureEnvironmentResourceGroupScope,
   legacyAzureEnvironmentResourceGroupScope,
@@ -86,7 +89,7 @@ type AzureResource = {
   id: string;
   name: string;
   location?: string;
-  identity?: { principalId?: string; tenantId?: string; type?: string };
+  identity?: { principalId?: string; tenantId?: string; type?: string; userAssignedIdentities?: Record<string, unknown> };
   properties?: Record<string, any>;
   tags?: Record<string, string>;
 };
@@ -103,6 +106,7 @@ type AzureProject = {
 
 export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMaintenanceAdapter {
   readonly name = 'azure-container-apps';
+  readonly registryCredentialLifecycle = createAzureRegistryCredentialLifecycle(() => this.connected().client);
   readonly serviceVolumes = new AzureServiceVolumes(() => this.connected().client);
 
   readonly capabilities: ProviderCapabilities = {
@@ -116,6 +120,8 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     managedTls: true,
     supportsObserve: true,
     supportsDeferredDeploy: true,
+    credentialUpdateActivation: 'provider-rollout',
+    credentialValueEvidence: 'readback',
     supportsMaintenance: true,
   };
 
@@ -324,6 +330,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       }
       if (!app) throw new Error('Azure Container App reconciliation returned no resource.');
       const expectedVolumes = azureVolumeFingerprint(app.properties?.template);
+      const expectedIdentity = azureRuntimeIdentityFingerprint(app);
       this.assertAppEnvironment(app, project.environmentId);
       const principalId = app.identity?.principalId;
       if (!principalId) throw new Error(`Container App ${app.id} did not return its system-assigned identity.`);
@@ -339,6 +346,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       app = await this.waitForProvisioning(app.id, CONTAINER_APPS_API);
       app = await this.waitForContainerAppRevision(app.id, previousReadyRevision);
       if (azureVolumeFingerprint(app.properties?.template) !== expectedVolumes) throw new Error('Azure volume mounts changed during runtime configuration.');
+      if (azureRuntimeIdentityFingerprint(app) !== expectedIdentity) throw new Error('Azure workload identity changed during runtime configuration.');
       const url = this.appUrl(app);
       return {
         serviceId: service.id,
@@ -366,13 +374,100 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     }
   }
 
+  async readProviderEnvironmentVariables(request: ProviderEnvironmentVariablesRequest): Promise<ProviderEnvironmentVariablesResult> {
+    try {
+      const binding = parseHostingBindings(request.environment);
+      const appId = binding.services?.[request.service.name]?.serviceId;
+      if (binding.provider !== this.name || !binding.projectId || !binding.environmentId || !appId) throw new Error();
+      const project = this.projectFromResourceGroup(binding.projectId, binding.environmentId);
+      this.assertAppScope(appId, project.resourceGroupId);
+      const app = await this.getResource(appId, CONTAINER_APPS_API);
+      if (!app || app.id.toLowerCase() !== appId.toLowerCase() || !this.isOwned(app, request.environment.id)) throw new Error();
+      this.assertAppEnvironment(app, project.environmentId);
+      const container = this.container(app);
+      if (!container?.image || !Array.isArray(container.env ?? [])) throw new Error();
+      const secrets = await this.listAppSecrets(appId);
+      if (secrets.some(secret => !secret.name) || new Set(secrets.map(secret => secret.name)).size !== secrets.length) throw new Error();
+      const references = new Set((app.properties?.configuration?.secrets ?? []).filter((secret: any) => secret.keyVaultUrl).map((secret: any) => secret.name));
+      const byName = new Map(secrets.map(secret => [secret.name, secret.value]));
+      const variables: Record<string, string> = {}; const unresolvedKeys: string[] = [];
+      const entries = container.env ?? [];
+      if (entries.some((entry: any) => typeof entry.name !== 'string') || new Set(entries.map((entry: any) => entry.name)).size !== entries.length) throw new Error();
+      for (const entry of entries) {
+        if (typeof entry.value === 'string' && !entry.secretRef) variables[entry.name] = entry.value;
+        else if (!references.has(entry.secretRef) && typeof byName.get(entry.secretRef) === 'string') variables[entry.name] = byName.get(entry.secretRef)!;
+        else unresolvedKeys.push(entry.name);
+      }
+      return { success: true, variables, ...(unresolvedKeys.length ? { unresolvedKeys: unresolvedKeys.sort() } : {}) };
+    } catch { return { success: false, error: 'Exact Azure Container App configuration could not be verified.' }; }
+  }
+
   async setEnvVars(
     environment: Environment,
     service: Service,
     vars: Record<string, string>,
     options: DeploymentMutationOptions = {}
   ): Promise<Receipt> {
+    if (options.requireCredentialUpdate) return this.setCredentialEnvVars(environment, service, vars);
     return (await this.deploy(service, environment, vars, options)).receipt;
+  }
+
+  private async setCredentialEnvVars(environment: Environment, service: Service, vars: Record<string, string>): Promise<Receipt> {
+    let attempted = false;
+    try {
+      const binding = parseHostingBindings(environment);
+      const appId = binding.services?.[service.name]?.serviceId;
+      if (binding.provider !== this.name || !binding.projectId || !binding.environmentId || !appId) throw new Error();
+      const project = this.projectFromResourceGroup(binding.projectId, binding.environmentId);
+      this.assertAppScope(appId, project.resourceGroupId);
+      const app = await this.getResource(appId, CONTAINER_APPS_API);
+      if (!app || !app.location || app.id.toLowerCase() !== appId.toLowerCase() || !this.isOwned(app, environment.id)) throw new Error();
+      this.assertAppEnvironment(app, project.environmentId);
+      const container = this.container(app);
+      if (!container?.image || !Array.isArray(container.env ?? [])) throw new Error();
+      const secrets = await this.listAppSecrets(appId);
+      if (new Set(secrets.map(secret => secret.name)).size !== secrets.length || secrets.some(secret => !secret.name)) throw new Error();
+      const byName = new Map<string, any>((app.properties?.configuration?.secrets ?? []).map((secret: any) => [secret.name, secret]));
+      for (const secret of secrets) byName.set(secret.name!, { ...byName.get(secret.name!), ...secret });
+      if ([...byName.values()].some(secret => typeof secret.value !== 'string' && typeof secret.keyVaultUrl !== 'string')) throw new Error();
+      const remaining = new Map(Object.entries(vars));
+      const env = (container.env ?? []).map((entry: any) => {
+        if (!remaining.has(entry.name)) return entry;
+        remaining.delete(entry.name);
+        return { name: entry.name, secretRef: this.secretName(entry.name) };
+      }).concat([...remaining].map(([name]) => ({ name, secretRef: this.secretName(name) })));
+      if (new Set(env.map((entry: any) => entry.name)).size !== env.length) throw new Error();
+      for (const [key, value] of Object.entries(vars)) {
+        const name = this.secretName(key);
+        const previous = (container.env ?? []).find((entry: any) => entry.name === key);
+        // Never reuse an unreviewed secret slot that may belong to another input.
+        if (byName.has(name) && previous?.secretRef !== name) throw new Error();
+        if ((container.env ?? []).some((entry: any) => entry.secretRef === name && !Object.hasOwn(vars, entry.name))) throw new Error();
+        byName.set(name, { name, value });
+      }
+      const templateChanged = JSON.stringify(env) !== JSON.stringify(container.env ?? []);
+      // ARM uses JSON Merge Patch: omitted nested settings are preserved and
+      // explicit null removes an old suffix before Azure chooses a new revision.
+      const template = { containers: [{ ...container, env }], ...(app.properties?.template?.revisionSuffix ? { revisionSuffix: null } : {}) };
+      const patch = { location: app.location, properties: { configuration: { secrets: [...byName.values()] }, ...(templateChanged ? { template } : {}) } };
+      const identity = azureRuntimeIdentityFingerprint(app);
+      const volumes = azureVolumeFingerprint(app.properties?.template);
+      const beforeRevision = app.properties?.latestReadyRevisionName;
+      attempted = true;
+      await this.connected().client.request('PATCH', appId, CONTAINER_APPS_API, patch);
+      const after = await this.waitForProvisioning(appId, CONTAINER_APPS_API);
+      if (azureRuntimeIdentityFingerprint(after) !== identity || azureVolumeFingerprint(after.properties?.template) !== volumes) throw new Error();
+      const readback = new Map((await this.listAppSecrets(appId)).map(secret => [secret.name, secret.value]));
+      if (Object.entries(vars).some(([key, value]) => readback.get(this.secretName(key)) !== value)) throw new Error();
+      const observedEnv = this.container(after)?.env ?? [];
+      if (Object.keys(vars).some(key => observedEnv.find((entry: any) => entry.name === key)?.secretRef !== this.secretName(key))) throw new Error();
+      return { success: true, message: 'Selected Azure credential configuration verified; runtime activation requires revision evidence.', data: {
+        serviceId: appId, credentialValueEvidence: 'readback', credentialUpdateActivation: templateChanged ? 'provider-rollout' : 'deferred',
+        configurationUpdated: true, runtimeRolloutRequired: true, mutationAttempted: true,
+        rolloutBaseline: beforeRevision ? { state: 'present', deploymentId: beforeRevision } : { state: 'unknown' },
+        ...(templateChanged && after.properties?.latestRevisionName ? { deploymentId: after.properties.latestRevisionName } : {}),
+      } };
+    } catch { return { success: false, message: attempted ? 'Azure credential write requires readback recovery.' : 'Exact Azure credential target could not be verified; no write attempted.', data: { mutationAttempted: attempted } }; }
   }
 
   async deleteEnvVars(environment: Environment, service: Service, keys: string[]): Promise<Receipt> {
@@ -390,6 +485,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
         : undefined;
       const container = this.container(app);
       const expectedVolumes = azureVolumeFingerprint(app.properties?.template);
+      const expectedIdentity = azureRuntimeIdentityFingerprint(app);
       const secrets = await this.listAppSecrets(appId);
       const secretRefs = new Set(
         (container?.env ?? []).filter((item: any) => retired.has(item.name)).map((item: any) => item.secretRef).filter(Boolean)
@@ -412,6 +508,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       await this.waitForProvisioning(appId, CONTAINER_APPS_API);
       const ready = await this.waitForContainerAppRevision(appId, previousReadyRevision);
       if (azureVolumeFingerprint(ready.properties?.template) !== expectedVolumes) throw new Error('Azure volume mounts changed during environment variable removal.');
+      if (azureRuntimeIdentityFingerprint(ready) !== expectedIdentity) throw new Error('Azure workload identity changed during environment variable removal.');
       return { success: true, message: `Deleted ${keys.length} retired Azure environment variable${keys.length === 1 ? '' : 's'}.` };
     } catch (error) {
       return this.failedReceipt('Failed to delete Azure environment variables', this.formatError(error));
@@ -660,6 +757,18 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     }
   }
 
+  private async observedCredentialDeployment(app: AzureResource): Promise<ObservedService['deployment']> {
+    const id = app.properties?.latestReadyRevisionName;
+    if (typeof id !== 'string' || !id) return undefined;
+    const base = { id, status: app.properties?.provisioningState };
+    try {
+      const revisions = await this.connected().client.listAll<AzureResource>(`${app.id}/revisions`, CONTAINER_APPS_API);
+      if (!revisions.length || revisions.some(revision => !revision.name || revision.id.toLowerCase() !== `${app.id}/revisions/${revision.name}`.toLowerCase()
+        || typeof revision.properties?.active !== 'boolean' || !Number.isInteger(revision.properties?.replicas) || revision.properties.replicas < 0)) return base;
+      return { ...base, activeDeploymentIds: revisions.filter(revision => revision.properties?.active || revision.properties?.replicas > 0).map(revision => revision.name!).sort(), activeDeploymentCoverage: 'instances' };
+    } catch { return base; }
+  }
+
   async observe(environment: Environment): Promise<ObservedState> {
     const bindings = parseHostingBindings(environment);
     if (!bindings.projectId) return this.emptyObservation(false);
@@ -713,6 +822,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       ) as Record<string, string>;
       const visible = Object.entries(envValues).filter(([key]) => !INTERNAL_ENV_KEYS.has(key));
       const customDomains = this.azureCustomDomains(app).map((domain) => domain.name).filter(Boolean) as string[];
+      const deployment = await this.observedCredentialDeployment(app);
       services.push({
         name,
         externalId: app.id,
@@ -726,8 +836,10 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
           public: app.properties?.configuration?.ingress?.external === true,
         },
         sourceState: 'disconnected',
-        envVarKeys: visible.map(([key]) => key).sort(),
+        envVarKeys: (container?.env ?? []).map((entry: any) => entry.name).filter((name: unknown): name is string => typeof name === 'string' && !INTERNAL_ENV_KEYS.has(name)).sort(),
+        envVarState: (container?.env ?? []).some((entry: any) => typeof envValues[entry.name] !== 'string') ? 'unknown' : 'resolved',
         envVarHashes: Object.fromEntries(visible.map(([key, value]) => [key, hashEnvValue(value)])),
+        ...(deployment ? { deployment } : {}),
         status: app.properties?.provisioningState === 'Succeeded'
           ? (container?.image === BOOTSTRAP_IMAGE ? 'empty' : 'running')
           : app.properties?.provisioningState === 'Failed' ? 'failed' : 'unknown',
@@ -1020,7 +1132,12 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     const template = params.app?.properties?.template ?? {};
     return {
       location: params.app?.location ?? this.connected().credentials.location,
-      identity: { type: 'SystemAssigned' },
+      identity: params.app ? {
+        type: params.app.identity?.type,
+        ...(params.app.identity?.userAssignedIdentities ? {
+          userAssignedIdentities: Object.fromEntries(Object.keys(params.app.identity.userAssignedIdentities).map(id => [id, {}])),
+        } : {}),
+      } : { type: 'SystemAssigned' },
       properties: {
         managedEnvironmentId: params.environmentId,
         configuration: {
@@ -1381,6 +1498,7 @@ providerRegistry.register({
       diff: { workloadKindObservation: 'exact' },
       ci: {
         displayName: 'Azure Container Apps',
+        rendererRevision: 1,
         requiredSecrets: AZURE_CONTAINER_APPS_CI_REQUIRED_SECRETS,
         secretCredentialKeys: {
           AZURE_TENANT_ID: 'tenantId',

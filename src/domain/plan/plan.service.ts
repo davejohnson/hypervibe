@@ -1,3 +1,6 @@
+import { credentialSourceInputKeys } from '../services/accepted-credential-inputs.js';
+import { databaseConsumerReadiness, type DatabaseConsumerReadiness } from '../services/database-consumer-readiness.service.js';
+import { planCredentialLifecycle, pendingCredentialUpdate } from '../services/credential-lifecycle.service.js';
 import { planDatabaseCredentialAliases } from '../services/database-credential-aliases.service.js';
 import { planScheduleActivations, SCHEDULE_ACTIVATION_OPERATION } from '../services/schedule-activation.service.js';
 import { scopedSecretObservation } from './scoped-secrets.js';
@@ -139,7 +142,9 @@ import {
 
 export interface PlanOptions {
   /** Restrict the plan to one lifecycle stage. Omission preserves full-plan behavior. */
-  scope?: 'full' | 'retained-cleanup' | 'secrets' | 'database-credential-aliases';
+  credential?: string;
+  intent?: 'adopt' | 'rotate';
+  scope?: 'full' | 'credentials' | 'retained-cleanup' | 'secrets' | 'database-credential-aliases';
   /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
   serviceFilter?: string[];
   /** One-off env var overrides merged over spec.envVars, frozen (encrypted) into the plan. */
@@ -153,6 +158,8 @@ export interface PlanOptions {
 }
 
 export interface EnvironmentPlan {
+  databaseConsumers?: DatabaseConsumerReadiness[];
+  credentialReview?: { role: string; label: string; purpose: string; intent: 'adopt' | 'rotate'; source?: string; identity?: Record<string, unknown>; validation: import('../registry/credential-validation.registry.js').CredentialValidation; targets: Array<Record<string, unknown>> };
   backupCoverage?: Awaited<ReturnType<typeof observeBackupPolicy>> & {
     complete: boolean;
   } & ReturnType<typeof backupEvidenceSummary>;
@@ -160,7 +167,7 @@ export interface EnvironmentPlan {
   webhookReadiness?: WebhookReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
-  scope: 'full' | 'secrets' | 'database-credential-aliases' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
+  scope: 'full' | 'credentials' | 'secrets' | 'database-credential-aliases' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
   backupReadiness?: BackupReadiness;
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
@@ -369,7 +376,9 @@ export class PlanService {
     }
 
     try {
-      const observed = await adapter.observe(environment);
+      const observed = await adapter.observe(environment, { databaseEnvAliases: Object.fromEntries(
+        Object.entries(environmentSpec.services).map(([name, service]) => [name, service.databaseEnvAliases ?? {}])
+      ) });
       const reportedCompleteness = observed.completeness;
       const providerHasSeparateEnvironment = providerRegistry
         .getMetadata(provider)
@@ -385,6 +394,7 @@ export class PlanService {
               : 'unknown'
             : 'complete'),
         services: observed.completeness?.services ?? (observed.partial ? 'unknown' : 'complete'),
+        ...(reportedCompleteness?.serviceIdentities ? { serviceIdentities: reportedCompleteness.serviceIdentities } : {}),
         databases: observed.completeness?.databases ?? 'complete',
         caches: observed.completeness?.caches ?? 'complete',
         storage: observed.completeness?.storage ?? 'complete',
@@ -1665,12 +1675,18 @@ export class PlanService {
       return { error: providerValidation.message };
     }
     const scope = options?.scope ?? 'full';
+    if (scope === 'credentials') return planCredentialLifecycle(projectWithSpecGitRemoteUrl(project, specResult.spec), specResult.spec, specResult.revision, environmentName, options!);
+    if (options?.credential || options?.intent) return { error: 'Credential review inputs require scope=credentials.' };
+    if (Object.keys(options?.secretRefs ?? {}).some(key => specResult.spec.secrets[key]?.credential)) return { error: 'Tracked credentials require a reviewed credential adoption or rotation plan.' };
+    const pendingCredential = pendingCredentialUpdate(project.id);
+    if (pendingCredential && scope !== 'database-credential-aliases' && scope !== 'full') return { error: `Credential synchronization is incomplete. Recover hv_apply planId="${pendingCredential}" before planning deployment.` };
     if (scope === 'database-credential-aliases' || scope === 'full') {
       const aliases = await planDatabaseCredentialAliases({ project: projectWithSpecGitRemoteUrl(project, specResult.spec),
         spec: specResult.spec, revision: specResult.revision, environmentName,
         ...(scope === 'full' ? { onlyIfNeeded: true } : { options }) });
-      if (aliases) return aliases;
+      if (aliases && (!pendingCredential || !('actions' in aliases) || aliases.actions.length === 0)) return aliases;
     }
+    if (pendingCredential) return { error: `Credential synchronization is incomplete. Recover hv_apply planId="${pendingCredential}" before planning deployment.` };
     if (scope === 'secrets') return this.planSecrets(projectWithSpecGitRemoteUrl(project, specResult.spec), environmentName, specResult, options!);
     if (scope === 'retained-cleanup') {
       const incompatibleInputs = [
@@ -1826,6 +1842,7 @@ export class PlanService {
       )
     )).sort();
     const reservedSecretKeys = new Set([
+      ...credentialSourceInputKeys(specResult.spec),
       ...managedSecretSlots.keys(),
       ...delegatedSecretSlots.keys(),
       ...immutableConflictKeys,
@@ -2050,6 +2067,8 @@ export class PlanService {
       }
     }
     const { observed, warnings: observeWarnings } = await this.observeEnvironment(projectForPlan, environmentForObserve, environmentSpec);
+    const databaseConsumers = databaseConsumerReadiness({ spec: environmentSpec, environment: environmentForObserve, observed });
+    for (const consumer of databaseConsumers) if (consumer.reason) observeWarnings.push(`Database consumer ${consumer.service}: ${consumer.reason} SQL authentication and application operation remain unchecked.`);
     const hostingMetadata = providerRegistry.getMetadata(environmentSpec.hosting.provider);
     const boundEnvironmentId = recordValue(effectiveBindingRecord, 'environmentId');
     const destinationsAreKnownAbsent = Boolean(
@@ -3273,6 +3292,7 @@ export class PlanService {
       planRunId: run.id,
       scope: persistedScope,
       backupCoverage,
+      databaseConsumers,
       backupReadiness,
       ...(domainSecurity ? { domainSecurity } : {}),
       ...(webhookReadiness ? { webhookReadiness } : {}),

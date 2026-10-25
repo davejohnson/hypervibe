@@ -118,7 +118,7 @@ for (const key of targetKeys) {
   const deployed = matches[0]?.component?.image;
   if (matches.length !== 1 || deployed?.registry_type !== 'DOCR' || deployed?.registry !== registry || deployed?.repository !== repository || deployed?.tag !== sha) throw new Error('DigitalOcean component did not converge to exact SHA: ' + key);
 }
-await writeFile('.hypervibe-release.json', JSON.stringify({ version: 1, provider: 'digitalocean', repository: process.env.HYPERVIBE_REPOSITORY, environment: process.env.HYPERVIBE_ENVIRONMENT, sha, programFingerprint: process.env.HYPERVIBE_PROGRAM_FINGERPRINT, deployments: [{ appId, deploymentId }] }) + '\\n', { mode: 0o600 });
+await writeFile('.hypervibe-release.json', JSON.stringify({ version: 1, provider: 'digitalocean', repository: process.env.HYPERVIBE_REPOSITORY, environment: process.env.HYPERVIBE_ENVIRONMENT, sha, programFingerprint: process.env.HYPERVIBE_PROGRAM_FINGERPRINT, deployments: targets.map(({ collection, component }) => ({ appId, serviceId: appId + ':' + collection + ':' + component.name, deploymentId })) }) + '\\n', { mode: 0o600 });
 `;
 }
 

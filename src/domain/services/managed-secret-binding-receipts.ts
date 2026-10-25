@@ -40,10 +40,19 @@ export function withReceiptValidatedManagedSecretBindings<
 
     const run = runs.findById(applyRunId);
     if (!run) return true;
+    const planId = asRecord(run.plan)?.planRunId;
+    const plan = typeof planId === 'string' ? runs.findById(planId) : null;
+    const planDocument = asRecord(plan?.plan);
+    const reviewed = plan?.type === 'plan' && plan.projectId === environment.projectId && planDocument?.scope === 'credentials'
+      && Array.isArray(planDocument.actions) && planDocument.actions.some(action => {
+        const candidate = asRecord(action);
+        return candidate?.id === actionId && asRecord(asRecord(candidate.metadata)?.target)?.environmentId === environment.id;
+      });
     const hasAcceptedReceipt = run.type === 'apply'
       && run.projectId === environment.projectId
-      && run.environmentId === environment.id
-      && run.receipts.some((receipt) => receipt.step === actionId && receipt.status === 'success');
+      && (run.environmentId === environment.id || reviewed)
+      && run.receipts.some((receipt) => receipt.step === actionId && receipt.status === 'success'
+        && (run.environmentId === environment.id || receipt.result?.environmentId === environment.id));
     if (!hasAcceptedReceipt) removed = true;
     return hasAcceptedReceipt;
   });

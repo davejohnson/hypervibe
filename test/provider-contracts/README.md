@@ -8,6 +8,13 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+The [database credential rotation review](../../docs/database-credential-rotation.md)
+covers all eight registered PostgreSQL providers. Normal `npm test` checks port
+coverage, native REST and AWS Query serialization, PostgreSQL wire authentication,
+generated-password recovery and Railway's pinned issuer/alias behavior. Password
+updates, fresh authentication, runtime activation and application health remain
+separate evidence. These offline checks do not claim a live credential rotation.
+
 The [database provisioning review](../../docs/database-provisioning-evidence.md)
 and `database-provisioning-provider-matrix.json` cover every registered database
 provider, including hosting-backed databases. The normal acceptance test checks

@@ -31,6 +31,7 @@ type ReleaseEvidence = {
   pipelineId: string;
   createdAt: string;
   imageUri?: string;
+  credentialActivation?: unknown;
 };
 
 type GitLabRollbackObservation = {
@@ -82,7 +83,7 @@ function currentJob(jobs: CiJobSummary[], name: string): CiJobSummary | null {
   return candidates.sort((left, right) => Number(right.id) - Number(left.id))[0] ?? null;
 }
 
-async function evidenceFor(params: {
+export async function readGitLabManagedReleaseEvidence(params: {
   observation: GitLabRollbackObservation['program'];
   environmentName: string;
   run: CiRunSummary;
@@ -158,6 +159,7 @@ async function evidenceFor(params: {
     pipelineId: params.run.id,
     createdAt: params.job.completedAt ?? params.run.updatedAt ?? params.run.createdAt ?? '',
     ...(expected.requiresImmutableImage ? { imageUri } : {}),
+    ...(evidence.credentialActivation ? { credentialActivation: evidence.credentialActivation } : {}),
   };
 }
 
@@ -196,7 +198,7 @@ async function observeRollback(params: {
     }
     const successful: ReleaseEvidence[] = [];
     for (const candidate of relevant) {
-      const evidence = await evidenceFor({
+      const evidence = await readGitLabManagedReleaseEvidence({
         observation: program,
         environmentName: params.environment.name,
         run: candidate.run,

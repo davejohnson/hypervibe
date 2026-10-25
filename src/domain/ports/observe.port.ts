@@ -60,6 +60,10 @@ export interface ObservedService {
   envVarKeys: string[];
   /** sha256 hex of each env var value, for drift comparison without exposure. */
   envVarHashes: Record<string, string>;
+  /** Whether configured values were fully resolved by the provider. */
+  envVarState?: 'resolved' | 'unknown';
+  /** Recorded write metadata cannot prove the provider's current value. */
+  envVarEvidence?: 'provider-value' | 'recorded-update';
   /** 'empty' = the service exists but has never deployed (no source/code). */
   status: 'running' | 'failed' | 'empty' | 'unknown';
   /** Provider confirms an owned namespace exists but its workload does not yet exist. */
@@ -75,6 +79,16 @@ export interface ObservedService {
     id: string;
     status?: string;
     createdAt?: string;
+    /** Exact provider-observed active deployment identities. Omitted means unknown;
+     * a new successful deployment does not prove older instances stopped. */
+    activeDeploymentIds?: string[];
+    /** Traffic coverage does not prove in-flight requests or processes stopped. */
+    activeDeploymentCoverage?: 'traffic' | 'instances';
+    /** Private comparison inputs from this exact deployment snapshot, never from
+     * the service's current configured values. Public projections must omit them. */
+    envVarHashes?: Record<string, string>;
+    /** Unresolved references, omitted reads, and unsupported snapshot semantics stay unknown. */
+    configurationState?: 'resolved' | 'unknown';
   };
   /** Provider-confirmed execution state used by environment maintenance. */
   maintenance?: {
@@ -135,6 +149,9 @@ export type CredentialAlignmentComparison =
 export interface DatabaseCredentialAlignment {
   basis: 'configured-variable-values';
   authentication: 'unverified';
+  rawReferences: 'unchecked';
+  deployedConfiguration: 'unchecked';
+  applicationOperation: 'unchecked';
   issuer: {
     comparisons: Array<{
       source: string;
@@ -246,6 +263,8 @@ export interface ObservedState {
     project?: 'complete' | 'unknown';
     environment?: 'complete' | 'unknown';
     services?: 'complete' | 'unknown';
+    /** Exact workload identities can be complete while write-only values remain unknown. */
+    serviceIdentities?: 'complete' | 'unknown';
     databases?: 'complete' | 'unknown';
     caches?: 'complete' | 'unknown';
     storage?: 'complete' | 'unknown';
@@ -265,7 +284,12 @@ export interface ObservedState {
 }
 
 export interface IObservableHosting {
-  observe(environment: Environment): Promise<ObservedState>;
+  observe(environment: Environment, context?: HostingObservationContext): Promise<ObservedState>;
+}
+
+/** Value-free declared consumer names; these do not prove live configuration. */
+export interface HostingObservationContext {
+  databaseEnvAliases?: Record<string, Record<string, 'DATABASE_URL' | 'DIRECT_URL'>>;
 }
 
 export interface IObservableDatabase {

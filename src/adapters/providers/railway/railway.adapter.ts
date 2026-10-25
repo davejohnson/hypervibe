@@ -1,3 +1,4 @@
+import { createRailwayRegistryCredentialLifecycle } from './railway-registry-credential.js';
 import { GraphQLClient, gql } from 'graphql-request';
 import { randomBytes } from 'crypto';
 import { z } from 'zod';
@@ -19,6 +20,7 @@ import { parseRecoveryFailureMarker, recoveryDiagnosticSchema, recoveryFailure, 
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../domain/entities/service.entity.js';
 import type { IServiceVolumes, ServiceVolumeTarget, ServiceVolumeObservation } from '../../../domain/ports/service-volume.port.js';
+import { railwayDeployedConfiguration } from './railway-runtime-configuration.js';
 import {
   createHostingServiceCreateRecovery,
   parseHostingBindings,
@@ -35,7 +37,7 @@ import { HostedObservationError } from '../../../domain/ports/hosted-observation
 import { observeRailwayHosted } from './railway-hosted-observation.js';
 import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
 import { hashEnvValue } from '../../../domain/ports/observe.port.js';
-import type { ObservedCache, ObservedDatabase, ObservedService, ObservedState, ObservedStorage } from '../../../domain/ports/observe.port.js';
+import type { HostingObservationContext, ObservedCache, ObservedDatabase, ObservedService, ObservedState, ObservedStorage } from '../../../domain/ports/observe.port.js';
 import {
   providerRegistry,
   type DatabaseRuntimeProjection,
@@ -250,6 +252,7 @@ export class RailwayAdapter implements
   IProviderBuildLogsAdapter,
   IProviderEnvironmentVariablesAdapter {
   readonly name = 'railway';
+  readonly registryCredentialLifecycle = createRailwayRegistryCredentialLifecycle(() => this.client);
   readonly railwayCredentialAliases = createRailwayCredentialAliases(() => this.client);
 
   readonly capabilities: ProviderCapabilities = {
@@ -265,6 +268,8 @@ export class RailwayAdapter implements
     queues: { backend: 'postgres' },
     supportsOneOffTasks: true,
     supportsDeferredDeploy: true,
+    credentialUpdateActivation: 'deferred',
+    credentialValueEvidence: 'readback',
     supportsDeferredSecretUpdates: true,
     supportsCreateOnlyDeploy: true,
     supportsTemporaryDatabaseAccess: true,
@@ -3750,6 +3755,7 @@ export class RailwayAdapter implements
     vars: Record<string, string>,
     options: DeploymentMutationOptions = {}
   ): Promise<Receipt> {
+    if (options.requireCredentialUpdate) options = { ...options, deferDeployment: true, requireDeferredSecretUpdate: true };
     if (options.requireDeferredSecretUpdate && (!options.deferDeployment
       || environment.platformBindings.provider !== this.name
       || !environment.platformBindings.projectId || !environment.platformBindings.environmentId
@@ -3892,6 +3898,7 @@ export class RailwayAdapter implements
         success: true,
         message: `Set ${Object.keys(vars).length} environment variables`,
         data: {
+          ...(options.requireCredentialUpdate ? { credentialUpdateActivation: 'deferred', credentialValueEvidence: 'readback', configurationUpdated: true } : {}),
           variableCount: Object.keys(vars).length,
           ...(Object.keys(vars).length > 0
             ? {
@@ -5259,20 +5266,31 @@ export class RailwayAdapter implements
     }
     return {
       success: true,
-      variables: await this.getServiceVariables(projectId, serviceId, environmentId),
+      variables: request.preserveReferences
+        ? await this.fetchServiceVariables(projectId, serviceId, environmentId, { unrendered: true })
+        : await this.getServiceVariables(projectId, serviceId, environmentId),
     };
   }
 
   private async fetchServiceVariables(
     projectId: string,
     serviceId: string,
-    environmentId: string
+    environmentId: string,
+    options?: { forDeployment?: boolean; unrendered?: boolean }
   ): Promise<Record<string, string>> {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
     }
 
-    const query = gql`
+    const query = options?.forDeployment ? gql`
+      query GetVariables($projectId: String!, $serviceId: String!, $environmentId: String!) {
+        variables: variablesForServiceDeployment(projectId: $projectId, serviceId: $serviceId, environmentId: $environmentId)
+      }
+    ` : options?.unrendered ? gql`
+      query GetUnrenderedVariables($projectId: String!, $serviceId: String!, $environmentId: String!) {
+        variables(projectId: $projectId, serviceId: $serviceId, environmentId: $environmentId, unrendered: true)
+      }
+    ` : gql`
       query GetVariables($projectId: String!, $serviceId: String!, $environmentId: String!) {
         variables(projectId: $projectId, serviceId: $serviceId, environmentId: $environmentId)
       }
@@ -5416,6 +5434,28 @@ export class RailwayAdapter implements
     } catch (error) {
       throw new Error(this.describeError(error));
     }
+  }
+
+  async synchronizeDatabasePasswordIssuer(target: { projectId: string; environmentId: string; serviceId: string }, password: string): Promise<void> {
+    if (!this.client || !password) throw new Error('Database password issuer synchronization is unavailable.');
+    const instance = await this.inspectServiceInstance(target.serviceId, target.environmentId);
+    if (instance.state !== 'present') throw new Error('The exact database service instance is absent or unknown.');
+    const before = await this.getServiceVariables(target.projectId, target.serviceId, target.environmentId);
+    if (!before.POSTGRES_PASSWORD) throw new Error('The bound password issuer is unavailable.');
+    if (before.POSTGRES_PASSWORD === password) return;
+    try {
+      const result = await this.client.request<{ variableCollectionUpsert?: boolean }>(gql`
+        mutation RotateDatabasePasswordIssuer($projectId: String!, $environmentId: String!, $serviceId: String!, $variables: EnvironmentVariables!) {
+          variableCollectionUpsert(input: { projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId,
+            variables: $variables, replace: false, skipDeploys: true })
+        }
+      `, { ...target, variables: { POSTGRES_PASSWORD: password } });
+      if (result.variableCollectionUpsert !== true) throw new Error('Password issuer write was not acknowledged.');
+    } catch {
+      // The write may have committed. Exact readback is the only recovery proof.
+    }
+    const after = await this.getServiceVariables(target.projectId, target.serviceId, target.environmentId);
+    if (after.POSTGRES_PASSWORD !== password) throw new Error('Database password issuer synchronization remains unconfirmed.');
   }
 
   async acquireTemporaryDatabaseAccess(
@@ -7145,9 +7185,9 @@ export class RailwayAdapter implements
    * Read back the live state of an environment for spec → observe → diff reconciliation.
    * Never includes raw env var values — only key names and sha256 hashes.
    */
-  async observe(environment: Environment, options?: {
-    strictScope: { projectId: string; environmentId: string };
-    maxResources: number;
+  async observe(environment: Environment, options?: HostingObservationContext & {
+    strictScope?: { projectId: string; environmentId: string };
+    maxResources?: number;
   }): Promise<ObservedState> {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
@@ -7163,7 +7203,7 @@ export class RailwayAdapter implements
       services?: Record<string, { serviceId?: string; workloadKind?: string; source?: { repo?: string; branch?: string } }>;
     };
     const projectId = bindings.projectId;
-    if (options && (!projectId || projectId !== options.strictScope.projectId
+    if (options?.strictScope && (!projectId || projectId !== options.strictScope.projectId
       || bindings.environmentId !== options.strictScope.environmentId)) {
       throw new HostedObservationError('scope_mismatch');
     }
@@ -7191,7 +7231,7 @@ export class RailwayAdapter implements
 
     const details = await this.getProjectDetails(projectId, options?.maxResources);
     if (!details) {
-      if (options) throw new HostedObservationError('scope_mismatch');
+      if (options?.strictScope) throw new HostedObservationError('scope_mismatch');
       return {
         provider: 'railway',
         observedAt,
@@ -7216,7 +7256,7 @@ export class RailwayAdapter implements
 
     const projectEnvironments = (details.environments?.edges ?? []).map((e) => e.node);
     let environmentId = bindings.environmentId;
-    if (options) {
+    if (options?.strictScope) {
       const exactEnvironments = projectEnvironments.filter((env) => env.id === environmentId);
       if (exactEnvironments.length !== 1) {
         throw new HostedObservationError(exactEnvironments.length === 0 ? 'scope_mismatch' : 'provider_error');
@@ -7224,7 +7264,7 @@ export class RailwayAdapter implements
       // Budget the whole returned inventory before any per-resource reads begin.
       const resources = (details.services?.edges.length ?? 0)
         + (details.buckets?.edges.length ?? 0) + (details.plugins?.edges.length ?? 0);
-      if (resources > options.maxResources) throw new HostedObservationError('budget_exhausted');
+      if (options.maxResources !== undefined && resources > options.maxResources) throw new HostedObservationError('budget_exhausted');
     }
     if (!environmentId || !projectEnvironments.some((env) => env.id === environmentId)) {
       environmentId = projectEnvironments.find(
@@ -7378,6 +7418,7 @@ export class RailwayAdapter implements
       let sleepApplication: boolean | undefined;
       let deploymentId: string | undefined;
       let deploymentStatus: string | undefined;
+      let activeDeploymentIds: string[] | undefined;
       let instanceSourceRepo: string | undefined;
       let instanceSourceObserved = false;
       let status: ObservedService['status'] = 'unknown';
@@ -7395,6 +7436,7 @@ export class RailwayAdapter implements
             sleepApplication = instanceDetails.sleepApplication;
             deploymentId = instanceDetails.latestDeployment?.id;
             deploymentStatus = instanceDetails.latestDeployment?.status;
+            activeDeploymentIds = instanceDetails.activeDeployments?.map(deployment => deployment.id);
             instanceSourceRepo = instanceDetails.source?.repo ?? undefined;
             // No deployment at all means the service has no source connected.
             status = instanceDetails.latestDeployment
@@ -7409,15 +7451,17 @@ export class RailwayAdapter implements
 
       const envVarKeys: string[] = [];
       const envVarHashes: Record<string, string> = {};
+      let envVarState: ObservedService['envVarState'] = 'unknown';
       let consumerEvidence: DatabaseVariableEvidence = { reason: 'read_failed' };
       if (environmentId) {
         try {
-          const vars = await this.fetchServiceVariables(projectId, node.id, environmentId);
+          const vars = await this.fetchServiceVariables(projectId, node.id, environmentId, { forDeployment: true });
+          envVarState = Object.values(vars).every(value => !value.includes('${{')) ? 'resolved' : 'unknown';
           for (const [key, value] of Object.entries(vars)) {
             envVarKeys.push(key);
             envVarHashes[key] = hashEnvValue(value);
           }
-          consumerEvidence = { variables: Object.fromEntries(['DATABASE_URL', 'DIRECT_URL']
+          consumerEvidence = { variables: Object.fromEntries(['DATABASE_URL', 'DIRECT_URL', ...Object.keys(options?.databaseEnvAliases?.[boundServiceName ?? ''] ?? {})]
             .filter(key => vars[key] !== undefined).map(key => [key, vars[key]])) };
         } catch {
           warnings.push(`Failed to read variables for "${observedServiceName}" (${node.name}): provider_read_failed`);
@@ -7427,6 +7471,7 @@ export class RailwayAdapter implements
       if (boundServiceName) {
         credentialConsumers.push({
           name: boundServiceName, externalId: node.id,
+          aliases: options?.databaseEnvAliases?.[boundServiceName],
           evidence: bindings.environmentId === environmentId ? consumerEvidence : { reason: 'scope_unverified' },
         });
       }
@@ -7468,11 +7513,13 @@ export class RailwayAdapter implements
         sourceState,
         envVarKeys,
         envVarHashes,
+        envVarState,
         status,
         ...(deploymentId
           ? {
               deployment: {
                 id: deploymentId,
+                ...(activeDeploymentIds ? { activeDeploymentIds } : {}),
                 ...(deploymentStatus ? { status: deploymentStatus } : {}),
               },
             }
@@ -7493,6 +7540,15 @@ export class RailwayAdapter implements
     for (const database of databases) {
       const evidence = databaseVariables.get(database.externalId);
       if (evidence) database.credentialAlignment = compareDatabaseCredentials(evidence, credentialConsumers);
+    }
+
+    // Snapshot reads have their own completeness boundary: lack of deployment
+    // configuration evidence must not turn ordinary resource presence unknown.
+    for (const service of services) {
+      if (!service.deployment || !environmentId || bindings.services?.[service.name]?.serviceId !== service.externalId) continue;
+      Object.assign(service.deployment, await railwayDeployedConfiguration(this.client!, {
+        projectId, environmentId, serviceId: service.externalId, deploymentId: service.deployment.id,
+      }));
     }
 
     const serviceObservationComplete = !partial;
@@ -7564,6 +7620,7 @@ export class RailwayAdapter implements
     sleepApplication?: boolean;
     source?: { repo?: string } | null;
     latestDeployment?: { id?: string; status?: string } | null;
+    activeDeployments?: Array<{ id: string }>;
   } | null> {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
@@ -7581,6 +7638,7 @@ export class RailwayAdapter implements
           source {
             repo
           }
+          activeDeployments { id }
           latestDeployment {
             id
             status
@@ -7599,6 +7657,7 @@ export class RailwayAdapter implements
         sleepApplication?: boolean;
         source?: { repo?: string } | null;
         latestDeployment?: { id?: string; status?: string } | null;
+    activeDeployments?: Array<{ id: string }>;
       } | null;
     }>(query, { serviceId, environmentId });
     return result.serviceInstance ?? null;

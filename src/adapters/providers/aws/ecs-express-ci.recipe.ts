@@ -1,6 +1,6 @@
 import type { BranchDeployTarget, PortableCiDeployRecipe } from '../../../domain/ports/ci-deploy.port.js';
 import { HYPERVIBE_MANAGED_NPM_PACKAGES } from '../../../domain/services/managed-runtime.js';
-import { ecsTaskDefinitionInput } from './ecs-volume-runtime.js';
+import { ecsCurrentConfiguration, ecsTaskDefinitionInput } from './ecs-volume-runtime.js';
 
 export const ECS_EXPRESS_PORTABLE_RUNTIME_PATH = '.gitlab/hypervibe/ecs-express-deploy.cjs';
 
@@ -8,6 +8,7 @@ export const ECS_EXPRESS_PORTABLE_RUNTIME_PATH = '.gitlab/hypervibe/ecs-express-
 export function buildEcsExpressTaskDefinitionRuntime(): string {
   return `const { DescribeTaskDefinitionCommand, RegisterTaskDefinitionCommand } = require('@aws-sdk/client-ecs');
 ${ecsTaskDefinitionInput.toString()}
+${ecsCurrentConfiguration.toString()}
 function ecsRegistrationInput(definition, tags) {
   return { ...ecsTaskDefinitionInput(definition, {}), ...(tags?.length ? { tags } : {}) };
 }
@@ -19,7 +20,7 @@ function ecsPreserves(expected, observed) {
 async function ecsReleaseContainer(client, config, serviceArn) {
   if (!config?.taskDefinitionArn) {
     if (!config?.primaryContainer) throw new Error('ECS returned no active container or task definition');
-    return { container: config.primaryContainer };
+    return { container: config.primaryContainer, taskRoleArn: config.taskRoleArn };
   }
   const arn = config.taskDefinitionArn;
   if (typeof arn !== 'string' || !arn.startsWith(serviceArn.split(':service/')[0] + ':task-definition/') || !/:\\d+$/.test(arn)) throw new Error('ECS task definition is outside the reviewed account or region');
@@ -28,7 +29,8 @@ async function ecsReleaseContainer(client, config, serviceArn) {
   if (definition?.taskDefinitionArn !== arn || definition.status !== 'ACTIVE'
     || arn !== serviceArn.split(':service/')[0] + ':task-definition/' + definition.family + ':' + definition.revision) throw new Error('ECS returned an invalid exact Express task definition');
   const input = ecsTaskDefinitionInput(definition, {});
-  return { container: input.containerDefinitions.find(item => item.name === 'Main'), definition, tags: response.tags };
+  if (config.taskRoleArn !== undefined && config.taskRoleArn !== definition.taskRoleArn) throw new Error('ECS current task role disagrees with the exact task definition');
+  return { container: input.containerDefinitions.find(item => item.name === 'Main'), definition, tags: response.tags, taskRoleArn: definition.taskRoleArn };
 }
 async function ecsPrepareRelease(client, config, serviceArn, exactImage, sha, digest) {
   const current = await ecsReleaseContainer(client, config, serviceArn);
@@ -39,7 +41,7 @@ async function ecsPrepareRelease(client, config, serviceArn, exactImage, sha, di
   environment.push({ name: 'HYPERVIBE_DEPLOY_SHA', value: sha }, { name: 'HYPERVIBE_IMAGE_DIGEST', value: digest });
   const container = { ...current.container, image: exactImage, environment, ...(startCommand ? { command: ['sh', '-lc', startCommand] } : {}) };
   const common = { serviceArn, healthCheckPath: healthPath, networkConfiguration: config.networkConfiguration, scalingTarget: config.scalingTarget };
-  if (!current.definition) return { healthPath, update: { ...common, primaryContainer: container, executionRoleArn: config.executionRoleArn, taskRoleArn: config.taskRoleArn, cpu: config.cpu, memory: config.memory } };
+  if (!current.definition) return { healthPath, taskRoleArn: current.taskRoleArn, update: { ...common, primaryContainer: container, executionRoleArn: config.executionRoleArn, taskRoleArn: current.taskRoleArn, cpu: config.cpu, memory: config.memory } };
   const registration = ecsRegistrationInput(current.definition, current.tags);
   registration.containerDefinitions = registration.containerDefinitions.map(item => item.name === 'Main' ? container : item);
   // RegisterTaskDefinition has no idempotency token: a lost acknowledgement must
@@ -51,7 +53,7 @@ async function ecsPrepareRelease(client, config, serviceArn, exactImage, sha, di
   if (typeof arn !== 'string' || !arn.startsWith(familyPrefix) || !/^\\d+$/.test(arn.slice(familyPrefix.length))) throw new Error('ECS did not acknowledge the exact task-definition family');
   const verified = await ecsReleaseContainer(client, { taskDefinitionArn: arn }, serviceArn);
   if (!ecsPreserves(registration, ecsRegistrationInput(verified.definition, verified.tags))) throw new Error('Registered ECS task definition did not preserve reviewed runtime configuration');
-  return { healthPath, taskDefinitionArn: arn, update: { ...common, taskDefinitionArn: arn } };
+  return { healthPath, taskDefinitionArn: arn, taskRoleArn: current.taskRoleArn, update: { ...common, taskDefinitionArn: arn } };
 }
 `;
 }
@@ -111,10 +113,7 @@ const digest = detail.imageDigest.toLowerCase();
 if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw new Error('ECR returned an invalid image digest');
 const exactImage = registry + '/' + repositoryName + '@' + digest;
 const ecs = new ECSClient({ region });
-const currentConfig = (service) => {
-  const configs = service?.activeConfigurations || [];
-  return configs.find((item) => item.serviceRevisionArn === service.currentDeployment) || [...configs].sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())[0];
-};
+const currentConfig = ecsCurrentConfiguration;
 const deployments = [];
 for (const serviceArn of serviceArns) {
   const before = (await ecs.send(new DescribeExpressGatewayServiceCommand({ serviceArn }))).service;
@@ -130,6 +129,7 @@ for (const serviceArn of serviceArns) {
     const observed = (await ecs.send(new DescribeExpressGatewayServiceCommand({ serviceArn }))).service;
     const active = currentConfig(observed);
     const deployed = await ecsReleaseContainer(ecs, active, serviceArn);
+    if (deployed.taskRoleArn !== release.taskRoleArn) throw new Error('ECS deployed task role changed from the reviewed runtime identity');
     const activeEnv = deployed.container.environment || [];
     const value = (name) => activeEnv.find((entry) => entry.name === name)?.value;
     if (observed?.serviceArn === serviceArn && observed.cluster === clusterArn && observed.status?.statusCode === 'ACTIVE' && (!release.taskDefinitionArn || active?.taskDefinitionArn === release.taskDefinitionArn) && deployed.container.image === exactImage && value('HYPERVIBE_DEPLOY_SHA') === sha && value('HYPERVIBE_IMAGE_DIGEST') === digest) {
@@ -143,7 +143,7 @@ for (const serviceArn of serviceArns) {
   if (!endpoint) throw new Error('ECS Express returned no public endpoint');
   const health = await fetch(new URL(healthPath, endpoint.startsWith('http') ? endpoint : 'https://' + endpoint), { redirect: 'follow' });
   if (!health.ok) throw new Error('ECS Express health check failed with HTTP ' + health.status);
-  deployments.push({ serviceArn, revision, url: endpoint });
+  deployments.push({ serviceArn, serviceId: serviceArn, revision, deploymentId: revision, url: endpoint });
 }
 writeFileSync('.hypervibe-release.json', JSON.stringify({ version: 1, provider: 'ecs', repository: process.env.HYPERVIBE_REPOSITORY, environment: process.env.HYPERVIBE_ENVIRONMENT, sha, programFingerprint: process.env.HYPERVIBE_PROGRAM_FINGERPRINT, deployments }) + '\\n', { mode: 0o600 });
 `;

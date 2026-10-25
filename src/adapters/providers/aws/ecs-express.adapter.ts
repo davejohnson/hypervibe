@@ -1,8 +1,11 @@
+import type { ProviderEnvironmentVariablesRequest, ProviderEnvironmentVariablesResult } from '../../../domain/ports/provider-env-vars.port.js';
+import { createEcsRegistryCredentialLifecycle } from './ecs-registry-credential.js';
+import { AwsSecretsAdapter } from '../secretmanagers/aws-secrets.adapter.js';
 import { createHash } from 'node:crypto';
 import { EFSClient } from '@aws-sdk/client-efs';
 import { EcsServiceVolumes } from './ecs-service-volumes.js';
 import { ecsTaskDefinitionWriter } from './ecs-task-definition-writer.js';
-import { ecsTaskDefinitionInput, ecsVolumeFingerprint } from './ecs-volume-runtime.js';
+import { ecsCurrentConfiguration, ecsTaskDefinitionInput, ecsVolumeFingerprint } from './ecs-volume-runtime.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
 import {
   ACMClient,
@@ -190,6 +193,27 @@ type ExpressRouting = {
 
 export class EcsExpressAdapter implements IProviderAdapter {
   readonly name = 'ecs';
+  readonly registryCredentialLifecycle = createEcsRegistryCredentialLifecycle(async (environment, service) => {
+    const binding = parseHostingBindings(environment); const arn = binding.services?.[service]?.serviceId;
+    if (binding.provider !== this.name || !binding.projectId || binding.environmentId !== binding.projectId || !arn) throw new Error();
+    const identity = this.parseClusterArn(binding.projectId);
+    if (await this.resolveAccountId() !== identity.accountId) throw new Error();
+    const current = await this.getExpressService(arn);
+    if (!current) throw new Error();
+    this.assertExpressScope(current, binding.projectId, arn, environment.id);
+    const runtime = await this.runtimeConfiguration(this.currentConfiguration(current), arn);
+    const credentialReference = runtime.container.repositoryCredentials?.credentialsParameter;
+    const { credentials } = this.connected();
+    if (!runtime.container.image || typeof credentialReference !== 'string'
+      || !credentialReference.startsWith(`arn:aws:secretsmanager:${credentials.region}:${identity.accountId}:secret:`)) throw new Error();
+    return { provider: this.name, projectId: binding.projectId, environmentId: binding.projectId, serviceId: arn, instanceId: arn,
+      image: runtime.container.image, credentialReference, registry: runtime.container.image.split('/')[0]!, activation: 'deferred' };
+  }, async () => {
+    const { credentials } = this.connected();
+    const secrets = new AwsSecretsAdapter();
+    await secrets.connect({ accessKeyId: credentials.accessKeyId, secretAccessKey: credentials.secretAccessKey, region: credentials.region });
+    return secrets;
+  });
   readonly serviceVolumes = new EcsServiceVolumes(() => ({ clients: this.connected().clients, region: this.connected().credentials.region }), () => this.resolveAccountId());
 
   readonly capabilities: ProviderCapabilities = {
@@ -203,6 +227,8 @@ export class EcsExpressAdapter implements IProviderAdapter {
     managedTls: true,
     supportsObserve: true,
     supportsDeferredDeploy: true,
+    credentialUpdateActivation: 'provider-rollout',
+    credentialValueEvidence: 'readback',
   };
 
   private credentials: ConnectedEcsExpressCredentials | null = null;
@@ -455,7 +481,8 @@ export class EcsExpressAdapter implements IProviderAdapter {
           binding,
           runtime.container.image,
           existing.currentDeployment,
-          taskDefinitionArn
+          taskDefinitionArn,
+          runtime.task?.taskRoleArn ?? config.taskRoleArn ?? null
         );
         if (output.service?.serviceArn !== binding) {
           throw new Error(`AWS update response did not preserve bound service ${binding}.`);
@@ -528,12 +555,71 @@ export class EcsExpressAdapter implements IProviderAdapter {
     }
   }
 
+  async readProviderEnvironmentVariables(request: ProviderEnvironmentVariablesRequest): Promise<ProviderEnvironmentVariablesResult> {
+    try {
+      const binding = parseHostingBindings(request.environment);
+      const arn = binding.services?.[request.service.name]?.serviceId;
+      if (binding.provider !== this.name || !binding.projectId || !arn) throw new Error();
+      this.parseClusterArn(binding.projectId);
+      const current = await this.getExpressService(arn);
+      if (!current) throw new Error();
+      this.assertExpressScope(current, binding.projectId, arn, request.environment.id);
+      const config = this.currentConfiguration(current);
+      const runtime = await this.runtimeConfiguration(config, arn);
+      if (!config || !runtime.container?.image) throw new Error();
+      const entries = runtime.container.environment ?? [];
+      const references = runtime.container.secrets ?? [];
+      if (!Array.isArray(entries) || !Array.isArray(references) || [...entries, ...references].some(entry => typeof entry.name !== 'string')
+        || new Set([...entries, ...references].map(entry => entry.name)).size !== entries.length + references.length) throw new Error();
+      const variables = Object.fromEntries(entries.filter(entry => typeof entry.value === 'string').map(entry => [entry.name!, entry.value!]));
+      const unresolvedKeys = [...references.map(entry => entry.name!), ...entries.filter(entry => typeof entry.value !== 'string').map(entry => entry.name!)].sort();
+      return { success: true, variables, ...(unresolvedKeys.length ? { unresolvedKeys } : {}) };
+    } catch { return { success: false, error: 'Exact ECS service configuration could not be verified.' }; }
+  }
+
   async setEnvVars(
     environment: Environment,
     service: Service,
     vars: Record<string, string>,
     options: DeploymentMutationOptions = {}
   ): Promise<Receipt> {
+    if (options.requireCredentialUpdate) {
+      let attempted = false;
+      try {
+        const binding = parseHostingBindings(environment);
+        const arn = binding.services?.[service.name]?.serviceId;
+        if (binding.provider !== this.name || !binding.projectId || !arn) throw new Error();
+        this.parseClusterArn(binding.projectId);
+        const current = await this.getExpressService(arn);
+        if (!current) throw new Error();
+        this.assertExpressScope(current, binding.projectId, arn, environment.id);
+        const config = this.currentConfiguration(current);
+        const runtime = await this.runtimeConfiguration(config, arn);
+        if (!config || !runtime.container?.image) throw new Error();
+        const existing = runtime.container.environment ?? [];
+        if (!Array.isArray(existing) || existing.some((entry: any) => typeof entry.name !== 'string') || new Set(existing.map((entry: any) => entry.name)).size !== existing.length) throw new Error();
+        const remaining = new Map(Object.entries(vars));
+        const values = existing.map((entry: any) => {
+          if (!remaining.has(entry.name)) return entry;
+          const value = remaining.get(entry.name); remaining.delete(entry.name);
+          return { name: entry.name, value };
+        }).concat([...remaining].map(([name, value]) => ({ name, value })));
+        // A selected literal replaces only its own native secret reference.
+        const secrets = (runtime.container.secrets ?? []).filter((entry: any) => !Object.hasOwn(vars, entry.name));
+        attempted = true;
+        const changed = await this.updateRuntimeConfiguration(arn, config, { environment: values, ...(runtime.container.secrets ? { secrets } : {}) }, { serviceArn: arn });
+        const after = await this.waitForExpress(arn, runtime.container.image, current.currentDeployment, changed.taskDefinitionArn, runtime.task?.taskRoleArn ?? config.taskRoleArn ?? null);
+        this.assertExpressScope(after, binding.projectId, arn, environment.id);
+        const actual = await this.runtimeConfiguration(this.currentConfiguration(after), arn);
+        const readback = new Map((actual.container.environment ?? []).map((entry: any) => [entry.name, entry.value]));
+        if (Object.entries(vars).some(([key, value]) => readback.get(key) !== value)) throw new Error();
+        return { success: true, message: 'Selected ECS credential configuration verified; native rolling deployment initiated.', data: {
+          serviceId: arn, credentialValueEvidence: 'readback', credentialUpdateActivation: 'provider-rollout', configurationUpdated: true, runtimeRolloutRequired: true,
+          rolloutBaseline: current.currentDeployment ? { state: 'present', deploymentId: current.currentDeployment } : { state: 'unknown' },
+          deploymentId: after.currentDeployment, mutationAttempted: true,
+        } };
+      } catch { return { success: false, message: attempted ? 'ECS credential write requires readback recovery.' : 'Exact ECS credential target could not be verified; no write attempted.', data: { mutationAttempted: attempted } }; }
+    }
     const deployed = await this.deploy(service, environment, vars, options);
     return deployed.receipt;
   }
@@ -579,7 +665,8 @@ export class EcsExpressAdapter implements IProviderAdapter {
         serviceArn,
         runtime.container.image,
         express.currentDeployment,
-        taskDefinitionArn
+        taskDefinitionArn,
+        runtime.task?.taskRoleArn ?? config.taskRoleArn ?? null
       );
       return {
         success: true,
@@ -850,8 +937,16 @@ export class EcsExpressAdapter implements IProviderAdapter {
           public: true,
         },
         sourceState: 'disconnected',
-        envVarKeys: visible.map(([key]) => key).sort(),
+        envVarKeys: [...new Set([...visible.map(([key]) => key), ...(runtime.container.secrets ?? []).map((entry: { name?: string }) => entry.name).filter((key: unknown): key is string => typeof key === 'string' && !INTERNAL_ENV_KEYS.has(key))])].sort(),
+        envVarState: (runtime.container.secrets?.length ?? 0) > 0 ? 'unknown' : 'resolved',
         envVarHashes: Object.fromEntries(visible.map(([key, value]) => [key, hashEnvValue(value)])),
+        ...(express.currentDeployment ? { deployment: {
+          id: express.currentDeployment, status: express.status?.statusCode,
+          ...(Array.isArray(express.activeConfigurations) && express.activeConfigurations.every(configuration => typeof configuration.serviceRevisionArn === 'string' && configuration.serviceRevisionArn.length > 0)
+            ? { activeDeploymentIds: [...new Set(express.activeConfigurations.map(configuration => configuration.serviceRevisionArn!))].sort(), activeDeploymentCoverage: 'traffic' as const } : {}),
+          envVarHashes: Object.fromEntries(visible.map(([key, value]) => [key, hashEnvValue(value)])),
+          configurationState: (runtime.container.secrets?.length ?? 0) > 0 ? 'unknown' as const : 'resolved' as const,
+        } } : {}),
         status: express.status?.statusCode === 'ACTIVE'
           ? (runtime.container.image === BOOTSTRAP_IMAGE ? 'empty' : 'running')
           : express.status?.statusCode === 'INACTIVE' ? 'failed' : 'unknown',
@@ -1484,11 +1579,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
   }
 
   private currentConfiguration(service: ECSExpressGatewayService): ExpressGatewayServiceConfiguration | undefined {
-    return (service.activeConfigurations ?? []).find(
-      (config) => config.serviceRevisionArn === service.currentDeployment
-    ) ?? [...(service.activeConfigurations ?? [])].sort(
-      (left, right) => (right.createdAt?.getTime() ?? 0) - (left.createdAt?.getTime() ?? 0)
-    )[0];
+    return ecsCurrentConfiguration(service);
   }
 
   private async runtimeConfiguration(config: ExpressGatewayServiceConfiguration | undefined, serviceArn: string): Promise<{ container: any; task?: TaskDefinition; tags?: Array<{ key?: string; value?: string }> }> {
@@ -1500,14 +1591,16 @@ export class EcsExpressAdapter implements IProviderAdapter {
     if (!arn.startsWith(serviceArn.split(':service/')[0] + ':task-definition/') || !/:\d+$/.test(arn)) throw new Error('ECS task definition is outside the bound account or region.');
     const result = await this.connected().clients.ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: arn, include: ['TAGS'] }));
     const task = result.taskDefinition;
-    if (task?.taskDefinitionArn !== arn || task.status !== 'ACTIVE') throw new Error('ECS exact task definition could not be verified.');
+    if (task?.taskDefinitionArn !== arn || task.status !== 'ACTIVE'
+      || arn !== `${serviceArn.split(':service/')[0]}:task-definition/${task.family}:${task.revision}`) throw new Error('ECS exact task definition could not be verified.');
+    if (config.taskRoleArn !== undefined && config.taskRoleArn !== task.taskRoleArn) throw new Error('ECS current task role disagrees with the exact task definition.');
     ecsTaskDefinitionInput(task, {});
     return { container: task.containerDefinitions!.find((container) => container.name === 'Main')!, task, tags: result.tags };
   }
 
   private async updateRuntimeConfiguration(serviceArn: string, config: ExpressGatewayServiceConfiguration, patch: Record<string, unknown>, changes: UpdateExpressGatewayServiceRequest) {
     const current = await this.runtimeConfiguration(config, serviceArn);
-    if (!current.task) return { output: await this.connected().clients.ecs.send(new UpdateExpressGatewayServiceCommand({ ...changes, primaryContainer: { ...current.container, ...patch } })), taskDefinitionArn: undefined };
+    if (!current.task) return { output: await this.connected().clients.ecs.send(new UpdateExpressGatewayServiceCommand({ ...changes, taskRoleArn: config.taskRoleArn, primaryContainer: { ...current.container, ...patch } })), taskDefinitionArn: undefined };
     const input = { ...ecsTaskDefinitionInput(current.task, patch), ...(current.tags ? { tags: current.tags } : {}) };
     const registered = await ecsTaskDefinitionWriter(this.connected().clients.ecs).send(new RegisterTaskDefinitionCommand(input));
     const arn = registered.taskDefinition?.taskDefinitionArn;
@@ -1537,7 +1630,8 @@ export class EcsExpressAdapter implements IProviderAdapter {
     serviceArn: string,
     image?: string,
     previousDeployment?: string,
-    taskDefinitionArn?: string
+    taskDefinitionArn?: string,
+    taskRoleArn?: string | null
   ): Promise<ECSExpressGatewayService> {
     const attempts = this.attempts('HYPERVIBE_ECS_EXPRESS_WAIT_ATTEMPTS', 120);
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -1548,6 +1642,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
       if (service.status?.statusCode === 'ACTIVE'
         && (!image || runtime.container.image === image)
         && (!taskDefinitionArn || config?.taskDefinitionArn === taskDefinitionArn)
+        && (taskRoleArn === undefined || (runtime.task?.taskRoleArn ?? config?.taskRoleArn ?? null) === taskRoleArn)
         && (!previousDeployment || (
           Boolean(service.currentDeployment)
           && service.currentDeployment !== previousDeployment
@@ -1991,6 +2086,7 @@ providerRegistry.register({
       project: { shareAcrossEnvironments: false },
       diff: { workloadKindObservation: 'exact' },
       ci: {
+        rendererRevision: 1,
         displayName: 'AWS ECS Express Mode',
         requiredSecrets: ECS_EXPRESS_CI_REQUIRED_SECRETS,
         secretCredentialKeys: {

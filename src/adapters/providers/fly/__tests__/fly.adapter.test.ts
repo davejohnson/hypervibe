@@ -319,7 +319,7 @@ describe('FlyAdapter', () => {
       }
       if (url.pathname === `/v1/apps/${appName}/machines` && method === 'GET') {
         return json([{
-          id: 'machine-1',
+          id: 'machine-1', instance_id: 'instance-current',
           state: 'started',
           config: {
             image: 'registry.fly.io/hv-app@sha256:abc',
@@ -370,6 +370,8 @@ describe('FlyAdapter', () => {
       url: 'https://hv-app.fly.dev',
       envVarKeys: ['APP_SECRET'],
       envVarHashes: { APP_SECRET: hash },
+      envVarEvidence: 'recorded-update', envVarState: 'unknown',
+      deployment: expect.objectContaining({ id: 'instance-current', activeDeploymentIds: ['instance-current'], activeDeploymentCoverage: 'instances' }),
       status: 'running',
       sourceState: 'disconnected',
     })]);

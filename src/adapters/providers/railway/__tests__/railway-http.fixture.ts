@@ -13,6 +13,8 @@ export const postgresTemplate = JSON.parse(readFileSync('test/provider-contracts
 type Instance = {
   id: string; serviceId: string; environmentId: string; deletedAt: string | null;
   numReplicas: number | null;
+  activeDeployments?: Array<{ id: string }>;
+  latestDeployment?: { id: string; status: string };
   source: { image?: string }; domains: { serviceDomains: Array<{ domain: string }>; customDomains: [] };
 };
 type ProviderService = { id: string; name: string; instances: Map<string, Instance>; templateId?: string; templateServiceId?: string };
@@ -44,6 +46,7 @@ export async function railwayHttpFixture(options: {
   dropBackupCreateResponse?: boolean; backupWorkflowId?: string | null;
   dropScheduleUpdateResponse?: boolean; ignoreScheduleUpdate?: boolean;
   dropVariableResponse?: boolean;
+  variableMutationEnvironments?: string[];
   dropTemplateDeployResponse?: boolean;
   templateWithoutVolume?: boolean;
   templateWorkflowStatus?: 'Complete' | 'Running' | 'Error' | 'NotFound';
@@ -69,6 +72,9 @@ export async function railwayHttpFixture(options: {
   const backupSchedules = new Map<string, Array<Record<string, unknown>>>();
   let nextVolumeId = 0;
   const variables = new Map<string, Record<string, string>>();
+  // Snapshot evidence is deliberately separate from mutable service variables.
+  const deployments = new Map<string, { id: string; projectId: string; environmentId: string; serviceId: string; snapshotId: string }>();
+  const deploymentSnapshots = new Map<string, { id: string; variables: unknown }>();
   const mutations: Array<{ field: string; args: Record<string, any> }> = [];
   const requests: Array<{ query: string; variables: Record<string, any> }> = [];
   const contractErrors: string[] = [];
@@ -88,7 +94,7 @@ export async function railwayHttpFixture(options: {
   function addService(id: string, name: string, environmentId: string) {
     const service: ProviderService = { id, name, instances: new Map<string, Instance>() };
     service.instances.set(environmentId, {
-      id: `instance-${id}-${environmentId}`, serviceId: id, environmentId, deletedAt: null, numReplicas: 1,
+      id: `instance-${id}-${environmentId}`, serviceId: id, environmentId, deletedAt: null, numReplicas: 1, activeDeployments: [],
       source: {}, domains: { serviceDomains: [], customDomains: [] },
     });
     services.set(id, service);
@@ -246,6 +252,9 @@ export async function railwayHttpFixture(options: {
     },
     variablesForServiceDeployment: ({ serviceId, environmentId }) =>
       renderVariables(variables.get(`${serviceId}/${environmentId}`) ?? {}),
+    deployment: ({ id }) => deployments.get(id) ?? [...services.values()].flatMap(service => [...service.instances.values()]
+      .filter(instance => instance.latestDeployment?.id === id).map(instance => ({ id, projectId, environmentId: instance.environmentId, serviceId: service.id, snapshotId: null })))[0],
+    deploymentSnapshot: ({ deploymentId }) => deploymentSnapshots.get(deploymentId) ?? null,
     environmentCreate: ({ input }) => {
       expect(input.projectId).toBe(projectId);
       const environment = { id: stagingId, name: input.name, config: {} };
@@ -266,6 +275,14 @@ export async function railwayHttpFixture(options: {
       // from https://docs.railway.com/integrations/api/manage-variables.
       const key = `${input.serviceId}/${input.environmentId}`;
       variables.set(key, { ...(input.replace ? {} : variables.get(key)), ...input.variables });
+      return true;
+    },
+    serviceInstanceUpdate: ({ serviceId, environmentId, input }) => {
+      expect(services.get(serviceId)?.instances.has(environmentId)).toBe(true);
+      expect(Object.keys(input)).toEqual(['registryCredentials']);
+      expect(Object.keys(input.registryCredentials).sort()).toEqual(['password', 'username']);
+      // The independent contract allows a credential-only patch. The fixture
+      // keeps image, source, variables and deployment state unchanged.
       return true;
     },
     volumeCreate: ({ input }) => {
@@ -324,11 +341,12 @@ export async function railwayHttpFixture(options: {
       return 'bucket-deployment';
     },
   };
-  for (const field of ['projectCreate', 'environmentCreate', 'templateDeployV2', 'serviceCreate', 'variableCollectionUpsert', 'volumeCreate', 'volumeDelete', 'serviceInstanceRedeploy', 'serviceDelete', 'serviceDomainCreate', 'bucketCreate', 'environmentPatchCommit']) {
+  for (const field of ['projectCreate', 'environmentCreate', 'templateDeployV2', 'serviceCreate', 'variableCollectionUpsert', 'serviceInstanceUpdate', 'volumeCreate', 'volumeDelete', 'serviceInstanceRedeploy', 'serviceDelete', 'serviceDomainCreate', 'bucketCreate', 'environmentPatchCommit']) {
     const resolve = root[field];
     root[field] = (args) => {
       if (!['projectCreate', 'environmentCreate', 'bucketCreate', 'volumeDelete'].includes(field)) {
-        expect(args.input?.environmentId ?? args.environmentId).toBe(stagingId);
+        if (field === 'variableCollectionUpsert' && options.variableMutationEnvironments) expect(options.variableMutationEnvironments).toContain(args.input?.environmentId);
+        else expect(args.input?.environmentId ?? args.environmentId).toBe(stagingId);
       }
       mutations.push({ field, args });
       return resolve(args);
@@ -389,5 +407,5 @@ export async function railwayHttpFixture(options: {
     createdAt: new Date(), updatedAt: new Date(),
   };
   return { adapter, environment, services, environments, buckets, volumes, addService, addVolume,
-    mutations, requests, variables, contractErrors, backups, backupWorkflows, backupSchedules };
+    mutations, requests, variables, deployments, deploymentSnapshots, contractErrors, backups, backupWorkflows, backupSchedules };
 }

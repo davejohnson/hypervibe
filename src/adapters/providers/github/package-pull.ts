@@ -29,6 +29,14 @@ export function githubConnectionRank(scope: string | null, repo?: string): numbe
 export function githubPackagePullCredentials(
   options: { githubRepo?: string; githubLogin?: string } = {}
 ): { username: string; token: string } | null {
+  const source = githubPackagePullSource(options);
+  return source ? { username: source.username, token: source.token } : null;
+}
+
+/** Private provenance for the same selection used by CI and container pulls. */
+export function githubPackagePullSource(
+  options: { githubRepo?: string; githubLogin?: string } = {}
+): { connectionId: string; credentialKey: 'packageReadToken'; username: string; token: string } | null {
   const connectionRepo = new ConnectionRepository();
   const secretStore = getSecretStore();
   const ranked = connectionRepo.findAllByProvider('github')
@@ -50,7 +58,7 @@ export function githubPackagePullCredentials(
         ? credentials.packageReadToken
         : undefined;
     if (username && token) {
-      return { username, token };
+      return { connectionId: connection.id, credentialKey: 'packageReadToken', username, token };
     }
   }
   return null;

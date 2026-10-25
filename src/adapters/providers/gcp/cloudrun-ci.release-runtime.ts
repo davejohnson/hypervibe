@@ -46,21 +46,26 @@ export function buildCloudRunReleaseRuntime(): string {
 ${cloudRunJobUpdateBody.toString()}
 function cloudRunFilesystemGuard(resource, kind, expectedUid) {
   const template = kind === 'service' ? resource?.template : resource?.template?.template;
+  const runtimePrincipal = template?.serviceAccount || template?.serviceAccountName;
+  if (typeof runtimePrincipal !== 'string' || !runtimePrincipal) throw new Error('Cloud Run runtime principal is unavailable before update');
   const fingerprint = cloudRunFilesystemIdentity(template);
   if (expectedUid !== undefined && (resource?.uid !== expectedUid || typeof resource?.etag !== 'string' || !resource.etag)) {
     throw new Error('Cloud Run bound resource UID or concurrency identity changed before update');
   }
-  if (fingerprint !== null && (typeof resource.uid !== 'string' || !resource.uid || typeof resource.etag !== 'string' || !resource.etag)) {
-    throw new Error('Cloud Run filesystem requires an observable UID and etag identity before update');
+  if (typeof resource.uid !== 'string' || !resource.uid || typeof resource.etag !== 'string' || !resource.etag) {
+    throw new Error('Cloud Run runtime requires an observable UID and etag identity before update');
   }
-  return { fingerprint, uid: resource?.uid, etag: resource?.etag, verifyUid: expectedUid !== undefined };
+  return { fingerprint, runtimePrincipal, uid: resource?.uid, etag: resource?.etag, verifyUid: true };
 }
 function cloudRunVerifyFilesystem(resource, kind, expected) {
   if (expected?.verifyUid && resource?.uid !== expected.uid) {
-    throw new Error('Cloud Run bound resource UID changed during deployment');
+    throw new Error('Cloud Run bound resource UID identity changed during deployment');
+  }
+  const template = kind === 'service' ? resource?.template : resource?.template?.template;
+  if (expected && (template?.serviceAccount || template?.serviceAccountName) !== expected.runtimePrincipal) {
+    throw new Error('Cloud Run runtime principal identity changed during deployment');
   }
   if (!expected || expected.fingerprint === null) return;
-  const template = kind === 'service' ? resource?.template : resource?.template?.template;
   if (resource?.uid !== expected.uid || cloudRunFilesystemIdentity(template) !== expected.fingerprint) {
     throw new Error('Cloud Run filesystem or resource identity changed during deployment');
   }
@@ -258,6 +263,8 @@ async function runCloudRunReleaseCommands(params) {
     const previousJob = await cloudRunReleaseResponse(observedResponse, 'Cloud Run release job lookup for ' + jobName);
     const expectedJobName = 'projects/' + params.projectId + '/locations/' + params.region + '/jobs/' + jobName;
     if (previousJob.name !== expectedJobName) throw new Error('Cloud Run release job lookup returned a different identity');
+    const previousPrincipal = previousJob.template?.template?.serviceAccount || previousJob.template?.template?.serviceAccountName;
+    if (!previousPrincipal || previousPrincipal !== task.serviceAccount) throw new Error('Cloud Run release job runtime identity differs from its bound source; apply its reviewed identity transition before release');
     const filesystem = cloudRunFilesystemGuard({ ...previousJob, template: jobSpec.template }, 'job');
     if (previousJob.etag) jobSpec.etag = previousJob.etag;
     const mutationResponse = await fetch(jobUrl, {

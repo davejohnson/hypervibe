@@ -180,6 +180,7 @@ describe('RailwayAdapter observe', () => {
         persistence: { state: 'unknown', reason: 'Railway database persistence could not verify the exact service and environment identity.' },
         credentialAlignment: {
           basis: 'configured-variable-values', authentication: 'unverified',
+          rawReferences: 'unchecked', deployedConfiguration: 'unchecked', applicationOperation: 'unchecked',
           issuer: { comparisons: [
             { source: 'DATABASE_URL', against: 'POSTGRES_PASSWORD', comparison: { result: 'match' } },
             { source: 'DATABASE_PRIVATE_URL', against: 'POSTGRES_PASSWORD', comparison: { result: 'match' } },

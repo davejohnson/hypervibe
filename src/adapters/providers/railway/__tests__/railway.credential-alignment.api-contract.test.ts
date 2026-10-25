@@ -47,6 +47,22 @@ async function inspect(fixture: Awaited<ReturnType<typeof setup>>) {
 // EnvironmentVariables is opaque: credential values below are synthetic
 // counterexamples, not recorded Railway responses or proof of SQL authentication.
 describe('Railway configured database credential alignment', () => {
+  it('includes declared application aliases and leaves unobserved credential layers unchecked', async () => {
+    const fixture = await setup();
+    fixture.variables.set(`staging-web/${stagingId}`, { DATABASE_URL: uri(), POSTGRES_DB_URL: uri(stalePassword) });
+    const observed = await fixture.adapter.observe(fixture.environment, {
+      strictScope: { projectId, environmentId: stagingId }, maxResources: 100,
+      databaseEnvAliases: { web: { POSTGRES_DB_URL: 'DATABASE_URL' } },
+    } as any);
+    expect(observed.databases[0].credentialAlignment).toMatchObject({
+      rawReferences: 'unchecked', deployedConfiguration: 'unchecked', authentication: 'unverified', applicationOperation: 'unchecked',
+      consumers: expect.arrayContaining([{ name: 'web', externalId: 'staging-web', source: 'POSTGRES_DB_URL', issuerSource: 'DATABASE_URL',
+        credentialComparison: { result: 'mismatch' }, target: { result: 'match' } }]),
+    });
+    expect(fixture.contractErrors).toEqual([]);
+    expect(fixture.mutations).toEqual([]);
+    expect(JSON.stringify(observed)).not.toContain(stalePassword);
+  });
   it('reports independently stale issuer PGPASSWORD and DIRECT_URL and app DIRECT_URL values', async () => {
     const fixture = await setup();
     fixture.variables.set(`staging-db/${stagingId}`, {
@@ -151,6 +167,7 @@ describe('Railway configured database credential alignment', () => {
     const { alignment } = await inspect(fixture);
     expect(alignment).toEqual({
       basis: 'configured-variable-values', authentication: 'unverified',
+      rawReferences: 'unchecked', deployedConfiguration: 'unchecked', applicationOperation: 'unchecked',
       issuer: { comparisons: [
         { source: 'DATABASE_URL', against: 'POSTGRES_PASSWORD', comparison: { result: 'mismatch' } },
         { source: 'DATABASE_PRIVATE_URL', against: 'POSTGRES_PASSWORD', comparison: { result: 'match' } },

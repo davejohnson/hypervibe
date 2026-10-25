@@ -49,6 +49,10 @@ export interface HostingCapabilities {
   /** Selected-key writes to exact bound services without creates or workload
    * restarts; verified configuration is picked up by a later managed CI run. */
   supportsDeferredSecretUpdates?: boolean;
+  credentialUpdateActivation?: 'deferred' | 'provider-rollout';
+  credentialValueEvidence?: 'readback' | 'acknowledgement';
+  registryCredentialModel?: 'native-workload-identity' | 'build-input';
+  registryCredentialGuidance?: string;
   /** Enforces creation-only admission at the final provider mutation boundary. */
   supportsCreateOnlyDeploy?: boolean;
   /** Can prepare an untriggered cron workload and activate it after a verified CI release. */
@@ -489,7 +493,7 @@ export interface IHostingAdapter {
    * Read back live state for an environment (services, config, env var
    * hashes, databases). Implemented when capabilities.supportsObserve is true.
    */
-  observe?(environment: Environment): Promise<import('./observe.port.js').ObservedState>;
+  observe?(environment: Environment, context?: import('./observe.port.js').HostingObservationContext): Promise<import('./observe.port.js').ObservedState>;
 }
 
 /**

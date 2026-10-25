@@ -327,6 +327,36 @@ export class VercelClient {
     return deployments.sort((left, right) => right.createdAt - left.createdAt);
   }
 
+  /** Exact project aliases, including older deployment URLs that still route traffic. */
+  async listActiveAliasDeploymentIds(projectId: string): Promise<string[]> {
+    const ids = new Set<string>();
+    const aliases = new Set<string>();
+    const cursors = new Set<string>();
+    let until: string | undefined;
+    for (let page = 0; page < PAGE_CAP; page += 1) {
+      const response = await this.request<{ aliases?: Array<{ uid?: string; alias?: string; projectId?: string | null; deploymentId?: string | null; deployment?: { id?: string }; deletedAt?: number | null; redirect?: string | null; microfrontends?: unknown }>; pagination?: { next?: unknown } }>(
+        'GET', '/v4/aliases', { query: { projectId, limit: PAGE_LIMIT, ...(until ? { until } : {}) } }
+      );
+      if (!Array.isArray(response.aliases)) throw new Error('Vercel alias observation is incomplete.');
+      for (const alias of response.aliases) {
+        if (!alias.uid || !alias.alias || alias.projectId !== projectId || aliases.has(alias.uid)) throw new Error('Vercel alias scope is unknown.');
+        aliases.add(alias.uid);
+        if (alias.deletedAt || alias.redirect) continue;
+        // Microfrontend routing needs each routed application's identity; never
+        // claim complete coverage from the default deployment alone.
+        if (alias.microfrontends) throw new Error('Vercel alias routing has unresolved application targets.');
+        const id = alias.deployment?.id ?? alias.deploymentId;
+        if (!id || alias.deployment?.id && alias.deploymentId && alias.deployment.id !== alias.deploymentId) throw new Error('Vercel alias deployment is unknown.');
+        ids.add(id);
+      }
+      const next = response.pagination?.next;
+      if (next === null || next === undefined) return [...ids].sort();
+      if (!(typeof next === 'number' || typeof next === 'string') || !String(next) || cursors.has(String(next))) throw new Error('Vercel alias pagination is incomplete.');
+      until = String(next); cursors.add(until);
+    }
+    throw new Error('Vercel alias observation exceeded its pagination bound.');
+  }
+
   async listProjectDomains(
     projectIdOrName: string
   ): Promise<VercelProjectDomain[]> {

@@ -113,8 +113,10 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
             }
             core.setOutput('image_uri', 'registry.fly.io/' + app + '@' + digest);
       - name: Deploy immutable digest to existing Fly.io Machines
+        id: runtime_deploy
         uses: actions/github-script@v9
         env:
+          HYPERVIBE_CREDENTIAL_OPERATIONS: \${{ inputs.credential_operations || '{}' }}
           FLY_API_TOKEN: \${{ secrets.FLY_API_TOKEN }}
           FLY_ORGANIZATION_SLUG: ${organizationValue}
           FLY_SERVICE_BINDINGS_JSON: ${bindingValue}
@@ -123,6 +125,9 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
           DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
+            const credentialDeployments = [];
+            const credentialOperations = JSON.parse(process.env.HYPERVIBE_CREDENTIAL_OPERATIONS || '{}');
+            if (!credentialOperations || typeof credentialOperations !== 'object' || Array.isArray(credentialOperations)) throw new Error('Credential operations are malformed');
             const endpoint = 'https://api.machines.dev';
 ${buildFlyMountIdentityRuntime().split('\n').map(line => `            ${line}`).join('\n')}
             const token = (process.env.FLY_API_TOKEN || '').trim();
@@ -177,7 +182,7 @@ ${buildFlyMountIdentityRuntime().split('\n').map(line => `            ${line}`).
               ) {
                 throw new Error('Fly.io service binding is outside the target organization');
               }
-              return parsed;
+              return { ...parsed, providerResourceId: value };
             });
             const identities = new Set(bindings.map((binding) => binding.appId));
             if (identities.size !== bindings.length) {
@@ -240,6 +245,9 @@ ${buildFlyMountIdentityRuntime().split('\n').map(line => `            ${line}`).
                   + ' does not contain only the exact reviewed Hypervibe Machine'
                 );
               }
+              const credentialOperation = Object.values(credentialOperations).find((entry) => entry?.serviceId === binding.providerResourceId);
+              const minimumSecretsVersion = credentialOperation?.configurationVersion;
+              if (credentialOperation && (!Number.isSafeInteger(minimumSecretsVersion) || minimumSecretsVersion < 0)) throw new Error('The accepted Fly secret version is required before credential deployment');
               const machine = exact[0];
               const expectedMounts = flyMountIdentity(machine.config);
               if (!machine.id || !machine.instance_id || !machine.config) {
@@ -261,6 +269,7 @@ ${buildFlyMountIdentityRuntime().split('\n').map(line => `            ${line}`).
                 {
                   config,
                   current_version: machine.instance_id,
+                  ...(minimumSecretsVersion !== undefined ? { min_secrets_version: minimumSecretsVersion } : {}),
                   skip_launch: false,
                 },
                 'exact Machine update'
@@ -308,10 +317,12 @@ ${buildFlyMountIdentityRuntime().split('\n').map(line => `            ${line}`).
                   'Fly.io Machine ' + machine.id + ' did not converge to the exact image digest'
                 );
               }
+              if (observed.instance_id) credentialDeployments.push({ serviceId: binding.providerResourceId, deploymentIds: [observed.instance_id], ...(minimumSecretsVersion !== undefined ? { configurationVersion: minimumSecretsVersion } : {}) });
               core.info(
                 'Fly.io Machine ' + machine.id + ' is healthy on exact SHA ' + sha
               );
             }
+            core.setOutput('credential_deployments', JSON.stringify(credentialDeployments));
 `,
   };
 }

@@ -1,3 +1,4 @@
+import '../adapters/providers/credential-validation.js';
 /**
  * Provider registration is application bootstrap, not an interface concern.
  * Both MCP and CLI import this module before constructing a command context.
