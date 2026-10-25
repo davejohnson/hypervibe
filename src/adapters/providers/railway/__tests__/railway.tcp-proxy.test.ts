@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { RailwayAdapter } from '../railway.adapter.js';
 
+// Complete synthetic records for fields required by the pinned official SDL.
+const proxyScope = { environmentId: 'rail-env-1', serviceId: 'rail-svc-db-1', syncStatus: 'ACTIVE', deletedAt: null };
+
 function stubClient(adapter: RailwayAdapter, request: ReturnType<typeof vi.fn>): void {
   (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 }
@@ -30,7 +33,7 @@ describe('RailwayAdapter TCP proxy', () => {
       .mockResolvedValueOnce({ tcpProxies: [] })
       // tcpProxyCreate
       .mockResolvedValueOnce({
-        tcpProxyCreate: { id: 'proxy-1', domain: 'tramway.proxy.rlwy.net', proxyPort: 12345, applicationPort: 5432 },
+        tcpProxyCreate: { ...proxyScope, id: 'proxy-1', domain: 'tramway.proxy.rlwy.net', proxyPort: 12345, applicationPort: 5432 },
       });
 
     const adapter = new RailwayAdapter();
@@ -49,8 +52,8 @@ describe('RailwayAdapter TCP proxy', () => {
   it('reuses an existing proxy for the same application port without mutating', async () => {
     const request = vi.fn().mockResolvedValueOnce({
       tcpProxies: [
-        { id: 'proxy-other', domain: 'other.proxy.rlwy.net', proxyPort: 11111, applicationPort: 6379 },
-        { id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 22222, applicationPort: 5432 },
+        { ...proxyScope, id: 'proxy-other', domain: 'other.proxy.rlwy.net', proxyPort: 11111, applicationPort: 6379 },
+        { ...proxyScope, id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 22222, applicationPort: 5432 },
       ],
     });
 
@@ -76,7 +79,7 @@ describe('RailwayAdapter TCP proxy', () => {
 
   it('getTcpProxy returns the matching proxy and never mutates', async () => {
     const request = vi.fn().mockResolvedValueOnce({
-      tcpProxies: [{ id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 33333, applicationPort: 5432 }],
+      tcpProxies: [{ ...proxyScope, id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 33333, applicationPort: 5432 }],
     });
 
     const adapter = new RailwayAdapter();
@@ -84,14 +87,14 @@ describe('RailwayAdapter TCP proxy', () => {
 
     const proxy = await adapter.getTcpProxy('rail-env-1', 'rail-svc-db-1', 5432);
 
-    expect(proxy).toEqual({ id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 33333, applicationPort: 5432 });
+    expect(proxy).toEqual({ ...proxyScope, id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 33333, applicationPort: 5432 });
     expect(request).toHaveBeenCalledTimes(1);
   });
 
   it('getTcpProxy returns null when no proxy matches the port', async () => {
     const adapter = new RailwayAdapter();
     stubClient(adapter, vi.fn().mockResolvedValueOnce({
-      tcpProxies: [{ id: 'proxy-other', domain: 'other.proxy.rlwy.net', proxyPort: 11111, applicationPort: 6379 }],
+      tcpProxies: [{ ...proxyScope, id: 'proxy-other', domain: 'other.proxy.rlwy.net', proxyPort: 11111, applicationPort: 6379 }],
     }));
     expect(await adapter.getTcpProxy('rail-env-1', 'rail-svc-db-1', 5432)).toBeNull();
   });
@@ -109,7 +112,7 @@ describe('RailwayAdapter TCP proxy', () => {
   it('deletes a TCP proxy and verifies that it is no longer active', async () => {
     const request = vi.fn()
       .mockResolvedValueOnce({
-        tcpProxies: [{ id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 33333, applicationPort: 5432 }],
+        tcpProxies: [{ ...proxyScope, id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 33333, applicationPort: 5432 }],
       })
       .mockResolvedValueOnce({ tcpProxyDelete: true })
       .mockResolvedValueOnce({ tcpProxies: [] });
@@ -140,32 +143,34 @@ describe('RailwayAdapter TCP proxy', () => {
     const adapter = new RailwayAdapter();
     stubClient(adapter, vi.fn()
       .mockResolvedValueOnce({
-        tcpProxies: [{ id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 33333, applicationPort: 5432 }],
+        tcpProxies: [{ ...proxyScope, id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 33333, applicationPort: 5432 }],
       })
       .mockResolvedValueOnce({ tcpProxyDelete: false })
       .mockResolvedValueOnce({
-        tcpProxies: [{ id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 33333, applicationPort: 5432 }],
+        tcpProxies: [{ ...proxyScope, id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 33333, applicationPort: 5432 }],
       }));
 
     await expect(adapter.deleteTcpProxy('rail-env-1', 'rail-svc-db-1', 'proxy-pg'))
       .rejects.toThrow('did not confirm deletion');
   });
 
-  it('ignores proxies already deleting during cleanup verification', async () => {
+  it('waits for actual absence after observing a deleting proxy', async () => {
     const request = vi.fn()
       .mockResolvedValueOnce({
-        tcpProxies: [{ id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 33333, applicationPort: 5432 }],
+        tcpProxies: [{ ...proxyScope, id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 33333, applicationPort: 5432 }],
       })
       .mockResolvedValueOnce({ tcpProxyDelete: true })
       .mockResolvedValueOnce({
         tcpProxies: [{
+          ...proxyScope,
           id: 'proxy-pg',
           domain: 'db.proxy.rlwy.net',
           proxyPort: 33333,
           applicationPort: 5432,
           syncStatus: 'DELETING',
         }],
-      });
+      })
+      .mockResolvedValueOnce({ tcpProxies: [] });
     const adapter = new RailwayAdapter();
     stubClient(adapter, request);
 
