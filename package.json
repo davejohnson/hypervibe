@@ -83,7 +83,7 @@
     "@aws-sdk/client-secrets-manager": "3.1106.0",
     "@aws-sdk/client-sts": "^3.1106.0",
     "@aws-sdk/credential-provider-node": "^3.972.80",
-    "@azure/identity": "4.13.2",
+    "@azure/identity": "file:vendor/azure-identity-4.13.2-hypervibe.1.tgz",
     "@azure/storage-blob": "^12.33.0",
     "@bitwarden/sdk-napi": "^1.0.0",
     "@google-cloud/cloud-sql-connector": "1.10.0",
@@ -114,9 +114,6 @@
   "overrides": {
     "googleapis-common": {
       "gaxios": "7.3.0"
-    },
-    "@azure/identity@4.13.2": {
-      "@azure/msal-node": "7.1.1"
     }
   },
   "bundleDependencies": [
@@ -127,7 +124,9 @@
     "skills/",
     "data/.gitkeep",
     "templates/",
-    "test/backup-runner-smoke.mjs"
+    "test/backup-runner-smoke.mjs",
+    "vendor/azure-identity-4.13.2-hypervibe.1.tgz",
+    "vendor/azure-identity.provenance.json"
   ],
   "engines": {
     "node": ">=22.0.0"

@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
-import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { execFile, spawnSync } from 'node:child_process';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,17 +14,76 @@ it('delivers patched Azure authentication inside the actual npm tarball without 
   // using patched MSAL is insufficient if the shipped package re-resolves 5.x.
   // https://docs.npmjs.com/cli/v11/configuring-npm/package-json#overrides
   const directory = mkdtempSync(path.join(tmpdir(), 'hypervibe-azure-package-'));
-  const run = (command: string, args: string[]) => {
-    const result = spawnSync(command, args, { cwd: root, encoding: 'utf8', timeout: 60_000,
+  const run = (command: string, args: string[], cwd = root) => {
+    const result = spawnSync(command, args, { cwd, encoding: 'utf8', timeout: 60_000,
       maxBuffer: 8 * 1024 * 1024, env: { ...process.env, npm_config_cache: path.join(directory, 'cache') } });
     expect(result.error?.message, result.stderr).toBeUndefined();
     expect(result.status, result.stderr).toBe(0);
     return result.stdout;
   };
   try {
-    const [packed] = JSON.parse(run('npm', ['pack', '--json', '--ignore-scripts', '--pack-destination', directory]));
-    run('tar', ['-xzf', path.join(directory, packed.filename), '-C', directory]);
+    let archive = process.env.HYPERVIBE_PACKAGE_TEST_ARCHIVE;
+    if (!archive) {
+      const [packed] = JSON.parse(run('npm', ['pack', '--json', '--ignore-scripts', '--pack-destination', directory]));
+      archive = path.join(directory, packed.filename);
+    }
+    run('tar', ['-xzf', archive, '-C', directory]);
     const installed = path.join(directory, 'package');
+    // Exercise npm's real lock generation and clean-install contract with the
+    // exact shipped Azure closure. Other Hypervibe providers are outside this
+    // dependency regression; the full release consumer also installs the whole
+    // unchanged tarball. A complete bundle must need no registry re-resolution.
+    const closure = path.join(directory, 'azure-closure');
+    const consumer = path.join(directory, 'consumer');
+    mkdirSync(closure);
+    mkdirSync(consumer);
+    cpSync(path.join(installed, 'node_modules'), path.join(closure, 'node_modules'), { recursive: true });
+    if (existsSync(path.join(installed, 'vendor'))) cpSync(path.join(installed, 'vendor'), path.join(closure, 'vendor'), { recursive: true });
+    const delivered = JSON.parse(readFileSync(path.join(installed, 'package.json'), 'utf8'));
+    writeFileSync(path.join(closure, 'package.json'), JSON.stringify({
+      name: 'hypervibe-azure-closure-probe', version: '1.0.0', private: true,
+      dependencies: { '@azure/identity': delivered.dependencies['@azure/identity'] },
+      bundleDependencies: ['@azure/identity'],
+    }));
+    const [closurePacked] = JSON.parse(run('npm', ['pack', '--json', '--ignore-scripts', '--pack-destination', directory], closure));
+    writeFileSync(path.join(consumer, 'package.json'), JSON.stringify({
+      name: 'hypervibe-clean-consumer', version: '1.0.0', private: true,
+      dependencies: { 'hypervibe-azure-closure-probe': `file:${path.join(directory, closurePacked.filename)}` },
+    }));
+    const emptyUserConfig = path.join(directory, 'empty-user.npmrc');
+    const emptyGlobalConfig = path.join(directory, 'empty-global.npmrc');
+    writeFileSync(emptyUserConfig, '');
+    writeFileSync(emptyGlobalConfig, '');
+    const registryRequests: string[] = [];
+    const registry = createServer((request, response) => {
+      registryRequests.push(request.url ?? '');
+      response.writeHead(404, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: 'This complete bundled closure must not need an external package' }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      registry.once('error', reject);
+      registry.listen(0, '127.0.0.1', resolve);
+    });
+    try {
+      const address = registry.address();
+      if (!address || typeof address === 'string') throw new Error('Missing isolated registry address');
+      const args = ['--ignore-scripts', '--no-audit', '--no-fund', '--update-notifier=false', '--fetch-retries=0', '--fetch-timeout=2000',
+        `--registry=http://127.0.0.1:${address.port}`, `--userconfig=${emptyUserConfig}`, `--globalconfig=${emptyGlobalConfig}`];
+      for (const command of [['install', '--package-lock-only'], ['ci'], ['ls', '@azure/msal-node', '--all', '--json']]) {
+        const result = await new Promise<{ error: Error | null; stderr: string; stdout: string }>(resolve => {
+          execFile('npm', [...command, ...args], { cwd: consumer, timeout: 30_000, maxBuffer: 4 * 1024 * 1024,
+            env: { ...process.env, npm_config_cache: path.join(directory, 'consumer-cache') } },
+          (error, stdout, stderr) => resolve({ error, stdout, stderr }));
+        });
+        expect(result.error, `npm ${command.join(' ')} failed:\n${result.stderr}\n${result.stdout}`).toBeNull();
+      }
+      expect(registryRequests, 'A reviewed complete bundle must not resolve a different MSAL version').toEqual([]);
+      const cleanIdentity = createRequire(path.join(consumer,
+        'node_modules/hypervibe-azure-closure-probe/node_modules/@azure/identity/package.json'));
+      expect(JSON.parse(readFileSync(cleanIdentity.resolve('@azure/msal-node/package.json'), 'utf8')).version).toBe('7.1.1');
+    } finally {
+      await new Promise<void>((resolve, reject) => registry.close(error => error ? reject(error) : resolve()));
+    }
     const identityManifest = path.join(installed, 'node_modules/@azure/identity/package.json');
     expect(existsSync(identityManifest), 'Azure Identity must travel with its reviewed dependency closure').toBe(true);
     const identityRequire = createRequire(identityManifest);

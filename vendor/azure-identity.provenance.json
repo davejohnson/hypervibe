@@ -1,0 +1,27 @@
+{
+  "upstream": {
+    "name": "@azure/identity",
+    "version": "4.13.2",
+    "integrity": "sha512-NXL2/pCJctLxgw8bvrwwgge743kEq8LBT+O1pmV0vyUwetzFPH9auP6jhkU/cgZCPPtWoewAe3ncaGCgPo07fA=="
+  },
+  "distribution": {
+    "name": "@azure/identity",
+    "version": "4.13.2-hypervibe.1",
+    "file": "azure-identity-4.13.2-hypervibe.1.tgz",
+    "integrity": "sha512-Od6lpbVFA0eNzHRt0am3FplDz7Cgz/z72a1CqmesWyil6UE2Zo+mOvXaHYo0MzpbsPeuKDOJVXoJWJjmHr5X+Q=="
+  },
+  "metadataChanges": {
+    "version": {
+      "from": "4.13.2",
+      "to": "4.13.2-hypervibe.1"
+    },
+    "msalNode": {
+      "from": "^5.1.5",
+      "to": "7.1.1"
+    },
+    "addedProvenance": "hypervibePatch"
+  },
+  "sdkSourceModified": false,
+  "preservedNonManifestFiles": 1143,
+  "preservedContentSha256": "23f33d34749228f04df7dbb654c119beba2006be388cc3cdedc1f35a657bf260"
+}

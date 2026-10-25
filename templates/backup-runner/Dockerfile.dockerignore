@@ -1,6 +1,9 @@
 **
 !package.json
 !package-lock.json
+!vendor
+!vendor/azure-identity-4.13.2-hypervibe.1.tgz
+!vendor/azure-identity.provenance.json
 !tsconfig.json
 !tsconfig.build.json
 !src
