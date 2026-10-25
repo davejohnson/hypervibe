@@ -88,7 +88,9 @@ import {
 import {
   credentialFieldsFromSchema,
   connectionSetupDetails,
+  connectionSetupUrl,
   GITHUB_TOKEN_URLS,
+  type ConnectionGuidanceContext,
 } from '../domain/services/connection-guidance.js';
 import { removeServiceBinding, serviceBindingFor } from '../domain/services/spec.service.js';
 import { removeHostingEnvVars, syncHostingEnvVars } from '../domain/services/hosting-env.service.js';
@@ -552,7 +554,8 @@ function bootstrapSuccessData(summary: Record<string, unknown>): Record<string, 
 
 export function splitActionScopedConnectionBlocks(
   blocked: ConnectionBlock[],
-  actions: PlanAction[]
+  actions: PlanAction[],
+  context: ConnectionGuidanceContext = {}
 ): {
   hardBlocked: ConnectionBlock[];
   actionScopedBlocked: ConnectionBlock[];
@@ -584,7 +587,7 @@ export function splitActionScopedConnectionBlocks(
         ? { requiredCredentialKeys: ['apiToken', 'packageReadToken'] }
         : {}),
       reason: hasImageRegistrySecret
-        ? `GitHub Actions deploy ${action.resource.name} is missing GHCR image pull credentials (${missing.join(', ')}). Connect GitHub with apiToken for repo/workflow API access plus packageReadToken for read:packages (create: ${GITHUB_TOKEN_URLS.packageRead}) before relying on push-to-deploy.`
+        ? `GitHub Actions deploy ${action.resource.name} is missing GHCR image pull credentials (${missing.join(', ')}). Connect GitHub with apiToken for repo/workflow API access plus packageReadToken for read:packages (create: ${connectionSetupUrl(GITHUB_TOKEN_URLS.packageRead, context)}) before relying on push-to-deploy.`
         : `GitHub Actions deploy ${action.resource.name} is missing provider secrets (${missing.join(', ')}). Connect and verify ${String(action.metadata?.provider ?? action.resource.provider)} before relying on push-to-deploy.`,
     }];
   });
@@ -668,7 +671,9 @@ async function executeRepositoryPlanApply(
   const projectForApply = syncProjectGitRemoteUrl(ctx, params.project, params.spec);
   const planService = new PlanService();
   const blocked = planService.projectPreflight(projectForApply, params.spec, params.envName);
-  const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, params.actions);
+  const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, params.actions, {
+    project: projectForApply.name, repositoryUrl: projectForApply.gitRemoteUrl,
+  });
   const applyBlocked = [
     ...hardBlocked,
     ...actionScopedBlocksRequiringConnectBeforeApply(actionScopedBlocked),
@@ -1070,7 +1075,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
         ...planService.projectPreflight(projectForPreflight, spec, envName),
         ...planService.providerPreflight(cleanupProviders),
       ];
-  const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, loaded.document.actions);
+  const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, loaded.document.actions, {
+    project: projectForPreflight.name, repositoryUrl: projectForPreflight.gitRemoteUrl,
+  });
   const connectBeforeApply = actionScopedBlocksRequiringConnectBeforeApply(actionScopedBlocked);
   const applyBlocked = [...hardBlocked, ...connectBeforeApply];
   if (applyBlocked.length > 0) {

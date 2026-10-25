@@ -39,7 +39,10 @@ struct ConnectionsView: View {
             AddConnectionView(
                 providers: catalog?.providers ?? [],
                 connections: catalog?.connections ?? [],
-                initialProvider: preselectedProvider
+                initialProvider: preselectedProvider,
+                onDescribe: { provider, scope in
+                    try await model.describeConnection(projectID: project.id, provider: provider, scope: scope)
+                }
             ) { request in
                 let result = try await model.addConnection(
                     projectID: project.id,
@@ -325,6 +328,7 @@ private struct AddConnectionView: View {
     let providers: [ProviderCatalogEntry]
     let connections: [ConnectionSummary]
     let initialProvider: String?
+    let onDescribe: (String, String) async throws -> ConnectionGuidance
     let onSubmit: (ConnectionRequest) async throws -> ConnectionMutationResult
 
     @State private var selectedProviderName: String?
@@ -336,16 +340,23 @@ private struct AddConnectionView: View {
     @State private var showingGuidance = false
     @State private var submitting = false
     @State private var errorMessage: String?
+    @State private var guidance: ConnectionGuidance?
+    @State private var loadingGuidance = false
+    @State private var guidanceRequestID = UUID()
+    @State private var guidanceSelection: [String]?
+    @State private var useExistingCredentials = false
 
     init(
         providers: [ProviderCatalogEntry],
         connections: [ConnectionSummary],
         initialProvider: String?,
+        onDescribe: @escaping (String, String) async throws -> ConnectionGuidance,
         onSubmit: @escaping (ConnectionRequest) async throws -> ConnectionMutationResult
     ) {
         self.providers = providers
         self.connections = connections
         self.initialProvider = initialProvider
+        self.onDescribe = onDescribe
         self.onSubmit = onSubmit
         _selectedProviderName = State(initialValue: initialProvider)
     }
@@ -353,6 +364,10 @@ private struct AddConnectionView: View {
     private var selectedProvider: ProviderCatalogEntry? {
         guard let selectedProviderName else { return nil }
         return providers.first { $0.name == selectedProviderName }
+    }
+
+    private var currentGuidance: ConnectionGuidance? {
+        guidanceSelection == [selectedProviderName ?? "", scope] ? guidance : nil
     }
 
     var body: some View {
@@ -377,6 +392,7 @@ private struct AddConnectionView: View {
             }
         }
         .frame(width: 620, height: 520)
+        .task(id: [selectedProviderName ?? "", scope]) { await loadGuidance() }
         .onDisappear(perform: clearCredentialState)
     }
 
@@ -436,8 +452,9 @@ private struct AddConnectionView: View {
             .sorted { $0.category.localizedCaseInsensitiveCompare($1.category) == .orderedAscending }
     }
 
-    private func providerForm(_ provider: ProviderCatalogEntry) -> some View {
-        VStack(spacing: 0) {
+    private func providerForm(_ catalogProvider: ProviderCatalogEntry) -> some View {
+        let provider = currentGuidance?.provider ?? catalogProvider
+        return VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     HStack(spacing: 11) {
@@ -451,124 +468,142 @@ private struct AddConnectionView: View {
                         .clickTargetCursor()
                         ProviderLogo(provider: provider.name, size: 38)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(provider.displayName)
-                                .font(.headline)
+                            Text(provider.displayName).font(.headline)
                             if let tokenType = provider.tokenType {
-                                Text(tokenType)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
+                                Text(tokenType).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                             }
                         }
                         Spacer()
-                        ForEach(provider.setupLinks) { link in
-                            Link(destination: link.url) {
-                                Label(link.label, systemImage: "arrow.up.right.square")
-                            }
-                            .font(.caption)
-                            .clickTargetCursor()
-                        }
-                    }
-
-                    if !provider.requiredPermissions.isEmpty || !provider.notes.isEmpty {
-                        DisclosureGroup(isExpanded: $showingGuidance) {
-                            VStack(alignment: .leading, spacing: 7) {
-                                ForEach(provider.requiredPermissions, id: \.self) { permission in
-                                    Label(permission, systemImage: "checkmark.circle")
-                                }
-                                ForEach(provider.notes, id: \.self) { note in
-                                    Label(note, systemImage: "info.circle")
-                                }
-                            }
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 8)
-                        } label: {
-                            Text("Permissions and setup notes")
-                                .clickTargetCursor()
-                        }
-                    }
-
-                    if provider.credentialFields != nil {
-                        Picker("Credential source", selection: $mode) {
-                            ForEach(CredentialMode.allCases) { mode in
-                                Text(mode.rawValue).tag(mode)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .clickTargetCursor()
-                    } else {
-                        Label(
-                            "This Hypervibe version does not describe this provider's fields. Use a secure reference instead.",
-                            systemImage: "info.circle"
-                        )
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    }
-
-                    if mode == .direct, let fields = provider.credentialFields {
-                        if fields.isEmpty {
-                            Label("This provider does not require credentials.", systemImage: "checkmark.circle")
-                                .foregroundStyle(.secondary)
-                        } else {
-                            ForEach(fields) { field in
-                                credentialField(field)
-                            }
-                        }
-                    } else {
-                        referenceFields(provider)
                     }
 
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("Scope (optional)")
-                            .font(.caption.weight(.medium))
+                        Text("Scope (optional)").font(.caption.weight(.medium))
                         TextField("global, owner/repo, or example.com", text: $scope)
                             .textFieldStyle(.roundedBorder)
-                        Text("Leave blank for a global connection. Scoped connections can coexist.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                        Text("Leave blank for a global connection. Setup links update for the scope you enter.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+
+                    if loadingGuidance {
+                        ProgressView("Preparing setup guidance…")
+                    } else if let guidance = currentGuidance {
+                        if provider.requiresAgentSetup && !useExistingCredentials {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Label("Continue with your coding agent", systemImage: "bubble.left.and.text.bubble.right")
+                                    .font(.headline)
+                                Text("Hypervibe can handle the supported account and sign-in setup. Your agent will reuse existing access and guide you through any browser sign-in or approvals.")
+                                Text(guidance.agentSetupPrompt)
+                                    .font(.callout).textSelection(.enabled)
+                                Button("Copy setup prompt") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(guidance.agentSetupPrompt, forType: .string)
+                                }
+                                .buttonStyle(.borderedProminent).clickTargetCursor()
+                                Button("Use credentials I already have") { useExistingCredentials = true }
+                                    .buttonStyle(.link).clickTargetCursor()
+                            }
+                        } else {
+                            VStack(alignment: .leading, spacing: 9) {
+                                if let url = guidance.recommendedSetupURL {
+                                    Link(destination: url) {
+                                        Label("Open recommended setup", systemImage: "arrow.up.right.square")
+                                    }
+                                    .font(.headline).clickTargetCursor()
+                                }
+                                ForEach(provider.setupLinks.filter { $0.url != guidance.recommendedSetupURL }) { link in
+                                    Link(destination: link.url) {
+                                        Label(link.label, systemImage: "arrow.up.right.square")
+                                    }
+                                    .font(.caption).clickTargetCursor()
+                                }
+                            }
+                            if !provider.requiredPermissions.isEmpty || !provider.notes.isEmpty {
+                                DisclosureGroup(isExpanded: $showingGuidance) {
+                                    VStack(alignment: .leading, spacing: 7) {
+                                        ForEach(provider.requiredPermissions, id: \.self) { Label($0, systemImage: "checkmark.circle") }
+                                        ForEach(provider.notes, id: \.self) { Label($0, systemImage: "info.circle") }
+                                    }
+                                    .font(.caption).foregroundStyle(.secondary).padding(.top, 8)
+                                } label: {
+                                    Text("Permissions and setup notes").clickTargetCursor()
+                                }
+                            }
+                            credentialInputs(provider)
+                            if provider.requiresAgentSetup {
+                                Button("Use guided setup instead") { useExistingCredentials = false }
+                                    .buttonStyle(.link).clickTargetCursor()
+                            }
+                        }
                     }
 
                     if let errorMessage {
                         Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
-                            .font(.callout)
-                            .foregroundStyle(.red)
-                            .textSelection(.enabled)
-                            .padding(10)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .font(.callout).foregroundStyle(.red).textSelection(.enabled)
+                            .padding(10).frame(maxWidth: .infinity, alignment: .leading)
                             .background(.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                        if currentGuidance == nil && !loadingGuidance {
+                            Button("Retry setup guidance") { Task { await loadGuidance() } }
+                                .clickTargetCursor()
+                        }
                     }
                 }
                 .padding(16)
             }
-
             Divider()
             HStack {
-                Button("Cancel") {
-                    clearCredentialState()
-                    dismiss()
-                }
-                .clickTargetCursor()
+                Button("Cancel") { clearCredentialState(); dismiss() }.clickTargetCursor()
                 Spacer()
                 if submitting {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Adding and verifying…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    ProgressView().controlSize(.small)
+                    Text("Adding and verifying…").font(.caption).foregroundStyle(.secondary)
                 }
-                Button(hasMatchingConnection(provider) ? "Replace Connection" : "Add Connection") {
-                    Task { await submit(provider) }
+                if !provider.requiresAgentSetup || useExistingCredentials {
+                    Button(hasMatchingConnection(provider) ? "Replace Connection" : "Add Connection") {
+                        Task { await submit(provider) }
+                    }
+                    .buttonStyle(.borderedProminent).clickTargetCursor()
+                    .disabled(!canSubmit(provider) || submitting)
                 }
-                .buttonStyle(.borderedProminent)
-                .clickTargetCursor()
-                .disabled(!canSubmit(provider) || submitting)
             }
             .padding(14)
         }
     }
 
-    @ViewBuilder
+    private func credentialInputs(_ provider: ProviderCatalogEntry) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if provider.credentialFields != nil {
+                Picker("Credential source", selection: $mode) {
+                    ForEach(CredentialMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .clickTargetCursor()
+            } else {
+                Label(
+                    "This Hypervibe version does not describe this provider's fields. Use a secure reference instead.",
+                    systemImage: "info.circle"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            if mode == .direct, let fields = provider.credentialFields {
+                if fields.isEmpty {
+                    Label("This provider does not require credentials.", systemImage: "checkmark.circle")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(fields) { field in
+                        credentialField(field)
+                    }
+                }
+            } else {
+                referenceFields(provider)
+            }
+
+        }
+    }
+
     private func credentialField(_ field: CredentialField) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 3) {
@@ -660,6 +695,8 @@ private struct AddConnectionView: View {
     }
 
     private func canSubmit(_ provider: ProviderCatalogEntry) -> Bool {
+        guard currentGuidance != nil, !loadingGuidance,
+            !provider.requiresAgentSetup || useExistingCredentials else { return false }
         if mode == .reference || provider.credentialFields == nil {
             return !credentialsReference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
@@ -746,6 +783,37 @@ private struct AddConnectionView: View {
         mode = .direct
         errorMessage = nil
         showingGuidance = false
+        guidance = nil
+        guidanceSelection = nil
+        guidanceRequestID = UUID()
+        loadingGuidance = false
+        useExistingCredentials = false
+    }
+
+    private func loadGuidance() async {
+        guard let requestedProvider = selectedProviderName else { return }
+        let requestedScope = scope
+        let requestID = UUID()
+        guidanceRequestID = requestID
+        guidance = nil
+        loadingGuidance = true
+        errorMessage = nil
+        do {
+            try await Task.sleep(for: .milliseconds(250))
+            let result = try await onDescribe(requestedProvider, requestedScope)
+            guard !Task.isCancelled, guidanceRequestID == requestID,
+                selectedProviderName == requestedProvider, scope == requestedScope else { return }
+            guard result.provider.name == requestedProvider else {
+                throw HypervibeClientError.malformedResponse("Setup guidance belongs to another provider.")
+            }
+            guidance = result
+            guidanceSelection = [requestedProvider, requestedScope]
+            loadingGuidance = false
+        } catch {
+            guard !Task.isCancelled, guidanceRequestID == requestID else { return }
+            loadingGuidance = false
+            errorMessage = (error as? LocalizedError)?.errorDescription ?? "Hypervibe could not prepare setup guidance."
+        }
     }
 
     private func clearCredentialState() {

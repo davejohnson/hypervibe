@@ -192,6 +192,19 @@ final class CompanionAppModel: ObservableObject {
         }
     }
 
+    func describeConnection(
+        projectID: UUID,
+        provider: String,
+        scope: String
+    ) async throws -> ConnectionGuidance {
+        let project = try connectionProject(id: projectID)
+        return try await mcpClient.describeConnection(
+            project: project,
+            provider: provider,
+            scope: scope
+        )
+    }
+
     func addConnection(
         projectID: UUID,
         request: ConnectionRequest
@@ -444,6 +457,28 @@ final class CompanionAppModel: ObservableObject {
             }
             mcpHostErrors.removeValue(forKey: host)
             await refreshMCPHostStatuses(clearErrors: true)
+        } catch {
+            mcpHostErrors[host] = userFacingMessage(for: error)
+            await refreshMCPHostStatuses()
+        }
+    }
+
+    func updateMCPHostSkill(_ host: MCPHost) async {
+        guard !updatingMCPHosts.contains(host) else { return }
+        guard CompanionDistribution.isReadyForOnboarding else {
+            mcpHostErrors[host] = CompanionDistribution.onboardingGuidance
+            return
+        }
+        updatingMCPHosts.insert(host)
+        defer { updatingMCPHosts.remove(host) }
+
+        do {
+            try await mcpHostConfigurator.updateSkill(
+                for: host,
+                launcherURL: CompanionDistribution.launcherURL
+            )
+            mcpHostErrors.removeValue(forKey: host)
+            await refreshMCPHostStatuses()
         } catch {
             mcpHostErrors[host] = userFacingMessage(for: error)
             await refreshMCPHostStatuses()

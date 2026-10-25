@@ -269,30 +269,7 @@ enum HypervibeResponseMapper {
             }
 
         let providers = payload.availableProviders.flatMap { category, entries in
-            entries.map { entry in
-                let links = setupLinks(for: entry)
-                return ProviderCatalogEntry(
-                    name: entry.name,
-                    displayName: entry.displayName ?? entry.name,
-                    category: category,
-                    setupLinks: links,
-                    tokenType: entry.tokenType,
-                    requiredPermissions: entry.requiredPermissions ?? [],
-                    notes: entry.notes ?? [],
-                    credentialFields: entry.credentialFields?.map { field in
-                        CredentialField(
-                            name: field.name,
-                            label: field.label ?? field.name,
-                            required: field.required ?? false,
-                            sensitive: field.sensitive ?? true,
-                            inputKind: CredentialInputKind(rawValue: field.inputKind ?? "secret") ?? .secret,
-                            options: field.options ?? [],
-                            description: field.description
-                        )
-                    },
-                    defaultScalarKey: entry.defaultScalarKey
-                )
-            }
+            entries.map { providerEntry($0, category: category) }
         }.sorted {
             if $0.category == $1.category {
                 return $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
@@ -301,6 +278,20 @@ enum HypervibeResponseMapper {
         }
 
         return ConnectionCatalog(connections: connections, providers: providers)
+    }
+
+    static func decodeConnectionGuidance(_ data: Data) throws -> ConnectionGuidance {
+        let envelope: ToolEnvelope<ConnectionDescriptionData> = try decodeEnvelope(data)
+        guard let payload = envelope.data else {
+            throw HypervibeClientError.malformedResponse("hv_connections returned no setup guidance.")
+        }
+        return ConnectionGuidance(
+            provider: providerEntry(payload.provider, category: "selected"),
+            recommendedSetupURL: payload.connectionSetup.recommendedSetupUrl.flatMap(URL.init(string:)),
+            credentialExample: payload.connectionSetup.credentialExample,
+            projectName: payload.connectionSetup.project,
+            scope: payload.connectionSetup.scope
+        )
     }
 
     static func decodeConnectionMutation(_ data: Data) throws -> ConnectionMutationResult {
@@ -377,6 +368,32 @@ enum HypervibeResponseMapper {
             links.append(ProviderSetupLink(label: "Setup guide", url: url))
         }
         return links
+    }
+
+    private static func providerEntry(_ entry: ConnectionsToolData.Provider, category: String) -> ProviderCatalogEntry {
+        ProviderCatalogEntry(
+            name: entry.name,
+            displayName: entry.displayName ?? entry.name,
+            category: category,
+            setupLinks: setupLinks(for: entry),
+            tokenType: entry.tokenType,
+            requiredPermissions: entry.requiredPermissions ?? [],
+            notes: entry.notes ?? [],
+            credentialFields: entry.credentialFields?.map { field in
+                CredentialField(
+                    name: field.name,
+                    label: field.label ?? field.name,
+                    required: field.required ?? false,
+                    sensitive: field.sensitive ?? true,
+                    inputKind: CredentialInputKind(rawValue: field.inputKind ?? "secret") ?? .secret,
+                    options: field.options ?? [],
+                    description: field.description
+                )
+            },
+            defaultScalarKey: entry.defaultScalarKey,
+            bootstrap: entry.bootstrap,
+            localSetup: entry.localSetup
+        )
     }
 
     private static func resources(for environment: DesiredEnvironment) -> [ResourceSummary] {
@@ -930,6 +947,8 @@ private struct ConnectionsToolData: Decodable {
         let notes: [String]?
         let credentialFields: [Field]?
         let defaultScalarKey: String?
+        let bootstrap: ProviderBootstrap?
+        let localSetup: ProviderLocalSetup?
     }
 
     struct SetupLink: Decodable {
@@ -945,6 +964,18 @@ private struct ConnectionsToolData: Decodable {
         let inputKind: String?
         let options: [String]?
         let description: String?
+    }
+}
+
+private struct ConnectionDescriptionData: Decodable {
+    let provider: ConnectionsToolData.Provider
+    let connectionSetup: Setup
+
+    struct Setup: Decodable {
+        let recommendedSetupUrl: String?
+        let credentialExample: String
+        let project: String?
+        let scope: String?
     }
 }
 
