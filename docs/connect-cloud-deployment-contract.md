@@ -209,6 +209,13 @@ Two merge assumptions were falsified at real boundaries before runtime fixes:
   accepted revision with no second write. This follows main's rotation evidence contract and
   Azure's revision/readback contract cited in [prepared hosting evidence](connect-cloud-azure-prepared.md).
 
+The equivalent Azure registry audit falsified the suspected bypass: its helper already
+uses the scoped ARM client, which rejects `listSecrets` before requesting a token or
+sending HTTP; the Key Vault client separately rejects federated data-plane reads/writes.
+A new real adapter/HTTP regression passes without a runtime change, allowing only scoped
+metadata inspection and rejecting a sibling environment. That check and adjacent registry
+and ARM client contracts pass together (25 tests in three files).
+
 The focused AWS/Azure, credential lifecycle, prepared release and legacy compatibility
 regressions pass together (166 tests in 16 files) after a clean dependency install. They
 remain in ordinary `npm test` discovery and the committed acceptance workflow. They validate application/SDK/emitted-program behavior against reconstructed transport;

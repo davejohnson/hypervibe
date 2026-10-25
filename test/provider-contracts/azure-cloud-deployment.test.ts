@@ -6,6 +6,7 @@ import { resourceName } from '../../src/domain/services/resource-names.js';
 import type { CloudDeploymentConnectionV1 } from '../../src/domain/ports/cloud-deployment.port.js';
 import type { CloudInstallationIntent, CloudInstallationRecord } from '../../src/domain/ports/cloud-installation.port.js';
 import { AzureContainerAppsAdapter } from '../../src/adapters/providers/azure/azure-container-apps.adapter.js';
+import { AzureResourceManagerClient } from '../../src/adapters/providers/azure/azure-resource-manager.client.js';
 import '../../src/adapters/providers/azure/azure-container-apps.adapter.js';
 import { providerRegistry } from '../../src/domain/registry/provider.registry.js';
 import { environmentSpecSchema } from '../../src/domain/spec/spec.schema.js';
@@ -64,6 +65,39 @@ function fixture(change?: (path: string, body: Record<string, any>) => Record<st
 }
 describe('Azure purpose-specific deployment installation and issuance', () => {
   afterEach(() => vi.unstubAllGlobals());
+  it('keeps hosted registry credential access behind the existing ARM and Key Vault gates', async () => {
+    const appId = `${group}/providers/Microsoft.App/containerApps/web`, managed = `${group}/providers/Microsoft.App/managedEnvironments/runtime`;
+    const f = fixture((id, body) => id === appId ? { id, properties: { managedEnvironmentId: managed,
+      configuration: { registries: [{ server: 'registry.example.test', username: 'existing-user', passwordSecretRef: 'registry-password' }],
+        secrets: [{ name: 'registry-password' }] }, template: { containers: [{ name: 'main', image: 'registry.example.test/app:existing' }] } } } : body);
+    vi.stubGlobal('fetch', f.request);
+    const getAccessToken = vi.fn(async () => ({ token: 'synthetic-arm-access', expiresAt: new Date(Date.now() + 300000).toISOString() }));
+    const adapter = new AzureContainerAppsAdapter();
+    await adapter.connectTransient({ connection, capability: 'provision', authentication: { kind: 'azure-federation', principal: provision, getAccessToken } });
+    const environment: any = { id: 'local-environment', projectId: 'local-project', name: 'production', platformBindings: {
+      provider: 'azure-container-apps', projectId: group, environmentId: managed, services: { web: { serviceId: appId } } } };
+    f.calls.splice(0); getAccessToken.mockClear();
+    const target = await adapter.registryCredentialLifecycle.inspect(environment, 'web');
+    expect(target.credentialReference).toBe(`${appId}/secrets/registry-password`);
+    for (const action of ['update', 'reconcile'] as const) {
+      const receipt = await adapter.registryCredentialLifecycle[action]!(environment, 'web', target,
+        { username: 'next-user', token: 'synthetic-next-password' }, { operationId: 'a'.repeat(32) });
+      expect(receipt).toMatchObject({ success: false, data: { mutationAttempted: false } });
+    }
+    // Scoped metadata is readable; POST listSecrets never reaches the broker or
+    // ARM, so registry rotation cannot acquire or mutate secret values.
+    expect(f.calls.map(call => [call.method, new URL(call.url).pathname])).toEqual([['GET', appId], ['GET', appId], ['GET', appId]]);
+    expect(getAccessToken).toHaveBeenCalledTimes(3);
+    const before = f.calls.length;
+    const foreign = structuredClone(environment);
+    foreign.platformBindings.services.web.serviceId = appId.replace('/isolated-production/', '/other-environment/');
+    await expect(adapter.registryCredentialLifecycle.inspect(foreign, 'web')).rejects.toThrow();
+    const client = new AzureResourceManagerClient({ authMode: 'federated', ...provision, resourceGroup: 'isolated-production', getAccessToken });
+    for (const method of ['GET', 'PUT'] as const) await expect(client.requestKeyVault(method,
+      'https://reviewed-vault.vault.azure.net/secrets/registry-password', method === 'PUT' ? { value: 'synthetic-next-password' } : undefined)).rejects.toThrow(/transient/);
+    expect(f.calls).toHaveLength(before); expect(getAccessToken).toHaveBeenCalledTimes(3);
+    await adapter.disconnect();
+  });
   it.each([false, true])('binds the independently observed precreated runtime identity and reviewed reader grants through the shared frontier (reference=%s)', async withReference => {
     const managed = `${group}/providers/Microsoft.App/managedEnvironments/runtime`;
     const environment: any = { id: 'local-environment-id', projectId: 'local-project-id', name: 'production',
