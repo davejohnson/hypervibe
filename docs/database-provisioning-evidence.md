@@ -1,0 +1,189 @@
+# Database provisioning and persistence review
+
+Reviewed 2026-10-24 against all eight registered database providers, including
+the database adapters supplied by hosting providers. The machine-readable
+[provider matrix](../test/provider-contracts/database-provisioning-provider-matrix.json)
+records each native create API, storage model, identity, completion boundary,
+recovery behavior, prerequisites and coverage gap. Official documentation was
+read during this review; tests never download it.
+
+## Shared contract and challenged assumption
+
+A provisioned database must have a durable provider identity and storage that
+survives replacement of its compute process. For a service-backed database,
+the PostgreSQL data directory must be inside the exact service instance's
+attached persistent volume. For a native managed database, the native database
+resource owns storage. A successful create response, healthy process, familiar
+service name, image name or dashboard icon is insufficient proof.
+
+The counterexample is PostgreSQL running successfully from a container image
+whose data directory is outside its persistent mount (or which has no mount).
+It can accept writes and later initialize an empty database after a deployment.
+Another counterexample is a managed database create that is rejected: falling
+back to an ordinary hosting container would violate the declared database intent.
+
+Provisioning must fail honestly when the provider cannot establish the required
+identity/storage contract. Observation must preserve unknown evidence instead of
+treating it as absence. Existing databases require preservation-safe inspection;
+attaching a fresh empty volume or recreating a same-named database is not repair.
+Desired backup policy, available recovery points and a successful restore remain
+three separate claims. No project incident cause is established by this review.
+
+## Named provider findings
+
+| Provider | Native storage and implemented creation path | Independent evidence and limits |
+| --- | --- | --- |
+| Railway | Reviewed creation uses the official PostgreSQL database template through `templateDeployV2`, then verifies its service and attached volume. Persistence depends on the actual data directory and mount, not its icon. | Railway documents [service construction](https://docs.railway.com/databases/build-a-database-service) and [persistent volumes](https://docs.railway.com/volumes). The [official image contract](https://github.com/docker-library/docs/blob/master/postgres/README.md) distinguishes version-specific data-directory defaults. Template or volume acknowledgement alone cannot verify the resulting attachment. |
+| Supabase | Native hosted project with its own PostgreSQL instance and provider-managed disk; `POST /v1/projects`. | [Compute and disk](https://supabase.com/docs/guides/platform/compute-and-disk) and the [project API](https://supabase.com/docs/reference/api/v1-create-a-project). Project readiness does not prove backup entitlement or a tested restore. |
+| Neon | Native project/branch with durable storage separated from ephemeral compute; `POST /api/v2/projects`. | [Architecture](https://neon.com/docs/introduction/architecture-overview) and [create API](https://api-docs.neon.tech/reference/createproject). Endpoint suspension does not mean loss of branch data; project/branch deletion remains destructive. |
+| Cloud SQL | Native Cloud SQL instance, using provider-default database disk configuration; SQL Admin `instances.insert`. | [Instance API](https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1/instances/insert) and [storage settings](https://docs.cloud.google.com/sql/docs/postgres/instance-settings). No Cloud Run database-image fallback exists in this path. Default capacity and live recovery remain unverified here. |
+| RDS | Native RDS instance with explicit encrypted 20 GiB `gp3` storage. | [CreateDBInstance](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBInstance.html) and [EBS-backed database storage](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html). Existing tests exercise SDK command inputs and lifecycle behavior; this review does not upgrade that evidence to create wire-schema or live certification. |
+| Azure PostgreSQL | Native Flexible Server with explicit 32 GiB managed disk and auto-grow. | [Create API](https://learn.microsoft.com/en-us/rest/api/postgresql/servers/create-or-update?view=rest-postgresql-2025-08-01) and [managed storage](https://learn.microsoft.com/en-us/azure/postgresql/compute-storage/concepts-storage). Subscription/resource-group ownership and runtime access are prerequisites, separate from durability. |
+| Fly | Native Managed Postgres cluster with explicit 10 GiB storage, through `/v1/postgres`; not an unmanaged app Machine. | [Official API announcement](https://fly.io/changelog/managed-postgres-machines-api/) identifies asynchronous MPG v2 operations; [product documentation](https://fly.io/docs/about/pricing/) distinguishes MPG storage and its lifetime from app deletion. MPG v1 is outside this API; live compatibility is unverified. |
+| DigitalOcean | Native managed PostgreSQL cluster with storage provided by its selected database size; `POST /v2/databases`, engine `pg`. | [Cluster creation](https://docs.digitalocean.com/products/databases/postgresql/how-to/create/) and [API contract](https://docs.digitalocean.com/products/databases/postgresql/reference/api/). This path does not create an App Platform development database. Online state is distinct from retained backups and restore proof. |
+
+The bounded review found no second image-without-volume provisioning path among
+the other seven providers. That is a source-and-contract finding, not proof that
+every deployed database is durable, correctly wired, backed up or recoverable.
+This work does not alter application repositories or adopt/repair existing cloud
+resources.
+
+Legacy runtime-reference metadata uses the existing isolated `database-bindings`
+stage. The optional provider-neutral database capability observes the exact
+bound resource and returns only its direct-URL variable name plus a fingerprint
+of identity and key presence. Railway implements this capability using its
+[variable API](https://docs.railway.com/integrations/api/manage-variables) and the
+recorded official PostgreSQL template. Supabase, Neon, Cloud SQL, RDS, Azure
+PostgreSQL, Fly and DigitalOcean explicitly do not implement this service-variable
+metadata capability; their native URL projection is unchanged. The provider
+matrix and ordinary CI require that distinction for every registered database.
+
+The local repair requires independently observed native backup-source identity,
+an exact reviewed action, unchanged binding metadata, and fresh matching variable
+evidence. It merges only an absent `directUrlVariable` name, never overwrites an
+explicit selection, and preserves the legacy private reference when it exists.
+Valid partial legacy scope is completed only when the independently observed
+native source agrees with every recorded key; malformed or conflicting scope is
+preserved and blocked. The reviewed partial scope is checked again at apply.
+The exact service's observed name must match the committed reference namespace;
+a renamed database or stale reference name is blocked without automatic renaming.
+An unknown read or unusable selected key blocks dependent work. It does not
+change variables, credentials, volumes, workloads, or database contents, and its
+fingerprint never includes credential values or credential-derived hashes.
+
+Railway's official CLI at immutable revision
+`f60f3a77b980c47f1136909fbd9a443e29a2b95f` distinguishes
+[database addition](https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/commands/add.rs)
+from Docker-image services. Its
+[template deploy implementation](https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/commands/deploy.rs)
+passes the fetched serialized configuration through to `templateDeployV2`,
+preserving native fields and generators, and waits for workflow completion.
+The checked-in [source excerpts](../test/provider-contracts/railway/database-template-source.json)
+and [recorded public template response](../test/provider-contracts/railway/postgres-template.recorded.json)
+provide independent evidence beyond the opaque GraphQL JSON scalar. The
+recorded PostgreSQL 18 template explicitly puts `PGDATA` at
+`/var/lib/postgresql/data/pgdata` and mounts `/var/lib/postgresql/data`, so its
+explicit configuration outranks the upstream image's default. Template metadata
+was read publicly without authentication; no database was created by recording
+this evidence. Nullable template provenance fields are not storage proof.
+
+## Executable enforcement and evidence limits
+
+`database-provisioning-provider-contracts.test.ts` compares the named matrix with
+the complete database registry, so an added provider cannot bypass this review.
+Its native API checks call the real Supabase, Neon, Cloud SQL, Azure PostgreSQL,
+Fly and DigitalOcean adapters through serialized HTTP. Reconstructed preflight
+responses permit one native database create, which is rejected with HTTP 400.
+The assertions require a failed receipt and no hosting-resource fallback or
+follow-on mutation. Authentication is synthetic; no provider is contacted.
+These checks supplement the pinned Supabase/Neon schemas and existing provider
+lifecycle tests. They do not validate complete response schemas, successful
+creation, disk contents, restarts, or recovery. RDS has existing SDK-command
+coverage rather than a new create-transport case in this test.
+
+The regression suite is included by the ordinary `npm test` Vitest configuration.
+Passing offline checks do not establish live branch-protection enforcement or
+provider certification. Railway's persistence regression and its observed
+before/after result belong in the accompanying implementation change; the
+cross-provider audit tests are baseline conformance checks, not newly reproduced
+bugs in those seven providers.
+
+## Railway regression record
+
+Before runtime edits, `railway.database-template.api-contract.test.ts` observed
+`serviceCreate`, `variableCollectionUpsert`, `volumeCreate` and redeploy where the
+user requirement and official CLI require one `templateDeployV2`. The real-client
+persistence regressions observed a verified database noop both without a volume
+and with `PGDATA` outside its mount; removing the disk did not change the plan's
+observation fingerprint. Issuer-reference transport regressions rejected the
+official composed URL as `unsupported_reference` and omitted `DIRECT_URL`.
+These are reproduced code defects, not a proven cause of Billforge's incident.
+
+The corresponding regressions now require official template deployment,
+unchanged reference/generator definitions, exact persistent configuration,
+blocked missing/unknown evidence and stale-plan rejection on volume changes.
+Template tests cover failed/pending/uncertain workflows, malformed acknowledgements,
+extra resource rejection, two environments, provider-assigned names, and raw alias
+readback. Shared lifecycle tests cover confirmation, durable bindings, incomplete
+provisioning recovery and mutation-free noop. Existing data is not automatically
+adopted, attached to a new disk, migrated, restarted or deleted.
+
+The official CLI establishes complete-workflow plus before/after service inventory
+correlation. Hypervibe additionally requires matching template provenance and the
+original template service key, exact environment/image and a unique new identity.
+The schema permits nullable template provenance; the semantic equality between
+`templateServiceId` and the serialized slot key remains unverified against a live
+deployment. Missing/mismatched provenance therefore blocks with retained recovery
+state rather than guessing ownership. The pinned schema validates GraphQL types;
+the public recorded template and official CLI source separately establish opaque
+serialized-configuration expectations. No live creation, persistence experiment,
+backup, restore or customer repair was performed by this change.
+
+The Railway retained-resource regression also challenges the assumptions that
+every PostgreSQL image ends in `/postgres` and every durable database uses the
+default mount. The official `railwayapp-templates/postgres-ssl` image and a
+recorded valid nondefault mount are counterexamples. The real-client pinned-SDL
+tests in `railway.database-retained.api-contract.test.ts` observed both failures
+before the shared image predicate and exact recorded-mount checks were applied.
+The retained path now checks provider scope, image and live volume identity,
+preserves ambiguous/unsafe evidence, and remains idempotent after confirmed
+absence. These are offline lifecycle results; no live database was deleted.
+
+Explicit Railway adoption has a separate reference round-trip regression in
+`railway-database-import.contract.test.ts`. The recorded current template has
+`DATABASE_URL` without `DATABASE_PRIVATE_URL`; before the fix, a successful
+real-client/MCP import omitted the selection metadata and projected the missing
+private alias as `DIRECT_URL`. The test observed that missing metadata before
+runtime edits. Import now privately reads only the confirmed mapped instances,
+requires nonempty selected keys, and stores their names without their values.
+Existing `DIRECT_URL` or `DATABASE_PRIVATE_URL` keys take precedence; an empty
+present alias blocks instead of choosing a different destination. The passing
+transport regressions include two environments, unreadable/malformed variables,
+no writes on incomplete evidence, and preservation after a failed force-import.
+This establishes configured key presence and reference projection, not SQL
+authentication, successful runtime resolution or a live import.
+
+Three additional serialized import counterexamples initially adopted observed
+service names containing reference delimiters or a newline. Import now invokes
+the shared reference builder before local writes and rejects those names with
+value-free diagnostics. These tests exercise reference construction from a
+provider response; they do not claim Railway permits creating every synthetic
+name used by the negative cases.
+
+The import round-trip also reproduced a missing environment ID in the saved
+PostgreSQL scope. Import now retains both project and environment IDs, and the
+same real-client test verifies that subsequent credential inspection accepts
+each imported binding in its own environment.
+
+Legacy bindings with complete provider scope and committed database identity also
+need the URL-key metadata. The lifecycle regression initially returned a full plan
+without the required repair; it now produces an isolated `database-bindings`
+action, rechecks its evidence during apply, and reaches an ordinary noop afterward.
+The real-transport cases cover denied reads, unusable present keys, changed scope
+or selection, preserved explicit choices, export retries and deferred secret
+inputs. Credential-value changes do not change this value-free metadata
+fingerprint. Separate template regressions also reproduced a stale serialized
+`value` taking precedence over the official `defaultValue`, and a composed URL
+pointing at the wrong component references. Both now fail safely or use the
+official default as appropriate. These checks do not establish live URL
+resolution or database authentication.

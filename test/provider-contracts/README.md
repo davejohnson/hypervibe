@@ -8,6 +8,16 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+The [database provisioning review](../../docs/database-provisioning-evidence.md)
+and `database-provisioning-provider-matrix.json` cover every registered database
+provider, including hosting-backed databases. The normal acceptance test checks
+registry completeness and runs six real REST adapters through serialized native
+database-create rejection, requiring failure without a generic hosting fallback.
+Railway's separate pinned GraphQL/public-template fixtures establish database
+template configuration and volume requirements; RDS retains its existing
+SDK-command lifecycle coverage. These checks do not certify live persistence,
+backup points or restore success.
+
 `src/application/__tests__/seed-registry-scope.api-contract.test.ts` exercises
 database seed dispatch through real encrypted connection selection and Railway
 HTTP serialization. Its synthetic responses execute against the pinned official

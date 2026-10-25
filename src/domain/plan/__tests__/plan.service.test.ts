@@ -7,6 +7,7 @@ import { execFileSync } from 'child_process';
 import { SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import '../../../adapters/providers/railway/railway.adapter.js';
 import { createRailwayDatabaseAdapter } from '../../../adapters/providers/railway/railway-database.factory.js';
+import { railwayHttpFixture, projectId as nativeProjectId, stagingId as nativeEnvironmentId } from '../../../adapters/providers/railway/__tests__/railway-http.fixture.js';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
 import '../../../adapters/providers/gcp/cloudsql.adapter.js';
 import '../../../adapters/providers/aws/s3.adapter.js';
@@ -218,6 +219,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 function mockObservingAdapter(observed: ObservedState, extra: Record<string, unknown> = {}) {
@@ -1559,6 +1561,12 @@ describe('PlanService.plan', () => {
   it('reconciles a bound Railway database when hosting reports its provider service as a workload', async () => {
     const databaseId = '6b5f-railway-postgres-service';
     const seedCommand = 'npm run db:seed';
+    // Preserve the aggregate-workload classification scenario while obtaining
+    // exact instance and persistence evidence through real serialized GraphQL.
+    const native = await railwayHttpFixture();
+    native.addService(databaseId, 'Postgres', nativeEnvironmentId).instances.get(nativeEnvironmentId)!.source = { image: 'postgres:16' };
+    native.addVolume(databaseId, nativeEnvironmentId, '/var/lib/postgresql/data');
+    native.variables.set(`${databaseId}/${nativeEnvironmentId}`, { PGDATA: '/var/lib/postgresql/data/pgdata' });
     new SpecStore().replace(project, {
       version: 1,
       project: project.name,
@@ -1575,8 +1583,8 @@ describe('PlanService.plan', () => {
       name: 'staging',
       platformBindings: {
         provider: 'railway',
-        projectId: 'rail-project-1',
-        environmentId: 'rail-environment-1',
+        projectId: nativeProjectId,
+        environmentId: nativeEnvironmentId,
         services: {},
       },
     });
@@ -1586,11 +1594,11 @@ describe('PlanService.plan', () => {
       externalId: databaseId,
       bindings: {
         provider: 'railway',
-        projectId: 'rail-project-1',
-        environmentId: 'rail-environment-1',
+        projectId: nativeProjectId,
+        environmentId: nativeEnvironmentId,
         serviceId: databaseId,
         resourceKind: 'service',
-        providerScope: { projectId: 'rail-project-1', environmentId: 'rail-environment-1' },
+        providerScope: { projectId: nativeProjectId, environmentId: nativeEnvironmentId },
         pluginName: 'Postgres',
         seed: {
           commandHash: sha256(seedCommand),
@@ -1604,8 +1612,8 @@ describe('PlanService.plan', () => {
       provider: 'railway',
       observedAt: new Date().toISOString(),
       projectExists: true,
-      projectId: 'rail-project-1',
-      environmentId: 'rail-environment-1',
+      projectId: nativeProjectId,
+      environmentId: nativeEnvironmentId,
       services: [{
         name: 'Postgres',
         externalId: databaseId,
@@ -1632,12 +1640,12 @@ describe('PlanService.plan', () => {
       adapter: { ...createRailwayDatabaseAdapter({
         hostingAdapter: {
           observe: async () => structuredClone(observedState),
-          inspectServiceInstance: async () => ({ state: 'present', instanceId: 'database-instance',
-            serviceId: databaseId, environmentId: 'rail-environment-1' }),
+          inspectServiceInstance: native.adapter.inspectServiceInstance.bind(native.adapter),
+          observeDatabasePersistence: native.adapter.observeDatabasePersistence.bind(native.adapter),
         } as never,
         envRepo: new EnvironmentRepository(),
       }), dailyBackups: dailyBackupEvidence({ provider: 'railway', primaryExternalId: databaseId,
-        providerScope: { projectId: 'rail-project-1', environmentId: 'rail-environment-1' }, resourceIdentity: { volumeId: 'database-volume' } }) },
+        providerScope: { projectId: nativeProjectId, environmentId: nativeEnvironmentId }, resourceIdentity: { volumeId: 'database-volume' } }) },
     });
 
     const result = await new PlanService().plan(project, 'staging');
@@ -1650,6 +1658,8 @@ describe('PlanService.plan', () => {
       unmanaged: plan.unmanaged.filter((item) => item.name === 'Postgres'),
     }).toEqual({ database: 'noop', seed: 'noop', unmanaged: [] });
 
+    expect(native.contractErrors).toEqual([]);
+    expect(native.mutations).toEqual([]);
     new EnvironmentRepository().updatePlatformBindings(environment.id, {
       services: { web: { serviceId: databaseId } },
     });

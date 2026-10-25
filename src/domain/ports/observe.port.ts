@@ -160,6 +160,22 @@ export interface ObservedDatabase {
   providerScope?: Record<string, string>;
   name?: string;
   status: 'running' | 'stopped' | 'provisioning' | 'error' | 'unknown';
+  /** Provider configuration evidence only; not a restart, database I/O or restore test.
+   * Adapters for service-backed databases must distinguish a data volume from
+   * a healthy process. Native managed databases may rely on their separately
+   * reviewed persistent-storage contract instead of inventing volume evidence. */
+  persistence?: {
+    state: 'configured' | 'missing' | 'unknown';
+    reason?: string;
+    /** Value-free fingerprint of the exact storage/configuration observed. */
+    configurationFingerprint?: string;
+  };
+  /** A missing local issuer-key selection requires reviewed metadata repair. */
+  runtimeReferenceBinding?: {
+    state: 'configured' | 'missing' | 'unknown';
+    evidenceFingerprint?: string;
+    reason?: string;
+  };
   /** Value-free comparisons; never raw credentials, connection URLs or credential hashes. */
   credentialAlignment?: DatabaseCredentialAlignment;
   resilience?: {

@@ -47,6 +47,8 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     Object.assign(nativeService.instances.get(stagingId)!, { source: { image: 'ghcr.io/railwayapp-templates/postgres-ssl:16' },
       latestDeployment: { id: 'database-deployment', status: 'SUCCESS', createdAt: '2026-10-01T00:00:00Z' } });
     const volume = http.addVolume('staging-postgres', stagingId, '/var/lib/postgresql/data');
+    http.variables.set(`staging-postgres/${stagingId}`, { PGDATA: '/var/lib/postgresql/data/pgdata',
+    DATABASE_URL: 'postgresql://synthetic:private@database.railway.internal/postgres' });
     http.backupSchedules.set(String(volume.instance.id), [{ id: 'daily', kind: 'DAILY', name: 'Daily',
       cron: '0 0 * * *', retentionSeconds: 6 * 86400, createdAt: '2026-10-01T00:00:00Z' }]);
     if (backupMode === 'disabled') http.backupSchedules.clear();
@@ -67,7 +69,7 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
       databaseCheckpoints: checkpoints,
     } });
     const component = ctx.repos.components.create({ environmentId: environment.id, type: 'postgres', externalId: 'staging-postgres',
-      bindings: { provider: 'railway', resourceKind: 'service', projectId, environmentId: stagingId,
+      bindings: { provider: 'railway', resourceKind: 'service', projectId, environmentId: stagingId, pluginName: 'postgres', directUrlVariable: 'DATABASE_URL',
         connectionUrl: 'postgres://synthetic:private@database.internal/app',
         resilience: { checkpoints } } });
     const service = ctx.repos.services.create({ projectId: project.id, name: 'web',
@@ -129,6 +131,8 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
 
   it.each(['missing', 'provided'] as const)('normalizes legacy scope, repairs aliases and resumes %s deployment input', async input => {
     const f = await fixture({ renderVariableReferences: true }, true);
+    const { directUrlVariable: _direct, ...legacyBindings } = f.component.bindings;
+    ctx.repos.components.update(f.component.id, { bindings: { ...legacyBindings, providerScope: { projectId } } });
     f.spec = projectSpecSchema.parse({ ...f.spec, secrets: {
       ANTHROPIC_API_KEY: { principal: 'github:tester', environments: ['staging'] },
     } });
@@ -136,7 +140,7 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     vi.stubEnv('ALIAS_TEST_DELEGATED', 'synthetic-delegated-secret');
     const options = { envVarOverrides: { FEATURE_FLAG: 'reviewed' },
       ...(input === 'provided' ? { secretRefs: { ANTHROPIC_API_KEY: 'env:ALIAS_TEST_DELEGATED' } } : {}) };
-    f.http.variables.set(`staging-postgres/${stagingId}`, { POSTGRES_PASSWORD: 'synthetic-current',
+    f.http.variables.set(`staging-postgres/${stagingId}`, { PGDATA: '/var/lib/postgresql/data/pgdata', POSTGRES_PASSWORD: 'synthetic-current',
       PGPASSWORD: 'synthetic-previous', DATABASE_URL: 'postgresql://postgres:synthetic-previous@database.internal:5432/postgres' });
     const bindingPlan = await f.plan(options);
     if ('error' in bindingPlan) throw new Error(bindingPlan.error);
@@ -151,6 +155,7 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
       .toMatchObject({ kind: 'executed', result: { success: true } });
     expect(f.http.mutations).toEqual([]);
     expect(ctx.repos.components.findById(f.component.id)?.bindings.providerScope).toEqual({ projectId, environmentId: stagingId });
+    expect(ctx.repos.components.findById(f.component.id)?.bindings.directUrlVariable).toBe('DATABASE_URL');
     const aliases = await f.plan(options);
     if ('error' in aliases) throw new Error(aliases.error);
     expect(aliases.scope).toBe('database-credential-aliases');
@@ -186,10 +191,10 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     expect(f.http.contractErrors).toEqual([]);
   });
 
-  it.each(['unknown', 'partial', 'malformed', 'unsupported', 'rotation'] as const)('keeps %s scope blocked when aliases are declared', async state => {
+  it.each(['unknown', 'conflicting-partial', 'malformed', 'unsupported', 'rotation'] as const)('keeps %s scope blocked when aliases are declared', async state => {
     const f = await fixture(state === 'unknown' ? { responseOverride: ({ query }) => query.includes('DatabaseCheckpointTarget')
       ? Response.json({ errors: [{ message: 'synthetic unavailable scope' }] }, { status: 403 }) : undefined } : {}, true);
-    if (state === 'partial') ctx.repos.components.updateBindings(f.component.id, { providerScope: { projectId } });
+    if (state === 'conflicting-partial') ctx.repos.components.updateBindings(f.component.id, { providerScope: { projectId: 'different-project' } });
     if (state === 'malformed') ctx.repos.components.updateBindings(f.component.id, { providerScope: null });
     if (state === 'unsupported') vi.mocked(AdapterFactory.prototype.getDatabaseAdapter)
       .mockResolvedValue({ success: true, adapter: { ...f.database, credentialAliases: undefined } });
@@ -316,9 +321,9 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     expect(f.http.mutations).toEqual([]);
   });
 
-  it.each(['explicit-scope', 'malformed-scope', 'unfinished-create', 'malformed-create', 'retained', 'duplicate'])('preserves %s state without adopting it', async change => {
+  it.each(['conflicting-scope', 'malformed-scope', 'unfinished-create', 'malformed-create', 'retained', 'duplicate'])('preserves %s state without adopting it', async change => {
     const f = await fixture();
-    if (change === 'explicit-scope') ctx.repos.components.updateBindings(f.component.id, { providerScope: { projectId } });
+    if (change === 'conflicting-scope') ctx.repos.components.updateBindings(f.component.id, { providerScope: { projectId: 'different-project' } });
     if (change === 'malformed-scope') ctx.repos.components.updateBindings(f.component.id, { providerScope: null });
     if (change === 'unfinished-create') ctx.repos.components.updateBindings(f.component.id, {
       unresolvedMutation: createUnresolvedDatabaseMutation('postgres', { projectId, environmentId: stagingId }) });
