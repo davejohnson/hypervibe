@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { createAwsOperatorArtifactCapability } from './aws-operator-artifacts.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
 import {
   CreateBucketCommand,
@@ -636,6 +637,7 @@ providerRegistry.register({
       },
     },
   },
+  artifactPublication: createAwsOperatorArtifactCapability(),
   factory: async (credentials) => {
     const adapter = new S3StorageAdapter();
     await adapter.connect(credentials);

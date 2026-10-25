@@ -1,3 +1,4 @@
+import { gcpGithubRecoveryAuthentication } from './gcp-github-automation.js';
 import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { z } from 'zod';
 import { randomInt, randomUUID } from 'crypto';
@@ -7,6 +8,7 @@ import path from 'path';
 import { Connector, IpAddressTypes } from '@google-cloud/cloud-sql-connector';
 import { GoogleAuth } from 'google-auth-library';
 import { GcpLocalDefaultAuthentication } from './gcp-local-default-authentication.js';
+import { GcpGithubWorkloadAuthentication, gcpGithubWorkloadIdentitySchema } from './gcp-github-workload-identity.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { Component } from '../../../domain/entities/component.entity.js';
 import type { Receipt, TemporaryDatabaseAccess, VerifyResult } from '../../../domain/ports/provider.port.js';
@@ -43,11 +45,16 @@ import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
 // Credentials schema for self-registration
 export const CloudSqlCredentialsSchema = z.object({
   projectId: z.string().min(1, 'GCP Project ID is required'),
-  authMode: z.enum(['default', 'serviceAccount']).optional(),
+  authMode: z.enum(['default', 'serviceAccount', 'github-workload-identity']).optional(),
+  workloadIdentity: gcpGithubWorkloadIdentitySchema.optional(),
   credentials: z.string().min(1, 'Service account JSON is required').optional(),
   region: z.string().default('us-central1'),
 }).superRefine((value, context) => {
-  if (value.authMode === 'default' ? value.credentials !== undefined : !value.credentials) {
+  if (value.authMode === 'github-workload-identity') {
+    if (!value.workloadIdentity || value.workloadIdentity.projectId !== value.projectId || value.credentials !== undefined)
+      context.addIssue({ code: 'custom', path: ['workloadIdentity'], message: 'GitHub federation requires the exact nonsecret project identity and no private key.' });
+  } else if (value.workloadIdentity !== undefined) context.addIssue({ code: 'custom', path: ['workloadIdentity'], message: 'A workload identity requires its explicit authentication mode.' });
+  if (value.authMode !== 'github-workload-identity' && (value.authMode === 'default' ? value.credentials !== undefined : !value.credentials)) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['credentials'], message: value.authMode === 'default'
       ? 'Default authentication uses local ADC and cannot also contain a service account key.' : 'Service account JSON is required.' });
   }
@@ -258,6 +265,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
   private credentials: CloudSqlCredentials | null = null;
   private serviceAccountCreds: ServiceAccountCredentials | null = null;
   private localDefaultAuthentication: GcpLocalDefaultAuthentication | null = null;
+  private githubWorkloadAuthentication: GcpGithubWorkloadAuthentication | null = null;
   private accessToken: string | null = null;
   private tokenExpiry: Date | null = null;
   private temporaryConnectors = new Map<string, { connector: Connector; directory: string }>();
@@ -266,6 +274,12 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     const parsed = CloudSqlCredentialsSchema.parse(credentials);
     await this.disconnect();
     this.credentials = parsed;
+    if (parsed.authMode === 'github-workload-identity') {
+      const auth = new GcpGithubWorkloadAuthentication(parsed.workloadIdentity!);
+      try { await auth.initialize(); this.githubWorkloadAuthentication = auth; }
+      catch (error) { await this.disconnect(); throw error; }
+      return;
+    }
     if (parsed.authMode === 'default') {
       const auth = new GcpLocalDefaultAuthentication(parsed.projectId);
       try { await auth.initialize(); this.localDefaultAuthentication = auth; }
@@ -334,6 +348,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     this.credentials = null;
     this.serviceAccountCreds = null;
     this.localDefaultAuthentication = null;
+    this.githubWorkloadAuthentication = null;
     this.accessToken = null;
     this.tokenExpiry = null;
   }
@@ -733,7 +748,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
       throw new Error('Cloud SQL bindings are missing the database username, password, or database name.');
     }
 
-    const auth = this.localDefaultAuthentication?.auth ?? new GoogleAuth({
+    const auth = this.githubWorkloadAuthentication?.auth ?? this.localDefaultAuthentication?.auth ?? new GoogleAuth({
       credentials: this.serviceAccountCreds!,
       scopes: ['https://www.googleapis.com/auth/sqlservice.admin'],
     });
@@ -742,7 +757,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     const socketPath = path.join(directory, '.s.PGSQL.5432');
     let connectorInitialized = false;
     try {
-      if (this.localDefaultAuthentication) {
+      if (this.localDefaultAuthentication || this.githubWorkloadAuthentication) {
         // Connector 1.10.0 close() attaches an uncaught continuation to a failed
         // initial refresh. No socket/refresh timer exists before getOptions
         // succeeds for this exact connection name (domain discovery is unused).
@@ -764,9 +779,9 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
         releaseToken,
       };
     } catch (error) {
-      if (!this.localDefaultAuthentication || connectorInitialized) connector.close();
+      if (!(this.localDefaultAuthentication || this.githubWorkloadAuthentication) || connectorInitialized) connector.close();
       await rm(directory, { recursive: true, force: true }).catch(() => {});
-      if (this.localDefaultAuthentication) throw new Error('Temporary Cloud SQL access is unavailable; the exact instance authorization and connection remain unverified.');
+      if (this.localDefaultAuthentication || this.githubWorkloadAuthentication) throw new Error('Temporary Cloud SQL access is unavailable; the exact instance authorization and connection remain unverified.');
       throw error;
     }
   }
@@ -1625,11 +1640,13 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
   }
 
   private request(input: string | URL | Request, init?: RequestInit): Promise<Response> {
-    return this.localDefaultAuthentication ? this.localDefaultAuthentication.request(input, init) : fetch(input, init);
+    return this.githubWorkloadAuthentication ? this.githubWorkloadAuthentication.request(input, init)
+      : this.localDefaultAuthentication ? this.localDefaultAuthentication.request(input, init) : fetch(input, init);
   }
 
   private async getAccessToken(): Promise<string> {
     if (this.localDefaultAuthentication) return this.localDefaultAuthentication.token();
+    if (this.githubWorkloadAuthentication) return this.githubWorkloadAuthentication.token();
     if (this.accessToken && this.tokenExpiry && new Date() < this.tokenExpiry) {
       return this.accessToken;
     }
@@ -1947,6 +1964,20 @@ providerRegistry.register({
     category: 'database',
     credentialsSchema: CloudSqlCredentialsSchema,
     setupHelpUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
+    credentials: {
+      automationAuthentication: gcpGithubRecoveryAuthentication,
+      automationSecretKeys: { GCP_SERVICE_ACCOUNT_JSON: 'credentials', GCP_PROJECT_ID: 'projectId' },
+      canUseForAutomation: credentials => {
+        if (credentials.authMode === 'github-workload-identity') return CloudSqlCredentialsSchema.safeParse(credentials).success;
+        if (credentials.authMode === 'default' || typeof credentials.credentials !== 'string' || typeof credentials.projectId !== 'string') return false;
+        try {
+          const value = JSON.parse(credentials.credentials) as Record<string, unknown>;
+          return value.type === 'service_account' && value.project_id === credentials.projectId
+            && typeof value.client_email === 'string' && value.client_email.endsWith(`@${credentials.projectId}.iam.gserviceaccount.com`)
+            && typeof value.private_key === 'string' && value.private_key.trim().length > 0;
+        } catch { return false; }
+      },
+    },
     maturity: {
       lifecycle: {
         database: { status: 'ready-for-live' },

@@ -6,8 +6,8 @@ interface JournalRecord {
   schemaVersion: 1;
   installationId: string;
   revision: number;
-  intent: { appId: string; environment: string };
-  plan: unknown;
+  intent: { appId: string; environment: string; predecessor?: { installationId: string; planDigest: string } };
+  plan: { digest: string };
   status: string;
   attempts: Array<{ id: string; actionId?: string; status?: string; evidence?: CloudInstallationEvidence }>;
   completed?: Record<string, unknown>;
@@ -30,10 +30,43 @@ function retainsAttempt(previous: JournalRecord['attempts'][number], next: Journ
     && Object.entries(previous.evidence.native).every(([key, value]) => isDeepStrictEqual(value, next.evidence!.native[key]));
 }
 
+/** One accepted lineage; unattempted proposals cannot replace durable effects. */
+export function acceptedJournalLeaf<T extends JournalRecord>(history: T[]): T | undefined {
+  const accepted = history.filter(record => record.attempts.length > 0 || Object.keys(record.completed ?? {}).length > 0);
+  if (!accepted.length) return undefined;
+  const roots = accepted.filter(record => !record.intent.predecessor);
+  if (roots.length !== 1) throw invalid();
+  let current = roots[0]; const visited = new Set([current.installationId]);
+  while (true) {
+    const children = accepted.filter(record => record.intent.predecessor?.installationId === current.installationId);
+    if (!children.length) break;
+    if (children.length !== 1 || visited.has(children[0].installationId) || children[0].intent.predecessor!.planDigest !== current.plan.digest) throw invalid();
+    current = children[0]; visited.add(current.installationId);
+  }
+  if (visited.size !== accepted.length || visited.size > 20) throw invalid(); return current;
+}
+
+/** Discover durable publication namespaces independently of the mutable spec. */
+export function operatorArtifactJournalNames(scope: Scope): string[] {
+  const db = getDb();
+  const environment = db.prepare('SELECT project_id, name FROM environments WHERE id = ?').get(scope.environmentId) as
+    { project_id: string; name: string } | undefined;
+  if (!environment || environment.project_id !== scope.projectId || environment.name !== scope.environmentName) throw invalid();
+  const rows = db.prepare("SELECT DISTINCT type FROM runs WHERE project_id = ? AND environment_id = ? AND type LIKE 'operator-artifacts:%' ORDER BY type LIMIT ?")
+    .all(scope.projectId, scope.environmentId, HISTORY_LIMIT + 1) as Array<{ type: string }>;
+  if (rows.length > HISTORY_LIMIT || rows.some(row => !/^operator-artifacts:[a-z][a-z0-9-]{0,62}$/.test(row.type))) throw invalid();
+  return rows.map(row => row.type.slice('operator-artifacts:'.length));
+}
+
 /** Nonsecret operation history in existing runs; no new schema or credential store. */
 export class CloudScopePreparationRepository<T extends JournalRecord> {
   private readonly scope: Scope;
-  constructor(scope: Scope, private readonly parseRecord: (value: unknown) => T) { this.scope = { ...scope }; }
+  private readonly type: string;
+  constructor(scope: Scope, private readonly parseRecord: (value: unknown) => T,
+    private readonly policy?: { allowHistoricalPredecessor?(parent: T, next: T): boolean; recordType?: string }) {
+    this.scope = { ...scope }; this.type = policy?.recordType ?? TYPE;
+    if (this.type !== TYPE && !/^operator-artifacts:[a-z][a-z0-9-]{0,62}$/.test(this.type)) throw invalid();
+  }
 
   private assertScope(): void {
     const row = getDb().prepare('SELECT project_id, name FROM environments WHERE id = ?').get(this.scope.environmentId) as
@@ -60,7 +93,7 @@ export class CloudScopePreparationRepository<T extends JournalRecord> {
 
   private history(): T[] {
     const rows = getDb().prepare(`SELECT id, plan FROM runs WHERE project_id = ? AND environment_id = ? AND type = ?
-      ORDER BY created_at, id LIMIT ?`).all(this.scope.projectId, this.scope.environmentId, TYPE, HISTORY_LIMIT + 1) as Row[];
+      ORDER BY created_at, id LIMIT ?`).all(this.scope.projectId, this.scope.environmentId, this.type, HISTORY_LIMIT + 1) as Row[];
     if (rows.length > HISTORY_LIMIT) throw historyFull();
     return rows.map(row => this.fromRow(row));
   }
@@ -68,7 +101,7 @@ export class CloudScopePreparationRepository<T extends JournalRecord> {
   async read(installationId: string): Promise<T | null> {
     this.assertScope();
     const row = getDb().prepare('SELECT id, plan FROM runs WHERE id = ? AND project_id = ? AND environment_id = ? AND type = ?')
-      .get(installationId, this.scope.projectId, this.scope.environmentId, TYPE) as Row | undefined;
+      .get(installationId, this.scope.projectId, this.scope.environmentId, this.type) as Row | undefined;
     return row ? this.fromRow(row) : null;
   }
 
@@ -87,7 +120,7 @@ export class CloudScopePreparationRepository<T extends JournalRecord> {
       const anyRow = db.prepare('SELECT id, project_id, environment_id, type, plan FROM runs WHERE id = ?').get(installationId) as
         (Row & { project_id: string; environment_id: string; type: string }) | undefined;
       if (expectedRevision === null ? !!anyRow : !anyRow) return false;
-      if (anyRow && (anyRow.project_id !== this.scope.projectId || anyRow.environment_id !== this.scope.environmentId || anyRow.type !== TYPE)) return false;
+      if (anyRow && (anyRow.project_id !== this.scope.projectId || anyRow.environment_id !== this.scope.environmentId || anyRow.type !== this.type)) return false;
       if (!anyRow && history.length >= HISTORY_LIMIT) throw historyFull();
       const current = anyRow ? this.fromRow(anyRow) : undefined;
       if (current && current.revision !== expectedRevision) return false;
@@ -101,15 +134,32 @@ export class CloudScopePreparationRepository<T extends JournalRecord> {
             && attempt.status === 'succeeded' && isDeepStrictEqual(attempt.evidence, proof)))))) throw invalid();
       // A stale sibling proposal cannot allocate another project or erase an
       // accepted allocation. Source edits and terminal status do not reset it.
-      if (history.some(record => record.installationId !== installationId && record.attempts.length > 0)) return false;
+      const ancestors = (record: T): Set<string> => {
+        const found = new Set<string>(); let cursor = record;
+        while (cursor.intent.predecessor) {
+          const predecessor = cursor.intent.predecessor;
+          if (found.has(predecessor.installationId) || found.size >= 20) throw invalid();
+          const parent = history.find(item => item.installationId === predecessor.installationId);
+          if (!parent || parent.plan.digest !== predecessor.planDigest) throw invalid();
+          found.add(parent.installationId); cursor = parent;
+        }
+        return found;
+      };
+      const prior = ancestors(next);
+      if (next.intent.predecessor && expectedRevision === null) {
+        const parent = history.find(item => item.installationId === next.intent.predecessor!.installationId);
+        if (!parent || parent.status !== 'scope-ready' && !this.policy?.allowHistoricalPredecessor?.(parent, next)) return false;
+      }
+      if (history.some(record => record.installationId !== installationId && (record.attempts.length > 0 || Object.keys(record.completed ?? {}).length > 0)
+        && !prior.has(record.installationId) && !ancestors(record).has(installationId))) return false;
       const status = next.status === 'scope-ready' ? 'succeeded' : next.status === 'blocked' ? 'blocked' : 'pending';
       const serialized = JSON.stringify(next);
       if (!current) {
         db.prepare('INSERT INTO runs (id, project_id, environment_id, type, status, plan, receipts, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-          .run(installationId, this.scope.projectId, this.scope.environmentId, TYPE, status, serialized, '[]', new Date().toISOString());
+          .run(installationId, this.scope.projectId, this.scope.environmentId, this.type, status, serialized, '[]', new Date().toISOString());
       } else {
         const update = db.prepare('UPDATE runs SET plan = ?, status = ? WHERE id = ? AND project_id = ? AND environment_id = ? AND type = ? AND plan = ?')
-          .run(serialized, status, installationId, this.scope.projectId, this.scope.environmentId, TYPE, anyRow!.plan);
+          .run(serialized, status, installationId, this.scope.projectId, this.scope.environmentId, this.type, anyRow!.plan);
         if (update.changes !== 1) return false;
       }
       return true;

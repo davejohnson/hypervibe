@@ -160,7 +160,7 @@ export async function resolveBackupTarget(context: BackupPolicyContext, resource
     if (resource.kind === 'database') {
       const component = context.components.find(component => component.id === resource.componentId && component.environmentId === environment.id && component.bindings.provider === resource.provider);
       if (!component || !externalId(component)) return unknown;
-      const result = await context.adapterFactory.getDatabaseAdapter(resource.provider, context.project);
+      const result = await context.adapterFactory.getDatabaseAdapter(resource.provider, context.project, environment.name);
       if (!result.success || !result.adapter || result.adapter.name !== resource.provider) return unknown;
       return bind(result.adapter.dailyBackups, { environment, component });
     }
@@ -180,7 +180,7 @@ export async function resolveBackupTarget(context: BackupPolicyContext, resource
     const instanceScope = scope(binding?.instanceScope);
     const id = identity(binding?.externalId);
     if (!id || !instanceScope || binding?.provider !== resource.provider) return unknown;
-    const result = await context.adapterFactory.getStorageAdapter(resource.provider, context.project);
+    const result = await context.adapterFactory.getStorageAdapter(resource.provider, context.project, environment.name);
     if (!result.success || !result.adapter || result.adapter.name !== resource.provider) return unknown;
     return bind(result.adapter.dailyBackups, { environment, context: instanceScope, externalId: id });
   } catch { return unknown; }

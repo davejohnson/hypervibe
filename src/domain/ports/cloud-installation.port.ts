@@ -58,20 +58,53 @@ export interface LocalCloudScopePreparationIntent extends Omit<CloudInstallation
   purpose?: never;
   deployment?: never;
   scopePreparation?: never;
+  /** Immutable local predecessor; never hosted federation authority. */
+  predecessor?: { installationId: string; planDigest: string };
+  selection?: Record<string, string>;
   migrationTargets?: never;
   installed?: never;
 }
-export type CloudInstallationExecutableIntent = CloudInstallationIntent | LocalCloudScopePreparationIntent;
+/** Operator release assets are a separate local actor, never hosted setup authority. */
+export interface OperatorArtifactIntent extends Omit<LocalCloudScopePreparationIntent, 'execution' | 'hostingProvider'> {
+  execution: { kind: 'operator-artifact-publisher'; authentication: 'aws-session' | 'google-user-adc' };
+  artifactProvider: string;
+  artifacts: string[];
+}
+export interface OperatorArtifactAuthentication {
+  kind: 'operator-artifact-publisher';
+  awsSession?: { getCredentials(signal: AbortSignal): Promise<{ accessKeyId: string; secretAccessKey: string; sessionToken: string; expiration: Date }> };
+  administrator?: { getAccessToken(scope: string, signal: AbortSignal): Promise<string> };
+}
+export interface OperatorArtifactCapability {
+  schemaVersion: 1;
+  parseDeclaration(nativeScope: unknown, artifacts: string[], bindings: Record<string, unknown>): Record<string, string>;
+  parseRecord(value: unknown): CloudInstallationRecord<OperatorArtifactIntent>;
+  /** Local-only preparation binds exact tested artifact bytes before cloud review. */
+  prepare?(nativeScope: Record<string, string>, artifacts: string[], source: OperatorArtifactIntent['source']): Promise<Record<string, string>>;
+  create(nativeScope: Record<string, string>, signal?: AbortSignal): Promise<{ driver: CloudInstallationDriver<OperatorArtifactIntent>; authentication: OperatorArtifactAuthentication }>;
+  nextScope(record: CloudInstallationRecord<OperatorArtifactIntent>): Record<string, string> | null;
+  refreshScope?(record: CloudInstallationRecord<OperatorArtifactIntent>, declaration: Record<string, string>, artifacts: string[]): Record<string, string>;
+  receipts(record: CloudInstallationRecord<OperatorArtifactIntent>): Array<Record<string, string>>;
+}
+export type CloudInstallationExecutableIntent = CloudInstallationIntent | LocalCloudScopePreparationIntent | OperatorArtifactIntent;
 export interface LocalCloudScopePreparationAuthentication {
   kind: 'local-administrator';
   administrator: { getAccessToken(scope: string, signal: AbortSignal): Promise<string> };
 }
 export type CloudInstallationAuthenticationFor<I extends CloudInstallationExecutableIntent> =
-  I extends LocalCloudScopePreparationIntent ? LocalCloudScopePreparationAuthentication : CloudInstallationAuthentication;
+  I extends LocalCloudScopePreparationIntent ? LocalCloudScopePreparationAuthentication
+    : I extends OperatorArtifactIntent ? OperatorArtifactAuthentication : CloudInstallationAuthentication;
 export interface LocalCloudScopePreparationCapability {
   schemaVersion: 1;
   parseScope(value: unknown): Record<string, string>;
   parseRecord(value: unknown): CloudInstallationRecord<LocalCloudScopePreparationIntent>;
+  continuation?: {
+    parseSelection(value: unknown, placement?: { region?: string }): Record<string, string>;
+    /** Explicit trust removal may preserve an existing hosting binding. */
+    permitsBoundCleanup?(nativeScope: Record<string, string>): boolean;
+    nextScope(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>, selection: Record<string, string>): Record<string, string> | null;
+    binding(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>, placement: { region?: string }): { platformBindings: Record<string, unknown>; connections: Array<{ provider: string; config: Record<string, string> }>; removeBindings?: Array<{ key: string; expectedValue: unknown }> };
+  };
   create(nativeScope: Record<string, string>, signal?: AbortSignal): Promise<{ driver: CloudInstallationDriver<LocalCloudScopePreparationIntent>;
     authentication: LocalCloudScopePreparationAuthentication }>;
 }
@@ -153,8 +186,9 @@ export interface CloudInstallationScopeDiscovery {
   cursor?: string;
 }
 export interface CloudInstallationDriver<I extends CloudInstallationExecutableIntent = CloudInstallationIntent> {
-  /** Only a single empty-project action is admitted by the local kernel. */
-  readonly localScopePreparation?: { hostingProvider: string };
+  /** Local allocation or explicitly registered, predecessor-bound continuation. */
+  readonly localScopePreparation?: { hostingProvider: string; continuation?: true };
+  readonly artifactPublication?: { providerName: string; authentication: OperatorArtifactIntent['execution']['authentication'] };
   readonly provider: CloudInstallationProvider;
   /** Explicit separate installation capability; collection support never implies deployment authority. */
   deployment?: {
@@ -237,6 +271,8 @@ export interface CloudInstallationApplyInput<I extends CloudInstallationExecutab
   installationId: string;
   planDigest: string;
   confirmActions: string[];
+  /** Local continuation adapter executes only this exact current outer action. */
+  onlyActionId?: string;
   /** A rejected attempt needs a new exact confirmation; uncertain attempts cannot be retried. */
   retryActions?: Array<{ actionId: string; attemptId: string }>;
 }

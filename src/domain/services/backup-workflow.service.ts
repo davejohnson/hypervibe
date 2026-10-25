@@ -1,3 +1,4 @@
+import { recoveryAutomationSchema } from '../ports/recovery-runtime.port.js';
 import { createHash } from 'node:crypto';
 import { stringify } from 'yaml';
 import { canonicalizeJson, canonicalJsonSha256 } from '../../lib/canonical-json.js';
@@ -84,13 +85,16 @@ export function compileBackupWorkflow(input: {
     || !/^[a-z0-9.-]+(?::[0-9]+)?\/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$/.test(input.runnerImage)
     || !/^[a-f0-9]{64}$/.test(input.contractHash)
     || canonicalJsonSha256(input.contract) !== input.contractHash) throw new Error('Managed backup workflow requires a valid scope, reviewed contract and immutable image digest.');
+  const automation = recoveryAutomationSchema.parse((input.contract as { automation?: unknown }).automation ?? {});
+  const authorizationInputs = [...new Set(Object.values(automation).flatMap(value => value.environmentKeys))].sort();
+  const oidc = Object.values(automation).some(value => value.oidc);
   const credentials = [...new Set(input.providerCredentialNames)].sort();
   if (credentials.some(name => !/^[A-Z][A-Z0-9_]{0,95}$/.test(name)
     || /^(GITHUB_|HYPERVIBE_|PG)/.test(name) || /DATABASE_URL|DB_URL|PASSWORD/.test(name))) throw new Error('Managed backup workflow credential names must be explicit control-plane inputs.');
   const path = `.github/hypervibe/backups-${input.environment}.json`;
   const output = `hypervibe-backup-${input.environment}`;
   const forwarded = [
-    ...credentials, 'GITHUB_TOKEN', 'GITHUB_REPOSITORY', 'GITHUB_SHA', 'GITHUB_REF', 'GITHUB_EVENT_NAME', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT',
+    ...credentials, ...authorizationInputs, 'GITHUB_TOKEN', 'GITHUB_REPOSITORY', 'GITHUB_SHA', 'GITHUB_REF', 'GITHUB_EVENT_NAME', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT',
     'HYPERVIBE_BACKUP_OPERATION', 'HYPERVIBE_BACKUP_CONTRACT_HASH', 'HYPERVIBE_BACKUP_RUNNER_IMAGE',
     'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN',
   ];
@@ -138,7 +142,7 @@ export function compileBackupWorkflow(input: {
       backup: {
         if: "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)",
         'runs-on': 'ubuntu-latest', 'timeout-minutes': 60, environment: input.environment,
-        permissions: { contents: 'read', actions: 'read' },
+        permissions: { contents: 'read', actions: 'read', ...(oidc ? { 'id-token': 'write' } : {}) },
         steps: [
           { uses: 'actions/checkout@v7', with: { ref: '${{ github.sha }}', 'persist-credentials': false } },
           { name: 'Run managed backup controller', shell: 'bash', env: {

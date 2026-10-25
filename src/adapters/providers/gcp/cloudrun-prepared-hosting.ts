@@ -44,6 +44,7 @@ export class CloudRunPreparedHosting implements IPreparedHosting {
           workloadKind: workload.kind, publicAccess: workload.public === true, serviceAccountEmail: runtime.serviceAccountEmail,
           envVars: environmentSpec.envVars, secretVersionRefs: Object.fromEntries(workload.runtimeSecrets.map(value => [value.key, value.reference])),
           startCommand: desired.startCommand?.trim() || null, healthCheckPath: desired.healthCheckPath?.trim() || null,
+          instanceBounds: desired.instanceBounds,
         }));
         services[item.workload] = { serviceId: item.id.split('/').at(-1)!, resourceUid: item.lifetimeId, resourceType: 'service',
           workloadKind: workload.kind, imageUri: String(native.template.containers[0].image) };

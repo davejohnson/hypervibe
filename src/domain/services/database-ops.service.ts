@@ -107,7 +107,7 @@ export async function resolveEnvironmentDatabaseUrl(
   const componentBindings = component?.bindings as Record<string, unknown> | undefined;
   const componentProvider = typeof componentBindings?.provider === 'string' ? componentBindings.provider : undefined;
   if (component && componentProvider && componentProvider !== 'railway') {
-    const adapterResult = await adapterFactory.getDatabaseAdapter(componentProvider, project);
+    const adapterResult = await adapterFactory.getDatabaseAdapter(componentProvider, project, env.name);
     if (adapterResult.success && adapterResult.adapter) {
       const adapterUrl = await adapterResult.adapter.getConnectionUrl(component);
       if (adapterUrl) {

@@ -142,7 +142,8 @@ export class ConnectionRepository {
     }
 
     if (!scopeHint) {
-      return this.findAllByProvider(provider).find((connection) => connection.status === 'verified') ?? null;
+      return this.findAllByProvider(provider).find((connection) => connection.status === 'verified'
+        && !connection.scope?.includes('#environment=')) ?? null;
     }
 
     const candidates = this.findAllByProvider(provider)

@@ -106,7 +106,7 @@ export async function observeDatabaseCredentialAliases(params: { project: Projec
   try {
     const current = load(params.project, params.environmentName, params.spec);
     if (pending(current.component)) throw new AliasPrerequisite('The original alias repair needs readback verification through its isolated plan.');
-    const adapter = await adapterFactory.getDatabaseAdapter(current.target.provider, params.project);
+    const adapter = await adapterFactory.getDatabaseAdapter(current.target.provider, params.project, params.environmentName);
     if (!adapter.success || !adapter.adapter?.credentialAliases) throw new AliasPrerequisite('The database provider does not support credential alias inspection.');
     const observed = inspection(await adapter.adapter.credentialAliases.inspect(current), current.target);
     return { state: observed.changeNames.length ? 'drift' : 'verified', checkedNames: observed.checkedNames,
@@ -140,7 +140,7 @@ export async function planDatabaseCredentialAliases(params: { project: Project; 
       // Explicit partial/malformed scope and pending credential work stay blocked.
       if (component && !Object.hasOwn(component.bindings, 'providerScope')
         && !context.components.some(entry => entry.bindings.credentialAliasRepair !== undefined || activeRotation(entry))) {
-        const provider = await adapterFactory.getDatabaseAdapter(spec.database.provider, params.project);
+        const provider = await adapterFactory.getDatabaseAdapter(spec.database.provider, params.project, params.environmentName);
         if (!provider.success || !provider.adapter?.credentialAliases) {
           throw new AliasPrerequisite(`Credential alias repair is unsupported or unavailable for ${spec.database.provider}.`);
         }
@@ -159,7 +159,7 @@ export async function planDatabaseCredentialAliases(params: { project: Project; 
       }
     }
     const current = load(params.project, params.environmentName, spec);
-    const resolved = await adapterFactory.getDatabaseAdapter(spec.database.provider, params.project);
+    const resolved = await adapterFactory.getDatabaseAdapter(spec.database.provider, params.project, params.environmentName);
     const capability = resolved.adapter?.credentialAliases;
     if (!resolved.success || !capability) throw new AliasPrerequisite(`Credential alias repair is unsupported or unavailable for ${spec.database.provider}.`);
     const observed = inspection(await capability.inspect(current), current.target);
@@ -199,7 +199,7 @@ export async function verifyDatabaseCredentialAliases(params: { project: Project
     const current = load(params.project, params.environmentName, params.spec);
     if (pending(current.component) || current.component.id !== m.componentId
       || bindingIdentityFingerprint(current.environment.platformBindings) !== m.environmentFingerprint) return false;
-    const adapter = await adapterFactory.getDatabaseAdapter(current.target.provider, params.project);
+    const adapter = await adapterFactory.getDatabaseAdapter(current.target.provider, params.project, params.environmentName);
     if (!adapter.success || !adapter.adapter?.credentialAliases) return false;
     const observed = inspection(await adapter.adapter.credentialAliases.inspect(current), current.target);
     return !observed.changeNames.length && isDeepStrictEqual(m, metadataFor(current.component, current.environment.platformBindings, observed));
@@ -218,7 +218,7 @@ export async function applyDatabaseCredentialAliases(params: { project: Project;
     const recovery = pending(current.component);
     if (recovery && (!isDeepStrictEqual(recovery.metadata, m)
       || !isDeepStrictEqual(decrypt(recovery.inspectionEncrypted, current.target), expected))) return stop('The original alias recovery evidence changed; it was preserved.');
-    const adapter = await adapterFactory.getDatabaseAdapter(current.target.provider, params.project);
+    const adapter = await adapterFactory.getDatabaseAdapter(current.target.provider, params.project, params.environmentName);
     const capability = adapter.adapter?.credentialAliases;
     if (!adapter.success || !capability) return stop('The reviewed database alias capability is unavailable.');
     let recorded = Boolean(recovery);

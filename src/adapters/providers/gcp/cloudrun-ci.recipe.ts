@@ -11,7 +11,7 @@ import {
 
 export const CLOUDRUN_PORTABLE_RUNTIME_PATH = '.gitlab/hypervibe/cloudrun-deploy.mjs';
 
-export function buildCloudRunPortableRuntime(): string {
+export function buildCloudRunPortableRuntime(options: { instanceBounds?: boolean } = {}): string {
   return `import { createSign } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
@@ -149,7 +149,7 @@ async function waitOperation(operation, description) {
   }
   throw new Error(description + ' operation timed out');
 }
-${buildCloudRunReleaseRuntime()}
+${buildCloudRunReleaseRuntime(options)}
 const runtimeResources = cloudRunRuntimeResourcesFromBase64(
   process.env.CLOUDRUN_RUNTIME_RESOURCES_B64,
   services,
@@ -168,7 +168,7 @@ async function waitReady(url, name, kind, expectedImage, runtimeResource, filesy
       const expectedName = 'projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/' + (kind === 'service' ? 'services/' : 'jobs/') + name;
       if (value.name !== expectedName) throw new Error('Cloud Run returned a different ' + kind + ' identity');
       cloudRunVerifyFilesystem(value, kind, filesystem);
-      const mismatch = cloudRunRuntimeMismatch(container, runtimeResource);
+${options.instanceBounds ? '      assertCloudRunInstanceBounds(value.scaling, runtimeResource.instanceBounds);\n' : ''}      const mismatch = cloudRunRuntimeMismatch(container, runtimeResource);
       if (mismatch) throw new Error('Cloud Run ' + kind + ' ' + name + ' did not converge to the exact reviewed ' + mismatch);
       return value;
     }
@@ -178,7 +178,13 @@ async function waitReady(url, name, kind, expectedImage, runtimeResource, filesy
 }
 const deployments = [];
 if (!rollback) {
-  await runCloudRunReleaseCommands({
+${options.instanceBounds ? `  for (const resource of runtimeResources.filter(item => item.instanceBounds)) {
+    const name = 'projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/services/' + resource.providerResourceId;
+    const current = await json('https://run.googleapis.com/v2/' + name, { headers: auth }, 'Cloud Run instance bounds preflight');
+    if (current.name !== name) throw new Error('Cloud Run instance bounds resource identity changed');
+    assertCloudRunInstanceBounds(current.scaling, resource.instanceBounds);
+  }
+` : ''}  await runCloudRunReleaseCommands({
     releases: releaseCommands,
     imageUri: exactImage,
     projectId: process.env.GCP_PROJECT_ID,
@@ -195,7 +201,7 @@ for (const name of services) {
   const current = await json(url, { headers: auth }, 'Cloud Run service lookup');
   if (current.name !== 'projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/services/' + name) throw new Error('Cloud Run returned a different service identity');
   const runtimeResource = cloudRunRuntimeResource(runtimeResources, 'service', name);
-  const filesystem = cloudRunFilesystemGuard(current, 'service', runtimeResource.providerResourceUid);
+${options.instanceBounds ? '  assertCloudRunInstanceBounds(current.scaling, runtimeResource.instanceBounds);\n' : ''}  const filesystem = cloudRunFilesystemGuard(current, 'service', runtimeResource.providerResourceUid);
   const template = { ...(current.template || {}) };
   const containers = Array.isArray(template.containers) && template.containers.length ? [...template.containers] : [{}];
   containers[0] = cloudRunContainerWithRuntime(containers[0], exactImage, runtimeResource);
@@ -227,7 +233,7 @@ await writeFile('.hypervibe-release.json', JSON.stringify({ version: 1, provider
 }
 
 export function buildCloudRunPortableRecipe(target: BranchDeployTarget): PortableCiDeployRecipe {
-  if (target.deploymentAccess) throw new Error('Hosted deployment federation currently requires reviewed GitHub Actions identity; GitLab federation is not implemented.');
+  if (target.deploymentAccess || target.nativeAuthentication) throw new Error('Hosted or federated deployment requires reviewed GitHub Actions identity; GitLab federation is not implemented.');
   const projectId = target.providerScope?.projectId?.trim();
   const region = target.providerRegion?.trim();
   const artifactRepository = target.providerScope?.artifactRepository?.trim() || 'hypervibe';
@@ -272,7 +278,7 @@ export function buildCloudRunPortableRecipe(target: BranchDeployTarget): Portabl
       { name: 'CLOUDRUN_RELEASE_COMMANDS_B64', source: { kind: 'literal', value: encodedReleaseCommands }, secret: false },
       { name: 'CLOUDRUN_RUNTIME_RESOURCES_B64', source: { kind: 'literal', value: encodedRuntimeResources }, secret: false },
     ],
-    runtime: { path: CLOUDRUN_PORTABLE_RUNTIME_PATH, content: buildCloudRunPortableRuntime() },
+    runtime: { path: CLOUDRUN_PORTABLE_RUNTIME_PATH, content: buildCloudRunPortableRuntime({ instanceBounds: runtimeResources.some(resource => resource.instanceBounds !== undefined) }) },
     containerBuildStartCommand: cloudRunContainerBuildStartCommand(target),
     releaseEvidence: {
       providerResources,

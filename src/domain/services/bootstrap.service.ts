@@ -143,6 +143,7 @@ export async function executeBootstrap(params: {
         buildConfig: {
           workloadKind,
           builder: 'nixpacks',
+          ...(runtimeConfig?.instanceBounds ? { instanceBounds: runtimeConfig.instanceBounds } : {}),
           ...(runtimeConfig?.startCommand ? { startCommand: runtimeConfig.startCommand } : {}),
           ...(runtimeConfig?.releaseCommand ? { releaseCommand: runtimeConfig.releaseCommand } : {}),
           ...(runtimeConfig?.healthCheckPath ? { healthCheckPath: runtimeConfig.healthCheckPath } : {}),
@@ -163,6 +164,7 @@ export async function executeBootstrap(params: {
     } else {
       const nextBuildConfig = {
         ...service.buildConfig,
+        instanceBounds: runtimeConfig?.instanceBounds,
         workloadKind,
         ...(runtimeConfig?.startCommand ? { startCommand: runtimeConfig.startCommand } : {}),
         ...(runtimeConfig?.releaseCommand ? { releaseCommand: runtimeConfig.releaseCommand } : {}),

@@ -121,6 +121,7 @@ export function githubActionsServerProgramFingerprint(params: {
       workloadKind: resource.workloadKind,
       startCommand: resource.startCommand,
       healthCheckPath: resource.healthCheckPath,
+      ...(resource.instanceBounds ? { instanceBounds: resource.instanceBounds } : {}),
     }))
     .sort((left, right) => left.logicalName.localeCompare(right.logicalName));
   const releaseCommands = params.target.releaseCommands

@@ -8,6 +8,21 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+`service-instance-bounds.test.ts` pins all seven hosting providers against the
+[service capacity contract](../../docs/service-instance-bounds.md). Cloud Run
+uses native service-level automatic limits; six other adapters explicitly reject
+the field. Normal CI also executes saved-plan confirmation, emitted GitHub and
+portable releases, prepared first release, and unchanged legacy renderer bytes.
+Synthetic serialized transport establishes offline behavior, not live scaling
+or a spending ceiling.
+
+The [local registry prerequisite](../../docs/local-artifact-registry.md) and
+[operator GitHub identity](../../docs/gcp-github-operator-identity.md) extend that
+same normal gate. Real serialized provider clients and the application/SQLite
+lineage cover separate public/private repositories, exact native lifetimes,
+uncertain acknowledgements and separately reviewed CI trust removal. Those
+contracts do not establish native publication or a live token exchange.
+
 `gcp-local-project-allocation.test.ts` and `gcp-local-project-journal.test.ts`
 exercise the reviewed local empty-project capability through reconstructed CRM v3
 transport. The latter composes the shared lifecycle with real SQLite to distinguish

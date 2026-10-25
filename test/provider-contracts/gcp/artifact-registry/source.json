@@ -1,0 +1,18 @@
+{
+  "apiVersion": "Artifact Registry v1",
+  "revision": "9415ba048aa587b1b2df2b96fc00aa009c831597",
+  "reviewedAt": "2026-10-25",
+  "sources": [
+    {
+      "url": "https://raw.githubusercontent.com/googleapis/googleapis/9415ba048aa587b1b2df2b96fc00aa009c831597/google/devtools/artifactregistry/v1/repository.proto",
+      "snapshot": "repository.proto",
+      "sha256": "d8406ab11c9758b6e703194d7dcffff7fc176a142f761f6e9150eb0b74449fc0"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/googleapis/googleapis/9415ba048aa587b1b2df2b96fc00aa009c831597/google/devtools/artifactregistry/v1/service.proto",
+      "snapshot": "service.proto",
+      "sha256": "a8d0ec85e55349d51c6b18b55cf1deb1409c129661833e3217373fef99e73ba5"
+    }
+  ],
+  "extraction": "Full unchanged official protobuf source; tests inspect package/message and CreateRepository response-type declarations. This is not a full REST/protobuf schema validator."
+}

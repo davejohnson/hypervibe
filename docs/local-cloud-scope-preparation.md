@@ -76,7 +76,9 @@ stage does not advance deployment markers or imply environment convergence.
 Removal of the declaration does not delete the project or erase its journal.
 A completed allocation with no hosting bindings remains in this isolated stage,
 even after declaration removal. An explicit later billing/connection/binding
-handoff is still required; that handoff is not implemented by this capability.
+handoff is still required. The optional [reviewed continuation](local-cloud-scope-continuation.md)
+implements separately confirmed billing, API preparation and local connection/binding
+stages while retaining this allocation and its original approval.
 
 ## Acceptance evidence
 

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { operatorArtifactDeclarationSchema } from '../ports/operator-artifact.port.js';
 import { secretDestinationSchema, runtimeSecretReferenceSchema, secretDestinationIdentity } from '../ports/secret-destination.port.js';
 import { parse as parseDomain } from 'tldts';
 import { isReservedRuntimeEnvKey, RESERVED_RUNTIME_ENV_ERROR } from '../services/runtime-env-policy.js';
@@ -58,7 +59,13 @@ const DATABASE_ENV_ALIAS_SOURCES = [
 
 export const databaseEnvAliasSourceSchema = z.enum(DATABASE_ENV_ALIAS_SOURCES);
 
+export const serviceInstanceBoundsSchema = z.object({
+  min: z.number().int().min(0),
+  max: z.number().int().min(1),
+}).strict().refine(bounds => bounds.min <= bounds.max, 'min must not exceed max');
+
 export const serviceSpecSchema = z.object({
+  instanceBounds: serviceInstanceBoundsSchema.optional(),
   /** Retained filesystem storage; not object/bucket storage. */
   volume: z.object({
     mountPath: z.string().regex(/^\/(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*)(?:\/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$/, 'Use a canonical absolute mount path, for example /data'),
@@ -82,6 +89,12 @@ export const serviceSpecSchema = z.object({
     databaseEnvAliasSourceSchema
   ).optional(),
 }).strict().superRefine((service, ctx) => {
+  if (service.instanceBounds && (service.workloadKind === 'cron'
+    || (service.workloadKind === 'worker' && service.instanceBounds.min < 1))) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['instanceBounds'],
+      message: service.workloadKind === 'cron' ? 'Scheduled jobs cannot declare service instance bounds'
+        : 'Workers require at least one running instance' });
+  }
   if (service.workloadKind === 'cron' && !service.cronSchedule) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -1599,6 +1612,8 @@ export const secretDestinationBindingSchema = z.object({
 });
 
 export const environmentSpecSchema = z.object({
+  /** Operator release assets; target, content and public-read changes are separately reviewed. */
+  operatorArtifacts: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,62}$/), operatorArtifactDeclarationSchema).optional(),
   hosting: z.object({
     /** Hosting provider name; validated against the adapter registry at spec_set time. */
     provider: z.string().min(1),
@@ -1609,6 +1624,8 @@ export const environmentSpecSchema = z.object({
       schemaVersion: z.literal(1),
       authentication: z.literal('local-default'),
       nativeScope: z.record(z.string().min(1).max(100), z.string().min(1).max(1024)),
+      /** Separately reviewed provider-owned stages after this exact allocation. */
+      continuation: z.object({ nativeScope: z.record(z.string().min(1).max(100), z.string().min(1).max(1024)) }).strict().optional(),
     }).strict().optional(),
   }).strict(),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),

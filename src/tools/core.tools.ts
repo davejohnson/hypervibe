@@ -1,5 +1,6 @@
 import { planScheduleActivations } from '../domain/services/schedule-activation.service.js';
 import { inspectLocalCloudScope, localCloudScopeRequired } from '../domain/services/local-cloud-scope.service.js';
+import { operatorArtifactWorkRequired } from '../domain/services/operator-artifact.service.js';
 import { classifyPlanBlocks } from '../domain/plan/plan-block.js';
 import { planApiPolicy } from '../domain/services/api-policy.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
@@ -795,12 +796,13 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const currentSpec = currentSpecResult?.spec;
       const plannedEnvironment = currentSpec ? commandEnvironment(currentSpec, env) : env?.trim() || 'staging';
       const cloudScopeOnly = await localCloudScopeRequired(project, plannedEnvironment, currentSpec);
-      if (currentSpec && !cloudScopeOnly) validateInstalledProviders(currentSpec);
+      const retainedArtifactOnly = await operatorArtifactWorkRequired(project, plannedEnvironment);
+      if (currentSpec && !cloudScopeOnly && !retainedArtifactOnly) validateInstalledProviders(currentSpec);
       // Local dotenv preparation is part of the hv_plan contract. Establish
       // its git-safety and filesystem boundary before PlanService persists an
       // executable plan, so an unsafe tracked .env cannot leave an undisclosed
       // authorization record behind.
-      const preparedLocalEnv = currentSpec && !cloudScopeOnly && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'secret-destinations'
+      const preparedLocalEnv = currentSpec && !cloudScopeOnly && !retainedArtifactOnly && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'secret-destinations'
         ? ensureProjectLocalEnv({
           source: currentSpecResult?.source,
           projectName: project.name,
@@ -843,7 +845,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         : undefined;
       let localEnv: RepoEnvFileWrite | undefined;
       try {
-        localEnv = result.scope === 'cloud-scope' || scope === 'secrets' || scope === 'secret-destinations' ? undefined : mergeLocalEnvWrites(
+        localEnv = result.scope === 'cloud-scope' || result.scope === 'operator-artifacts' || scope === 'secrets' || scope === 'secret-destinations' ? undefined : mergeLocalEnvWrites(
           preparedLocalEnv,
           ensureProjectLocalEnv({
             source: currentSpecResult?.source,
@@ -1465,8 +1467,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { hint: 'hv_spec, then hv_plan.' });
       }
       // The application revalidates this exact persisted plan before execution.
-      // Historical cloud-scope recovery must not depend on today's provider selection.
-      if (asRecord(ctx.repos.runs.findById(planId)?.plan)?.scope !== 'cloud-scope') validateInstalledProviders(specResult.spec);
+      // Historical scoped recovery must not depend on today's hosting selection.
+      // The application validates the saved stage, identities and action proof.
+      if (!['cloud-scope', 'operator-artifacts'].includes(String(asRecord(ctx.repos.runs.findById(planId)?.plan)?.scope))) validateInstalledProviders(specResult.spec);
 
       const outcome = await executePlanApply(ctx, {
         project,

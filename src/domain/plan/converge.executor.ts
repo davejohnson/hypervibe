@@ -1,3 +1,4 @@
+import { isRecoveryRuntimeAction } from '../services/recovery-runtime.service.js';
 import { isRuntimeAccessAction } from '../services/runtime-access.service.js';
 import { databaseCredentialAliasesActionSchema, databaseCredentialAliasesMetadataSchema,
   DATABASE_CREDENTIAL_ALIASES_OPERATION } from '../services/database-credential-aliases.service.js';
@@ -7,6 +8,7 @@ import { DATABASE_SCOPE_BIND_OPERATION, isDatabaseScopeBindingAction } from '../
 import { HOSTING_PREPARED_OPERATION, isPreparedHostingAction } from '../services/hosting-prepared.service.js';
 import { createHash } from 'crypto';
 import { z } from 'zod';
+import { isOperatorArtifactAction, OPERATOR_ARTIFACT_OPERATION, operatorArtifactPlanSchema } from '../ports/operator-artifact.port.js';
 import { isLocalCloudScopeAction, LOCAL_CLOUD_SCOPE_OPERATION, localCloudScopePlanSchema } from '../ports/local-cloud-scope.port.js';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import type { Run, RunReceipt } from '../entities/run.entity.js';
@@ -225,6 +227,7 @@ export const planRunDocumentSchema = z.object({
     'secrets',
     'secret-destinations',
     'cloud-scope',
+    'operator-artifacts',
     'api-policy',
     'retained-cleanup',
     'managed-ci-bindings',
@@ -232,6 +235,7 @@ export const planRunDocumentSchema = z.object({
     'hosting-prepared-bindings',
     'service-volumes',
     'runtime-access',
+    'backup-runtime',
     'database-checkpoint',
     'database-credential-aliases',
     'database-bindings',
@@ -244,6 +248,7 @@ export const planRunDocumentSchema = z.object({
   ]).optional(),
   environmentName: z.string().min(1),
   cloudScope: localCloudScopePlanSchema.optional(),
+  artifactPublication: operatorArtifactPlanSchema.optional(),
   databaseCredentialAliasesReady: z.boolean().optional(),
   databaseCredentialAliasesVerification: databaseCredentialAliasesMetadataSchema.optional(),
   specRevision: z.number().int().nonnegative(),
@@ -268,14 +273,26 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'operator-artifacts') {
+    const proof = document.artifactPublication;
+    if (!proof || document.actions.length > 300 || (proof.mode === 'verified') !== (document.actions.length === 0)
+      || document.actions.some(action => !isOperatorArtifactAction(action)
+        || !isDeepStrictEqual(Object.fromEntries(Object.keys(proof).map(key => [key, action.metadata?.[key]])), proof))
+      || document.cloudScope || document.overrides || document.inputRequired?.length || document.sourceCommitSha || document.integrationFingerprints
+      || document.lockEnvironmentIds?.length || document.observedFingerprint !== null)
+      ctx.addIssue({ code: 'custom', message: 'Operator publication requires its exact isolated saved actions and no deployment inputs.' });
+    return;
+  }
+  if (document.artifactPublication || document.actions.some(action => action.metadata?.operation === OPERATOR_ARTIFACT_OPERATION))
+    ctx.addIssue({ code: 'custom', message: 'Operator publication requires its isolated plan stage.' });
   if (document.scope === 'cloud-scope') {
     const proof = document.cloudScope;
-    if (!proof || document.actions.length > 1 || (proof.mode === 'verified') !== (document.actions.length === 0)
+    if (!proof || document.actions.length > 300 || (proof.mode === 'verified') !== (document.actions.length === 0)
       || document.actions.some(action => !isLocalCloudScopeAction(action)
         || !isDeepStrictEqual(Object.fromEntries(Object.keys(proof).map(key => [key, action.metadata?.[key]])), proof))
       || document.overrides || document.inputRequired?.length || document.sourceCommitSha || document.integrationFingerprints
       || document.lockEnvironmentIds?.length || document.observedFingerprint !== null)
-      ctx.addIssue({ code: 'custom', message: 'Cloud scope preparation requires one exact allocation or read-only recovery action and no deployment inputs.' });
+      ctx.addIssue({ code: 'custom', message: 'Cloud scope preparation requires exact preparation or read-only recovery actions and no deployment inputs.' });
     return;
   }
   if (document.cloudScope || document.actions.some(action => action.metadata?.operation === LOCAL_CLOUD_SCOPE_OPERATION))
@@ -429,6 +446,12 @@ export const planRunDocumentSchema = z.object({
       || document.overrides || document.integrationFingerprints
       || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
       ctx.addIssue({ code: 'custom', message: 'database-checkpoint plans must contain only the independent checkpoint action and no runtime or cross-environment inputs.' });
+    }
+    return;
+  }
+  if (document.scope === 'backup-runtime') {
+    if (document.actions.length !== 1 || !isRecoveryRuntimeAction(document.actions[0]) || document.overrides || document.inputRequired?.length || document.integrationFingerprints) {
+      ctx.addIssue({ code: 'custom', message: 'backup-runtime plan must contain only one exact prerequisite and no secret or unrelated integration inputs.' });
     }
     return;
   }

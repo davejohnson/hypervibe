@@ -8,6 +8,9 @@ import { recoverySourceIdentitySchema } from '../domain/services/recovery-source
 import { createS3ObjectClient } from '../domain/services/object-storage-transfer.service.js';
 import { formatRecoveryFailureMarker, RecoveryDiagnosticError, recoveryFailure, type RecoveryDiagnostic } from '../domain/ports/recovery-diagnostics.port.js';
 import type { StorageObjectClient } from '../domain/ports/storage.port.js';
+import type { RecoveryWorkerSession } from '../domain/ports/recovery-worker.port.js';
+import { recoveryWorkerRegistry } from '../domain/registry/recovery-worker.registry.js';
+import './recovery-workers.js';
 
 const configSchema = z.object({
   version: z.literal(1), operation: z.literal('recovery-set'),
@@ -17,6 +20,7 @@ const configSchema = z.object({
   objects: z.array(z.object({ name: z.string().regex(/^[a-z][a-z0-9-]{0,60}$/), identity: objectRecoveryIdentitySchema,
     bucket: z.string().min(1) }).strict()).max(32),
   fileReferenceQueries: z.array(z.object({ storageName: z.string().min(1), query: z.string().min(1).max(32_768) }).strict()).max(32).optional(),
+  nativeAccess: z.object({ provider: z.string().regex(/^[a-z][a-z0-9-]*$/), configuration: z.record(z.string(), z.string()) }).strict().optional(),
 }).strict();
 const credentialsSchema = z.object({
   bucket: z.string().min(1), endpoint: z.string().url(), region: z.string().min(1),
@@ -27,8 +31,16 @@ const credentialsSchema = z.object({
 export function parseBackupHelperEnvironment(environment: NodeJS.ProcessEnv) {
   try {
     const config = configSchema.parse(JSON.parse(environment.HYPERVIBE_BACKUP_CONFIG ?? ''));
-    const credentials = credentialsSchema.parse(JSON.parse(environment.HYPERVIBE_BACKUP_STORAGE_CREDENTIALS_JSON ?? ''));
     const sourceUrl = config.database ? environment.HYPERVIBE_BACKUP_DATABASE_URL ?? '' : undefined;
+    if (new Set(config.objects.map(item => item.name)).size !== config.objects.length) throw new Error('Duplicate source name.');
+    if (config.nativeAccess) {
+      if (environment.HYPERVIBE_BACKUP_STORAGE_CREDENTIALS_JSON || environment.HYPERVIBE_BACKUP_OBJECTS_CREDENTIALS_JSON) throw new Error('Native recovery cannot consume copied provider credentials.');
+      const worker = recoveryWorkerRegistry.get(config.nativeAccess.provider);
+      if (!worker) throw new Error('Native recovery worker is unsupported.');
+      worker.validate({ ...config, configuration: config.nativeAccess.configuration, sourceUrl });
+      return { config, sourceUrl, credentials: undefined, sourceCredentials: undefined };
+    }
+    const credentials = credentialsSchema.parse(JSON.parse(environment.HYPERVIBE_BACKUP_STORAGE_CREDENTIALS_JSON ?? ''));
     const source = sourceUrl ? new URL(sourceUrl) : undefined;
     const privateHost = environment.HYPERVIBE_BACKUP_PRIVATE_HOST;
     const endpoint = new URL(credentials.endpoint);
@@ -56,17 +68,22 @@ export async function runBackupHelper(environment: NodeJS.ProcessEnv = process.e
   let stage: RecoveryDiagnostic['stage'] = 'worker-input';
   let failure: RecoveryDiagnosticError | undefined;
   const clients: StorageObjectClient[] = [];
+  let native: RecoveryWorkerSession | undefined;
   try {
     const { config, credentials, sourceCredentials, sourceUrl } = parseBackupHelperEnvironment(environment);
+    if (config.nativeAccess) {
+      native = await recoveryWorkerRegistry.get(config.nativeAccess.provider)!.open({ ...config, configuration: config.nativeAccess.configuration, sourceUrl });
+    }
     stage = 'archive-open';
-    const archive = createS3ObjectClient(credentials); clients.push(archive);
+    const archive = native ? await native.openStorage(config.destination) : createS3ObjectClient(credentials!); clients.push(archive);
     stage = 'source-open';
-    const objects = config.objects.map(object => {
-      const client = createS3ObjectClient(sourceCredentials[object.name]); clients.push(client);
-      return { name: object.name, identity: object.identity, client };
-    });
+    const objects = [];
+    for (const object of config.objects) {
+      const client = native ? await native.openStorage(object.identity) : createS3ObjectClient(sourceCredentials![object.name]); clients.push(client);
+      objects.push({ name: object.name, identity: object.identity, client });
+    }
     stage = 'recovery-set';
-    const result = await createRecoverySet({ ...config, database: config.database ? { ...config.database, sourceUrl: sourceUrl! } : undefined,
+    const result = await createRecoverySet({ ...config, database: config.database ? { ...config.database, sourceUrl: native?.sourceUrl ?? sourceUrl! } : undefined,
       archive, objects });
     return result.receipt;
   } catch (error) {
@@ -77,6 +94,7 @@ export async function runBackupHelper(environment: NodeJS.ProcessEnv = process.e
     for (const client of clients) {
       try { client.destroy(); } catch { cleanupFailed = true; }
     }
+    try { await native?.close(); } catch { cleanupFailed = true; }
     if (cleanupFailed) throw new RecoveryDiagnosticError({
       ...(failure?.diagnostic ?? { stage: 'restore-cleanup', category: 'cleanup' }), localCleanupFailed: true,
     });

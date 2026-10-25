@@ -1,3 +1,4 @@
+import { mergeRecoveryRuntimeBindings, recoveryRuntimeBindings } from '../services/runtime-evidence.js';
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import path from 'path';
 import { repoBindingsFileSchema } from './repo-bindings.schema.js';
@@ -37,6 +38,7 @@ const BINDINGS_FILE = 'bindings.json';
 const SENSITIVE_KEY_PATTERN = /(^|_)?(secret|token|password|connectionstring|connectionurl|databaseurl|databaseprivateurl|privateurl|privatekey|apikey)($|_)?/i;
 const LOCAL_ONLY_BINDING_KEYS = new Set([
   'delegatedEnvBindings',
+  'recoveryRuntimeSecretInputs',
   'delegatedActionsBindings',
 ]);
 
@@ -92,6 +94,7 @@ export function mergeRepoPlatformBindings(
   existing: Record<string, unknown>,
   repoBindings: Record<string, unknown>
 ): Record<string, unknown> {
+  if (Object.hasOwn(repoBindings, 'recoveryRuntimeSecretInputs')) throw new Error('Private recovery inputs are local only and cannot be imported.');
   if (existing.recoveryDatabases !== undefined) recoveryDatabaseBindings(existing.recoveryDatabases);
   if (repoBindings.recoveryDatabases !== undefined) recoveryDatabaseBindings(repoBindings.recoveryDatabases);
   const localVolumes = parseServiceVolumeBindings({ platformBindings: existing });
@@ -114,6 +117,7 @@ export function mergeRepoPlatformBindings(
     // observation and an explicit local metadata action advance this journal.
     merged.preparedHosting = local ?? incoming;
   }
+  if (existing.recoveryRuntime !== undefined || repoBindings.recoveryRuntime !== undefined) merged.recoveryRuntime = mergeRecoveryRuntimeBindings(existing.recoveryRuntime, repoBindings.recoveryRuntime);
   if (existing.backupPolicyAttempts !== undefined || repoBindings.backupPolicyAttempts !== undefined) {
     merged.backupPolicyAttempts = mergeBackupPolicyAttempts(existing.backupPolicyAttempts, repoBindings.backupPolicyAttempts);
   }
@@ -137,7 +141,7 @@ export function mergeRepoPlatformBindings(
       merged[key] = retained;
       continue;
     }
-    if (key === 'databaseCheckpoints' || key === 'backupPolicyAttempts' || key === 'runtimeIdentities' || key === 'storageRuntimeAccess' || key === 'preparedHosting') continue;
+    if (key === 'databaseCheckpoints' || key === 'backupPolicyAttempts' || key === 'runtimeIdentities' || key === 'storageRuntimeAccess' || key === 'preparedHosting' || key === 'recoveryRuntime') continue;
     if (key === 'serviceVolumes' && existing[key] !== undefined) {
       const retained = { ...incomingVolumes, ...localVolumes };
       for (const [name, next] of Object.entries(incomingVolumes)) {
@@ -222,6 +226,7 @@ function sanitizePlatformBindings(raw: Record<string, unknown>): Record<string, 
     if (raw[key] !== undefined) sanitized[key] = access[key];
   }
   if (raw.secretDestinationContainers !== undefined) sanitized.secretDestinationContainers = secretContainerBindings(raw.secretDestinationContainers);
+  if (raw.recoveryRuntime !== undefined) sanitized.recoveryRuntime = recoveryRuntimeBindings(raw.recoveryRuntime);
   if (raw.recoveryDatabases !== undefined) sanitized.recoveryDatabases = recoveryDatabaseBindings(raw.recoveryDatabases);
   if (raw.backupPolicyAttempts !== undefined) {
     // Strict value-free identities remain recoverable even for secret-shaped names.

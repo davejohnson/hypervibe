@@ -58,7 +58,10 @@ const applicationConfiguration = {
       resources: { limits: { cpu: '1', memory: '512Mi' }, cpuIdle: true, startupCpuBoost: false },
       startupProbe: { tcpSocket: { port: 8080 }, periodSeconds: 240, timeoutSeconds: 240, failureThreshold: 1 } }] },
 };
-function fixture(options: { secretCreateTime?: string; finalResponse?: (value: any) => any; rejectWrite?: boolean; loseAcknowledgment?: boolean; operationError?: string } = {}) {
+function fixture(options: { bounds?: boolean; secretCreateTime?: string; finalResponse?: (value: any) => any; rejectWrite?: boolean; loseAcknowledgment?: boolean; operationError?: string } = {}) {
+  const expectedApplication = { ingress: applicationConfiguration.ingress, invokerIamDisabled: false,
+    ...(options.bounds ? { scaling: { scalingMode: 'AUTOMATIC', minInstanceCount: 0, maxInstanceCount: 1 } } : {}),
+    template: applicationConfiguration.template };
   const connection: CloudDeploymentConnectionV1 = {
     schemaVersion: 1, purpose: 'deployment', provider: 'gcp', hostingProvider: 'cloudrun', installationId, planDigest: 'c'.repeat(64),
     customerId: 'customer-a', appId: 'app-a', environment: 'production',
@@ -81,10 +84,12 @@ function fixture(options: { secretCreateTime?: string; finalResponse?: (value: a
     platformBindings: { provider: 'cloudrun', projectId, environmentId: region,
       services: { web: { serviceId: nativeServiceName, resourceUid, imageUri: holdingImage, workloadKind: 'web', resourceType: 'service' } },
       preparedHosting: { schemaVersion: 1, installationId, planDigest: connection.planDigest, receiptDigest: canonicalJsonSha256(connection),
-        pendingFirstRelease: ['web'], firstReleaseConfigurationDigests: { web: digest(applicationConfiguration) } } } as Record<string, any> };
-  const service = { id: 'local-web', projectId: 'local-app', name: 'web', buildConfig: { builder: 'dockerfile' as const, public: false },
+        pendingFirstRelease: ['web'], firstReleaseConfigurationDigests: { web: digest(expectedApplication) } } } as Record<string, any> };
+  const service = { id: 'local-web', projectId: 'local-app', name: 'web', buildConfig: { builder: 'dockerfile' as const, public: false,
+    ...(options.bounds ? { instanceBounds: { min: 0, max: 1 } } : {}) },
     envVarSpec: {}, createdAt: now, updatedAt: now };
-  const environmentSpec = environmentSpecSchema.parse({ hosting: { provider: 'cloudrun', region }, services: { web: { public: false } },
+  const environmentSpec = environmentSpecSchema.parse({ hosting: { provider: 'cloudrun', region }, services: { web: { public: false,
+    ...(options.bounds ? { instanceBounds: { min: 0, max: 1 } } : {}) } },
     envVars: { SETTING: 'reviewed-nonsecret' }, secretDestinations: { API_TOKEN: reference }, deploy: { strategy: 'branch', trigger: 'ci' } });
   let current: any = { name: resource, uid: resourceUid, etag: 'holding-etag', generation: '1', observedGeneration: '1',
     createTime: '2026-10-24T12:00:00Z', terminalCondition: { state: 'CONDITION_SUCCEEDED' },
@@ -117,7 +122,7 @@ function fixture(options: { secretCreateTime?: string; finalResponse?: (value: a
         if (options.rejectWrite) return Response.json({ error: { code: 409, status: 'ABORTED' } }, { status: 409 });
         // Independent final native response; not an echo of the submitted body.
         current = { ...current, etag: 'application-etag', generation: '2', observedGeneration: '2',
-          ...structuredClone(applicationConfiguration), template: { ...structuredClone(applicationConfiguration.template),
+          ...structuredClone(expectedApplication), template: { ...structuredClone(applicationConfiguration.template),
             containers: [{ ...structuredClone(applicationConfiguration.template.containers[0]), image: candidateImage }] },
           latestCreatedRevision: `${resource}/revisions/web-production-00002-app`, latestReadyRevision: `${resource}/revisions/web-production-00002-app` };
         if (options.finalResponse) current = options.finalResponse(current);
@@ -190,8 +195,8 @@ describe('prepared Cloud Run first application release', () => {
     expect(receipt.success).toBe(false); expect(f.writes).toEqual([]);
     expect(JSON.stringify(receipt)).not.toMatch(/changed-local-input|synthetic-value/);
   });
-  it('applies the exact candidate, final runtime reader and immutable secret reference in one conditional update', async () => {
-    const f = fixture(), adapter = await f.create();
+  it.each([false, true])('applies the exact candidate, final reader and immutable reference with reviewed bounds=%s', async bounds => {
+    const f = fixture({ bounds }), adapter = await f.create();
     const result = await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },
       { secretVersionRefs: { API_TOKEN: reference } });
     expect(result.receipt.success).toBe(true);
@@ -200,6 +205,10 @@ describe('prepared Cloud Run first application release', () => {
       containers: [expect.objectContaining({ image: candidateImage, env: applicationConfiguration.template.containers[0].env })] } });
     expect(new URL(f.writes[0]!.url).searchParams.get('updateMask')).toContain('template');
     expect(f.writes[0]!.url).not.toContain('allowMissing=true');
+    if (bounds) {
+      expect(f.writes[0]!.body.scaling).toEqual({ scalingMode: 'AUTOMATIC', minInstanceCount: 0, maxInstanceCount: 1 });
+      expect(new URL(f.writes[0]!.url).searchParams.get('updateMask')).toContain('scaling');
+    }
   });
   it('preserves revision labels during the reviewed first release', async () => {
     const f = fixture(), adapter = await f.create();
@@ -237,9 +246,11 @@ describe('prepared Cloud Run first application release', () => {
       { secretVersionRefs: { API_TOKEN: reference } });
     expect(result.receipt.success).toBe(false); expect(f.writes).toHaveLength(1);
   });
-  it.each(['first-release', 'reverted-holding', 'operation-error', 'terminal-error'] as const)('executes the emitted CI %s with native first-release authority', async scenario => {
+  it.each(['first-release', 'first-release-bounds', 'bounds-lost', 'reverted-holding', 'operation-error', 'terminal-error'] as const)('executes the emitted CI %s with native first-release authority', async scenario => {
     const echoedValue = 'synthetic-provider-echoed-submission';
-    const f = fixture({ ...(scenario === 'operation-error' ? { operationError: echoedValue } : {}),
+    const bounds = scenario === 'first-release-bounds' || scenario === 'bounds-lost';
+    const f = fixture({ bounds, ...(scenario === 'bounds-lost' ? { finalResponse: (value: any) => ({ ...value, scaling: { maxInstanceCount: 5 } }) } : {}),
+      ...(scenario === 'operation-error' ? { operationError: echoedValue } : {}),
       ...(scenario === 'terminal-error' ? { finalResponse: (value: any) => ({ ...value,
         terminalCondition: { state: 'CONDITION_FAILED', reason: echoedValue, message: echoedValue } }) } : {}) });
     if (scenario === 'reverted-holding') Object.assign(f.current(), { generation: '3', observedGeneration: '3',
@@ -248,7 +259,8 @@ describe('prepared Cloud Run first application release', () => {
       serviceNames: ['web'], providerProjectId: projectId, providerEnvironmentId: region, providerRegion: region,
       providerScope: { projectId, region, artifactRepository: registryName, artifactRepositoryCreateTime: '2026-10-24T11:00:00Z' },
       providerServiceIds: [nativeServiceName], runtimeResources: [{ logicalName: 'web', workloadKind: 'web', providerResourceType: 'service',
-        providerResourceId: nativeServiceName, providerResourceUid: resourceUid, startCommand: null, healthCheckPath: null }],
+        providerResourceId: nativeServiceName, providerResourceUid: resourceUid, startCommand: null, healthCheckPath: null,
+        ...(bounds ? { instanceBounds: { min: 0, max: 1 } } : {}) }],
       deploymentAccess: { origin: 'https://hypervibe.dev', projectId: 'app-a', connectionId: installationId, environment: 'production', sourceBranch: 'main', connection: f.connection },
       preparedRuntime: { envVars: { SETTING: 'reviewed-nonsecret' }, preparation: f.environment.platformBindings.preparedHosting },
     } as BranchDeployTarget;
@@ -267,7 +279,7 @@ describe('prepared Cloud Run first application release', () => {
     if (scenario === 'reverted-holding') {
       expect(f.writes).toEqual([]); expect(failure).toBeInstanceOf(Error); return;
     }
-    if (scenario === 'operation-error' || scenario === 'terminal-error') {
+    if (scenario === 'operation-error' || scenario === 'terminal-error' || scenario === 'bounds-lost') {
       expect(f.writes).toHaveLength(1); expect(failure).toBeInstanceOf(Error);
       expect(failure.message).not.toContain(echoedValue); return;
     }
@@ -276,6 +288,7 @@ describe('prepared Cloud Run first application release', () => {
       containers: [expect.objectContaining({ image: candidateImage, env: applicationConfiguration.template.containers[0].env })] } });
     expect(new URL(f.writes[0]!.url).searchParams.get('updateMask')).toContain('template');
     expect(failure).toBeUndefined();
+    if (bounds) expect(f.writes[0]!.body.scaling).toEqual({ scalingMode: 'AUTOMATIC', minInstanceCount: 0, maxInstanceCount: 1 });
     expect(outputs).toEqual([]);
   });
 });

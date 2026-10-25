@@ -48,12 +48,20 @@ Do not treat cached local state as proof of convergence when live observation is
 
 Local cloud scope preparation is an isolated `cloud-scope` prerequisite in the
 ordinary plan/apply loop, before deployment connection lookup. A declared provider
-capability may authorize exactly one reviewed empty-project allocation; the shared
-installation kernel records its nonsecret attempts in SQLite with transactional
-revision protection. Native unknown reads remain unknown. This stage never grants
-billing, connection, hosting or deployment-marker authority. See
-[local scope preparation](docs/local-cloud-scope-preparation.md) for the explicit
-GCP-only admission, native proof, historical recovery and live-evidence limits.
+capability may authorize exactly one reviewed empty-project allocation. Optional
+provider-declared continuation creates new, separately reviewed stages with an
+immutable predecessor digest; allocation approval never authorizes billing, API,
+identity or binding work. The shared installation kernel records nonsecret attempts
+in SQLite with transactional revision and sibling-branch protection. Each exact
+current continuation action has separate confirmation and native recovery; uncertain
+writes cannot be resubmitted. Native unknown reads remain unknown. A final reviewed
+local handoff writes only nonsecret connections scoped to the exact repository and
+environment plus its verified project binding. Callers without explicit environment
+context cannot select those connections; legacy scopes retain their existing meaning.
+Hosted factories never admit local ADC or substitute a fictional hosted identity.
+See [local scope preparation](docs/local-cloud-scope-preparation.md) and
+[reviewed continuation](docs/local-cloud-scope-continuation.md) for the explicit
+provider matrix, native proof, historical recovery and live-evidence limits.
 
 Administrator-prepared hosting resources use an explicit metadata handoff before
 runtime convergence. A provider-declared `preparedHosting` capability verifies the
@@ -84,6 +92,13 @@ or another real provider. The first reviewed environment spec establishes the
 project's hosting provider before plan/apply can mutate infrastructure.
 
 ## Project Runtime Desired State
+
+Optional `services.<name>.instanceBounds` declares reviewed automatic service-wide
+minimum and maximum capacity. Provider metadata admits only complete implementations;
+Cloud Run carries it through spec, native observation, confirmed apply and emitted
+release verification. Unset values preserve native limits and legacy CI bytes.
+See [service instance bounds](docs/service-instance-bounds.md) for provider differences,
+unknown-read behavior and offline/live evidence limits.
 
 `HYPERVIBE_` is reserved for orchestration inputs. Dotenv loading always skips
 that prefix; explicit application env values, runtime secret destinations,

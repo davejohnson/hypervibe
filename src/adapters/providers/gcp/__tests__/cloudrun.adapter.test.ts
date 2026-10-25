@@ -2004,7 +2004,7 @@ it('refuses to create a release job when neither it nor the existing service has
     expect(fetchMock.mock.calls.every(([, init]) => (init?.method ?? 'GET') === 'GET')).toBe(true);
   });
 
-  it('creates a digest-pinned holding service for the first CI-managed release without exposing source credentials or running release code', async () => {
+  it.each([false, true])('creates a digest-pinned first holding service with bounds=%s without exposing source credentials or running release code', async bounded => {
     const resolvedCommitSha = 'c'.repeat(40);
     const imageDigest = `sha256:${'d'.repeat(64)}`;
     const digestImageUri = `us-central1-docker.pkg.dev/gcp-project/hypervibe/staging-web-bootstrap@${imageDigest}`;
@@ -2099,6 +2099,7 @@ it('refuses to create a release job when neither it nor the existing service has
           reconciling: false,
           uri: 'https://web-7e22b6c2dc.run.app',
           annotations: {},
+          ...(bounded ? { scaling: { maxInstanceCount: 1 } } : {}),
           template: {
             serviceAccount: EXPECTED_RUNTIME_SERVICE_ACCOUNT,
             containers: [{ image: digestImageUri, env: createdServiceEnvironment }],
@@ -2107,6 +2108,7 @@ it('refuses to create a release job when neither it nor the existing service has
         });
       }
       if (url.includes('/services?serviceId=web-7e22b6c2dc') && method === 'POST') {
+        if (bounded) expect(JSON.parse(String(init?.body)).scaling).toEqual({ scalingMode: 'AUTOMATIC', minInstanceCount: 0, maxInstanceCount: 1 });
         serviceCreated = true;
         createdServiceEnvironment = JSON.parse(String(init?.body)).template.containers[0].env;
         return Response.json({
@@ -2132,6 +2134,7 @@ it('refuses to create a release job when neither it nor the existing service has
         startCommand: 'npm run web',
         healthCheckPath: '/healthz',
         releaseCommand: 'npm run db:migrate',
+        ...(bounded ? { instanceBounds: { min: 0, max: 1 } } : {}),
       },
       envVarSpec: {},
       createdAt: now,
@@ -2642,7 +2645,7 @@ it('refuses to create a release job when neither it nor the existing service has
     ]);
   });
 
-  it('attempts logging IAM repair during project convergence without blocking deploy', async () => {
+  it.each([false, true])('preserves reviewed registry identity during project convergence (registry=%s)', async (withRegistry) => {
     const adapter = new CloudRunAdapter();
     await adapter.connect({
       projectId: 'gcp-project',
@@ -2680,7 +2683,7 @@ it('refuses to create a release job when neither it nor the existing service has
       id: 'env-1',
       projectId: 'project-1',
       name: 'production',
-      platformBindings: { provider: 'cloudrun', projectId: 'gcp-project' },
+      platformBindings: { provider: 'cloudrun', projectId: 'gcp-project', ...(withRegistry ? { providerScope: { projectId: 'gcp-project', region: 'us-central1', artifactRepository: 'hypervibe', artifactRepositoryCreateTime: '2026-10-25T01:00:00Z' } } : {}) },
       createdAt: now,
       updatedAt: now,
     });
@@ -2694,6 +2697,7 @@ it('refuses to create a release job when neither it nor the existing service has
         providerScope: {
           projectId: 'gcp-project',
           region: 'us-central1',
+          ...(withRegistry ? { artifactRepository: 'hypervibe', artifactRepositoryCreateTime: '2026-10-25T01:00:00Z' } : {}),
         },
       },
       loggingIamRepair: {

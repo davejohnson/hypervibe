@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { CloudInstallationBoundaryError, type CloudInstallationAction, type CloudInstallationAttempt,
-  type CloudInstallationDriver, type CloudInstallationEvidence, type CloudInstallationIntent, type CloudInstallationObservation,
-  type CloudInstallationProviderContext, type CloudInstallationReason } from '../../../domain/ports/cloud-installation.port.js';
+  type CloudInstallationDriver, type CloudInstallationEvidence, type CloudInstallationObservation,
+  type CloudInstallationProviderContext, type CloudInstallationExecutableIntent, type LocalCloudScopePreparationIntent, type CloudInstallationReason } from '../../../domain/ports/cloud-installation.port.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
 import { DestinationBoundaryError, DestinationBudget, destinationJson } from '../secret-destination-http.js';
 import { GcpSecretWriterClient, type WriterIamPolicy } from './gcp-secret-writer.client.js';
@@ -29,7 +29,12 @@ const proofSchema = z.object({ resources: z.array(z.object({ kind: z.enum(['proj
     billingAccountName: z.string().max(100).optional(), assignmentMode: z.literal('initial-reviewed-v1').optional(),
     policyResource: z.string().max(1024).optional(), role: z.string().max(1024).optional(), member: z.string().max(1024).optional(),
   }).strict() }).strict();
-type Context = CloudInstallationProviderContext;
+type Intent = CloudInstallationExecutableIntent;
+type Context = CloudInstallationProviderContext<Intent>;
+function hostedEmail(intent: Intent): string {
+  if (!intent.hostIdentity) throw new BillingError('identity_mismatch');
+  return intent.hostIdentity.serviceAccountEmail;
+}
 type ActionContext = Context & { action: CloudInstallationAction; attempt?: CloudInstallationAttempt };
 type Target = 'project' | 'billing' | 'account';
 class BillingError extends CloudInstallationBoundaryError {}
@@ -42,10 +47,10 @@ function failure(error: unknown): CloudInstallationReason {
   }
   return 'provider_error';
 }
-function names(intent: CloudInstallationIntent) {
+function names(intent: Intent) {
   if (intent.provider !== 'gcp' || intent.stage !== 'scope-preparation' || !['connect', 'disconnect'].includes(intent.mode)) throw new BillingError('identity_mismatch');
   const native = gcpBillingPreparationScopeSchema.parse(intent.nativeScope);
-  if (intent.mode === 'connect' && intent.scopePreparation?.installationId !== native.projectInstallationId) throw new BillingError('ownership_mismatch');
+  if (intent.mode === 'connect' && ('execution' in intent ? intent.predecessor?.installationId : intent.scopePreparation?.installationId) !== native.projectInstallationId) throw new BillingError('ownership_mismatch');
   const connectionId = intent.mode === 'disconnect' ? z.string().guid().parse(intent.installed?.[0]?.native.installationId) : intent.installationId;
   const parts = [intent.customerId, intent.appId, intent.environment];
   const owner = createHash('sha256').update(JSON.stringify([...parts, connectionId])).digest('hex');
@@ -55,7 +60,7 @@ function names(intent: CloudInstallationIntent) {
   const roles = Object.fromEntries(Object.keys(rolePermissions).map(key => [key, `projects/${native.projectId}/roles/${resourceName(key, { compact: true, scope: [...parts, connectionId] })}`])) as Record<keyof typeof rolePermissions, string>;
   return { ...native, connectionId, owner, projectOwner, accountId, email, account: `projects/${native.projectId}/serviceAccounts/${email}`, roles };
 }
-function allActions(intent: CloudInstallationIntent): CloudInstallationAction[] {
+function allActions(intent: Intent): CloudInstallationAction[] {
   const n = names(intent);
   if (n.assignmentMode === 'initial-reviewed-v1' && intent.mode === 'connect') return [initialAssignmentAction(intent)];
   const action = (id: string, operation: typeof operations[number], name: string, category: CloudInstallationAction['metadata']['category'], native: Record<string, unknown>, dependsOn: string[] = []): CloudInstallationAction => ({
@@ -78,7 +83,7 @@ function allActions(intent: CloudInstallationIntent): CloudInstallationAction[] 
   result.push(action('revoke:account', 'revoke', n.account, 'trust', { target: 'account' }, ['revoke:billing']));
   return result;
 }
-function initialAssignmentAction(intent: CloudInstallationIntent): CloudInstallationAction {
+function initialAssignmentAction(intent: Intent): CloudInstallationAction {
   const n = names(intent);
   if (n.assignmentMode !== 'initial-reviewed-v1') throw new BillingError('billing_assignment_unverified');
   return { id: 'gcp:billing:initial-assignment-v1', type: 'update', resource: { kind: 'project', name: `projects/${n.projectNumber}`, provider: 'gcp' },
@@ -86,19 +91,19 @@ function initialAssignmentAction(intent: CloudInstallationIntent): CloudInstalla
     reason: 'Assign the reviewed billing account to this exact newly created project using transient browser authorization.',
     metadata: { operation: 'assign-initial-billing', category: 'scope', execution: 'api', native: { assignmentMode: n.assignmentMode } } };
 }
-function actions(intent: CloudInstallationIntent): CloudInstallationAction[] {
+function actions(intent: Intent): CloudInstallationAction[] {
   if (intent.mode !== 'disconnect') return allActions(intent);
   const grants = new Set(intent.installed?.map(item => item.native.actionId));
   const result = allActions(intent).filter(action => action.metadata.operation === 'revoke' && grants.has(`gcp:billing:grant:${action.metadata.native.target}`));
   return result.map((action, index) => ({ ...action, dependsOn: index ? [result[index - 1].id] : [] }));
 }
-function verificationAction(intent: CloudInstallationIntent): CloudInstallationAction {
+function verificationAction(intent: Intent): CloudInstallationAction {
   const n = names(intent);
   return { id: 'gcp:billing:existing', type: 'noop', resource: { kind: 'project', name: `projects/${n.projectNumber}`, provider: 'gcp' },
     verified: true, requiresConfirm: false, reason: 'Verify the existing selected billing association without changing billing or permissions.',
     metadata: { operation: 'verify-existing-billing', category: 'verification', execution: 'api', native: {} } };
 }
-function parseEvidence(value: unknown, intent: CloudInstallationIntent): CloudInstallationEvidence {
+function parseEvidence(value: unknown, intent: Intent): CloudInstallationEvidence {
   const p = proofSchema.parse(value); const n = names(intent); const action = [...allActions(intent), verificationAction(intent)].find(item => item.id === p.native.actionId);
   if (!action || action.metadata.operation !== p.native.operation || p.native.owner !== n.owner || p.native.installationId !== n.connectionId) throw new BillingError('ownership_mismatch');
   const kinds = p.resources.map(resource => resource.kind).sort();
@@ -122,7 +127,7 @@ function parseEvidence(value: unknown, intent: CloudInstallationIntent): CloudIn
     const target = action.metadata.native.target as Target;
     if (!account || p.native.policyResource !== (target === 'project' ? `projects/${n.projectNumber}` : target === 'billing' ? n.billingAccountName : `projects/${n.projectId}/serviceAccounts/${account.identity.uniqueId}`)
       || p.native.role !== (target === 'project' ? n.roles.link : target === 'billing' ? 'roles/billing.user' : n.roles.impersonator)
-      || p.native.member !== `serviceAccount:${target === 'account' ? intent.hostIdentity.serviceAccountEmail : n.email}`) throw new BillingError('ownership_mismatch');
+      || p.native.member !== `serviceAccount:${target === 'account' ? hostedEmail(intent) : n.email}`) throw new BillingError('ownership_mismatch');
   }
   return p;
 }
@@ -137,7 +142,9 @@ function completed(context: Context, id: string, kind: string) {
   if (!resource) throw new BillingError('ownership_mismatch'); return resource;
 }
 
-export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetch } = {}): CloudInstallationDriver {
+export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetch; local: true }): CloudInstallationDriver<LocalCloudScopePreparationIntent>;
+export function createGcpBillingPreparationDriver(options?: { fetch?: typeof fetch; local?: false }): CloudInstallationDriver;
+export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetch; local?: boolean } = {}): CloudInstallationDriver<Intent> {
   const request = options.fetch ?? fetch;
   async function knownProjectBilling(client: GcpSecretWriterClient, projectId: string) {
     const billing = await client.bootstrap.getProjectBillingInfo(projectId);
@@ -147,7 +154,7 @@ export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetc
     if (!billing) throw new BillingError('provider_error');
     return billing;
   }
-  async function verifyBilling(client: GcpSecretWriterClient, intent: CloudInstallationIntent) {
+  async function verifyBilling(client: GcpSecretWriterClient, intent: Intent) {
     if (intent.mode === 'disconnect') return;
     const n = names(intent); const billing = await knownProjectBilling(client, n.projectId);
     if (billing?.billingAccountName && billing.billingAccountName !== n.billingAccountName) throw new BillingError('ownership_mismatch');
@@ -192,7 +199,7 @@ export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetc
     }
     return { writer, target, policyResource: target === 'project' ? `projects/${n.projectNumber}` : target === 'billing' ? n.billingAccountName : `projects/${n.projectId}/serviceAccounts/${writer.identity.uniqueId}`,
       role: target === 'project' ? n.roles.link : target === 'billing' ? 'roles/billing.user' : n.roles.impersonator,
-      member: `serviceAccount:${target === 'account' ? context.intent.hostIdentity.serviceAccountEmail : n.email}` };
+      member: `serviceAccount:${target === 'account' ? hostedEmail(context.intent) : n.email}` };
   }
   async function policy(client: GcpSecretWriterClient, target: Target, resource: string): Promise<WriterIamPolicy> {
     if (target !== 'billing') return client.policy(target, resource);
@@ -257,6 +264,7 @@ export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetc
       : context.attempt ? { state: 'pending', reason: 'not_converged' } : { state: 'action-required' };
   }
   async function billingToken(client: GcpSecretWriterClient, context: Context, budget: DestinationBudget): Promise<string> {
+    if (!('host' in context.authentication)) throw new BillingError('identity_mismatch');
     const n = names(context.intent); const writer = await verifiedAccount(client, context);
     const host = await budget.wait(context.authentication.host.verifyIdentity(budget.signal));
     if (!isDeepStrictEqual(host, context.intent.hostIdentity)) throw new BillingError('identity_mismatch');
@@ -277,9 +285,11 @@ export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetc
     }
     return result.accessToken;
   }
-  const driver: CloudInstallationDriver = {
-    provider: 'gcp', parseScope: value => gcpBillingPreparationScopeSchema.parse(value), parseEvidence,
+  const driver: CloudInstallationDriver<Intent> = {
+    ...(options.local ? { localScopePreparation: { hostingProvider: 'cloudrun', continuation: true as const } } : {}),
+    provider: 'gcp', parseScope: value => (options.local ? gcpBillingPreparationScopeSchema.extend({ assignmentMode: z.literal('initial-reviewed-v1') }) : gcpBillingPreparationScopeSchema).parse(value), parseEvidence,
     scopePreparation: { disconnectionIntent(record, installationId) {
+      if ('execution' in record.intent) return null;
       names(record.intent);
       const pending = record.attempts.some(attempt => attempt.actionId.startsWith('gcp:billing:grant:')
         && attempt.status !== 'rejected' && !record.completed[attempt.actionId]);
@@ -362,7 +372,7 @@ export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetc
           resources: [{ kind: 'temporary-service-account', name: n.email, scope: `projects/${n.projectNumber}` }, ...Object.values(n.roles).map(name => ({ kind: 'temporary-custom-role', name, scope: `projects/${n.projectNumber}` }))],
           permissions: [{ principal: n.email, scope: `projects/${n.projectNumber}`, actions: rolePermissions.link, purpose: 'installation-verification' },
             { principal: n.email, scope: n.billingAccountName, actions: ['roles/billing.user'], purpose: 'installation-verification' },
-            { principal: context.intent.hostIdentity.serviceAccountEmail, scope: n.account, actions: rolePermissions.impersonator, purpose: 'installation-verification' },
+            { principal: hostedEmail(context.intent), scope: n.account, actions: rolePermissions.impersonator, purpose: 'installation-verification' },
             { principal: 'Browser administrator', scope: n.billingAccountName, actions: ['billing.accounts.getIamPolicy', 'billing.accounts.setIamPolicy'], purpose: 'installation-verification' }],
           costs: [{ resource: n.billingAccountName, description: 'Enable billing for this exact project. Future approved resources can incur charges; this stage creates no paid workloads.', pricingUrl: 'https://cloud.google.com/pricing' }],
           warnings: ['Automatic attachment is blocked before temporary resources or grants are installed. No verified native guard currently prevents replacing a concurrent billing association when the principal has inherited unlink permission on another account.',

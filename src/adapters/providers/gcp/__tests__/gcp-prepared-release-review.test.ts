@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { gcpObservedPreparedApplicationConfiguration } from '../gcp-prepared-release.js';
+import { gcpObservedPreparedApplicationConfiguration, gcpPreparedApplicationConfiguration } from '../gcp-prepared-release.js';
 import { githubActionsWorkflowInputHash } from '../../../../domain/services/github-ops.service.js';
 import { gcpBrokerTarget } from '../../../../domain/services/__tests__/cloud-deployment-ci.fixture.js';
 
@@ -21,6 +21,14 @@ function native() {
         startupProbe: { tcpSocket: { port: 8080 }, periodSeconds: 240, timeoutSeconds: 240, failureThreshold: 1 } }] } }));
 }
 describe('independent prepared first-release readback counterexamples', () => {
+  it('retains service-wide capacity in both the reviewed first release and independent native evidence', () => {
+    const value = native(); value.scaling = { maxInstanceCount: 1 };
+    const expected = { scalingMode: 'AUTOMATIC', minInstanceCount: 0, maxInstanceCount: 1 };
+    expect(gcpObservedPreparedApplicationConfiguration(value)).toMatchObject({ scaling: expected });
+    expect(gcpPreparedApplicationConfiguration({ workloadKind: 'web', publicAccess: false,
+      serviceAccountEmail: value.template.serviceAccount, envVars: {}, secretVersionRefs: {}, startCommand: null,
+      healthCheckPath: null, instanceBounds: { min: 0, max: 1 } })).toMatchObject({ scaling: expected });
+  });
   it.each(['missing-condition', 'missing-generation', 'missing-observed-generation', 'old-ready-revision', 'reconciling', 'holding-traffic'])('rejects %s as successful application convergence', variant => {
     const value = native();
     if (variant === 'missing-condition') delete value.terminalCondition;

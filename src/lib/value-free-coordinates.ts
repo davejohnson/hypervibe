@@ -20,7 +20,7 @@ export const runtimeCoordinateSchema = z.string().min(1).max(8192)
   .refine(value => !/[\u0000-\u001f\u007f]/.test(value) && !value.includes('://') && !/-----BEGIN |^Bearer /i.test(value));
 const referenceKeys = new Set(['secret', 'secretName', 'secretVersion', 'secretAttemptId', 'credentialHash']);
 const coordinateKey = z.string().refine(key => isNonSecretConnectionField(key) && !/(?:database|private|connection)(?:url|string)$/i.test(key) || referenceKeys.has(key)
-  || /^permission:(?:deployer-access|database-access|database-secret-access|archive-access|source-access:[a-zA-Z0-9_-]+)$/.test(key));
+  || /^permission:(?:deployer-access|database-access|database-secret-access|archive-access|controller-archive-access|source-access:[a-zA-Z0-9_-]+)$/.test(key));
 const resourceReference = (value: string) => /^(?:arn:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[^\s]*|\/?[A-Za-z][A-Za-z0-9_-]*(?:\/[A-Za-z0-9_.@:+-]+){3,})$/.test(value);
 export const runtimeCoordinatesSchema = z.record(coordinateKey, runtimeCoordinateSchema).superRefine((values, ctx) => {
   for (const [key, value] of Object.entries(values)) {

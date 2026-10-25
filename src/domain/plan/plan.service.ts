@@ -1,6 +1,8 @@
+import { observeRecoveryRuntime, planRecoveryRuntime } from '../services/recovery-runtime.service.js';
 import { observeRuntimeAccess, planRuntimeAccess, projectRuntimeAccessInput } from '../services/runtime-access.service.js';
 import { planDatabaseCredentialAliases } from '../services/database-credential-aliases.service.js';
 import { planSecretContainers } from '../services/secret-container-setup.js';
+import { operatorArtifactWorkRequired, planOperatorArtifacts } from '../services/operator-artifact.service.js';
 import { localCloudScopeRequired, planLocalCloudScope } from '../services/local-cloud-scope.service.js';
 import type { CloudInstallationReview } from '../ports/cloud-installation.port.js';
 import { planScheduleActivations, SCHEDULE_ACTIVATION_OPERATION } from '../services/schedule-activation.service.js';
@@ -169,7 +171,7 @@ export interface EnvironmentPlan {
   webhookReadiness?: WebhookReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
-  scope: 'full' | 'secrets' | 'database-credential-aliases' | 'secret-destinations' | 'cloud-scope' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'hosting-prepared-bindings' | 'service-volumes' | 'runtime-access' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
+  scope: 'full' | 'secrets' | 'database-credential-aliases' | 'secret-destinations' | 'cloud-scope' | 'operator-artifacts' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'hosting-prepared-bindings' | 'service-volumes' | 'runtime-access' | 'backup-runtime' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
   backupReadiness?: BackupReadiness;
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
@@ -470,7 +472,7 @@ export class PlanService {
         )
       ) {
         observed.completeness.databases = 'unknown';
-        const dbResult = await adapterFactory.getDatabaseAdapter(dbProvider, project);
+        const dbResult = await adapterFactory.getDatabaseAdapter(dbProvider, project, environment.name);
         const dbAdapter = dbResult.adapter;
         if (dbResult.success && dbAdapter) {
           try {
@@ -547,7 +549,7 @@ export class PlanService {
           candidate.provider === dbProvider && candidate.externalId === localDatabaseExternalId);
         if (database) {
           try {
-            const result = await adapterFactory.getDatabaseAdapter(dbProvider, project);
+            const result = await adapterFactory.getDatabaseAdapter(dbProvider, project, environment.name);
             if (!result.success || !supportsDatabaseCheckpoint(result.adapter)) {
               throw new Error('The database adapter cannot observe recovery checkpoints.');
             }
@@ -669,7 +671,7 @@ export class PlanService {
           );
           continue;
         }
-        const storageResult = await adapterFactory.getStorageAdapter(storageProvider, project);
+        const storageResult = await adapterFactory.getStorageAdapter(storageProvider, project, environment.name);
         if (!storageResult.success || !storageResult.adapter) {
           observed.partial = true;
           observed.warnings.push(`Storage observation failed (${storageProvider}): ${storageResult.error ?? 'adapter unavailable'}`);
@@ -919,6 +921,7 @@ export class PlanService {
         blocked.push({ provider: requirement.provider, policy: 'hard', reason: 'The exact environment deployment approval is unavailable or changed. Reconnect deployment access; saved cloud credentials cannot replace this approval.' });
         continue;
       }
+      if (!requirement.scopeHints?.length && project) requirement.scopeHints = getProjectScopeHints(project, environmentName);
       const connectionProviders = providerRegistry.connectionProviders(requirement.provider);
       const scoped = requirement.scopeHints?.length
         ? connectionProviders
@@ -928,7 +931,7 @@ export class PlanService {
       const verified = requirement.scopeHints?.length
         ? Boolean(scoped)
         : connectionProviders.some((connectionProvider) =>
-          this.connectionRepo.findAllByProvider(connectionProvider).some((connection) => connection.status === 'verified')
+          this.connectionRepo.findAllByProvider(connectionProvider).some((connection) => connection.status === 'verified' && !connection.scope?.includes('#environment='))
         );
       if (!verified) {
         const scope = requirement.scopeHints?.[0];
@@ -1292,7 +1295,7 @@ export class PlanService {
         };
       }
       let blockedReason: string | undefined;
-      const adapterResult = await adapterFactory.getDatabaseAdapter(previousDatabaseProvider, projectForPlan);
+      const adapterResult = await adapterFactory.getDatabaseAdapter(previousDatabaseProvider, projectForPlan, environmentName);
       if (!adapterResult.success || !adapterResult.adapter) {
         retainedDatabaseVerified = false;
         blockedReason = 'retained_database_connection_unavailable';
@@ -1726,6 +1729,26 @@ export class PlanService {
           unmanaged: [], warnings: prepared.warnings, inputRequired: [], blocked: [] };
       }
     } catch { return { error: 'Cloud project preparation could not be verified. Preserve any saved allocation and its exact native operation; no hosting or replacement project is authorized.' }; }
+    if (scope !== 'full') {
+      try { if (await operatorArtifactWorkRequired(project, environmentName)) return { error: 'Run hv_plan with scope=full to recover the retained operator artifact operation before narrower work.' }; }
+      catch { return { error: 'Retained operator artifact history could not be verified; preserve its exact operation before narrower work.' }; }
+    }
+    if (scope === 'full') {
+      try {
+        const prepared = await planOperatorArtifacts({ project, environmentName, specResult, options });
+        if (prepared) {
+          const document: PlanRunDocument = { kind: 'hv_plan', scope: 'operator-artifacts', environmentName,
+            specRevision: specResult.revision, observedFingerprint: null, actions: prepared.actions,
+            artifactPublication: prepared.artifactPublication, warnings: prepared.warnings };
+          planRunDocumentSchema.parse(document);
+          const run = this.runRepo.create({ projectId: project.id, environmentId: prepared.environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
+          this.runRepo.updateStatus(run.id, 'succeeded');
+          return { planRunId: run.id, scope: 'operator-artifacts', specRevision: specResult.revision,
+            environmentName, verified: true, observed: null, actions: prepared.actions, cloudScopeReview: prepared.review,
+            unmanaged: [], warnings: prepared.warnings, inputRequired: [], blocked: [] };
+        }
+      } catch { return { error: 'Operator artifacts could not be verified. Preserve saved native operations and receipts; no repeated publication or replacement target is authorized.' }; }
+    }
     const providerValidation = firstProviderSpecValidationFailure(specResult.spec);
     if (providerValidation) {
       return { error: providerValidation.message };
@@ -2333,6 +2356,8 @@ export class PlanService {
     const checkpointStageActive = checkpointActions.length > 0;
     const backupObservation = await observeBackupPolicy({ spec: environmentSpec, environment,
       components: local.components, project: projectForPlan, adapterFactory });
+    const recoveryRuntime = await observeRecoveryRuntime({ spec: environmentSpec, environment, components: local.components, project: projectForPlan, adapterFactory });
+    const recoveryRuntimeActions = planRecoveryRuntime(recoveryRuntime);
     const databaseScopeBinding = await planDatabaseScopeBinding({ spec: environmentSpec, environment,
       components: local.components, project: projectForPlan, adapterFactory });
     const backupPolicy = planBackupPolicy(backupObservation, {
@@ -3089,14 +3114,15 @@ export class PlanService {
       && queuePermissionPrerequisites.every(isRuntimeQueuePrerequisite);
     const runtimeAccessStageActive = !checkpointStageActive && !providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive
       && (queuePermissionStage || runtimeAccessActions.length > 0);
-    const ciBindingStageActive = ciBindingStage && !runtimeAccessStageActive && !providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive;
-    const ciWorkflowPublicationStageActive = ciWorkflowPublicationStage && !runtimeAccessStageActive && !providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive;
+    const recoveryRuntimeStageActive = !checkpointStageActive && !providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive && !runtimeAccessStageActive && recoveryRuntimeActions.length > 0;
+    const ciBindingStageActive = ciBindingStage && !runtimeAccessStageActive && !recoveryRuntimeStageActive && !providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive;
+    const ciWorkflowPublicationStageActive = ciWorkflowPublicationStage && !runtimeAccessStageActive && !recoveryRuntimeStageActive && !providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive;
     const backupProgramPublicationActions = githubInfrastructure.actions.filter(isBackupProgramPublicationAction);
-    const backupProgramPublicationStageActive = !runtimeAccessStageActive && !providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive
+    const backupProgramPublicationStageActive = !runtimeAccessStageActive && !recoveryRuntimeStageActive && !providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive
       && !ciBindingStageActive && !ciWorkflowPublicationStageActive && backupProgramPublicationActions.length === 1;
-    const volumeStageActive = !runtimeAccessStageActive && !providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive && !ciBindingStageActive && !ciWorkflowPublicationStageActive && !backupProgramPublicationStageActive
+    const volumeStageActive = !runtimeAccessStageActive && !recoveryRuntimeStageActive && !providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive && !ciBindingStageActive && !ciWorkflowPublicationStageActive && !backupProgramPublicationStageActive
       && serviceVolumes.actions.some(action => action.type !== 'noop');
-    if (serviceFilter && runtimeAccessStageActive) return { error: 'Run hv_plan without services to review the current workload access prerequisite stage.' };
+    if (serviceFilter && (runtimeAccessStageActive || recoveryRuntimeStageActive)) return { error: 'Run hv_plan without services to review the current workload access prerequisite stage.' };
     let backupProvisioningStageActive = false;
     let backupReadinessStageActive = false;
     let ciCredentialsStageActive = false;
@@ -3117,6 +3143,9 @@ export class PlanService {
       storage.warnings.push(queuePermissionStage
         ? 'This plan prepares only declared queues so workload permissions can be granted on their exact resources. Apply and re-plan before permission grants, runtime wiring or deployment.'
         : 'This plan prepares only the current workload identity or permission stage. Apply and re-plan before runtime wiring or deployment.');
+    } else if (recoveryRuntimeStageActive) {
+      actions = recoveryRuntimeActions;
+      backupPolicy.warnings.push('This plan prepares only the current backup worker prerequisite. Re-plan to publish and run the recovery program after preparation converges.');
     } else if (ciBindingStageActive) {
       const closure = actionDependencyClosure(
         actions,
@@ -3312,7 +3341,7 @@ export class PlanService {
           : {}),
       }
       : undefined;
-    const isolatedCiStage = runtimeAccessStageActive || checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || backupProgramPublicationStageActive || ciBindingStageActive || ciWorkflowPublicationStageActive || volumeStageActive;
+    const isolatedCiStage = recoveryRuntimeStageActive || runtimeAccessStageActive || checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || backupProgramPublicationStageActive || ciBindingStageActive || ciWorkflowPublicationStageActive || volumeStageActive;
     const ciSelection = resolveDevOpsSelection(specResult.spec)?.ci;
     const ciConnectionProvider = ciSelection
       ? devOpsProviderRegistry.ciProvider(ciSelection.provider)?.connectionProvider
@@ -3324,20 +3353,20 @@ export class PlanService {
       ? this.providerPreflight(isolatedProviders, project, environmentName)
       : blocked;
     if (backupReadinessStageActive) planBlocked.push({ category: 'prerequisite', provider: 'hypervibe', policy: 'hard', reason: `Backup readiness is incomplete. ${backupReadiness.gaps.join(' ')}` });
-    const planInputRequired = runtimeAccessStageActive || checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive || volumeStageActive
+    const planInputRequired = recoveryRuntimeStageActive || runtimeAccessStageActive || checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive || volumeStageActive
       ? []
       : ciBindingStageActive
         ? ciBindingInputRequired
         : secretInputRequired;
-    const planOverrides = runtimeAccessStageActive || checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive || ciProjectBootstrapStage || volumeStageActive ? undefined : overrides;
-    const persistedScope = runtimeAccessStageActive ? 'runtime-access' as const : databaseBindingStageActive ? 'database-bindings' as const : backupProgramPublicationStageActive ? 'backup-program-publication' as const : checkpointStageActive ? 'database-checkpoint' as const : backupPolicyStageActive ? 'backup-policy' as const
+    const planOverrides = recoveryRuntimeStageActive || runtimeAccessStageActive || checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive || ciProjectBootstrapStage || volumeStageActive ? undefined : overrides;
+    const persistedScope = recoveryRuntimeStageActive ? 'backup-runtime' as const : runtimeAccessStageActive ? 'runtime-access' as const : databaseBindingStageActive ? 'database-bindings' as const : backupProgramPublicationStageActive ? 'backup-program-publication' as const : checkpointStageActive ? 'database-checkpoint' as const : backupPolicyStageActive ? 'backup-policy' as const
       : backupProvisioningStageActive ? 'backup-provisioning' as const : ciCredentialsStageActive ? 'managed-ci-credentials' as const : backupReadinessStageActive ? 'backup-readiness' as const : ciBindingStageActive
       ? ((volumeIdentityStage || runtimeIdentityScopeBootstrap) && !managedCiEnabled ? 'hosting-bindings' as const : 'managed-ci-bindings' as const)
       : ciWorkflowPublicationStageActive
         ? 'managed-ci-publication' as const
         : volumeStageActive ? 'service-volumes' as const : 'full' as const;
     const actionKinds = new Set(actions.map((action) => action.resource.kind));
-    const integrationFingerprints = runtimeAccessStageActive || checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive ? {} : {
+    const integrationFingerprints = recoveryRuntimeStageActive || runtimeAccessStageActive || checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive ? {} : {
       ...((!ciBindingStageActive || actionKinds.has('payment')) && stripeSync.fingerprint
         ? { stripe: stripeSync.fingerprint } : {}),
       ...((!ciBindingStageActive || actionKinds.has('email')) && email.fingerprint

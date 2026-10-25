@@ -548,3 +548,35 @@ describe('repo bindings delegated metadata', () => {
     }
   });
 });
+
+describe('backup runtime evidence export and recovery merge', () => {
+  it.each(['secret', 'secretVersion', 'credentialHash'])('rejects private values disguised as a public recovery %s reference', key => {
+    expect(() => mergeRepoPlatformBindings({ recoveryRuntime: { provider: 'cloudrun', evidence: { [key]: 'synthetic-private-value' } } }, {})).toThrow(/recovery/i);
+  });
+  it('preserves a local recovery worker pending attempt and its encrypted private payload against stale public imports', () => {
+    const pending = { attemptId: 'exact-attempt', step: { component: 'database-secret-version', operation: 'write', target: { secret: 'projects/project/secrets/backup', credentialHash: 'a'.repeat(64), priorVersions: '[]' }, description: 'Write the selected database reference.', requiresConfirm: true, privateInputKeys: ['databaseUrl'] } };
+    const binding = { provider: 'cloudrun', evidence: { accountUniqueId: '123456789', secretVersion: 'projects/project/secrets/backup/versions/1' }, pending };
+    const local = { recoveryRuntime: binding, recoveryRuntimeSecretInputs: 'local-encrypted-payload' };
+    expect(mergeRepoPlatformBindings(local, { recoveryRuntime: { ...binding, pending: undefined } })).toEqual(local);
+    expect(mergeRepoPlatformBindings(local, {})).toEqual(local);
+    expect(() => mergeRepoPlatformBindings(local, { recoveryRuntime: { ...binding, evidence: { ...binding.evidence, accountUniqueId: 'replacement' } } })).toThrow(/recovery.*conflict/i);
+    expect(() => mergeRepoPlatformBindings(local, { recoveryRuntimeSecretInputs: 'foreign-encrypted-payload' })).toThrow(/private|local/i);
+  });
+  it('roundtrips value-free recovery references without exporting private inputs', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'hv-runtime-export-'));
+    execFileSync('git', ['init', '-q', root]);
+    execFileSync('git', ['-C', root, 'remote', 'add', 'origin', 'https://github.com/owner/runtime-export.git']);
+    const now = new Date(); const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    const project: Project = { id: 'project', name: 'runtime-export', gitRemoteUrl: 'https://github.com/owner/runtime-export.git', defaultPlatform: 'ecs', policies: {}, createdAt: now, updatedAt: now };
+    const recoveryRuntime = { provider: 'cloudrun', evidence: { secretVersion: 'projects/project/secrets/backup/versions/1' }, pending: { attemptId: 'attempt', step: { component: 'database-secret-version', operation: 'write', target: { secret: 'projects/project/secrets/backup' }, description: 'Prepare backup reference.', requiresConfirm: true, privateInputKeys: ['databaseUrl'] } } };
+    const environment: Environment = { id: 'environment', projectId: project.id, name: 'staging', createdAt: now, updatedAt: now, platformBindings: { recoveryRuntime, recoveryRuntimeSecretInputs: 'local-encrypted-payload' } };
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      const file = writeRepoBindingsForEnvironment(project, environment, root)!;
+      const contents = readFileSync(file, 'utf8'); expect(contents).not.toContain('local-encrypted-payload');
+      const result = readRepoBindingsFile(project.name, root)!.document.environments.staging.platformBindings;
+      expect(result.recoveryRuntime).toEqual(recoveryRuntime);
+      expect(result.recoveryRuntimeSecretInputs).toBeUndefined();
+    } finally { if (oldDisable === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC; else process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable; rmSync(root, { recursive: true, force: true }); }
+  });
+});

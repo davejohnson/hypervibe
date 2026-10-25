@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto';
+import { recoveryAutomationSchema, recoveryRuntimeBindingSchema, recoveryRuntimeExecutionTargetSchema, type RecoveryRuntimeTarget } from '../ports/recovery-runtime.port.js';
+import { buildDatabaseEnvVarsFromComponent } from './database-env.js';
 import { z } from 'zod';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import type { Environment } from '../entities/environment.entity.js';
@@ -9,12 +12,17 @@ import { objectRecoveryIdentitySchema, type ObjectRecoveryIdentity } from './obj
 import { parseStorageBindings } from './storage-plan.service.js';
 import { recoverySourceIdentitySchema } from './recovery-source.js';
 import { createS3ObjectClient } from './object-storage-transfer.service.js';
+import type { EnvironmentSpec } from '../spec/spec.schema.js';
 
 const logicalName = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,100}$/);
 const selectedStorage = z.object({ name: logicalName, identity: objectRecoveryIdentitySchema }).strict();
 /** The published recurring authority names every source, destination, query and immutable runner. */
 export const managedBackupTargetSchema = z.object({ version: z.literal(1), project: logicalName, environment: logicalName,
-  hosting: z.object({ provider: z.string().min(1), providerScope: z.record(z.string(), z.string().min(1)) }).strict(),
+  hosting: z.object({ provider: z.string().min(1), providerScope: z.record(z.string(), z.string().min(1)), region: z.string().min(1).optional() }).strict(),
+  environmentId: z.string().min(1).max(200).optional(),
+  executionTarget: recoveryRuntimeExecutionTargetSchema.optional(),
+  runtimeBindingHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  automation: recoveryAutomationSchema.optional(),
   runnerImage: z.string().regex(/^[^@\s]+@sha256:[a-f0-9]{64}$/),
   destination: selectedStorage,
   database: z.object({ componentId: z.string().min(1), source: recoverySourceIdentitySchema }).strict().optional(),
@@ -27,16 +35,28 @@ export const managedBackupTargetHash = (target: ManagedBackupTarget) => canonica
 
 /** Object-only recovery runs in the controller and requires no hosting credential. */
 export function managedBackupProviderNames(target: {
-  hosting: { provider: string }; database?: unknown;
+  hosting: { provider: string }; database?: { provider?: string; source?: { provider: string } };
   destination: { identity: { provider: string } }; objects: Array<{ identity: { provider: string } }>;
 }): string[] {
-  return [...new Set([...(target.database ? [target.hosting.provider] : []), target.destination.identity.provider,
+  const databaseProvider = target.database?.source?.provider ?? target.database?.provider;
+  return [...new Set([...(target.database ? [target.hosting.provider] : []), ...(databaseProvider ? [databaseProvider] : []), target.destination.identity.provider,
     ...target.objects.map(item => item.identity.provider)])].sort();
 }
 
 export function managedBackupCredentialKeys(provider: string): Record<string, string> | undefined {
   const metadata = providerRegistry.getMetadata(provider);
   return metadata?.credentials?.automationSecretKeys ?? metadata?.orchestration?.ci?.secretCredentialKeys;
+}
+
+/** Only the declared recovery sources and selected archive authorize CI credentials. */
+export function managedBackupProvidersForSpec(input: EnvironmentSpec): string[] {
+  const spec = withBackupStorageDefaults(input), strategy = resolveBackupStrategy(spec);
+  const destination = strategy.destination ? spec.storage?.[strategy.destination] : undefined;
+  if (strategy.mode !== 'daily' || !strategy.runnerImage || !destination || destination.purpose !== 'backup') return [];
+  return managedBackupProviderNames({ hosting: spec.hosting, database: spec.database,
+    destination: { identity: { provider: destination.provider } },
+    objects: Object.values(spec.storage ?? {}).filter(storage => storage.purpose !== 'backup')
+      .map(storage => ({ identity: { provider: storage.provider } })) });
 }
 
 export function supportsManagedRecoveryDatabase(hostingProvider: string, databaseProvider: string): boolean {
@@ -58,7 +78,7 @@ export function objectRecoverySourceIdentity(identity: ObjectRecoveryIdentity) {
     providerScope: { storageScopeHash: canonicalJsonSha256(objectRecoveryIdentitySchema.parse(identity).instanceScope) }, resourceIdentity: {} });
 }
 
-export async function resolveManagedBackupTarget(context: BackupPolicyContext): Promise<
+export async function resolveManagedBackupTarget(context: BackupPolicyContext, options: { allowUnpreparedRuntime?: boolean } = {}): Promise<
   { state: 'ready'; target: ManagedBackupTarget; contractHash: string; providerCredentialNames: string[] }
   | { state: 'blocked'; issues: string[] }
 > {
@@ -95,7 +115,7 @@ export async function resolveManagedBackupTarget(context: BackupPolicyContext): 
         primaryExternalId: components[0].externalId, providerScope: components[0].bindings.providerScope, resourceIdentity: {} });
       if (!bound.success) issues.push('The database binding lacks valid durable recovery scope; re-plan to review independently verifiable legacy scope. Malformed or unverifiable scope requires resolving the exact binding identity.');
       else try {
-        const adapter = await context.adapterFactory.getDatabaseAdapter(spec.database.provider, context.project);
+        const adapter = await context.adapterFactory.getDatabaseAdapter(spec.database.provider, context.project, environment.name);
         if (!adapter.success || adapter.adapter?.name !== bound.data.provider) throw new Error('Database adapter differs.');
         const observed = await adapter.adapter.dailyBackups?.observe({ environment, component: components[0] });
         const source = recoverySourceIdentitySchema.safeParse(observed?.state === 'known' ? observed.source : undefined);
@@ -112,14 +132,25 @@ export async function resolveManagedBackupTarget(context: BackupPolicyContext): 
     issues.push('A reviewed read-only file-reference query is required for every bucket in a combined database/files set.');
   }
   const providers = destination ? managedBackupProviderNames({ hosting: spec.hosting, database, destination, objects }) : [];
-  if (database) for (const provider of new Set([...objects.map(object => object.identity.provider), ...(destination ? [destination.identity.provider] : [])])) {
+  const runtimeCapability = providerRegistry.getMetadata(spec.hosting.provider)?.lifecycle?.hosting?.recoveryRuntime;
+  const nativeRuntime = Boolean(database && runtimeCapability?.databaseProviders.includes(database.source.provider)
+    && [...objects, ...(destination ? [destination] : [])].every(object => runtimeCapability.storageProviders.includes(object.identity.provider)));
+  if (database && !nativeRuntime) for (const provider of new Set([...objects.map(object => object.identity.provider), ...(destination ? [destination.identity.provider] : [])])) {
     try {
-      const selected = await context.adapterFactory.getStorageAdapter(provider, context.project);
+      const selected = await context.adapterFactory.getStorageAdapter(provider, context.project, environment.name);
       if (!selected.success || selected.adapter?.capabilities?.recoveryCredentialScope !== 'bucket' || !selected.adapter.getCredentials) issues.push(`${provider} has no reviewed private-worker credential handoff for combined SQL/files recovery.`);
     } catch { issues.push(`${provider} private-worker credential handoff could not be resolved.`); }
   }
   const credentialNames = new Set<string>();
+  const automation: NonNullable<ManagedBackupTarget['automation']> = {};
   for (const provider of providers) {
+    try {
+      const selected = providerRegistry.getMetadata(provider)?.credentials?.automationAuthentication?.(environment);
+      if (selected) {
+        automation[provider] = recoveryAutomationSchema.parse({ [provider]: { ...selected, credentials: JSON.stringify(selected.credentials) } })[provider];
+        continue;
+      }
+    } catch { issues.push(`${provider} reviewed automation identity is unavailable or differs from this environment.`); continue; }
     const keys = managedBackupCredentialKeys(provider);
     if (!keys || !Object.keys(keys).length) issues.push(`${provider} has no reviewed CI credential contract for recovery execution.`);
     else for (const key of Object.keys(keys)) credentialNames.add(key);
@@ -127,9 +158,29 @@ export async function resolveManagedBackupTarget(context: BackupPolicyContext): 
   const providerScope = managedBackupHostingScope(environment, Boolean(spec.database));
   const parsed = managedBackupTargetSchema.safeParse({ version: 1, project: context.project.name, environment: environment.name,
     hosting: { provider: spec.hosting.provider, providerScope }, runnerImage: strategy.runnerImage, destination, database,
-    objects, fileReferenceQueries, retainSets: 7, maxDataAgeHours: 24, restoreEveryDays: 7 });
+    objects, fileReferenceQueries, retainSets: 7, maxDataAgeHours: 24, restoreEveryDays: 7,
+    ...(Object.keys(automation).length ? { automation } : {}) });
   if (!parsed.success) issues.push('The complete backup execution contract is not available yet.');
   if (issues.length || !parsed.success) return { state: 'blocked', issues: [...new Set(issues)] };
+  if (nativeRuntime && !options.allowUnpreparedRuntime) {
+    try {
+      const selected = await context.adapterFactory.getProviderAdapter(spec.hosting.provider, context.project, undefined, environment.name);
+      if (!selected.success || selected.adapter?.name !== spec.hosting.provider || !selected.adapter.recoveryRuntime) throw new Error('Recovery driver unavailable.');
+      await selected.adapter.configureTarget?.({ region: spec.hosting.region });
+      const binding = environment.platformBindings.recoveryRuntime === undefined ? undefined : recoveryRuntimeBindingSchema.parse(environment.platformBindings.recoveryRuntime);
+      if (!binding || binding.pending) throw new Error('Recovery runtime binding is not final.');
+      const live = await selected.adapter.recoveryRuntime.inspect({ target: managedBackupRecoveryRuntimeTarget(context, parsed.data), binding, mode: 'ensure' });
+      if (live.state !== 'ready' || !live.executionTarget) throw new Error('Recovery runtime has not converged.');
+      parsed.data.executionTarget = recoveryRuntimeExecutionTargetSchema.parse(live.executionTarget);
+      parsed.data.runtimeBindingHash = canonicalJsonSha256(binding);
+      if (parsed.data.executionTarget.environmentId !== environment.id) throw new Error('Recovery runtime environment differs.');
+      parsed.data.environmentId = environment.id;
+      const region = spec.hosting.region ?? parsed.data.executionTarget.region;
+      if (region !== parsed.data.executionTarget.region) throw new Error('Recovery runtime region differs.');
+      if (region) parsed.data.hosting.region = region;
+      if (parsed.data.executionTarget.provider !== spec.hosting.provider) throw new Error('Recovery runtime provider differs.');
+    } catch { return { state: 'blocked', issues: ['The exact backup workload identity, database credential version and source/archive permissions require preparation or fresh verification. Re-plan before publishing recovery.'] }; }
+  }
   return { state: 'ready', target: parsed.data, contractHash: managedBackupTargetHash(parsed.data), providerCredentialNames: [...credentialNames].sort() };
 }
 
@@ -142,4 +193,14 @@ export async function openRecoveryStorage(adapter: IStorageAdapter, environment:
   if (adapter.openObjectTransfer) return adapter.openObjectTransfer(environment, identity.instanceScope, identity.externalId);
   if (adapter.getCredentials) return createS3ObjectClient(await adapter.getCredentials(environment, identity.instanceScope, identity.externalId));
   throw new Error('Backup storage does not support verified object streams.');
+}
+
+/** Build the native preparation target without ever exporting its database URL. */
+export function managedBackupRecoveryRuntimeTarget(context: BackupPolicyContext, target: ManagedBackupTarget): RecoveryRuntimeTarget {
+  const component = context.components.find(item => item.id === target.database?.componentId && item.environmentId === context.environment?.id);
+  if (!context.environment || !target.database || !component) throw new Error('The exact recovery database component is unavailable.');
+  const databaseUrl = buildDatabaseEnvVarsFromComponent(component).envVars.DATABASE_URL;
+  if (!databaseUrl) throw new Error('The recovery database credential must be present in the encrypted component binding.');
+  return { environment: context.environment, database: target.database.source, destination: target.destination.identity, objects: target.objects,
+    runnerImage: target.runnerImage, privateInputFingerprints: { databaseUrl: createHash('sha256').update(databaseUrl).digest('hex') } };
 }

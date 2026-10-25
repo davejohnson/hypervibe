@@ -16,6 +16,7 @@ export interface GcpPreparedApplicationInput {
   secretVersionRefs: Record<string, RuntimeSecretReference>;
   startCommand: string | null;
   healthCheckPath: string | null;
+  instanceBounds?: { min: number; max: number };
 }
 
 /** Self-contained native renderer shared with the emitted first release. All
@@ -47,8 +48,12 @@ export function gcpPreparedApplicationConfiguration(input: GcpPreparedApplicatio
   }
   env.sort((a, b) => a.name.localeCompare(b.name));
   const worker = input.workloadKind === 'worker';
+  const bounds = input.instanceBounds;
+  if (bounds && (!Number.isSafeInteger(bounds.min) || !Number.isSafeInteger(bounds.max)
+    || bounds.min < (worker ? 1 : 0) || bounds.max < 1 || bounds.min > bounds.max)) fail();
   return {
     ingress: !worker && input.publicAccess ? 'INGRESS_TRAFFIC_ALL' : 'INGRESS_TRAFFIC_INTERNAL_ONLY', invokerIamDisabled: false,
+    ...(bounds ? { scaling: { scalingMode: 'AUTOMATIC', minInstanceCount: bounds.min, maxInstanceCount: bounds.max } } : {}),
     template: { serviceAccount: input.serviceAccountEmail, executionEnvironment: 'EXECUTION_ENVIRONMENT_GEN2',
       scaling: { minInstanceCount: worker ? 1 : 0, maxInstanceCount: 100 }, timeout: '300s', maxInstanceRequestConcurrency: 80,
       containers: [{ ports: [{ containerPort: port }], env,
@@ -74,6 +79,14 @@ export function gcpObservedPreparedApplicationConfiguration(resource: unknown): 
   const empty = (v: unknown) => v === undefined || Array.isArray(v) && v.length === 0;
   const noFields = (v: unknown) => v === undefined || v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 0;
   const r = object(resource), t = object(r.template), containers = t.containers;
+  let serviceScaling: { scalingMode: string; minInstanceCount: number; maxInstanceCount: number } | undefined;
+  if (!noFields(r.scaling)) {
+    const s = object(r.scaling), min = s.minInstanceCount ?? 0, max = s.maxInstanceCount;
+    if (!keys(s, ['scalingMode', 'minInstanceCount', 'maxInstanceCount'])
+      || s.scalingMode !== undefined && !['', 'SCALING_MODE_UNSPECIFIED', 'AUTOMATIC'].includes(s.scalingMode)
+      || !Number.isSafeInteger(min) || !Number.isSafeInteger(max) || min < 0 || max < 1 || min > max) fail();
+    serviceScaling = { scalingMode: 'AUTOMATIC', minInstanceCount: min, maxInstanceCount: max };
+  }
   if (typeof r.name !== 'string' || !/^projects\/[^/]+\/locations\/[^/]+\/services\/[^/]+$/.test(r.name)
     || typeof r.generation !== 'string' || !/^[1-9]\d*$/.test(r.generation) || r.observedGeneration !== r.generation
     || r.reconciling !== undefined && r.reconciling !== false || r.terminalCondition?.state !== 'CONDITION_SUCCEEDED'
@@ -82,7 +95,7 @@ export function gcpObservedPreparedApplicationConfiguration(resource: unknown): 
     || r.latestReadyRevision !== r.latestCreatedRevision
     || !['INGRESS_TRAFFIC_ALL', 'INGRESS_TRAFFIC_INTERNAL_ONLY'].includes(r.ingress)
     || r.invokerIamDisabled !== undefined && r.invokerIamDisabled !== false
-    || !noFields(r.scaling) || !empty(r.customAudiences) || r.iapEnabled !== undefined && r.iapEnabled !== false
+    || !empty(r.customAudiences) || r.iapEnabled !== undefined && r.iapEnabled !== false
     || !Array.isArray(containers) || containers.length !== 1 || !empty(t.volumes) || !noFields(t.vpcAccess)
     || t.sessionAffinity !== undefined && t.sessionAffinity !== false || t.healthCheckDisabled !== undefined && t.healthCheckDisabled !== false
     || t.gpuZonalRedundancyDisabled !== undefined && t.gpuZonalRedundancyDisabled !== false
@@ -141,12 +154,14 @@ export function gcpObservedPreparedApplicationConfiguration(resource: unknown): 
   } else if (!keys(object(probe.tcpSocket), ['port']) || (probe.tcpSocket.port ?? port) !== port
     || probe.periodSeconds !== 240 || probe.timeoutSeconds !== 240 || probe.failureThreshold !== 1) fail();
   const worker = (scaling.minInstanceCount ?? 0) === 1;
+  if (worker && serviceScaling && serviceScaling.minInstanceCount < 1) fail();
   if ((resources.cpuIdle ?? false) !== !worker || worker && r.ingress !== 'INGRESS_TRAFFIC_INTERNAL_ONLY') fail();
   // Recreate the renderer's field order without changing the actual env set.
   const env = (c.env ?? []).map((raw: any) => raw.valueSource
     ? { name: raw.name, valueSource: { secretKeyRef: { secret: raw.valueSource.secretKeyRef.secret, version: raw.valueSource.secretKeyRef.version } } }
     : { name: raw.name, value: raw.value ?? '' }).sort((a: any, b: any) => a.name.localeCompare(b.name));
   return { ingress: r.ingress, invokerIamDisabled: false,
+    ...(serviceScaling ? { scaling: serviceScaling } : {}),
     template: { serviceAccount: t.serviceAccount, executionEnvironment: 'EXECUTION_ENVIRONMENT_GEN2',
       scaling: { minInstanceCount: worker ? 1 : 0, maxInstanceCount: 100 }, timeout: '300s', maxInstanceRequestConcurrency: 80,
       containers: [{ ports: [{ containerPort: port }], env,
@@ -201,7 +216,7 @@ export function buildGcpPreparedReleaseRuntime(target: BranchDeployTarget): stri
     const configuration = pending ? gcpPreparedApplicationConfiguration({ workloadKind: workload.kind, publicAccess: workload.public === true,
       serviceAccountEmail: runtime.serviceAccountEmail, envVars: target.preparedRuntime!.envVars,
       secretVersionRefs: Object.fromEntries(workload.runtimeSecrets.map(item => [item.key, item.reference])),
-      startCommand: desired.startCommand, healthCheckPath: desired.healthCheckPath }) : null;
+      startCommand: desired.startCommand, healthCheckPath: desired.healthCheckPath, instanceBounds: desired.instanceBounds }) : null;
     const configurationDigest = marker.firstReleaseConfigurationDigests?.[prepared.workload];
     if (pending && (!configuration || gcpPreparedApplicationDigest(configuration) !== configurationDigest)) throw new Error('The first Google runtime configuration needs a reviewed preparation plan.');
     return { prepared, publicAccess: workload.public === true, runtimeEmail: runtime.serviceAccountEmail, pending,

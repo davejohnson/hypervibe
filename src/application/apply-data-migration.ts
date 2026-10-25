@@ -166,7 +166,7 @@ async function destroyDatabaseCandidate(params: {
   candidate: Component;
   provider: string;
 }): Promise<boolean> {
-  const adapterResult = await adapterFactory.getDatabaseAdapter(params.provider, params.project);
+  const adapterResult = await adapterFactory.getDatabaseAdapter(params.provider, params.project, params.environment.name);
   if (!adapterResult.success || !adapterResult.adapter) return false;
   const receipt = await adapterResult.adapter.destroy(params.candidate);
   if (!receipt.success) return false;
@@ -277,7 +277,7 @@ async function applyDatabaseMigration(params: {
     }
   }
 
-  const adapterResult = await adapterFactory.getDatabaseAdapter(identity.targetProvider, params.project);
+  const adapterResult = await adapterFactory.getDatabaseAdapter(identity.targetProvider, params.project, targetEnvironment.name);
   if (!adapterResult.success || !adapterResult.adapter || adapterResult.adapter.name !== identity.targetProvider) {
     return { success: false, status: 'blocked', message: 'Target database adapter is unavailable', error: 'No database binding was changed.' };
   }
@@ -794,7 +794,7 @@ async function destroyPreviousDatabaseTarget(params: {
     || !previousBindings
   ) return stale(params.action, 'The retained database rollback target changed.');
 
-  const adapterResult = await adapterFactory.getDatabaseAdapter(params.action.resource.provider, params.project);
+  const adapterResult = await adapterFactory.getDatabaseAdapter(params.action.resource.provider, params.project, params.targetEnvironmentName);
   if (!adapterResult.success || !adapterResult.adapter || adapterResult.adapter.name !== params.action.resource.provider) {
     return { success: false, status: 'blocked', message: 'Previous database adapter is unavailable', error: 'The rollback target remains retained.' };
   }

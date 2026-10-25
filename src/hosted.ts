@@ -54,3 +54,5 @@ export { cloudInstallationDriverFactories } from './application/hosted/cloud-ins
 
 /** Canonical reviewed program hash, including all managed companion files. */
 export { workflowFilesContentHash as workflowFilesContentHashV1 } from './domain/services/ci-deploy.service.js';
+
+export { parseOperatorArtifactDeclarationV1 } from './domain/ports/operator-artifact.port.js';

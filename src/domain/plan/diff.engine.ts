@@ -448,6 +448,13 @@ export function diffEnvironment(input: {
       continue;
     }
 
+    if (serviceSpec.instanceBounds && (!observed || observed.completeness?.services === 'unknown'
+      || observed.completeness?.services === undefined && observed.partial)) {
+      actions.push({ id, type: 'update', resource, verified: false,
+        reason: 'Service instance bounds require complete native observation before planning capacity changes.',
+        metadata: { blockedReason: 'service_instance_bounds_unknown' } });
+      continue;
+    }
     if (observed && serviceObservationKnown) {
       const live = observedServices.get(name);
       if (!live) {
@@ -532,6 +539,12 @@ export function diffEnvironment(input: {
           ? local.bindings.cacheNetwork
           : undefined,
       });
+      if (serviceSpec.instanceBounds && !live.config.instanceBounds && !live.identityOnly) {
+        actions.push({ id, type: 'update', resource, verified: false,
+          reason: 'Automatic service instance bounds could not be observed; preserve current capacity and re-plan.',
+          metadata: { blockedReason: 'service_instance_bounds_unknown' } });
+        continue;
+      }
       const localRuntime = localServices.get(name)?.buildConfig.runtime;
       const runtimeDrift = Boolean(input.projectRuntime)
         && JSON.stringify(localRuntime) !== JSON.stringify(input.projectRuntime);
@@ -573,6 +586,7 @@ export function diffEnvironment(input: {
           verified: !runtimeDrift,
           reason: reasons.join('; '),
           ...(diff.length > 0 ? { diff } : {}),
+          ...(diff.some(field => field.field === 'instanceBounds') ? { requiresConfirm: true, billable: true } : {}),
           ...(failedDeployment
             ? { metadata: { observedStatus: live.status, externalId: live.externalId } }
             : {}),
@@ -1710,6 +1724,13 @@ function diffServiceConfig(
     if (actual !== wanted) {
       diff.push({ field, from: actual === undefined ? undefined : String(actual), to: String(wanted) });
     }
+  }
+
+  if (spec.instanceBounds && (spec.instanceBounds.min !== live.config.instanceBounds?.min
+    || spec.instanceBounds.max !== live.config.instanceBounds?.max)) {
+    const actual = live.config.instanceBounds;
+    diff.push({ field: 'instanceBounds', from: actual ? `${actual.min}–${actual.max}` : undefined,
+      to: `${spec.instanceBounds.min}–${spec.instanceBounds.max}` });
   }
 
   if (spec.releaseCommand !== undefined) {

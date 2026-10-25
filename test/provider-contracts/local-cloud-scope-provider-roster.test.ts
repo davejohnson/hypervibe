@@ -20,6 +20,9 @@ describe('local empty-project capability provider roster', () => {
         expect(capability.parseScope(nativeScope)).toEqual(nativeScope);
         expect(capability.parseRecord).toBeTypeOf('function');
         expect(capability.create).toBeTypeOf('function');
+        expect(capability.continuation?.parseSelection({ scopeKind: 'operator-hosting-v1', billingAccountName: 'billingAccounts/ABCDEF-123456-789ABC' }, { region: 'us-west1' }))
+          .toEqual({ scopeKind: 'operator-hosting-v1', billingAccountName: 'billingAccounts/ABCDEF-123456-789ABC', hostingRegion: 'us-west1' });
+        expect(() => capability.continuation?.parseSelection({ scopeKind: 'operator-hosting-v1', projectId: 'other-project' })).toThrow();
         expect(() => capability.parseScope({ ...nativeScope, billingAccountName: 'billingAccounts/ABCDEF-123456-789ABC' })).toThrow();
       }
     }

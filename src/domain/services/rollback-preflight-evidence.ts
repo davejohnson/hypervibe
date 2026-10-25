@@ -22,6 +22,7 @@ function program(spec: RecordValue, environment: string) {
         workloadKind: service.workloadKind ?? null, startCommand: service.startCommand ?? null,
         healthCheckPath: service.healthCheckPath ?? null, releaseCommand: service.releaseCommand ?? null,
         cronSchedule: service.cronSchedule ?? null,
+        ...(service.instanceBounds ? { instanceBounds: service.instanceBounds } : {}),
       }];
     })),
     migrations: selected.migrations ?? null,

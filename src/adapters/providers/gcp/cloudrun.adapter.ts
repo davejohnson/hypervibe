@@ -1,9 +1,14 @@
+import { createGcpOperatorArtifactCapability } from './gcp-operator-artifacts.js';
+import { gcpGithubRecoveryAuthentication } from './gcp-github-automation.js';
+import { CloudRunRecoveryRuntime } from './cloudrun-recovery-runtime.js';
+import { runCloudRunRecoveryTask } from './cloudrun-recovery-task.js';
 import { z } from 'zod';
 import { isDeepStrictEqual } from 'node:util';
 import type { CloudDeploymentAdapterInputV1, CloudDeploymentConnectionV1, CloudDeploymentSourceAuthorizationV1 } from '../../../domain/ports/cloud-deployment.port.js';
 import { validateCloudDeploymentAdapterInputV1 } from '../../../domain/services/cloud-deployment-authentication.js';
 import { GcpDeploymentAuthentication, gcpDeploymentScopeSchema } from './gcp-deployment-authentication.js';
 import { GcpLocalDefaultAuthentication } from './gcp-local-default-authentication.js';
+import { GcpGithubWorkloadAuthentication, gcpGithubWorkloadIdentitySchema, gcpGithubCiBoundAuthentication } from './gcp-github-workload-identity.js';
 import { createGcpLocalProjectAllocationCapability } from './gcp-local-project-allocation.js';
 import { getGcpNativeAdminToken } from './gcp-runtime-client.js';
 import { validateRuntimeSecretReferences, runtimeSecretReferenceIdentity } from '../../../domain/services/runtime-secret-references.js';
@@ -66,6 +71,7 @@ import type {
   IDeploySourceCredentialAdapter,
 } from '../../../domain/ports/deploy-source.port.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
+import { cloudRunInstanceBounds, assertCloudRunInstanceBounds } from './cloudrun-instance-bounds.js';
 import {
   CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION,
   CLOUD_RUN_SOURCE_COMMIT_ANNOTATION,
@@ -77,11 +83,16 @@ import {
 // Credentials schema for self-registration
 const CloudRunAuthenticationSchema = z.object({
   projectId: z.string().min(1, 'GCP Project ID is required'),
-  authMode: z.enum(['default', 'serviceAccount']).optional(),
+  authMode: z.enum(['default', 'serviceAccount', 'github-workload-identity']).optional(),
+  workloadIdentity: gcpGithubWorkloadIdentitySchema.optional(),
   credentials: z.string().min(1, 'Service account JSON is required').optional(),
   runtimeServiceAccountEmail: z.string().trim().email('Runtime service account email must be valid').optional(),
 }).strict().superRefine((value, context) => {
-  if (value.authMode === 'default' ? value.credentials !== undefined : !value.credentials) {
+  if (value.authMode === 'github-workload-identity') {
+    if (!value.workloadIdentity || value.workloadIdentity.projectId !== value.projectId || value.credentials !== undefined)
+      context.addIssue({ code: 'custom', path: ['workloadIdentity'], message: 'GitHub federation requires the exact nonsecret project identity and no private key.' });
+  } else if (value.workloadIdentity !== undefined) context.addIssue({ code: 'custom', path: ['workloadIdentity'], message: 'A workload identity requires its explicit authentication mode.' });
+  if (value.authMode !== 'github-workload-identity' && (value.authMode === 'default' ? value.credentials !== undefined : !value.credentials)) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['credentials'], message: value.authMode === 'default'
       ? 'Default authentication uses local ADC and cannot also contain a service account key.' : 'Service account JSON is required.' });
   }
@@ -165,6 +176,7 @@ interface CloudRunService {
   };
   template?: {
     labels?: Record<string, string>;
+    scaling?: { minInstanceCount?: number; maxInstanceCount?: number };
     containers?: CloudRunContainer[];
     volumes?: Array<Record<string, unknown>>;
     serviceAccount?: string;
@@ -525,14 +537,16 @@ export class CloudRunAdapter implements
   private tokenExpiry: Date | null = null;
   private transientAuthentication: GcpDeploymentAuthentication | null = null;
   private localDefaultAuthentication: GcpLocalDefaultAuthentication | null = null;
+  private githubWorkloadAuthentication: GcpGithubWorkloadAuthentication | null = null;
   private deploymentConnection: CloudDeploymentConnectionV1 | null = null;
   private deploymentSourceAuthorization: CloudDeploymentSourceAuthorizationV1 | undefined;
   private get deploymentEmail(): string | undefined {
-    return this.transientAuthentication?.authentication.principal.serviceAccountEmail ?? this.serviceAccountCreds?.client_email;
+    return this.transientAuthentication?.authentication.principal.serviceAccountEmail ?? this.githubWorkloadAuthentication?.principal.email ?? this.serviceAccountCreds?.client_email;
   }
   private request(input: string | URL | Request, init?: RequestInit): Promise<Response> {
     return this.transientAuthentication ? this.transientAuthentication.request(input, init)
-      : this.localDefaultAuthentication ? this.localDefaultAuthentication.request(input, init) : fetch(input, init);
+      : this.githubWorkloadAuthentication ? this.githubWorkloadAuthentication.request(input, init)
+        : this.localDefaultAuthentication ? this.localDefaultAuthentication.request(input, init) : fetch(input, init);
   }
   readonly serviceVolumes = new CloudRunServiceVolumes(() => {
     if (!this.credentials) throw new Error('Cloud Run filesystem requires a verified connection.');
@@ -548,6 +562,22 @@ export class CloudRunAdapter implements
     if (this.localDefaultAuthentication) return this.getAccessToken();
     return getGcpNativeAdminToken();
   }, (input, init) => this.request(input, init));
+
+  private readonly recoveryDependencies = {
+    connection: () => {
+      if (!this.credentials || (!this.deploymentEmail && !this.localDefaultAuthentication?.principal)) throw new Error('Cloud Run recovery requires a verified connection and native deployment identity.');
+      return { projectId: this.credentials.projectId, region: this.credentials.region, deployerEmail: this.deploymentEmail,
+        ...(this.localDefaultAuthentication ? { defaultAuthentication: true } : {}) };
+    },
+    token: () => this.getAccessToken(),
+    adminToken: async () => {
+      if (this.transientAuthentication) throw new Error('Recovery permissions require their separately reviewed cloud installation.');
+      if (this.localDefaultAuthentication) return this.getAccessToken();
+      return getGcpNativeAdminToken();
+    },
+    request: (input: string | URL | Request, init?: RequestInit) => this.request(input, init),
+  };
+  readonly recoveryRuntime = new CloudRunRecoveryRuntime(this.recoveryDependencies);
 
   private readonly installedRuntimeIdentities = new CloudRunInstalledRuntimeIdentities(() => {
     if (!this.deploymentConnection) throw new Error('Reviewed Google deployment installation is unavailable.');
@@ -579,6 +609,12 @@ export class CloudRunAdapter implements
       ? (credentials as Record<string, string>).region
       : DEFAULT_CLOUD_RUN_REGION;
     this.credentials = { ...parsed, region: CloudRunRegionSchema.parse(legacyRegion) };
+    if (parsed.authMode === 'github-workload-identity') {
+      const auth = new GcpGithubWorkloadAuthentication(parsed.workloadIdentity!);
+      try { await auth.initialize(); this.githubWorkloadAuthentication = auth; }
+      catch (error) { await this.disconnect(); throw error; }
+      return;
+    }
     if (parsed.authMode === 'default') {
       const auth = new GcpLocalDefaultAuthentication(parsed.projectId);
       try { await auth.initialize(); this.localDefaultAuthentication = auth; }
@@ -706,6 +742,7 @@ export class CloudRunAdapter implements
     this.tokenExpiry = null;
     this.transientAuthentication = null;
     this.localDefaultAuthentication = null;
+    this.githubWorkloadAuthentication = null;
     this.deploymentConnection = null;
     this.deploymentSourceAuthorization = undefined;
   }
@@ -758,10 +795,10 @@ export class CloudRunAdapter implements
 
     // Cloud Run doesn't have "projects" in the deployment sense
     // The GCP project is the container
-    const bindings = environment.platformBindings as {
-      projectId?: string;
-      provider?: string;
-    };
+    const bindings = parseHostingBindings(environment);
+    const retainedScope = bindings.providerScope;
+    const sameScope = retainedScope?.projectId === this.credentials.projectId
+      && retainedScope.region === this.credentials.region;
 
     const projectId = bindings.projectId || this.credentials.projectId;
     const data: Record<string, unknown> = {
@@ -771,6 +808,7 @@ export class CloudRunAdapter implements
       environmentId: this.credentials.region,
       providerBindings: {
         providerScope: {
+          ...(sameScope ? retainedScope : {}),
           projectId: this.credentials.projectId,
           region: this.credentials.region,
         },
@@ -851,7 +889,7 @@ export class CloudRunAdapter implements
             template: { ...prepared.configuration.template,
               ...(prepared.native.template?.labels ? { labels: prepared.native.template.labels } : {}),
               containers: [{ ...prepared.configuration.template.containers[0], image }] } };
-          const response = await this.request(`https://run.googleapis.com/v2/${resource}?updateMask=ingress,template`, {
+          const response = await this.request(`https://run.googleapis.com/v2/${resource}?updateMask=ingress,template${prepared.configuration.scaling ? ',scaling' : ''}`, {
             method: 'PATCH', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
           if (!response.ok) throw new Error();
           await this.waitForCloudRunOperation(token, await response.json() as CloudRunOperation, 'first application release', resource);
@@ -992,6 +1030,10 @@ export class CloudRunAdapter implements
       // Permission, transport, and server failures must not authorize a create.
       const cloudRunService = await this.getService(serviceName);
       const deploymentEtag = this.assertDeploymentServiceIdentity(environment, service, cloudRunService);
+      const instanceBounds = service.buildConfig.instanceBounds;
+      if (instanceBounds && cloudRunService && !cloudRunInstanceBounds(cloudRunService.scaling)) {
+        throw new Error('Manual Cloud Run scaling must be resolved before applying automatic instance bounds.');
+      }
       if (options.deferDeployment) {
         const freshDeferredProblem = this.deferredWorkloadProblem({
           expectedExisting: Boolean(serviceBinding?.serviceId),
@@ -1117,12 +1159,15 @@ export class CloudRunAdapter implements
       }
       const serviceSpec = {
         ...(deploymentEtag ? { etag: deploymentEtag } : {}),
+        ...(instanceBounds ? { scaling: { scalingMode: 'AUTOMATIC', minInstanceCount: instanceBounds.min, maxInstanceCount: instanceBounds.max } } : {}),
         labels,
         annotations,
         ingress: isWorker ? 'INGRESS_TRAFFIC_INTERNAL_ONLY' : 'INGRESS_TRAFFIC_ALL',
         template: {
           labels,
-          ...(isWorker ? { scaling: { minInstanceCount: 1 } } : {}),
+          ...(!instanceBounds && isWorker ? { scaling: { ...cloudRunService?.template?.scaling,
+            minInstanceCount: Math.max(1, cloudRunService?.template?.scaling?.minInstanceCount ?? 0) } }
+            : !instanceBounds && cloudRunService?.template?.scaling ? { scaling: cloudRunService.template.scaling } : {}),
           containers: [containerSpec],
           ...(templateVolumes && (templateVolumes.length > 0 || replaceManagedDatabaseVars)
             ? { volumes: templateVolumes }
@@ -1193,7 +1238,7 @@ export class CloudRunAdapter implements
 
       if (cloudRunService) {
         // Update existing service
-        const response = await this.request(`${baseUrl}/${serviceName}?updateMask=labels,annotations,ingress,template`, {
+        const response = await this.request(`${baseUrl}/${serviceName}?updateMask=labels,annotations,ingress,template${instanceBounds ? ',scaling' : ''}`, {
           method: 'PATCH',
           headers: {
             Authorization: `Bearer ${token}`,
@@ -1253,6 +1298,7 @@ export class CloudRunAdapter implements
           : undefined
       );
       this.assertVpcAccess(serviceInfo, vpcAccess, `Cloud Run service ${serviceName}`);
+      assertCloudRunInstanceBounds(serviceInfo?.scaling, instanceBounds);
       this.assertPreservedFilesystem(cloudRunService, serviceInfo);
       if (this.deploymentConnection && (!serviceInfo?.uid
         || serviceBinding?.resourceUid && serviceInfo.uid !== serviceBinding.resourceUid)) {
@@ -1878,6 +1924,7 @@ export class CloudRunAdapter implements
     if (identity.state === 'unknown' || identity.state === 'waiting') throw new Error();
     const configuration = gcpPreparedApplicationConfiguration({ workloadKind: kind, publicAccess: reviewed.public === true,
       serviceAccountEmail: transition.principal.serviceAccountEmail, envVars: this.runtimeEnvVarsForService(service, vars), secretVersionRefs: references,
+      instanceBounds: service.buildConfig.instanceBounds,
       startCommand: service.buildConfig.startCommand?.trim() || null, healthCheckPath: service.buildConfig.healthCheckPath?.trim() || null });
     if (gcpPreparedApplicationDigest(configuration) !== transition.configurationDigest) throw new Error();
     return { name: bound.serviceId, native: native!, transition, configuration };
@@ -2541,11 +2588,9 @@ export class CloudRunAdapter implements
     command: string,
     options?: EnvironmentTaskOptions
   ): Promise<JobResult> {
-    if (options?.managedRecoveryTask) return {
-      jobId: '', status: 'failed', receipt: { success: false,
-        message: 'The Cloud Run adapter does not implement managed recovery tasks.',
-        data: { applied: 0, skipped: 1, mutationAttempted: false } },
-    };
+    if (options?.managedRecoveryTask) return runCloudRunRecoveryTask({
+      dependencies: this.recoveryDependencies, runtime: this.recoveryRuntime, environment, command, options,
+    });
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }
@@ -3131,6 +3176,7 @@ export class CloudRunAdapter implements
       const healthCheckPath = container?.startupProbe?.httpGet?.path ?? container?.livenessProbe?.httpGet?.path;
       const releaseCommandHash = liveService.annotations?.[CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION];
       const cacheNetwork = this.normalizedVpcAccess(this.serviceVpcAccess(liveService));
+      const instanceBounds = cloudRunInstanceBounds(liveService.scaling);
       let publicAccess: boolean | undefined;
       try {
         publicAccess = await this.observePublicInvoker(externalId, token);
@@ -3161,6 +3207,7 @@ export class CloudRunAdapter implements
             }
           : {}),
         config: {
+          ...(instanceBounds ? { instanceBounds } : {}),
           ...(startCommand ? { startCommand } : {}),
           ...(releaseCommandHash ? { releaseCommandHash } : {}),
           ...(healthCheckPath ? { healthCheckPath } : {}),
@@ -5357,6 +5404,7 @@ export class CloudRunAdapter implements
 
   private async getAccessToken(): Promise<string> {
     if (this.transientAuthentication) return this.transientAuthentication.token();
+    if (this.githubWorkloadAuthentication) return this.githubWorkloadAuthentication.token();
     if (this.localDefaultAuthentication) return this.localDefaultAuthentication.token();
     if (this.accessToken && this.tokenExpiry && new Date() < this.tokenExpiry) {
       return this.accessToken;
@@ -6807,6 +6855,7 @@ export class CloudRunAdapter implements
 
 // Self-register with provider registry
 providerRegistry.register({
+  artifactPublication: createGcpOperatorArtifactCapability(),
   localScopePreparation: createGcpLocalProjectAllocationCapability(),
   transientAuthentication: {
     provider: 'gcp', hostingProvider: 'cloudrun', parseScope: value => gcpDeploymentScopeSchema.parse(value), parsePreparedResources: parseGcpPreparedResources,
@@ -6822,6 +6871,7 @@ providerRegistry.register({
     credentialsSchema: CloudRunCredentialsSchema,
     setupHelpUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
     credentials: {
+      automationAuthentication: gcpGithubRecoveryAuthentication,
       agentManagedKeys: ['runtimeServiceAccountEmail'],
     },
     maturity: {
@@ -6836,8 +6886,11 @@ providerRegistry.register({
     lifecycle: {
       hosting: {
         workloadKinds: ['web', 'worker', 'cron'],
+        instanceBounds: 'service-wide',
         preparedResources: 'installer-receipt-v1',
         runtimeIdentityTiming: 'before-workload',
+        recoveryRuntime: { databaseProviders: ['cloudsql'], storageProviders: ['gcs'], status: 'ready-for-live' },
+        recoveryTasks: { variableMode: 'references', execution: 'temporary-workload', status: 'ready-for-live', databaseProviders: ['cloudsql'] },
         serviceVolumes: { workloadKinds: ['web', 'worker'], retention: 'retain-only', attachmentTiming: 'service-update' },
         customDomains: 'managed',
         domainTrafficProxy: 'dns-only',
@@ -6856,6 +6909,7 @@ providerRegistry.register({
       },
       ci: {
         displayName: 'Cloud Run',
+        boundAuthentication: gcpGithubCiBoundAuthentication,
         transientDeployment: 'github-oidc-broker-v1',
         rendererRevision: 2,
         requiredSecrets: CLOUDRUN_CI_REQUIRED_SECRETS,

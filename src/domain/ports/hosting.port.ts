@@ -71,6 +71,8 @@ export interface ManagedRecoveryTaskOptions {
   expectedImage: string;
   executionId: string;
   databaseSource: import('./recovery-source.port.js').RecoverySourceIdentity;
+  /** Provider-owned prepared identity, network and exact private credential reference. */
+  executionTarget?: import('./recovery-runtime.port.js').RecoveryRuntimeExecutionTarget;
   variableReferences: Array<{ sourceServiceId: string; variableName: string; targetName: string }>;
   /** Non-secret reviewed worker configuration; never application environment. */
   variables: Record<string, string>;
@@ -358,6 +360,7 @@ export function parseHostingBindings(
  * Hosting adapters handle deploying services to cloud platforms.
  */
 export interface IHostingAdapter {
+  readonly recoveryRuntime?: import('./recovery-runtime.port.js').IRecoveryRuntime;
   readonly preparedHosting?: import('./hosting-prepared.port.js').IPreparedHosting;
   readonly runtimeIdentities?: import('./runtime-identity.port.js').IRuntimeIdentities;
   readonly serviceVolumes?: import('./service-volume.port.js').IServiceVolumes;

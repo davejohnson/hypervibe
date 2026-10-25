@@ -26,6 +26,8 @@ const RESERVED_PROVIDER_BINDINGS = new Set([
   'previousHosting',
   'maintenance',
   'runtimeRollouts',
+  'recoveryRuntime',
+  'recoveryRuntimeSecretInputs',
 ]);
 
 function sameScope(left: ProviderScope | undefined, right: ProviderScope | undefined): boolean {
@@ -118,6 +120,9 @@ export function prepareHostingBindingTransition(params: {
 
   if (!resetActiveScope) return { ok: true, changed: false, patch };
 
+  if (params.current.recoveryRuntime !== undefined || params.current.recoveryRuntimeSecretInputs !== undefined) {
+    return { ok: false, error: 'Retained backup recovery authority blocks hosting scope changes. Reconcile that exact authority before replacing its provider scope.' };
+  }
   if (current.maintenance !== undefined) {
     return {
       ok: false,

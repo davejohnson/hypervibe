@@ -25,6 +25,7 @@ export interface BranchDeployReleaseResource {
 
 /** Exact reviewed runtime configuration for one provider-bound workload. */
 export interface BranchDeployRuntimeResource extends BranchDeployReleaseResource {
+  instanceBounds?: { min: number; max: number };
   /** Provider-confirmed lifetime identity, retained independently of bootstrap state. */
   providerResourceUid?: string;
   startCommand: string | null;
@@ -44,6 +45,8 @@ export interface BranchDeployReleaseTarget {
 
 export interface BranchDeployTarget {
   deploymentAccess?: CloudDeploymentCiAccessV1;
+  /** Provider-validated nonsecret access descriptor from its reviewed local lifecycle. */
+  nativeAuthentication?: Record<string, unknown>;
   /** First rollout uses committed nonsecret settings and the reviewed local
    * preparation journal. Collected values remain immutable provider references. */
   preparedRuntime?: {
@@ -153,6 +156,11 @@ export interface CiWorkflowDiagnostic {
 
 export interface ProviderCiDeployMetadata {
   displayName: string;
+  /** A registered provider owns parsing and exact-scope validation of this binding. */
+  boundAuthentication?: {
+    bindingKey: string;
+    parse(value: unknown, context: { environment: string; branch: string; providerProjectId?: string; repository?: string | null }): Record<string, unknown>;
+  };
   /** Explicit emitted identity protocol; absence cannot fall back to copied cloud credentials. */
   transientDeployment?: 'github-oidc-broker-v1';
   /** Opt-in migration of accepted GitHub workflow inputs for this provider only. */

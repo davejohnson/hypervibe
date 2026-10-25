@@ -1,3 +1,4 @@
+import { applyRecoveryRuntimeAction } from '../domain/services/recovery-runtime.service.js';
 import { applyRuntimeAccessAction, observeRuntimeAccess, planRuntimeAccess, projectRuntimeAccessInput } from '../domain/services/runtime-access.service.js';
 import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from '../domain/services/database-credential-aliases.service.js';
 import { applySecretContainer, assertReadySecretContainers } from '../domain/services/secret-container-setup.js';
@@ -33,6 +34,7 @@ import {
 } from '../domain/spec/spec-bootstrap.js';
 import { executeBootstrap } from '../domain/services/bootstrap.service.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
+import { applyOperatorArtifacts } from '../domain/services/operator-artifact.service.js';
 import { applyLocalCloudScope } from '../domain/services/local-cloud-scope.service.js';
 import { isDeepStrictEqual } from 'node:util';
 import {
@@ -825,12 +827,27 @@ export async function executePlanApply(ctx: CommandContext, params: {
     // A historical allocation may need recovery after the current provider
     // changes. This routing hint permits parsing only, never action authority.
     const saved = ctx.repos.runs.findById(planId);
-    if (saved?.type !== 'plan' || saved.projectId !== project.id || asRecord(saved.plan)?.scope !== 'cloud-scope')
+    if (saved?.type !== 'plan' || saved.projectId !== project.id || !['cloud-scope', 'operator-artifacts'].includes(String(asRecord(saved.plan)?.scope)))
       return invalidSpec;
   }
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(planId);
   if ('error' in loaded) return { kind: 'plan_not_found', error: loaded.error };
+  if (loaded.document.scope === 'operator-artifacts') {
+    const envName = loaded.document.environmentName;
+    const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap)
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'Operator publication requires its exact saved application/environment and cannot deploy workloads.' }] };
+    const unchangedPlan = () => isDeepStrictEqual(ctx.repos.runs.findById(planId)?.plan, loaded.run.plan);
+    if (!loaded.document.actions.length) {
+      const verified = await applyOperatorArtifacts({ project, environment, artifactPublication: loaded.document.artifactPublication, authorize: unchangedPlan });
+      if (!verified.success) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: verified.message }] };
+    }
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
+      handler: (action, execution) => applyOperatorArtifacts({ project, environment, artifactPublication: loaded.document.artifactPublication, action,
+        authorize: () => ctx.repos.runs.findById(execution.applyRunId)?.status === 'running' && unchangedPlan() }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Only the exact reviewed operator target, artifact and public-read actions were authorized.'] };
+  }
   if (loaded.document.scope === 'cloud-scope') {
     const envName = loaded.document.environmentName;
     const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
@@ -844,7 +861,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
       handler: (action, execution) => applyLocalCloudScope({ project, environment, cloudScope: loaded.document.cloudScope, action,
         authorize: () => ctx.repos.runs.findById(execution.applyRunId)?.status === 'running' && unchangedPlan() }) });
-    return { kind: 'executed', envName, result, actionScopedWarnings: ['Only empty cloud project allocation was reviewed. Billing, API enablement, connections and hosting remain separate work.'] };
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Only the exact saved cloud preparation actions were reviewed. Later billing, API, identity, connection or hosting stages require their own current plan.'] };
   }
   if (invalidSpec) return invalidSpec;
   const planService = new PlanService();
@@ -1408,6 +1425,17 @@ export async function executePlanApply(ctx: CommandContext, params: {
     const servicesComplete = observed && (observed.completeness?.services === 'complete'
       || observed.completeness?.services === undefined && observed.partial === false);
     const observedServiceIds = observed?.services.filter(service => service.externalId === boundService?.serviceId) ?? [];
+    const desiredInstanceBounds = envSpec.services[action.resource.name]?.instanceBounds;
+    if (capability === 'hosting.service.converge' && action.type === 'update' && desiredInstanceBounds
+      && action.metadata?.workloadCreateRequired !== true) {
+      const actual = observedServiceIds.length === 1 ? observedServiceIds[0].config.instanceBounds : undefined;
+      if (!servicesComplete || !actual) return { success: false, status: 'blocked',
+        message: 'Exact native service instance bounds are unknown; re-plan before changing capacity.' };
+      if ((actual.min !== desiredInstanceBounds.min || actual.max !== desiredInstanceBounds.max)
+        && (action.requiresConfirm !== true || action.billable !== true || !confirmedActionIds.has(action.id))) {
+        return { success: false, status: 'blocked', message: 'Changing service instance bounds requires the persisted billable confirmation and exact confirmed action ID.' };
+      }
+    }
     const deferredIdentityCreation = isDeferredIdentityCandidate(action) && servicesComplete
       && (action.type === 'create' && !boundService?.serviceId && !action.metadata?.externalId
           && observed?.services.some(service => service.name === action.resource.name) === false
@@ -1427,6 +1455,12 @@ export async function executePlanApply(ctx: CommandContext, params: {
       }
     }
 
+    if (capability === 'hosting.recovery-runtime.mutate') {
+      return applyRecoveryRuntimeAction({ context: { project: applyProject, environment: volumeEnvironment, spec: envSpec,
+        components: volumeEnvironment ? ctx.repos.components.findByEnvironmentId(volumeEnvironment.id) : [], adapterFactory },
+        action, confirmedActionIds, save: (patch) => { if (!volumeEnvironment || !ctx.repos.environments.updatePlatformBindings(volumeEnvironment.id, { ...patch })) throw new Error('Backup preparation intent was not persisted.'); },
+      });
+    }
     if (capability === 'hosting.runtime-identity.mutate' || capability === 'storage.runtime-access.mutate') {
       return applyRuntimeAccessAction({ ...await projectRuntimeAccessInput(applyProject, volumeEnvironment, envSpec), action, confirmedActionIds,
         save: (bindings) => { if (!volumeEnvironment || !ctx.repos.environments.updatePlatformBindings(volumeEnvironment.id, bindings)) throw new Error('Runtime access intent was not persisted.'); },
@@ -3835,7 +3869,7 @@ async function destroyDatabase(
     };
   }
 
-  const adapterResult = await adapterFactory.getDatabaseAdapter(action.resource.provider, project);
+  const adapterResult = await adapterFactory.getDatabaseAdapter(action.resource.provider, project, environment.name);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: 'Database adapter unavailable', error: adapterResult.error };
   }
@@ -3995,7 +4029,7 @@ async function destroyRetainedDatabase(
     }
   }
 
-  const adapterResult = await adapterFactory.getDatabaseAdapter(provider, project);
+  const adapterResult = await adapterFactory.getDatabaseAdapter(provider, project, environment.name);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, status: 'blocked', message: 'Retained database adapter unavailable', error: adapterResult.error };
   }
@@ -4506,7 +4540,7 @@ async function createDatabase(
     };
   }
 
-  const adapterResult = await adapterFactory.getDatabaseAdapter(action.resource.provider, project);
+  const adapterResult = await adapterFactory.getDatabaseAdapter(action.resource.provider, project, environment.name);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: 'Database adapter unavailable', error: adapterResult.error };
   }

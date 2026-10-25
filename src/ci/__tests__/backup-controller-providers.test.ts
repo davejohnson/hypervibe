@@ -21,6 +21,13 @@ const cases: Array<{ provider: string; mapping: Record<string, string>; secrets:
 ];
 
 describe('packaged backup controller provider and credential boundary', () => {
+  it('registers the native Cloud Run and Cloud SQL recovery path in the isolated controller', async () => {
+    await import('../backup-controller.js');
+    const { providerRegistry } = await import('../../domain/registry/provider.registry.js');
+    expect(providerRegistry.getMetadata('cloudrun')?.lifecycle?.hosting?.recoveryTasks?.databaseProviders).toEqual(['cloudsql']);
+    expect(providerRegistry.getMetadata('cloudsql')?.credentials?.automationSecretKeys).toEqual({ GCP_SERVICE_ACCOUNT_JSON: 'credentials', GCP_PROJECT_ID: 'projectId' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it.each(cases)('registers $provider and constructs its existing adapter from only mapped CI credentials', async ({ provider, mapping, secrets }) => {
     await import('../backup-controller.js');
     const { providerRegistry } = await import('../../domain/registry/provider.registry.js');

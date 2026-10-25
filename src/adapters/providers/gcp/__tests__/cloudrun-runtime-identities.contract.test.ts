@@ -129,6 +129,41 @@ async function prepare(f: ReturnType<typeof fixture>, input: RuntimeIdentityRequ
 }
 
 describe('Cloud Run service-owned runtime identities', () => {
+  it.each([false, true])('reviews CI actAs separately from local caller authority and blocks replaced CI identity=%s', async replaced => {
+    const f = fixture(); const prepared = await prepare(f, request);
+    const ci = { schemaVersion: 1, projectId, projectNumber: '123456789012',
+      workloadIdentityProvider: 'projects/123456789012/locations/global/workloadIdentityPools/hv-ci-test/providers/github',
+      serviceAccountEmail: `ci-deployer@${projectId}.iam.gserviceaccount.com`, serviceAccountUniqueId: '222222222222222222222',
+      repository: 'synthetic-owner/app', repositoryId: '123456789', repositoryOwnerId: '987654321', branch: 'main',
+      environment: 'production', workflow: '.github/workflows/deploy-cloudrun-production.yml' };
+    let replace = false;
+    const original = f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async (url, init) => {
+      if (String(url).endsWith(':testIamPermissions')) return Response.json({ permissions: ['iam.serviceAccounts.actAs'] });
+      if (String(url).endsWith(`/serviceAccounts/${ci.serviceAccountUniqueId}`)) return Response.json({
+        name: `projects/${projectId}/serviceAccounts/${ci.serviceAccountEmail}`, email: ci.serviceAccountEmail, projectId,
+        uniqueId: replace ? '333333333333333333333' : ci.serviceAccountUniqueId, disabled: false });
+      return original(url, init);
+    });
+    const local = new CloudRunRuntimeIdentities(() => ({ projectId, region: 'us-central1', defaultAuthentication: true }),
+      async () => 'synthetic-access-token', (_env, name, boundId) => boundId ?? name, async () => 'synthetic-native-token');
+    const input = { ...request, binding: prepared.binding, environment: { ...request.environment,
+      platformBindings: { ...request.environment.platformBindings, gcpGithubWorkloadIdentity: JSON.stringify(ci) } } };
+    const next = await local.inspect(input);
+    expect(next).toMatchObject({ state: 'action', step: { operation: 'attach', target: { ciServiceAccountEmail: ci.serviceAccountEmail,
+      ciServiceAccountUniqueId: ci.serviceAccountUniqueId } } });
+    if (next.state !== 'action') throw new Error('missing separately reviewed CI access');
+    replace = replaced; const before = f.writes.length;
+    const result = await apply(local, { ...input, step: next.step, attemptId: 'ci-act-as' });
+    if (replaced) { expect(result.receipt.success).toBe(false); expect(f.writes).toHaveLength(before); }
+    else {
+      expect(result.receipt.success).toBe(true); expect(f.writes).toHaveLength(before + 1);
+      expect(f.writes.at(-1)!.body.policy.bindings).toContainEqual({ role: 'roles/iam.serviceAccountUser',
+        members: [`serviceAccount:${deployEmail}`, `serviceAccount:${ci.serviceAccountEmail}`] });
+      expect(await local.inspect({ ...input, binding: result.binding })).toMatchObject({ state: 'ready' });
+      expect(f.writes).toHaveLength(before + 1);
+    }
+  });
   // Secret Manager metadata and etag policy shapes are reconstructed from:
   // docs.cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets
   // docs.cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets.versions/get

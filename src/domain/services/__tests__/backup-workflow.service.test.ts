@@ -10,9 +10,10 @@ import { compileBackupWorkflow } from '../backup-workflow.service.js';
 
 const image = `ghcr.io/example/hypervibe-backup@sha256:${'a'.repeat(64)}`;
 const contract = { version: 1, environment: 'staging', runnerImage: image };
-function compiled() {
+function compiled(federated = false) {
+  const selectedContract = federated ? { ...contract, automation: { example: { credentials: JSON.stringify({ authMode: 'workload', projectId: 'test-project' }), environmentKeys: ['ACTIONS_ID_TOKEN_REQUEST_URL', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN'], oidc: true } } } : contract;
   const files = compileBackupWorkflow({ project: 'example', environment: 'staging', runnerImage: image,
-    contractHash: canonicalJsonSha256(contract), providerCredentialNames: ['RAILWAY_API_TOKEN'], contract });
+    contractHash: canonicalJsonSha256(selectedContract), providerCredentialNames: federated ? [] : ['RAILWAY_API_TOKEN'], contract: selectedContract });
   return { files, workflow: parse(files.find(file => file.path.endsWith('.yml'))!.content) };
 }
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...args: string[]) => (...args: unknown[]) => Promise<unknown>;
@@ -32,8 +33,9 @@ describe('managed backup workflow', () => {
     expect(JSON.parse(files.find(file => file.path.endsWith('.json'))!.content)).toEqual(contract);
   });
 
-  it('executes the emitted Docker boundary with only named credentials and blocks repeated backup attempts', () => {
-    const { workflow } = compiled();
+  it.each([false, true])('executes the emitted Docker boundary with named credentials or reviewed OIDC and blocks repeated backup attempts: %s', federated => {
+    const { workflow } = compiled(federated);
+    expect(workflow.jobs.backup.permissions['id-token']).toBe(federated ? 'write' : undefined);
     const step = workflow.jobs.backup.steps.find((entry: { name?: string }) => entry.name === 'Run managed backup controller');
     const directory = mkdtempSync(join(tmpdir(), 'hv-backup-workflow-'));
     try {
@@ -53,7 +55,11 @@ describe('managed backup workflow', () => {
       expect(operation).toBe('backup');
       expect(args).toContain(image);
       expect(args).toContain('/opt/hypervibe/dist/ci/backup-controller.js');
-      expect(args).toContain('RAILWAY_API_TOKEN');
+      if (federated) {
+        expect(args).toContain('ACTIONS_ID_TOKEN_REQUEST_URL');
+        expect(args).toContain('ACTIONS_ID_TOKEN_REQUEST_TOKEN');
+        expect(args).not.toContain('RAILWAY_API_TOKEN');
+      } else expect(args).toContain('RAILWAY_API_TOKEN');
       expect(args).not.toContain('UNRELATED_APP_SECRET');
       expect(JSON.stringify(args)).not.toContain('provider-secret');
       expect(args.some(arg => arg.includes('/input/contract.json,readonly'))).toBe(true);

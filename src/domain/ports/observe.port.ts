@@ -35,6 +35,8 @@ export interface ObservedService {
     }>;
   }>;
   config: {
+    /** Native automatic service bounds; zero max means no service-level limit. */
+    instanceBounds?: { min: number; max: number };
     startCommand?: string;
     releaseCommand?: string;
     /** Provider-observed sha256 marker for release commands that must not be exposed in metadata. */

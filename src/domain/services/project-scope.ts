@@ -4,7 +4,12 @@ import type { Project } from '../entities/project.entity.js';
  * Build ordered scope hints from a project's git remote.
  * Most-specific first, so connection lookup can try exact then fallback.
  */
-export function getProjectScopeHints(project: Project): string[] {
+export function environmentConnectionScope(repository: string, environment: string): string {
+  if (!repository || !environment || repository.includes('#')) throw new Error('An exact repository and environment are required.');
+  return `${repository}#environment=${encodeURIComponent(environment)}`;
+}
+
+export function getProjectScopeHints(project: Project, environment?: string): string[] {
   if (!project.gitRemoteUrl) {
     return [];
   }
@@ -16,6 +21,7 @@ export function getProjectScopeHints(project: Project): string[] {
 
   const hints: string[] = [];
   const fullScope = `${parsed.host}/${parsed.path}`;
+  if (environment) hints.push(environmentConnectionScope(fullScope, environment));
   hints.push(fullScope);
 
   const pathParts = parsed.path.split('/').filter(Boolean);

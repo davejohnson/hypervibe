@@ -8,7 +8,7 @@ import { supportsDatabaseLifecycle, type IDatabaseAdapter } from '../ports/datab
 import { supportsCacheLifecycle, type ICacheAdapter } from '../ports/cache.port.js';
 import { supportsStorageLifecycle, type IStorageAdapter } from '../ports/storage.port.js';
 import { supportsLoadBalancer, type ILoadBalancerAdapter } from '../ports/load-balancer.port.js';
-import { getProjectScopeHints } from './project-scope.js';
+import { environmentConnectionScope, getProjectScopeHints } from './project-scope.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import { resolveDeploymentAdapter } from '../../adapters/cloud/deployment-access.client.js';
 
@@ -74,17 +74,18 @@ export class AdapterFactory {
    */
   async getDatabaseAdapter(
     providerName: string,
-    project?: Project
+    project?: Project,
+    environment?: string
   ): Promise<AdapterResult<IDatabaseAdapter>> {
     const maturityBlock = this.lifecycleMutationBlock<IDatabaseAdapter>(providerName, 'database');
     if (maturityBlock) return maturityBlock;
     const provider = providerRegistry.get(providerName);
     const result = provider?.derivedAdapters?.database
-      ? await this.getDerivedAdapter<IDatabaseAdapter>(providerName, 'database', project)
+      ? await this.getDerivedAdapter<IDatabaseAdapter>(providerName, 'database', project, environment)
       : await this.getAdapter<IDatabaseAdapter>(
           providerName,
           'database',
-          project ? getProjectScopeHints(project) : undefined
+          project ? getProjectScopeHints(project) : undefined, environment
         );
     return this.requireLifecyclePort(result, supportsDatabaseLifecycle, providerName, 'database');
   }
@@ -106,13 +107,13 @@ export class AdapterFactory {
     return this.requireLifecyclePort(result, supportsCacheLifecycle, providerName, 'cache');
   }
 
-  async getStorageAdapter(providerName: string, project?: Project): Promise<AdapterResult<IStorageAdapter>> {
+  async getStorageAdapter(providerName: string, project?: Project, environment?: string): Promise<AdapterResult<IStorageAdapter>> {
     const maturityBlock = this.lifecycleMutationBlock<IStorageAdapter>(providerName, 'storage');
     if (maturityBlock) return maturityBlock;
     const provider = providerRegistry.get(providerName);
     const result = provider?.derivedAdapters?.storage
-      ? await this.getDerivedAdapter<IStorageAdapter>(providerName, 'storage', project)
-      : await this.getAdapter<IStorageAdapter>(providerName, 'storage', project ? getProjectScopeHints(project) : undefined);
+      ? await this.getDerivedAdapter<IStorageAdapter>(providerName, 'storage', project, environment)
+      : await this.getAdapter<IStorageAdapter>(providerName, 'storage', project ? getProjectScopeHints(project) : undefined, environment);
     return this.requireLifecyclePort(result, supportsStorageLifecycle, providerName, 'storage');
   }
 
@@ -247,6 +248,9 @@ export class AdapterFactory {
       }
     }
 
+    // Environment-scoped operator metadata is never selected without explicit context.
+    if (environment && scopeHints?.[0] && !scopeHints[0].includes('#environment='))
+      scopeHints = [environmentConnectionScope(scopeHints[0], environment), ...scopeHints];
     // Look up connection
     const connectionCandidates = providerRegistry.connectionProviders(providerName)
       .map((connectionProvider) => this.connectionRepo.findBestMatchFromHints(connectionProvider, scopeHints))
@@ -284,7 +288,8 @@ export class AdapterFactory {
   private async getDerivedAdapter<T>(
     providerName: string,
     capability: 'database' | 'cache' | 'storage',
-    project?: Project
+    project?: Project,
+    environment?: string
   ): Promise<AdapterResult<T>> {
     const provider = providerRegistry.get(providerName);
     const derive = provider?.derivedAdapters?.[capability];
@@ -294,7 +299,7 @@ export class AdapterFactory {
     const base = await this.getAdapter<IProviderAdapter>(
       providerName,
       provider.metadata.category,
-      project ? getProjectScopeHints(project) : undefined
+      project ? getProjectScopeHints(project) : undefined, environment
     );
     if (!base.success || !base.adapter) {
       return { success: false, error: base.error || `No ${providerName} adapter available` };

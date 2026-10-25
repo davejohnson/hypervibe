@@ -10,6 +10,9 @@ import { SpecStore } from '../../domain/spec/spec.store.js';
 import { PlanService } from '../../domain/plan/plan.service.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
+import { localCloudScopeRequired } from '../../domain/services/local-cloud-scope.service.js';
+import { providerRegistry } from '../../domain/registry/provider.registry.js';
+import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { CommandRegistry } from '../commands.js';
 import { registerCoreTools } from '../../tools/core.tools.js';
 
@@ -287,4 +290,203 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       const full = await registry.execute('hv_plan', { project: f.project.name, env: 'staging', scope: 'full' });
       expect(full).toMatchObject({ ok: true, data: { scope: 'cloud-scope', actions: [expect.objectContaining({ id: 'gcp:project' })] } });
     });
+  it.each(['normal', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-lost-ack', 'public-registry', 'public-grant-lost-ack', 'github-ci-public-registry'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
+    const f = fixture(); const allocated = await f.plan(); if ('error' in allocated) throw new Error(allocated.error);
+    expect(await f.apply(allocated.planRunId)).toMatchObject({ kind: 'executed', result: { success: true } });
+    const desired = structuredClone(f.desired) as any;
+    desired.environments.staging.hosting.scopePreparation.continuation = { nativeScope: { scopeKind: 'operator-hosting-v1', billingAccountName: 'billingAccounts/ABCDEF-123456-789ABC' } };
+    f.store.replace(f.project, desired);
+    const github = scenario.startsWith('github-ci');
+    const publicImages = scenario.includes('public-');
+    if (publicImages) { desired.environments.staging.hosting.scopePreparation.continuation.nativeScope.publicArtifactRepository = 'operator-public'; f.store.replace(f.project, desired); }
+    if (github) {
+      Object.assign(desired.environments.staging.hosting.scopePreparation.continuation.nativeScope, { githubRepository: 'acme/operator-host',
+        githubRepositoryId: '123456789', githubRepositoryOwnerId: '987654321', githubBranch: 'main',
+        githubWorkflow: '.github/workflows/deploy-cloudrun-staging.yml', githubBackupWorkflow: '.github/workflows/hypervibe-backup-staging.yml' });
+      f.store.replace(f.project, desired);
+    }
+    const native = new Map<string, any>(), operations = new Map<string, any>(); let lostCiAck = false;
+    const unrelated = { role: 'roles/viewer', members: ['user:unrelated@example.invalid'], condition: { title: 'retained', expression: 'true' } };
+    const projectPolicy = { version: 3, etag: 'project-etag', bindings: [unrelated] } as any;
+    const accountPolicy = { version: 3, etag: 'account-etag', bindings: [] } as any;
+    const registryPolicy = { version: 3, etag: 'registry-etag', bindings: [unrelated] } as any;
+    const publicPolicy = { version: 3, etag: 'public-etag', bindings: [unrelated] } as any;
+    const registries = new Map<string, Record<string, unknown>>(); let lostPublicAck = false;
+    const base = f.request.getMockImplementation()!; let billing = false; let apis = false; const writes: string[] = [];
+    f.request.mockImplementation(async (input, init) => {
+      const url = new URL(String(input)); const method = init?.method ?? 'GET';
+      if (url.pathname.endsWith(':testIamPermissions')) return Response.json({ permissions: ['billing.accounts.get', 'billing.resourceAssociations.create',
+        'resourcemanager.projects.get', 'resourcemanager.projects.createBillingAssignment', 'serviceusage.services.list',
+        'serviceusage.effectivepolicy.get', 'serviceusage.services.get', 'serviceusage.services.enable',
+        'artifactregistry.repositories.get', 'artifactregistry.repositories.create', 'artifactregistry.repositories.setIamPolicy', 'artifactregistry.repositories.getIamPolicy',
+        'iam.workloadIdentityPools.create', 'iam.workloadIdentityPoolProviders.create', 'iam.serviceAccounts.create', 'iam.serviceAccounts.setIamPolicy',
+        'iam.roles.create', 'resourcemanager.projects.setIamPolicy'] });
+      if (url.pathname.endsWith(':getIamPolicy')) return Response.json(url.host === 'iam.googleapis.com' ? accountPolicy
+        : url.host === 'artifactregistry.googleapis.com' ? (url.pathname.includes('/operator-public:') ? publicPolicy : registryPolicy) : projectPolicy);
+      if (url.pathname.endsWith(':setIamPolicy')) {
+        const target = url.host === 'iam.googleapis.com' ? accountPolicy : url.host === 'artifactregistry.googleapis.com' ? (url.pathname.includes('/operator-public:') ? publicPolicy : registryPolicy) : projectPolicy;
+        const body = JSON.parse(String(init?.body)); expect(body.policy.etag).toBe(target.etag);
+        Object.assign(target, body.policy, { etag: target.etag + '-next' }); writes.push(target === publicPolicy ? 'public-iam-policy' : 'iam-policy');
+        if (target === publicPolicy && scenario === 'public-grant-lost-ack' && !lostPublicAck) { lostPublicAck = true; throw new Error('synthetic lost public policy acknowledgment'); }
+        return Response.json(target);
+      }
+      if (url.host === 'iam.googleapis.com') {
+        const name = url.pathname.replace('/v1/', '');
+        if (method !== 'POST') return Response.json(operations.get(name) ?? native.get(name) ?? {}, { status: operations.has(name) || native.has(name) ? 200 : 404 });
+        const body = JSON.parse(String(init?.body)); writes.push('ci-identity');
+        if (name.endsWith('/workloadIdentityPools') || name.endsWith('/providers')) {
+          const id = url.searchParams.get('workloadIdentityPoolId') ?? url.searchParams.get('workloadIdentityPoolProviderId');
+          const resource = `${name}/${id}`, operation = `${resource}/operations/synthetic-operation`;
+          native.set(resource, { ...body, name: resource, state: 'ACTIVE' }); operations.set(operation, { name: operation, done: true });
+          if (!lostCiAck && scenario === 'github-ci-lost-ack' && name.endsWith('/workloadIdentityPools')) { lostCiAck = true; throw new Error(`lost WIF acknowledgment ${token}`); }
+          return Response.json({ name: operation, done: false });
+        }
+        if (name.endsWith('/serviceAccounts')) {
+          const email = `${body.accountId}@${nativeId}.iam.gserviceaccount.com`, resource = `${name}/${email}`;
+          const account = { ...body.serviceAccount, name: resource, email, projectId: nativeId, uniqueId: '123456789012345678901', disabled: false };
+          native.set(resource, account); return Response.json(account);
+        }
+        if (name.endsWith('/roles')) { const role = { ...body.role, name: `${name}/${body.roleId}` }; native.set(role.name, role); return Response.json(role); }
+        throw new Error('Unexpected reconstructed CI identity mutation');
+      }
+      if (url.host === 'cloudbilling.googleapis.com') {
+        if (url.pathname === '/v1/billingAccounts/ABCDEF-123456-789ABC') return Response.json({ name: 'billingAccounts/ABCDEF-123456-789ABC', open: true });
+        if (method === 'PUT') { expect(JSON.parse(String(init?.body))).toEqual({ billingAccountName: 'billingAccounts/ABCDEF-123456-789ABC' }); billing = true; writes.push('billing'); }
+        return Response.json({ name: `projects/${nativeId}/billingInfo`, projectId: nativeId, billingAccountName: billing ? 'billingAccounts/ABCDEF-123456-789ABC' : '', billingEnabled: billing });
+      }
+      if (url.host === 'serviceusage.googleapis.com') {
+        if (method === 'POST') { expect(url.pathname).toBe(`/v1/projects/${number}/services:batchEnable`); apis = true; writes.push('apis'); if (scenario === 'lost-api-ack') throw new Error(`Lost acknowledgment ${token}`); return Response.json({ name: 'operations/acf.synthetic' }); }
+        if (scenario === 'unknown-api-state') return Response.json({}, { status: 403 });
+        return Response.json({ name: url.pathname.replace('/v1/', ''), state: apis ? 'ENABLED' : 'DISABLED' });
+      }
+      if (url.host === 'artifactregistry.googleapis.com') {
+        if (method === 'POST') {
+          const id = url.searchParams.get('repositoryId'); expect(['hypervibe', 'operator-public']).toContain(id);
+          const name = `projects/${nativeId}/locations/us-central1/repositories/${id}`;
+          const registry = { name, ...JSON.parse(String(init?.body)), createTime: id === 'hypervibe' ? '2026-10-25T08:30:00Z' : '2026-10-25T08:35:00Z' };
+          registries.set(name, registry); writes.push('registry');
+          const operation = `projects/${nativeId}/locations/us-central1/operations/registry-${id}`;
+          operations.set(operation, { name: operation, done: true, response: { '@type': 'type.googleapis.com/google.devtools.artifactregistry.v1.Repository', ...registry } });
+          return Response.json({ name: operation });
+        }
+        const name = url.pathname.replace('/v1/', '');
+        if (url.pathname.includes('/operations/')) return Response.json(operations.get(name));
+        return registries.has(name) ? Response.json(registries.get(name)) : Response.json({}, { status: 404 });
+      }
+      return base(input, init);
+    });
+    const billingPlan = await f.plan(); if ('error' in billingPlan) throw new Error(billingPlan.error);
+    expect(billingPlan.actions.map(action => action.id)).toEqual(['gcp:billing:initial-assignment-v1']);
+    expect(writes).toEqual([]);
+    expect(await f.apply(billingPlan.planRunId, ['gcp:billing:initial-assignment-v1'])).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(writes).toEqual(['billing']);
+    if (scenario === 'changed-billing-selection') {
+      desired.environments.staging.hosting.scopePreparation.continuation.nativeScope.billingAccountName = 'billingAccounts/111111-222222-333333';
+      f.store.replace(f.project, desired);
+    }
+    const apiPlan = await f.plan();
+    if (['unknown-api-state', 'changed-billing-selection'].includes(scenario)) {
+      expect('error' in apiPlan || apiPlan.blocked.length > 0).toBe(true); expect(writes).toEqual(['billing']); return;
+    }
+    if ('error' in apiPlan) throw new Error(apiPlan.error);
+    expect(apiPlan.actions.map(action => action.id)).toEqual(['gcp:local-scope:services']);
+    expect(await f.apply(apiPlan.planRunId, ['gcp:local-scope:services'])).toMatchObject({ kind: 'executed', result: { success: scenario !== 'lost-api-ack' } });
+    const registryPlan = await f.plan(); if ('error' in registryPlan) throw new Error(registryPlan.error);
+    expect(registryPlan.actions.map(action => action.id)).toEqual(['gcp:local-scope:artifact-registry']);
+    expect(await f.apply(registryPlan.planRunId, ['gcp:local-scope:artifact-registry'])).toMatchObject({ kind: 'executed', result: { success: true } });
+    if (publicImages) {
+      const publicPlan = await f.plan(); if ('error' in publicPlan) throw new Error(publicPlan.error);
+      expect(publicPlan.actions.map(action => action.id)).toEqual(['gcp:local-scope:public-artifact-registry', 'gcp:local-scope:public-artifact-reader']);
+      const before = writes.length;
+      expect(await f.apply(publicPlan.planRunId, [])).toMatchObject({ kind: 'executed', result: { success: false } });
+      expect(writes).toHaveLength(before);
+      for (let step = 0; step < 6; step++) {
+        const planned = await f.plan(); if ('error' in planned) throw new Error(JSON.stringify(planned));
+        if (planned.actions.some(action => action.id === 'cloud-scope:bind' || action.id.startsWith('gcp:github-ci:'))) break;
+        await f.apply(planned.planRunId, planned.actions.filter(action => action.type !== 'noop' && action.requiresConfirm).map(action => action.id));
+      }
+      expect(writes.filter(write => write === 'registry')).toHaveLength(2);
+      expect(writes.filter(write => write === 'public-iam-policy')).toHaveLength(1);
+      expect(publicPolicy.bindings).toEqual([unrelated, { role: 'roles/artifactregistry.reader', members: ['allUsers'] }]);
+      expect(registryPolicy.bindings).toEqual([unrelated]);
+    }
+    if (github) {
+      for (let step = 0; step < 18; step++) {
+        const planned = await f.plan(); if ('error' in planned) throw new Error(JSON.stringify({ planned, step, writes }));
+        if (planned.actions.some(action => action.id === 'cloud-scope:bind')) break;
+        const action = planned.actions.find(action => action.type !== 'noop');
+        expect(action, JSON.stringify(planned)).toBeDefined();
+        const before = writes.length, current = f.store.get(f.project)!;
+        // Reconstruct the application context every time: all authoritative
+        // ownership, attempts and partial completion come from durable SQLite.
+        const confirmations = planned.actions.filter(action => action.type !== 'noop' && action.requiresConfirm).map(action => action.id);
+        const result = await executePlanApply(createCommandContext(), { project: f.project, spec: current.spec, specRevision: current.revision,
+          planId: planned.planRunId, confirmActions: step === 0 ? confirmations.slice(0, 1) : confirmations });
+        if (step === 0) { expect(writes).toHaveLength(before); expect(result).toMatchObject({ kind: 'executed', result: { success: false } }); }
+        else expect(writes.length - before).toBeLessThanOrEqual(confirmations.length);
+      }
+      expect(writes.filter(write => write === 'ci-identity')).toHaveLength(4);
+      expect(writes.filter(write => write === 'iam-policy')).toHaveLength(3);
+      expect(projectPolicy.bindings).toEqual(expect.arrayContaining([unrelated]));
+      expect(projectPolicy.bindings.some((binding: any) => binding.role === 'roles/artifactregistry.writer')).toBe(false);
+      expect(registryPolicy.bindings.some((binding: any) => binding.role === 'roles/artifactregistry.writer')).toBe(true);
+    }
+    const bind = await f.plan(); if ('error' in bind) throw new Error(bind.error);
+    expect(bind.actions.map(action => action.id)).toEqual(['cloud-scope:bind']);
+    expect(f.ctx.repos.connections.findByProviderAndScope('cloudrun', 'github.com/acme/operator-host#environment=staging')).toBeNull();
+    if (scenario === 'conflicting-connection') {
+      const existing = f.ctx.repos.connections.upsertVerifiedBatch([{ provider: 'cloudrun', scope: 'github.com/acme/operator-host#environment=staging',
+        credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'unrelated-project', authMode: 'default' }) }])[0];
+      expect(await f.apply(bind.planRunId, ['cloud-scope:bind'])).toMatchObject({ kind: 'executed', result: { success: false } });
+      expect(f.ctx.repos.connections.findById(existing.id)).toEqual(existing);
+      expect(f.ctx.repos.environments.findByProjectAndName(f.project.id, 'staging')?.platformBindings).toEqual({ provider: 'cloudrun' }); return;
+    }
+    expect(await f.apply(bind.planRunId, ['cloud-scope:bind'])).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(f.ctx.repos.environments.findByProjectAndName(f.project.id, 'staging')?.platformBindings).toMatchObject({ provider: 'cloudrun', projectId: nativeId });
+    expect(f.ctx.repos.environments.findByProjectAndName(f.project.id, 'staging')?.platformBindings.providerScope).toMatchObject({
+      projectId: nativeId, projectNumber: number, projectCreateTime: '2026-10-25T08:00:00.123456Z', projectParent: 'none',
+      projectInstallationId: expect.stringMatching(/^[a-f0-9-]{36}$/), projectAttemptId: expect.stringMatching(/^[a-f0-9-]{36}$/) });
+    expect(f.ctx.repos.connections.findByProviderAndScope('cloudrun', 'github.com/acme/operator-host#environment=staging')?.status).toBe('verified');
+    expect(f.ctx.repos.connections.findByProviderAndScope('cloudsql', 'github.com/acme/operator-host#environment=staging')?.status).toBe('verified');
+    expect(f.writes).toHaveLength(1);
+    if (publicImages) expect(f.ctx.repos.environments.findByProjectAndName(f.project.id, 'staging')!.platformBindings.providerScope).toMatchObject({ artifactRepository: 'hypervibe', artifactRepositoryCreateTime: '2026-10-25T08:30:00Z', publicArtifactRepository: 'operator-public', publicArtifactRepositoryCreateTime: '2026-10-25T08:35:00Z' });
+    if (github) {
+      const bound = f.ctx.repos.environments.findByProjectAndName(f.project.id, 'staging')!;
+      expect(JSON.parse(String(bound.platformBindings.gcpGithubWorkloadIdentity))).toMatchObject({ repository: 'acme/operator-host', serviceAccountUniqueId: '123456789012345678901' });
+      const priorBindings = structuredClone(bound.platformBindings);
+      const connections = ['cloudrun', 'cloudsql', 'gcs'].map(provider => f.ctx.repos.connections.findByProviderAndScope(provider, 'github.com/acme/operator-host#environment=staging'));
+      const identities = structuredClone([...native]); const before = writes.length;
+      desired.environments.staging.hosting.scopePreparation.continuation.nativeScope.githubAccess = 'disconnect';
+      f.store.replace(f.project, desired);
+      for (let step = 0; step < 8; step++) {
+        const planned = await f.plan(); if ('error' in planned) throw new Error(planned.error);
+        const action = planned.actions.find(action => action.type !== 'noop');
+        expect(action, JSON.stringify(planned)).toBeDefined();
+        const current = f.store.get(f.project)!;
+        const result = await executePlanApply(createCommandContext(), { project: f.project, spec: current.spec, specRevision: current.revision,
+          planId: planned.planRunId, confirmActions: planned.actions.filter(action => action.type !== 'noop' && action.requiresConfirm).map(action => action.id) });
+        if (action!.id === 'cloud-scope:bind') { expect(result).toMatchObject({ kind: 'executed', result: { success: true } }); break; }
+      }
+      const after = f.ctx.repos.environments.findByProjectAndName(f.project.id, 'staging')!;
+      const { gcpGithubWorkloadIdentity: _removed, ...preserved } = priorBindings;
+      expect(after.platformBindings).toEqual(preserved);
+      expect(['cloudrun', 'cloudsql', 'gcs'].map(provider => f.ctx.repos.connections.findByProviderAndScope(provider, 'github.com/acme/operator-host#environment=staging'))).toEqual(connections);
+      expect(writes).toHaveLength(before + 3); expect(accountPolicy.bindings).toEqual([]);
+      expect(projectPolicy.bindings).toEqual([unrelated]); expect(registryPolicy.bindings).toEqual([unrelated]);
+      expect([...native]).toEqual(identities);
+      if (publicImages) expect(publicPolicy.bindings).toEqual([unrelated, { role: 'roles/artifactregistry.reader', members: ['allUsers'] }]); expect(JSON.stringify({ bind, after })).not.toMatch(/synthetic-local-allocation-token|synthetic-refresh/);
+      return;
+    }
+    expect(writes).toEqual(['billing', 'apis', 'registry', ...(publicImages ? ['registry', 'public-iam-policy'] : [])]);
+    const instantiate = vi.spyOn(providerRegistry, 'createAdapter').mockResolvedValue({} as any);
+    expect(await adapterFactory.getProviderAdapter('cloudrun', f.project, undefined, 'staging')).toMatchObject({ success: true });
+    expect(await adapterFactory.getProviderAdapter('cloudrun', f.project, undefined, 'production')).toMatchObject({ success: false });
+    expect(await adapterFactory.getProviderAdapter('cloudrun', f.project)).toMatchObject({ success: false });
+    expect(instantiate).toHaveBeenCalledTimes(1);
+    expect(new PlanService().preflight(desired.environments.staging, 'production', desired, f.project).some(item => item.provider === 'cloudrun')).toBe(true);
+    expect(JSON.stringify(bind)).not.toContain(token);
+    desired.environments.staging.services.web.healthCheckPath = '/healthz'; f.store.replace(f.project, desired);
+    expect(await localCloudScopeRequired(f.project, 'staging', f.store.get(f.project)!.spec)).toBe(false);
+  }, 60_000);
+
 });

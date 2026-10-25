@@ -45,7 +45,7 @@ function errorReason(error: unknown): CloudInstallationReason {
 function scope(intent: CloudInstallationExecutableIntent) {
   if (intent.provider !== 'gcp' || intent.stage !== 'scope-preparation' || intent.mode !== 'connect') throw new ScopeError('identity_mismatch');
   if ('execution' in intent) {
-    if (intent.hostingProvider !== 'cloudrun') throw new ScopeError('identity_mismatch');
+    if (!('hostingProvider' in intent) || intent.hostingProvider !== 'cloudrun') throw new ScopeError('identity_mismatch');
     return { ...gcpLocalProjectAllocationScopeSchema.parse(intent.nativeScope), billingAccountName: undefined, assignmentMode: undefined };
   }
   return gcpProjectPreparationScopeSchema.parse(intent.nativeScope);

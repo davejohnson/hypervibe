@@ -314,6 +314,7 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
           ? { providerResourceUid: bindings.resourceUidsByName[resource.logicalName] }
           : {}),
         startCommand: desiredService.startCommand?.trim() || null,
+        ...(desiredService.instanceBounds ? { instanceBounds: desiredService.instanceBounds } : {}),
         healthCheckPath: resource.workloadKind !== 'cron'
           ? desiredService.healthCheckPath?.trim() || null
           : null,
@@ -377,6 +378,13 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
     }
     const boundEnvironment = bindingOverride?.name === environmentName ? bindingOverride
       : new EnvironmentRepository().findByProjectAndName(project.id, environmentName);
+    const nativeAuthentication = providerRegistry.getMetadata(environment.hosting.provider)?.orchestration?.ci?.boundAuthentication;
+    const nativeBinding = nativeAuthentication && boundEnvironment?.platformBindings[nativeAuthentication.bindingKey];
+    if (nativeBinding !== undefined && nativeAuthentication) {
+      if (target.deploymentAccess) throw new Error('Select one separately reviewed CI authentication authority for this environment.');
+      target.nativeAuthentication = nativeAuthentication.parse(nativeBinding, { environment: environmentName, branch,
+        providerProjectId: target.providerProjectId, repository: spec.gitRemoteUrl ?? project.gitRemoteUrl });
+    }
     if (deployment?.receipt.preparedResources) {
       const preparation = preparedHostingMarkerSchema.parse(boundEnvironment?.platformBindings.preparedHosting);
       if (preparation.installationId !== deployment.receipt.installationId || preparation.planDigest !== deployment.receipt.planDigest) {

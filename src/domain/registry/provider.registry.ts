@@ -9,7 +9,7 @@ import type { WorkloadKind } from '../entities/service.entity.js';
 import type { Receipt } from '../ports/provider.port.js';
 import type { HostedObservationCapability } from '../ports/hosted-observation.port.js';
 import type { CloudDeploymentAdapterCapabilityV1, CloudDeploymentAdapterInputV1 } from '../ports/cloud-deployment.port.js';
-import type { LocalCloudScopePreparationCapability } from '../ports/cloud-installation.port.js';
+import type { LocalCloudScopePreparationCapability, OperatorArtifactCapability } from '../ports/cloud-installation.port.js';
 import { CloudDeploymentAccessError, validateCloudDeploymentAdapterInputV1 } from '../services/cloud-deployment-authentication.js';
 
 export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'messaging' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
@@ -161,6 +161,12 @@ export interface ProviderMetadata {
     agentManagedKeys?: string[];
     /** The adapter can authenticate through the provider's native local CLI/default chain. */
     supportsNativeCliAuth?: boolean;
+    /** Reject local or expiring sessions before unattended CI/backup automation. */
+    canUseForAutomation?: (credentials: Record<string, unknown>) => boolean;
+    /** Reconstruct public federation configuration from the exact reviewed environment. */
+    automationAuthentication?: (environment: Environment) => {
+      credentials: Record<string, unknown>; environmentKeys: readonly string[]; oidc: boolean;
+    } | undefined;
     /**
      * Environment-variable names which may resolve the same credential value.
      * Exact requested names win; aliases are only fallbacks.
@@ -194,6 +200,8 @@ export interface ProviderMetadata {
       preparedResources?: 'installer-receipt-v1';
       /** Workload kinds this adapter can reconcile through the complete hosting lifecycle. */
       workloadKinds: readonly WorkloadKind[];
+      /** Complete service-wide automatic min/max reconciliation, distinct from revision limits. */
+      instanceBounds?: 'service-wide';
       runtimeIdentityTiming?: 'before-workload' | 'after-workload';
       /** Explicit, retain-only filesystem mounts; never implicit service provisioning. */
       serviceVolumes?: {
@@ -223,6 +231,12 @@ export interface ProviderMetadata {
         status: 'ready-for-live';
         /** Native database references the private helper can actually resolve. */
         databaseProviders: readonly string[];
+      };
+      /** Explicit staged prerequisite for a native private recovery worker. */
+      recoveryRuntime?: {
+        databaseProviders: readonly string[];
+        storageProviders: readonly string[];
+        status: 'ready-for-live';
       };
       /** Smallest provider-owned boundary that completely removes one Hypervibe environment. */
       teardownBoundary: 'services' | 'environment' | 'project';
@@ -339,6 +353,7 @@ export interface RegisteredProvider {
   transientAuthentication?: CloudDeploymentAdapterCapabilityV1;
   /** Explicit local scope allocation only; independent from hosting credentials or deployment. */
   localScopePreparation?: LocalCloudScopePreparationCapability;
+  artifactPublication?: OperatorArtifactCapability;
   /** Optional hook to install CLI tools or other dependencies when a connection is created. */
   ensureDependencies?: () => Promise<{ installed: string[]; errors: string[] }>;
   /** Optional provider-owned raw forensic reads used by hv_inspect. */
@@ -893,6 +908,10 @@ export class ProviderRegistry {
    */
   getMetadata(name: string): ProviderMetadata | undefined {
     return this.providers.get(name)?.metadata;
+  }
+
+  getArtifactPublication(name: string): OperatorArtifactCapability | undefined {
+    return this.providers.get(name)?.artifactPublication;
   }
 
   getLocalScopePreparation(name: string): LocalCloudScopePreparationCapability | undefined {

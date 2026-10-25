@@ -10,7 +10,7 @@ import {
   type CloudInstallationContext, type CloudInstallationDriver, type CloudInstallationEvidence,
   type CloudInstallationIntent, type CloudInstallationObservation, type CloudInstallationReason,
   type CloudInstallationRecord, type CloudInstallationProviderContext,
-  type CloudInstallationMutation, type CloudInstallationExecutableIntent, type LocalCloudScopePreparationIntent,
+  type CloudInstallationMutation, type CloudInstallationExecutableIntent, type LocalCloudScopePreparationIntent, type OperatorArtifactIntent,
 } from '../ports/cloud-installation.port.js';
 
 export class CloudInstallationError extends Error {
@@ -38,14 +38,24 @@ const intentSchema = z.object({ schemaVersion: z.literal(1), installationId: z.s
   installed: z.array(evidenceSchema).max(300).optional() }).strict();
 const localIntentSchema = intentSchema.omit({ hostIdentity: true, purpose: true, deployment: true, scopePreparation: true,
   migrationTargets: true, installed: true, source: true }).extend({
+  selection: strings.optional(),
+  predecessor: z.object({ installationId: z.string().guid(), planDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
   execution: z.object({ kind: z.literal('local-administrator'), authentication: z.literal('google-user-adc') }).strict(),
   hostingProvider: text,
   mode: z.literal('connect'), stage: z.literal('scope-preparation'), keys: z.tuple([]),
   source: z.object({ kind: z.literal('local-spec'), repository: intentSchema.shape.source.shape.repository,
     specRevision: z.number().int().positive(), specDigest: intentSchema.shape.source.shape.specDigest }).strict(),
 }).strict();
+const artifactIntentSchema = localIntentSchema.omit({ execution: true, hostingProvider: true }).extend({
+  execution: z.object({ kind: z.literal('operator-artifact-publisher'), authentication: z.enum(['aws-session', 'google-user-adc']) }).strict(),
+  artifactProvider: text, artifacts: z.array(z.enum(['aws-collection-template-v1', 'aws-deployment-template-v1', 'holding-v1', 'backup-runner-v1'])).min(1).max(4),
+}).strict();
+
 function localIntent(intent: CloudInstallationExecutableIntent): intent is LocalCloudScopePreparationIntent {
-  return 'execution' in intent;
+  return 'execution' in intent && intent.execution.kind === 'local-administrator';
+}
+function artifactIntent(intent: CloudInstallationExecutableIntent): intent is OperatorArtifactIntent {
+  return 'execution' in intent && intent.execution.kind === 'operator-artifact-publisher';
 }
 const actionSchema = z.object({ id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9:_.\/-]{0,255}$/).refine(value => !['constructor', 'prototype', '__proto__'].includes(value)), type: z.enum(['create', 'update', 'replace', 'destroy', 'noop']),
   resource: z.object({ kind: z.enum(['project', 'environment', 'service', 'volume', 'database', 'cache', 'storage', 'retained-resource', 'load-balancer', 'domain',
@@ -92,12 +102,25 @@ function parseEvidence<I extends CloudInstallationExecutableIntent = CloudInstal
 }
 export function parseCloudInstallationIntentV1<I extends CloudInstallationExecutableIntent = CloudInstallationIntent>(value: unknown, driver: CloudInstallationDriver<I>): I {
   return contract(() => {
-    const isLocal = Boolean(value && typeof value === 'object' && 'execution' in value);
-    if (isLocal !== Boolean(driver.localScopePreparation)) throw new Error();
-    const parsed = (isLocal ? localIntentSchema.parse(value) : intentSchema.parse(value)) as I;
+    const actor = value && typeof value === 'object' && 'execution' in value ? (value as { execution?: { kind?: unknown } }).execution?.kind : undefined;
+    const isArtifact = actor === 'operator-artifact-publisher';
+    const isLocal = actor === 'local-administrator';
+    if (isLocal !== Boolean(driver.localScopePreparation) || isArtifact !== Boolean(driver.artifactPublication)
+      || actor !== undefined && !isLocal && !isArtifact || isLocal && isArtifact) throw new Error();
+    const parsed = (isArtifact ? artifactIntentSchema.parse(value) : isLocal ? localIntentSchema.parse(value) : intentSchema.parse(value)) as I;
+    if (artifactIntent(parsed)) {
+      if (!driver.scopePreparation || driver.deployment || parsed.provider !== driver.provider
+        || parsed.artifactProvider !== driver.artifactPublication?.providerName
+        || parsed.execution.authentication !== driver.artifactPublication.authentication
+        || new Set(parsed.artifacts).size !== parsed.artifacts.length || parsed.predecessor?.installationId === parsed.installationId) throw new Error();
+      parsed.nativeScope = strings.parse(driver.parseScope(parsed.nativeScope)); return parsed;
+    }
     if (localIntent(parsed)) {
       if (!driver.scopePreparation || driver.deployment || parsed.provider !== driver.provider
-        || parsed.hostingProvider !== driver.localScopePreparation?.hostingProvider) throw new Error();
+        || parsed.hostingProvider !== driver.localScopePreparation?.hostingProvider
+        || Boolean(parsed.predecessor) !== Boolean(driver.localScopePreparation?.continuation)
+        || Boolean(parsed.selection) !== Boolean(parsed.predecessor)
+        || parsed.predecessor?.installationId === parsed.installationId) throw new Error();
       parsed.nativeScope = strings.parse(driver.parseScope(parsed.nativeScope));
       return parsed;
     }
@@ -125,9 +148,17 @@ export function parseCloudInstallationIntentV1<I extends CloudInstallationExecut
 function parseActions<I extends CloudInstallationExecutableIntent = CloudInstallationIntent>(value: unknown, intent: I, driver: CloudInstallationDriver<I>, blockedReason?: CloudInstallationReason): CloudInstallationAction[] {
   return contract(() => {
     const actions = z.array(actionSchema).min(1).max(300).parse(value).map(raw => actionSchema.parse(driver.parseAction(raw, intent)));
-    if (localIntent(intent) && (actions.length !== 1 || actions[0].resource.kind !== 'project'
-      || actions[0].metadata.category !== 'scope' || actions[0].metadata.execution !== 'api'
-      || !['create', 'noop'].includes(actions[0].type) || actions[0].dependsOn?.length)) throw new Error();
+    if (localIntent(intent)) {
+      if (!driver.localScopePreparation?.continuation && (actions.length !== 1 || actions[0].resource.kind !== 'project'
+        || actions[0].metadata.category !== 'scope' || actions[0].metadata.execution !== 'api'
+        || !['create', 'noop'].includes(actions[0].type) || actions[0].dependsOn?.length)) throw new Error();
+      if (driver.localScopePreparation?.continuation && actions.some(action => action.metadata.execution !== 'api'
+        || !['scope', 'identity', 'trust', 'verification'].includes(action.metadata.category)
+        || !['create', 'update', 'noop'].includes(action.type))) throw new Error();
+    }
+    if (artifactIntent(intent) && actions.some(action => action.metadata.execution !== 'api'
+      || !['scope', 'identity', 'trust', 'verification'].includes(action.metadata.category)
+      || !['create', 'update', 'noop'].includes(action.type))) throw new Error();
     for (const action of actions) {
       if (action.resource.provider !== intent.provider || (!action.verified && !blockedReason) || (action.type !== 'noop' && action.requiresConfirm !== true)) throw new Error();
       if (intent.mode === 'disconnect' && action.type !== 'noop' && (action.metadata.category !== 'trust' || !['update', 'destroy'].includes(action.type))) throw new Error();
@@ -206,10 +237,10 @@ export function cloudInstallationDeploymentConnectionV1(value: unknown, driver: 
 export function cloudInstallationResolvedScopeV1<I extends CloudInstallationExecutableIntent = CloudInstallationIntent>(value: unknown, driver: CloudInstallationDriver<I>): Record<string, string> {
   const record = parseCloudInstallationRecordV1(value, driver);
   if (record.status !== 'scope-ready' || record.intent.stage !== 'scope-preparation' || !driver.scopePreparation) throw new CloudInstallationError('not_ready');
-  return contract(() => { const resolved = driver.scopePreparation!.resolvedScope(record); return strings.parse(localIntent(record.intent) ? resolved : driver.parseScope(resolved)); });
+  return contract(() => { const resolved = driver.scopePreparation!.resolvedScope(record); return strings.parse(localIntent(record.intent) || artifactIntent(record.intent) ? resolved : driver.parseScope(resolved)); });
 }
 export function cloudInstallationNextStageV1(value: unknown, driver: CloudInstallationDriver): 'scope-preparation' | 'collection' | 'deployment' {
-  if (driver.localScopePreparation) throw new CloudInstallationError('unsupported');
+  if (driver.localScopePreparation || driver.artifactPublication) throw new CloudInstallationError('unsupported');
   const record = parseCloudInstallationRecordV1(value, driver);
   cloudInstallationResolvedScopeV1(record, driver);
   return contract(() => {
@@ -259,9 +290,9 @@ async function verifyScopePreparation(context: CloudInstallationContext, intent:
   }
 }
 
-async function bounded<T>(context: Pick<CloudInstallationContext, 'signal' | 'timeoutMs'>, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+async function bounded<T>(context: Pick<CloudInstallationContext, 'signal' | 'timeoutMs'>, work: (signal: AbortSignal) => Promise<T>, maximumMs = 60000): Promise<T> {
   const timeoutMs = context.timeoutMs ?? 15000;
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000) throw new CloudInstallationError('invalid_contract');
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > maximumMs) throw new CloudInstallationError('invalid_contract');
   const timeout = AbortSignal.timeout(timeoutMs);
   const signal = context.signal ? AbortSignal.any([timeout, context.signal]) : timeout;
   return new Promise<T>((resolve, reject) => {
@@ -277,7 +308,11 @@ async function authorized<T, I extends CloudInstallationExecutableIntent>(contex
   attempts: CloudInstallationRecord['attempts'] = []): Promise<T> {
   return bounded(context, async signal => {
     if (!await context.authorize({ intent: structuredClone(intent), phase, planDigest, actionId })) throw new CloudInstallationError('authorization_revoked');
-    if (localIntent(intent)) {
+    if (artifactIntent(intent)) {
+      if (!context.driver.artifactPublication || !('kind' in context.authentication) || context.authentication.kind !== 'operator-artifact-publisher'
+        || 'host' in context.authentication || (intent.execution.authentication === 'aws-session' ? !context.authentication.awsSession : !context.authentication.administrator))
+        throw new CloudInstallationError('authorization_expired');
+    } else if (localIntent(intent)) {
       if (!context.driver.localScopePreparation || !('kind' in context.authentication)
         || context.authentication.kind !== 'local-administrator' || !context.authentication.administrator
         || 'host' in context.authentication) throw new CloudInstallationError('authorization_expired');
@@ -291,7 +326,7 @@ async function authorized<T, I extends CloudInstallationExecutableIntent>(contex
     if (signal.aborted) throw new CloudInstallationError('cancelled');
     return work({ intent: structuredClone(intent), authentication: context.authentication, signal, completed: structuredClone(completed), attempts: structuredClone(attempts),
       beforeMutation: async () => { throw new CloudInstallationError('mutation_not_authorized'); } });
-  });
+  }, artifactIntent(intent) ? 600_000 : 60_000);
 }
 function reason(error: unknown): CloudInstallationReason {
   if (error instanceof CloudInstallationBoundaryError && reasonSchema.safeParse(error.reason).success) return error.reason;
@@ -345,6 +380,8 @@ async function execute<I extends CloudInstallationExecutableIntent = CloudInstal
   let record = await read(input, input.installationId);
   if (!record) throw new CloudInstallationError('not_found');
   if (record.plan.digest !== input.planDigest) throw new CloudInstallationError('plan_mismatch');
+  if (input.onlyActionId && (!(localIntent(record.intent) && input.driver.localScopePreparation?.continuation || artifactIntent(record.intent) && input.driver.artifactPublication)
+    || !record.plan.actions.some(action => action.id === input.onlyActionId))) throw new CloudInstallationError('invalid_contract');
   if (record.status === 'disconnected') {
     // A terminal removal receipt is historical evidence. Requiring the removed
     // customer trust to read it would make successful disconnection unrecoverable.
@@ -361,12 +398,14 @@ async function execute<I extends CloudInstallationExecutableIntent = CloudInstal
   }
   const confirmed = new Set(input.confirmActions);
   if (!readOnly) {
-    const unconfirmed = record.plan.actions.find(action => action.type !== 'noop'
+    const unconfirmed = record.plan.actions.find(action => (!input.onlyActionId || action.id === input.onlyActionId) && action.type !== 'noop'
       && !hasExactPlanActionConfirmationAuthority(action, true, confirmed));
     if (unconfirmed) return stop('blocked', 'confirmation_required');
   }
   const ordered = orderActions(record.plan.actions) as CloudInstallationAction[];
   for (const action of ordered) {
+    if (input.onlyActionId && action.id !== input.onlyActionId && !record.completed[action.id]) continue;
+    if (input.onlyActionId === action.id && action.dependsOn?.some(id => !record!.completed[id])) return stop('blocked', 'not_converged');
     // Finished records are freshly re-observed too; cached success never grants continuing authority.
     let attempt = record.attempts.filter(item => item.actionId === action.id).at(-1);
     // A blocked review can only recover exact historical attempts. It cannot
@@ -459,10 +498,11 @@ async function execute<I extends CloudInstallationExecutableIntent = CloudInstal
       updatedAt: new Date().toISOString() } : item), completed: { ...record.completed, [action.id]: evidence }, reason: undefined });
   }
   if (record.plan.blockedReason) return stop('blocked', record.plan.blockedReason);
+  if (ordered.some(action => !record!.completed[action.id])) return update({ ...record, status: 'pending', reason: undefined });
   return update({ ...record, status: record.intent.mode === 'disconnect' ? 'disconnected' : record.intent.stage === 'scope-preparation' ? 'scope-ready' : 'ready', reason: undefined });
 }
 export function applyCloudInstallationV1<I extends CloudInstallationExecutableIntent = CloudInstallationIntent>(input: CloudInstallationApplyInput<I>): Promise<CloudInstallationRecord<I>> { return execute(input, false); }
-export function reconcileCloudInstallationV1<I extends CloudInstallationExecutableIntent = CloudInstallationIntent>(input: CloudInstallationContext<I> & { installationId: string; planDigest: string }): Promise<CloudInstallationRecord<I>> {
+export function reconcileCloudInstallationV1<I extends CloudInstallationExecutableIntent = CloudInstallationIntent>(input: CloudInstallationContext<I> & { installationId: string; planDigest: string; onlyActionId?: string }): Promise<CloudInstallationRecord<I>> {
   return execute({ ...input, confirmActions: [] }, true);
 }
 
@@ -472,7 +512,7 @@ export async function planCloudInstallationContinuationV1(input: CloudInstallati
   /** Exact independently read source; required to derive final deployment topology. */
   spec?: ProjectSpec;
 }): Promise<CloudInstallationRecord> {
-  if (input.driver.localScopePreparation) throw new CloudInstallationError('unsupported');
+  if (input.driver.localScopePreparation || input.driver.artifactPublication) throw new CloudInstallationError('unsupported');
   if (input.installationId === input.scopePreparationId) throw new CloudInstallationError('scope_mismatch');
   const previous = await reconcileCloudInstallationV1({ ...input, installationId: input.scopePreparationId, planDigest: input.scopePreparationDigest });
   const nativeScope = cloudInstallationResolvedScopeV1(previous, input.driver);

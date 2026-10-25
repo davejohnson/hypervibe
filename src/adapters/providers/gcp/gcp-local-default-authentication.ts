@@ -4,7 +4,7 @@ import { redactExactValues } from '../../../utils/redact-exact-values.js';
 
 const hosts = new Set(['run.googleapis.com', 'iam.googleapis.com', 'cloudresourcemanager.googleapis.com',
   'artifactregistry.googleapis.com', 'cloudbuild.googleapis.com', 'cloudscheduler.googleapis.com',
-  'logging.googleapis.com', 'serviceusage.googleapis.com', 'compute.googleapis.com', 'sqladmin.googleapis.com',
+  'logging.googleapis.com', 'cloudbilling.googleapis.com', 'serviceusage.googleapis.com', 'compute.googleapis.com', 'sqladmin.googleapis.com',
   'secretmanager.googleapis.com', 'pubsub.googleapis.com', 'storage.googleapis.com', 'file.googleapis.com']);
 type Principal = { kind: 'user' };
 

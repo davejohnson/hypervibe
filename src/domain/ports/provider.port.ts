@@ -195,6 +195,7 @@ export interface VerifyResult {
 }
 
 export interface IProviderAdapter {
+  readonly recoveryRuntime?: import('./recovery-runtime.port.js').IRecoveryRuntime;
   /** Read-only discovery of exact administrator-prepared hosting resources. */
   readonly preparedHosting?: import('./hosting-prepared.port.js').IPreparedHosting;
   readonly runtimeIdentities?: import('./runtime-identity.port.js').IRuntimeIdentities;

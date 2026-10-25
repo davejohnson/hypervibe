@@ -7,6 +7,7 @@ import { getGcpNativeAdminToken, gcpRuntimeError, GcpRuntimeError, gcpRuntimeReq
 import { cloudRunJobUpdateBody } from './cloudrun-job-request.js';
 import { desiredRuntimeQueues, parseRuntimeQueues, readRuntimeQueuePolicies, serializeRuntimeQueues, unionRuntimeQueues, type GcpRuntimeQueue } from './gcp-runtime-queues.js';
 import { hasRuntimeSecretConsumers, desiredRuntimeSecrets, parseRuntimeSecrets, readRuntimeSecretPolicies, serializeRuntimeSecrets, unionRuntimeSecrets, type GcpRuntimeSecret } from './gcp-runtime-secrets.js';
+import { parseGcpGithubWorkloadIdentity } from './gcp-github-workload-identity.js';
 
 interface Scope { projectId: string; region: string; deployEmail?: string; defaultAuthentication?: boolean }
 const IAM = 'https://iam.googleapis.com/v1';
@@ -32,6 +33,9 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
 
   private coordinates(request: RuntimeIdentityRequest) {
     const scope = this.connected(); const { environment, service } = request;
+    const ci = environment.platformBindings.gcpGithubWorkloadIdentity === undefined ? undefined
+      : parseGcpGithubWorkloadIdentity(environment.platformBindings.gcpGithubWorkloadIdentity);
+    if (ci && (ci.projectId !== scope.projectId || ci.environment !== environment.name)) throw new GcpRuntimeError('The reviewed CI identity belongs to another project or environment.');
     if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(scope.projectId) || !/^[a-z]+-[a-z]+[0-9]$/.test(scope.region)
       || (!scope.defaultAuthentication && !scope.deployEmail)
       || (scope.deployEmail !== undefined && !scope.deployEmail.endsWith(`@${scope.projectId}.iam.gserviceaccount.com`))
@@ -62,6 +66,7 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
     const resource = `${prefix}${job ? 'jobs' : 'services'}/${workloadName}`;
     if (retainedResource && retainedResource !== resource) throw new GcpRuntimeError('The bound Cloud Run workload differs from its retained runtime identity scope.');
     return { ...scope, accountId, email, name, boundId, job,
+      ...(ci ? { ciServiceAccountEmail: ci.serviceAccountEmail, ciServiceAccountUniqueId: ci.serviceAccountUniqueId } : {}),
       resource,
       marker: gcpRuntimeOwner(scope.projectId, environment, service.name),
       cloudsql: request.environmentSpec?.database?.provider === 'cloudsql' || request.binding?.evidence.cloudsqlClient === 'required' };
@@ -171,6 +176,7 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
 
   private step(scope: ReturnType<CloudRunRuntimeIdentities['coordinates']>, operation: RuntimeIdentityStep['operation'], uniqueId?: string): RuntimeIdentityStep {
     return { operation, requiresConfirm: true, target: { projectId: scope.projectId, region: scope.region, email: scope.email, name: scope.name,
+      ...(scope.ciServiceAccountEmail ? { ciServiceAccountEmail: scope.ciServiceAccountEmail, ciServiceAccountUniqueId: scope.ciServiceAccountUniqueId! } : {}),
       ...(uniqueId ? { uniqueId } : {}), cloudsqlClient: scope.cloudsql ? 'required' : 'not-required' },
       description: operation === 'attach' ? 'Grant the deployer permission to use this exact workload identity and the application’s declared Cloud SQL access using native administrator sign-in.'
         : operation === 'create' ? 'Create an isolated, keyless Google runtime identity for this service and environment.'
@@ -195,6 +201,12 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
   private async permissions(scope: ReturnType<CloudRunRuntimeIdentities['coordinates']>, uniqueId: string, token: string, requireActAs = true) {
     const saUrl = `${IAM}/projects/${scope.projectId}/serviceAccounts/${uniqueId}`;
     const projectUrl = `https://cloudresourcemanager.googleapis.com/v1/projects/${scope.projectId}`;
+    if (scope.ciServiceAccountEmail) {
+      const account = await this.api(`${IAM}/projects/${scope.projectId}/serviceAccounts/${scope.ciServiceAccountUniqueId}`, token) as Record<string, unknown> | null;
+      if (!account || account.name !== `projects/${scope.projectId}/serviceAccounts/${scope.ciServiceAccountEmail}`
+        || account.projectId !== scope.projectId || account.email !== scope.ciServiceAccountEmail || account.uniqueId !== scope.ciServiceAccountUniqueId
+        || account.disabled !== undefined && account.disabled !== false) throw new GcpRuntimeError('The exact reviewed CI principal is missing, replaced or disabled.');
+    }
     if (scope.defaultAuthentication && requireActAs) {
       // ADC may represent a user. Check native caller authority; never manufacture
       // a serviceAccount:<user> member or install a caller grant from local labels.
@@ -209,6 +221,7 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
       { method: 'POST', body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }) }));
     const sa = await read(saUrl); const project = await read(projectUrl);
     return { saUrl, projectUrl, sa, project, ready: (scope.defaultAuthentication || hasGcpRuntimeRole(sa, 'roles/iam.serviceAccountUser', `serviceAccount:${scope.deployEmail}`))
+      && (!scope.ciServiceAccountEmail || hasGcpRuntimeRole(sa, 'roles/iam.serviceAccountUser', `serviceAccount:${scope.ciServiceAccountEmail}`))
       && (!scope.cloudsql || hasGcpRuntimeRole(project, 'roles/cloudsql.client', `serviceAccount:${scope.email}`)) };
   }
 
@@ -337,6 +350,8 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
       }
       if (request.step.operation === 'recover') {
         const { scope, token, account, workload, releaseWorkload } = await this.read(request);
+        if (request.step.target.ciServiceAccountEmail !== scope.ciServiceAccountEmail
+          || request.step.target.ciServiceAccountUniqueId !== scope.ciServiceAccountUniqueId) throw new GcpRuntimeError('The retained runtime permission attempt has a different CI principal.');
         if (!account && !workload && !releaseWorkload && request.step.target.recoverOperation === 'destroy'
           && request.binding.evidence.uniqueId === request.step.target.uniqueId
           && request.step.target.email === scope.email && request.step.target.name === scope.name) {
@@ -366,7 +381,8 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
           const selected = await this.activationWorkload(request, scope, request.step.target, token);
           if (!this.activationComplete(selected.scope, selected.workload, request.step.target)) throw new GcpRuntimeError('The pending runtime activation is not yet independently verified; retain its exact attempt.');
         }
-        if (request.step.target.recoverOperation === 'attach') await this.permissions(scope, account.uniqueId, token);
+        if (request.step.target.recoverOperation === 'attach' && !(await this.permissions(scope, account.uniqueId, token)).ready)
+          throw new GcpRuntimeError('The retained runtime permission attempt has not converged; no grant was repeated.');
         return { receipt: { success: true, message: 'Recovered the independently verified runtime identity from its exact recorded attempt.' }, binding };
       }
       const preview = await this.inspect({ ...request, binding: { provider: request.binding.provider, evidence: request.binding.evidence } });
@@ -489,9 +505,12 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
         parseGcpRuntimePolicy(await this.api(`${url}:setIamPolicy`, admin, { method: 'POST', body: JSON.stringify({ policy }) }));
       };
       if (request.step.operation === 'attach') {
-        if (!scope.defaultAuthentication && !hasGcpRuntimeRole(policies.sa, 'roles/iam.serviceAccountUser', `serviceAccount:${scope.deployEmail}`)) {
-          await write(policies.saUrl, withGcpRuntimeRole(policies.sa, 'roles/iam.serviceAccountUser', `serviceAccount:${scope.deployEmail}`));
+        let accountPolicy = policies.sa;
+        for (const email of [scope.defaultAuthentication ? undefined : scope.deployEmail, scope.ciServiceAccountEmail]) {
+          if (email && !hasGcpRuntimeRole(accountPolicy, 'roles/iam.serviceAccountUser', `serviceAccount:${email}`))
+            accountPolicy = withGcpRuntimeRole(accountPolicy, 'roles/iam.serviceAccountUser', `serviceAccount:${email}`);
         }
+        if (accountPolicy !== policies.sa) await write(policies.saUrl, accountPolicy);
         if (scope.cloudsql && !hasGcpRuntimeRole(policies.project, 'roles/cloudsql.client', `serviceAccount:${scope.email}`)) {
           await write(policies.projectUrl, withGcpRuntimeRole(policies.project, 'roles/cloudsql.client', `serviceAccount:${scope.email}`));
         }

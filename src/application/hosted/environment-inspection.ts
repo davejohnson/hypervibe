@@ -95,7 +95,7 @@ const limitsSchema = z.object({
   timeoutMs: z.number().int().min(1).max(30_000).default(10_000),
 }).strict();
 const MAX_ENV_FIELDS = 100;
-const CONFIG_FIELDS = ['startCommand', 'releaseCommand', 'healthCheckPath', 'cronSchedule', 'public'] as const;
+const CONFIG_FIELDS = ['startCommand', 'releaseCommand', 'healthCheckPath', 'cronSchedule', 'public', 'instanceBounds'] as const;
 const OUTSIDE_SCOPE = ['runtime-health', 'release-revision', 'managed-secret-values', 'workload-kind'];
 
 function resource(kind: string, name: string, provider: string): HostedResourceInspectionV1 {

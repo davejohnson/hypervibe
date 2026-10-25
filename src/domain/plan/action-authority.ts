@@ -1,3 +1,5 @@
+import { isRecoveryRuntimeAction } from '../services/recovery-runtime.service.js';
+import { recoveryRuntimeStepSchema } from '../ports/recovery-runtime.port.js';
 import { isRuntimeAccessAction, RUNTIME_ACCESS_OPERATIONS } from '../services/runtime-access.service.js';
 import { databaseCredentialAliasesActionSchema, DATABASE_CREDENTIAL_ALIASES_OPERATION } from '../services/database-credential-aliases.service.js';
 import { secretReferenceActionMetadataSchema, SECRET_REFERENCE_OPERATION } from '../services/secret-reference-plan.js';
@@ -12,6 +14,7 @@ import { providerRegistry } from '../registry/provider.registry.js';
 import { API_POLICY_OPERATION } from '../services/api-policy.js';
 import { EMAIL_SIGNING_OPERATIONS } from '../services/email-signing.service.js';
 import type { PlanAction, PlanResourceKind } from './plan.types.js';
+import { isOperatorArtifactAction } from '../ports/operator-artifact.port.js';
 import { isLocalCloudScopeAction } from '../ports/local-cloud-scope.port.js';
 export { hasExactPlanActionConfirmationAuthority } from './action-confirmation.js';
 import { HOSTING_ENVIRONMENT_ENSURE_OPERATION } from './plan.service.js';
@@ -98,11 +101,13 @@ import {
 
 export type PlanMutationCapability =
   | 'cloud.scope.prepare'
+  | 'operator.artifact.publish'
   | 'database.credential-aliases.repair'
   | 'database.scope.bind'
   | 'hosting.prepared.bind'
   | 'backup-policy.configure'
   | 'api.policy.accept'
+  | 'hosting.recovery-runtime.mutate'
   | 'hosting.volume.mutate'
   | 'hosting.environment.ensure'
   | 'domain.registration.mutate'
@@ -490,6 +495,7 @@ export function resolvePlanActionAuthority(
   if (!action.id.trim() || !action.resource.name.trim() || !action.resource.provider.trim()) {
     return null;
   }
+  if (isOperatorArtifactAction(action)) return authority(action, 'operator.artifact.publish');
   if (isLocalCloudScopeAction(action)) return authority(action, 'cloud.scope.prepare');
 
   if (action.metadata?.operation === SECRET_DESTINATION_PREPARE) {
@@ -1001,6 +1007,12 @@ export function resolvePlanActionAuthority(
       return authority(action, 'storage.migration-target.destroy');
     }
     return null;
+  }
+  if (isRecoveryRuntimeAction(action)) {
+    if (action.type !== 'update' || !action.verified || action.metadata?.blockedReason || !exactResource(action, 'service') || action.resource.name !== 'backup-runtime'
+      || !['ensure', 'destroy'].includes(String(action.metadata?.mode)) || action.id !== 'recovery-runtime:backup-runtime' || !/^[a-f0-9]{64}$/.test(String(action.metadata?.targetHash))
+      || !/^[a-f0-9]{64}$/.test(String(action.metadata?.bindingHash)) || !recoveryRuntimeStepSchema.safeParse(action.metadata?.step).success) return null;
+    return authority(action, 'hosting.recovery-runtime.mutate');
   }
   if (isRuntimeAccessAction(action)) {
     const identity = action.metadata?.operation === RUNTIME_ACCESS_OPERATIONS.identity;
