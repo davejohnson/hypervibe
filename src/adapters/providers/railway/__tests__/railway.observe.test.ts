@@ -177,6 +177,7 @@ describe('RailwayAdapter observe', () => {
         providerScope: { projectId: 'rail-project-1', environmentId: 'env-prod' },
         name: 'postgres-db',
         status: 'running',
+        persistence: { state: 'unknown', reason: 'Railway database persistence could not verify the exact service and environment identity.' },
         credentialAlignment: {
           basis: 'configured-variable-values', authentication: 'unverified',
           issuer: { comparisons: [

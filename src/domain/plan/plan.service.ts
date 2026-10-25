@@ -453,6 +453,9 @@ export class PlanService {
           dbProvider !== provider
           || observed.completeness.databases !== 'complete'
           || observedBoundDatabaseServices.length === 1
+          // A service-backed database's aggregate storage configuration must
+          // also agree with its durable provider-owned storage binding.
+          || observed.databases.some(database => database.externalId === localDatabaseExternalId && database.persistence !== undefined)
           || (
             databaseSharesHostingScope
             && Boolean(localDatabaseExternalId)
@@ -754,6 +757,14 @@ export class PlanService {
       if (Object.values(observed.serviceVolumes).some((v) => v.observation.state === 'unknown')) {
         observed.partial = true;
         observed.warnings.push('Service-volume attachment observation is incomplete; volume actions are blocked.');
+      }
+      if (observed.databases.some(database => database.persistence?.state === 'unknown')) {
+        observed.partial = true;
+        observed.warnings.push('Database persistent storage could not be verified; database and dependent service changes are blocked.');
+      }
+      if (observed.databases.some(database => database.runtimeReferenceBinding?.state === 'unknown')) {
+        observed.partial = true;
+        observed.warnings.push('Database runtime URL reference observation is incomplete; dependent changes are blocked.');
       }
       return { observed, warnings };
     } catch (error) {
@@ -2985,7 +2996,7 @@ export class PlanService {
       backupPolicy.warnings.push('This plan configures only daily backup schedules on bound resources. Re-run hv_plan afterward for remaining infrastructure and backup coverage gaps. Backup completion and restores remain unchecked.');
     } else if (databaseBindingStageActive) {
       actions = databaseScopeBinding.actions;
-      databaseScopeBinding.warnings.push('This plan records only the existing database recovery scope. Re-run hv_plan for remaining backup provisioning, verification and deployment work.');
+      databaseScopeBinding.warnings.push('This plan records only verified metadata for the existing database. Re-run hv_plan for remaining backup provisioning, verification and deployment work.');
     } else if (ciBindingStageActive) {
       const closure = actionDependencyClosure(
         actions,

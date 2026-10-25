@@ -7,7 +7,7 @@ const projectId = 'project-shared';
 const environmentId = 'environment-staging';
 const productionId = 'environment-production';
 
-function makeFixture(kind: 'postgres' | 'redis' | 'web', inventoryOverride?: (after: unknown) => unknown) {
+function makeFixture(kind: 'redis' | 'web', inventoryOverride?: (after: unknown) => unknown) {
   const baseName = kind === 'web' ? 'web' : `${kind}-db`;
   const services = new Map([
     ['service-production', { name: baseName, environments: [productionId] }],
@@ -95,8 +95,10 @@ function makeFixture(kind: 'postgres' | 'redis' | 'web', inventoryOverride?: (af
   return { provision, services, mutations, request };
 }
 
-describe('Railway creation beside production-only services', () => {
-  it.each(['postgres', 'redis', 'web'] as const)('creates staging %s when the base-name service exists only in production', async (kind) => {
+// Generic service creation remains the Redis/web path. PostgreSQL uses the
+// native database template, whose scope is covered by its API/lifecycle tests.
+describe('Railway generic creation beside production-only services', () => {
+  it.each(['redis', 'web'] as const)('creates staging %s when the base-name service exists only in production', async (kind) => {
     const fixture = makeFixture(kind);
     const result = await fixture.provision();
 
@@ -116,7 +118,7 @@ describe('Railway creation beside production-only services', () => {
   });
 
   it('finishes pagination before proving a candidate absent from staging', async () => {
-    const fixture = makeFixture('postgres', (after) => ({ service: {
+    const fixture = makeFixture('redis', (after) => ({ service: {
       id: 'service-production', projectId,
       serviceInstances: {
         edges: [{ node: after
@@ -148,17 +150,17 @@ describe('Railway creation beside production-only services', () => {
       serviceInstances: { edges: [], pageInfo: { hasNextPage: true, endCursor: null } },
     } }), 'pagination cursor'],
   ] as const)('blocks creation on %s', async (_name, inventory, error) => {
-    const fixture = makeFixture('postgres', inventory);
+    const fixture = makeFixture('redis', inventory);
 
     await expect(fixture.provision()).rejects.toThrow(error);
     expect(fixture.mutations).toEqual([]);
   });
 
   it('blocks ambiguous services when both candidate names have staging instances', async () => {
-    const fixture = makeFixture('postgres');
+    const fixture = makeFixture('redis');
     fixture.services.get('service-production')!.environments.push(environmentId);
     fixture.services.set('service-existing-staging', {
-      name: 'postgres-db-staging', environments: [environmentId],
+      name: 'redis-db-staging', environments: [environmentId],
     });
 
     await expect(fixture.provision()).rejects.toThrow('Multiple Railway services match');
@@ -166,7 +168,7 @@ describe('Railway creation beside production-only services', () => {
   });
 
   it('keeps a failed exact-instance read unknown when inventory lists the target', async () => {
-    const fixture = makeFixture('postgres', () => ({ service: {
+    const fixture = makeFixture('redis', () => ({ service: {
       id: 'service-production', projectId,
       serviceInstances: {
         edges: [{ node: { id: 'instance-staging', environmentId } }],

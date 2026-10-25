@@ -83,6 +83,7 @@ import {
 import { checkpointIdentityMatches } from '../../../domain/services/database-checkpoint.js';
 import { recoveryIdentityStringSchema, recoverySourceIdentitySchema } from '../../../domain/services/recovery-source.js';
 import { railwayDailyBackupPolicy } from './railway-daily-backup.js';
+import { isRailwayPostgresImage, railwayDatabaseReferences, railwayPostgresTemplate, railwayTemplateServices } from './railway-postgres-template.js';
 
 // Credentials schema for self-registration
 export const RailwayCredentialsSchema = z.object({
@@ -160,6 +161,20 @@ interface RailwayVolumeInstance {
   isPendingDeletion: boolean;
 }
 
+export interface RailwayDatabasePersistenceObservation {
+  /** Independently observed name used by Railway's variable-reference namespace. */
+  serviceName?: string;
+  persistence: NonNullable<ObservedDatabase['persistence']>;
+  volume?: {
+    volumeId: string;
+    instanceId: string;
+    mountPath: string;
+    projectId: string;
+    environmentId: string;
+    serviceId: string;
+  };
+}
+
 class RailwayProjectPaginationError extends Error {}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -177,10 +192,7 @@ function projectRailwayDatabaseRuntime(
   if (!pluginName) return standard;
 
   return {
-    envVars: {
-      DATABASE_URL: '${{' + pluginName + '.DATABASE_URL}}',
-      DIRECT_URL: '${{' + pluginName + '.DATABASE_PRIVATE_URL}}',
-    },
+    envVars: railwayDatabaseReferences(pluginName, bindings.directUrlVariable),
     connectionUrl: standard.connectionUrl,
   };
 }
@@ -1108,7 +1120,9 @@ export class RailwayAdapter implements
       throw new Error('No Railway project bound to this environment');
     }
 
-    // Railway component provisioning is service-first: create a datastore service.
+    // Match Railway's Add PostgreSQL flow. A generic service image is not the
+    // provider's database provisioning contract (volumes, references, metadata).
+    if (type === 'postgres') return this.createPostgresFromTemplate(environment, projectId);
     const created = await this.createServiceBackedDatastore(type, environment, projectId);
     if (created) {
       return created;
@@ -1134,6 +1148,131 @@ export class RailwayAdapter implements
     };
   }
 
+  private async createPostgresFromTemplate(environment: Environment, projectId: string): Promise<ComponentResult> {
+    const client = this.client!;
+    const environmentId = environment.platformBindings.environmentId;
+    const empty = (): Component => ({ id: '', environmentId: environment.id, type: 'postgres',
+      bindings: {}, externalId: null, createdAt: new Date(), updatedAt: new Date() });
+    if (typeof environmentId !== 'string' || !environmentId.trim()) {
+      return { component: empty(), receipt: { success: false,
+        message: 'Apply the reviewed Railway environment action before creating its database.' } };
+    }
+    const scope = { projectId, environmentId };
+    // Unknown scope or inventory never authorizes a new template deployment.
+    const target = await this.environmentExists(projectId, environmentId);
+    if (target.state !== 'present') {
+      return { component: empty(), receipt: { success: false,
+        message: 'The exact Railway project and environment could not be verified for database creation.' } };
+    }
+    let template: Awaited<ReturnType<typeof railwayPostgresTemplate>>;
+    let before: Awaited<ReturnType<typeof railwayTemplateServices>>;
+    try {
+      template = await railwayPostgresTemplate(client);
+      before = await railwayTemplateServices(client, projectId);
+    } catch {
+      return { component: empty(), receipt: { success: false,
+        message: 'Railway PostgreSQL template or complete service inventory could not be verified; no database was created.' } };
+    }
+    const candidates = new Set([template.name, ...this.railwayServiceNameCandidates('postgres-db', environment.name)]);
+    for (const service of before.filter(service => candidates.has(service.name) || service.templateId === template.templateId)) {
+      const inventory = await this.serviceInstanceInventory(service.id, projectId);
+      if (inventory.state !== 'complete') throw new Error('Railway database environment membership is unknown; creation is blocked.');
+      if (inventory.environmentIds.includes(environmentId) && await this.serviceHasEnvironmentInstance(service.id, environmentId)) {
+        return { component: empty(), receipt: { success: false,
+          message: `Railway PostgreSQL service ${service.name} already exists but is unbound.`,
+          error: 'Use hv_import for that exact database identity; Hypervibe will not replace, adopt or redeploy it from a create action.' } };
+      }
+    }
+    const previousIds = new Set(before.map(service => service.id));
+    let workflowId: string | undefined;
+    let component = empty();
+    const unresolved = (): Component => ({ ...empty(), bindings: {
+      provider: 'railway', providerScope: scope,
+      unresolvedMutation: { resourceKind: 'database', operation: 'create', resourceName: template.name, providerScope: scope },
+      databaseTemplate: { templateId: template.templateId, templateServiceId: template.serviceKey,
+        ...(workflowId ? { workflowId } : {}), priorServiceIds: [...previousIds] },
+    } });
+    let attempted = false;
+    try {
+      attempted = true;
+      const response = await client.request<{ templateDeployV2?: { projectId?: unknown; workflowId?: unknown } }>(gql`
+        mutation CreatePostgresTemplate($input: TemplateDeployV2Input!) {
+          templateDeployV2(input: $input) { projectId workflowId }
+        }
+      `, { input: { projectId, environmentId, templateId: template.templateId, serializedConfig: template.serializedConfig } });
+      const receipt = response.templateDeployV2;
+      if (receipt?.projectId !== projectId || typeof receipt.workflowId !== 'string' || !receipt.workflowId.trim()) {
+        return { component: unresolved(), receipt: { success: false,
+          message: 'Railway database template acknowledgement is incomplete; creation remains unresolved.' } };
+      }
+      workflowId = receipt.workflowId;
+      const configuredAttempts = Number(process.env.HYPERVIBE_RAILWAY_CREATE_VERIFY_ATTEMPTS ?? 60);
+      const configuredDelay = Number(process.env.HYPERVIBE_RAILWAY_CREATE_VERIFY_DELAY_MS ?? 1000);
+      const attempts = Number.isInteger(configuredAttempts) && configuredAttempts > 0 ? Math.min(configuredAttempts, 300) : 60;
+      const delay = Number.isFinite(configuredDelay) && configuredDelay >= 0 ? Math.min(configuredDelay, 5000) : 1000;
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        const result = await client.request<{ workflowStatus?: { status?: unknown } }>(gql`
+          query DatabaseTemplateWorkflow($workflowId: String!) { workflowStatus(workflowId: $workflowId) { status } }
+        `, { workflowId });
+        const status = result.workflowStatus?.status;
+        if (status === 'Error') return { component: unresolved(), receipt: { success: false,
+          message: 'Railway database template workflow failed; its recovery identity has been retained.' } };
+        if (!['Complete', 'Running', 'NotFound'].includes(String(status))) throw new Error('Incomplete template workflow observation.');
+        if (status === 'Complete') {
+          const after = await railwayTemplateServices(client, projectId);
+          const created = after.filter(service => !previousIds.has(service.id)
+            && service.templateId === template.templateId && service.templateServiceId === template.serviceKey);
+          if (created.length > 1) throw new Error('Ambiguous database template identity.');
+          const database = created[0];
+          if (database) {
+            const instance = await this.inspectServiceInstance(database.id, environmentId);
+            if (instance.state !== 'present' || instance.sourceImage !== template.image) {
+              throw new Error('Database template instance identity or source was not verified.');
+            }
+            component = { ...empty(), externalId: database.id, bindings: {
+              provider: 'railway', providerScope: scope, resourceKind: 'service', pluginName: database.name,
+              directUrlVariable: template.directUrlVariable,
+              databaseTemplate: { templateId: template.templateId, templateServiceId: template.serviceKey, workflowId },
+            } };
+            railwayDatabaseReferences(database.name, template.directUrlVariable);
+            const persistence = await this.observeDatabasePersistence({ ...scope, serviceId: database.id });
+            if (persistence.persistence.state === 'configured' && persistence.volume) {
+              const { volumeId, mountPath } = persistence.volume;
+              if (mountPath !== template.mountPath) throw new Error('Database template mount differs from the reviewed template.');
+              component.bindings.volumeId = volumeId;
+              component.bindings.volumeTarget = { ...scope, serviceId: database.id, mountPath };
+              // Read raw definitions and provider-rendered values separately.
+              // A working password copy does not prove reference-based wiring.
+              const aliases = await this.railwayCredentialAliases.inspect({ component, environment });
+              const definitions = isRecord(aliases.privateState) && isRecord(aliases.privateState.definitions)
+                ? aliases.privateState.definitions : {};
+              const normalizedReference = (value: string) => value.replace(/\$\{\{\s*([A-Z_][A-Z0-9_]*)\s*\}\}/g, '<$1>');
+              const exactReferences = Object.entries(template.referenceDefinitions).every(([key, expected]) =>
+                typeof definitions[key] === 'string'
+                && normalizedReference(definitions[key]) === normalizedReference(expected));
+              if (aliases.changeNames.length > 0 || !aliases.checkedNames.includes('PGPASSWORD')
+                || !aliases.checkedNames.includes(template.directUrlVariable) || !exactReferences) {
+                throw new Error('Database template credential references have not converged.');
+              }
+              return { component, receipt: { success: true,
+                message: `Created Railway PostgreSQL database (${database.name}) from the official database template and verified its persistent data mount.`,
+                data: { serviceId: database.id, serviceName: database.name, workflowId, templateId: template.templateId } } };
+            }
+          }
+        }
+        if (attempt < attempts - 1) await this.sleep(delay);
+      }
+      return { component: component.externalId ? component : unresolved(), receipt: { success: false,
+        message: 'Railway database template creation has not converged to a verified persistent database; recovery state was retained.' } };
+    } catch (error) {
+      return { component: component.externalId ? component
+        : attempted && (workflowId !== undefined || this.isMutationOutcomeUncertain(error)) ? unresolved() : empty(),
+      receipt: { success: false,
+        message: 'Railway database template creation was not verified. No fallback creation or follow-up mutation was attempted.',
+        data: { mutationAttempted: attempted, ...(workflowId ? { workflowId } : {}) } } };
+    }
+  }
+
   private async createServiceBackedDatastore(
     type: ComponentType,
     environment: Environment,
@@ -1143,7 +1282,6 @@ export class RailwayAdapter implements
     if (!client) return null;
 
     const imageMap: Partial<Record<ComponentType, string>> = {
-      postgres: 'postgres:16',
       redis: 'bitnami/redis:7.4',
     };
     const image = imageMap[type];
@@ -1544,28 +1682,6 @@ export class RailwayAdapter implements
   private buildDatastoreBootstrapVars(type: ComponentType, serviceName: string): Record<string, string> | null {
     const serviceHost = `${serviceName}.railway.internal`;
 
-    if (type === 'postgres') {
-      const password = randomBytes(18).toString('base64url');
-      // Railway regenerates POSTGRES_PASSWORD; aliases must follow that issuer.
-      const passwordRef = '${{POSTGRES_PASSWORD}}';
-      const connectionUrl = `postgresql://postgres:${passwordRef}@${serviceHost}:5432/postgres`;
-      return {
-        POSTGRES_PASSWORD: password,
-        POSTGRES_USER: 'postgres',
-        POSTGRES_DB: 'postgres',
-        // Volume mounts contain lost+found; initdb refuses a non-empty dir,
-        // so point PGDATA at a subdirectory of the mount.
-        PGDATA: '/var/lib/postgresql/data/pgdata',
-        DATABASE_URL: connectionUrl,
-        DATABASE_PRIVATE_URL: connectionUrl,
-        PGHOST: serviceHost,
-        PGPORT: '5432',
-        PGUSER: 'postgres',
-        PGPASSWORD: passwordRef,
-        PGDATABASE: 'postgres',
-      };
-    }
-
     if (type === 'redis') {
       const password = randomBytes(18).toString('base64url');
       const connectionUrl = `redis://default:${password}@${serviceHost}:6379`;
@@ -1580,7 +1696,6 @@ export class RailwayAdapter implements
   }
 
   private datastoreVolumeMountPath(type: ComponentType): string | null {
-    if (type === 'postgres') return '/var/lib/postgresql/data';
     if (type === 'redis') return '/bitnami/redis/data';
     return null;
   }
@@ -1874,6 +1989,110 @@ export class RailwayAdapter implements
     throw new Error(
       `Railway volume inventory exceeded 100 pages for environment ${target.environmentId}; observation is incomplete.`
     );
+  }
+
+  /** A running database does not establish persistent storage. Inspect the
+   * exact native instance and mounted data path without changing either. This
+   * proves provider configuration only, not database I/O or a successful restore. */
+  async observeDatabasePersistence(
+    target: Pick<RailwayVolumeTarget, 'projectId' | 'environmentId' | 'serviceId'>,
+    options: { image?: string | null; variables?: Record<string, string> | null; expectedVolumeId?: string } = {},
+  ): Promise<RailwayDatabasePersistenceObservation> {
+    const unknown = (reason: string): RailwayDatabasePersistenceObservation => ({
+      persistence: { state: 'unknown', reason },
+    });
+    try {
+      if (!this.client) return unknown('Railway database persistence requires a verified connection.');
+      for (const value of [target.projectId, target.environmentId, target.serviceId]) {
+        recoveryIdentityStringSchema.parse(value);
+      }
+      if (options.expectedVolumeId !== undefined) recoveryIdentityStringSchema.parse(options.expectedVolumeId);
+      const response = await this.client.request<unknown>(gql`
+        query DatabasePersistenceTarget($projectId: String!, $environmentId: String!, $serviceId: String!) {
+          service(id: $serviceId) { id name projectId deletedAt }
+          environment(id: $environmentId, projectId: $projectId) { id projectId deletedAt }
+          serviceInstance(serviceId: $serviceId, environmentId: $environmentId) {
+            id serviceId environmentId deletedAt startCommand source { image }
+          }
+        }
+      `, target);
+      if (!isRecord(response) || !isRecord(response.service) || !isRecord(response.environment)
+        || !isRecord(response.serviceInstance)
+        || response.service.id !== target.serviceId || response.service.projectId !== target.projectId
+        || response.environment.id !== target.environmentId || response.environment.projectId !== target.projectId
+        || typeof response.serviceInstance.id !== 'string' || !response.serviceInstance.id.trim()
+        || response.serviceInstance.serviceId !== target.serviceId
+        || response.serviceInstance.environmentId !== target.environmentId
+        || response.service.deletedAt !== null || response.environment.deletedAt !== null
+        || response.serviceInstance.deletedAt !== null) {
+        return unknown('Railway database persistence could not verify the exact service and environment identity.');
+      }
+      const attached = (await this.listEnvironmentVolumeInstances(target))
+        .filter(volume => volume.deletedAt === null && volume.serviceId === target.serviceId);
+      if (attached.length === 0) return { persistence: {
+        state: 'missing', reason: 'The exact Railway database instance has no attached persistent volume.',
+      } };
+      if (attached.length !== 1 || attached[0]!.isPendingDeletion) {
+        return unknown('The Railway database volume is ambiguous or pending deletion.');
+      }
+      if (options.expectedVolumeId !== undefined && attached[0]!.volumeId !== options.expectedVolumeId) {
+        return unknown('The attached Railway database volume no longer matches its durable binding.');
+      }
+      const instance = response.serviceInstance;
+      // -D or data_directory startup overrides can supersede PGDATA. Do not
+      // infer effective storage from arbitrary caller-owned shell commands.
+      if (instance.startCommand !== null && instance.startCommand !== '') {
+        return unknown('The database has a custom or unobserved startup command; its effective data directory is unverified.');
+      }
+      if (!isRecord(instance.source) || typeof instance.source.image !== 'string'
+        || !instance.source.image.trim()
+        || (options.image !== undefined && options.image !== null && options.image !== instance.source.image)) {
+        return unknown('The database image is missing or changed during persistence observation.');
+      }
+      if (!isRailwayPostgresImage(instance.source.image)) {
+        return unknown('The custom database image has no verified PGDATA contract for persistence observation.');
+      }
+      if (options.variables === null) return unknown('The database data-directory variables could not be read.');
+      const variables = options.variables
+        ?? await this.fetchServiceVariables(target.projectId, target.serviceId, target.environmentId);
+      let dataPath = variables.PGDATA;
+      // Official Docker PostgreSQL 16/17 images declare this default. Explicit
+      // PGDATA always wins, including Railway's PostgreSQL 18 template override.
+      // Other images/tags require explicit evidence, never a guessed directory.
+      if (dataPath === undefined && /^(?:(?:docker\.io\/)?library\/|docker\.io\/)?postgres:(?:16|17)(?:\.\d+)*(?:-[\w.-]+)?(?:@sha256:[a-f\d]+)?$/i.test(instance.source.image)) {
+        dataPath = '/var/lib/postgresql/data';
+      }
+      const validPath = (value: unknown): value is string => typeof value === 'string'
+        && value.startsWith('/') && !value.includes('\0') && !value.includes('${')
+        && !value.split('/').some(segment => segment === '.' || segment === '..');
+      const volume = attached[0]!;
+      if (!validPath(dataPath) || !validPath(volume.mountPath)) {
+        return unknown('The database data directory or volume mount is missing, relative, or unresolved.');
+      }
+      const normalizedDataPath = dataPath.replace(/\/+/g, '/').replace(/\/$/, '') || '/';
+      const normalizedMount = volume.mountPath.replace(/\/+/g, '/').replace(/\/$/, '') || '/';
+      if (normalizedDataPath !== normalizedMount
+        && !normalizedDataPath.startsWith(normalizedMount === '/' ? '/' : `${normalizedMount}/`)) {
+        return { persistence: { state: 'missing',
+          reason: 'The configured PostgreSQL data directory is outside the exact attached Railway volume.' } };
+      }
+      return {
+        ...(typeof response.service.name === 'string' && response.service.name.trim()
+          ? { serviceName: response.service.name } : {}),
+        persistence: {
+          state: 'configured',
+          configurationFingerprint: hashEnvValue(JSON.stringify({ ...target,
+            instanceId: instance.id, image: instance.source.image, dataPath: normalizedDataPath,
+            volumeId: volume.volumeId, volumeInstanceId: volume.instanceId, mountPath: normalizedMount })),
+        },
+        volume: { volumeId: volume.volumeId, instanceId: volume.instanceId, mountPath: volume.mountPath,
+          projectId: volume.projectId, environmentId: volume.environmentId, serviceId: target.serviceId },
+      };
+    } catch {
+      // Provider responses can contain credentials. The result is deliberately
+      // value-free, and an unavailable read never proves missing storage.
+      return unknown('Railway database persistence could not be verified from the exact service, variables, and volume inventory.');
+    }
   }
 
   private async resolveBackupVolume(
@@ -7091,21 +7310,24 @@ export class RailwayAdapter implements
             status: this.toObservedDatastoreStatus(instance.latestDeployment?.status),
           });
         } else {
-          databases.push({
+          const database: ObservedDatabase = {
             provider: 'railway',
             engine,
             externalId: node.id,
             providerScope: { projectId, environmentId },
             name: node.name,
             status: this.toObservedDatastoreStatus(instance.latestDeployment?.status),
-          });
+          };
+          databases.push(database);
           if (engine === 'postgres') {
             let evidence: DatabaseVariableEvidence = { reason: 'scope_unverified' };
+            let variables: Record<string, string> | null = null;
             if (bindings.environmentId === environmentId) {
               try {
                 const vars = await this.fetchServiceVariables(projectId, node.id, environmentId);
+                variables = vars;
                 evidence = { variables: Object.fromEntries(
-                  ['POSTGRES_PASSWORD', 'DATABASE_URL', 'DATABASE_PRIVATE_URL']
+                  ['POSTGRES_PASSWORD', 'DATABASE_URL', 'DATABASE_PRIVATE_URL', 'PGPASSWORD', 'DIRECT_URL']
                     .filter(key => vars[key] !== undefined).map(key => [key, vars[key]])
                 ) };
               } catch {
@@ -7114,6 +7336,8 @@ export class RailwayAdapter implements
               }
             }
             databaseVariables.set(node.id, evidence);
+            database.persistence = (await this.observeDatabasePersistence({ projectId, environmentId, serviceId: node.id },
+              { image: instance.source?.image, variables })).persistence;
           }
         }
         continue;
@@ -7193,7 +7417,8 @@ export class RailwayAdapter implements
             envVarKeys.push(key);
             envVarHashes[key] = hashEnvValue(value);
           }
-          consumerEvidence = { variables: vars.DATABASE_URL === undefined ? {} : { DATABASE_URL: vars.DATABASE_URL } };
+          consumerEvidence = { variables: Object.fromEntries(['DATABASE_URL', 'DIRECT_URL']
+            .filter(key => vars[key] !== undefined).map(key => [key, vars[key]])) };
         } catch {
           warnings.push(`Failed to read variables for "${observedServiceName}" (${node.name}): provider_read_failed`);
           partial = true;
@@ -7556,7 +7781,7 @@ export class RailwayAdapter implements
   private classifyDatastoreImage(image?: string | null): 'postgres' | 'redis' | null {
     if (!image) return null;
     const normalized = image.toLowerCase();
-    if (/(^|\/)postgres(?::|@|$)/.test(normalized)) return 'postgres';
+    if (isRailwayPostgresImage(normalized)) return 'postgres';
     if (/(^|\/)(?:redis|valkey)(?::|@|$)/.test(normalized)) return 'redis';
     return null;
   }

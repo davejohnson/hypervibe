@@ -700,12 +700,14 @@ deploying. An uncertain write is recovered by readback only. Full planning
 treats unconverged aliases as a prerequisite. See the
 [provider contract](docs/database-credential-aliases.md) for coverage and limits.
 
-Start with ordinary `hv_plan`. If a legacy database lacks durable provider scope,
+Start with ordinary `hv_plan`. If a legacy database lacks complete durable provider scope,
 that plan first offers the existing, independently verified `database-bindings`
 action. Apply it, then plan again for alias repair. Neither stage carries
 deployment overrides or secret inputs; supply those again when ordinary planning
-resumes. An explicit alias-only scope requires complete bindings. Unknown,
-partial or malformed scope, unsupported capabilities and pending credential work
+resumes. Nonconflicting partial scope can be completed only from independently
+verified native identity while preserving every recorded key. An explicit
+alias-only scope requires complete bindings. Unknown, conflicting or malformed scope,
+unsupported capabilities and pending credential work
 remain blocked; they never fall through into unrelated full-plan actions.
 
 New Railway PostgreSQL bootstrap configurations keep `POSTGRES_PASSWORD` as
@@ -1957,6 +1959,41 @@ browser/UI inspection, or direct CI/provider APIs; a blocked `hv_ci_trigger` or
 `hv_ci_status` result should surface its connection/error guidance and stop the
 stage.
 
+## Database Provisioning And Persistence
+
+Every database adapter provisions the provider's database product. Railway uses
+the official `postgres` template through `templateDeployV2`, the same API path
+as Railway's database-add CLI, with its provider-owned image, persistent volume,
+variables, generators and metadata preserved. It never falls back to a generic
+PostgreSQL image service. The template must fit the one-database action scope;
+unsupported extra resources or missing storage/reference definitions block before
+creation. A complete workflow is followed by bounded service identity, exact
+environment, image, attached-volume and credential-reference readback. Uncertain
+or incomplete creation retains recovery state and cannot authorize another create.
+See the [eight-provider evidence review](docs/database-provisioning-evidence.md).
+
+Service-backed database observation carries explicit `persistence` configuration
+evidence. Railway verifies the exact instance, volume identity, mount and effective
+`PGDATA`; missing, ambiguous or unknown evidence blocks database and dependent
+changes. Persisted volume bindings and plan fingerprints prevent silently accepting
+a replacement disk. This verifies provider configuration, not database contents,
+restart durability or a successful restore. Existing databases are never replaced,
+restarted or given a new empty volume as an implicit repair.
+
+Railway runtime wiring preserves provider variable references. New template-backed
+bindings record which existing issuer URL key supplies `DIRECT_URL`, since native
+templates need not define `DATABASE_PRIVATE_URL`. Provisioning and subsequent
+runtime projection share the same reference builder. Explicit import observes and
+records that key before adopting the database. Existing bindings without it use
+the isolated `database-bindings` stage, which rechecks the exact native identity
+and variable-key evidence and merges only missing metadata. Explicit selections
+and existing legacy private aliases are preserved; unknown reads block repair.
+Issuer alias repair preserves
+composed user/host/port/database references, keeps `PGPASSWORD` linked to
+`POSTGRES_PASSWORD`, and includes existing `DIRECT_URL` definitions. Raw definitions
+and provider-rendered values are read separately; copied values alone cannot prove
+reference convergence. These repairs remain reviewed spec/plan/apply actions.
+
 ## Database Resilience
 
 Recovery source identities, selected points, operation observations and evidence
@@ -2077,10 +2114,16 @@ manifests or establish a successful restore. Compiler and helper changes must
 ship together as a reviewed workflow and pinned image update; see
 [daily backup defaults](docs/default-backup-policy.md).
 
-Legacy database bindings with absent provider scope use a separate reviewed
+Legacy database bindings with absent or valid nonconflicting partial provider scope use a separate reviewed
 `database-bindings` prerequisite when the native backup observer can independently
 prove the exact existing source. Apply re-observes the pinned source and merges
-only scope metadata into the unchanged component. This stage does not provision,
+only absent scope keys into the unchanged component, preserving and rechecking
+every recorded key. Malformed or conflicting scope remains blocked. An optional provider-owned
+runtime-reference observation can also propose an absent URL variable-name
+binding, including when scope and primary identity are already recorded. Apply
+rechecks exact native source and value-free variable-key evidence, preserves
+existing selections, and merges only the reviewed absent field. Unknown evidence
+blocks dependent work. This stage does not provision,
 deploy, advance deployment markers or rewrite the spec. Conflicting or incomplete
 identity remains blocked; a full import is not a metadata repair. The
 [shared recovery contract](docs/recovery-contract.md#legacy-database-scope-reconciliation)

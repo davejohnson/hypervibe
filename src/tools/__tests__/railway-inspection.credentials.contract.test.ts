@@ -39,11 +39,13 @@ describe('Railway inspection public credential comparison contract', () => {
     wire.addService('staging-db', 'postgres-db', stagingId).instances.get(stagingId)!.source = { image: 'postgres:16' };
     wire.variables.set(`staging-db/${stagingId}`, {
       POSTGRES_PASSWORD: current, DATABASE_URL: url(previous), DATABASE_PRIVATE_URL: url(current),
+      PGPASSWORD: previous, DIRECT_URL: url(current),
     });
     for (const name of ['web', 'worker', 'cron']) {
       wire.addService(`staging-${name}`, name, stagingId);
       wire.variables.set(`staging-${name}/${stagingId}`, {
         DATABASE_URL: name === 'cron' ? '${{postgres-db.DATABASE_URL}}' : url(name === 'web' ? previous : current),
+        ...(name === 'web' ? { DIRECT_URL: url(previous) } : {}),
       });
     }
 
@@ -77,12 +79,16 @@ describe('Railway inspection public credential comparison contract', () => {
         issuer: { comparisons: [
           { source: 'DATABASE_URL', against: 'POSTGRES_PASSWORD', comparison: { result: 'mismatch' } },
           { source: 'DATABASE_PRIVATE_URL', against: 'POSTGRES_PASSWORD', comparison: { result: 'match' } },
+          { source: 'PGPASSWORD', against: 'POSTGRES_PASSWORD', comparison: { result: 'mismatch' } },
+          { source: 'DIRECT_URL', against: 'POSTGRES_PASSWORD', comparison: { result: 'match' } },
         ] },
         consumers: [
           { name: 'cron', externalId: 'staging-cron', source: 'DATABASE_URL', issuerSource: 'DATABASE_URL',
             credentialComparison: { result: 'unknown', reason: 'unresolved_reference' }, target: { result: 'unknown', reason: 'unresolved_reference' } },
           { name: 'web', externalId: 'staging-web', source: 'DATABASE_URL', issuerSource: 'DATABASE_URL',
             credentialComparison: { result: 'match' }, target: { result: 'match' } },
+          { name: 'web', externalId: 'staging-web', source: 'DIRECT_URL', issuerSource: 'DIRECT_URL',
+            credentialComparison: { result: 'mismatch' }, target: { result: 'match' } },
           { name: 'worker', externalId: 'staging-worker', source: 'DATABASE_URL', issuerSource: 'DATABASE_URL',
             credentialComparison: { result: 'mismatch' }, target: { result: 'match' } },
         ],
@@ -93,7 +99,10 @@ describe('Railway inspection public credential comparison contract', () => {
       expect(text).toContain('configured-variable-values; authentication unverified');
       expect(text).toContain('DATABASE_URL vs POSTGRES_PASSWORD: mismatch');
       expect(text).toContain('DATABASE_PRIVATE_URL vs POSTGRES_PASSWORD: match');
+      expect(text).toContain('PGPASSWORD vs POSTGRES_PASSWORD: mismatch');
+      expect(text).toContain('DIRECT_URL vs POSTGRES_PASSWORD: match');
       expect(text).toContain('web DATABASE_URL vs issuer DATABASE_URL: credentials match; target match');
+      expect(text).toContain('web DIRECT_URL vs issuer DIRECT_URL: credentials mismatch; target match');
       expect(text).toContain('worker DATABASE_URL vs issuer DATABASE_URL: credentials mismatch; target match');
       expect(text).toContain('cron DATABASE_URL vs issuer DATABASE_URL: credentials unknown (unresolved_reference); target unknown (unresolved_reference)');
       const serialized = JSON.stringify(response);

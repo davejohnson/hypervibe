@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Component } from '../../../../domain/entities/component.entity.js';
 import { createRailwayDatabaseAdapter } from '../railway-database.factory.js';
-import { railwayHttpFixture, projectId, productionId, stagingId } from './railway-http.fixture.js';
+import { railwayHttpFixture, projectId, productionId, stagingId, postgresTemplate } from './railway-http.fixture.js';
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 const canonical = 'synthetic-current-password';
@@ -29,6 +29,107 @@ async function fixture(options: Parameters<typeof railwayHttpFixture>[0] = {}) {
 // unrendered references, deployment rendering, additive upsert and skipDeploys.
 // This proves configuration reconciliation, not live SQL or running containers.
 describe('Railway database credential alias API contract', () => {
+  it('accepts the recorded official template composed references without flattening them', async () => {
+    const f = await fixture();
+    const service = Object.values(postgresTemplate.serializedConfig.services)[0] as {
+      variables: Record<string, { defaultValue: string }>;
+    };
+    const definitions = Object.fromEntries(Object.entries(service.variables).map(([key, value]) => [key, value.defaultValue]));
+    Object.assign(definitions, { POSTGRES_PASSWORD: canonical, RAILWAY_PRIVATE_DOMAIN: 'staging-db.railway.internal',
+      DIRECT_URL: 'postgresql://${{PGUSER}}:${{POSTGRES_PASSWORD}}@${{PGHOST}}:${{PGPORT}}/${{PGDATABASE}}' });
+    f.variables.set(`staging-db/${stagingId}`, definitions);
+    const capability = f.database.credentialAliases!;
+    const expected = await capability.inspect(f.input);
+    expect(expected.changeNames).toEqual([]);
+    expect(expected.checkedNames).toEqual(['DATABASE_URL', 'DIRECT_URL', 'PGPASSWORD']);
+    const result = await capability.repair({ ...f.input, expected, allowWrite: true, beforeWrite: vi.fn() });
+    expect(result).toMatchObject({ success: true, data: { appliedCount: 0, referencesVerified: true } });
+    expect(f.mutations).toEqual([]);
+    expect(f.variables.get(`staging-db/${stagingId}`)).toEqual(definitions);
+    // Native references keep following the issuer after its supported rotation.
+    // This synthetic provider read does not claim SQL authentication was changed.
+    definitions.POSTGRES_PASSWORD = 'synthetic-next-password';
+    expect((await capability.inspect(f.input)).changeNames).toEqual([]);
+    expect(f.mutations).toEqual([]);
+    expect(f.contractErrors).toEqual([]);
+  });
+
+  it('repairs a copied DIRECT_URL using independently observed same-service components', async () => {
+    const f = await fixture();
+    const direct = `postgresql://postgres:${stale}@staging-db.railway.internal:5432/railway`;
+    f.variables.set(`staging-db/${stagingId}`, {
+      POSTGRES_PASSWORD: canonical, PGPASSWORD: stale, POSTGRES_USER: 'postgres', POSTGRES_DB: 'railway',
+      PGUSER: '${{POSTGRES_USER}}', PGDATABASE: '${{POSTGRES_DB}}', PGPORT: '5432',
+      PGHOST: '${{RAILWAY_PRIVATE_DOMAIN}}', RAILWAY_PRIVATE_DOMAIN: 'staging-db.railway.internal',
+      DATABASE_URL: 'postgresql://${{PGUSER}}:${{POSTGRES_PASSWORD}}@${{PGHOST}}:${{PGPORT}}/${{PGDATABASE}}',
+      DIRECT_URL: direct,
+    });
+    const capability = f.database.credentialAliases!;
+    const expected = await capability.inspect(f.input);
+    expect(expected.changeNames).toEqual(['DIRECT_URL', 'PGPASSWORD']);
+    const result = await capability.repair({ ...f.input, expected, allowWrite: true, beforeWrite: vi.fn() });
+    expect(result).toMatchObject({ success: true, data: { appliedCount: 2, referencesVerified: true } });
+    expect(f.mutations).toEqual([{ field: 'variableCollectionUpsert', args: { input: {
+      projectId, environmentId: stagingId, serviceId: 'staging-db', replace: false, skipDeploys: true,
+      variables: { PGPASSWORD: ref,
+        DIRECT_URL: 'postgresql://${{PGUSER}}:${{POSTGRES_PASSWORD}}@${{PGHOST}}:${{PGPORT}}/${{PGDATABASE}}' },
+    } } }]);
+    expect(f.variables.get(`production-postgres-db/${productionId}`)?.PGPASSWORD).toBe(stale);
+    expect(JSON.stringify(result)).not.toContain(canonical);
+    expect(JSON.stringify(result)).not.toContain(stale);
+    expect(f.contractErrors).toEqual([]);
+  });
+
+  it('does not rewrite a different DIRECT_URL destination to match convenient component variables', async () => {
+    const f = await fixture();
+    Object.assign(f.variables.get(`staging-db/${stagingId}`)!, {
+      PGUSER: 'postgres', PGHOST: 'another-database.internal', PGPORT: '5432', PGDATABASE: 'another_database',
+      DIRECT_URL: `postgresql://postgres:${stale}@reviewed-database.internal:5432/reviewed_database`,
+    });
+    const capability = f.database.credentialAliases!;
+    const expected = await capability.inspect(f.input);
+    const result = await capability.repair({ ...f.input, expected, allowWrite: true, beforeWrite: vi.fn() });
+    expect(result.success).toBe(true);
+    expect(f.variables.get(`staging-db/${stagingId}`)?.DIRECT_URL)
+      .toBe(`postgresql://postgres:${ref}@reviewed-database.internal:5432/reviewed_database`);
+  });
+
+  it('blocks a changed component reference before writing a reviewed DIRECT_URL repair', async () => {
+    const f = await fixture();
+    Object.assign(f.variables.get(`staging-db/${stagingId}`)!, {
+      PGHOST: 'reviewed-database.internal', PGPORT: '5432', PGDATABASE: 'reviewed_database',
+      DIRECT_URL: `postgresql://postgres:${stale}@reviewed-database.internal:5432/reviewed_database`,
+    });
+    const capability = f.database.credentialAliases!;
+    const expected = await capability.inspect(f.input);
+    f.variables.get(`staging-db/${stagingId}`)!.PGDATABASE = 'different_database';
+    const result = await capability.repair({ ...f.input, expected, allowWrite: true, beforeWrite: vi.fn() });
+    expect(result.success).toBe(false);
+    expect(f.mutations).toEqual([]);
+  });
+
+  it('recovers a committed DIRECT_URL reference repair by readback only', async () => {
+    let lose = true;
+    const f = await fixture({ responseOverride: request => {
+      if (request.query.includes('mutation RepairDatabaseCredentialAliases') && lose) {
+        lose = false;
+        Object.assign(f.variables.get(`staging-db/${stagingId}`)!, request.variables.values);
+        throw new TypeError('synthetic response lost');
+      }
+      return undefined;
+    } });
+    Object.assign(f.variables.get(`staging-db/${stagingId}`)!, {
+      PGHOST: 'reviewed-database.internal', PGPORT: '5432', PGDATABASE: 'reviewed_database',
+      DIRECT_URL: `postgresql://postgres:${stale}@reviewed-database.internal:5432/reviewed_database`,
+    });
+    const capability = f.database.credentialAliases!;
+    const expected = await capability.inspect(f.input);
+    expect((await capability.repair({ ...f.input, expected, allowWrite: true, beforeWrite: vi.fn() })).success).toBe(false);
+    const result = await capability.repair({ ...f.input, expected, allowWrite: false, beforeWrite: vi.fn() });
+    expect(result).toMatchObject({ success: true, data: { appliedCount: 0, skippedCount: 4, referencesVerified: true } });
+    expect(f.requests.filter(r => r.query.includes('mutation RepairDatabaseCredentialAliases'))).toHaveLength(1);
+  });
+
   it('repairs only stale aliases, preserving the issuer and each URL target byte-for-byte', async () => {
     const f = await fixture();
     expect(f.database.credentialAliases).toBeDefined();
