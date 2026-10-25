@@ -82,10 +82,14 @@ describe('opted-in SQL password rotation with full parameter logging', () => {
     expect(await f.port.rotate(f.environment, f.component, target, replacement)).toEqual({ state: 'acknowledged' });
     const logs = await readFile(join(directory, 'postgres.log'), 'utf8');
     expect(logs.includes('hypervibe.credential_rotation_password')).toBe(true);
-    expect(logs.includes('DETAIL:  parameters:')).toBe(true);
     expect(logs.includes(replacement)).toBe(false);
     const { rows } = await admin.query("SELECT rolpassword FROM pg_authid WHERE rolname = 'rotation_app'");
     expect(/^SCRAM-SHA-256\$4096:[A-Za-z0-9+/]+=*\$[A-Za-z0-9+/]+=*:[A-Za-z0-9+/]+=*$/.test(rows[0].rolpassword)).toBe(true);
+    // PostgreSQL 14 says "parameters", while 17 says "Parameters". Prove the
+    // full Bind value was logged by comparing with the independently stored
+    // verifier, not the version-specific (and translatable) detail label.
+    // https://github.com/postgres/postgres/blob/REL_17_6/src/backend/nodes/params.c
+    expect(logs.includes(`$1 = '${rows[0].rolpassword}'`)).toBe(true);
     expect(await f.port.probe(f.environment, f.component, target, replacement)).toMatchObject({ state: 'authenticated' });
     expect(await f.port.probe(f.environment, f.component, target, oldPassword)).toMatchObject({ state: 'rejected' });
   });
