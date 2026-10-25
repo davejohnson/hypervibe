@@ -41,6 +41,9 @@ export interface DatabaseCapabilities {
   /** Whether bounded operations can acquire and release provider-owned access. */
   supportsTemporaryDatabaseAccess?: boolean;
 
+  /** Provider-owned, value-free guidance when no usable database route exists. */
+  databaseAccessHint?: string;
+
   /** Prefer provider-owned access even when a stored public-looking URL exists. */
   prefersTemporaryDatabaseAccess?: boolean;
 }
@@ -267,6 +270,14 @@ export interface IDatabaseAdapter {
    * Useful when the URL needs to be refreshed or retrieved.
    */
   getConnectionUrl(component: Component): Promise<string | null>;
+
+  /** Read an already existing external route for this exact component without
+   * creating access or changing its runtime URL. Null means no usable route;
+   * incomplete/failed provider observation must throw. Returned secrets stay
+   * inside the operation and must never be persisted or exposed. */
+  getExistingExternalConnectionUrl?(
+    environment: Environment, component: Component
+  ): Promise<string | null>;
 
   /**
    * Destroy a provisioned database instance.

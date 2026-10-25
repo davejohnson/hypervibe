@@ -60,6 +60,8 @@ tool descriptions, and contextual results; they do not inherit this file.
 - Use Hypervibe for infrastructure operations. Direct provider APIs/CLIs and other
   connectors must not bypass its plans, state, or blockers. MCP agents use available
   `hv_*` tools directly; the Hypervibe CLI shares the same state and reconciliation.
+  The narrow [operator-managed Railway private SSH exception](docs/development-guidance-connections.md#dg-034)
+  requires explicit user authorization and does not permit infrastructure changes.
 - Honor each result's stage and continuation contract. Failed, blocked, pending, or
   confirmation-required work stops dependent work unless an explicit bounded
   continuation or user-authorized investigation applies. Report succeeded, failed,

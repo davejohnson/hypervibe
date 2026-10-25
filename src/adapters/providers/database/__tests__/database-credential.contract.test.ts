@@ -57,6 +57,23 @@ it('distinguishes authentication rejection from an uncertain connection failure'
   expect(JSON.stringify(result)).not.toContain('secret-echo');
 });
 
+it.each(['127.0.0.1', 'explicit.railway.internal'])('preserves an explicit direct connection to %s without choosing another route', async host => {
+  const bound = { ...component, bindings: { ...component.bindings, directUrl: `postgresql://app:old-password@${host}:5433/appdb?application_name=explicit` } };
+  const external = vi.fn().mockResolvedValue('postgresql://other:other-password@public.example/other');
+  const scopedAdapter = { ...adapter, getExistingExternalConnectionUrl: external } as IDatabaseAdapter;
+  const hosts: string[] = [];
+  vi.spyOn(pg.Client.prototype, 'connect').mockImplementation(async function (this: pg.Client) {
+    hosts.push((this as any).connectionParameters.host);
+  });
+  vi.spyOn(pg.Client.prototype, 'end').mockResolvedValue(undefined);
+  vi.spyOn(pg.Client.prototype, 'query').mockResolvedValue({ rows: [{ username: 'app', database: 'appdb' }] } as never);
+  const port = createPostgresCredentialLifecycle(() => scopedAdapter);
+  const target = await port.inspect(environment, bound, selection);
+  expect(await port.probe(environment, bound, target, 'replacement')).toMatchObject({ state: 'authenticated' });
+  expect(hosts).toEqual([host]);
+  expect(external).not.toHaveBeenCalled();
+});
+
 it('replaces only the password of a reviewed URL while preserving encoded options and identity', () => {
   expect(replaceDatabasePassword('postgresql://app:old@db.example:5433/appdb?sslmode=require&application_name=a%20b', 'next@password', { username: 'app', database: 'appdb' })).toBe('postgresql://app:next%40password@db.example:5433/appdb?sslmode=require&application_name=a%20b');
   expect(() => replaceDatabasePassword('postgresql://other:old@db.example/appdb', 'next', { username: 'app', database: 'appdb' })).toThrow(/identity/i);
