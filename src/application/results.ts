@@ -163,7 +163,7 @@ function hasConnectionSetup(data: Record<string, unknown>): boolean {
   return isRecord(setup) || (Array.isArray(setup) && setup.some(isRecord));
 }
 
-const CONNECTION_SETUP_AGENT_MESSAGE = 'Stop before any dependent operation. Show the user the exact clickable setup links and required permissions from connectionSetup, recommend its recommendedSetupUrl, and offer to open that page in their browser. Then explain where to save the credential and show the complete credentialExample with /absolute/path replaced by the real local path. Never summarize this as a vague "Hypervibe credential flow" or ask the user to paste a token into chat.';
+const CONNECTION_SETUP_AGENT_MESSAGE = 'Stop before any dependent operation. Show the user the exact clickable setup links and required permissions from connectionSetup, recommend its recommendedSetupUrl, and offer to open that page in their browser. Preserve the complete query string, including the name and description; Hypervibe has prepared the supported known fields. Never replace a pre-filled form link with a dashboard URL or a click-by-click navigation checklist, and do not invent or rewrite query parameters. Explain only the remaining manual fields, review, or consent from the guidance; never put secrets in URLs. Then explain where to save the credential and show the complete credentialExample with /absolute/path replaced by the real local path. Never summarize this as a vague "Hypervibe credential flow" or ask the user to paste a token into chat.';
 
 function successAgentInstruction(data: unknown): CommandEnvelope['agentInstruction'] | undefined {
   if (!isRecord(data)) return undefined;

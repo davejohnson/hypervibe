@@ -259,7 +259,7 @@ export function rootHelp(registry: CommandRegistry): string {
     'Desired-state infrastructure orchestration through the same command core as Hypervibe MCP.',
     '',
     'Commands:',
-    '  install claude               Install the MCP server for Claude Code (user scope).',
+    '  install <client>             Install skill + MCP for codex, claude, or opencode with npx.',
   ];
   for (const command of registry.list().sort((a, b) => a.cliPath.join(' ').localeCompare(b.cliPath.join(' ')))) {
     const summary = command.description.split('\n')[0];

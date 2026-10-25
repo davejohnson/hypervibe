@@ -1,6 +1,6 @@
 # Hypervibe macOS Companion
 
-**Status:** Rev 7, explicit production deployment added to the implemented companion
+**Status:** Rev 8, bundled agent guidance and contextual connection setup
 **Shape:** A menu bar app in `apps/macos/`. Chat remains the general control plane. The app provides ambient status, resource topology, notifications, plan review, and one narrow production-deploy action through existing Hypervibe commands.
 
 Rev 4 deliberately removes the companion read-model database. Hypervibe already has authoritative repo specs, local history, bindings, and live provider observation. The app should ask Hypervibe for those views through its existing local MCP process, retain only a small disposable cache, and never become another infrastructure state owner.
@@ -109,6 +109,7 @@ bundle contains:
 - a small native restart helper used only after an update is fully staged;
 - a small native `hypervibe-mcp` stdio launcher;
 - the built, existing Hypervibe TypeScript server and production dependencies;
+- the server's required templates and canonical Hypervibe skill;
 - a pinned Node.js runtime and its license;
 - Hypervibe and included dependency licenses.
 
@@ -166,6 +167,43 @@ argument. Removing a project removes its managed entries. Desktop clients must
 be fully restarted after changes.
 
 This is onboarding around the current MCP, not a second server implementation.
+
+Codex connection also invokes the bundled launcher's existing skill-only
+installer. The shared TypeScript implementation owns skill hashes, installation
+receipts, and safe upgrades; Swift does not duplicate those rules. A read-only
+check reports missing, current, outdated, custom, or unavailable guidance
+separately from MCP registration. Settings can explicitly install/update owned
+guidance, and preserves a custom skill while keeping MCP usable. Claude Desktop
+remains MCP-only. The terminal-client installer continues to serve Claude Code
+and OpenCode; this change does not add new native host configurators.
+
+Connection forms obtain provider and known project context through MCP. Their
+links come from read-only `hv_connections action="describe"`, refreshed when
+the selected provider or scope changes. An obsolete response must not replace
+the current selection. Swift preserves URLs verbatim and never recreates
+provider query-string rules. Declared bootstrap/local-setup capabilities lead
+to a concrete chat handoff; importing credentials the user already has remains
+an explicit option. Reading guidance does not initialize a project or resolve
+credential values.
+
+The Rev 8 regressions challenged three assumptions: MCP registration alone
+completes agent setup, generic provider discovery is enough for scoped forms,
+and a two-tool handshake establishes a complete app bundle. Missing skill
+installation, missing contextual token fields, an adopting identity read, and
+an omitted runtime template each produced observed failures before correction.
+The shared URL fields follow the [provider form contracts](connection-form-links.md).
+Swift tests exercise isolated native subprocesses, and the package smoke
+executes the actual bundled launcher. Shared MCP tests prove that guidance
+does not resolve credentials or adopt state.
+
+On 2026-10-24, final validation passed 145 focused Node tests, all 66 native
+Swift tests, typecheck, and the configured Node runtime smoke. The local arm64
+DMG built from the corrected sources passed its bundled-launcher smoke
+(version, 23 tools, full guidance, complete links and isolated skill install)
+and code-signature verification. This is an ad-hoc local build, not a notarized
+public release, an Intel build, an authenticated provider-form test, or proof
+of interactive UI behavior. Release remains a separate clean-batch gate;
+the contemporaneous production dependency audit reported four high findings.
 
 ## Why not read SQLite directly?
 
