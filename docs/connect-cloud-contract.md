@@ -209,14 +209,34 @@ approved disposable-account walkthroughs remain explicit release gates. Both
 PRs remain drafts until all agreed criteria are met. No merge, publication or
 deployment is authorized by this design document.
 
-Dependency review on 2026-10-25 found an unresolved Azure Identity/MSAL release
-gate. The lock selects Identity 4.13.2 and MSAL Node 5.5.0; Microsoft's
+Dependency review at 2026-10-25 07:39 UTC confirmed the unresolved Azure
+Identity/MSAL release gate. The lock selects Identity 4.13.2 and MSAL Node 5.5.0; Microsoft's
 [advisory](https://github.com/AzureAD/microsoft-authentication-library-for-js/security/advisories/GHSA-xcx6-jx8p-x3h5)
 identifies MSAL 7.1.0 as the patched floor. Published Identity 4.14.0 and
-4.15.0-beta.1 still require MSAL 6, and no published compatible Identity range
-accepts the patch. A major override crosses documented breaking changes and is
-not a supported repair. A compatible upstream release or separately reviewed,
-maintained backport is required. Hypervibe currently uses DefaultAzureCredential;
+4.15.0-beta.1 still require MSAL 6. The public npm registry contained 810 Identity
+versions; none declared a range accepting MSAL 7.1.0 or later. An isolated,
+script-free lockfile resolution of Identity 4.14.0 selected MSAL 6.0.1;
+`npm audit --omit=dev` exited 1 with the same two high findings (the MSAL advisory
+and its Identity dependency), matching the current application audit. These are
+package-resolution observations, not a reproduced application exploit. Microsoft's
+repository advisory labels severity moderate, while npm's advisory feed labels
+it high; both give the same affected range and patched floor.
+
+The [upstream Identity upgrade issue](https://github.com/Azure/azure-sdk-for-js/issues/40441)
+remained open after maintainer acknowledgment. The official
+[security patch](https://github.com/AzureAD/microsoft-authentication-library-for-js/pull/8901)
+is merged, but published MSAL 5.x and 6.x end at 5.6.0 and 6.0.1 respectively,
+both inside the advisory's affected range. Updating only Identity therefore
+does not repair this gate. An override to MSAL 7 crosses the SDK's declared
+compatibility range and [documented interactive-authentication changes](https://github.com/AzureAD/microsoft-authentication-library-for-js/blob/dev/lib/msal-node/docs/v7-migration.md).
+The audit's suggested downgrade to Identity 4.13.0 would also discard later
+structured-process credential execution and dependency fixes, so it is not an
+accepted repair. Package manifests and the lockfile remain unchanged.
+
+The smallest supported repair is an upstream Identity release accepting patched
+MSAL. A maintained backport would instead require a separately reviewed artifact,
+provenance, upstream patch regression, SDK credential-chain compatibility checks,
+and an explicit maintenance owner; none is currently established. Hypervibe uses DefaultAzureCredential;
 the absence of a direct authorization-code call limits demonstrated reachability
 but does not clear the audit finding. See the [Identity changelog](https://github.com/Azure/azure-sdk-for-js/blob/main/sdk/identity/identity/CHANGELOG.md)
 and [MSAL changelog](https://github.com/AzureAD/microsoft-authentication-library-for-js/blob/dev/lib/msal-node/CHANGELOG.md).

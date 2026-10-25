@@ -10,7 +10,7 @@ deployment. Existing collection records omit `stage` and retain their digest.
 | --- | --- | --- |
 | AWS | Customer selects an existing account in the reviewed CloudFormation console installation. Creating an organization member account has different authority and lifecycle. | Unsupported; no account-creation stage is inferred from CloudFormation support. |
 | Azure | Customer selects an existing tenant/subscription. Subscription creation and billing ownership are separate Azure APIs and agreements. | Subscription/billing preparation is unsupported. Within an existing scope, the reviewed exclusive app/environment namespace uses actual ARM deployment provenance and upsert semantics for collection and [prepared hosting](connect-cloud-azure-prepared.md); historical atomic-create-blocked plans retain their restrictions. Live walkthrough remains outstanding. |
-| GCP | Resource Manager POST creates a project and returns an operation; a second reviewed scope operation handles billing. | Project creation/recovery, versioned initial billing assignment, existing-billing verification and historical temporary-grant cleanup have offline acceptance. Initial assignment has explicitly reviewed native non-atomic semantics. Old unversioned plans remain blocked. No live walkthrough completed. |
+| GCP | Resource Manager POST exclusively allocates a globally unique project ID and returns an operation; a second reviewed scope operation handles billing. | New `create-exclusive-v1` reviews authorize one allocation attempt even when the exact lookup returns403/unknown; they require terminal operation plus fresh lifetime proof. Old plans retain their rules. Versioned initial billing assignment, existing-billing verification and historical temporary-grant cleanup have offline acceptance. No live walkthrough completed. |
 
 The ordinary provider-roster test requires all three providers to declare this
 boundary. [AWS account creation](https://docs.aws.amazon.com/organizations/latest/APIReference/API_CreateAccount.html),
@@ -25,7 +25,21 @@ Browser discovery offers a proposed project with a deterministic native ID and
 an open billing account visible to the administrator. Discovery is not permission
 proof. Planning verifies the selected account, its link permission and explicit
 parent create permission where a parent is selected. Unknown project lookup
-does not prove absence. A foreign existing ID blocks; it is never adopted.
+does not prove absence. A known existing ID blocks; it is never adopted.
+
+New discovery proposals carry the digest-bound
+`allocationMode: create-exclusive-v1`. Under the explicitly approved allocation
+policy, this review authorizes one exclusive native `CreateProject` attempt for
+the exact ID. It does not infer a create from absent drift. A403 lookup remains
+unknown and is shown as such;401,429,5xx and other failed observations still block.
+Google's [creation guide](https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects)
+requires a globally unique ID that has never previously been used, including by
+deleted projects. The [POST endpoint](https://docs.cloud.google.com/resource-manager/reference/rest/v3/projects/create)
+does not update, undelete or adopt another project. Collision/rejection ends this
+review's one attempt without renaming or retrying. Even a separately confirmed
+retry cannot dispatch another create from that saved plan. A new allocation needs
+a new review. Existing unversioned plans still require a confirmed not-found
+lookup; no flag or confirmation can upgrade a saved plan or its digest.
 
 An omitted parent is explicitly reviewed as Google-selected, not as proof of
 “No organization.” Google may select an organization from the user's domain.
@@ -34,13 +48,20 @@ creation time. Project ownership and attempt labels are set in the create POST.
 The administrator, not Hypercloud's host service account, creates the project.
 See [Google project creation](https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects).
 
-The write attempt is durable before the POST. A returned operation identity is
-retained, observed without another write and correlated with a fresh project
-read. Google expires these operations after hours, so recovery also checks the
-exact project ID, ownership labels, attempt and retained lifetime. A missing or
-unknown response never permits blind resubmission. Definite rejection requires
-a separate exact retry confirmation. Created projects remain on partial failure;
-this stage has no deletion or compensation authority.
+The write attempt is durable before the POST, and authorization is checked again
+after native permission reads immediately before dispatch. A returned operation
+identity is retained and read without another write. New allocation completion
+requires a successful terminal operation whose protobuf Any response identifies
+the v3 Project type, plus a fresh exact project read matching ID, number,
+creation time, actual parent, owner and attempt. Only then is completed-operation
+proof retained. Google expires operations after hours; an already-proven terminal
+operation remains historical evidence, while its exact project lifetime is still
+freshly checked. An expired operation that never reached proven completion, or a
+lost acknowledgment without an operation ID, remains pending. Matching labels on
+a same-name project cannot replace the missing operation proof. Unversioned
+historical plans retain their older read-only recovery and rejected-retry rules.
+Created projects remain on partial failure; this stage has no deletion or
+compensation authority.
 
 Project-only completion returns `scope-ready`, which is not billing readiness.
 `cloudInstallationNextStageV1` selects another `scope-preparation` review. That
@@ -107,6 +128,26 @@ correlated cleanup attempts plus fresh absence and identity proof, so historical
 reconciliation cannot reinstall removed temporary access.
 
 ## Acceptance evidence
+
+The new allocation counterexample came from a bounded operator read: an exact
+proposed ID returned403 `IAM_PERMISSION_DENIED`, while browser-authenticated
+project/billing discovery succeeded. This proves unknown lookup, not absence or
+the cause of every onboarding failure. Six new shared-lifecycle/native-transport
+tests failed before the explicit contract; the complete 21-case project suite then
+passed. A further native counterexample initially accepted a terminal operation
+with a missing protobuf Any type as scope-ready; the new mode now preserves
+pending instead. [ProtoJSON Any representation](https://protobuf.dev/programming-guides/json/)
+and the published v3 project schema supply the independent type/identity contract.
+Independent review also reproduced explicit empty/null parent fields staying
+pending while omitted parent succeeded. The provider now normalizes those
+documented scalar defaults to observed no-parent; exact identity, ACTIVE state
+and configured-parent matching still remain mandatory.
+The normal provider-roster test rejects the allocation field on AWS, Azure,
+ordinary GCP scopes and non-project operations. Tests also cover exact confirmation,
+revocation during awaited permission reads, collisions, lost acknowledgments,
+expired operations, no-org parent observation, unchanged old plans, separate
+billing continuation and mutation-free re-observation. No allocation was attempted
+against a live cloud by this change.
 
 Assumption challenged: collection installation can require an existing project
 number without leaving fresh-customer project creation to a dashboard chore.

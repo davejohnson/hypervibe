@@ -7,7 +7,7 @@ import type { CloudInstallationIntent, CloudInstallationRecord } from '../../src
 // googleapis/googleapis google/cloud/resourcemanager/v3/projects.proto (2026-10-24):
 // POST projects creates, returns an expiring LRO; name/createTime identify the project.
 // cloud/billing/v1/cloud_billing.proto: billing PUT replaces associations, no etag.
-// Therefore no broad administrator billing PUT is authorized by this lifecycle.
+// Project creation never authorizes that separate, versioned billing review.
 const intent = {
   schemaVersion: 1, installationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', customerId: 'customer-a', appId: 'sequence',
   environment: 'production', provider: 'gcp', mode: 'connect', stage: 'scope-preparation', keys: ['API_KEY'],
@@ -16,13 +16,18 @@ const intent = {
   hostIdentity: { kind: 'gcp-service-account', projectId: 'hosting-project', projectNumber: '123456789',
     serviceAccountEmail: 'delivery@hosting-project.iam.gserviceaccount.com', subject: '123456789012345678901', issuer: 'https://accounts.google.com' },
 } as CloudInstallationIntent;
-function fixture(options: { lostAck?: boolean; deniedLookup?: boolean; deniedBilling?: boolean; pendingOperation?: boolean; rejectCreate?: boolean; automaticParent?: 'none' | string; changeBillingOnPrewriteRead?: boolean } = {}) {
+function fixture(options: { lostAck?: boolean; deniedLookup?: boolean; deniedBilling?: boolean; pendingOperation?: boolean; rejectCreate?: boolean; automaticParent?: 'none' | string; changeBillingOnPrewriteRead?: boolean;
+  exclusiveAllocation?: boolean; lookupBeforeCreate?: number; revokeBeforeDispatch?: boolean; operationMismatch?: boolean; operationType?: string;
+  noParentEncoding?: 'empty' | 'null' } = {}) {
   const selectedIntent = structuredClone(intent);
+  if (options.exclusiveAllocation) selectedIntent.nativeScope.allocationMode = 'create-exclusive-v1';
   if (options.automaticParent) delete selectedIntent.nativeScope.parent;
   let project: Record<string, unknown> | null = null;
   let billing = '';
   let operationVisible = true;
   let serviceReads = 0;
+  let createPermissionReads = 0;
+  let authorized = true;
   const calls: Array<{ path: string; method: string; body: any }> = [];
   const records = new Map<string, CloudInstallationRecord>();
   const request: typeof fetch = async (input, init = {}) => {
@@ -31,7 +36,10 @@ function fixture(options: { lostAck?: boolean; deniedLookup?: boolean; deniedBil
     calls.push({ path: url.pathname, method, body });
     expect(init.redirect).toBe('error');
     expect(new Headers(init.headers).get('authorization')).toBe('Bearer synthetic-browser-token');
-    if (url.pathname.endsWith(':testIamPermissions')) return Response.json({ permissions: options.deniedBilling && url.hostname === 'cloudbilling.googleapis.com' ? [] : body.permissions });
+    if (url.pathname.endsWith(':testIamPermissions')) {
+      if (url.pathname === '/v3/organizations/123456:testIamPermissions' && ++createPermissionReads === 2 && options.revokeBeforeDispatch) authorized = false;
+      return Response.json({ permissions: options.deniedBilling && url.hostname === 'cloudbilling.googleapis.com' ? [] : body.permissions });
+    }
     if (url.pathname === '/v1/billingAccounts/ABCDEF-123456-789ABC') return Response.json({ name: 'billingAccounts/ABCDEF-123456-789ABC', open: true, displayName: 'Studio' });
     if (url.pathname === '/v1/billingAccounts') return Response.json({ billingAccounts: [{ name: 'billingAccounts/ABCDEF-123456-789ABC', open: true, displayName: 'Studio' }, { name: 'billingAccounts/CLOSED-123456-789ABC' }] });
     if (url.pathname === '/v3/projects:search') return Response.json({});
@@ -43,15 +51,19 @@ function fixture(options: { lostAck?: boolean; deniedLookup?: boolean; deniedBil
       for (const label of Object.values(body.labels)) expect(String(label).length).toBeLessThanOrEqual(63);
       if (options.rejectCreate) return Response.json({}, { status: 409 });
       project = { name: 'projects/987654321012', projectId: 'sequence-new-project', displayName: 'Sequence',
-        ...(options.automaticParent === 'none' ? {} : { parent: options.automaticParent ?? 'organizations/123456' }),
+        ...(options.automaticParent === 'none' ? options.noParentEncoding ? { parent: options.noParentEncoding === 'empty' ? '' : null } : {}
+          : { parent: options.automaticParent ?? 'organizations/123456' }),
         state: 'ACTIVE', createTime: '2026-10-24T12:00:00Z', labels: body.labels };
       if (options.lostAck) throw new Error('synthetic lost response');
       return Response.json({ name: 'operations/pc.123456789' });
     }
     if (url.pathname === '/v3/operations/pc.123456789') return operationVisible
-      ? Response.json(options.pendingOperation ? { name: 'operations/pc.123456789' } : { name: 'operations/pc.123456789', done: true, response: project }) : Response.json({}, { status: 404 });
+      ? Response.json(options.pendingOperation ? { name: 'operations/pc.123456789' } : { name: 'operations/pc.123456789', done: true,
+        response: { ...project, ...(options.operationMismatch ? { createTime: '2026-10-23T12:00:00Z' } : {}),
+          ...(options.exclusiveAllocation && options.operationType !== 'omitted' ? { '@type': options.operationType ?? 'type.googleapis.com/google.cloudresourcemanager.v3.Project' } : {}) } }) : Response.json({}, { status: 404 });
     if (url.pathname === '/v3/projects/sequence-new-project' || url.pathname === '/v3/projects/987654321012') {
       if (options.deniedLookup) return Response.json({}, { status: 403 });
+      if (!project && options.lookupBeforeCreate) return Response.json({}, { status: options.lookupBeforeCreate });
       return project ? Response.json(project) : Response.json({}, { status: 404 });
     }
     if (url.pathname === '/v1/projects/sequence-new-project/billingInfo') return Response.json({ name: 'projects/sequence-new-project/billingInfo', projectId: 'sequence-new-project', billingAccountName: billing, billingEnabled: !!billing });
@@ -64,7 +76,7 @@ function fixture(options: { lostAck?: boolean; deniedLookup?: boolean; deniedBil
     throw new Error('Unexpected transport request');
   };
   const driver = createGcpCloudInstallationDriver({ fetch: request });
-  const context = { driver, authorize: async () => true, store: {
+  const context = { driver, authorize: async () => authorized, store: {
     read: async (id: string) => structuredClone(records.get(id) ?? null),
     compareAndSwap: async (id: string, revision: number | null, record: CloudInstallationRecord) => {
       if ((records.get(id)?.revision ?? null) !== revision) return false;
@@ -214,5 +226,125 @@ describe('GCP fresh-project scope through real shared lifecycle and reconstructe
     expect(result.status).toBe('blocked');
     expect(result.attempts).toHaveLength(1);
     expect(f.calls.some(call => call.path.endsWith(':enable') && call.method === 'POST')).toBe(false);
+  });
+});
+
+describe('versioned GCP exclusive allocation preserves unknown observation', () => {
+  // Reconstructed transport: native CreateProject is separate from PATCH and the
+  // official creation guide forbids IDs already used, including deleted IDs.
+  // Actual read-only operator evidence: proposed ID GET403 IAM_PERMISSION_DENIED;
+  // a visible-project search cannot establish absence or ownership of that ID.
+  it('reviews unknown403 then creates once under exact action confirmation and records terminal native proof', async () => {
+    const f = fixture({ exclusiveAllocation: true, lookupBeforeCreate: 403 }); const planned = await f.plan();
+    expect(planned.status).toBe('review-required');
+    expect(planned.intent.nativeScope.allocationMode).toBe('create-exclusive-v1');
+    expect(planned.plan.review.warnings.join(' ')).toMatch(/unknown/i);
+    expect(planned.plan.actions[0].metadata.native).toMatchObject({ allocationMode: 'create-exclusive-v1' });
+    expect((await lifecycle.applyCloudInstallationV1({ ...f.context, installationId: planned.installationId, planDigest: planned.plan.digest, confirmActions: [] })).reason).toBe('confirmation_required');
+    expect(f.calls.some(c => c.path === '/v3/projects' && c.method === 'POST')).toBe(false);
+    const ready = await f.apply(planned);
+    expect(ready.status).toBe('scope-ready');
+    expect(ready.completed['gcp:project'].native).toMatchObject({ operationName: 'operations/pc.123456789', operationCompleted: true });
+    f.expireOperation();
+    expect((await f.reconcile(ready)).status).toBe('scope-ready');
+    expect((await f.apply(ready)).status).toBe('scope-ready');
+    expect(f.calls.filter(c => c.path === '/v3/projects' && c.method === 'POST')).toHaveLength(1);
+    expect(f.calls.some(c => c.method === 'PUT' || c.method === 'PATCH')).toBe(false);
+  });
+
+  it('does not upgrade old blocked scopes or allow other unknown failures to authorize allocation', async () => {
+    await expect(fixture({ lookupBeforeCreate: 403 }).plan()).rejects.toMatchObject({ code: 'insufficient_permissions' });
+    for (const status of [401, 429, 500]) {
+      const f = fixture({ exclusiveAllocation: true, lookupBeforeCreate: status });
+      await expect(f.plan()).rejects.toThrow();
+      expect(f.calls.some(c => c.method === 'POST' && c.path === '/v3/projects')).toBe(false);
+    }
+    const f = fixture(); const old = await f.plan();
+    await expect(lifecycle.planCloudInstallationV1({ ...f.context, intent: { ...old.intent,
+      nativeScope: { ...old.intent.nativeScope, allocationMode: 'create-exclusive-v1' } } })).rejects.toThrow();
+  });
+
+  it('never adopts the same-name project after a lost acknowledgement, even with matching attempt labels', async () => {
+    const f = fixture({ exclusiveAllocation: true, lookupBeforeCreate: 403, lostAck: true }); const planned = await f.plan();
+    expect((await f.apply(planned)).status).toBe('pending');
+    const recovered = await f.reconcile(planned);
+    expect(recovered.status).toBe('pending');
+    expect(recovered.completed).toEqual({});
+    await expect(lifecycle.planCloudInstallationContinuationV1({ ...f.context, scopePreparationId: planned.installationId,
+      scopePreparationDigest: planned.plan.digest, installationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' })).rejects.toThrow();
+    expect((await f.apply(planned)).status).toBe('pending');
+    expect(f.calls.filter(c => c.path === '/v3/projects' && c.method === 'POST')).toHaveLength(1);
+  });
+
+  it('requires terminal operation plus fresh matching lifetime, preserving pending/expired outcomes', async () => {
+    for (const options of [{ pendingOperation: true }, { operationMismatch: true }, { deniedLookup: true }]) {
+      const f = fixture({ exclusiveAllocation: true, ...options }); const planned = await f.plan();
+      expect((await f.apply(planned)).status).toBe('pending');
+      f.expireOperation();
+      expect((await f.reconcile(planned)).status).toBe('pending');
+      expect(f.records.get(planned.installationId)?.completed).toEqual({});
+      expect(f.calls.filter(c => c.path === '/v3/projects' && c.method === 'POST')).toHaveLength(1);
+    }
+  });
+
+  it('rejects missing or wrong protobuf Any type before declaring the project operation complete', async () => {
+    for (const operationType of ['omitted', 'type.googleapis.com/google.cloudresourcemanager.v3.Folder']) {
+      const f = fixture({ exclusiveAllocation: true, operationType }); const planned = await f.plan();
+      expect((await f.apply(planned)).status).toBe('pending');
+      expect(f.records.get(planned.installationId)?.completed).toEqual({});
+      expect(f.calls.filter(c => c.path === '/v3/projects' && c.method === 'POST')).toHaveLength(1);
+    }
+  });
+
+  it('retains observed no-parent scope and rechecks exact lifetime before the separate billing review', async () => {
+    const f = fixture({ exclusiveAllocation: true, lookupBeforeCreate: 403, automaticParent: 'none' });
+    const planned = await f.plan(); const ready = await f.apply(planned); f.setBilling();
+    expect(planned.plan.review.warnings.join(' ')).toMatch(/project-creation authority is unverified/);
+    const billing = await lifecycle.planCloudInstallationContinuationV1({ ...f.context, scopePreparationId: ready.installationId,
+      scopePreparationDigest: ready.plan.digest, installationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' });
+    expect(billing.intent.nativeScope).toMatchObject({ projectParent: 'none', projectNumber: '987654321012', projectCreateTime: '2026-10-24T12:00:00Z' });
+    expect(billing.intent.nativeScope).not.toHaveProperty('allocationMode');
+    expect(billing.plan.review.resources).toContainEqual(expect.objectContaining({ kind: 'project', scope: 'No organization (observed)' }));
+    f.setProject({ ...f.getProject(), createTime: '2026-10-25T12:00:00Z' });
+    expect((await f.apply(billing)).status).toBe('blocked');
+    expect(f.calls.some(c => c.method === 'PUT' || c.method === 'PATCH')).toBe(false);
+  });
+
+  it('normalizes explicit empty and null ProtoJSON parent defaults in both operation and fresh project proof', async () => {
+    for (const noParentEncoding of ['empty', 'null'] as const) {
+      const f = fixture({ exclusiveAllocation: true, automaticParent: 'none', noParentEncoding });
+      const planned = await f.plan(); const ready = await f.apply(planned);
+      expect(ready.status).toBe('scope-ready');
+      expect(ready.completed['gcp:project'].resources[0].identity.parent).toBe('none');
+      expect((await f.reconcile(ready)).status).toBe('scope-ready');
+      expect(f.calls.filter(c => c.path === '/v3/projects' && c.method === 'POST')).toHaveLength(1);
+    }
+  });
+
+  it('preserves known collisions and prohibits a second create even under rejected-attempt retry confirmation', async () => {
+    const f = fixture({ exclusiveAllocation: true, lookupBeforeCreate: 403, rejectCreate: true }); const planned = await f.plan();
+    const rejected = await f.apply(planned);
+    expect(rejected.attempts[0].status).toBe('rejected');
+    await lifecycle.applyCloudInstallationV1({ ...f.context, installationId: planned.installationId, planDigest: planned.plan.digest,
+      confirmActions: ['gcp:project'], retryActions: [{ actionId: 'gcp:project', attemptId: rejected.attempts[0].id }] });
+    expect(f.calls.filter(c => c.path === '/v3/projects' && c.method === 'POST')).toHaveLength(1);
+    const known = fixture({ exclusiveAllocation: true }); known.setProject({ name: 'projects/987654321012', projectId: 'sequence-new-project',
+      state: 'ACTIVE', createTime: '2026-10-24T12:00:00Z', labels: {} });
+    await expect(known.plan()).rejects.toMatchObject({ code: 'ownership_mismatch' });
+    expect(known.calls.some(c => c.path === '/v3/projects' && c.method === 'POST')).toBe(false);
+  });
+
+  it('rechecks authorization after awaited native permission reads before creation dispatch', async () => {
+    const f = fixture({ exclusiveAllocation: true, lookupBeforeCreate: 403, revokeBeforeDispatch: true }); const planned = await f.plan();
+    expect((await f.apply(planned)).status).toBe('blocked');
+    expect(f.calls.some(c => c.path === '/v3/projects' && c.method === 'POST')).toBe(false);
+  });
+
+  it('discovers the explicit allocation review without enabling it on ordinary project resource scopes', async () => {
+    const f = fixture();
+    expect(() => f.context.driver.parseScope({ projectId: 'sequence-new-project', projectNumber: '987654321012', allocationMode: 'create-exclusive-v1' })).toThrow();
+    const result = await f.context.driver.discoverScopes!({ authentication: f.context.authentication, signal: new AbortController().signal,
+      sourceScope: { customerId: intent.customerId, appId: intent.appId, environment: intent.environment, installationId: intent.installationId } });
+    expect(result.scopes.find(s => s.stage === 'scope-preparation')?.nativeScope.allocationMode).toBe('create-exclusive-v1');
   });
 });

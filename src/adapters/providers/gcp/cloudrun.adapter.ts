@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { CloudDeploymentAdapterInputV1, CloudDeploymentConnectionV1, CloudDeploymentSourceAuthorizationV1 } from '../../../domain/ports/cloud-deployment.port.js';
 import { validateCloudDeploymentAdapterInputV1 } from '../../../domain/services/cloud-deployment-authentication.js';
 import { GcpDeploymentAuthentication, gcpDeploymentScopeSchema } from './gcp-deployment-authentication.js';
+import { GcpLocalDefaultAuthentication } from './gcp-local-default-authentication.js';
 import { getGcpNativeAdminToken } from './gcp-runtime-client.js';
 import { validateRuntimeSecretReferences, runtimeSecretReferenceIdentity } from '../../../domain/services/runtime-secret-references.js';
 import type { RuntimeSecretReference } from '../../../domain/ports/secret-destination.port.js';
@@ -75,9 +76,17 @@ import {
 // Credentials schema for self-registration
 const CloudRunAuthenticationSchema = z.object({
   projectId: z.string().min(1, 'GCP Project ID is required'),
-  credentials: z.string().min(1, 'Service account JSON is required'),
+  authMode: z.enum(['default', 'serviceAccount']).optional(),
+  credentials: z.string().min(1, 'Service account JSON is required').optional(),
   runtimeServiceAccountEmail: z.string().trim().email('Runtime service account email must be valid').optional(),
 }).strict().superRefine((value, context) => {
+  if (value.authMode === 'default' ? value.credentials !== undefined : !value.credentials) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['credentials'], message: value.authMode === 'default'
+      ? 'Default authentication uses local ADC and cannot also contain a service account key.' : 'Service account JSON is required.' });
+  }
+  if (value.authMode === 'default' && !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(value.projectId)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['projectId'], message: 'Select an exact valid GCP project ID for local authentication.' });
+  }
   if (
     value.runtimeServiceAccountEmail
     && !value.runtimeServiceAccountEmail.toLowerCase().endsWith(`@${value.projectId.toLowerCase()}.iam.gserviceaccount.com`)
@@ -514,26 +523,30 @@ export class CloudRunAdapter implements
   private accessToken: string | null = null;
   private tokenExpiry: Date | null = null;
   private transientAuthentication: GcpDeploymentAuthentication | null = null;
+  private localDefaultAuthentication: GcpLocalDefaultAuthentication | null = null;
   private deploymentConnection: CloudDeploymentConnectionV1 | null = null;
   private deploymentSourceAuthorization: CloudDeploymentSourceAuthorizationV1 | undefined;
   private get deploymentEmail(): string | undefined {
     return this.transientAuthentication?.authentication.principal.serviceAccountEmail ?? this.serviceAccountCreds?.client_email;
   }
   private request(input: string | URL | Request, init?: RequestInit): Promise<Response> {
-    return this.transientAuthentication ? this.transientAuthentication.request(input, init) : fetch(input, init);
+    return this.transientAuthentication ? this.transientAuthentication.request(input, init)
+      : this.localDefaultAuthentication ? this.localDefaultAuthentication.request(input, init) : fetch(input, init);
   }
   readonly serviceVolumes = new CloudRunServiceVolumes(() => {
     if (!this.credentials) throw new Error('Cloud Run filesystem requires a verified connection.');
     return { projectId: this.credentials.projectId, region: this.credentials.region };
-  }, () => this.getAccessToken());
+  }, () => this.getAccessToken(), (input, init) => this.request(input, init));
 
   private readonly legacyRuntimeIdentities = new CloudRunRuntimeIdentities(() => {
-    if (!this.credentials || !this.deploymentEmail) throw new Error('Cloud Run runtime identity requires a verified connection.');
-    return { projectId: this.credentials.projectId, region: this.credentials.region, deployEmail: this.deploymentEmail! };
+    if (!this.credentials || (!this.deploymentEmail && !this.localDefaultAuthentication?.principal)) throw new Error('Cloud Run runtime identity requires a verified connection and known caller kind.');
+    return { projectId: this.credentials.projectId, region: this.credentials.region, deployEmail: this.deploymentEmail,
+      ...(this.localDefaultAuthentication ? { defaultAuthentication: true } : {}) };
   }, () => this.getAccessToken(), (environment, serviceName, boundId) => this.workloadResourceName(environment, serviceName, boundId), async () => {
     if (this.transientAuthentication) throw new Error('Runtime permissions require their separately reviewed cloud installation.');
+    if (this.localDefaultAuthentication) return this.getAccessToken();
     return getGcpNativeAdminToken();
-  });
+  }, (input, init) => this.request(input, init));
 
   private readonly installedRuntimeIdentities = new CloudRunInstalledRuntimeIdentities(() => {
     if (!this.deploymentConnection) throw new Error('Reviewed Google deployment installation is unavailable.');
@@ -565,8 +578,14 @@ export class CloudRunAdapter implements
       ? (credentials as Record<string, string>).region
       : DEFAULT_CLOUD_RUN_REGION;
     this.credentials = { ...parsed, region: CloudRunRegionSchema.parse(legacyRegion) };
+    if (parsed.authMode === 'default') {
+      const auth = new GcpLocalDefaultAuthentication(parsed.projectId);
+      try { await auth.initialize(); this.localDefaultAuthentication = auth; }
+      catch (error) { await this.disconnect(); throw error; }
+      return;
+    }
     try {
-      this.serviceAccountCreds = JSON.parse(parsed.credentials);
+      this.serviceAccountCreds = JSON.parse(parsed.credentials!);
     } catch {
       throw new Error('Invalid service account JSON');
     }
@@ -629,7 +648,7 @@ export class CloudRunAdapter implements
   }
 
   async verify(): Promise<{ success: boolean; error?: string; email?: string; warning?: string }> {
-    if (!this.credentials || !this.deploymentEmail) {
+    if (!this.credentials) {
       return { success: false, error: 'Not connected. Call connect() first.' };
     }
 
@@ -650,7 +669,7 @@ export class CloudRunAdapter implements
             success: false,
             error: [
               'Cloud Run Admin API probe failed with 403.',
-              `Grant roles/run.admin to serviceAccount:${this.deploymentEmail!} on project ${projectId} — deploys are impossible without it.`,
+              `Grant roles/run.admin to ${this.deploymentEmail ? `serviceAccount:${this.deploymentEmail}` : 'the selected local Google caller'} on project ${projectId} — deploys are impossible without it.`,
               `Original error: ${text}`,
             ].join(' '),
           };
@@ -685,12 +704,14 @@ export class CloudRunAdapter implements
     this.accessToken = null;
     this.tokenExpiry = null;
     this.transientAuthentication = null;
+    this.localDefaultAuthentication = null;
     this.deploymentConnection = null;
     this.deploymentSourceAuthorization = undefined;
   }
 
   async repairLoggingAccess(): Promise<Receipt> {
     if (this.transientAuthentication) return { success: false, message: 'Logging access belongs to the separately reviewed cloud installation.' };
+    if (this.localDefaultAuthentication) return { success: false, message: 'Local Google logging access requires separately authorized caller permissions; no caller IAM grant was inferred.' };
     if (!this.credentials || !this.deploymentEmail) {
       return { success: false, message: 'Not connected', error: 'Call connect() first.' };
     }
@@ -1808,7 +1829,8 @@ export class CloudRunAdapter implements
   }
 
   get secretDestinationSetup() {
-    return createGcpSecretContainerSetup({ projectId: this.credentials?.projectId ?? '', getAccessToken: () => this.getAccessToken() });
+    return createGcpSecretContainerSetup({ projectId: this.credentials?.projectId ?? '', getAccessToken: () => this.getAccessToken() },
+      { fetch: (input, init) => this.request(input, init) });
   }
 
   private validateSecretReferences(options: DeploymentMutationOptions, vars: Record<string, string>, environment: Environment, service: Service) {
@@ -2671,7 +2693,7 @@ export class CloudRunAdapter implements
   async listQueueTopics(environment: Environment): Promise<pubsub.PubSubTopic[]> {
     if (!this.credentials) throw new Error('Not connected. Call connect() first.');
     const token = await this.getAccessToken();
-    const topics = await pubsub.listTopics(token, this.credentials.projectId);
+    const topics = await pubsub.listTopics(token, this.credentials.projectId, this.request.bind(this));
     const environmentLabel = this.labelValue(environment.name);
     return topics.filter((topic) => topic.labels?.['infraprint-environment'] === environmentLabel);
   }
@@ -2683,8 +2705,8 @@ export class CloudRunAdapter implements
     await this.assertNoUnboundLegacyQueue(environment, queueName, token);
     const { topicId, subscriptionId } = this.queueResourceNames(environment, queueName);
     const [topic, subscription] = await Promise.all([
-      pubsub.getTopic(token, this.credentials.projectId, topicId),
-      pubsub.getSubscription(token, this.credentials.projectId, subscriptionId),
+      pubsub.getTopic(token, this.credentials.projectId, topicId, this.request.bind(this)),
+      pubsub.getSubscription(token, this.credentials.projectId, subscriptionId, this.request.bind(this)),
     ]);
     if (topic) this.assertManagedQueueTopic(environment, queueName, topic);
     if (subscription) this.assertManagedQueueSubscription(environment, queueName, subscription);
@@ -2712,24 +2734,24 @@ export class CloudRunAdapter implements
       'infraprint-queue': this.labelValue(queueName),
     };
 
-    let existingTopic = await pubsub.getTopic(token, gcpProjectId, topicId);
+    let existingTopic = await pubsub.getTopic(token, gcpProjectId, topicId, this.request.bind(this));
     if (existingTopic) this.assertManagedQueueTopic(environment, queueName, existingTopic);
     let createdTopic = false;
     if (!existingTopic) {
-      const result = await pubsub.ensureTopic(token, gcpProjectId, topicId, labels);
+      const result = await pubsub.ensureTopic(token, gcpProjectId, topicId, labels, this.request.bind(this));
       createdTopic = result.created;
       existingTopic = await this.waitForQueueTopic(token, topicId);
       this.assertManagedQueueTopic(environment, queueName, existingTopic);
     }
 
-    let existing = await pubsub.getSubscription(token, gcpProjectId, subscriptionId);
+    let existing = await pubsub.getSubscription(token, gcpProjectId, subscriptionId, this.request.bind(this));
     if (existing) this.assertManagedQueueSubscription(environment, queueName, existing);
     let createdSubscription = false;
     if (!existing) {
       const result = await pubsub.ensureSubscription(token, gcpProjectId, subscriptionId, topicId, {
         ackDeadlineSeconds: options.ackDeadlineSeconds,
         labels,
-      });
+      }, this.request.bind(this));
       createdSubscription = result.created;
       existing = await this.waitForQueueSubscription(token, subscriptionId);
       this.assertManagedQueueSubscription(environment, queueName, existing);
@@ -2737,7 +2759,7 @@ export class CloudRunAdapter implements
       options.ackDeadlineSeconds !== undefined
       && existing.ackDeadlineSeconds !== options.ackDeadlineSeconds
     ) {
-      await pubsub.patchSubscriptionAckDeadline(token, gcpProjectId, subscriptionId, options.ackDeadlineSeconds);
+      await pubsub.patchSubscriptionAckDeadline(token, gcpProjectId, subscriptionId, options.ackDeadlineSeconds, this.request.bind(this));
       existing = await this.waitForQueueSubscription(token, subscriptionId, options.ackDeadlineSeconds);
       this.assertManagedQueueSubscription(environment, queueName, existing);
     }
@@ -2756,25 +2778,25 @@ export class CloudRunAdapter implements
     const token = await this.getAccessToken();
     const { topicId, subscriptionId } = this.queueResourceNames(environment, queueName);
     const [topic, subscription] = await Promise.all([
-      pubsub.getTopic(token, this.credentials.projectId, topicId),
-      pubsub.getSubscription(token, this.credentials.projectId, subscriptionId),
+      pubsub.getTopic(token, this.credentials.projectId, topicId, this.request.bind(this)),
+      pubsub.getSubscription(token, this.credentials.projectId, subscriptionId, this.request.bind(this)),
     ]);
     // Resolve and validate every target before the first destructive request so
     // a same-name unmanaged resource can never be partially torn down.
     if (topic) this.assertManagedQueueTopic(environment, queueName, topic);
     if (subscription) this.assertManagedQueueSubscription(environment, queueName, subscription);
     if (subscription) {
-      await pubsub.deleteSubscription(token, this.credentials.projectId, subscriptionId);
+      await pubsub.deleteSubscription(token, this.credentials.projectId, subscriptionId, this.request.bind(this));
       await this.waitForQueueAbsence(
         `subscription ${subscription.name}`,
-        () => pubsub.getSubscription(token, this.credentials!.projectId, subscriptionId)
+        () => pubsub.getSubscription(token, this.credentials!.projectId, subscriptionId, this.request.bind(this))
       );
     }
     if (topic) {
-      await pubsub.deleteTopic(token, this.credentials.projectId, topicId);
+      await pubsub.deleteTopic(token, this.credentials.projectId, topicId, this.request.bind(this));
       await this.waitForQueueAbsence(
         `topic ${topic.name}`,
-        () => pubsub.getTopic(token, this.credentials!.projectId, topicId)
+        () => pubsub.getTopic(token, this.credentials!.projectId, topicId, this.request.bind(this))
       );
     }
   }
@@ -2786,8 +2808,8 @@ export class CloudRunAdapter implements
       .replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 63);
     const projectId = this.queueProviderScope().projectId;
     const [topic, subscription] = await Promise.all([
-      pubsub.getTopic(token, projectId, legacy),
-      pubsub.getSubscription(token, projectId, `${legacy}-sub`),
+      pubsub.getTopic(token, projectId, legacy, this.request.bind(this)),
+      pubsub.getSubscription(token, projectId, `${legacy}-sub`, this.request.bind(this)),
     ]);
     if (topic || subscription) throw new Error(`Legacy Pub/Sub queue "${queueName}" exists without a durable binding; explicitly import or clean up that scoped identity before creating another queue.`);
   }
@@ -5334,6 +5356,7 @@ export class CloudRunAdapter implements
 
   private async getAccessToken(): Promise<string> {
     if (this.transientAuthentication) return this.transientAuthentication.token();
+    if (this.localDefaultAuthentication) return this.localDefaultAuthentication.token();
     if (this.accessToken && this.tokenExpiry && new Date() < this.tokenExpiry) {
       return this.accessToken;
     }
@@ -6637,7 +6660,7 @@ export class CloudRunAdapter implements
     const attempts = this.positiveIntegerEnv('HYPERVIBE_PUBSUB_CONVERGE_ATTEMPTS', 20);
     const intervalMs = this.nonNegativeIntegerEnv('HYPERVIBE_PUBSUB_POLL_INTERVAL_MS', 500);
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      const topic = await pubsub.getTopic(token, this.credentials.projectId, topicId);
+      const topic = await pubsub.getTopic(token, this.credentials.projectId, topicId, this.request.bind(this));
       if (topic) return topic;
       if (attempt < attempts) await this.delay(intervalMs);
     }
@@ -6654,7 +6677,7 @@ export class CloudRunAdapter implements
     const intervalMs = this.nonNegativeIntegerEnv('HYPERVIBE_PUBSUB_POLL_INTERVAL_MS', 500);
     let last: pubsub.PubSubSubscription | null = null;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      last = await pubsub.getSubscription(token, this.credentials.projectId, subscriptionId);
+      last = await pubsub.getSubscription(token, this.credentials.projectId, subscriptionId, this.request.bind(this));
       if (last && (ackDeadlineSeconds === undefined || last.ackDeadlineSeconds === ackDeadlineSeconds)) {
         return last;
       }

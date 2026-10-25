@@ -427,7 +427,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   cloudrun: {
     provider: 'cloudrun',
     displayName: 'Google Cloud Run',
-    tokenType: 'Google Cloud service account JSON key',
+    tokenType: 'Local Google user Application Default Credentials, or an existing service account JSON key',
     setupUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
     permissions: [
       'Grant roles/run.admin on the target Google Cloud project so Hypervibe can create/update Cloud Run services and jobs.',
@@ -446,10 +446,11 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Grant roles/logging.viewer and roles/logging.viewAccessor for logs.',
       'Native custom domains use the Cloud Run domain-mapping API covered by roles/run.admin. The connected identity must also be authorized for the verified base domain before apply.',
     ],
-    credentialExample: 'hv_connections provider="cloudrun" credentialsRef="file:/absolute/path/cloudrun.json"',
+    credentialExample: 'hv_connections provider="cloudrun" credentials={"authMode":"default","projectId":"<approved-gcp-project-id>"}',
     notes: [
       'Run hv_connections action="prepare" when Hypervibe should enable APIs and grant these roles. After the credential-free preview, prefer confirm=true with adminAuth="default" to use existing Google Application Default Credentials; explicit one-time admin credential references remain available. GCS, Memorystore, and Pub/Sub access are staged independently and never added by another capability.',
-      'The connection JSON contains only projectId and credentials. Hypervibe uses us-central1 when environments.<name>.hosting.region is omitted; an agent may declare another supported region in the spec.',
+      'For an existing approved project, authMode="default" reuses local Google user Application Default Credentials without copying a key or refresh token. Other ADC credential types are currently unsupported by this connection mode. Supply projectId explicitly; the login quota project does not select hosting scope. Hypervibe uses us-central1 when environments.<name>.hosting.region is omitted.',
+      'Local Google sign-in is management access only. Runtime service accounts remain separate, and managed CI requires separately reviewed deployment federation; local ADC is never copied into GitHub or GitLab secrets. The older project bootstrap still generates a deployment key.',
       'Cloud Run native domain mappings are available only in Google-supported regions. Hypervibe blocks before DNS mutation in other regions; use a separately declared external HTTPS load balancer there.',
       'Cloud Run returns a multi-value A/AAAA/CNAME record set for the mapping. Hypervibe keeps those traffic records DNS-only while Google validates ownership and manages TLS.',
       'Google recommends short-lived credentials over long-lived service account JSON keys; if you use a JSON key, rotate it and grant only the roles above.',
@@ -458,16 +459,17 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   cloudsql: {
     provider: 'cloudsql',
     displayName: 'Google Cloud SQL',
-    tokenType: 'Google Cloud service account JSON key',
+    tokenType: 'Local Google user Application Default Credentials, or an existing service account JSON key',
     setupUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
     permissions: [
-      'Grant roles/cloudsql.viewer to the connected service account so connection verification can list and inspect Cloud SQL instances.',
-      'Grant roles/cloudsql.client to the connected service account so hv_db_query can open its operation-scoped authenticated connector.',
+      'Grant roles/cloudsql.viewer to the selected Google caller so connection verification can list and inspect Cloud SQL instances.',
+      'Grant roles/cloudsql.client to the selected Google caller so hv_db_query can open its operation-scoped authenticated connector.',
       'Also grant roles/cloudsql.admin when Hypervibe should create or delete Cloud SQL instances and logical databases through hv_plan/hv_apply.',
       'The Cloud Run runtime service account separately needs roles/cloudsql.client when deployed services connect through /cloudsql.',
       'The sqladmin.googleapis.com API must already be enabled — hv_connections provider="cloudrun" action="prepare" enables it.',
     ],
-    credentialExample: 'hv_connections provider="cloudsql" credentialsRef="file:/absolute/path/cloudsql.json"',
+    credentialExample: 'hv_connections provider="cloudsql" credentials={"authMode":"default","projectId":"<approved-gcp-project-id>"}',
+    notes: ['The local SQL Connector reuses the same user ADC client; it never exports the login into the database or application. Other ADC credential types are currently unsupported by this connection mode. Automated restore drills still require their separately reviewed automation credentials.'],
   },
   memorystore: {
     provider: 'memorystore',

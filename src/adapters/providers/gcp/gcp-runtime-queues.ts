@@ -59,14 +59,14 @@ export function unionRuntimeQueues(...groups: GcpRuntimeQueue[][]): GcpRuntimeQu
 }
 
 /** Only exact bound queues are read. This helper never creates queues or grants. */
-export async function readRuntimeQueuePolicies(request: RuntimeIdentityRequest, targets: GcpRuntimeQueue[], token: string, required: GcpRuntimeQueue[]) {
+export async function readRuntimeQueuePolicies(request: RuntimeIdentityRequest, targets: GcpRuntimeQueue[], token: string, required: GcpRuntimeQueue[], transport: typeof fetch = fetch) {
   const label = (value: string) => value.toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').substring(0, 63) || 'unknown';
   const requiredNames = new Set(required.map(target => target.queueName));
   const results: Array<{ resource: string; url: string; role: string; desired: boolean; policy: ReturnType<typeof parseGcpRuntimePolicy> | null }> = [];
   for (const target of targets) {
     for (const [resource, role] of [[target.topicName, 'roles/pubsub.publisher'], [target.subscriptionName, 'roles/pubsub.subscriber']] as const) {
       const url = 'https://pubsub.googleapis.com/v1/' + resource.split('/').map(encodeURIComponent).join('/');
-      const value = await gcpRuntimeRequest(url, token) as Record<string, any> | null;
+      const value = await gcpRuntimeRequest(url, token, {}, transport) as Record<string, any> | null;
       if (!value) {
         if (requiredNames.has(target.queueName)) throw new GcpRuntimeError('The exact declared Pub/Sub queue is missing; reconcile its lifecycle before runtime permissions.');
         results.push({ resource, url, role, desired: false, policy: null }); continue;
@@ -76,7 +76,7 @@ export async function readRuntimeQueuePolicies(request: RuntimeIdentityRequest, 
         || (resource === target.subscriptionName && value.topic !== target.topicName)) {
         throw new GcpRuntimeError('Pub/Sub runtime permissions require the exact owned topic, subscription, and environment.');
       }
-      const policy = parseGcpRuntimePolicy(await gcpRuntimeRequest(`${url}:getIamPolicy?options.requestedPolicyVersion=3`, token));
+      const policy = parseGcpRuntimePolicy(await gcpRuntimeRequest(`${url}:getIamPolicy?options.requestedPolicyVersion=3`, token, {}, transport));
       results.push({ resource, url, role, desired: requiredNames.has(target.queueName), policy });
     }
   }

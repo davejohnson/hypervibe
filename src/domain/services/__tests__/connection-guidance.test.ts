@@ -527,7 +527,7 @@ describe('connection guidance', () => {
 describe('credentialFieldsFromSchema', () => {
   it('keeps hosting geography out of connection forms', () => {
     const expected = {
-      cloudrun: ['projectId', 'credentials'],
+      cloudrun: ['projectId', 'authMode', 'credentials'],
       ecs: ['accessKeyId', 'secretAccessKey'],
       'azure-container-apps': ['tenantId', 'subscriptionId', 'clientId', 'clientSecret'],
       s3: ['authMode', 'accessKeyId', 'secretAccessKey'],

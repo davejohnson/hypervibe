@@ -8,7 +8,7 @@ import { cloudRunJobUpdateBody } from './cloudrun-job-request.js';
 import { desiredRuntimeQueues, parseRuntimeQueues, readRuntimeQueuePolicies, serializeRuntimeQueues, unionRuntimeQueues, type GcpRuntimeQueue } from './gcp-runtime-queues.js';
 import { hasRuntimeSecretConsumers, desiredRuntimeSecrets, parseRuntimeSecrets, readRuntimeSecretPolicies, serializeRuntimeSecrets, unionRuntimeSecrets, type GcpRuntimeSecret } from './gcp-runtime-secrets.js';
 
-interface Scope { projectId: string; region: string; deployEmail: string }
+interface Scope { projectId: string; region: string; deployEmail?: string; defaultAuthentication?: boolean }
 const IAM = 'https://iam.googleapis.com/v1';
 const attempt = (value: string) => /^[A-Za-z0-9-]{1,128}$/.test(value);
 const canonical = (value: unknown): string => JSON.stringify(value, (_key, entry) => entry && typeof entry === 'object' && !Array.isArray(entry)
@@ -23,12 +23,18 @@ export function gcpRuntimeAccount(projectId: string, environment: Environment, s
 export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
   constructor(private readonly connected: () => Scope, private readonly token: () => Promise<string>,
     private readonly workloadName: (environment: Environment, serviceName: string, boundId?: string) => string,
-    private readonly adminToken: () => Promise<string> = getGcpNativeAdminToken) {}
+    private readonly adminToken: () => Promise<string> = getGcpNativeAdminToken,
+    private readonly transport: typeof fetch = (input, init) => fetch(input, init)) {}
+
+  private api(url: string, token: string, init?: RequestInit) {
+    return gcpRuntimeRequest(url, token, init, this.transport);
+  }
 
   private coordinates(request: RuntimeIdentityRequest) {
     const scope = this.connected(); const { environment, service } = request;
     if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(scope.projectId) || !/^[a-z]+-[a-z]+[0-9]$/.test(scope.region)
-      || !scope.deployEmail.endsWith(`@${scope.projectId}.iam.gserviceaccount.com`)
+      || (!scope.defaultAuthentication && !scope.deployEmail)
+      || (scope.deployEmail !== undefined && !scope.deployEmail.endsWith(`@${scope.projectId}.iam.gserviceaccount.com`))
       || environment.platformBindings.projectId !== scope.projectId
       || (environment.platformBindings.environmentId && environment.platformBindings.environmentId !== scope.region)
       || (environment.platformBindings.region && environment.platformBindings.region !== scope.region)) throw new GcpRuntimeError('Runtime identity requires the exact prepared Google project and region.');
@@ -63,7 +69,7 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
 
   private async account(scope: ReturnType<CloudRunRuntimeIdentities['coordinates']>, token: string, uniqueId?: string) {
     if (uniqueId !== undefined && !/^[1-9][0-9]{5,30}$/.test(uniqueId)) throw new GcpRuntimeError('The recorded Google runtime account immutable identity is invalid.');
-    const value = await gcpRuntimeRequest(`${IAM}/projects/${scope.projectId}/serviceAccounts/${encodeURIComponent(uniqueId ?? scope.email)}`, token);
+    const value = await this.api(`${IAM}/projects/${scope.projectId}/serviceAccounts/${encodeURIComponent(uniqueId ?? scope.email)}`, token);
     if (value === null) return null;
     const account = value as Record<string, unknown>;
     if (!account || account.name !== scope.name || account.projectId !== scope.projectId || account.email !== scope.email
@@ -158,7 +164,7 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
     if (target.workloadResource !== scope.resource && target.workloadResource !== release) throw new GcpRuntimeError('Runtime activation is not authorized for that bound workload.');
     const selected = { ...scope, resource: target.workloadResource!, job: target.workloadResource === release || scope.job };
     if (target.resourceKind !== (selected.job ? 'job' : 'service')) throw new GcpRuntimeError('Runtime activation resource kind changed.');
-    const workload = await gcpRuntimeRequest(`https://run.googleapis.com/v2/${selected.resource}`, token) as Record<string, any> | null;
+    const workload = await this.api(`https://run.googleapis.com/v2/${selected.resource}`, token) as Record<string, any> | null;
     if (workload && workload.name !== selected.resource) throw new GcpRuntimeError('Runtime activation returned a different workload identity.');
     return { scope: selected, workload };
   }
@@ -173,32 +179,42 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
 
   private async read(request: RuntimeIdentityRequest) {
     const scope = this.coordinates(request); const token = await this.token();
-    const workload = await gcpRuntimeRequest(`https://run.googleapis.com/v2/${scope.resource}`, token) as Record<string, any> | null;
+    const workload = await this.api(`https://run.googleapis.com/v2/${scope.resource}`, token) as Record<string, any> | null;
     if (workload && (workload.name !== scope.resource || (!scope.boundId && request.mode !== 'destroy'))) throw new GcpRuntimeError('An unbound or different Cloud Run workload requires explicit adoption before runtime identity preparation.');
     if (!workload && scope.boundId && request.mode === 'ensure') throw new GcpRuntimeError('The bound Cloud Run workload is missing; runtime identity remains unknown.');
     const principal = workload ? (scope.job ? workload.template?.template?.serviceAccount : workload.template?.serviceAccount) : undefined;
     if (workload && (typeof principal !== 'string' || !principal)) throw new GcpRuntimeError('The bound Cloud Run workload omitted its runtime principal.');
     const releaseResource = this.releaseJobResource(request, scope);
     const releaseWorkload = request.mode === 'destroy' && releaseResource
-      ? await gcpRuntimeRequest(`https://run.googleapis.com/v2/${releaseResource}`, token) as Record<string, unknown> | null : null;
+      ? await this.api(`https://run.googleapis.com/v2/${releaseResource}`, token) as Record<string, unknown> | null : null;
     if (releaseWorkload && releaseWorkload.name !== releaseResource) throw new GcpRuntimeError('The retained release job returned a different native identity.');
     const account = await this.account(scope, token, request.binding?.evidence.uniqueId);
     return { scope, token, workload, principal, account, releaseWorkload };
   }
 
-  private async permissions(scope: ReturnType<CloudRunRuntimeIdentities['coordinates']>, uniqueId: string, token: string) {
+  private async permissions(scope: ReturnType<CloudRunRuntimeIdentities['coordinates']>, uniqueId: string, token: string, requireActAs = true) {
     const saUrl = `${IAM}/projects/${scope.projectId}/serviceAccounts/${uniqueId}`;
     const projectUrl = `https://cloudresourcemanager.googleapis.com/v1/projects/${scope.projectId}`;
-    const read = async (url: string) => parseGcpRuntimePolicy(await gcpRuntimeRequest(`${url}:getIamPolicy`, token,
+    if (scope.defaultAuthentication && requireActAs) {
+      // ADC may represent a user. Check native caller authority; never manufacture
+      // a serviceAccount:<user> member or install a caller grant from local labels.
+      const result = await this.api(`${saUrl}:testIamPermissions`, token,
+        { method: 'POST', body: JSON.stringify({ permissions: ['iam.serviceAccounts.actAs'] }) }) as Record<string, unknown> | null;
+      if (!result || !Array.isArray(result.permissions) || !result.permissions.every(value => typeof value === 'string')
+        || !result.permissions.includes('iam.serviceAccounts.actAs')) {
+        throw new GcpRuntimeError('The selected local Google caller lacks verified iam.serviceAccounts.actAs access to this exact runtime identity; no caller grant was inferred.');
+      }
+    }
+    const read = async (url: string) => parseGcpRuntimePolicy(await this.api(`${url}:getIamPolicy`, token,
       { method: 'POST', body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }) }));
     const sa = await read(saUrl); const project = await read(projectUrl);
-    return { saUrl, projectUrl, sa, project, ready: hasGcpRuntimeRole(sa, 'roles/iam.serviceAccountUser', `serviceAccount:${scope.deployEmail}`)
+    return { saUrl, projectUrl, sa, project, ready: (scope.defaultAuthentication || hasGcpRuntimeRole(sa, 'roles/iam.serviceAccountUser', `serviceAccount:${scope.deployEmail}`))
       && (!scope.cloudsql || hasGcpRuntimeRole(project, 'roles/cloudsql.client', `serviceAccount:${scope.email}`)) };
   }
 
   private async queuePermissionStep(request: RuntimeIdentityRequest, scope: ReturnType<CloudRunRuntimeIdentities['coordinates']>, uniqueId: string, token: string, desired: GcpRuntimeQueue[]): Promise<RuntimeIdentityObservation | undefined> {
     const previous = parseRuntimeQueues(request.binding?.evidence.queueGrants, scope.projectId);
-    const policies = await readRuntimeQueuePolicies(request, unionRuntimeQueues(previous, desired), token, desired);
+    const policies = await readRuntimeQueuePolicies(request, unionRuntimeQueues(previous, desired), token, desired, this.transport);
     const next = policies.find(entry => entry.policy && hasGcpRuntimeRole(entry.policy, entry.role, `serviceAccount:${scope.email}`) !== entry.desired);
     if (!next && serializeRuntimeQueues(desired) === serializeRuntimeQueues(previous)) return undefined;
     return { state: 'action', step: { ...this.step(scope, 'attach', uniqueId),
@@ -210,11 +226,11 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
 
   private async secretPermissionStep(request: RuntimeIdentityRequest, scope: ReturnType<CloudRunRuntimeIdentities['coordinates']>, uniqueId: string, token: string, desired: GcpRuntimeSecret[]): Promise<RuntimeIdentityObservation | undefined> {
     const previous = parseRuntimeSecrets(request.binding?.evidence.readerGrants);
-    const policies = await readRuntimeSecretPolicies(scope.projectId, unionRuntimeSecrets(previous, desired), token, desired);
+    const policies = await readRuntimeSecretPolicies(scope.projectId, unionRuntimeSecrets(previous, desired), token, desired, this.transport);
     const next = policies.find(entry => entry.policy && hasGcpRuntimeRole(entry.policy, 'roles/secretmanager.secretAccessor', `serviceAccount:${scope.email}`) !== entry.desired);
     if (next && !next.desired && await hasRuntimeSecretConsumers(scope.projectId, next.target,
       [{ name: scope.resource, job: scope.job }, ...(this.releaseJobResource(request, scope)
-        ? [{ name: this.releaseJobResource(request, scope)!, job: true }] : [])], token))
+        ? [{ name: this.releaseJobResource(request, scope)!, job: true }] : [])], token, this.transport))
       return { state: 'waiting', reason: 'Remove the retained workload, revision and release-job references before revoking their secret reader access.' };
     const retained = policies.filter(entry => entry.desired).map(entry => entry.target);
     if (!next && serializeRuntimeSecrets(retained) === serializeRuntimeSecrets(previous)) return undefined;
@@ -272,7 +288,7 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
       if (secretStep) return secretStep;
       const releaseResource = this.releaseJobResource(request, scope);
       if (workload && releaseResource && !scope.job) {
-        const release = await gcpRuntimeRequest(`https://run.googleapis.com/v2/${releaseResource}`, token) as Record<string, any> | null;
+        const release = await this.api(`https://run.googleapis.com/v2/${releaseResource}`, token) as Record<string, any> | null;
         if (!release || release.name !== releaseResource || !release.template?.template?.serviceAccount) throw new GcpRuntimeError('The bound release job identity is missing or unverified; preserve it for exact reconciliation.');
         if (release.template.template.serviceAccount !== scope.email) {
           if (release.template.template.serviceAccount !== request.binding?.evidence.legacyPrincipal) throw new GcpRuntimeError('The release job uses a different unreviewed legacy principal; preserve it for explicit identity review.');
@@ -332,7 +348,7 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
           const desired = parseRuntimeSecrets(request.step.target.readerGrants);
           const previous = parseRuntimeSecrets(request.step.target.previousReaderGrants);
           const possible = unionRuntimeSecrets(previous, desired);
-          const entries = await readRuntimeSecretPolicies(scope.projectId, possible, token, desired);
+          const entries = await readRuntimeSecretPolicies(scope.projectId, possible, token, desired, this.transport);
           const entry = entries.find(value => value.target.resource === request.step.target.readerResource);
           if (request.step.target.readerOperation !== 'record' && (!entry || entry.policy
             && hasGcpRuntimeRole(entry.policy, 'roles/secretmanager.secretAccessor', `serviceAccount:${scope.email}`) !== entry.desired))
@@ -343,7 +359,7 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
           const desired = parseRuntimeQueues(request.step.target.queueGrants, scope.projectId);
           const previous = parseRuntimeQueues(request.step.target.previousQueueGrants, scope.projectId);
           const possible = unionRuntimeQueues(previous, desired);
-          await readRuntimeQueuePolicies(request, possible, token, []);
+          await readRuntimeQueuePolicies(request, possible, token, [], this.transport);
           binding.evidence.queueGrants = serializeRuntimeQueues(possible);
         }
         if (request.step.target.phase === 'activate') {
@@ -358,7 +374,7 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
       const scope = this.coordinates(request); const token = await this.token();
       if (request.step.operation === 'create') {
         mutationAttempted = true;
-        const created = await gcpRuntimeRequest(`${IAM}/projects/${scope.projectId}/serviceAccounts`, token, { method: 'POST', body: JSON.stringify({
+        const created = await this.api(`${IAM}/projects/${scope.projectId}/serviceAccounts`, token, { method: 'POST', body: JSON.stringify({
           accountId: scope.accountId, serviceAccount: { displayName: 'Hypervibe workload identity', description: scope.marker + request.attemptId },
         }) }) as Record<string, unknown> | null;
         createAcknowledged = true;
@@ -382,19 +398,19 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
         const ownedAccount = await this.account(scope, admin, account.uniqueId);
         if (!ownedAccount) throw new GcpRuntimeError('The exact runtime account disappeared before secret reader preparation.');
         this.owned(request, scope, ownedAccount);
-        const entries = await readRuntimeSecretPolicies(scope.projectId, targets, admin, desired);
+        const entries = await readRuntimeSecretPolicies(scope.projectId, targets, admin, desired, this.transport);
         const entry = entries.find(value => value.target.resource === request.step.target.readerResource);
         if (!entry || (entry.desired ? 'grant' : 'revoke') !== request.step.target.readerOperation) throw new GcpRuntimeError('The exact reviewed secret reader action changed.');
         if (!entry.desired && await hasRuntimeSecretConsumers(scope.projectId, entry.target,
           [{ name: scope.resource, job: scope.job }, ...(this.releaseJobResource(request, scope)
-            ? [{ name: this.releaseJobResource(request, scope)!, job: true }] : [])], admin))
+            ? [{ name: this.releaseJobResource(request, scope)!, job: true }] : [])], admin, this.transport))
           throw new GcpRuntimeError('A retained runtime consumer still requires this secret reader grant.');
         if (entry.policy && hasGcpRuntimeRole(entry.policy, 'roles/secretmanager.secretAccessor', `serviceAccount:${scope.email}`) !== entry.desired) {
           mutationAttempted = true;
-          parseGcpRuntimePolicy(await gcpRuntimeRequest(`${entry.url}:setIamPolicy`, admin, { method: 'POST', body: JSON.stringify({
+          parseGcpRuntimePolicy(await this.api(`${entry.url}:setIamPolicy`, admin, { method: 'POST', body: JSON.stringify({
             policy: withGcpRuntimeRole(entry.policy, 'roles/secretmanager.secretAccessor', `serviceAccount:${scope.email}`, !entry.desired),
           }) }));
-          const observed = (await readRuntimeSecretPolicies(scope.projectId, [entry.target], token, desired))[0];
+          const observed = (await readRuntimeSecretPolicies(scope.projectId, [entry.target], token, desired, this.transport))[0];
           if (!observed || observed.policy && hasGcpRuntimeRole(observed.policy, 'roles/secretmanager.secretAccessor', `serviceAccount:${scope.email}`) !== entry.desired)
             throw new GcpRuntimeError('Secret reader access has not converged; preserve its exact permission attempt.');
         }
@@ -412,15 +428,15 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
         const ownedAccount = await this.account(scope, admin, account.uniqueId);
         if (!ownedAccount) throw new GcpRuntimeError('The exact runtime account disappeared before queue permission preparation.');
         this.owned(request, scope, ownedAccount);
-        const entries = await readRuntimeQueuePolicies(request, targets, admin, desired);
+        const entries = await readRuntimeQueuePolicies(request, targets, admin, desired, this.transport);
         const entry = entries.find(value => value.resource === request.step.target.queueResource && value.role === request.step.target.queueRole);
         if (!entry || (entry.desired ? 'grant' : 'revoke') !== request.step.target.queueOperation) throw new GcpRuntimeError('The exact reviewed queue permission frontier changed.');
         if (entry.policy && hasGcpRuntimeRole(entry.policy, entry.role, `serviceAccount:${scope.email}`) !== entry.desired) {
           mutationAttempted = true;
-          parseGcpRuntimePolicy(await gcpRuntimeRequest(`${entry.url}:setIamPolicy`, admin, { method: 'POST', body: JSON.stringify({
+          parseGcpRuntimePolicy(await this.api(`${entry.url}:setIamPolicy`, admin, { method: 'POST', body: JSON.stringify({
             policy: withGcpRuntimeRole(entry.policy, entry.role, `serviceAccount:${scope.email}`, !entry.desired),
           }) }));
-          const verified = await readRuntimeQueuePolicies(request, targets.filter(target => target.topicName === entry.resource || target.subscriptionName === entry.resource), token, desired);
+          const verified = await readRuntimeQueuePolicies(request, targets.filter(target => target.topicName === entry.resource || target.subscriptionName === entry.resource), token, desired, this.transport);
           const observed = verified.find(value => value.resource === entry.resource);
           if (!observed || observed.policy && hasGcpRuntimeRole(observed.policy, entry.role, `serviceAccount:${scope.email}`) !== entry.desired) {
             throw new GcpRuntimeError('Exact Pub/Sub runtime access has not converged; preserve this permission attempt.');
@@ -441,14 +457,14 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
         const body = selected.scope.job ? cloudRunJobUpdateBody(selected.workload, { template: { template: { serviceAccount: scope.email } } })
           : { name: selected.scope.resource, etag: selected.workload.etag, template: { serviceAccount: scope.email } };
         mutationAttempted = true;
-        let operation = await gcpRuntimeRequest(`https://run.googleapis.com/v2/${selected.scope.resource}${selected.scope.job ? '' : '?updateMask=template.serviceAccount'}`, token,
+        let operation = await this.api(`https://run.googleapis.com/v2/${selected.scope.resource}${selected.scope.job ? '' : '?updateMask=template.serviceAccount'}`, token,
           { method: 'PATCH', body: JSON.stringify(body) }) as Record<string, any> | null;
         const operationName = operation?.name;
         if (typeof operationName !== 'string' || !operationName.startsWith(`projects/${scope.projectId}/locations/${scope.region}/operations/`)
           || !/^[A-Za-z0-9_-]+$/.test(operationName.split('/').at(-1)!)) throw new GcpRuntimeError('Runtime activation returned no exact operation identity; retain its pending attempt.');
         for (let count = 0; count < 10 && operation?.done !== true; count++) {
           await new Promise(resolve => setTimeout(resolve, 200));
-          operation = await gcpRuntimeRequest(`https://run.googleapis.com/v2/${operationName}`, token) as Record<string, any> | null;
+          operation = await this.api(`https://run.googleapis.com/v2/${operationName}`, token) as Record<string, any> | null;
           if (operation?.name !== operationName) throw new GcpRuntimeError('Runtime activation operation identity changed.');
         }
         if (operation?.done !== true || operation.error || operation.response?.name !== selected.scope.resource || operation.response?.uid !== selected.workload.uid) {
@@ -467,13 +483,13 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
       const adminObserved = await this.account(scope, admin, account.uniqueId);
       if (!adminObserved) throw new GcpRuntimeError('The exact runtime account disappeared during native administrator preparation.');
       this.owned(request, scope, adminObserved);
-      const policies = await this.permissions(scope, account.uniqueId, admin);
+      const policies = await this.permissions(scope, account.uniqueId, admin, request.step.operation !== 'destroy');
       const write = async (url: string, policy: ReturnType<typeof parseGcpRuntimePolicy>) => {
         mutationAttempted = true;
-        parseGcpRuntimePolicy(await gcpRuntimeRequest(`${url}:setIamPolicy`, admin, { method: 'POST', body: JSON.stringify({ policy }) }));
+        parseGcpRuntimePolicy(await this.api(`${url}:setIamPolicy`, admin, { method: 'POST', body: JSON.stringify({ policy }) }));
       };
       if (request.step.operation === 'attach') {
-        if (!hasGcpRuntimeRole(policies.sa, 'roles/iam.serviceAccountUser', `serviceAccount:${scope.deployEmail}`)) {
+        if (!scope.defaultAuthentication && !hasGcpRuntimeRole(policies.sa, 'roles/iam.serviceAccountUser', `serviceAccount:${scope.deployEmail}`)) {
           await write(policies.saUrl, withGcpRuntimeRole(policies.sa, 'roles/iam.serviceAccountUser', `serviceAccount:${scope.deployEmail}`));
         }
         if (scope.cloudsql && !hasGcpRuntimeRole(policies.project, 'roles/cloudsql.client', `serviceAccount:${scope.email}`)) {
@@ -485,10 +501,10 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
       if (request.step.operation !== 'destroy') throw new GcpRuntimeError('Unsupported Google runtime identity operation.');
       if (hasGcpRuntimeRole(policies.project, 'roles/cloudsql.client', `serviceAccount:${scope.email}`)) {
         await write(policies.projectUrl, withGcpRuntimeRole(policies.project, 'roles/cloudsql.client', `serviceAccount:${scope.email}`, true));
-        if (hasGcpRuntimeRole((await this.permissions(scope, account.uniqueId, admin)).project, 'roles/cloudsql.client', `serviceAccount:${scope.email}`)) throw new GcpRuntimeError('Runtime database access removal has not converged.');
+        if (hasGcpRuntimeRole((await this.permissions(scope, account.uniqueId, admin, false)).project, 'roles/cloudsql.client', `serviceAccount:${scope.email}`)) throw new GcpRuntimeError('Runtime database access removal has not converged.');
       }
       mutationAttempted = true;
-      await gcpRuntimeRequest(`${IAM}/projects/${scope.projectId}/serviceAccounts/${account.uniqueId}`, token, { method: 'DELETE' });
+      await this.api(`${IAM}/projects/${scope.projectId}/serviceAccounts/${account.uniqueId}`, token, { method: 'DELETE' });
       if (await this.account(scope, token, account.uniqueId)) throw new GcpRuntimeError('Runtime service account deletion is not yet observable.');
       return { receipt: { success: true, message: 'Deleted the exact owned Google runtime identity and verified its absence.' } };
     } catch (error) {

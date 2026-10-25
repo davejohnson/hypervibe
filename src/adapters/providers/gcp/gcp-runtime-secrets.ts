@@ -45,19 +45,19 @@ export function unionRuntimeSecrets(previous: GcpRuntimeSecret[], desired: GcpRu
   return [...result.values()];
 }
 /** Only metadata and policies; never access a secret payload or alter versions. */
-export async function readRuntimeSecretPolicies(projectId: string, targets: GcpRuntimeSecret[], token: string, required: GcpRuntimeSecret[]) {
+export async function readRuntimeSecretPolicies(projectId: string, targets: GcpRuntimeSecret[], token: string, required: GcpRuntimeSecret[], transport: typeof fetch = fetch) {
   const numbers = new Set<string>();
   const result: Array<{ target: GcpRuntimeSecret; desired: boolean; url: string; policy: ReturnType<typeof parseGcpRuntimePolicy> | null }> = [];
   for (const target of targets) {
     if (!numbers.has(target.projectNumber)) {
-      const project = await gcpRuntimeRequest(`https://cloudresourcemanager.googleapis.com/v3/projects/${target.projectNumber}`, token) as Record<string, unknown> | null;
+      const project = await gcpRuntimeRequest(`https://cloudresourcemanager.googleapis.com/v3/projects/${target.projectNumber}`, token, {}, transport) as Record<string, unknown> | null;
       if (project?.name !== `projects/${target.projectNumber}` || project.projectId !== projectId || project.state !== 'ACTIVE')
         throw new GcpRuntimeError('The runtime secret project number does not match its reviewed active project.');
       numbers.add(target.projectNumber);
     }
     const desired = required.some(value => value.resource === target.resource);
     const url = `https://secretmanager.googleapis.com/v1/${target.resource}`;
-    const secret = await gcpRuntimeRequest(url, token) as Record<string, unknown> | null;
+    const secret = await gcpRuntimeRequest(url, token, {}, transport) as Record<string, unknown> | null;
     if (!secret) {
       if (desired) throw new GcpRuntimeError('The exact declared secret container is absent; no replacement is authorized.');
       result.push({ target, desired, url, policy: null }); continue;
@@ -66,10 +66,10 @@ export async function readRuntimeSecretPolicies(projectId: string, targets: GcpR
       || target.createTime && secret.createTime !== target.createTime) throw new GcpRuntimeError('The runtime secret container identity is incomplete or was replaced.');
     if (desired) {
       const name = `${target.resource}/versions/${target.version}`;
-      const version = await gcpRuntimeRequest(`https://secretmanager.googleapis.com/v1/${name}`, token) as Record<string, unknown> | null;
+      const version = await gcpRuntimeRequest(`https://secretmanager.googleapis.com/v1/${name}`, token, {}, transport) as Record<string, unknown> | null;
       if (version?.name !== name || version.state !== 'ENABLED') throw new GcpRuntimeError('The immutable runtime secret version is missing, disabled, or unverified.');
     }
-    const policy = parseGcpRuntimePolicy(await gcpRuntimeRequest(`${url}:getIamPolicy?options.requestedPolicyVersion=3`, token));
+    const policy = parseGcpRuntimePolicy(await gcpRuntimeRequest(`${url}:getIamPolicy?options.requestedPolicyVersion=3`, token, {}, transport));
     result.push({ target: { ...target, createTime: String(secret.createTime) }, desired, url, policy });
   }
   return result;
@@ -79,7 +79,7 @@ export async function readRuntimeSecretPolicies(projectId: string, targets: GcpR
  * just the desired template. Published Run v2 list/resource contracts are the
  * metadata boundary; values are neither returned nor persisted. */
 export async function hasRuntimeSecretConsumers(projectId: string, target: GcpRuntimeSecret,
-  resources: Array<{ name: string; job: boolean }>, token: string): Promise<boolean> {
+  resources: Array<{ name: string; job: boolean }>, token: string, transport: typeof fetch = fetch): Promise<boolean> {
   const id = target.resource.split('/').at(-1)!;
   const matches = new Set([id, target.resource, `projects/${projectId}/secrets/${id}`]);
   const object = (value: unknown): Record<string, any> => {
@@ -112,7 +112,7 @@ export async function hasRuntimeSecretConsumers(projectId: string, target: GcpRu
   };
   for (const resource of resources) {
     const url = `https://run.googleapis.com/v2/${resource.name}`;
-    const current = await gcpRuntimeRequest(url, token);
+    const current = await gcpRuntimeRequest(url, token, {}, transport);
     if (current === null) continue;
     const workload = object(current);
     if (workload.name !== resource.name || typeof workload.uid !== 'string' || !workload.uid)
@@ -121,7 +121,7 @@ export async function hasRuntimeSecretConsumers(projectId: string, target: GcpRu
     const collection = resource.job ? 'executions' : 'revisions';
     let cursor: string | undefined; const seen = new Set<string>(); const identities = new Set<string>();
     for (let page = 0; page < 5; page++) {
-      const result = object(await gcpRuntimeRequest(`${url}/${collection}?${new URLSearchParams({ pageSize: '100', ...(cursor ? { pageToken: cursor } : {}) })}`, token));
+      const result = object(await gcpRuntimeRequest(`${url}/${collection}?${new URLSearchParams({ pageSize: '100', ...(cursor ? { pageToken: cursor } : {}) })}`, token, {}, transport));
       const children = result[collection] ?? [];
       if (!Array.isArray(children) || children.length > 100) throw new GcpRuntimeError('Retained runtime consumer inventory is incomplete.');
       for (const raw of children) {

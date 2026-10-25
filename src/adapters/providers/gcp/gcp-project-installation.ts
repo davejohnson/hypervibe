@@ -17,12 +17,14 @@ const BILLING = z.string().regex(/^billingAccounts\/[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z
 export const gcpProjectPreparationScopeSchema = z.object({ scopeKind: z.literal('new-project'), projectId: PROJECT,
   displayName: z.string().min(4).max(30).regex(/^[A-Za-z0-9][A-Za-z0-9 '!\-]*[A-Za-z0-9]$/),
   parent: PARENT.optional(), billingAccountName: BILLING,
+  allocationMode: z.literal('create-exclusive-v1').optional(),
   assignmentMode: z.literal('initial-reviewed-v1').optional() }).strict();
 const proofSchema = z.object({ resources: z.array(z.object({ kind: z.literal('project'), id: z.string().regex(/^projects\/[1-9]\d{5,29}$/),
   identity: z.object({ projectId: PROJECT, projectNumber: NUMBER, createTime: z.string().datetime(), parent: z.union([PARENT, z.literal('none')]),
     owner: z.string().regex(/^[a-f0-9]{64}$/), attemptId: z.string().guid() }).strict() }).strict()).max(1),
   native: z.object({ operation: z.enum(['create-project', 'verify-billing']), installationId: z.string().guid(), owner: z.string().regex(/^[a-f0-9]{64}$/),
     attemptId: z.string().guid().optional(), operationName: z.string().regex(/^operations\/[A-Za-z0-9._~-]{1,255}$/).optional(),
+    operationCompleted: z.literal(true).optional(),
     billingAccountName: BILLING.optional() }).strict() }).strict();
 type Context = CloudInstallationProviderContext;
 type ActionContext = Context & { action: CloudInstallationAction; attempt?: CloudInstallationAttempt };
@@ -46,12 +48,16 @@ function owner(intent: CloudInstallationIntent) {
 function actions(intent: CloudInstallationIntent): CloudInstallationAction[] {
   const target = scope(intent);
   return [{ id: 'gcp:project', type: 'create', resource: { kind: 'project', name: target.projectId, provider: 'gcp' }, verified: true,
-    requiresConfirm: true, billable: true, reason: 'Create the reviewed application project; retain it if later setup is blocked.',
-    metadata: { operation: 'create-project', category: 'scope', execution: 'api', native: {} } }];
+    requiresConfirm: true, billable: true, reason: target.allocationMode
+      ? 'Attempt exclusive allocation of the exact reviewed new project ID once; never adopt or overwrite an existing project.'
+      : 'Create the reviewed application project; retain it if later setup is blocked.',
+    metadata: { operation: 'create-project', category: 'scope', execution: 'api', native: target.allocationMode ? { allocationMode: target.allocationMode } : {} } }];
 }
 function parseEvidence(value: unknown, intent: CloudInstallationIntent): CloudInstallationEvidence {
   const parsed = proofSchema.parse(value); const target = scope(intent); const expectedOwner = owner(intent);
   if (parsed.native.installationId !== intent.installationId || parsed.native.owner !== expectedOwner) throw new ScopeError('ownership_mismatch');
+  if (target.allocationMode && parsed.resources.length && (!parsed.native.operationName || !parsed.native.operationCompleted)
+    || parsed.native.operationCompleted && (!target.allocationMode || parsed.resources.length !== 1 || !parsed.native.operationName)) throw new ScopeError('identity_mismatch');
   for (const resource of parsed.resources) {
     if (resource.identity.projectId !== target.projectId || resource.id !== `projects/${resource.identity.projectNumber}`
       || resource.identity.owner !== expectedOwner || target.parent && resource.identity.parent !== target.parent
@@ -60,7 +66,7 @@ function parseEvidence(value: unknown, intent: CloudInstallationIntent): CloudIn
   if (parsed.native.operation === 'verify-billing' && (parsed.resources.length !== 1 || parsed.native.billingAccountName !== target.billingAccountName)) throw new ScopeError('identity_mismatch');
   return parsed;
 }
-function proof(context: ActionContext, project?: GcpBootstrapProject, operationName?: string): CloudInstallationEvidence {
+function proof(context: ActionContext, project?: GcpBootstrapProject, operationName?: string, operationCompleted?: true): CloudInstallationEvidence {
   const expectedOwner = owner(context.intent); const target = scope(context.intent);
   if (project && (project.projectId !== target.projectId || project.state !== 'ACTIVE' || !project.createTime
     || project.labels?.['hv-installation'] !== expectedOwner.slice(0, 63) || !z.string().guid().safeParse(project.labels?.['hv-attempt']).success
@@ -70,6 +76,7 @@ function proof(context: ActionContext, project?: GcpBootstrapProject, operationN
     parent: project.parent ?? 'none', owner: expectedOwner, attemptId: project.labels!['hv-attempt'],
   } }] : [], native: { operation: context.action.metadata.operation, installationId: context.intent.installationId, owner: expectedOwner,
     ...(context.attempt ? { attemptId: context.attempt.id } : {}), ...(operationName ? { operationName } : {}),
+    ...(operationCompleted ? { operationCompleted } : {}),
     ...(context.action.metadata.operation === 'verify-billing' ? { billingAccountName: target.billingAccountName } : {}) } }, context.intent);
 }
 
@@ -111,26 +118,54 @@ export function createGcpProjectPreparationDriver(options: { fetch?: typeof fetc
       if (!Array.isArray(granted) || !permissions.every(permission => granted.includes(permission))) throw new ScopeError('insufficient_permissions');
     }
   }
+  // This is an allocation preflight, not absence inference. Only the separately
+  // reviewed exclusive POST contract permits a denied lookup to remain unknown.
+  async function allocationLookup(client: GcpBootstrapClient, intent: CloudInstallationIntent): Promise<'absent' | 'unknown'> {
+    const target = scope(intent);
+    let project: GcpBootstrapProject | null;
+    try { project = await client.getProject(target.projectId); }
+    catch (error) {
+      if (target.allocationMode && error instanceof GcpBootstrapApiError && error.status === 403) return 'unknown';
+      throw error;
+    }
+    if (project) throw new ScopeError('ownership_mismatch');
+    return 'absent';
+  }
   async function observe(context: ActionContext, client: GcpBootstrapClient): Promise<CloudInstallationObservation> {
     const target = scope(context.intent);
+    if (target.allocationMode && !context.attempt) {
+      if (context.attempts?.some(attempt => attempt.actionId === context.action.id)) return { state: 'rejected', reason: 'retry_confirmation_required' };
+      await allocationLookup(client, context.intent);
+      // Required work is one explicitly approved allocation attempt, not a
+      // create inferred from an absent resource. Unknown lookup stays in review.
+      return { state: 'action-required' };
+    }
     let acknowledged: GcpBootstrapProject | undefined;
     let operationName: string | undefined;
+    let operationCompleted: true | undefined;
     if (context.action.metadata.operation === 'create-project' && context.attempt?.evidence) {
       const old = parseEvidence(context.attempt.evidence, context.intent);
       if (old.native.operationName) {
         operationName = String(old.native.operationName);
-        const operation = await client.getProjectCreateOperation(operationName, target.projectId);
-        if (operation?.state === 'pending') return { state: 'pending', reason: 'not_converged' };
-        if (operation?.state === 'failed') return { state: 'unknown', reason: 'provider_error' };
-        if (operation?.state === 'succeeded') acknowledged = operation.project;
+        if (target.allocationMode && old.native.operationCompleted) operationCompleted = true;
+        else {
+          const operation = await client.getProjectCreateOperation(operationName, target.projectId, target.allocationMode ? { requireProjectType: true } : {});
+          if (operation?.state === 'pending') return { state: 'pending', reason: 'not_converged' };
+          if (operation?.state === 'failed') return { state: 'unknown', reason: 'provider_error' };
+          if (operation?.state === 'succeeded') { acknowledged = operation.project; if (target.allocationMode) operationCompleted = true; }
+        }
       }
     }
+    // A visible same-name project (even with matching labels) cannot replace a
+    // lost/expired native operation. Previously completed operation proof remains
+    // durable, but its exact project lifetime is still freshly checked below.
+    if (target.allocationMode && !operationCompleted) return { state: 'pending', reason: 'not_converged' };
     const project = await client.getProject(target.projectId);
     if (!project) return context.attempt || context.action.metadata.operation !== 'create-project'
       ? { state: 'pending', reason: 'not_converged' } : { state: 'action-required' };
     if (context.action.metadata.operation === 'create-project' && !context.attempt) return { state: 'conflict', reason: 'ownership_mismatch' };
-    const observed = proof(context, project, operationName);
-    if (acknowledged && !isDeepStrictEqual(proof(context, acknowledged).resources, observed.resources)) throw new ScopeError('identity_mismatch');
+    const observed = proof(context, project, operationName, operationCompleted);
+    if (acknowledged && !isDeepStrictEqual(proof(context, acknowledged, operationName, operationCompleted).resources, observed.resources)) throw new ScopeError('identity_mismatch');
     const retained = context.completed['gcp:project'] ?? context.attempt?.evidence;
     if (retained) {
       const prior = parseEvidence(retained, context.intent);
@@ -167,9 +202,9 @@ export function createGcpProjectPreparationDriver(options: { fetch?: typeof fetc
     },
     async plan(context) {
       try {
-        await withClient(context, async (client, json) => {
+        const observation = await withClient(context, async (client, json) => {
           await authority(context, json);
-          if (await client.getProject(scope(context.intent).projectId)) throw new ScopeError('ownership_mismatch');
+          return allocationLookup(client, context.intent);
         });
         const target = scope(context.intent);
         return { actions: actions(context.intent), review: {
@@ -179,6 +214,11 @@ export function createGcpProjectPreparationDriver(options: { fetch?: typeof fetc
               ? ['billing.resourceAssociations.create', 'billing.accounts.get'] : ['billing.resourceAssociations.create', 'billing.accounts.getIamPolicy', 'billing.accounts.setIamPolicy'], purpose: 'installation-verification' }],
           costs: [{ resource: target.projectId, description: 'Creating an empty project does not provision paid workloads. Enabling billing authorizes future resource usage charges; workloads need a separate review.', pricingUrl: 'https://cloud.google.com/pricing' }],
           warnings: ['This stage creates only the reviewed project and retains it on partial setup; it does not create secret containers, writer identities or workloads.',
+            ...(target.allocationMode ? [
+              observation === 'unknown' ? 'The exact project lookup is unknown: Google denied access. This is not evidence that the ID is available.' : 'Google returned not-found for the exact project ID; creation still depends on native global ID availability.',
+              'This review authorizes one exclusive CreateProject attempt for this exact ID. A collision fails without adopting, updating or renaming another project. A lost acknowledgment cannot be retried or replaced by a same-name lookup.',
+              ...(target.parent ? [] : ['No explicit parent is selected, so parent-level project-creation authority is unverified until Google accepts the native allocation. Sign-in alone does not prove that permission.']),
+            ] : []),
             target.assignmentMode ? 'A separate review will show the actual project parent, selected billing account, costs and native initial-assignment behavior before billing is enabled.'
               : 'A separate review will show the actual project parent, temporary billing identity, permissions and billing attachment before those operations can begin.',
             ...(target.parent ? [] : ['Google may automatically select an organization from the administrator’s domain. The actual parent is retained and verified before continuation.'])],
@@ -198,9 +238,13 @@ export function createGcpProjectPreparationDriver(options: { fetch?: typeof fetc
       try {
         driver.parseAction(context.action, context.intent);
         if (context.action.metadata.operation !== 'create-project') throw new ScopeError('ownership_mismatch');
+        if (scope(context.intent).allocationMode) {
+          const attempts = (context.attempts ?? []).filter(attempt => attempt.actionId === context.action.id);
+          if (attempts.length !== 1 || attempts[0].id !== context.attempt.id || attempts[0].status !== 'attempted') throw new ScopeError('retry_confirmation_required');
+        }
         return await withClient({ ...context, beforeMutation: async () => { await context.beforeMutation(); dispatched = true; } }, async (client, json) => {
           await authority(context, json);
-          if (await client.getProject(scope(context.intent).projectId)) throw new ScopeError('ownership_mismatch');
+          await allocationLookup(client, context.intent);
           const target = scope(context.intent);
           const operation = await client.createProject({ projectId: target.projectId, displayName: target.displayName, parent: target.parent,
             labels: { 'hv-installation': owner(context.intent).slice(0, 63), 'hv-attempt': context.attempt.id } });
@@ -228,7 +272,8 @@ export async function discoverGcpProjectPreparationScopes(context: Parameters<No
     if (accounts.nextPageToken !== undefined && typeof accounts.nextPageToken !== 'string') throw new ScopeError('provider_error');
     const projectId = resourceName('app', { maxLength: 30, scope: [context.sourceScope.customerId, context.sourceScope.appId, context.sourceScope.installationId] });
     return { complete: !accounts.nextPageToken, scopes: open.map(account => ({ stage: 'scope-preparation' as const,
-      nativeScope: { scopeKind: 'new-project', projectId, displayName: 'Hypervibe application', billingAccountName: account.name, assignmentMode: 'initial-reviewed-v1' },
+      nativeScope: { scopeKind: 'new-project', projectId, displayName: 'Hypervibe application', billingAccountName: account.name,
+        allocationMode: 'create-exclusive-v1', assignmentMode: 'initial-reviewed-v1' },
       label: `Create ${projectId} · ${account.displayName ?? account.name} · Google-selected parent` })) };
   } finally { budget.close(); }
 }

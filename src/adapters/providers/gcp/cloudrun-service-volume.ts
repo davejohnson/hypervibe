@@ -11,7 +11,8 @@ const SUBNET_CIDR = '10.42.0.0/26';
 
 /** Individually authorized retained resources, never an implicit deploy helper. */
 export class CloudRunServiceVolumes implements IServiceVolumes {
-  constructor(private connection: () => { projectId: string; region: string }, private token: () => Promise<string>) {}
+  constructor(private connection: () => { projectId: string; region: string }, private token: () => Promise<string>,
+    private readonly request: typeof fetch = (input, init) => fetch(input, init)) {}
 
   readonly staged: NonNullable<IServiceVolumes['staged']> = {
     resolveTarget: async ({ environment, serviceName, mountPath }) => {
@@ -75,7 +76,7 @@ export class CloudRunServiceVolumes implements IServiceVolumes {
   }
 
   private async get(url: string): Promise<Json | null> {
-    const response = await fetch(url, { headers: { Authorization: `Bearer ${await this.token()}` }, signal: AbortSignal.timeout(30_000) });
+    const response = await this.request(url, { headers: { Authorization: `Bearer ${await this.token()}` }, signal: AbortSignal.timeout(30_000) });
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(`GCP filesystem observation failed (HTTP ${response.status}); verify API access and resource permissions.`);
     const body = await response.json();
@@ -240,7 +241,7 @@ export class CloudRunServiceVolumes implements IServiceVolumes {
       }
       const token = await this.token();
       mutationAttempted = true;
-      const response = await fetch(url, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+      const response = await this.request(url, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
       if (!response.ok) throw new Error(`GCP filesystem mutation failed (HTTP ${response.status}); retained intent requires inspection before retry.`);
       const operation = await response.json() as Json;
       if (!operation || typeof operation.name !== 'string' || operation.error) throw new Error('GCP filesystem mutation did not return a valid operation acknowledgement.');

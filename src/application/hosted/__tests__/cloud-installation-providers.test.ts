@@ -51,4 +51,21 @@ describe('hosted installation provider roster', () => {
       expect(() => parseCloudInstallationIntentV1({ ...intent, purpose: 'deployment', stage: 'deployment', keys: [] }, driver)).toThrow('invalid_contract');
     }
   });
+  it('restricts exclusive scope allocation to the named GCP new-project capability', () => {
+    const scopes = {
+      aws: { accountId: '123456789012', region: 'us-west-2' },
+      azure: { tenantId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', subscriptionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', resourceGroup: 'app-production', location: 'westus2' },
+      gcp: { projectId: 'customer-project', projectNumber: '123456789' },
+    };
+    expect(Object.keys(scopes).sort()).toEqual([...CLOUD_INSTALLATION_PROVIDERS].sort());
+    for (const provider of CLOUD_INSTALLATION_PROVIDERS) {
+      const driver = cloudInstallationDriverFactories[provider]();
+      expect(driver.parseScope(scopes[provider])).toEqual(scopes[provider]);
+      expect(() => driver.parseScope({ ...scopes[provider], allocationMode: 'create-exclusive-v1' })).toThrow();
+      const projectScope = { scopeKind: 'new-project', projectId: 'customer-project', displayName: 'Customer application',
+        billingAccountName: 'billingAccounts/ABCDEF-123456-789ABC', allocationMode: 'create-exclusive-v1' };
+      if (provider === 'gcp') expect(driver.parseScope(projectScope)).toEqual(projectScope);
+      else expect(() => driver.parseScope(projectScope)).toThrow();
+    }
+  });
 });

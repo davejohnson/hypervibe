@@ -429,6 +429,18 @@ describe('ci-deploy.service', () => {
   });
 
   describe('providerSecretsForGitHubActions', () => {
+    it('does not export local Google ADC or invent an automation key', () => {
+      const connectionRepo = new ConnectionRepository();
+      const connection = connectionRepo.create({ provider: 'cloudrun', scope: 'davejohnson/billforge',
+        credentialsEncrypted: getSecretStore().encryptObject({ authMode: 'default', projectId: 'cloud-project' }) });
+      connectionRepo.updateStatus(connection.id, 'verified');
+      const projected = providerSecretsForGitHubActions('cloudrun', { githubRepo: 'davejohnson/billforge' });
+      expect(projected).toEqual([{ name: 'GCP_PROJECT_ID', value: 'cloud-project' }]);
+      const missing = requiredProviderSecretNamesForGitHubActions('cloudrun').filter(name => !projected.some(item => item.name === name));
+      expect(missing).toEqual(['GCP_SERVICE_ACCOUNT_JSON']);
+      expect(missingProviderSecretsMessage('cloudrun', missing)).toContain('separately reviewed deployment federation');
+    });
+
     it('uses only the exact repository-scoped cloud connection ahead of global fallback', () => {
       const connectionRepo = new ConnectionRepository();
       const secretStore = getSecretStore();

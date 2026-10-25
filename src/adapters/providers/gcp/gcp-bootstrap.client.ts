@@ -170,7 +170,7 @@ export class GcpBootstrapClient {
   }
 
   /** One read, no polling or writes; an expired native operation is not a failed create. */
-  async getProjectCreateOperation(operationName: string, projectId: string): Promise<
+  async getProjectCreateOperation(operationName: string, projectId: string, options: { requireProjectType?: true } = {}): Promise<
     { state: 'pending' | 'failed'; name: string } | { state: 'succeeded'; name: string; project: GcpBootstrapProject } | null
   > {
     this.assertOperationName(operationName); this.assertProjectId(projectId);
@@ -181,6 +181,8 @@ export class GcpBootstrapClient {
     if (operation.done !== true) return { state: 'pending', name: operationName };
     if (operation.error !== undefined) return { state: 'failed', name: operationName };
     if (!operation.response) throw new Error('GCP project operation completed without identity.');
+    if (options.requireProjectType && this.asRecord(operation.response, 'GCP project operation returned an invalid response.')['@type']
+      !== 'type.googleapis.com/google.cloudresourcemanager.v3.Project') throw new Error('GCP project operation returned the wrong resource type.');
     return { state: 'succeeded', name: operationName, project: this.parseProject(operation.response, projectId) };
   }
 
@@ -627,6 +629,9 @@ export class GcpBootstrapClient {
 
   private parseProject(value: unknown, expectedProjectId: string): GcpBootstrapProject {
     const record = this.asRecord(value, 'GCP project lookup returned an invalid response.');
+    // ProtoJSON implicit parent defaults mean no parent; unlike identity and
+    // explicit lifecycle success, an empty/null parent is valid native evidence.
+    const parent = record.parent ?? '';
     if (record.createTime !== undefined && (typeof record.createTime !== 'string' || !Number.isFinite(Date.parse(record.createTime))))
       throw new Error('GCP project creation time is invalid.');
     let labels: Record<string, string> | undefined;
@@ -640,8 +645,7 @@ export class GcpBootstrapClient {
       || (record.state !== 'ACTIVE'
         && record.state !== 'DELETE_REQUESTED'
         && record.state !== 'STATE_UNSPECIFIED')
-      || (record.parent !== undefined
-        && (typeof record.parent !== 'string' || !PARENT_PATTERN.test(record.parent)))) {
+      || typeof parent !== 'string' || (parent !== '' && !PARENT_PATTERN.test(parent))) {
       throw new Error('GCP project lookup returned a different or invalid resource identity.');
     }
     return {
@@ -649,7 +653,7 @@ export class GcpBootstrapClient {
       projectId: expectedProjectId,
       state: record.state,
       ...(typeof record.displayName === 'string' ? { displayName: record.displayName } : {}),
-      ...(typeof record.parent === 'string' ? { parent: record.parent } : {}),
+      ...(parent === '' ? {} : { parent }),
       ...(typeof record.createTime === 'string' ? { createTime: record.createTime } : {}),
       ...(labels === undefined ? {} : { labels }),
     };
