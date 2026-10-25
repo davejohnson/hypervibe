@@ -15,6 +15,7 @@ import { createPostgresCredentialLifecycle } from '../database/database-credenti
 import { recoveryIdentityStringSchema } from '../../../domain/services/recovery-source.js';
 import { isRailwayPostgresImage, railwayDatabaseReferences, selectRailwayDatabaseDirectUrlVariable } from './railway-postgres-template.js';
 import { bindingIdentityFingerprint } from '../../../domain/services/binding-identity.js';
+import { isExternallyUsableDatabaseUrl } from '../../../domain/services/database-ops.service.js';
 import type { EnvironmentRepository } from '../../db/repositories/environment.repository.js';
 import type { IDatabaseCheckpointAdapter, DatabaseCheckpointIdentity, DatabaseCheckpointSource,
   DatabaseCheckpointBinding, DatabaseCheckpointObservation } from '../../../domain/ports/database-checkpoint.port.js';
@@ -49,6 +50,7 @@ interface RailwayHostingOps {
   ) => Promise<RailwayServiceInstanceInspection>;
   observe?: (environment: Environment) => Promise<ObservedState>;
   getServiceVariables?: (projectId: string, serviceId: string, environmentId: string) => Promise<Record<string, string>>;
+  getTcpProxy?: (environmentId: string, serviceId: string, applicationPort: number) => Promise<{ domain: string; proxyPort: number } | null>;
   observeDatabasePersistence?: (
     target: Pick<RailwayVolumeTarget, 'projectId' | 'environmentId' | 'serviceId'>,
     options?: { image?: string | null; variables?: Record<string, string> | null; expectedVolumeId?: string }
@@ -63,11 +65,6 @@ interface RailwayHostingOps {
     volumeId: string,
     target: RailwayVolumeTarget
   ) => Promise<{ success: boolean; error?: string; alreadyAbsent?: boolean }>;
-  acquireTemporaryDatabaseAccess?: (
-    environment: Environment,
-    component: Component,
-    applicationPort: number
-  ) => Promise<TemporaryDatabaseAccess>;
   releaseTemporaryDatabaseAccess?: (
     environment: Environment,
     component: Component,
@@ -533,7 +530,8 @@ export function createRailwayDatabaseAdapter(params: {
       supportsReadReplicas: false,
       supportsPointInTimeRecovery: false,
       serverlessOptimized: false,
-      supportsTemporaryDatabaseAccess: true,
+      supportsTemporaryDatabaseAccess: false,
+      databaseAccessHint: 'Railway public TCP proxy creation is disabled. For operator-managed private access, use a current Railway CLI with railway connect <database-service-name> --project <project-id> --environment <environment-id> --ssh in your own terminal. Verify the service name and existing CLI/SSH access first; Hypervibe does not open the tunnel or register keys. Keep credentials private and use a verified loopback database connection for Hypervibe operations.',
     },
     async connect() {
       // Already connected via factory; no-op for compatibility.
@@ -702,6 +700,40 @@ export function createRailwayDatabaseAdapter(params: {
       const value = bindings.connectionUrl;
       return typeof value === 'string' ? value : null;
     },
+    async getExistingExternalConnectionUrl(environment, component) {
+      const current = envRepo.findById(environment.id) ?? environment;
+      const projectId = assertCurrentProjectScope(current, component);
+      const environmentId = current.platformBindings.environmentId;
+      if (component.bindings.provider !== 'railway' || component.type !== 'postgres'
+        || component.environmentId !== current.id || !component.externalId
+        || component.bindings.retainedCleanup === true
+        || typeof environmentId !== 'string' || !environmentId.trim()
+        || (componentEnvironmentId(component) !== undefined && componentEnvironmentId(component) !== environmentId)) {
+        throw new Error('Railway database access requires the exact bound project, environment and service.');
+      }
+      if (!railway.getServiceVariables || !railway.getTcpProxy) {
+        throw new Error('Railway existing database access observation is unavailable.');
+      }
+      const variables = await railway.getServiceVariables(projectId, component.externalId, environmentId);
+      const key = typeof component.bindings.directUrlVariable === 'string' ? component.bindings.directUrlVariable
+        : selectRailwayDatabaseDirectUrlVariable(variables);
+      const configured = key ? variables[key] : undefined;
+      if (!configured || configured.includes('${{')) throw new Error('The selected Railway database connection is unresolved.');
+      const url = new URL(configured);
+      if (!['postgres:', 'postgresql:'].includes(url.protocol)) throw new Error('The selected Railway database connection is invalid.');
+      if (isExternallyUsableDatabaseUrl(configured)) return configured;
+      // Reuse only an observed ACTIVE endpoint for this exact service. Public
+      // URL aliases are not credential authority. Preserve the selected URL's
+      // user, password, database and options; replace only its transport address.
+      if (['host', 'hostaddr', 'port'].some(key => url.searchParams.has(key))) {
+        throw new Error('The selected Railway database connection has an unsupported address override.');
+      }
+      const proxy = await railway.getTcpProxy(environmentId, component.externalId, Number(url.port || 5432));
+      if (!proxy) return null;
+      url.hostname = proxy.domain.replace(/\.+$/, '');
+      url.port = String(proxy.proxyPort);
+      return url.toString();
+    },
     async observeDatabase(environment, component, options) {
       const retainedCleanup = component?.bindings.retainedCleanup === true;
       const currentEnvironment = retainedCleanup
@@ -713,12 +745,6 @@ export function createRailwayDatabaseAdapter(params: {
       return { ...observed, runtimeReferenceBinding: reference.state === 'unknown'
         ? reference : { state: Object.hasOwn(component.bindings, 'directUrlVariable') ? 'configured' : 'missing',
           evidenceFingerprint: reference.evidenceFingerprint } };
-    },
-    async acquireTemporaryDatabaseAccess(environment, component, applicationPort) {
-      if (typeof railway.acquireTemporaryDatabaseAccess !== 'function') {
-        throw new Error('Railway does not expose temporary database access.');
-      }
-      return railway.acquireTemporaryDatabaseAccess(environment, component, applicationPort);
     },
     async releaseTemporaryDatabaseAccess(environment, component, access) {
       if (typeof railway.releaseTemporaryDatabaseAccess !== 'function') {

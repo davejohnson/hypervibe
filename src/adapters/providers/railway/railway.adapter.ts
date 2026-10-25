@@ -272,7 +272,7 @@ export class RailwayAdapter implements
     credentialValueEvidence: 'readback',
     supportsDeferredSecretUpdates: true,
     supportsCreateOnlyDeploy: true,
-    supportsTemporaryDatabaseAccess: true,
+    supportsTemporaryDatabaseAccess: false,
     supportsMaintenance: true,
   };
 
@@ -5319,11 +5319,19 @@ export class RailwayAdapter implements
     serviceId: string,
     applicationPort: number
   ): Promise<RailwayTcpProxy | null> {
-    const proxies = await this.listTcpProxies(environmentId, serviceId);
-    return proxies.find((proxy) => proxy.applicationPort === applicationPort) ?? null;
+    const proxies = (await this.observeTcpProxies(environmentId, serviceId))
+      .filter((proxy) => proxy.applicationPort === applicationPort && proxy.syncStatus !== 'DELETED');
+    if (proxies.length > 1) throw new Error('Railway TCP proxy identity is ambiguous for the requested port.');
+    const proxy = proxies[0];
+    if (proxy && (proxy.syncStatus !== 'ACTIVE' || proxy.deletedAt !== null)) {
+      throw new Error('Railway TCP proxy convergence is pending; no replacement will be created.');
+    }
+    return proxy ?? null;
   }
 
-  private async listTcpProxies(environmentId: string, serviceId: string): Promise<RailwayTcpProxy[]> {
+  /** Complete scoped provider inventory, including transitional and deleted
+   * entries. DELETING is not removal, and malformed evidence is not absence. */
+  async observeTcpProxies(environmentId: string, serviceId: string): Promise<RailwayTcpProxy[]> {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
     }
@@ -5332,6 +5340,8 @@ export class RailwayAdapter implements
       query TcpProxies($environmentId: String!, $serviceId: String!) {
         tcpProxies(environmentId: $environmentId, serviceId: $serviceId) {
           id
+          environmentId
+          serviceId
           domain
           proxyPort
           applicationPort
@@ -5341,58 +5351,26 @@ export class RailwayAdapter implements
       }
     `;
 
-    const result = await this.client.request<{ tcpProxies?: RailwayTcpProxy[] }>(query, {
+    const result = await this.client.request<{ tcpProxies?: unknown }>(query, {
       environmentId,
       serviceId,
     });
-    return (result.tcpProxies ?? []).filter((proxy) =>
-      !proxy.deletedAt && proxy.syncStatus !== 'DELETED' && proxy.syncStatus !== 'DELETING'
-    );
-  }
-
-  /**
-   * Ensure a public TCP proxy exists for a service port (e.g. postgres 5432)
-   * so externally-run tools (pg_dump/pg_restore, CI) can reach an otherwise
-   * internal-only datastore. Reuses an existing proxy for the same
-   * application port when one is present.
-   */
-  async ensureTcpProxy(
-    environmentId: string,
-    serviceId: string,
-    applicationPort: number
-  ): Promise<{ id: string; domain: string; proxyPort: number; created: boolean }> {
-    if (!this.client) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-
-    const existing = await this.getTcpProxy(environmentId, serviceId, applicationPort);
-    if (existing) {
-      return { id: existing.id, domain: existing.domain, proxyPort: existing.proxyPort, created: false };
-    }
-
-    const mutation = gql`
-      mutation TcpProxyCreate($input: TCPProxyCreateInput!) {
-        tcpProxyCreate(input: $input) {
-          id
-          domain
-          proxyPort
-          applicationPort
-        }
+    if (!Array.isArray(result.tcpProxies)) throw new Error('Railway TCP proxy inventory is incomplete.');
+    const statuses = new Set(['ACTIVE', 'CREATING', 'DELETED', 'DELETING', 'UNSPECIFIED', 'UPDATING']);
+    const ids = new Set<string>();
+    for (const proxy of result.tcpProxies) {
+      if (!isRecord(proxy) || typeof proxy.id !== 'string' || !proxy.id.trim() || ids.has(proxy.id)
+        || proxy.environmentId !== environmentId || proxy.serviceId !== serviceId
+        || typeof proxy.domain !== 'string' || !proxy.domain.trim()
+        || !Number.isInteger(proxy.proxyPort) || Number(proxy.proxyPort) < 1 || Number(proxy.proxyPort) > 65535
+        || !Number.isInteger(proxy.applicationPort) || Number(proxy.applicationPort) < 1 || Number(proxy.applicationPort) > 65535
+        || typeof proxy.syncStatus !== 'string' || !statuses.has(proxy.syncStatus)
+        || !(proxy.deletedAt === null || (typeof proxy.deletedAt === 'string' && Number.isFinite(Date.parse(proxy.deletedAt))))) {
+        throw new Error('Railway TCP proxy inventory is malformed or has mismatched scope.');
       }
-    `;
-
-    try {
-      const result = await this.client.request<{ tcpProxyCreate?: RailwayTcpProxy }>(mutation, {
-        input: { environmentId, serviceId, applicationPort },
-      });
-      const created = result.tcpProxyCreate;
-      if (!created?.domain || typeof created.proxyPort !== 'number') {
-        throw new Error('Railway returned an empty tcpProxyCreate payload');
-      }
-      return { id: created.id, domain: created.domain, proxyPort: created.proxyPort, created: true };
-    } catch (error) {
-      throw new Error(this.describeError(error));
+      ids.add(proxy.id);
     }
+    return result.tcpProxies as unknown as RailwayTcpProxy[];
   }
 
   /** Delete one TCP proxy and verify it is no longer active. */
@@ -5408,22 +5386,25 @@ export class RailwayAdapter implements
     `;
 
     try {
-      const before = await this.listTcpProxies(environmentId, serviceId);
-      if (!before.some((proxy) => proxy.id === proxyId)) {
+      const before = await this.observeTcpProxies(environmentId, serviceId);
+      const existing = before.find((proxy) => proxy.id === proxyId);
+      if (!existing || existing.syncStatus === 'DELETED') {
         return;
       }
-      const result = await this.client.request<{ tcpProxyDelete?: boolean }>(mutation, { id: proxyId });
-      if (result.tcpProxyDelete !== true) {
-        const afterUnconfirmedDelete = await this.listTcpProxies(environmentId, serviceId);
-        if (!afterUnconfirmedDelete.some((proxy) => proxy.id === proxyId)) {
-          return;
+      if (existing.syncStatus !== 'DELETING') {
+        const result = await this.client.request<{ tcpProxyDelete?: boolean }>(mutation, { id: proxyId });
+        if (result.tcpProxyDelete !== true) {
+          const afterUnconfirmedDelete = await this.observeTcpProxies(environmentId, serviceId);
+          if (!afterUnconfirmedDelete.some((proxy) => proxy.id === proxyId && proxy.syncStatus !== 'DELETED')) {
+            return;
+          }
+          throw new Error(`Railway did not confirm deletion of TCP proxy ${proxyId}`);
         }
-        throw new Error(`Railway did not confirm deletion of TCP proxy ${proxyId}`);
       }
 
       for (let attempt = 0; attempt < 8; attempt += 1) {
-        const proxies = await this.listTcpProxies(environmentId, serviceId);
-        if (!proxies.some((proxy) => proxy.id === proxyId)) {
+        const proxies = await this.observeTcpProxies(environmentId, serviceId);
+        if (!proxies.some((proxy) => proxy.id === proxyId && proxy.syncStatus !== 'DELETED')) {
           return;
         }
         if (attempt < 7) {
@@ -5458,44 +5439,7 @@ export class RailwayAdapter implements
     if (after.POSTGRES_PASSWORD !== password) throw new Error('Database password issuer synchronization remains unconfirmed.');
   }
 
-  async acquireTemporaryDatabaseAccess(
-    environment: Environment,
-    component: Component,
-    applicationPort: number
-  ): Promise<TemporaryDatabaseAccess> {
-    const ids = this.databaseAccessIds(environment, component);
-    if (!ids) {
-      throw new Error('Railway database bindings are missing projectId, environmentId, or serviceId.');
-    }
-
-    const proxy = await this.ensureTcpProxy(ids.environmentId, ids.serviceId, applicationPort);
-    try {
-      const vars = await this.getServiceVariables(ids.projectId, ids.serviceId, ids.environmentId);
-      const connectionUrl = this.buildProxyDatabaseUrl(vars, proxy);
-      if (!connectionUrl) {
-        throw new Error('Railway datastore variables are missing PGUSER or POSTGRES_PASSWORD.');
-      }
-      return {
-        connectionUrl,
-        source: proxy.created ? 'created_proxy' : 'existing_proxy',
-        endpoint: `${proxy.domain.replace(/\.+$/, '')}:${proxy.proxyPort}`,
-        temporary: proxy.created,
-        ...(proxy.created ? { releaseToken: proxy.id } : {}),
-      };
-    } catch (error) {
-      if (proxy.created) {
-        try {
-          await this.deleteTcpProxy(ids.environmentId, ids.serviceId, proxy.id);
-        } catch (cleanupError) {
-          throw new Error(
-            `${this.describeError(error)} Cleanup also failed for temporary TCP proxy ${proxy.id}: ${this.describeError(cleanupError)}`
-          );
-        }
-      }
-      throw new Error(this.describeError(error));
-    }
-  }
-
+  // Retained solely to clean up owned proxy leases created by older versions.
   async releaseTemporaryDatabaseAccess(
     environment: Environment,
     component: Component,
@@ -5527,19 +5471,6 @@ export class RailwayAdapter implements
     const serviceId = component.externalId
       ?? (typeof componentBindings.serviceId === 'string' ? componentBindings.serviceId : undefined);
     return projectId && environmentId && serviceId ? { projectId, environmentId, serviceId } : null;
-  }
-
-  private buildProxyDatabaseUrl(
-    vars: Record<string, string>,
-    proxy: { domain: string; proxyPort: number }
-  ): string | null {
-    const user = vars.PGUSER;
-    const password = vars.POSTGRES_PASSWORD;
-    if (!user || !password) return null;
-    const database = vars.PGDATABASE || vars.POSTGRES_DB;
-    if (!database) return null;
-    const domain = proxy.domain.replace(/\.+$/, '');
-    return `postgresql://${user}:${encodeURIComponent(password)}@${domain}:${proxy.proxyPort}/${database}`;
   }
 
   async updateServiceInstanceConfig(params: {
@@ -7901,6 +7832,8 @@ export interface RailwayTcpProxy {
   domain: string;
   proxyPort: number;
   applicationPort: number;
+  environmentId?: string;
+  serviceId?: string;
   syncStatus?: string;
   deletedAt?: string | null;
 }

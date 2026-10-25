@@ -44,10 +44,12 @@ The plan contains two explicit, confirmed, data-bearing database actions:
    the first action's authentication proof, and verify their readback.
 
 Only the existing bound database and reviewed hosting consumer keys may be
-mutated by these actions. Fresh authentication reuses the provider's existing
-temporary access/connector lease and cleanup contract, explicitly described in
-the review. No data alteration, schema migration or session termination is
-implied. Hosting adapters retain their declared configuration activation effects;
+mutated by these actions. Fresh authentication uses the existing configured
+connection or a provider's supported temporary access/connector lease and cleanup
+contract, explicitly described in the review. Railway does not acquire public
+access; an unreachable private database remains unverified and cannot authorize
+credential mutation. No data alteration, schema migration or session termination
+is implied. Hosting adapters retain their declared configuration activation effects;
 the normal rollout lifecycle retains exact
 workload requirements, including declared `databaseEnvAliases`, even when their
 raw reference strings do not change. Every configured consumer must have one

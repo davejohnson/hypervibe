@@ -108,6 +108,46 @@ describe('Railway official database template provisioning', () => {
     expect(fixture.mutations).toEqual([]);
   });
 
+  it.each([
+    ['TCP proxy', { tcpProxies: { '5432': {} } }],
+    ['service domain', { serviceDomains: { 'postgres.up.railway.app': { port: 5432 } } }],
+    ['custom domain', { customDomains: { 'postgres.example.test': { port: 5432 } } }],
+    ['unreviewed networking', { syntheticUnknownNetworking: {} }],
+    ['malformed networking', []],
+    ['null networking', null],
+  ])('rejects template %s before deployment can create public access', async (_label, networking) => {
+    // The user requires no automatic public database access. The recorded
+    // official PostgreSQL template has networking: {}, while the pinned CLI
+    // passes this opaque JSON through unchanged (database-template-source.json).
+    // Official CLI config/mod.rs:1645 and :2660-2687 at b62467ef1b5303e3e340283ed96425dcf9612993
+    // independently identify nonempty tcpProxies as public database exposure:
+    // https://github.com/railwayapp/cli/blob/b62467ef1b5303e3e340283ed96425dcf9612993/src/commands/config/mod.rs#L1645
+    // The unknown/malformed cases are synthetic rejection probes, not claims
+    // that Railway accepts those shapes or that all networking is public.
+    const altered = structuredClone(postgresTemplate);
+    const service: any = Object.values(altered.serializedConfig.services)[0];
+    service.networking = networking;
+    const fixture = await railwayHttpFixture({ responseOverride: ({ query }) => query.includes('query PostgresTemplate')
+      ? Response.json({ data: { template: altered } }) : undefined });
+    const result = await fixture.adapter.ensureComponent('postgres', fixture.environment);
+    expect(fixture.mutations.map(({ field }) => field)).toEqual([]);
+    expect(result.receipt.success).toBe(false);
+  });
+
+  it.each([undefined, {}, { tcpProxies: {}, serviceDomains: {}, customDomains: {} }])(
+    'preserves template provisioning without public endpoints (%j)', async (networking) => {
+      const altered = structuredClone(postgresTemplate);
+      const service: any = Object.values(altered.serializedConfig.services)[0];
+      if (networking === undefined) delete service.networking;
+      else service.networking = networking;
+      const fixture = await railwayHttpFixture({ responseOverride: ({ query }) => query.includes('query PostgresTemplate')
+        ? Response.json({ data: { template: altered } }) : undefined });
+      const result = await fixture.adapter.ensureComponent('postgres', fixture.environment);
+      expect(result.receipt.success).toBe(true);
+      expect(fixture.mutations.map(({ field }) => field)).toEqual(['templateDeployV2']);
+    }
+  );
+
   it.each(['Running', 'NotFound', 'Error'] as const)('retains recovery without claiming completion for workflow %s', async (status) => {
     const fixture = await railwayHttpFixture({ templateWorkflowStatus: status });
     const result = await fixture.adapter.ensureComponent('postgres', fixture.environment);
