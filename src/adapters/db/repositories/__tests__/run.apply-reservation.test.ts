@@ -96,7 +96,7 @@ describe('apply-run reservation persistence', () => {
     const before = db.prepare('SELECT * FROM schema_migrations ORDER BY version').all();
 
     expect(() => SqliteAdapter.getInstance().migrate()).toThrow(
-      /state uses schema 999.*supports schema 11.*Update Hypervibe/
+      /state uses schema 999.*supports schema 13.*Update Hypervibe/
     );
     expect(db.prepare('SELECT * FROM schema_migrations ORDER BY version').all()).toEqual(before);
     expect(new EnvironmentRepository().findById(environmentId)?.projectId).toBe(projectId);
@@ -108,7 +108,7 @@ describe('apply-run reservation persistence', () => {
     db.exec(`
       DROP INDEX idx_runs_succeeded_apply_plan;
       DROP INDEX idx_runs_running_apply_environment;
-      DELETE FROM schema_migrations WHERE version = 11;
+      DELETE FROM schema_migrations WHERE version IN (11, 13);
     `);
     db.prepare(`
       INSERT INTO runs (
