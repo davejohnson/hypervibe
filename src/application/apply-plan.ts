@@ -814,6 +814,20 @@ export async function executePlanApply(ctx: CommandContext, params: {
   alwaysRunBootstrap?: boolean;
 }): Promise<PlanApplyOutcome> {
   const { project, spec, planId } = params;
+  const providerValidation = firstProviderSpecValidationFailure(spec);
+  const invalidSpec: PlanApplyOutcome | undefined = providerValidation ? {
+    kind: 'invalid_spec',
+    message: providerValidation.message,
+    hint: providerValidation.hint,
+    details: providerValidation.details,
+  } : undefined;
+  if (invalidSpec) {
+    // A historical allocation may need recovery after the current provider
+    // changes. This routing hint permits parsing only, never action authority.
+    const saved = ctx.repos.runs.findById(planId);
+    if (saved?.type !== 'plan' || saved.projectId !== project.id || asRecord(saved.plan)?.scope !== 'cloud-scope')
+      return invalidSpec;
+  }
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(planId);
   if ('error' in loaded) return { kind: 'plan_not_found', error: loaded.error };
@@ -832,15 +846,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
         authorize: () => ctx.repos.runs.findById(execution.applyRunId)?.status === 'running' && unchangedPlan() }) });
     return { kind: 'executed', envName, result, actionScopedWarnings: ['Only empty cloud project allocation was reviewed. Billing, API enablement, connections and hosting remain separate work.'] };
   }
-  const providerValidation = firstProviderSpecValidationFailure(spec);
-  if (providerValidation) {
-    return {
-      kind: 'invalid_spec',
-      message: providerValidation.message,
-      hint: providerValidation.hint,
-      details: providerValidation.details,
-    };
-  }
+  if (invalidSpec) return invalidSpec;
   const planService = new PlanService();
 
   const envName = loaded.document.environmentName;

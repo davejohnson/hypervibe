@@ -96,6 +96,13 @@ drift, evidence preservation and one-POST recovery. Separate local lifecycle,
 native transport, provider-roster and ordinary-command tests cover authorization,
 first environment creation, source changes and isolated action authority.
 
+The full gate also caught a validation-order regression: ordinary unsupported
+DigitalOcean/Vercel volume intents reached plan loading before spec rejection.
+Those two cases and three real-SQLite ownership/type negatives failed before the
+correction. Ordinary invalid specs now reject first; only an exact owned saved
+cloud-scope plan may proceed to strict parsing for historical recovery. The
+48-case affected group passes, including recovery after current-provider edits.
+
 These tests run in normal `npm test` discovery. The committed
 `Hypervibe / acceptance` workflow and desired required-check configuration both
 run `npm test` and type checking. Repository files do not establish live branch

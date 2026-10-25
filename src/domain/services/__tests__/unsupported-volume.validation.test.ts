@@ -84,4 +84,30 @@ describe('native unsupported filesystem mounts', () => {
     expect(ctx.repos.runs.findByProjectId(project.id)).toEqual([]);
     expect(ctx.repos.environments.findByProjectId(project.id)).toEqual([]);
   });
+
+  it.each(['foreign-project', 'wrong-run-type', 'missing-scope-marker'])(
+    'does not defer invalid-spec validation for a %s saved run', async variation => {
+      const ctx = createCommandContext();
+      const project = ctx.repos.projects.create({ name: 'invalid-volume-apply' });
+      const owner = variation === 'foreign-project' ? ctx.repos.projects.create({ name: 'other-project' }) : project;
+      const environment = ctx.repos.environments.create({ projectId: owner.id, name: 'staging' });
+      const run = ctx.repos.runs.create({ projectId: owner.id, environmentId: environment.id,
+        type: variation === 'wrong-run-type' ? 'deploy' : 'plan',
+        plan: variation === 'missing-scope-marker' ? {} : { scope: 'cloud-scope' } });
+      const loadPlan = vi.spyOn(ConvergeExecutor.prototype, 'loadPlan');
+      const providerAdapter = vi.spyOn(adapterFactory, 'getProviderAdapter');
+      const hostingAdapter = vi.spyOn(adapterFactory, 'getHostingAdapter');
+      const result = await executePlanApply(ctx, {
+        project, specRevision: 1, planId: run.id, confirmActions: [],
+        spec: projectSpecSchema.parse({ version: 1, project: project.name, environments: { staging: {
+          hosting: { provider: 'digitalocean' }, services: { web: { volume: { mountPath: '/data' } } },
+        } } }),
+      });
+      expect(result).toMatchObject({ kind: 'invalid_spec', details: { volumeSupport: 'provider-unsupported' } });
+      expect(loadPlan).not.toHaveBeenCalled();
+      expect(providerAdapter).not.toHaveBeenCalled();
+      expect(hostingAdapter).not.toHaveBeenCalled();
+      expect(ctx.repos.runs.findByProjectId(project.id).filter(item => item.type === 'apply')).toEqual([]);
+    },
+  );
 });
