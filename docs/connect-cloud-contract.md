@@ -60,7 +60,7 @@ hosting identity. That is an explicit release prerequisite.
 | Cloud | Administrator installation | Ongoing writer identity | Prepared resources |
 | --- | --- | --- | --- |
 | AWS | Reviewed CloudFormation console installation | Google ID token exchanged through STS web identity for a dedicated IAM role | Empty Secrets Manager containers and owned role/policies |
-| Azure | Entra online browser authorization and reviewed ARM/RBAC preparation; **whole new installation blocked before scope writes**, not ready for live | Google ID token exchange for an exact historically installed user-assigned identity; first UAMI creation is blocked | Intended isolated vault/writer/names, no empty SET; digest-bound blocked plans plus native group/vault/UAMI guards reject `create_ownership_unverified` pending atomic-create proof |
+| Azure | Entra browser authorization and reviewed exclusive app/environment namespace; [ARM deployment and native resource evidence](connect-cloud-azure-arm.md) govern installation. Offline acceptance only; live walkthrough outstanding. | Google ID token exchanged for the exact verified writer UAMI; newly prepared identities require retained native deployment and lifetime proof | Dedicated RBAC vault, writer UAMI and reviewed names; no empty SET. ARM remains upsert, with no atomic exclusion of independently authorized concurrent writes. Historical blocked plans retain their restrictions. |
 | GCP | Google online browser authorization and reviewed resource/IAM installation | Short-lived impersonation of the dedicated customer writer service account | Empty Secret Manager containers, writer account and owned scoped permissions |
 
 AWS Google claim mapping pins `sub`, maps Google's `azp` to
@@ -135,14 +135,20 @@ expiry, source changes and device revocation.
 
 Deployment installs immutable references under separately authorized readers:
 Cloud Run service accounts, ECS **task execution roles** for native environment
-secret injection, and Azure Container Apps managed identities. Azure requires a
-precreated reader identity for first-deployment Key Vault references. Its
-CreateOrUpdate API does not document create-only preconditions: identity
-preparation alone cannot justify changing the create-only capability flag.
-First-workload ownership needs its own verified lifecycle mechanism and tests.
-The same missing atomic-create evidence blocks new Azure vault/writer UAMI and
-runtime UAMI writes at their actual mutation boundaries, without a configuration
-bypass. Read-only historical recovery and exact writer disconnection remain.
+secret injection, and Azure Container Apps managed identities. Azure's
+[prepared hosting lifecycle](connect-cloud-azure-prepared.md) installs the reader
+UAMI and holding app under separately reviewed namespace authority, then binds
+their verified native identities before the first managed release adds immutable
+Key Vault references. The app-scoped identity settings prevent holding and
+application code from obtaining UAMI tokens in this narrow reference-only path.
+Ordinary CreateOrUpdate remains an upsert API; its create-only capability flag is
+unchanged. The reviewed namespace contract does not prevent an independently
+authorized concurrent overwrite. Historical blocked plans retain their rules;
+read-only recovery and exact writer disconnection remain available. Native
+installation, first image pull/reference consumption and disconnection still need
+the approved Azure live walkthrough. The earlier
+[conditional-header probe](connect-cloud-azure-disposable-probe.md) established
+neither atomic creation nor that end-to-end acceptance.
 
 The shared hosted installation engine is distinct from a full hosted application
 deployment engine. Hypercloud currently composes `createUnavailableReconciliationEngine`
@@ -333,5 +339,33 @@ initial assignment with its explicit concurrent-change limitation; old plans
 remain blocked because their link-only contract cannot be established. No
 temporary IAM grants are created by the new path. Exact historical temporary
 grants retain a separately reviewed cleanup path.
-AWS and Azure do not advertise scope preparation. No live support
-claim or release gate is changed by this offline implementation.
+AWS account creation and Azure subscription creation remain unsupported scope
+stages. No live support claim or release gate is changed by this offline implementation.
+
+## Agent onboarding guidance regression
+
+The challenged assumption was that exposing Connect Cloud as a tool was enough
+to direct a new customer into it. The independent requirement is onboarding
+without local cloud credentials or a manually prepared writer. A concrete
+counterexample was the actual MCP initialization response recommending GCP
+bootstrap, which creates a deployment service-account key, while connection
+discovery led with credential-file setup and even suggested chat entry.
+
+Three regressions first failed against the actual MCP initialization instructions,
+`tools/list` metadata and empty `hv_connections` response. They now pass with
+the implemented AWS/Azure/GCP browser route as the default, explicit legacy-key
+wording and private references for credentials a user already controls. The
+legacy operation and credential input behavior remain unchanged. Hosted setup
+unavailability is a prerequisite to report, never permission for a key fallback.
+Review added an initialization regression for two further counterexamples:
+existing-target/migration acceptance must preserve its committed references, and
+legacy preview may infer a project ID although confirmation requires the exact
+returned ID. That regression failed before those instruction corrections; the
+guidance now follows the returned continuation rather than requiring a patch or
+an extra project-ID question in every mode.
+
+These checks run in ordinary `npm test` discovery. Both the committed acceptance
+workflow and desired required-check configuration include that path; repository
+files do not establish live branch-protection enforcement. This is instruction
+delivery evidence, not proof of browser authorization, native installation or
+end-to-end cloud compatibility. The existing live walkthrough gates remain open.

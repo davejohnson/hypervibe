@@ -64,7 +64,7 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
         return Response.json({ name: 'operations/create-operator-project', done: false });
       }
       if (url === 'https://cloudresourcemanager.googleapis.com/v3/operations/create-operator-project') return Response.json(completed
-        ? { name: 'operations/create-operator-project', done: true, response: { '@type': 'type.googleapis.com/google.cloudresourcemanager.v3.Project', ...live } }
+        ? { name: 'operations/create-operator-project', done: true, response: { '@type': 'type.googleapis.com/google.cloud.resourcemanager.v3.Project', ...live } }
         : { name: 'operations/create-operator-project', done: false });
       if (url === `https://cloudresourcemanager.googleapis.com/v3/projects/${nativeId}` || url === `https://cloudresourcemanager.googleapis.com/v3/projects/${number}`)
         return live ? Response.json(live) : Response.json({}, { status: options.denied ? 403 : 404 });

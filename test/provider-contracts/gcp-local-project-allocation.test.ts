@@ -39,7 +39,7 @@ function fixture(options: { lostAck?: boolean; pending?: boolean; existing?: boo
     }
     if (url.pathname === '/v3/operations/pc.123') return operationVisible ? Response.json(options.pending
       ? { name: 'operations/pc.123' } : { name: 'operations/pc.123', done: true,
-        response: { '@type': 'type.googleapis.com/google.cloudresourcemanager.v3.Project', ...project } }) : Response.json({}, { status: 404 });
+        response: { '@type': 'type.googleapis.com/google.cloud.resourcemanager.v3.Project', ...project } }) : Response.json({}, { status: 404 });
     throw new Error(`Unexpected reconstructed transport ${url.pathname}`);
   };
   const driver = createGcpLocalProjectAllocationDriver({ fetch: request });

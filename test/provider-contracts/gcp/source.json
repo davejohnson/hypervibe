@@ -1,0 +1,27 @@
+{
+  "apiVersion": "Cloud Resource Manager v3",
+  "revision": "9415ba048aa587b1b2df2b96fc00aa009c831597",
+  "url": "https://raw.githubusercontent.com/googleapis/googleapis/9415ba048aa587b1b2df2b96fc00aa009c831597/google/cloud/resourcemanager/v3/projects.proto",
+  "snapshot": "projects.proto",
+  "sourceContentSha256": "fcf2b3c664ccf73cf278d8b0e3bef1daa4e0733bf72943596646bde4b87b8a84",
+  "sha256": "fcf2b3c664ccf73cf278d8b0e3bef1daa4e0733bf72943596646bde4b87b8a84",
+  "extraction": "Full unchanged official source. Tests inspect the protobuf package, Project message and CreateProject operation response type; this is not a full protobuf or REST schema validator.",
+  "protoJsonSource": "https://protobuf.dev/programming-guides/json/#any",
+  "reviewedAt": "2026-10-25",
+  "observedOperation": {
+    "evidence": "Sanitized field-only observation from the separately approved single-project live allocation. No raw response, credentials, resource identity or secret values are retained here.",
+    "observedAt": "2026-10-25T19:12:27.457Z",
+    "done": true,
+    "hasError": false,
+    "responseType": "type.googleapis.com/google.cloud.resourcemanager.v3.Project",
+    "responseFields": {
+      "name": "string",
+      "projectId": "string",
+      "state": "string",
+      "createTime": "string",
+      "parent": "omitted",
+      "labels": "object",
+      "@type": "string"
+    }
+  }
+}

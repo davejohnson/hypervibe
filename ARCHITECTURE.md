@@ -723,9 +723,10 @@ database URL password segments. Railway's documented password regeneration
 updates the database and `POSTGRES_PASSWORD`; dependent references then follow
 that value. This bootstrap behavior does not repair existing literal aliases.
 
-`hv_cloud_connections` / `hypervibe cloud connections` is an explicit hosted
-provider-access handoff, not infrastructure deployment. Its separate browser
-purpose issues revocable, expiring project access without expanding reporting
+`hv_cloud_connections` / `hypervibe cloud connections` with the default
+`purpose="provider-connections"` is an explicit hosted monitoring-credential
+handoff, not infrastructure deployment or Connect Cloud installation. Its separate
+browser approval issues revocable, expiring project access without expanding reporting
 tokens. A ten-minute preview binds origin, repository, exact destinations and
 private credential inputs before confirmed upload. Reuse requires the provider's
 declared monitoring credential kind; environment-scoped access never fans out
@@ -793,9 +794,19 @@ caveats, and the complete safe retry call. Do not recommend a third-party
 package-manager wrapper when Google provides a first-party installer or archive;
 package-manager runtime coupling can fail independently of Google credentials.
 
-The opinionated GCP `hv_connections action="bootstrap"` flow is a narrow
-account-and-credential prerequisite exception, not an imperative application
-lifecycle path. It requires an explicit Hypervibe project, exact repository
+New AWS, Azure and GCP secret-manager connections start with
+`hv_cloud_connections purpose="connect-cloud"` for the exact app/environment.
+Device approval, browser administrator installation, collection and deployment
+retain separate authority. This path does not require local cloud credentials or
+a manually prepared writer. An unavailable operator host or provider installation
+must report its concrete prerequisite rather than silently falling back to copied
+credentials or generated keys. See [Connect Cloud](docs/connect-cloud-contract.md).
+
+The legacy GCP `hv_connections action="bootstrap"` flow remains a narrow
+account-and-credential prerequisite exception for explicitly requested legacy
+setup; it is not the default for new Connect Cloud customers. It creates a
+deployment service-account key and is not an imperative application lifecycle
+path. It requires an explicit Hypervibe project, exact repository
 scope, and `adminAuth="default"`. When its GCP project ID is omitted, preview
 reuses verified repository-scoped connections or derives a stable project name;
 unreadable or conflicting scoped connections block that default. Confirmation

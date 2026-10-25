@@ -17,6 +17,16 @@ provider-roster tests run in ordinary `npm test` too. See the
 [contract and observed RED/GREEN evidence](../../docs/local-cloud-scope-preparation.md);
 these are offline checks, not live GCP allocation or all-cloud onboarding proof.
 
+`gcp-project-operation.test.ts` pins the unchanged official CRM v3
+[`projects.proto`](gcp/projects.proto), its source hash and an independently
+observed sanitized operation discriminator in [`gcp/source.json`](gcp/source.json).
+The real client consumes serialized HTTP responses using
+`type.googleapis.com/google.cloud.resourcemanager.v3.Project`; missing, malformed,
+wrong-resource/version and the formerly misspelled package remain rejected.
+This validates the specific protobuf package/message discriminator, not a full
+REST/protobuf schema. Hosted/local, SQLite and application recovery fixtures use
+that same official spelling. See [observed RED/GREEN evidence](../../docs/local-cloud-scope-preparation.md#gcp-operation-type-regression).
+
 `hosting-prepared-provider-roster.test.ts` pins the seven hosting providers against
 the [prepared hosting handoff](../../docs/connect-cloud-prepared-hosting.md).
 Shared receipt, repository replay and real SQLite plan/apply regressions run in normal

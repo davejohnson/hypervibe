@@ -52,7 +52,7 @@ function fixture(pending = false) {
       return Response.json({ name: 'operations/pc.123' });
     }
     if (url.pathname === '/v3/operations/pc.123') return Response.json(pending ? { name: 'operations/pc.123' }
-      : { name: 'operations/pc.123', done: true, response: { '@type': 'type.googleapis.com/google.cloudresourcemanager.v3.Project', ...project } });
+      : { name: 'operations/pc.123', done: true, response: { '@type': 'type.googleapis.com/google.cloud.resourcemanager.v3.Project', ...project } });
     throw new Error('Unexpected reconstructed native request');
   };
   const driver = createGcpLocalProjectAllocationDriver({ fetch: request });

@@ -80,6 +80,37 @@ handoff is still required; that handoff is not implemented by this capability.
 
 ## Acceptance evidence
 
+### GCP operation type regression
+
+The approved empty-project test exposed an incorrect assumption: the Resource
+Manager hostname spelling was also the protobuf package spelling. Google's
+[pinned official proto](https://github.com/googleapis/googleapis/blob/9415ba048aa587b1b2df2b96fc00aa009c831597/google/cloud/resourcemanager/v3/projects.proto)
+declares `google.cloud.resourcemanager.v3` and `CreateProject` returns `Project`.
+[ProtoJSON Any](https://protobuf.dev/programming-guides/json/#any) supplies that
+message's type URL. The independently observed operation on 2026-10-25 at
+19:12:27Z was terminal without error and carried
+`type.googleapis.com/google.cloud.resourcemanager.v3.Project`. Only the sanitized
+type and field shapes are retained in `test/provider-contracts/gcp/source.json`;
+test resource identities are reconstructed synthetic data.
+
+The real-client serialized transport regression rejected that valid response
+with `wrong resource type` and accepted the old misspelled package. Correcting
+the positive hosted/local/application fixtures also reproduced pending recovery
+instead of successful allocation. Before runtime changes, the five affected
+suites reported **15 failed, 44 passed**. The fix changes only the exact expected
+type string; it does not accept an alias or relax ownership or operation proof.
+Afterward, nine focused suites covering the real client, hosted/local lifecycle,
+SQLite journal, application plan/apply/status and billing continuation reported
+**156 passed**. The malformed, omitted, wrong-resource/version and misspelled
+type cases remain negative checks.
+
+All checks are discovered by ordinary `npm test`. The committed acceptance
+workflow and desired `.hypervibe/spec.json` both run that command and typecheck;
+live branch-protection enforcement was not inspected. These offline results do
+not prove the original journal has recovered in GCP, authorize another create,
+or establish complete cloud onboarding. Recovery must use the retained original
+operation, fresh native ownership/lifetime evidence and read-only requests.
+
 The regression assumption was that retaining the completed-resource map forever
 was sufficient recovery protection. The counterexamples were a completed native
 project becoming unreadable or having a different lifetime: the real shared

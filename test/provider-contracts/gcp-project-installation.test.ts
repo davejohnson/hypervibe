@@ -60,7 +60,7 @@ function fixture(options: { lostAck?: boolean; deniedLookup?: boolean; deniedBil
     if (url.pathname === '/v3/operations/pc.123456789') return operationVisible
       ? Response.json(options.pendingOperation ? { name: 'operations/pc.123456789' } : { name: 'operations/pc.123456789', done: true,
         response: { ...project, ...(options.operationMismatch ? { createTime: '2026-10-23T12:00:00Z' } : {}),
-          ...(options.exclusiveAllocation && options.operationType !== 'omitted' ? { '@type': options.operationType ?? 'type.googleapis.com/google.cloudresourcemanager.v3.Project' } : {}) } }) : Response.json({}, { status: 404 });
+          ...(options.exclusiveAllocation && options.operationType !== 'omitted' ? { '@type': options.operationType ?? 'type.googleapis.com/google.cloud.resourcemanager.v3.Project' } : {}) } }) : Response.json({}, { status: 404 });
     if (url.pathname === '/v3/projects/sequence-new-project' || url.pathname === '/v3/projects/987654321012') {
       if (options.deniedLookup) return Response.json({}, { status: 403 });
       if (!project && options.lookupBeforeCreate) return Response.json({}, { status: options.lookupBeforeCreate });
@@ -288,7 +288,7 @@ describe('versioned GCP exclusive allocation preserves unknown observation', () 
   });
 
   it('rejects missing or wrong protobuf Any type before declaring the project operation complete', async () => {
-    for (const operationType of ['omitted', 'type.googleapis.com/google.cloudresourcemanager.v3.Folder']) {
+    for (const operationType of ['omitted', 'type.googleapis.com/google.cloud.resourcemanager.v3.Folder']) {
       const f = fixture({ exclusiveAllocation: true, operationType }); const planned = await f.plan();
       expect((await f.apply(planned)).status).toBe('pending');
       expect(f.records.get(planned.installationId)?.completed).toEqual({});

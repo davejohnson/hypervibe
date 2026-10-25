@@ -182,7 +182,7 @@ export class GcpBootstrapClient {
     if (operation.error !== undefined) return { state: 'failed', name: operationName };
     if (!operation.response) throw new Error('GCP project operation completed without identity.');
     if (options.requireProjectType && this.asRecord(operation.response, 'GCP project operation returned an invalid response.')['@type']
-      !== 'type.googleapis.com/google.cloudresourcemanager.v3.Project') throw new Error('GCP project operation returned the wrong resource type.');
+      !== 'type.googleapis.com/google.cloud.resourcemanager.v3.Project') throw new Error('GCP project operation returned the wrong resource type.');
     return { state: 'succeeded', name: operationName, project: this.parseProject(operation.response, projectId) };
   }
 
