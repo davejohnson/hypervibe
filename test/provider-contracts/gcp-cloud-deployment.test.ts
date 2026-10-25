@@ -176,8 +176,13 @@ describe('native Google prepared deployment installation', () => {
     expect(f.calls.every(call => call.method === 'GET' || call.url.endsWith(':getIamPolicy') || call.url.endsWith(':testIamPermissions'))).toBe(true);
     expect(JSON.stringify(plan)).not.toContain('synthetic-admin-token');
   });
-  it('runs the real shared installation journal to private prepared resources without launching app configuration', async () => {
-    const f = nativeFixture(), driver = createGcpCloudInstallationDriver({ fetch: f.request, holdingImage: image });
+  // This compound case reviews 62 actions and exercises the real journal plus
+  // a final reconciliation. Profiling recorded 7/1724/516 serialized requests
+  // and all 235 deadline timers cleared. A bounded 5ms/read transport reproduced
+  // the CI 10s timeout; 30s passes without changing provider phase deadlines.
+  // These are offline fixture costs, not live latency or provider support proof.
+  it('runs the real shared installation journal to private prepared resources without launching app configuration', { timeout: 30_000 }, async () => {
+    const f = nativeFixture(16), driver = createGcpCloudInstallationDriver({ fetch: f.request, holdingImage: image });
     const records = new Map<string, CloudInstallationRecord>();
     const store = { read: async (id: string) => structuredClone(records.get(id) ?? null),
       compareAndSwap: async (id: string, revision: number | null, next: CloudInstallationRecord) => {
@@ -185,8 +190,13 @@ describe('native Google prepared deployment installation', () => {
       } };
     const shared = { driver, store, authentication, authorize: async () => true };
     const prepared = prepareCloudDeploymentIntentV1(spec, intent, driver), plan = await planCloudInstallationV1({ ...shared, intent: prepared });
+    const plannedCalls = f.calls.length;
+    expect(plannedCalls).toBeLessThanOrEqual(16);
+    f.state.callLimit = plannedCalls + 2000;
     const ready = await applyCloudInstallationV1({ ...shared, installationId: plan.installationId, planDigest: plan.plan.digest,
       confirmActions: plan.plan.actions.map(action => action.id) });
+    const appliedCalls = f.calls.length;
+    expect(appliedCalls - plannedCalls).toBeLessThanOrEqual(2000);
     expect(ready.status).toBe('ready');
     const connection = cloudInstallationDeploymentConnectionV1(ready, driver);
     expect(connection.preparedResources?.workloads).toHaveLength(2);
@@ -210,7 +220,9 @@ describe('native Google prepared deployment installation', () => {
     for (const current of f.policies.values()) expect(current.auditConfigs).toEqual([{ service: 'allServices', auditLogConfigs: [{ logType: 'ADMIN_READ' }] }]);
     const writes = () => f.calls.filter(call => call.method !== 'GET' && !/:getIamPolicy|:testIamPermissions/.test(call.url)).length;
     const before = writes();
+    f.state.callLimit = appliedCalls + 600;
     expect((await reconcileCloudInstallationV1({ ...shared, installationId: ready.installationId, planDigest: ready.plan.digest })).status).toBe('ready');
+    expect(f.calls.length - appliedCalls).toBeLessThanOrEqual(600);
     expect(writes()).toBe(before);
   });
   it('recovers the exact accepted native service attempt after a lost response without repeating create', async () => {

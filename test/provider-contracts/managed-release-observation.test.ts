@@ -69,10 +69,16 @@ describe('actual managed first-release provenance recovery', () => {
       name: managedCiReleaseArtifactName('staging', sha), expired: false, created_at: run.created_at, updated_at: run.updated_at,
       workflow_run: { id: run.id, head_sha: sha, head_branch: 'main', repository_id: 123, head_repository_id: 123 } }] });
     const producer = parse(contract.workflow.content).jobs.deploy.steps.find((step: any) => step.name === 'Write server release evidence');
+    // GitHub evaluates contexts before invoking the action. This ordinary first
+    // release has no credential-rotation input; model that concrete dispatch,
+    // not unresolved YAML expressions passed directly to JSON.parse.
+    // https://docs.github.com/en/actions/reference/workflows-and-actions/contexts
+    expect(producer.env.HYPERVIBE_CREDENTIAL_OPERATIONS).toBe("${{ inputs.credential_operations || '{}' }}");
+    expect(producer.env.HYPERVIBE_CREDENTIAL_DEPLOYMENTS).toBe("${{ steps.runtime_deploy.outputs.credential_deployments || '[]' }}");
     let evidence = ''; const realRequire = createRequire(import.meta.url);
     new Function('require', 'process', producer.with.script)((name: string) => name === 'fs' ? {
       readFileSync: () => `${releaseEvidenceValidationRuntime().trim()}\n`, writeFileSync: (_path: string, value: string) => { evidence = value; },
-    } : realRequire(name), { env: { ...producer.env, GITHUB_REPOSITORY: 'studio/sequence', HYPERVIBE_RELEASE_SHA: sha,
+    } : realRequire(name), { env: { ...producer.env, HYPERVIBE_CREDENTIAL_OPERATIONS: '{}', HYPERVIBE_CREDENTIAL_DEPLOYMENTS: '[]', GITHUB_REPOSITORY: 'studio/sequence', HYPERVIBE_RELEASE_SHA: sha,
       HYPERVIBE_RELEASE_IMAGE_URI: imageUri, HYPERVIBE_RELEASE_DEPLOYMENT_CONTRACT_FINGERPRINT: contract.target.deploymentContractFingerprint } });
     vi.spyOn(GitHubAdapter.prototype, 'readArtifactFiles').mockResolvedValue({ [MANAGED_CI_RELEASE_EVIDENCE_FILE]: evidence });
     const reviewed = await observeManagedReleaseEvidence({ project, spec, environment });
