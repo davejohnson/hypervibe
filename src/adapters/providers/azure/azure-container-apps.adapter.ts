@@ -1,3 +1,5 @@
+import { AzureRuntimeIdentities } from './azure-runtime-identities.js';
+import { runtimeAccessBindings } from '../../../domain/services/runtime-access.service.js';
 import { createHash } from 'node:crypto';
 import { validateRuntimeSecretReferences, runtimeSecretReferenceIdentity } from '../../../domain/services/runtime-secret-references.js';
 import type { RuntimeSecretReference } from '../../../domain/ports/secret-destination.port.js';
@@ -88,7 +90,7 @@ type AzureResource = {
   id: string;
   name: string;
   location?: string;
-  identity?: { principalId?: string; tenantId?: string; type?: string };
+  identity?: { principalId?: string; tenantId?: string; type?: string; userAssignedIdentities?: Record<string, { principalId?: string; clientId?: string }> };
   properties?: Record<string, any>;
   tags?: Record<string, string>;
 };
@@ -105,6 +107,7 @@ type AzureProject = {
 
 export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMaintenanceAdapter {
   readonly name = 'azure-container-apps';
+  readonly runtimeIdentities = new AzureRuntimeIdentities(() => { const { client, credentials } = this.connected(); return { client, ...credentials, deployClientId: credentials.clientId }; });
   readonly serviceVolumes = new AzureServiceVolumes(() => this.connected().client);
 
   readonly capabilities: ProviderCapabilities = {
@@ -270,6 +273,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     envVars: Record<string, string>,
     options: DeploymentMutationOptions = {}
   ): Promise<DeployResult> {
+    if (options.requireNewWorkload) return this.failedDeploy(service, 'Azure Container Apps does not expose a verified conditional-create API. This reviewed create-only request is blocked before provider access.');
     let secretVersionRefs: Record<string, RuntimeSecretReference>;
     try {
       secretVersionRefs = validateRuntimeSecretReferences(options.secretVersionRefs, envVars, (destination) =>
@@ -287,9 +291,17 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     if (!bindings.projectId || !bindings.environmentId) {
       return this.failedDeploy(service, 'No bound Azure resource group and managed environment exist. The project action must complete first.');
     }
+    let runtimeReader: string | undefined;
     let attemptedApp: AzureResource | null = null;
     let createdService = false;
     try {
+      const runtimeBinding = runtimeAccessBindings(environment)?.runtimeIdentities[service.name];
+      if (runtimeBinding) {
+        const runtime = await this.runtimeIdentities.inspect({ environment, service, binding: runtimeBinding, mode: 'ensure',
+          environmentSpec: { secretDestinations: secretVersionRefs } as never });
+        if (runtime.state !== 'ready' || !runtime.identity) throw new Error('The reviewed Azure runtime identity and reader permissions are not ready.');
+        runtimeReader = runtime.identity.scope.identityResourceId ?? 'system';
+      }
       const project = this.projectFromResourceGroup(bindings.projectId, bindings.environmentId);
       if (project.environmentId !== bindings.environmentId) {
         throw new Error(`Bound managed environment ${bindings.environmentId} is outside ${bindings.projectId}.`);
@@ -328,7 +340,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
           project,
           service,
           envVars,
-          secretVersionRefs,
+          secretVersionRefs, runtimeReader,
         }));
         attemptedApp = app;
         createdService = true;
@@ -345,13 +357,13 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
         project,
         service,
         envVars,
-        secretVersionRefs,
+        secretVersionRefs, runtimeReader,
       });
       await this.ensureRoleAssignment(project.registryId, principalId, ACR_PULL_ROLE, 'ServicePrincipal');
       app = await this.connected().client.request<AzureResource>('PATCH', app.id, CONTAINER_APPS_API, desiredBody);
       app = await this.waitForProvisioning(app.id, CONTAINER_APPS_API);
       app = await this.waitForContainerAppRevision(app.id, previousReadyRevision);
-      this.assertSecretReferences(app, secretVersionRefs);
+      this.assertSecretReferences(app, secretVersionRefs, runtimeReader ?? 'system');
       if (azureVolumeFingerprint(app.properties?.template) !== expectedVolumes) throw new Error('Azure volume mounts changed during runtime configuration.');
       const url = this.appUrl(app);
       return {
@@ -1020,6 +1032,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     service: Service;
     envVars: Record<string, string>;
     secretVersionRefs?: Record<string, RuntimeSecretReference>;
+    runtimeReader?: string;
   }): Record<string, unknown> {
     const currentContainer = this.container(params.app);
     const currentImage = currentContainer?.image ?? BOOTSTRAP_IMAGE;
@@ -1050,7 +1063,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     for (const [key, reference] of Object.entries(params.secretVersionRefs ?? {})) {
       const native = runtimeSecretReferenceIdentity(reference);
       const name = this.secretName(key);
-      definitions.set(name, { name, keyVaultUrl: `${native.resource}/${native.version}`, identity: 'system' });
+      definitions.set(name, { name, keyVaultUrl: `${native.resource}/${native.version}`, identity: params.runtimeReader ?? 'system' });
       env.set(key, { name: key, secretRef: name });
     }
     const changeSecrets = secretEntries.length > 0 || Object.keys(params.secretVersionRefs ?? {}).length > 0;
@@ -1063,7 +1076,11 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     const template = params.app?.properties?.template ?? {};
     return {
       location: params.app?.location ?? this.connected().credentials.location,
-      identity: params.app?.identity ?? { type: 'SystemAssigned' },
+      identity: { type: params.runtimeReader && params.runtimeReader !== 'system'
+          ? (String(params.app?.identity?.type ?? 'SystemAssigned').includes('SystemAssigned') ? 'SystemAssigned, UserAssigned' : 'UserAssigned')
+          : params.app?.identity?.type ?? 'SystemAssigned',
+        ...(params.app?.identity?.userAssignedIdentities || params.runtimeReader && params.runtimeReader !== 'system' ? { userAssignedIdentities: Object.fromEntries(
+          [...new Set([...Object.keys(params.app?.identity?.userAssignedIdentities ?? {}), ...(params.runtimeReader && params.runtimeReader !== 'system' ? [params.runtimeReader] : [])])].map(id => [id, {}])) } : {}) },
       properties: {
         managedEnvironmentId: params.environmentId,
         configuration: {
@@ -1126,13 +1143,13 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     return refs;
   }
 
-  private assertSecretReferences(app: AzureResource, refs: Record<string, RuntimeSecretReference>): void {
+  private assertSecretReferences(app: AzureResource, refs: Record<string, RuntimeSecretReference>, reader: string): void {
     const observed = this.observedSecretReferences(app);
     for (const [key, ref] of Object.entries(refs)) {
       const expected = runtimeSecretReferenceIdentity(ref);
       const entries = (this.container(app)?.env ?? []).filter((entry: any) => entry.name === key);
       const definition = app.properties?.configuration?.secrets?.find((entry: any) => entry.name === entries[0]?.secretRef);
-      if (entries.length !== 1 || observed[key]?.resource !== expected.resource || observed[key]?.version !== expected.version || definition?.identity !== 'system') {
+      if (entries.length !== 1 || observed[key]?.resource !== expected.resource || observed[key]?.version !== expected.version || typeof definition?.identity !== 'string' || definition.identity.toLowerCase() !== reader.toLowerCase()) {
         throw new Error('Azure did not verify the requested runtime secret references.');
       }
     }
@@ -1459,7 +1476,7 @@ providerRegistry.register({
       },
     },
     lifecycle: {
-      hosting: { workloadKinds: ['web'], serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only' }, customDomains: 'managed', domainTrafficProxy: 'dns-only', maintenance: 'managed', teardownBoundary: 'project' },
+      hosting: { runtimeIdentityTiming: 'before-workload', workloadKinds: ['web'], serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only' }, customDomains: 'managed', domainTrafficProxy: 'dns-only', maintenance: 'managed', teardownBoundary: 'project' },
     },
   },
   factory: async (credentials) => {

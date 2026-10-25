@@ -125,14 +125,13 @@ describe('shared storage runtime credential boundary', () => {
     expect(wiringPlan(refreshed)[0].type).toBe('noop');
   });
 
-  it('resolves a confirmed-absent new consumer before its local service row exists', async () => {
+  it('blocks a confirmed-absent new consumer until its per-service identity is prepared', async () => {
     const f = fixture();
     const services = new ServiceRepository();
     services.delete(services.findByProjectAndName(f.project.id, 'web')!.id);
     f.environment.platformBindings.services = {};
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({}, { status: 404 })));
-    const vars = await resolveStorageServiceEnvVars(f.project, spec, f.environment);
-    expect(vars?.web.GOOGLE_CLOUD_CREDENTIALS_JSON).toBe('');
+    await expect(resolveStorageServiceEnvVars(f.project, spec, f.environment)).rejects.toThrow(/identity|preparation/i);
     expect(services.findByProjectAndName(f.project.id, 'web')).toBeNull();
   });
 

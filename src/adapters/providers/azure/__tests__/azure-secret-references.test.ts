@@ -30,12 +30,18 @@ const url = 'https://credential-vault.vault.azure.net/secrets/api-token/' + refe
 const now = new Date();
 const service: Service = { id: 'service', projectId: 'project', name: 'web', buildConfig: { workloadKind: 'web' }, envVarSpec: {}, createdAt: now, updatedAt: now };
 const environment: Environment = { id: 'environment', projectId: 'project', name: 'staging', createdAt: now, updatedAt: now, platformBindings: { provider: 'azure-container-apps', projectId: group, environmentId: managedEnvironment, services: { web: { serviceId: appId } } } };
-async function fixture(options: { opaque?: boolean; corrupt?: boolean; environmentId?: string } = {}) {
+async function fixture(options: { opaque?: boolean; corrupt?: boolean; environmentId?: string; preparedReader?: boolean } = {}) {
   const adapter = new AzureContainerAppsAdapter();
   await adapter.connect({ tenantId, subscriptionId, clientId: '33333333-3333-4333-8333-333333333333', clientSecret: 'synthetic' });
   let revision = 1;
   const existingSecret = { name: 'existing-ref', keyVaultUrl: 'https://credential-vault.vault.azure.net/secrets/existing/' + 'b'.repeat(32), identity: 'system' };
   let live: any = { id: appId, name: 'web', location: 'canadacentral', identity: { type: 'SystemAssigned', principalId: '44444444-4444-4444-8444-444444444444' }, tags: { 'managed-by': 'hypervibe', 'hypervibe-environment-id': environment.id }, properties: { managedEnvironmentId: managedEnvironment, provisioningState: 'Succeeded', latestRevisionName: 'rev-1', latestReadyRevisionName: 'rev-1', configuration: { secrets: [existingSecret], ingress: { fqdn: 'app.example.test' } }, template: { containers: [{ name: 'main', image: 'registry/app@sha256:' + 'a'.repeat(64), env: [{ name: 'EXISTING', secretRef: 'existing-ref' }] }] } } };
+  const readerPrincipal = '66666666-6666-4666-8666-666666666666';
+  const readerClient = '77777777-7777-4777-8777-777777777777';
+  const owner = createHash('sha256').update(JSON.stringify([tenantId, subscriptionId, environment.projectId, environment.id, service.name])).digest('hex');
+  const readerId = `${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/runtime-0536d773be`;
+  const readerVault = `/subscriptions/${subscriptionId}/resourceGroups/secrets/providers/Microsoft.KeyVault/vaults/credential-vault`;
+  const readerGrant = `${readerVault}/providers/Microsoft.Authorization/roleAssignments/65798795-a4c4-5e6a-8aaa-bc97623807aa`;
   const writes: any[] = [];
   if (options.environmentId) live.tags['hypervibe-environment-id'] = options.environmentId;
   if (options.opaque) live.properties.configuration.secrets.push({ name: 'unknown-inline' });
@@ -45,6 +51,14 @@ async function fixture(options: { opaque?: boolean; corrupt?: boolean; environme
     const target = String(input), method = init?.method ?? 'GET';
     if (target.startsWith('https://login.microsoftonline.com/')) return Response.json({ access_token: 'header.' + Buffer.from(JSON.stringify({ oid: principal })).toString('base64url') + '.signature', expires_in: 3600 });
     const path = new URL(target).pathname;
+    if (options.preparedReader && path.includes('/userAssignedIdentities/')) {
+      expect(path).toBe(readerId);
+      return Response.json({ id: readerId, properties: { tenantId, clientId: readerClient, principalId: readerPrincipal },
+        tags: { hypervibeRuntime: owner, hypervibeAttempt: 'runtime-create-attempt' } });
+    }
+    if (options.preparedReader && path === readerVault) return Response.json({ id: readerVault, systemData: { createdAt: '2026-10-24T00:00:00Z' }, properties: { tenantId, enableRbacAuthorization: true, provisioningState: 'Succeeded' } });
+    if (options.preparedReader && path === readerGrant) return Response.json({ id: readerGrant, properties: { principalId: readerPrincipal,
+      roleDefinitionId: `/subscriptions/${subscriptionId}/providers/Microsoft.Authorization/roleDefinitions/4633458b-17de-408a-b874-0445c86b69e6`, scope: readerVault, principalType: 'ServicePrincipal', description: `Hypervibe runtime ${owner}` } });
     if (path === managedEnvironment) return Response.json({ id: managedEnvironment, name: 'staging', properties: { provisioningState: 'Succeeded' } });
     if (path.includes('/roleAssignments/')) {
       const scope = path.split('/providers/Microsoft.Authorization/')[0]!;
@@ -65,7 +79,7 @@ async function fixture(options: { opaque?: boolean; corrupt?: boolean; environme
     throw new Error('Unexpected request: ' + method + ' ' + target);
   });
   vi.stubGlobal('fetch', request);
-  return { adapter, writes, request, existingSecret };
+  return { adapter, writes, request, existingSecret, attachReader: (id: string) => { live.identity = { ...live.identity, type: 'SystemAssigned, UserAssigned', userAssignedIdentities: { [id]: { principalId: readerPrincipal, clientId: readerClient } } }; }, owner, readerPrincipal, readerClient, readerId, readerVault, readerGrant };
 }
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 describe('Azure immutable secret references', () => {
@@ -84,6 +98,31 @@ describe('Azure immutable secret references', () => {
     expect(observed.services[0]?.envVarKeys).toContain('API_TOKEN');
     expect(observed.services[0]?.envVarHashes).not.toHaveProperty('API_TOKEN');
     expect(f.request.mock.calls.some(([target]) => String(target).includes('listSecrets'))).toBe(false);
+  });
+  it('uses and verifies the separately prepared UAMI in the immutable Key Vault reference', async () => {
+    const f = await fixture({ preparedReader: true }); f.attachReader(f.readerId);
+    const scoped = structuredClone(environment);
+    scoped.platformBindings.runtimeIdentities = { web: { provider: 'azure-container-apps', evidence: {
+      tenantId, subscriptionId, environmentId: environment.id, serviceName: 'web', owner: f.owner, workloadId: appId, kind: 'user',
+      principalId: f.readerPrincipal, clientId: f.readerClient, identityId: f.readerId, creationAttempt: 'runtime-create-attempt',
+      readerGrants: JSON.stringify([{ vaultId: f.readerVault, createdAt: '2026-10-24T00:00:00Z', assignmentId: f.readerGrant, principalId: f.readerPrincipal }]),
+    } } };
+    expect(await f.adapter.setEnvVars(scoped, service, {}, { secretVersionRefs: { API_TOKEN: reference } } as any)).toMatchObject({ success: true });
+    expect(f.writes[0].properties.configuration.secrets).toContainEqual({ name: expect.any(String), keyVaultUrl: url, identity: f.readerId });
+    expect(f.writes[0].identity).toEqual({ type: 'SystemAssigned, UserAssigned', userAssignedIdentities: { [f.readerId]: {} } });
+    expect(f.request.mock.calls.every(([target, init]) => !String(target).includes('vault.azure.net') && (init?.method ?? 'GET') !== 'PUT')).toBe(true);
+  });
+  it('preserves user-assigned identities without echoing read-only principal metadata in ARM writes', async () => {
+    const f = await fixture();
+    const readerId = `${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/existing-reader`;
+    f.attachReader(readerId);
+    expect(await f.adapter.deploy(service, environment, {})).toMatchObject({ receipt: { success: true } });
+    expect(f.writes[0].identity).toEqual({ type: 'SystemAssigned, UserAssigned', userAssignedIdentities: { [readerId]: {} } });
+  });
+  it('rejects a create-only request before any ARM access while the native precondition remains unverified', async () => {
+    const f = await fixture();
+    expect(await f.adapter.deploy(service, environment, {}, { requireNewWorkload: true, deferDeployment: true })).toMatchObject({ receipt: { success: false } });
+    expect(f.request).not.toHaveBeenCalled();
   });
   it('blocks an update requiring unknown inline secret bytes instead of reading or dropping them', async () => {
     const f = await fixture({ opaque: true });

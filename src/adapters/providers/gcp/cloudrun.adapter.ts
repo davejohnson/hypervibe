@@ -23,6 +23,8 @@ import { buildCloudRunPortableRecipe } from './cloudrun-ci.recipe.js';
 import { createHostingServiceCreateRecovery, parseHostingBindings, pendingScheduleActivationSchema, type EnvironmentTaskOptions, type GetLogsOptions, type LogEntry } from '../../../domain/ports/hosting.port.js';
 import * as pubsub from './pubsub.api.js';
 import { CloudRunServiceVolumes } from './cloudrun-service-volume.js';
+import { CloudRunRuntimeIdentities } from './cloudrun-runtime-identities.js';
+import type { RuntimeIdentityBinding } from '../../../domain/ports/runtime-identity.port.js';
 import { cloudRunFilesystemIdentity } from './cloudrun-volume-runtime.js';
 import { cloudRunJobUpdateBody } from './cloudrun-job-request.js';
 import { parseServiceVolumeBindings } from '../../../domain/services/service-volume.service.js';
@@ -505,6 +507,11 @@ export class CloudRunAdapter implements
     return { projectId: this.credentials.projectId, region: this.credentials.region };
   }, () => this.getAccessToken());
 
+  readonly runtimeIdentities = new CloudRunRuntimeIdentities(() => {
+    if (!this.credentials || !this.serviceAccountCreds) throw new Error('Cloud Run runtime identity requires a verified connection.');
+    return { projectId: this.credentials.projectId, region: this.credentials.region, deployEmail: this.serviceAccountCreds.client_email };
+  }, () => this.getAccessToken(), (environment, serviceName, boundId) => this.workloadResourceName(environment, serviceName, boundId));
+
   async connect(credentials: unknown): Promise<void> {
     const parsed = CloudRunCredentialsSchema.parse(credentials);
     const legacyRegion = credentials && typeof credentials === 'object' && typeof (credentials as Record<string, unknown>).region === 'string'
@@ -519,16 +526,18 @@ export class CloudRunAdapter implements
   }
 
   async resolveRuntimeIdentity(environment: Environment, service: Pick<Service, 'name' | 'buildConfig'>): Promise<ProviderRuntimeIdentity> {
+    const runtimeBinding = (environment.platformBindings.runtimeIdentities as Record<string, RuntimeIdentityBinding> | undefined)?.[service.name];
+    if (runtimeBinding) {
+      const observation = await this.runtimeIdentities.inspect({ environment, service, binding: runtimeBinding, mode: 'ensure' });
+      if (observation.state !== 'ready' || !observation.identity) throw new Error('Cloud Run workload identity preparation is incomplete; apply its exact identity action before storage wiring.');
+      return observation.identity;
+    }
     if (!this.credentials) throw new Error('Not connected. Call connect() first.');
     const { projectId, region } = this.credentials;
     if (environment.platformBindings.projectId !== projectId
       || environment.platformBindings.environmentId !== region
       || (environment.platformBindings.region && environment.platformBindings.region !== region)) {
       throw new Error('Cloud Run workload runtime identity requires the exact bound project and region scope.');
-    }
-    const principal = this.requiredRuntimeServiceAccountEmail('workload storage access');
-    if (principal === this.serviceAccountCreds?.client_email) {
-      throw new Error('Cloud Run workload runtime identity cannot be the deployment identity.');
     }
     const bindings = environment.platformBindings as {
       services?: Record<string, { serviceId?: string; jobName?: string }>;
@@ -547,16 +556,18 @@ export class CloudRunAdapter implements
       : await this.getService(name);
     if (!current) {
       if (boundId) throw new Error('Bound Cloud Run workload is missing; runtime identity remains unknown.');
-      return { provider: 'gcp', principal, scope: { projectId }, source: 'configured' };
+      throw new Error('A new Cloud Run workload requires its reviewed per-service runtime identity preparation.');
     }
     if (!boundId) throw new Error('Unbound Cloud Run workload already exists; explicit adoption is required before runtime access.');
     const observedPrincipal = isJob
       ? this.jobRuntimeIdentity(current as CloudRunJob)
       : this.serviceRuntimeIdentity(current as CloudRunService);
-    if (current.name !== resourceName || observedPrincipal !== principal) {
+    if (current.name !== resourceName || !observedPrincipal || observedPrincipal === this.serviceAccountCreds?.client_email
+      || !observedPrincipal.endsWith(`@${projectId}.iam.gserviceaccount.com`)) {
       throw new Error('Observed Cloud Run workload resource or runtime identity does not match the selected destination.');
     }
-    return { provider: 'gcp', principal, scope: { projectId }, source: 'observed' };
+    return { provider: 'gcp', principal: observedPrincipal, scope: { projectId, region,
+      environmentId: environment.id, serviceName: service.name, workloadResource: resourceName }, source: 'observed' };
   }
 
   configureTarget(target: { region?: string }): void {
@@ -998,7 +1009,7 @@ export class CloudRunAdapter implements
         ?? cloudRunService?.spec?.template?.spec?.serviceAccountName;
       const serviceAccount = cloudRunService
         ? liveServiceAccount
-        : this.requiredRuntimeServiceAccountEmail('service');
+        : await this.preparedRuntimeServiceAccountEmail(environment, service);
       if (!deploymentDeferred && cloudRunService && !serviceAccount) {
         throw new Error(
           `Cloud Run service ${serviceName} did not expose its runtime service account; refusing to mutate code without exact runtime identity evidence.`
@@ -1358,7 +1369,8 @@ export class CloudRunAdapter implements
           },
         },
         serviceAccount: currentJob?.template?.template?.serviceAccount
-          ?? currentJob?.template?.template?.serviceAccountName,
+          ?? currentJob?.template?.template?.serviceAccountName
+          ?? await this.preparedRuntimeServiceAccountEmail(environment, service),
         labels,
         existingVolumes: currentJob?.template?.template?.volumes,
         existingVolumeMounts: currentJobContainer?.volumeMounts,
@@ -1409,7 +1421,7 @@ export class CloudRunAdapter implements
         timeZone: envVars['HYPERVIBE_CRON_TIME_ZONE']?.trim() || 'Etc/UTC',
         runtimeServiceAccountEmail: readyJob.template?.template?.serviceAccount
           ?? readyJob.template?.template?.serviceAccountName
-          ?? this.requiredRuntimeServiceAccountEmail('scheduled job'),
+          ?? this.requiredRuntimeServiceAccountEmail('scheduled job', environment, service.name),
       });
 
       const cleanupWarning = serviceBinding?.resourceUid
@@ -1497,8 +1509,8 @@ export class CloudRunAdapter implements
       const jobName = pending.jobName;
       const job = await this.getCloudRunJob(jobName, token);
       const expectedName = `projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs/${jobName}`;
-      const runtimeIdentity = this.requiredRuntimeServiceAccountEmail('scheduled job activation');
-      if (!job || job.name !== expectedName || job.uid !== options.expectedJobUid
+      const runtimeIdentity = this.jobRuntimeIdentity(job);
+      if (!runtimeIdentity || !job || job.name !== expectedName || job.uid !== options.expectedJobUid
         || !this.cloudRunJobReadiness(job).ready
         || this.primaryJobContainer(job)?.image !== options.expectedImage
         || this.containerStartCommand(this.primaryJobContainer(job)) !== this.requiredScheduledJobCommand(service)
@@ -5357,11 +5369,12 @@ export class CloudRunAdapter implements
         error: `The provider-observed Cloud Run ${resource} image changed during deferred reconciliation; re-run hv_plan before mutation.`,
       };
     }
-    const expectedRuntimeIdentity = this.credentials?.runtimeServiceAccountEmail?.trim();
-    if (!expectedRuntimeIdentity || evidence.runtimeServiceAccountEmail !== expectedRuntimeIdentity) {
+    const expectedRuntimeIdentity = evidence.runtimeServiceAccountEmail;
+    if (!expectedRuntimeIdentity || expectedRuntimeIdentity === this.serviceAccountCreds?.client_email
+      || !expectedRuntimeIdentity.endsWith(`@${this.credentials?.projectId}.iam.gserviceaccount.com`)) {
       return {
         phase: 'runtime_identity_evidence',
-        error: `The Cloud Run ${resource} does not use the exact runtime service account from the verified connection; refusing to create a deferred revision.`,
+        error: `The Cloud Run ${resource} did not expose a distinct runtime service account in the verified project; refusing to create a deferred revision.`,
       };
     }
     return undefined;
@@ -5409,12 +5422,31 @@ export class CloudRunAdapter implements
       ?? service?.spec?.template?.spec?.serviceAccountName;
   }
 
-  private requiredRuntimeServiceAccountEmail(resource: string): string {
-    const email = this.credentials?.runtimeServiceAccountEmail?.trim();
+  private requiredRuntimeServiceAccountEmail(resource: string, environment?: Environment, serviceName?: string): string {
+    const binding = environment && serviceName
+      ? (environment.platformBindings.runtimeIdentities as Record<string, RuntimeIdentityBinding> | undefined)?.[serviceName] : undefined;
+    if (environment && serviceName && (!binding || binding.provider !== 'cloudrun' || binding.pending
+      || binding.evidence.environmentId !== environment.id || binding.evidence.serviceName !== serviceName
+      || binding.evidence.projectId !== this.credentials?.projectId || !/^[1-9][0-9]{5,30}$/.test(binding.evidence.uniqueId ?? ''))) {
+      throw new Error(`Cloud Run runtimeServiceAccountEmail is required from a verified per-service runtime identity before creating ${resource}; apply its reviewed identity preparation first.`);
+    }
+    const email = binding?.evidence.email ?? this.credentials?.runtimeServiceAccountEmail?.trim();
     if (!email) {
       throw new Error(
         `Cloud Run runtimeServiceAccountEmail is required to create ${resource}; refusing to run application code as the deploy credential.`
       );
+    }
+    if (email === this.serviceAccountCreds?.client_email || !email.endsWith(`@${this.credentials?.projectId}.iam.gserviceaccount.com`)) throw new Error('Cloud Run runtime identity must be distinct from the deployer and belong to the exact project.');
+    return email;
+  }
+
+  private async preparedRuntimeServiceAccountEmail(environment: Environment, service: Pick<Service, 'name' | 'buildConfig'>): Promise<string> {
+    const email = this.requiredRuntimeServiceAccountEmail('workload', environment, service.name);
+    const binding = (environment.platformBindings.runtimeIdentities as Record<string, RuntimeIdentityBinding>)[service.name];
+    const observed = await this.runtimeIdentities.inspect({ environment, service, binding, mode: 'ensure' });
+    if (observed.state !== 'ready' || observed.identity?.principal !== email) {
+      throw new Error('The prepared Cloud Run runtime service account or exact deployment permission changed; re-plan its identity action before workload creation.'
+        + (observed.state === 'unknown' ? ` ${observed.reason}` : ''));
     }
     return email;
   }
@@ -5433,6 +5465,7 @@ export class CloudRunAdapter implements
   }
 
   private assertPreservedFilesystem(before: CloudRunService | null, after: CloudRunService | null): void {
+    if (before && this.serviceRuntimeIdentity(before) !== this.serviceRuntimeIdentity(after)) throw new Error('Cloud Run runtime identity changed during configuration update.');
     const expected = cloudRunFilesystemIdentity(before?.template ?? before?.spec?.template?.spec);
     const observed = cloudRunFilesystemIdentity(after?.template ?? after?.spec?.template?.spec);
     if (expected !== null && expected !== observed) throw new Error('Cloud Run filesystem mount or network identity changed during runtime configuration.');
@@ -5686,10 +5719,10 @@ export class CloudRunAdapter implements
     }
     const runtimeServiceAccountEmail = liveJob
       ? liveJob.template?.template?.serviceAccount ?? liveJob.template?.template?.serviceAccountName
-      : this.requiredRuntimeServiceAccountEmail(params.description);
+      : (params.jobSpec.template as { template?: { serviceAccount?: string } } | undefined)?.template?.serviceAccount;
     if (!runtimeServiceAccountEmail) {
       throw new Error(
-        `Cloud Run job ${params.jobName} did not expose its runtime service account; refusing to change its identity.`
+        `Cloud Run runtimeServiceAccountEmail is required for ${params.description}; the exact job or source workload must expose its runtime service account.`
       );
     }
     const candidateTask = (params.jobSpec.template as { template?: Record<string, unknown> } | undefined)?.template;
@@ -6616,6 +6649,7 @@ providerRegistry.register({
     lifecycle: {
       hosting: {
         workloadKinds: ['web', 'worker', 'cron'],
+        runtimeIdentityTiming: 'before-workload',
         serviceVolumes: { workloadKinds: ['web', 'worker'], retention: 'retain-only', attachmentTiming: 'service-update' },
         customDomains: 'managed',
         domainTrafficProxy: 'dns-only',
@@ -6634,7 +6668,7 @@ providerRegistry.register({
       },
       ci: {
         displayName: 'Cloud Run',
-        rendererRevision: 1,
+        rendererRevision: 2,
         requiredSecrets: CLOUDRUN_CI_REQUIRED_SECRETS,
         secretCredentialKeys: {
           GCP_SERVICE_ACCOUNT_JSON: 'credentials',

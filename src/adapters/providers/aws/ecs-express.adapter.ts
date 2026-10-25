@@ -1,4 +1,6 @@
+import type { ProviderRuntimeIdentity } from '../../../domain/ports/provider.port.js';
 import { createHash } from 'node:crypto';
+import { EcsRuntimeIdentities } from './ecs-runtime-identities.js';
 import { validateRuntimeSecretReferences, runtimeSecretReferenceIdentity } from '../../../domain/services/runtime-secret-references.js';
 import type { RuntimeSecretReference } from '../../../domain/ports/secret-destination.port.js';
 import { EFSClient } from '@aws-sdk/client-efs';
@@ -192,6 +194,7 @@ type ExpressRouting = {
 
 export class EcsExpressAdapter implements IProviderAdapter {
   readonly name = 'ecs';
+  readonly runtimeIdentities = new EcsRuntimeIdentities(() => ({ clients: this.connected().clients, region: this.connected().credentials.region }), request => this.resolveRuntimeIdentity(request.environment, request.service), clusterArn => { const scope = this.parseClusterArn(clusterArn); return this.projectResources(scope.accountId, scope.clusterName).executionRoleArn; });
   readonly serviceVolumes = new EcsServiceVolumes(() => ({ clients: this.connected().clients, region: this.connected().credentials.region }), () => this.resolveAccountId());
 
   readonly capabilities: ProviderCapabilities = {
@@ -212,6 +215,56 @@ export class EcsExpressAdapter implements IProviderAdapter {
   private credentials: ConnectedEcsExpressCredentials | null = null;
   private clients: AwsClients | null = null;
   private accountId: string | null = null;
+
+  async resolveRuntimeIdentity(environment: Environment, service: Pick<Service, 'name' | 'buildConfig'>): Promise<ProviderRuntimeIdentity> {
+    try {
+      const bindings = parseHostingBindings(environment);
+      const clusterArn = bindings.projectId;
+      const serviceArn = bindings.services?.[service.name]?.serviceId;
+      if (!clusterArn || !serviceArn || bindings.environmentId !== clusterArn) {
+        throw new Error('ECS runtime identity requires an exact bound environment and service.');
+      }
+      const { accountId } = this.parseClusterArn(clusterArn);
+      const { clients, credentials } = this.connected();
+      const caller = await clients.sts.send(new GetCallerIdentityCommand({}));
+      if (caller.Account !== accountId) throw new Error('AWS account identity mismatch.');
+      if (!caller.UserId || !caller.Arn
+        || !serviceArn.startsWith(clusterArn.replace(':cluster/', ':service/') + '/')) {
+        throw new Error('ECS runtime identity is outside the selected account or cluster scope.');
+      }
+      const express = await this.getExpressService(serviceArn);
+      if (!express) throw new Error('Bound ECS service is missing; runtime identity remains unknown.');
+      this.assertExpressScope(express, clusterArn, serviceArn, environment.id);
+      const configurations = (express.activeConfigurations ?? []).filter(config => config.serviceRevisionArn === express.currentDeployment);
+      if (!express.currentDeployment || configurations.length !== 1 || !configurations[0]!.taskDefinitionArn) {
+        throw new Error('ECS runtime identity requires the exact current deployment task definition.');
+      }
+      const config = configurations[0]!;
+      const { task } = await this.runtimeConfiguration(config, serviceArn);
+      const principal = task?.taskRoleArn;
+      if (!task || task.taskDefinitionArn !== `${serviceArn.split(':service/')[0]}:task-definition/${task.family}:${task.revision}`
+        || !principal || (config.taskRoleArn !== undefined && config.taskRoleArn !== principal)) {
+        throw new Error('ECS task role or task-definition identity is missing or inconsistent.');
+      }
+      const partition = clusterArn.split(':')[1];
+      const rolePrefix = `arn:${partition}:iam::${accountId}:role/`;
+      const roleName = principal.split('/').at(-1)!;
+      if (!principal.startsWith(rolePrefix) || !/^[\w+=,.@-]{1,64}$/.test(roleName)
+        || [task.executionRoleArn, config.executionRoleArn, express.infrastructureRoleArn].includes(principal)) {
+        throw new Error('ECS application task role must be distinct from deployment, execution and infrastructure roles.');
+      }
+      const role = (await clients.iam.send(new GetRoleCommand({ RoleName: roleName }))).Role;
+      if (role?.Arn !== principal || role.RoleName !== roleName || !/^AROA[A-Z0-9]{12,124}$/.test(role.RoleId ?? '')
+        || caller.UserId.split(':')[0] === role.RoleId || caller.Arn === principal) {
+        throw new Error('ECS runtime role identity could not be independently verified or is the deployment principal.');
+      }
+      return { provider: 'aws', principal, source: 'observed', scope: {
+        accountId, region: credentials.region, roleId: role.RoleId!, serviceArn, clusterArn, environmentId: environment.id,
+      } };
+    } catch (error) {
+      throw new Error(`ECS runtime identity could not be verified: ${this.formatError(error)}`);
+    }
+  }
 
   async connect(credentials: unknown): Promise<void> {
     const parsed = EcsExpressCredentialsSchema.parse(credentials);
@@ -458,7 +511,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
             : { command: ['sh', '-lc', service.buildConfig.startCommand] }),
         }, {
             serviceArn: binding,
-            executionRoleArn: resources.executionRoleArn,
+            executionRoleArn: runtime.task?.executionRoleArn ?? config.executionRoleArn,
             cpu: config.cpu ?? '256',
             memory: config.memory ?? '512',
             healthCheckPath: usingBootstrap
@@ -2063,6 +2116,7 @@ providerRegistry.register({
     },
     lifecycle: {
       hosting: {
+        runtimeIdentityTiming: 'before-workload',
         workloadKinds: ['web'],
         serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only' },
         customDomains: 'managed',

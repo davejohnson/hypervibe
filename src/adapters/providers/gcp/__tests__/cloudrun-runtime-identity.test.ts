@@ -38,17 +38,15 @@ describe('Cloud Run provider-owned runtime identity', () => {
         ? { template: { serviceAccount: principal } } : { serviceAccount: principal } });
     });
     vi.stubGlobal('fetch', request);
-    await expect((await adapter()).resolveRuntimeIdentity(env, workload)).resolves.toEqual({
+    await expect((await adapter()).resolveRuntimeIdentity(env, workload)).resolves.toMatchObject({
       provider: 'gcp', principal, scope: { projectId }, source: 'observed',
     });
     expect(request).toHaveBeenCalledTimes(1);
   });
 
-  it('labels provider-confirmed absence on an unbound target as configured, not observed', async () => {
+  it('requires per-service preparation before a confirmed-absent unbound target can receive workload access', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({}, { status: 404 })));
-    await expect((await adapter()).resolveRuntimeIdentity(environment(false), service)).resolves.toEqual({
-      provider: 'gcp', principal, scope: { projectId }, source: 'configured',
-    });
+    await expect((await adapter()).resolveRuntimeIdentity(environment(false), service)).rejects.toThrow(/preparation/i);
   });
 
   it.each([
@@ -56,8 +54,8 @@ describe('Cloud Run provider-owned runtime identity', () => {
     { label: 'unknown read', status: 403, bound: false, body: {} },
     { label: 'unbound lookalike', status: 200, bound: false,
       body: { name: 'projects/cloud-project/locations/us-central1/services/web', template: { serviceAccount: principal } } },
-    { label: 'other principal', status: 200, bound: true,
-      body: { name: 'projects/cloud-project/locations/us-central1/services/bound-web', template: { serviceAccount: 'other@cloud-project.iam.gserviceaccount.com' } } },
+    { label: 'deployment principal', status: 200, bound: true,
+      body: { name: 'projects/cloud-project/locations/us-central1/services/bound-web', template: { serviceAccount: 'deploy@cloud-project.iam.gserviceaccount.com' } } },
     { label: 'other resource scope', status: 200, bound: true,
       body: { name: 'projects/other-project/locations/us-central1/services/bound-web', template: { serviceAccount: principal } } },
     { label: 'missing principal', status: 200, bound: true,
@@ -65,6 +63,14 @@ describe('Cloud Run provider-owned runtime identity', () => {
   ])('rejects $label', async ({ status, bound, body }) => {
     vi.stubGlobal('fetch', vi.fn(async () => Response.json(body, { status })));
     await expect((await adapter()).resolveRuntimeIdentity(environment(bound), service)).rejects.toThrow();
+  });
+
+  it('preserves a distinct provider-observed legacy principal even when the connection carries a different old default', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ name: 'projects/cloud-project/locations/us-central1/services/bound-web',
+      template: { serviceAccount: 'legacy@cloud-project.iam.gserviceaccount.com' } })));
+    await expect((await adapter()).resolveRuntimeIdentity(environment(), service)).resolves.toMatchObject({
+      principal: 'legacy@cloud-project.iam.gserviceaccount.com', source: 'observed', scope: { environmentId: 'env-1' },
+    });
   });
 
   it('rejects a mismatched bound project before provider access', async () => {

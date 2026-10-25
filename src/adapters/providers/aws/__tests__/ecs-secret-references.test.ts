@@ -42,7 +42,7 @@ async function fixture(corrupt = false, unbound?: 'absent' | 'lookalike') {
     if (operation === 'ListTagsForResource') return reply({ tags: tags.map(t => ({ Key: t.key, Value: t.value })) });
     if (operation === 'ListServices') return reply({ serviceArns: unbound === 'absent' ? [] : [serviceArn] });
     if (operation === 'CreateExpressGatewayService') { container = body.primaryContainer; revision += 1; return reply({ service: { serviceArn, serviceName: 'web' } }); }
-    if (operation === 'DescribeExpressGatewayService') return reply({ service: { serviceArn, cluster, tags, currentDeployment: 'revision-' + revision, status: { statusCode: 'ACTIVE' }, activeConfigurations: [{ serviceRevisionArn: 'revision-' + revision, primaryContainer: container, ingressPaths: [{ accessType: 'PUBLIC', endpoint: 'https://app.example.test' }] }] } });
+    if (operation === 'DescribeExpressGatewayService') return reply({ service: { serviceArn, cluster, tags, currentDeployment: 'revision-' + revision, status: { statusCode: 'ACTIVE' }, activeConfigurations: [{ serviceRevisionArn: 'revision-' + revision, executionRoleArn: `arn:aws:iam::${accountId}:role/observed-execution`, primaryContainer: container, ingressPaths: [{ accessType: 'PUBLIC', endpoint: 'https://app.example.test' }] }] } });
     if (operation === 'UpdateExpressGatewayService') { container = body.primaryContainer; revision += 1; if (corrupt) container.secrets = originalSecrets; return reply({ service: { serviceArn } }); }
     throw new Error('Unexpected SDK operation ' + operation);
   } };
@@ -78,6 +78,7 @@ describe('ECS immutable secret references', () => {
     expect(first.environment.some((entry: any) => entry.name === 'API_TOKEN')).toBe(false);
     expect(await f.adapter.deploy(service, environment, { MODE: 'test' })).toMatchObject({ receipt: { success: true } });
     expect(f.requests.filter(r => r.operation === 'UpdateExpressGatewayService')[1]!.body.primaryContainer.secrets).toContainEqual(native);
+    expect(f.requests.filter(r => r.operation === 'UpdateExpressGatewayService')[1]!.body.executionRoleArn).toBe(`arn:aws:iam::${accountId}:role/observed-execution`);
     const observed = await f.adapter.observe(environment);
     expect(observed.services[0]?.envVarSecretRefs?.API_TOKEN).toEqual({ provider: 'aws-secrets', resource: reference.destination.secretArn, version: reference.version });
     expect(observed.services[0]?.envVarHashes).not.toHaveProperty('API_TOKEN');

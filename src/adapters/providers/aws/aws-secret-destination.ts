@@ -31,7 +31,7 @@ function providerError(error: unknown): DestinationBoundaryError {
 }
 
 /** Bound bytes before SDK deserialization, including ignored/error fields. */
-function boundSdkResponses(client: SecretsManagerClient | STSClient): void {
+export function boundAwsSdkResponses(client: { config: { requestHandler: STSClient['config']['requestHandler'] } }): void {
   const handler = client.config.requestHandler;
   const handle = handler.handle.bind(handler);
   client.config.requestHandler = Object.assign(Object.create(handler), {
@@ -80,7 +80,7 @@ export function createAwsSecretDestinationDriver(authentication: AwsSecretDestin
     maxAttempts: 1, ...(options.requestHandler ? { requestHandler: options.requestHandler } : {}) });
   const sts = new STSClient({ region: authentication.region, credentials: authentication.credentials,
     maxAttempts: 1, ...(options.stsRequestHandler ? { requestHandler: options.stsRequestHandler } : {}) });
-  boundSdkResponses(client); boundSdkResponses(sts);
+  boundAwsSdkResponses(client); boundAwsSdkResponses(sts);
   const scope = (input: SecretDestination): AwsSecretDestination => {
     const destination = parseDestination(input);
     if (destination.provider !== 'aws-secrets' || destination.accountId !== authentication.accountId

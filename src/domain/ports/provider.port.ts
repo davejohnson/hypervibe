@@ -65,6 +65,8 @@ export interface ProviderRuntimeIdentity {
   principal: string;
   scope: Record<string, string>;
   source: 'observed' | 'configured';
+  /** Transient activation preconditions; excluded from stable principal identity. */
+  activation?: Record<string, string>;
 }
 
 export interface ScheduleActivationOptions {
@@ -193,6 +195,7 @@ export interface VerifyResult {
 }
 
 export interface IProviderAdapter {
+  readonly runtimeIdentities?: import('./runtime-identity.port.js').IRuntimeIdentities;
   readonly secretDestinationSetup?: import('./secret-destination-lifecycle.port.js').SecretDestinationSetup;
   readonly serviceVolumes?: import('./service-volume.port.js').IServiceVolumes;
   readonly name: string;

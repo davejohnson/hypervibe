@@ -238,7 +238,7 @@ globalThis.fetch = async (input, init = {}) => {
   if (url === 'https://oauth2.googleapis.com/token') return json({ access_token: 'access-token' });
   if (url.includes('artifactregistry.googleapis.com')) return json({ name: 'projects/gcp-project/locations/us-central1/repositories/infraprint', format: 'DOCKER' });
   if (url.includes('/jobs/190/artifacts/.hypervibe-release.json')) return json(evidence);
-  if (url.endsWith('/services/web-service') && (init.method || 'GET') === 'GET') return json({ name: 'projects/gcp-project/locations/us-central1/services/web-service', uri: 'https://web.example.test', terminalCondition: { state: 'CONDITION_SUCCEEDED' }, reconciling: false, template: { containers: [{ image: patched ? exactImage : 'old-image' }] } });
+  if (url.endsWith('/services/web-service') && (init.method || 'GET') === 'GET') return json({ name: 'projects/gcp-project/locations/us-central1/services/web-service', uid: 'web-service-uid', etag: patched ? 'after-patch' : 'before-patch', uri: 'https://web.example.test', terminalCondition: { state: 'CONDITION_SUCCEEDED' }, reconciling: false, template: { serviceAccount: 'runtime@gcp-project.iam.gserviceaccount.com', containers: [{ image: patched ? exactImage : 'old-image' }] } });
   if (url.includes('/services/web-service?updateMask=') && init.method === 'PATCH') { patched = true; return json({ name: 'projects/gcp-project/locations/us-central1/operations/update', done: true }); }
   throw new Error('Unexpected request: ' + (init.method || 'GET') + ' ' + url);
 };

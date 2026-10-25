@@ -34,7 +34,7 @@ describe('first deployment with immutable native references', () => {
     const result = await plan();
     expect(result).not.toHaveProperty('error');
     if ('error' in result) throw new Error(result.error);
-    expect(result.actions.find(action => action.id === 'secret:API_TOKEN')).toMatchObject({ type: 'update', verified: true,
+    expect(result.actions.find(action => action.id === 'secret:API_TOKEN'), JSON.stringify(result)).toMatchObject({ type: 'update', verified: true,
       metadata: { operation: 'secretReferenceSync', reference, creationOnlyServices: ['web'] } });
     expect(result.inputRequired).toEqual([]);
   });

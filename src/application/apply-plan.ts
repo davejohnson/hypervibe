@@ -1,3 +1,4 @@
+import { applyRuntimeAccessAction, observeRuntimeAccess, planRuntimeAccess, projectRuntimeAccessInput } from '../domain/services/runtime-access.service.js';
 import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from '../domain/services/database-credential-aliases.service.js';
 import { applySecretContainer, assertReadySecretContainers } from '../domain/services/secret-container-setup.js';
 import { applySecretReference, assertDeploymentSecretReferences } from './apply-secret-references.js';
@@ -971,6 +972,8 @@ export async function executePlanApply(ctx: CommandContext, params: {
   // configured. Only this deferred creation path may precede backup readiness;
   // its live identity is checked again immediately before the handler runs.
   const serviceIdentityOnly = managedCiBindingsOnly && (planScope === 'hosting-bindings'
+    || Boolean(providerRegistry.getMetadata(envSpec.hosting.provider)?.lifecycle?.hosting?.runtimeIdentityTiming)
+    || Object.values(envSpec.storage ?? {}).some(storage => storage.injectInto.length > 0 && providerRegistry.getMetadata(storage.provider)?.storageRuntimeAccess?.hostingProviders.includes(envSpec.hosting.provider))
     || Object.values(envSpec.services).some(service => service.volume)
     || hasRetainedServiceVolumes(environment));
   const isDeferredIdentityCandidate = (action: PlanAction) => serviceIdentityOnly
@@ -1377,7 +1380,10 @@ export async function executePlanApply(ctx: CommandContext, params: {
         || action.metadata?.workloadCreateRequired === true && typeof boundService?.serviceId === 'string'
           && action.metadata.externalId === boundService.serviceId && observedServiceIds.length === 1
           && observedServiceIds[0].identityOnly === true);
-    let requireNewWorkload = false;
+    let requireNewWorkload = Boolean(deferredIdentityCreation);
+    if (isDeferredIdentityCandidate(action) && (!deferredIdentityCreation || action.requiresConfirm !== true
+      || action.billable !== true || !confirmedActionIds.has(action.id))) return { success: false, status: 'blocked',
+      message: 'Preparing a first workload requires exact confirmed creation authority and fresh proof of absence or a bound empty workload.' };
     if (!secretsOnly && actionRequiresBackupReadiness(action)) {
       const readiness = await freshBackupReadiness();
       if (!readiness.ready) {
@@ -1387,6 +1393,11 @@ export async function executePlanApply(ctx: CommandContext, params: {
       }
     }
 
+    if (capability === 'hosting.runtime-identity.mutate' || capability === 'storage.runtime-access.mutate') {
+      return applyRuntimeAccessAction({ ...await projectRuntimeAccessInput(applyProject, volumeEnvironment, envSpec), action, confirmedActionIds,
+        save: (bindings) => { if (!volumeEnvironment || !ctx.repos.environments.updatePlatformBindings(volumeEnvironment.id, bindings)) throw new Error('Runtime access intent was not persisted.'); },
+      });
+    }
     const volumeSafetyBlock = retainedVolumeHostingBlock(volumeEnvironment, envSpec, action);
     if (volumeSafetyBlock) return { success: false, status: 'blocked', message: volumeSafetyBlock };
     if (capability === 'hosting.volume.mutate') {
@@ -1412,6 +1423,14 @@ export async function executePlanApply(ctx: CommandContext, params: {
       || capability === 'gitlab.ci.rollback' || capability === 'github.applied-spec-hash.sync'
       || capability === 'ci.applied-spec-hash.sync'
     );
+    const preparingAfterWorkloadIdentity = serviceIdentityOnly && deferredIdentityCreation
+      && providerRegistry.getMetadata(envSpec.hosting.provider)?.lifecycle?.hosting?.runtimeIdentityTiming !== 'before-workload'
+      && action.requiresConfirm === true && action.billable === true && confirmedActionIds.has(action.id);
+    if (deployNeedsVolumes && !preparingAfterWorkloadIdentity) {
+      const access = await observeRuntimeAccess(await projectRuntimeAccessInput(applyProject, volumeEnvironment, envSpec));
+      if (planRuntimeAccess(access).length || access.grants.some(grant => grant.waiting)
+        || access.identities.some(identity => identity.observation.state !== 'ready')) return { success: false, status: 'blocked', message: 'Deployment requires verified workload identities and permissions. Re-plan to prepare the missing access.' };
+    }
     if (deployNeedsVolumes && (volumeEnvironment?.platformBindings.serviceVolumes !== undefined || Object.values(envSpec.services).some((s) => s.volume))) {
       const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject);
       const liveVolumes = await observeServiceVolumes({ environment: volumeEnvironment, environmentSpec: envSpec, volumes: (result.adapter as IProviderAdapter | undefined)?.serviceVolumes });

@@ -1,3 +1,4 @@
+import { runtimeAccessReady } from './runtime-access.service.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import type { Environment } from '../entities/environment.entity.js';
@@ -523,7 +524,9 @@ export function planStorage(params: {
       ));
       const keys = binding?.envKeys ?? storageEnvKeys(name);
       const runtimeContract = storageRuntimeContract(spec.provider, params.environmentSpec.hosting.provider);
-      const wired = !serviceIdentityMismatch
+      const nativeAccess = providerRegistry.getMetadata(spec.provider)?.storageRuntimeAccess?.hostingProviders.includes(params.environmentSpec.hosting.provider);
+      const accessReady = !nativeAccess || runtimeAccessReady(params.observed?.runtimeAccess, name, serviceName);
+      const wired = accessReady && !serviceIdentityMismatch
         && binding?.services.includes(serviceName)
         && (!runtimeContract || binding.runtimeContracts?.[serviceName] === runtimeContract)
         && keys.every((key) => observedService?.envVarKeys.includes(key));
@@ -545,6 +548,7 @@ export function planStorage(params: {
           envKeys: keys,
           ...(runtimeContract ? { runtimeContract } : {}),
           ...(serviceId ? { serviceId } : { serviceIdPending: true }),
+          ...(!accessReady ? { blockedReason: 'runtime_access_unverified' } : {}),
           ...(serviceIdentityMismatch ? {
             blockedReason: 'service_binding_identity_mismatch',
           } : {}),

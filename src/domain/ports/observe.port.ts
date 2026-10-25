@@ -222,6 +222,7 @@ export interface ObservedStorage {
 }
 
 export interface ObservedState {
+  runtimeAccess?: import('../services/runtime-access.service.js').RuntimeAccessObservation;
   serviceVolumes?: Record<string, import('./service-volume.port.js').ObservedServiceVolume>;
   provider: string;
   observedAt: string;

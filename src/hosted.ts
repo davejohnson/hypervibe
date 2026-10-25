@@ -31,3 +31,15 @@ export { MAX_PUBLIC_ENDPOINTS, type HostedPublicEndpointV1 } from './application
 export * from './hosted-secret-destinations.js';
 export { generateHostedSecretValueV1 } from './application/hosted/secret-generation.js';
 export { cloudSecretSetupSchema, cloudSecretSetupReceiptSchema, type CloudSecretSetup } from './application/cloud-secret-setup-contract.js';
+export * from './domain/ports/cloud-installation.port.js';
+export {
+  CloudInstallationError, parseCloudInstallationIntentV1, parseCloudInstallationRecordV1,
+  planCloudInstallationV1, applyCloudInstallationV1, reconcileCloudInstallationV1, cloudInstallationConnectionsV1,
+  cloudInstallationResolvedScopeV1, cloudInstallationNextStageV1, cloudInstallationDisconnectionIntentV1, planCloudInstallationContinuationV1,
+} from './application/hosted/cloud-installation.js';
+export { createAwsCloudInstallationDriver, createAwsCloudInstallationTemplateV1 } from './adapters/providers/aws/aws-cloud-installation.js';
+export { createAwsFederatedCredentialProvider } from './adapters/providers/aws/aws-federated-auth.js';
+export { createAzureCloudInstallationDriver } from './adapters/providers/azure/azure-cloud-installation.js';
+export { createAzureFederatedTokenProvider } from './adapters/providers/azure/azure-federated-auth.js';
+export { createGcpCloudInstallationDriver } from './adapters/providers/gcp/gcp-cloud-installation.js';
+export { cloudInstallationDriverFactories } from './application/hosted/cloud-installation-providers.js';

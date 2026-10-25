@@ -1,3 +1,4 @@
+import { isRuntimeAccessAction } from '../services/runtime-access.service.js';
 import { databaseCredentialAliasesActionSchema, databaseCredentialAliasesMetadataSchema,
   DATABASE_CREDENTIAL_ALIASES_OPERATION } from '../services/database-credential-aliases.service.js';
 import { isDeepStrictEqual } from 'node:util';
@@ -11,8 +12,10 @@ import type { ObservedState } from '../ports/observe.port.js';
 import { CI_CONFIGURATION_SYNC_OPERATION } from '../services/managed-ci.contract.js';
 import { resolvePlanActionAuthority } from './action-authority.js';
 import type { PlanAction } from './plan.types.js';
-import { isManagedCiCredentialAction } from './plan-stage.js';
+import { isManagedCiCredentialAction, isRuntimeQueuePrerequisite } from './plan-stage.js';
 import { isScopedSecretAction } from './scoped-secrets.js';
+import { orderActions } from './order-actions.js';
+export { orderActions } from './order-actions.js';
 
 /**
  * Converge executor: applies a previously persisted plan (terraform
@@ -224,6 +227,7 @@ export const planRunDocumentSchema = z.object({
     'managed-ci-bindings',
     'hosting-bindings',
     'service-volumes',
+    'runtime-access',
     'database-checkpoint',
     'database-credential-aliases',
     'database-bindings',
@@ -401,6 +405,12 @@ export const planRunDocumentSchema = z.object({
     }
     return;
   }
+  if (document.scope === 'runtime-access') {
+    if (!document.actions.length || !(document.actions.every(isRuntimeAccessAction) || document.actions.every(isRuntimeQueuePrerequisite)) || document.overrides || document.inputRequired?.length) {
+      ctx.addIssue({ code: 'custom', message: 'runtime-access plan must contain only exact identity/grant actions or queue prerequisites, and no secret inputs.' });
+    }
+    return;
+  }
   if (document.scope === 'service-volumes') {
     if (!document.actions.length || document.actions.some(action => action.resource.kind !== 'volume') || document.overrides || document.inputRequired?.length) {
       ctx.addIssue({ code: 'custom', message: 'service-volumes plan must contain only filesystem actions and no runtime secret inputs.' });
@@ -528,6 +538,7 @@ const DEFAULT_MAX_PLAN_AGE_MS = 24 * 60 * 60 * 1000;
 export function fingerprintObservedState(observed: ObservedState): string {
   const essence = {
     ...(observed.serviceVolumes && Object.keys(observed.serviceVolumes).length > 0 ? {
+    ...(observed.runtimeAccess && (observed.runtimeAccess.invalid || observed.runtimeAccess.identities.length || observed.runtimeAccess.grants.length) ? { runtimeAccess: observed.runtimeAccess } : {}),
       serviceVolumes: Object.fromEntries(Object.entries(observed.serviceVolumes).sort(([a], [b]) => a.localeCompare(b))),
     } : {}),
     provider: observed.provider,
@@ -626,42 +637,6 @@ export function fingerprintObservedState(observed: ObservedState): string {
 }
 
 /** Topological order by dependsOn; throws on cycles or unknown dependencies. */
-export function orderActions(actions: PlanAction[]): PlanAction[] {
-  const seen = new Set<string>();
-  for (const action of actions) {
-    if (seen.has(action.id)) {
-      throw new Error(`Duplicate plan action id "${action.id}"`);
-    }
-    seen.add(action.id);
-  }
-  const byId = new Map(actions.map((a) => [a.id, a]));
-  const ordered: PlanAction[] = [];
-  const state = new Map<string, 'visiting' | 'done'>();
-
-  const visit = (action: PlanAction) => {
-    const mark = state.get(action.id);
-    if (mark === 'done') return;
-    if (mark === 'visiting') {
-      throw new Error(`Dependency cycle involving "${action.id}"`);
-    }
-    state.set(action.id, 'visiting');
-    for (const dep of action.dependsOn ?? []) {
-      const target = byId.get(dep);
-      if (!target) {
-        throw new Error(
-          `Unknown dependency "${dep}" referenced by action "${action.id}"`
-        );
-      }
-      visit(target);
-    }
-    state.set(action.id, 'done');
-    ordered.push(action);
-  };
-
-  for (const action of actions) visit(action);
-  return ordered;
-}
-
 export class ConvergeExecutor {
   constructor(private runRepo = new RunRepository()) {}
 

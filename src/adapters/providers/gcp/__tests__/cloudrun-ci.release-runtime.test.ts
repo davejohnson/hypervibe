@@ -53,11 +53,12 @@ describe('Cloud Run generated release runtime', () => {
   function readyJob(overrides: Record<string, unknown> = {}) {
     return {
       name: `projects/${projectId}/locations/${region}/jobs/${jobName}`,
+      uid: 'job-uid', etag: 'job-etag',
       generation: '1',
       observedGeneration: '1',
       terminalCondition: { state: 'CONDITION_SUCCEEDED' },
       template: {
-        template: {
+        template: {serviceAccount: 'runtime@gcp-project.iam.gserviceaccount.com',
           containers: [{
             image: 'candidate@sha256:' + 'b'.repeat(64),
             command: ['/bin/sh'],
@@ -134,7 +135,7 @@ describe('Cloud Run generated release runtime', () => {
       authHeaders: { Authorization: 'Bearer token' },
       getJson: vi.fn(async () => ({
         name: `projects/${projectId}/locations/${region}/services/${serviceName}`,
-        template: { containers: [{}] },
+        template: {serviceAccount: 'runtime@gcp-project.iam.gserviceaccount.com',  containers: [{}] },
       })),
       waitOperation: vi.fn(),
     })).rejects.toThrow(/reviewed release job.*missing/i);
@@ -170,7 +171,7 @@ describe('Cloud Run generated release runtime', () => {
         };
       }
       if (url === jobUrl) {
-        return {
+        return {uid: 'job-uid', etag: 'job-etag',
           name: `projects/${projectId}/locations/${region}/jobs/${jobName}`,
           generation: '1',
           observedGeneration: '1',
@@ -231,6 +232,16 @@ describe('Cloud Run generated release runtime', () => {
     expect(requests.some((request) => request.url.includes('/executions'))).toBe(false);
   });
 
+  it('does not overwrite a bound release job principal when it differs from the source service', async () => {
+    const fetcher = vi.fn(async () => Response.json(readyJob()));
+    const loaded = await runtime(fetcher);
+    await expect(loaded.runCloudRunReleaseCommands({ releases: [release()], imageUri: 'candidate@sha256:' + 'b'.repeat(64), projectId, region,
+      headers: {}, authHeaders: {}, getJson: async () => ({ name: `projects/${projectId}/locations/${region}/services/${serviceName}`,
+        template: { serviceAccount: 'different@gcp-project.iam.gserviceaccount.com', containers: [{}] } }), waitOperation: vi.fn(),
+    })).rejects.toThrow(/reviewed identity transition/i);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it('retains writable release Job metadata without replaying execution tokens during PATCH', async () => {
     const metadata = {
       name: `projects/${projectId}/locations/${region}/jobs/${jobName}`,
@@ -268,7 +279,7 @@ describe('Cloud Run generated release runtime', () => {
       getJson: vi.fn(async (url: string) => {
         if (url === serviceUrl) return {
           name: `projects/${projectId}/locations/${region}/services/${serviceName}`,
-          template: { containers: [{}] },
+          template: {serviceAccount: 'runtime@gcp-project.iam.gserviceaccount.com',  containers: [{}] },
         };
         if (url === jobUrl) return readyJob();
         if (url === `${jobUrl}:run`) return { name: runOperationName, done: false };
@@ -299,7 +310,7 @@ describe('Cloud Run generated release runtime', () => {
     const getJson = vi.fn(async (url: string) => {
       if (url === serviceUrl) return {
         name: `projects/${projectId}/locations/${region}/services/${serviceName}`,
-        template: { containers: [{}] },
+        template: {serviceAccount: 'runtime@gcp-project.iam.gserviceaccount.com',  containers: [{}] },
       };
       if (url === jobUrl) return readyJob();
       if (url === `${jobUrl}:run`) return { name: runOperationName, done: false };
@@ -333,7 +344,7 @@ describe('Cloud Run generated release runtime', () => {
     const getJson = vi.fn(async (url: string) => {
       if (url === serviceUrl) return {
         name: `projects/${projectId}/locations/${region}/services/${serviceName}`,
-        template: { containers: [{}] },
+        template: {serviceAccount: 'runtime@gcp-project.iam.gserviceaccount.com',  containers: [{}] },
       };
       if (url === jobUrl) return readyJob();
       if (url === `${jobUrl}:run`) return { name: runOperationName, done: false };
@@ -367,11 +378,11 @@ describe('Cloud Run generated release runtime', () => {
     const getJson = vi.fn(async (url: string) => {
       if (url === serviceUrl) return {
         name: `projects/${projectId}/locations/${region}/services/${serviceName}`,
-        template: { containers: [{}] },
+        template: {serviceAccount: 'runtime@gcp-project.iam.gserviceaccount.com',  containers: [{}] },
       };
       if (url === jobUrl) return readyJob({
         template: {
-          template: {
+          template: {serviceAccount: 'runtime@gcp-project.iam.gserviceaccount.com',
             containers: [{
               image: 'stale@sha256:' + 'c'.repeat(64),
               command: ['/bin/sh'],
@@ -410,7 +421,7 @@ describe('Cloud Run generated release runtime', () => {
     const getJson = vi.fn(async (url: string) => {
       if (url === serviceUrl) return {
         name: `projects/${projectId}/locations/${region}/services/${serviceName}`,
-        template: { containers: [{}] },
+        template: {serviceAccount: 'runtime@gcp-project.iam.gserviceaccount.com',  containers: [{}] },
       };
       throw new Error(`Unexpected getJson ${url}`);
     });
@@ -436,7 +447,7 @@ describe('Cloud Run generated release runtime', () => {
     let runs = 0;
     const fetchImpl = vi.fn(async (_input: unknown, init?: RequestInit) => {
       if (init?.method === 'PATCH') { updated = JSON.parse(String(init.body)); return Response.json({ name: configureOperationName, done: true }); }
-      return Response.json({ ...readyJob(), uid: 'job-uid', etag: 'job-etag' });
+      return Response.json({ ...readyJob(), uid: 'job-uid', etag: 'job-etag', template: { template: task } });
     }) as unknown as typeof fetch;
     const loaded = await runtime(fetchImpl);
     const operation = loaded.runCloudRunReleaseCommands({ releases: [release()], imageUri: 'candidate@sha256:' + 'b'.repeat(64), projectId, region, headers: {}, authHeaders: {},

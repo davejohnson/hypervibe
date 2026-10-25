@@ -105,9 +105,17 @@ describe('bootstrap action receipt mapping', () => {
       vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter: {
         name: 'cloudrun', capabilities: { supportsObserve: false },
       } as never });
+      const bootstrap = await t.call('hv_plan', { project: project.name, env: 'staging', includeEnvFile: false });
+      expect(bootstrap.ok).toBe(true);
+      expect(bootstrap.data.scope).toBe('hosting-bindings');
+      expect(bootstrap.data.actions).toEqual([expect.objectContaining({ id: 'project:cloudrun' })]);
+      expect(bootstrap.data.inputRequired).toBeUndefined();
+      const prepared = new EnvironmentRepository().findByProjectAndName(project.id, 'staging')!;
+      new EnvironmentRepository().updatePlatformBindings(prepared.id, {
+        provider: 'cloudrun', projectId: 'synthetic-project', environmentId: 'us-central1', services: {} });
       const result = await t.call('hv_plan', { project: project.name, env: 'staging', includeEnvFile: false });
       expect(result.ok).toBe(true);
-      expect(result.data.inputRequired).toEqual([expect.objectContaining({ key: 'FLOW_KEY' })]);
+      expect(result.data.inputRequired, JSON.stringify(result.data)).toEqual([expect.objectContaining({ key: 'FLOW_KEY' })]);
       expect(result.hint).toContain('secret manager');
       expect(result.hint).not.toContain('dotenv:');
       expect(result.agentInstruction.message).not.toContain('local secretRef');

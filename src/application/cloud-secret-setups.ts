@@ -14,25 +14,49 @@ import { assertPendingSourceBranch, resolveCloudSourceBranch, sourceBranchSchema
 import { canonicalizeJson } from '../lib/canonical-json.js';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
 import { projectSpecSchema } from '../domain/spec/spec.schema.js';
+import { CLOUD_INSTALLATION_REASONS } from '../domain/ports/cloud-installation.port.js';
 import { secretDestinationSchema } from '../domain/ports/secret-destination.port.js';
 
 const PROVIDER = 'hypervibe-secret-destinations';
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 const canonical = (value: unknown) => JSON.stringify(canonicalizeJson(value));
 const writerSchema = z.object({ serviceAccountEmail: secretSetupServiceAccountSchema, uniqueId: z.string().regex(/^\d{1,30}$/) }).strict();
+const browserSource = z.object({ branch: sourceBranchSchema, revision: z.string().regex(/^[a-f0-9]{40}$/), digest: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
+const browserMode = z.enum(['connect', 'migrate']);
+const browserKeys = z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/)).min(1).max(16).refine(keys => new Set(keys).size === keys.length);
+// Deliberately project only value-free device fields. Browser review also has
+// installation details and administrator invitations; those are not agent data.
+const browserConnection = z.object({ id: z.string().uuid(), mode: browserMode.default('connect'),
+  status: z.enum(['choose-provider', 'authorization-required', 'review-required', 'pending', 'blocked', 'scope-ready', 'source-required', 'ready', 'cancelled', 'disconnecting', 'disconnected']),
+  provider: z.enum(['aws', 'azure', 'gcp']).nullable(), keys: browserKeys, environment: z.string(), source: browserSource,
+  expiresAt: z.string().datetime(), connectUrl: z.string().url(), deployment: z.literal('not-authorized'),
+  destinations: z.array(z.object({ key: z.string(), destination: secretDestinationSchema }).strict()).max(16).optional(),
+  acceptedSource: browserSource.omit({ branch: true }).optional(),
+  reason: z.enum(CLOUD_INSTALLATION_REASONS).optional(),
+  scopePreparation: z.object({ installationId: z.string().uuid(),
+    status: z.enum(['review-required', 'pending', 'blocked', 'scope-ready']),
+    reason: z.enum(CLOUD_INSTALLATION_REASONS).optional() }).optional(),
+});
+const browserInstallation = z.object({ id: z.string().uuid(), mode: browserMode.default('connect'), keys: browserKeys, source: browserSource, pending: z.boolean(),
+  acceptance: z.object({ revision: z.string().regex(/^[a-f0-9]{40}$/), digest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
+}).strict();
+const archivedInstallation = browserInstallation.extend({ terminalStatus: z.enum(['cancelled', 'disconnected']), archivedAt: z.string().datetime() }).strict();
 const stateSchema = z.object({
   version: z.literal(1), baseUrl: z.string(), repository: z.string(), env: z.string(), sourceBranch: sourceBranchSchema,
-  status: z.enum(['pending', 'verified']), expiresAt: z.string().datetime(),
+  status: z.enum(['pending', 'verified', 'revoked']), expiresAt: z.string().datetime(),
   deviceCode: z.string().optional(), userCode: z.string().optional(), verificationUrl: z.string().url().optional(), token: z.string().optional(),
   project: z.object({ id: z.string(), name: z.string() }).strict().optional(),
   environment: z.object({ id: z.string(), key: z.string(), name: z.string() }).strict().optional(),
   preview: z.object({ id: z.string().uuid(), fingerprint: z.string(), expiresAt: z.string().datetime(),
     planDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(), writerIdentity: writerSchema.optional(),
   }).strict().optional(),
+  installation: browserInstallation.optional(),
+  installationHistory: z.array(archivedInstallation).max(100).optional(),
 }).strict();
 type State = z.infer<typeof stateSchema>;
 export interface CloudSecretSetupInput {
-  action?: 'discover' | 'start' | 'status' | 'preview' | 'prepare' | 'connect' | 'revoke';
+  action?: 'discover' | 'start' | 'status' | 'preview' | 'prepare' | 'connect' | 'revoke' | 'accept-source';
+  browser?: boolean; keys?: string[]; mode?: 'connect' | 'migrate';
   env?: string; sourceBranch?: string; baseUrl?: string; previewId?: string; confirm?: boolean; adminAuth?: 'default';
   provider?: string; credentialsRef?: string; credentialKind?: string; connectionId?: string;
 }
@@ -64,7 +88,7 @@ export function createCloudSecretSetups({ context, fetchImpl = fetch, directory 
       throw new HvError('VALIDATION', 'Commit the destination declarations and use their reviewed source branch before connecting a secret manager.');
     const targets = Object.entries(document.spec.environments[env].secretDestinations ?? {}).sort(([a], [b]) => a.localeCompare(b))
       .map(([key, slot]) => ({ key, destination: slot.destination, ...(slot.version ? { version: slot.version } : {}) }));
-    if (!targets.length && input.action !== 'discover') throw new HvError('VALIDATION', 'Discover and declare separate secretDestinations for this environment with hv_spec before connecting its manager.');
+    if (!targets.length && input.action !== 'discover' && !input.browser) throw new HvError('VALIDATION', 'Discover and declare separate secretDestinations for this environment with hv_spec before connecting its manager.');
     return { root, spec: document.spec, repository, env,
       source: { branch: branch!, revision, digest: hash(readFileSync(file)) }, targets };
   }
@@ -97,8 +121,11 @@ export function createCloudSecretSetups({ context, fetchImpl = fetch, directory 
       const latest = context.repos.connections.findByProviderAndScope(PROVIDER, scope);
       if (!latest) return;
       try {
-        if (stateSchema.parse(context.secretStore.decryptObject(latest.credentialsEncrypted)).token === access.token)
-          context.repos.connections.delete(latest.id);
+        if (stateSchema.parse(context.secretStore.decryptObject(latest.credentialsEncrypted)).token === access.token) {
+          if (access.installation) save(scope, { ...access, status: 'revoked', expiresAt: now().toISOString(),
+            token: undefined, deviceCode: undefined, userCode: undefined, verificationUrl: undefined, preview: undefined });
+          else context.repos.connections.delete(latest.id);
+        }
       } catch { /* Replaced or unreadable access must not be removed. */ }
     };
     if (canonical(checkoutIdentity(input)) !== canonical(identity)
@@ -117,6 +144,9 @@ export function createCloudSecretSetups({ context, fetchImpl = fetch, directory 
     if (input.credentialsRef || input.credentialKind || input.connectionId || input.provider)
       throw new HvError('VALIDATION', 'Secret-manager setup uses reviewed destinations and identity delegation, never deployment credential uploads.');
     const action = input.action ?? 'preview';
+    if (input.browser && !['start', 'status', 'preview', 'connect', 'accept-source', 'revoke'].includes(action))
+      throw new HvError('VALIDATION', 'Connect Cloud uses browser installation. Start device access, then connect, inspect status, or accept the committed destination patch.');
+    if (!input.browser && (input.mode || input.keys || action === 'accept-source')) throw new HvError('VALIDATION', 'Use purpose="connect-cloud" for browser installation.');
     if (input.adminAuth && action !== 'prepare') throw new HvError('VALIDATION', 'Use adminAuth only for the reviewed writer preparation step.');
     if (action === 'revoke') return revoke(input);
     const local = checkout(input);
@@ -166,12 +196,19 @@ export function createCloudSecretSetups({ context, fetchImpl = fetch, directory 
       if (saved.baseUrl !== baseUrl || saved.repository !== local.repository || saved.env !== local.env)
         throw new HvError('VALIDATION', 'Stored setup access belongs to another repository or environment.');
     }
-    const active = saved && Date.parse(saved.expiresAt) > now().getTime();
+    const active = saved && saved.status !== 'revoked' && Date.parse(saved.expiresAt) > now().getTime();
     if (active) assertPendingSourceBranch(local.source.branch, saved!.sourceBranch);
     function forget(field: 'token' | 'deviceCode', value: string) {
       const latest = context.repos.connections.findByProviderAndScope(PROVIDER, scope);
       if (!latest) return;
-      try { if (stateSchema.parse(context.secretStore.decryptObject(latest.credentialsEncrypted))[field] === value) context.repos.connections.delete(latest.id); }
+      try {
+        const current = stateSchema.parse(context.secretStore.decryptObject(latest.credentialsEncrypted));
+        if (current[field] === value) {
+          if (current.installation) expectedCipher = save(scope, { ...current, status: 'revoked', expiresAt: now().toISOString(),
+            token: undefined, deviceCode: undefined, userCode: undefined, verificationUrl: undefined, preview: undefined });
+          else { context.repos.connections.delete(latest.id); expectedCipher = undefined; }
+        }
+      }
       catch { /* Unreadable or replaced state must not be erased. */ }
     }
     const rawRequest = createCloudJsonClient(baseUrl, fetchImpl, 30_000);
@@ -194,14 +231,39 @@ export function createCloudSecretSetups({ context, fetchImpl = fetch, directory 
         throw new HvError('VALIDATION', 'Hosted setup differs from this exact repository, environment, source or destination. Review the current committed setup before continuing.');
       return remote;
     }
+    async function browserView(access: State, supplied?: unknown) {
+      if (!access.token || !access.project || !access.installation) throw new HvError('VALIDATION', 'Start this environment’s cloud connection first.');
+      const endpoint = `/api/v1/projects/${encodeURIComponent(access.project.id)}/cloud-connections/${access.installation.id}`;
+      const raw = supplied ?? await request(endpoint, { method: 'GET', token: access.token });
+      const result = z.object({ connection: browserConnection }).safeParse(raw);
+      if (!result.success) throw new HvError('PROVIDER_ERROR', 'The hosted cloud connection returned an invalid value-free receipt.');
+      const remote = result.data.connection;
+      const expectedUrl = new URL(`/apps/${encodeURIComponent(access.project.id)}/cloud-connections/${access.installation.id}`, baseUrl).toString();
+      if (remote.mode !== access.installation.mode || remote.id !== access.installation.id || remote.environment !== local.env || canonical(remote.keys.slice().sort()) !== canonical(access.installation.keys)
+        || canonical(remote.source) !== canonical(access.installation.source) || remote.connectUrl !== expectedUrl
+        || remote.destinations && (remote.destinations.length !== remote.keys.length || new Set(remote.destinations.map(slot => slot.key)).size !== remote.keys.length
+          || remote.destinations.some(slot => !remote.keys.includes(slot.key))))
+        throw new HvError('PROVIDER_ERROR', 'The hosted cloud connection receipt differs from the exact reviewed app, environment, source or targets.');
+      const nextStep = remote.status === 'scope-ready' ? { command: 'hv_cloud_connections',
+        instruction: 'Open this connection’s browser link to review the next setup step in the verified cloud project. Scope preparation does not authorize collection or deployment.' }
+        : remote.status === 'source-required' && remote.mode === 'migrate' ? { command: 'hv_cloud_connections',
+        instruction: 'Use purpose="connect-cloud" action="accept-source" to approve the reviewed writer switch. Preserve the committed destinations and immutable versions.' }
+        : remote.status === 'source-required' ? { command: 'hv_spec',
+        instruction: 'Apply only these value-free destinations to this environment, preserving all other settings and secret ownership. Commit the spec, then use hv_cloud_connections purpose="connect-cloud" action="accept-source".' }
+        : remote.status === 'ready' ? { command: 'hv_cloud_requests', instruction: 'Authorize collection separately, then request only eligible missing inputs from the current plan.' } : undefined;
+      return { status: remote.status, connection: remote, ...(nextStep ? { nextStep } : {}) };
+    }
     const pairing = createHypervibeCloudPairingClient({ baseUrl, fetchImpl, grant: { purpose: 'secret-destinations', environment: local.env } });
     if (action === 'start') {
+      if (saved?.installation && saved.installation.source.branch !== local.source.branch)
+        throw new HvError('VALIDATION', 'Reconnect from the installation’s original source branch to preserve its exact recovery history.');
       if (active && saved?.status === 'pending') return summary(saved);
       if (active && saved?.status === 'verified') {
+        if (input.browser) return saved.installation ? browserView(saved) : summary(saved);
         try { await inspect(saved); return summary(saved); } catch (error) { if (!cloudAccessRejected(error)) throw error; }
       }
       const started = await pairing.start(local.repository, local.source.branch);
-      saved = { version: 1, status: 'pending', baseUrl, repository: local.repository, env: local.env, sourceBranch: local.source.branch,
+      saved = { version: 1, status: 'pending', baseUrl, repository: local.repository, env: local.env, sourceBranch: local.source.branch, installation: saved?.installation, installationHistory: saved?.installationHistory,
         deviceCode: started.deviceCode, userCode: started.userCode, verificationUrl: started.verificationUrl, expiresAt: started.expiresAt };
       saveCurrent(saved); return summary(saved);
     }
@@ -216,10 +278,90 @@ export function createCloudSecretSetups({ context, fetchImpl = fetch, directory 
       if (!credential.expiresAt || Date.parse(credential.expiresAt) <= now().getTime() || Date.parse(credential.expiresAt) > now().getTime() + 31 * 86400_000)
         throw new HvError('PROVIDER_ERROR', 'Hypervibe returned invalid setup access expiry.');
       saved = { version: 1, status: 'verified', baseUrl, repository: local.repository, env: local.env, sourceBranch: saved.sourceBranch,
-        project: exchange.project, environment: credential.environment, token: credential.token, expiresAt: credential.expiresAt };
+        project: exchange.project, environment: credential.environment, token: credential.token, expiresAt: credential.expiresAt, installation: saved.installation, installationHistory: saved.installationHistory };
       saveCurrent(saved); return summary(saved);
     }
     if (!saved.token || !saved.project) throw new HvError('VALIDATION', 'Start a new secret-manager setup approval.');
+    if (input.browser) {
+      if (action === 'status' || action === 'preview') return saved.installation ? browserView(saved) : summary(saved);
+      if (action === 'accept-source') {
+        const current = await browserView(saved);
+        if (current.status === 'ready') {
+          if (canonical(current.connection.acceptedSource) !== canonical({ revision: local.source.revision, digest: local.source.digest }))
+            throw new HvError('VALIDATION', 'This local commit is not the accepted destination source.');
+          return current;
+        }
+        if (current.status !== 'source-required' || !current.connection.destinations || !saved.installation)
+          throw new HvError('VALIDATION', 'The exact installation must finish before accepting its committed destination patch.');
+        for (const slot of current.connection.destinations) {
+          const declared = local.spec.environments[local.env].secretDestinations?.[slot.key];
+          if (!declared || current.connection.mode !== 'migrate' && declared.version || canonical(declared.destination) !== canonical(slot.destination))
+            throw new HvError('VALIDATION', 'Commit the exact proposed native destinations without introducing values or versions.');
+        }
+        if (saved.installation.acceptance) return { ...current, status: 'pending',
+          message: 'The source-acceptance result is uncertain. Its exact historical status was checked; no acceptance was sent again.' };
+        saved.installation.acceptance = { revision: local.source.revision, digest: local.source.digest };
+        saveCurrent(saved);
+        let response: unknown;
+        try {
+          response = await request(`/api/v1/projects/${encodeURIComponent(saved.project.id)}/cloud-connections/${saved.installation.id}/source-acceptances`, {
+            method: 'POST', token: saved.token, body: { expectedSourceRevision: local.source.revision, expectedSourceDigest: local.source.digest },
+          });
+        } catch (error) {
+          // Only the server's definite transaction rejection releases this
+          // attempt. Preserve ambiguous writes and any concurrently revoked grant.
+          if (error instanceof CloudHttpError && error.status >= 400 && error.status < 500 && error.status !== 429) {
+            const latest = context.repos.connections.findByProviderAndScope(PROVIDER, scope);
+            if (latest && latest.credentialsEncrypted === expectedCipher) {
+              const currentState = stateSchema.parse(context.secretStore.decryptObject(latest.credentialsEncrypted));
+              if (currentState.installation?.id === saved.installation.id
+                && canonical(currentState.installation.acceptance) === canonical(saved.installation.acceptance)) {
+                delete currentState.installation.acceptance; expectedCipher = save(scope, currentState);
+              }
+            }
+          }
+          throw error;
+        }
+        const accepted = await browserView(saved, response);
+        if (accepted.status !== 'ready' || canonical(accepted.connection.acceptedSource) !== canonical(saved.installation.acceptance))
+          throw new HvError('PROVIDER_ERROR', 'The exact source acceptance could not be confirmed. Inspect status before continuing.');
+        return accepted;
+      }
+      let archive: z.infer<typeof archivedInstallation> | undefined;
+      if (saved.installation) {
+        const previous = await browserView(saved);
+        if (action !== 'connect' || !['cancelled', 'disconnected'].includes(previous.status)) {
+          if (input.mode && input.mode !== saved.installation.mode) throw new HvError('VALIDATION', 'Resume the existing cloud connection in its original mode.');
+          return previous;
+        }
+        // Only an exact terminal server receipt permits a new intent. Cancellation
+        // preserves any partial cloud installation in the server's original journal;
+        // it is not a claim that hosted trust or stored secrets were removed.
+        if ((saved.installationHistory?.length ?? 0) >= 100)
+          throw new HvError('VALIDATION', 'This device has reached its retained cloud-connection history limit. Preserve its recovery records before preparing another connection.');
+        archive = archivedInstallation.parse({ ...saved.installation, terminalStatus: previous.status, archivedAt: now().toISOString() });
+      }
+      const desired = local.spec.environments[local.env];
+      const reconnectsTargets = archive && archive.keys.every(key => desired.secretDestinations?.[key]);
+      const mode = input.mode ?? (reconnectsTargets ? 'migrate' : 'connect');
+      const keys = browserKeys.parse(input.keys ?? (reconnectsTargets && mode === 'migrate' ? archive?.keys : undefined) ?? Object.entries(local.spec.secrets)
+        .filter(([key, slot]) => slot.ownership === 'delegated' && slot.environments.includes(local.env) && (mode === 'migrate' ? !!desired.secretDestinations?.[key] : !desired.secretDestinations?.[key]))
+        .map(([key]) => key)).sort();
+      if (keys.some(key => !local.spec.secrets[key]?.environments.includes(local.env) || (mode === 'migrate' ? !desired.secretDestinations?.[key] : !!desired.secretDestinations?.[key])))
+        throw new HvError('VALIDATION', 'Select declared environment secrets matching this mode: connect prepares missing destinations; migrate preserves existing destinations and reviews a writer replacement.');
+      if (archive) saved.installationHistory = [...(saved.installationHistory ?? []), archive];
+      saved.installation = { id: randomUUID(), mode, keys, source: local.source, pending: true };
+      // Save before POST. A timeout can only read this ID; it cannot send another installation.
+      saveCurrent(saved);
+      const response = await request(`/api/v1/projects/${encodeURIComponent(saved.project.id)}/cloud-connections`, {
+        method: 'POST', token: saved.token, body: { connectionId: saved.installation.id, mode, keys,
+          expectedSourceRevision: local.source.revision, expectedSourceDigest: local.source.digest },
+      });
+      const view = await browserView(saved, response);
+      if (canonical(checkout(input).source) !== canonical(local.source)) throw new HvError('VALIDATION', 'The local source changed during connection setup. The historical request is retained.');
+      saved.installation.pending = false; saveCurrent(saved);
+      return view;
+    }
     const remote = await inspect(saved);
     const selected = remote.destinations.filter(item => !item.version);
     const fingerprint = hash(canonical({ source: remote.source, host: remote.host, targets: local.targets }));

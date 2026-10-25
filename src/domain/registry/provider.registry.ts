@@ -197,6 +197,7 @@ export interface ProviderMetadata {
   connectionAliases?: string[];
   /** Versioned provider-owned runtime projection; changes require reviewed per-consumer rewiring. */
   storageRuntimeContract?: string;
+  storageRuntimeAccess?: { hostingProviders: readonly string[] };
   maturity?: {
     /** Evidence status for each lifecycle slice implemented by this registration. */
     lifecycle?: Partial<Record<ProviderLifecycleCapability, ProviderCapabilityMaturity>>;
@@ -207,6 +208,7 @@ export interface ProviderMetadata {
     hosting?: {
       /** Workload kinds this adapter can reconcile through the complete hosting lifecycle. */
       workloadKinds: readonly WorkloadKind[];
+      runtimeIdentityTiming?: 'before-workload' | 'after-workload';
       /** Explicit, retain-only filesystem mounts; never implicit service provisioning. */
       serviceVolumes?: {
         workloadKinds: readonly WorkloadKind[];

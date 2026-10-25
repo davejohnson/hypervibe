@@ -14,6 +14,7 @@ import { projectRecoveryDatabases, recoveryDatabaseBindings } from '../services/
 import type { Component } from '../entities/component.entity.js';
 import { secretContainerBindings } from '../ports/secret-destination-lifecycle.port.js';
 import { isDeepStrictEqual } from 'node:util';
+import { mergeRuntimeAccessBindings, runtimeAccessBindings } from '../services/runtime-access.service.js';
 
 // Bindings are the inverse of the spec's source-of-truth contract: the DB
 // column `environments.platform_bindings` is authoritative (it holds data the
@@ -97,7 +98,7 @@ export function mergeRepoPlatformBindings(
   if (!localVolumes || !incomingVolumes) {
     throw new Error('Malformed retained service-volume bindings; refusing to overwrite recovery state.');
   }
-  const merged: Record<string, unknown> = { ...existing, ...repoBindings };
+  const merged: Record<string, unknown> = { ...existing, ...repoBindings, ...mergeRuntimeAccessBindings(existing, repoBindings) };
   if (existing.backupPolicyAttempts !== undefined || repoBindings.backupPolicyAttempts !== undefined) {
     merged.backupPolicyAttempts = mergeBackupPolicyAttempts(existing.backupPolicyAttempts, repoBindings.backupPolicyAttempts);
   }
@@ -121,7 +122,7 @@ export function mergeRepoPlatformBindings(
       merged[key] = retained;
       continue;
     }
-    if (key === 'databaseCheckpoints' || key === 'backupPolicyAttempts') continue;
+    if (key === 'databaseCheckpoints' || key === 'backupPolicyAttempts' || key === 'runtimeIdentities' || key === 'storageRuntimeAccess') continue;
     if (key === 'serviceVolumes' && existing[key] !== undefined) {
       const retained = { ...incomingVolumes, ...localVolumes };
       for (const [name, next] of Object.entries(incomingVolumes)) {
@@ -198,6 +199,11 @@ function presentStorageInstanceScopes(platformBindings: Record<string, unknown>)
 
 function sanitizePlatformBindings(raw: Record<string, unknown>): Record<string, unknown> {
   const sanitized = sanitize(raw) as Record<string, unknown>;
+  const access = runtimeAccessBindings({ platformBindings: raw });
+  if (!access) throw new Error('Malformed runtime permission bindings cannot be exported safely.');
+  for (const key of ['runtimeIdentities', 'storageRuntimeAccess'] as const) {
+    if (raw[key] !== undefined) sanitized[key] = access[key];
+  }
   if (raw.secretDestinationContainers !== undefined) sanitized.secretDestinationContainers = secretContainerBindings(raw.secretDestinationContainers);
   if (raw.recoveryDatabases !== undefined) sanitized.recoveryDatabases = recoveryDatabaseBindings(raw.recoveryDatabases);
   if (raw.backupPolicyAttempts !== undefined) {

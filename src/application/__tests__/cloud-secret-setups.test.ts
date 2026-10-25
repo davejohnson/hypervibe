@@ -85,6 +85,165 @@ function fixture() {
 }
 
 describe('owner-approved cloud secret setup through the real command boundary', () => {
+  it('starts Connect Cloud without local cloud credentials or predeclared native destinations', async () => {
+    const file = path.join(root, '.hypervibe/spec.json'); const spec = JSON.parse(readFileSync(file, 'utf8'));
+    delete spec.environments.staging.secretDestinations; writeFileSync(file, JSON.stringify(spec));
+    git('add', '.hypervibe/spec.json'); git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false', 'commit', '-m', 'new cloud customer');
+    const f = fixture(); const adapter = vi.spyOn(f.context.adapterFactory, 'getProviderAdapter');
+    const run = (input: Record<string, unknown>) => f.run({ purpose: 'connect-cloud', ...input });
+    const original = f.fetchImpl.getMockImplementation()!;
+    let received: any;
+    f.fetchImpl.mockImplementation(async (url, init) => {
+      if (String(url).includes('/cloud-connections')) {
+        if (init?.method === 'POST') {
+          const body = JSON.parse(String(init.body));
+          expect(body.keys).toEqual(['API_KEY']);
+          expect(body.expectedSourceRevision).toBe(f.remote.source.revision);
+          received = { id: body.connectionId, status: 'choose-provider', provider: null, keys: body.keys, environment: 'staging', source: f.remote.source,
+            expiresAt: new Date(Date.now() + 86400_000).toISOString(), connectUrl: `https://hypervibe.dev/apps/app-id/cloud-connections/${body.connectionId}`, deployment: 'not-authorized' };
+          return Response.json({ applied: 1, skipped: 0, connection: received });
+        }
+        return Response.json({ connection: received });
+      }
+      return original(url, init);
+    });
+    expect(await run({ action: 'start' })).toMatchObject({ ok: true, data: { status: 'pending' } });
+    expect(await run({ action: 'status' })).toMatchObject({ ok: true, data: { status: 'verified' } });
+    const result = await run({ action: 'connect' });
+    expect(result).toMatchObject({ ok: true, data: { status: 'choose-provider', connection: { keys: ['API_KEY'], deployment: 'not-authorized' } } });
+    expect(adapter).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain(token);
+    received.status = 'scope-ready';
+    received.scopePreparation = { installationId: '33333333-3333-4333-8333-333333333333', status: 'scope-ready',
+      plan: { administratorEmail: 'private-admin@example.test', unexpected: 'MUST_NOT_RENDER' } };
+    const scoped = await run({ action: 'status' });
+    expect(scoped).toMatchObject({ ok: true, data: { status: 'scope-ready', connection: { scopePreparation: {
+      installationId: '33333333-3333-4333-8333-333333333333', status: 'scope-ready' } }, nextStep: { command: 'hv_cloud_connections' } } });
+    expect(JSON.stringify(scoped)).not.toMatch(/MUST_NOT_RENDER|private-admin@example/);
+  });
+
+  it('retains the cloud-connection intent and reads its exact UUID after a lost start response', async () => {
+    const f = fixture(); const run = (input: Record<string, unknown>) => f.run({ purpose: 'connect-cloud', ...input });
+    const file = path.join(root, '.hypervibe/spec.json'); const spec = JSON.parse(readFileSync(file, 'utf8'));
+    delete spec.environments.staging.secretDestinations; writeFileSync(file, JSON.stringify(spec));
+    git('add', '.hypervibe/spec.json'); git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false', 'commit', '-m', 'fresh scope');
+    const source = { ...f.remote.source, revision: git('rev-parse', 'HEAD'), digest: createHash('sha256').update(readFileSync(file)).digest('hex') };
+    const original = f.fetchImpl.getMockImplementation()!; let posts = 0; let id = ''; let revoked = false;
+    f.fetchImpl.mockImplementation(async (url, init) => {
+      if (String(url).includes('/cloud-connections')) {
+        if (init?.method === 'POST') { posts++; id = JSON.parse(String(init.body)).connectionId; throw new Error('lost acknowledgement'); }
+        if (revoked) return Response.json({}, { status: 401 });
+        expect(String(url).endsWith(`/cloud-connections/${id}`)).toBe(true);
+        return Response.json({ connection: { id, status: 'choose-provider', provider: null, keys: ['API_KEY'], environment: 'staging', source,
+          expiresAt: new Date(Date.now() + 86400_000).toISOString(), connectUrl: `https://hypervibe.dev/apps/app-id/cloud-connections/${id}`, deployment: 'not-authorized' } });
+      }
+      return original(url, init);
+    });
+    await run({ action: 'start' }); await run({ action: 'status' });
+    expect(await run({ action: 'connect' })).toMatchObject({ ok: false });
+    expect(await run({ action: 'status' })).toMatchObject({ ok: true, data: { status: 'choose-provider' } });
+    expect(posts).toBe(1);
+    revoked = true;
+    expect(await run({ action: 'status' })).toMatchObject({ ok: false });
+    revoked = false;
+    expect(await run({ action: 'start' })).toMatchObject({ ok: true, data: { status: 'pending' } });
+    expect(await run({ action: 'status' })).toMatchObject({ ok: true, data: { status: 'verified' } });
+    expect(await run({ action: 'status' })).toMatchObject({ ok: true, data: { status: 'choose-provider', connection: { id } } });
+    expect(posts).toBe(1);
+  });
+
+  it.each(['cancelled', 'disconnected'] as const)('archives an exact %s receipt only when explicitly connecting a new intent, retaining recovery after a lost new response', async terminal => {
+    const f = fixture(); const original = f.fetchImpl.getMockImplementation()!;
+    const run = (input: Record<string, unknown>) => f.run({ purpose: 'connect-cloud', ...input });
+    const ids: string[] = []; let remoteStatus = 'choose-provider'; let loseNext = false;
+    const receipt = (id: string) => ({ id, mode: 'migrate', status: remoteStatus, provider: 'gcp', keys: ['API_KEY'], environment: 'staging', source: f.remote.source,
+      expiresAt: new Date(Date.now() + 86400_000).toISOString(), connectUrl: `https://hypervibe.dev/apps/app-id/cloud-connections/${id}`, deployment: 'not-authorized' });
+    f.fetchImpl.mockImplementation(async (url, init) => {
+      if (String(url).includes('/cloud-connections')) {
+        if (init?.method === 'POST') {
+          const body = JSON.parse(String(init.body)); ids.push(body.connectionId); remoteStatus = 'choose-provider';
+          if (loseNext) throw new Error('new response lost');
+          return Response.json({ connection: receipt(body.connectionId) });
+        }
+        return Response.json({ connection: receipt(String(url).split('/').at(-1)!) });
+      }
+      return original(url, init);
+    });
+    const state = () => {
+      const row = f.context.repos.connections.findByProviderAndScope('hypervibe-secret-destinations', 'https://hypervibe.dev|studio/app|staging')!;
+      return f.context.secretStore.decryptObject(row.credentialsEncrypted) as any;
+    };
+    await run({ action: 'start' }); await run({ action: 'status' }); await run({ action: 'connect', mode: 'migrate' });
+    remoteStatus = terminal;
+    expect(await run({ action: 'status' })).toMatchObject({ ok: true, data: { status: terminal } });
+    expect(await run({ action: 'start' })).toMatchObject({ ok: true, data: { status: terminal } }); expect(ids).toHaveLength(1);
+    expect(await run({ action: 'connect', mode: 'migrate', keys: ['UNDECLARED'] })).toMatchObject({ ok: false });
+    expect(state().installation.id).toBe(ids[0]); expect(state().installationHistory ?? []).toEqual([]);
+    loseNext = true;
+    expect(await run({ action: 'connect' })).toMatchObject({ ok: false });
+    expect(ids).toHaveLength(2); expect(ids[0]).not.toBe(ids[1]);
+    expect(state().installationHistory).toMatchObject([{ id: ids[0], terminalStatus: terminal, source: f.remote.source }]);
+    expect(state().installation).toMatchObject({ id: ids[1], pending: true });
+    expect(await run({ action: 'connect' })).toMatchObject({ ok: true, data: { status: 'choose-provider', connection: { id: ids[1] } } }); expect(ids).toHaveLength(2);
+    expect(await run({ action: 'revoke', confirm: true })).toMatchObject({ ok: true, data: { status: 'revoked' } });
+    await run({ action: 'start' }); await run({ action: 'status' });
+    expect(state().installationHistory).toMatchObject([{ id: ids[0], terminalStatus: terminal }]); expect(state().installation.id).toBe(ids[1]);
+  });
+
+  it.each(['create_ownership_unverified', 'insufficient_permissions', 'provider-echoed-private-token'])('projects only a closed Connect Cloud reason: %s', async reason => {
+    const f = fixture(); const original = f.fetchImpl.getMockImplementation()!;
+    f.fetchImpl.mockImplementation(async (url, init) => {
+      if (String(url).endsWith('/cloud-connections')) {
+        const body = JSON.parse(String(init?.body));
+        return Response.json({ connection: { id: body.connectionId, mode: 'migrate', status: 'blocked', provider: 'azure', keys: ['API_KEY'], environment: 'staging', source: f.remote.source,
+          expiresAt: new Date(Date.now() + 86400_000).toISOString(), connectUrl: `https://hypervibe.dev/apps/app-id/cloud-connections/${body.connectionId}`, deployment: 'not-authorized',
+          reason, providerMessage: 'private-provider-response' } });
+      }
+      return original(url, init);
+    });
+    const run = (input: Record<string, unknown>) => f.run({ purpose: 'connect-cloud', ...input });
+    await run({ action: 'start' }); await run({ action: 'status' });
+    const result = await run({ action: 'connect', mode: 'migrate' });
+    if (reason === 'provider-echoed-private-token') expect(result).toMatchObject({ ok: false, error: { code: 'PROVIDER_ERROR' } });
+    else expect(result).toMatchObject({ ok: true, data: { status: 'blocked', connection: { reason } } });
+    expect(JSON.stringify(result)).not.toContain('private-provider-response'); expect(JSON.stringify(result)).not.toContain('provider-echoed-private-token');
+  });
+
+  it('migrates a legacy writer using the unchanged committed destination and immutable version', async () => {
+    const file = path.join(root, '.hypervibe/spec.json'); const spec = JSON.parse(readFileSync(file, 'utf8'));
+    spec.environments.staging.secretDestinations.API_KEY.version = '7'; writeFileSync(file, JSON.stringify(spec));
+    git('add', '.hypervibe/spec.json'); git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false', 'commit', '-m', 'pinned legacy reference');
+    const f = fixture(); const original = f.fetchImpl.getMockImplementation()!;
+    const before = readFileSync(file, 'utf8'); const adapter = vi.spyOn(f.context.adapterFactory, 'getProviderAdapter');
+    let connection: any; let accepts = 0;
+    f.fetchImpl.mockImplementation(async (url, init) => {
+      if (String(url).endsWith('/cloud-connections') && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)); expect(body.mode).toBe('migrate');
+        connection = { id: body.connectionId, mode: 'migrate', status: 'source-required', provider: 'gcp', keys: ['API_KEY'], environment: 'staging', source: f.remote.source,
+          expiresAt: new Date(Date.now() + 86400_000).toISOString(), connectUrl: `https://hypervibe.dev/apps/app-id/cloud-connections/${body.connectionId}`,
+          deployment: 'not-authorized', destinations: [{ key: 'API_KEY', destination }] };
+        return Response.json({ connection });
+      }
+      if (String(url).endsWith('/source-acceptances')) {
+        accepts++;
+        // A transaction-rejected request is safe to submit again after review;
+        // a transport failure is handled by the separate uncertain-outcome test.
+        if (accepts === 1) return Response.json({ error: 'source conflict' }, { status: 409 });
+        const body = JSON.parse(String(init?.body)); expect(body).toEqual({ expectedSourceRevision: f.remote.source.revision, expectedSourceDigest: f.remote.source.digest });
+        connection = { ...connection, status: 'ready', acceptedSource: { revision: f.remote.source.revision, digest: f.remote.source.digest } };
+        return Response.json({ connection });
+      }
+      if (String(url).includes('/cloud-connections/')) return Response.json({ connection });
+      return original(url, init);
+    });
+    const run = (input: Record<string, unknown>) => f.run({ purpose: 'connect-cloud', ...input });
+    await run({ action: 'start' }); await run({ action: 'status' });
+    expect(await run({ action: 'connect', mode: 'migrate' })).toMatchObject({ ok: true, data: { status: 'source-required',
+      connection: { mode: 'migrate' }, nextStep: { command: 'hv_cloud_connections' } } });
+    expect(await run({ action: 'accept-source' })).toMatchObject({ ok: false });
+    expect(await run({ action: 'accept-source' })).toMatchObject({ ok: true, data: { status: 'ready' } });
+    expect(accepts).toBe(2); expect(adapter).not.toHaveBeenCalled(); expect(readFileSync(file, 'utf8')).toBe(before);
+  });
   // Independent policy: the owner requires agent-led setup without uploading
   // deploy keys or retaining application values. Monitoring is not writer consent.
   it('starts a separate environment-scoped approval and returns no credential material', async () => {

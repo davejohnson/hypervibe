@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CloudRunAdapter } from '../cloudrun.adapter.js';
+import { preparedRuntimeFixture } from './cloudrun-runtime-fixture.js';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../../domain/entities/service.entity.js';
 import { hashEnvValue } from '../../../../domain/ports/observe.port.js';
@@ -1352,7 +1353,6 @@ it('refuses to create a release job when neither it nor the existing service has
         reconciling: false,
         uri: 'https://gcp-project-web.run.app',
         template: {
-          serviceAccount: EXPECTED_RUNTIME_SERVICE_ACCOUNT,
           containers: [{ image: EXPECTED_DEPLOY_IMAGE }],
         },
         terminalCondition: { type: 'Ready', state: 'CONDITION_SUCCEEDED' },
@@ -1394,7 +1394,7 @@ it('refuses to create a release job when neither it nor the existing service has
     status: 'failed',
     receipt: {
       success: false,
-      error: expect.stringMatching(/runtimeServiceAccountEmail.*release job/i),
+      error: expect.stringMatching(/runtime service account/i),
     },
   });
   expect(mutations).toBe(0);
@@ -1603,20 +1603,20 @@ it('refuses to create a release job when neither it nor the existing service has
       envVarSpec: {},
       createdAt: now,
       updatedAt: now,
-    }, {
+    }, preparedRuntimeFixture({
       id: 'env-1',
       projectId: 'project-1',
       name: 'production',
       platformBindings: { provider: 'cloudrun', projectId: 'gcp-project' },
       createdAt: now,
       updatedAt: now,
-    }, {
+    }, 'cron', fetchMock), {
       IMAGE_URI_CRON: `us-central1-docker.pkg.dev/gcp-project/infraprint/production-cron@sha256:${'b'.repeat(64)}`,
     });
 
     expect(result).toMatchObject({
       status: 'failed',
-      receipt: { success: false, error: expect.stringMatching(/429.*rate limited/i) },
+      receipt: { success: false, error: expect.stringMatching(/HTTP 429/i) },
     });
     expect(fetchMock.mock.calls.every(([, init]) => (init?.method ?? 'GET') === 'GET')).toBe(true);
   });
@@ -1914,7 +1914,7 @@ it('refuses to create a release job when neither it nor the existing service has
 
   it.each([
     ['a mutable image tag', 'us-central1-docker.pkg.dev/gcp-project/hypervibe/web:latest', EXPECTED_RUNTIME_SERVICE_ACCOUNT, /immutable.*repo@sha256/i],
-    ['a different runtime identity', `us-central1-docker.pkg.dev/gcp-project/hypervibe/web@sha256:${'3'.repeat(64)}`, 'other@gcp-project.iam.gserviceaccount.com', /exact runtime service account/i],
+    ['the deployment runtime identity', `us-central1-docker.pkg.dev/gcp-project/hypervibe/web@sha256:${'3'.repeat(64)}`, 'deploy@gcp-project.iam.gserviceaccount.com', /distinct runtime service account/i],
   ] as const)('blocks a deferred existing service with %s before mutation', async (_case, image, serviceAccount, expectedError) => {
     const adapter = new CloudRunAdapter();
     await adapter.connect({
@@ -2136,14 +2136,14 @@ it('refuses to create a release job when neither it nor the existing service has
       envVarSpec: {},
       createdAt: now,
       updatedAt: now,
-    }, {
+    }, preparedRuntimeFixture({
       id: 'env-1',
       projectId: 'project-1',
       name: 'staging',
       platformBindings: { provider: 'cloudrun', projectId: 'gcp-project' },
       createdAt: now,
       updatedAt: now,
-    }, {
+    }, 'web', fetchMock), {
       HYPERVIBE_SOURCE_REPO_URL: 'https://github.com/acme/demo.git',
       HYPERVIBE_SOURCE_REVISION: 'main',
       HYPERVIBE_GITHUB_TOKEN: 'private-repo-token',
@@ -3061,7 +3061,7 @@ it('refuses to create a release job when neither it nor the existing service has
 
     let jobCreated = false;
     let migrationJobSpec: Record<string, unknown> | undefined;
-    let serviceCreated = false;
+    let serviceCreated = true;
     let serviceMutations = 0;
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
       const url = String(input);
@@ -3110,13 +3110,13 @@ it('refuses to create a release job when neither it nor the existing service has
       if (url.includes('/services/gcp-project-web') && method === 'GET') {
         if (!serviceCreated) return new Response('not found', { status: 404 });
         return Response.json({
-          name: 'gcp-project-web',
+          name: 'projects/gcp-project/locations/us-central1/services/gcp-project-web',
           generation: '1',
           observedGeneration: '1',
           reconciling: false,
           uri: 'https://gcp-project-web.run.app',
           terminalCondition: { type: 'Ready', state: 'CONDITION_SUCCEEDED' },
-          template: { containers: [{ image: 'us-central1-docker.pkg.dev/gcp-project/app/web:new' }] },
+          template: { serviceAccount: EXPECTED_RUNTIME_SERVICE_ACCOUNT, containers: [{ image: 'us-central1-docker.pkg.dev/gcp-project/app/web:new' }] },
         });
       }
       if (url.includes('/services?serviceId=gcp-project-web') && method === 'POST') {
@@ -3266,7 +3266,7 @@ it('refuses to create a release job when neither it nor the existing service has
       updatedAt: now,
     };
 
-    const result = await adapter.deploy(service, environment, {
+    const result = await adapter.deploy(service, preparedRuntimeFixture(environment, 'worker', fetchMock), {
       IMAGE_URI_WORKER: `us-central1-docker.pkg.dev/gcp-project/infraprint/production-worker@sha256:${'b'.repeat(64)}`,
     });
 
@@ -4316,12 +4316,12 @@ it('refuses to create a release job when neither it nor the existing service has
         return Response.json({ network: `https://www.googleapis.com/compute/v1/${network}` });
       }
 
-      if (url.includes('run.googleapis.com') && url.includes('/jobs/gcp-project-cron') && !url.includes(':run') && method === 'GET') {
+      if (url.includes('run.googleapis.com') && url.includes('/jobs/cron-383368e489') && !url.includes(':run') && method === 'GET') {
         if (!jobCreated) {
           return new Response('not found', { status: 404 });
         }
         return Response.json({
-          name: 'projects/gcp-project/locations/us-central1/jobs/gcp-project-cron',
+          name: 'projects/gcp-project/locations/us-central1/jobs/cron-383368e489',
           generation: '1',
           observedGeneration: '1',
           reconciling: false,
@@ -4332,32 +4332,32 @@ it('refuses to create a release job when neither it nor the existing service has
           ...jobSpec,
         });
       }
-      if (url.includes('run.googleapis.com') && url.includes('/jobs?jobId=gcp-project-cron') && method === 'POST') {
+      if (url.includes('run.googleapis.com') && url.includes('/jobs?jobId=cron-383368e489') && method === 'POST') {
         jobCreated = true;
         jobSpec = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return Response.json({
           name: 'projects/gcp-project/locations/us-central1/operations/create-job',
           done: true,
-          response: { name: 'projects/gcp-project/locations/us-central1/jobs/gcp-project-cron' },
+          response: { name: 'projects/gcp-project/locations/us-central1/jobs/cron-383368e489' },
         });
       }
-      if (url.includes('cloudscheduler.googleapis.com') && url.includes('/jobs/gcp-project-cron-schedule') && method === 'GET') {
+      if (url.includes('cloudscheduler.googleapis.com') && url.includes('/jobs/cron-383368e489-schedule') && method === 'GET') {
         if (!schedulerCreated) {
           return new Response('not found', { status: 404 });
         }
         return Response.json({
-          name: 'projects/gcp-project/locations/us-central1/jobs/gcp-project-cron-schedule',
+          name: 'projects/gcp-project/locations/us-central1/jobs/cron-383368e489-schedule',
           state: 'ENABLED',
         });
       }
       if (url.includes('cloudscheduler.googleapis.com') && url.endsWith('/jobs') && method === 'POST') {
         schedulerCreated = true;
         return Response.json({
-          name: 'projects/gcp-project/locations/us-central1/jobs/gcp-project-cron-schedule',
+          name: 'projects/gcp-project/locations/us-central1/jobs/cron-383368e489-schedule',
           state: 'ENABLED',
         });
       }
-      if (url.includes('/services/gcp-project-cron') && method === 'GET') {
+      if (url.includes('/services/cron-383368e489') && method === 'GET') {
         return new Response('not found', { status: 404 });
       }
 
@@ -4373,12 +4373,7 @@ it('refuses to create a release job when neither it nor the existing service has
       platformBindings: {
         provider: 'cloudrun',
         projectId: 'gcp-project',
-        services: {
-          cron: {
-            jobName: 'gcp-project-cron',
-            schedulerJobName: 'gcp-project-cron-schedule',
-          },
-        },
+        services: {},
         cacheNetwork: {
           provider: 'cloudrun',
           projectId: 'gcp-project',
@@ -4406,18 +4401,18 @@ it('refuses to create a release job when neither it nor the existing service has
       updatedAt: now,
     };
 
-    const result = await adapter.deploy(service, environment, {
+    const result = await adapter.deploy(service, preparedRuntimeFixture(environment, 'cron', fetchMock), {
       IMAGE_URI_CRON: EXPECTED_CRON_IMAGE,
       DATABASE_URL: 'postgres://example',
       HYPERVIBE_CRON_TIME_ZONE: 'America/Vancouver',
     });
 
     expect(result.status).toBe('deployed');
-    expect(result.externalId).toBe('gcp-project-cron-schedule');
+    expect(result.externalId).toBe('cron-383368e489-schedule');
     expect(result.receipt.data).toMatchObject({
       resourceType: 'scheduledJob',
-      jobName: 'gcp-project-cron',
-      schedulerJobName: 'gcp-project-cron-schedule',
+      jobName: 'cron-383368e489',
+      schedulerJobName: 'cron-383368e489-schedule',
       schedule: '*/5 * * * *',
       imageUri: EXPECTED_CRON_IMAGE,
       createdJob: true,
@@ -4425,7 +4420,7 @@ it('refuses to create a release job when neither it nor the existing service has
     });
 
     const jobCreateCall = fetchMock.mock.calls.find(([url, init]) =>
-      String(url).includes('/jobs?jobId=gcp-project-cron') && init?.method === 'POST'
+      String(url).includes('/jobs?jobId=cron-383368e489') && init?.method === 'POST'
     );
     expect(jobCreateCall).toBeTruthy();
     const jobBody = JSON.parse(String(jobCreateCall?.[1]?.body));
@@ -4455,11 +4450,11 @@ it('refuses to create a release job when neither it nor the existing service has
     expect(schedulerCreateCall).toBeTruthy();
     const schedulerBody = JSON.parse(String(schedulerCreateCall?.[1]?.body));
     expect(schedulerBody).toMatchObject({
-      name: 'projects/gcp-project/locations/us-central1/jobs/gcp-project-cron-schedule',
+      name: 'projects/gcp-project/locations/us-central1/jobs/cron-383368e489-schedule',
       schedule: '*/5 * * * *',
       timeZone: 'America/Vancouver',
       httpTarget: {
-        uri: 'https://run.googleapis.com/v2/projects/gcp-project/locations/us-central1/jobs/gcp-project-cron:run',
+        uri: 'https://run.googleapis.com/v2/projects/gcp-project/locations/us-central1/jobs/cron-383368e489:run',
         httpMethod: 'POST',
         oauthToken: {
           serviceAccountEmail: EXPECTED_RUNTIME_SERVICE_ACCOUNT,
@@ -4501,12 +4496,12 @@ it('refuses to create a release job when neither it nor the existing service has
       const url = String(input);
       const method = init?.method ?? 'GET';
 
-      if (url.includes('run.googleapis.com') && url.includes('/jobs/gcp-project-cron') && !url.includes(':run') && method === 'GET') {
+      if (url.includes('run.googleapis.com') && url.includes('/jobs/cron-383368e489') && !url.includes(':run') && method === 'GET') {
         if (!jobCreated) {
           return new Response('not found', { status: 404 });
         }
         return Response.json({
-          name: 'projects/gcp-project/locations/us-central1/jobs/gcp-project-cron',
+          name: 'projects/gcp-project/locations/us-central1/jobs/cron-383368e489',
           generation: '1',
           observedGeneration: '1',
           reconciling: false,
@@ -4517,16 +4512,16 @@ it('refuses to create a release job when neither it nor the existing service has
           ...jobSpec,
         });
       }
-      if (url.includes('run.googleapis.com') && url.includes('/jobs?jobId=gcp-project-cron') && method === 'POST') {
+      if (url.includes('run.googleapis.com') && url.includes('/jobs?jobId=cron-383368e489') && method === 'POST') {
         jobCreated = true;
         jobSpec = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return Response.json({
           name: 'projects/gcp-project/locations/us-central1/operations/create-job',
           done: true,
-          response: { name: 'projects/gcp-project/locations/us-central1/jobs/gcp-project-cron' },
+          response: { name: 'projects/gcp-project/locations/us-central1/jobs/cron-383368e489' },
         });
       }
-      if (url.includes('cloudscheduler.googleapis.com') && url.includes('/jobs/gcp-project-cron-schedule') && method === 'GET') {
+      if (url.includes('cloudscheduler.googleapis.com') && url.includes('/jobs/cron-383368e489-schedule') && method === 'GET') {
         return new Response('not found', { status: 404 });
       }
       if (url.includes('cloudscheduler.googleapis.com') && url.endsWith('/jobs') && method === 'POST') {
@@ -4541,14 +4536,14 @@ it('refuses to create a release job when neither it nor the existing service has
           }, { status: 403 });
         }
         return Response.json({
-          name: 'projects/gcp-project/locations/us-central1/jobs/gcp-project-cron-schedule',
+          name: 'projects/gcp-project/locations/us-central1/jobs/cron-383368e489-schedule',
           state: 'ENABLED',
         });
       }
       if (url.endsWith('/services/cloudscheduler.googleapis.com:enable') && method === 'POST') {
         return Response.json({ name: 'operations/enable-scheduler', done: true });
       }
-      if (url.includes('/services/gcp-project-cron') && method === 'GET') {
+      if (url.includes('/services/cron-383368e489') && method === 'GET') {
         return new Response('not found', { status: 404 });
       }
 
@@ -4570,23 +4565,18 @@ it('refuses to create a release job when neither it nor the existing service has
       envVarSpec: {},
       createdAt: now,
       updatedAt: now,
-    }, {
+    }, preparedRuntimeFixture({
       id: 'env-1',
       projectId: 'project-1',
       name: 'production',
       platformBindings: {
         provider: 'cloudrun',
         projectId: 'gcp-project',
-        services: {
-          cron: {
-            jobName: 'gcp-project-cron',
-            schedulerJobName: 'gcp-project-cron-schedule',
-          },
-        },
+        services: {},
       },
       createdAt: now,
       updatedAt: now,
-    }, {
+    }, 'cron', fetchMock), {
       IMAGE_URI_CRON: EXPECTED_CRON_IMAGE,
     });
 

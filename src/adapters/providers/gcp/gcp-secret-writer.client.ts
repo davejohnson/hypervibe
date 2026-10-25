@@ -6,7 +6,7 @@ export interface WriterIamBinding { role: string; members: string[]; condition?:
 export interface WriterIamPolicy extends Record<string, unknown> { etag: string; version?: number; bindings: WriterIamBinding[] }
 export interface WriterCustomRole { name: string; description: string; includedPermissions: string[]; stage: 'GA' }
 export interface WriterMutationContext { secretId?: string }
-const ROOTS = new Set(['iam.googleapis.com', 'cloudresourcemanager.googleapis.com', 'serviceusage.googleapis.com', 'secretmanager.googleapis.com']);
+const ROOTS = new Set(['iam.googleapis.com', 'cloudresourcemanager.googleapis.com', 'serviceusage.googleapis.com', 'secretmanager.googleapis.com', 'cloudbilling.googleapis.com']);
 
 /** Fixed GCP REST endpoints; one shared deadline includes provider body reads. */
 export class GcpSecretWriterClient {

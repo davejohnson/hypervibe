@@ -8,6 +8,21 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+Azure Connect Cloud preparation, federation, historical recovery, runtime readers and
+migration preservation are covered by `azure-cloud-installation.test.ts`,
+`azure-federated-auth.test.ts`, `azure-runtime-identities.test.ts` and the real
+Azure adapter reference suite. See [assumptions, official contracts, observed
+regressions and unresolved live gates](../../docs/connect-cloud-azure-evidence.md).
+`runtime-identity-provider-roster.test.ts` enforces the named hosting registry
+review; shared runtime-access tests exercise saved plans and SQLite recovery.
+The create-only probe tests are synthetic acceptance criteria, not evidence
+that Azure honors the proposed header. All run in the ordinary `npm test` gate.
+New Azure connect/migration plans are blocked before registration/group writes;
+native first group/vault/UAMI writes and first ACA workload creation remain blocked. Azure new
+customer onboarding is not ready for live. Positive historical fixtures do not
+establish successful installation of a new customer.
+
+
 `secret-container-setup.test.ts` and the application/service suites with the same
 prefix enforce the [empty container setup contract](../../docs/secret-destination-delivery.md#empty-container-setup).
 The named matrix admits only GCP setup while preserving separate AWS/Azure
@@ -340,3 +355,15 @@ public health, and a subsequent noop plan. Customer production is not a
 destructive test fixture. Broader create/update/delete live certification stays
 in disposable accounts; the existing live harness's project/environment cleanup
 TODO remains a limitation, not a passing check.
+
+Connect Cloud scope preparation additionally runs
+`gcp-project-installation.test.ts` and `gcp-billing-installation.test.ts` in the
+ordinary Vitest gate. These use reconstructed Resource Manager/Billing REST
+responses, not captured live acceptance. Project creation has an independently
+reviewed continuation; existing billing verification is mutation-free. New
+billing attachment remains hard blocked: inherited unlink permission on another
+account invalidates a selected-account-only preservation argument. Cleanup tests
+reconstruct historical native resources and exact durable attempts, then exercise
+read-only recovery and explicit removal through the actual shared engine. The
+fixture's synthetic historical plan is not a runtime feature flag or a production
+bypass. See [scope evidence and remaining gaps](../../docs/connect-cloud-scope-preparation.md).

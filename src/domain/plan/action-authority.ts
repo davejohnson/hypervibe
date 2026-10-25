@@ -1,3 +1,4 @@
+import { isRuntimeAccessAction, RUNTIME_ACCESS_OPERATIONS } from '../services/runtime-access.service.js';
 import { databaseCredentialAliasesActionSchema, DATABASE_CREDENTIAL_ALIASES_OPERATION } from '../services/database-credential-aliases.service.js';
 import { secretReferenceActionMetadataSchema, SECRET_REFERENCE_OPERATION } from '../services/secret-reference-plan.js';
 import { secretContainerActionMetadataSchema, SECRET_DESTINATION_PREPARE } from '../ports/secret-destination-lifecycle.port.js';
@@ -10,6 +11,7 @@ import { providerRegistry } from '../registry/provider.registry.js';
 import { API_POLICY_OPERATION } from '../services/api-policy.js';
 import { EMAIL_SIGNING_OPERATIONS } from '../services/email-signing.service.js';
 import type { PlanAction, PlanResourceKind } from './plan.types.js';
+export { hasExactPlanActionConfirmationAuthority } from './action-confirmation.js';
 import { HOSTING_ENVIRONMENT_ENSURE_OPERATION } from './plan.service.js';
 import {
   isCloudflareDomainRegistrationAction,
@@ -176,6 +178,8 @@ export type PlanMutationCapability =
   | 'local.environment.record'
   | 'hosting.project.ensure'
   | 'hosting.schedule.activate'
+  | 'hosting.runtime-identity.mutate'
+  | 'storage.runtime-access.mutate'
   | 'hosting.service.converge'
   | 'hosting.service.rollback';
 
@@ -196,15 +200,6 @@ export interface PlanActionAuthority {
  * the reviewed action retained its confirmation marker and the caller names
  * that exact action id.
  */
-export function hasExactPlanActionConfirmationAuthority(
-  action: PlanAction,
-  confirmationRequired: boolean,
-  confirmedActionIds: ReadonlySet<string>
-): boolean {
-  return !confirmationRequired
-    || (action.requiresConfirm === true && confirmedActionIds.has(action.id));
-}
-
 function authority(
   action: PlanAction,
   capability: PlanMutationCapability
@@ -997,6 +992,14 @@ export function resolvePlanActionAuthority(
     ) {
       return authority(action, 'storage.migration-target.destroy');
     }
+    return null;
+  }
+  if (isRuntimeAccessAction(action)) {
+    const identity = action.metadata?.operation === RUNTIME_ACCESS_OPERATIONS.identity;
+    if (action.type !== 'update' || !action.verified || action.metadata?.blockedReason
+      || !metadataString(action, 'serviceName') || !/^[a-f0-9]{64}$/.test(String(action.metadata?.evidenceHash))) return null;
+    if (identity && exactResource(action, 'service') && action.resource.name === action.metadata?.serviceName && action.metadata?.step) return authority(action, 'hosting.runtime-identity.mutate');
+    if (!identity && exactResource(action, 'storage') && action.resource.name === action.metadata?.storageName) return authority(action, 'storage.runtime-access.mutate');
     return null;
   }
   if (
