@@ -445,6 +445,7 @@ export function createRailwayDatabaseAdapter(params: {
     name: 'railway',
     get credentialLifecycle() {
       return createPostgresCredentialLifecycle(() => databaseAdapter, {
+        passwordEncoding: 'scram-sha-256',
         rotate: async (_component, _target, password) => {
           // Existing native aliases interpolate this issuer into URL password
           // positions. Refuse characters that would alter URL structure before

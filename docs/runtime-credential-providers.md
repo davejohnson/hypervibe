@@ -37,6 +37,14 @@ coverage for the selected replacements. Earlier active revisions remain pending.
 Write-only values retain unknown current-value comparison even when accepted
 synchronization and exact deployment activation are established. Instance
 retirement remains separate where the provider observes routing or revisions.
+
+Credential requirements remain pending for `activeDeploymentCoverage: traffic`,
+even with an exact native or managed deployment receipt. Routing cutover cannot
+prove that older requests or processes have stopped. This currently limits Cloud
+Run services, ECS Express, DigitalOcean App Platform and Vercel; it does not alter
+ordinary non-credential rollout completion. Instance-backed evidence, exact
+selected-key coverage and matching deployment identities remain required as
+before for providers that expose them.
 These local expectations are excluded from repository binding exports and cannot
 be replaced by importing a repository binding file.
 

@@ -363,6 +363,7 @@ function strictConfigurationReason(binding: RuntimeRolloutBinding, service: Obse
     || separateEnvironment && !binding.providerEnvironmentId
     || binding.providerEnvironmentId && observed.environmentId !== binding.providerEnvironmentId) return 'The exact provider scope of the credential consumer could not be verified.';
   const deployment = service?.deployment;
+  if (deployment?.activeDeploymentCoverage === 'traffic') return 'Traffic retirement does not establish that older credential consumers have stopped; complete instance retirement evidence is required.';
   const expectedActiveIds = binding.expectedDeploymentIds ?? (deployment?.id ? [deployment.id] : []);
   const completedExecution = service?.workloadKind === 'cron' && deployment?.status === 'completed'
     && deployment.activeDeploymentCoverage === 'instances' && deployment.activeDeploymentIds?.length === 0;

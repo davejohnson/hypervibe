@@ -85,11 +85,12 @@ describe('upstream database credential consumer readiness', () => {
     expect(complete.data.databaseConsumers.every((entry: any) => entry.authentication === 'unchecked')).toBe(true);
   });
 
-  it.each(['missing-snapshot', 'missing-drain', 'different-scope', 'duplicate-identity', 'missing-bound-scope', 'unresolved-configured', 'unknown-workload'])('keeps %s evidence unknown rather than current', async failure => {
+  it.each(['missing-snapshot', 'missing-drain', 'traffic-only-coverage', 'different-scope', 'duplicate-identity', 'missing-bound-scope', 'unresolved-configured', 'unknown-workload'])('keeps %s evidence unknown rather than current', async failure => {
     const f = fixture();
     f.observed.services.forEach(service => { service.deployment = { id: `new-${service.name}`, activeDeploymentIds: [`new-${service.name}`], configurationState: 'resolved', envVarHashes: f.hashes }; });
     if (failure === 'missing-snapshot') delete f.observed.services[0].deployment!.envVarHashes;
     if (failure === 'missing-drain') delete f.observed.services[0].deployment!.activeDeploymentIds;
+    if (failure === 'traffic-only-coverage') f.observed.services[0].deployment!.activeDeploymentCoverage = 'traffic';
     if (failure === 'different-scope') f.observed.environmentId = 'staging';
     if (failure === 'duplicate-identity') f.observed.services.push({ ...f.observed.services[0] });
     if (failure === 'missing-bound-scope') f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { projectId: undefined, environmentId: undefined });
