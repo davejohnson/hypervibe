@@ -69,7 +69,7 @@ it('delivers patched Azure authentication inside the actual npm tarball without 
       if (!address || typeof address === 'string') throw new Error('Missing isolated registry address');
       const args = ['--ignore-scripts', '--no-audit', '--no-fund', '--update-notifier=false', '--fetch-retries=0', '--fetch-timeout=2000',
         `--registry=http://127.0.0.1:${address.port}`, `--userconfig=${emptyUserConfig}`, `--globalconfig=${emptyGlobalConfig}`];
-      for (const command of [['install', '--package-lock-only'], ['ci'], ['ls', '@azure/msal-node', '--all', '--json']]) {
+      for (const command of [['install', '--package-lock-only'], ['ci'], ['ls', '--all', '--json']]) {
         const result = await new Promise<{ error: Error | null; stderr: string; stdout: string }>(resolve => {
           execFile('npm', [...command, ...args], { cwd: consumer, timeout: 30_000, maxBuffer: 4 * 1024 * 1024,
             env: { ...process.env, npm_config_cache: path.join(directory, 'consumer-cache') } },

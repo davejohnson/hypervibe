@@ -72,7 +72,14 @@ override. Normal CI now extracts the actual package, installs its Azure closure
 against an empty local registry, generates a fresh lock, runs `npm ci`, and asks
 `npm ls` to verify the dependency graph before repeating the adversarial probe.
 The original exact archive fails with `ELSPROBLEMS`; the repaired archive passes
-with no registry requests. Separately, the complete repaired tarball passed
+with no registry requests. The graph check covers the entire closure, including
+Identity itself: a filtered MSAL-only check missed npm treating a bundled local
+`file:` declaration as invalid. The public dependency now declares the exact
+distribution version; the committed development lock still resolves the same
+integrity-verified local archive. Fresh source lock generation, ordinary install
+and clean install, plus a complete downstream clean install and `npm ls --all`,
+all pass. No upstream or patched SDK bytes changed for this correction.
+Separately, the complete repaired tarball passed
 fresh lock generation and ordinary `npm ci` with native install scripts enabled,
 both in an empty consumer and with Hypercloud's previously failing lock. The
 three private Hypercloud package version/resolved/integrity triples were preserved.
@@ -116,6 +123,10 @@ metadata, repacks it, and verifies every non-manifest file against the original.
 preserved content digest. Reproduce it by fetching
 `npm pack @azure/identity@4.13.2 --ignore-scripts`, then running
 `node scripts/prepare-azure-identity-package.mjs <official.tgz> vendor`.
+Repository installs use the committed lock, which records the local archive;
+the patched Identity distribution is bundled, not separately published. Keep
+that local resolution when updating the lock rather than resolving its version
+from the public registry.
 
 Version 0.1.44 is prepared but unpublished. A coordinated release must run final
 release gates, obtain owner publication approval, update Hypercloud's exact

@@ -17,7 +17,7 @@ for (const [location, entry] of Object.entries(lock.packages)) {
     const archive = 'vendor/azure-identity-4.13.2-hypervibe.1.tgz';
     const provenance = JSON.parse(readFileSync(resolve(root, 'vendor/azure-identity.provenance.json'), 'utf8'));
     if (location !== 'node_modules/@azure/identity' || entry.resolved !== `file:${archive}`
-      || packageJson.dependencies['@azure/identity'] !== entry.resolved
+      || packageJson.dependencies['@azure/identity'] !== entry.version
       || !packageJson.bundleDependencies?.includes('@azure/identity')
       || !packageJson.files?.includes(archive)
       || entry.version !== provenance.distribution.version || provenance.distribution.file !== archive.slice('vendor/'.length)

@@ -21,7 +21,7 @@ it('ships the exact integrity-verified local Azure archive with the operator dep
     const script = path.join(directory, 'scripts/package-operator-artifact-lock.mjs');
     execFileSync(process.execPath, [script], { stdio: 'pipe' });
     expect(JSON.parse(readFileSync(path.join(directory, 'dist/operator-artifacts/package-lock.json'), 'utf8'))).toEqual(lock);
-    const archive = path.join(directory, manifest.dependencies['@azure/identity'].slice('file:'.length));
+    const archive = path.join(directory, lock.packages['node_modules/@azure/identity'].resolved.slice('file:'.length));
     const original = readFileSync(archive);
     expect(`sha512-${createHash('sha512').update(original).digest('base64')}`).toBe(lock.packages['node_modules/@azure/identity'].integrity);
     writeFileSync(archive, Buffer.concat([original, Buffer.from('unreviewed changes')]));
