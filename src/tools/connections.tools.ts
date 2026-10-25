@@ -67,6 +67,7 @@ function providerDiscoveryEntry(metadata: Pick<
   const guidance = getConnectionGuidance(metadata.name);
   const credentialFields = credentialFieldsFromSchema(metadata.credentialsSchema, {
     exclude: metadata.credentials?.agentManagedKeys,
+    excludeChoices: metadata.credentials?.agentManagedChoices,
   });
   return {
     name: metadata.name,

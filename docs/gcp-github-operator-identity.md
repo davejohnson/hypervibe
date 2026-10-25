@@ -81,3 +81,15 @@ runs that command and type checking. A read-only `hv_ci_status` observation on
 mandatory human review, and `enforceAdmins: false`. Live GitHub OIDC, Google IAM
 propagation, registry uploads and backup execution still require the approved
 disposable walkthrough.
+
+The full acceptance run also challenged treating every credential-schema field
+as a manual connection input. The owner requires infrastructure identities to be
+prepared by the reviewed workflow. The new federation descriptor and mode
+appeared in connection forms instead: the existing field regression failed,
+and an actual MCP discovery regression separately failed on the internal mode.
+Provider metadata now keeps the descriptor and its workflow-only choice out of
+manual forms for Cloud Run, Cloud SQL and GCS, preserving both existing sign-in
+choices. GCS project identity stays workflow-owned too. The shared form helper,
+MCP discovery and apply guidance use the same metadata. All 83 focused checks
+across guidance, actual MCP and registry suites pass; type checking passes.
+This is interface evidence, not proof of native federation or cloud authority.

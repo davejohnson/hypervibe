@@ -145,7 +145,7 @@ function enumOptions(schema: z.ZodTypeAny): string[] | undefined {
  */
 export function credentialFieldsFromSchema(
   schema: z.ZodTypeAny,
-  options: { exclude?: readonly string[] } = {}
+  options: { exclude?: readonly string[]; excludeChoices?: Readonly<Record<string, readonly string[]>> } = {}
 ): CredentialFieldDescriptor[] | undefined {
   const objectSchema = unwrapCredentialSchema(schema);
   if (!(objectSchema instanceof z.ZodObject)) {
@@ -156,9 +156,9 @@ export function credentialFieldsFromSchema(
   return Object.entries(objectSchema.shape).filter(([name]) => !excluded.has(name)).map(([name, rawField]) => {
     const field = rawField as z.ZodTypeAny;
     const unwrapped = unwrapCredentialSchema(field);
-    const options = enumOptions(unwrapped);
+    const choices = enumOptions(unwrapped)?.filter(choice => !options.excludeChoices?.[name]?.includes(choice));
     const sensitive = isSensitiveCredentialField(name);
-    const inputKind: CredentialInputKind = options
+    const inputKind: CredentialInputKind = choices
       ? 'choice'
       : sensitive && /(credentials|private.*key)/i.test(name)
         ? 'multilineSecret'
@@ -173,7 +173,7 @@ export function credentialFieldsFromSchema(
       required: !field.safeParse(undefined).success,
       sensitive,
       inputKind,
-      ...(options ? { options } : {}),
+      ...(choices ? { options: choices } : {}),
       ...(description ? { description } : {}),
     };
   });

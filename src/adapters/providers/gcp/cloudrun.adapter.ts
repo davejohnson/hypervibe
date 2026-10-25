@@ -6872,7 +6872,8 @@ providerRegistry.register({
     setupHelpUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
     credentials: {
       automationAuthentication: gcpGithubRecoveryAuthentication,
-      agentManagedKeys: ['runtimeServiceAccountEmail'],
+      agentManagedKeys: ['runtimeServiceAccountEmail', 'workloadIdentity'],
+      agentManagedChoices: { authMode: ['github-workload-identity'] },
     },
     maturity: {
       lifecycle: {

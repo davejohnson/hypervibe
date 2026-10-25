@@ -159,6 +159,8 @@ export interface ProviderMetadata {
     hostedMonitoring?: { credentialKind: string; credentialKey: string; scope: 'project' };
     /** Credential values supplied by an opinionated Hypervibe workflow, not user-facing forms. */
     agentManagedKeys?: string[];
+    /** Enum choices established by a reviewed workflow, excluded from manual forms. */
+    agentManagedChoices?: Record<string, string[]>;
     /** The adapter can authenticate through the provider's native local CLI/default chain. */
     supportsNativeCliAuth?: boolean;
     /** Reject local or expiring sessions before unattended CI/backup automation. */
@@ -408,6 +410,7 @@ export class ProviderRegistry {
   private assertCredentialMetadata(provider: RegisteredProvider): void {
     const inputs = provider.metadata.credentials?.localEnvInputs ?? [];
     const agentManagedKeys = provider.metadata.credentials?.agentManagedKeys ?? [];
+    const managedChoices = provider.metadata.credentials?.agentManagedChoices ?? {};
     const schemaKeys = inputs.length > 0 || agentManagedKeys.length > 0
       ? credentialSchemaKeys(provider.metadata.credentialsSchema)
       : null;
@@ -420,6 +423,17 @@ export class ProviderRegistry {
       || agentManagedKeys.some((key) => !schemaKeys?.has(key))
     ) {
       throw new Error(`Provider "${provider.metadata.name}" has invalid agent-managed credential keys.`);
+    }
+    const object = unwrapCredentialSchema(provider.metadata.credentialsSchema);
+    for (const [key, choices] of Object.entries(managedChoices)) {
+      const field = object instanceof z.ZodObject ? object.shape[key] : undefined;
+      const enumeration = field ? unwrapCredentialSchema(field) : undefined;
+      if (!(enumeration instanceof z.ZodEnum) || !choices.length
+        || new Set(choices).size !== choices.length || choices.some(choice => !enumeration.options.includes(choice))
+        || choices.length === enumeration.options.length || agentManagedKeys.includes(key)
+        || choices.includes(field.safeParse(undefined).data)) {
+        throw new Error(`Provider "${provider.metadata.name}" has invalid agent-managed credential choices.`);
+      }
     }
     const credentialRoleOwners = new Map<string, string>();
     for (const input of inputs) {

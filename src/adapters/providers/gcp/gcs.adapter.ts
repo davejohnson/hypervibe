@@ -730,7 +730,8 @@ providerRegistry.register({
     setupHelpUrl: 'https://cloud.google.com/iam/docs/keys-create-delete',
     credentials: {
       automationAuthentication: gcpGithubRecoveryAuthentication,
-      agentManagedKeys: ['runtimeServiceAccountEmail'],
+      agentManagedKeys: ['runtimeServiceAccountEmail', 'projectId', 'workloadIdentity'],
+      agentManagedChoices: { authMode: ['github-workload-identity'] },
       automationSecretKeys: { GCP_SERVICE_ACCOUNT_JSON: 'credentials' },
       defaultScalarKey: 'credentials',
       supportsNativeCliAuth: true,

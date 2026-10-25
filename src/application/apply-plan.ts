@@ -390,6 +390,7 @@ function requiredCredentialKeys(block: ConnectionBlock): string[] {
   return metadata
     ? credentialFieldsFromSchema(metadata.credentialsSchema, {
       exclude: metadata.credentials?.agentManagedKeys,
+      excludeChoices: metadata.credentials?.agentManagedChoices,
     })
       ?.filter((field) => field.required)
       .map((field) => field.name) ?? []

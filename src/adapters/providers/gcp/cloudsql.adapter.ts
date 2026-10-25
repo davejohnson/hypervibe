@@ -1966,6 +1966,8 @@ providerRegistry.register({
     setupHelpUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
     credentials: {
       automationAuthentication: gcpGithubRecoveryAuthentication,
+      agentManagedKeys: ['workloadIdentity'],
+      agentManagedChoices: { authMode: ['github-workload-identity'] },
       automationSecretKeys: { GCP_SERVICE_ACCOUNT_JSON: 'credentials', GCP_PROJECT_ID: 'projectId' },
       canUseForAutomation: credentials => {
         if (credentials.authMode === 'github-workload-identity') return CloudSqlCredentialsSchema.safeParse(credentials).success;
