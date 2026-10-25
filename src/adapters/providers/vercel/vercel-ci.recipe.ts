@@ -1,3 +1,4 @@
+import { vercelCredentialDeploymentMarkers } from './vercel-credential-runtime.js';
 import type { BranchDeployTarget, PortableCiDeployRecipe } from '../../../domain/ports/ci-deploy.port.js';
 import { parseVercelServiceBinding } from './vercel.binding.js';
 
@@ -26,6 +27,7 @@ if (!Array.isArray(projectIds) || projectIds.length === 0 || projectIds.some((id
   throw new Error('VERCEL_PROJECT_IDS_JSON must contain bound Vercel project IDs');
 }
 projectIds = [...new Set(projectIds)];
+const credentialMarkers = (${vercelCredentialDeploymentMarkers.toString()})(JSON.parse(process.env.HYPERVIBE_CREDENTIAL_OPERATIONS || '{}'), process.env.VERCEL_SCOPE_BINDING.trim(), projectIds, value => createHash('sha256').update(value).digest('hex'));
 const delay = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 function url(path, query = {}) {
   const value = new URL(path, 'https://api.vercel.com');
@@ -82,11 +84,44 @@ for (const [sha, content] of contents) {
   if (!response.ok) throw new Error('Vercel file upload failed with HTTP ' + response.status);
 }
 async function findExact(projectId) {
-  const listed = await request('GET', '/v7/deployments', { query: { projectId, target: 'production', limit: 100 } });
-  const match = (listed?.deployments || []).filter((candidate) => candidate?.projectId === projectId && candidate?.target === 'production' && candidate?.meta?.hypervibeGitSha === deploySha && candidate?.meta?.hypervibeRepository === process.env.HYPERVIBE_REPOSITORY).sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))[0];
+  const matches = new Map(); let until; const cursors = new Set();
+  for (let page = 0; ; page++) {
+    if (page >= 100) throw new Error('Complete Vercel deployment reconciliation exceeded its page limit');
+    const listed = await request('GET', '/v7/deployments', { query: { projectId, target: 'production', limit: 100, ...(until !== undefined ? { until } : {}) } });
+    if (!Array.isArray(listed?.deployments) || !listed.pagination || typeof listed.pagination !== 'object') throw new Error('Vercel deployment reconciliation returned an incomplete response');
+    for (const candidate of listed.deployments) {
+      if (candidate?.projectId !== projectId || candidate?.target !== 'production' || candidate?.meta?.hypervibeGitSha !== deploySha || candidate?.meta?.hypervibeRepository !== process.env.HYPERVIBE_REPOSITORY
+        || credentialMarkers[projectId] && candidate?.meta?.hypervibeCredentialOperation !== credentialMarkers[projectId].identity) continue;
+      const id = candidate.uid || candidate.id;
+      if (typeof id !== 'string' || !id.trim()) throw new Error('Vercel deployment reconciliation returned no durable identity');
+      matches.set(id, candidate);
+    }
+    const next = listed.pagination.next;
+    if (next === undefined || next === null) break;
+    if (!Number.isSafeInteger(next) || next < 0 || cursors.has(next) || until !== undefined && next >= until) throw new Error('Vercel deployment reconciliation pagination is invalid');
+    cursors.add(next); until = next;
+  }
+  if (credentialMarkers[projectId]) {
+    const viable = [];
+    for (const id of matches.keys()) {
+      const observed = await request('GET', '/v13/deployments/' + encodeURIComponent(id));
+      if ((observed?.id || observed?.uid) !== id
+        || observed?.projectId !== projectId || observed?.target !== 'production'
+        || observed?.meta?.hypervibeGitSha !== deploySha || observed?.meta?.hypervibeRepository !== process.env.HYPERVIBE_REPOSITORY
+        || observed?.meta?.hypervibeCredentialOperation !== credentialMarkers[projectId].identity) throw new Error('Vercel credential deployment retry provenance changed');
+      // Only independently verified terminal failures permit a new attempt.
+      if (['ERROR', 'CANCELED'].includes(observed.readyState)) continue;
+      if (!['READY', 'BUILDING', 'INITIALIZING', 'QUEUED'].includes(observed.readyState)) throw new Error('Vercel credential deployment retry is blocked or its state is unknown');
+      viable.push(observed);
+    }
+    if (viable.length > 1) throw new Error('Multiple Vercel deployments claim the same accepted credential operation; reconciliation is ambiguous');
+    return viable[0] || null;
+  }
+  const match = [...matches.values()].sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))[0];
   const id = match?.uid || match?.id;
   return id ? request('GET', '/v13/deployments/' + encodeURIComponent(id)) : null;
 }
+
 const deployments = [];
 for (const projectId of projectIds) {
   const project = await request('GET', '/v9/projects/' + encodeURIComponent(projectId));
@@ -94,12 +129,12 @@ for (const projectId of projectIds) {
   let deployment = await findExact(projectId);
   if (!deployment) {
     try {
-      deployment = await request('POST', '/v13/deployments', { retry: false, body: {
+      deployment = await request('POST', '/v13/deployments', { retry: false, ...(credentialMarkers[projectId] ? { query: { forceNew: 1 } } : {}), body: {
         name: project.name, project: project.id, files, target: 'production',
-        meta: { hypervibeGitSha: deploySha, hypervibeRepository: process.env.HYPERVIBE_REPOSITORY },
+        meta: { hypervibeGitSha: deploySha, hypervibeRepository: process.env.HYPERVIBE_REPOSITORY, ...(credentialMarkers[projectId] ? { hypervibeCredentialOperation: credentialMarkers[projectId].identity } : {}) },
       }});
     } catch (error) {
-      if (![429, 500, 502, 503, 504].includes(error?.status)) throw error;
+      if (error?.status !== undefined && ![429, 500, 502, 503, 504].includes(error.status)) throw error;
       for (let attempt = 0; attempt < 10 && !deployment; attempt++) { await delay(2000); deployment = await findExact(projectId); }
       if (!deployment) throw error;
     }
@@ -108,14 +143,14 @@ for (const projectId of projectIds) {
   if (!id) throw new Error('Vercel deployment returned no durable id');
   let observed = deployment;
   for (let attempt = 0; attempt < 180; attempt++) {
-    if (observed.projectId !== projectId || observed.target !== 'production' || observed.meta?.hypervibeGitSha !== deploySha || observed.meta?.hypervibeRepository !== process.env.HYPERVIBE_REPOSITORY) throw new Error('Vercel deployment provenance changed');
+    if (observed.projectId !== projectId || observed.target !== 'production' || observed.meta?.hypervibeGitSha !== deploySha || observed.meta?.hypervibeRepository !== process.env.HYPERVIBE_REPOSITORY || credentialMarkers[projectId] && observed.meta?.hypervibeCredentialOperation !== credentialMarkers[projectId].identity) throw new Error('Vercel deployment provenance changed');
     if (observed.readyState === 'READY') break;
     if (['BLOCKED', 'CANCELED', 'ERROR'].includes(observed.readyState)) throw new Error('Vercel deployment entered ' + observed.readyState);
     if (attempt === 179) throw new Error('Vercel deployment did not reach READY');
     await delay(2000);
     observed = await request('GET', '/v13/deployments/' + encodeURIComponent(id));
   }
-  deployments.push({ projectId, deploymentId: id, url: observed.url ? 'https://' + observed.url : null });
+  deployments.push({ projectId, serviceId: process.env.VERCEL_SCOPE_BINDING.trim() + ':' + projectId, deploymentId: id, ...(credentialMarkers[projectId]?.configurationVersion !== undefined ? { configurationVersion: credentialMarkers[projectId].configurationVersion } : {}), url: observed.url ? 'https://' + observed.url : null });
 }
 await writeFile('.hypervibe-release.json', JSON.stringify({ version: 1, provider: 'vercel', repository: process.env.HYPERVIBE_REPOSITORY, environment: process.env.HYPERVIBE_ENVIRONMENT, sha: deploySha, programFingerprint: process.env.HYPERVIBE_PROGRAM_FINGERPRINT, deployments }) + '\\n', { mode: 0o600 });
 `;

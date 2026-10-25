@@ -41,6 +41,7 @@ const COMMAND_PRESENTATION = {
   hv_deploy: { label: 'DEPLOY' },
   hv_rollback: { label: 'ROLLBACK' },
   hv_inspect: { label: 'INSPECT' },
+  hv_db_verify_auth: { label: 'VERIFY DATABASE AUTHENTICATION' },
   hv_import: { label: 'IMPORT' },
   hv_destroy: { label: 'DESTROY' },
   hv_logs: { label: 'LOGS' },
@@ -382,6 +383,15 @@ function applyPresentation(data: DataRecord): CommandPresentation {
 }
 
 function healthPresentation(data: DataRecord): CommandPresentation {
+  if (typeof data.role === 'string' && ['verified', 'failed', 'unknown'].includes(String(data.state))) {
+    const verified = data.state === 'verified'; const failed = data.state === 'failed';
+    return { tone: verified ? 'success' : failed ? 'danger' : 'warning', icon: verified ? '✅' : failed ? '❌' : '⚠️',
+      title: `APPLICATION OPERATION ${verified ? 'VERIFIED' : failed ? 'FAILED' : 'UNVERIFIED'}`,
+      context: [data.role, compactId(data.operationId) ? `rotation ${compactId(data.operationId)}` : undefined].filter(Boolean).join(' · '),
+      summary: stringValue(data.reason),
+      sections: Array.isArray(data.checks) && data.checks.length ? [{ title: '🧾  OPERATION RECEIPTS', lines: formatCommandDataLines({ checks: data.checks }) }] : [],
+    };
+  }
   const check = record(data.check);
   const maintenance = record(data.maintenance);
   const deploymentHealth = record(data.deploymentHealth);
@@ -768,6 +778,7 @@ function inspectionPresentation(data: DataRecord): CommandPresentation {
   const presentation = commandPresentation('hv_inspect', data);
   const databases = arrayValue(record(data.observed)?.databases);
   const lines: string[] = [];
+  if (data.databaseAliasCoverage === 'unknown') lines.push('Declared database alias coverage: unknown; desired state was unavailable.');
   const comparisonLabel = (value: unknown): string => {
     const comparison = record(value);
     if (comparison?.result === 'match' || comparison?.result === 'mismatch') return comparison.result;
@@ -780,6 +791,7 @@ function inspectionPresentation(data: DataRecord): CommandPresentation {
     const alignment = record(item?.credentialAlignment);
     if (!alignment) continue;
     lines.push(`${stringValue(item?.name) ?? stringValue(item?.externalId) ?? 'Database'}: configured-variable-values; authentication unverified`);
+    lines.push('  Raw references, deployed configuration, and application operation: unchecked.');
     const comparisons = arrayValue(record(alignment.issuer)?.comparisons);
     for (const value of comparisons.slice(0, 25)) {
       const comparison = record(value);

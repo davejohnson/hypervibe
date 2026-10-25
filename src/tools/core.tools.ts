@@ -34,6 +34,7 @@ import { secretContainerActionMetadataSchema } from '../domain/ports/secret-dest
 import { deriveHypervibeSecretValues } from '../domain/services/hypervibe-secret-value.js';
 import { withReceiptValidatedManagedSecretBindings } from '../domain/services/managed-secret-binding-receipts.js';
 import { runtimeRolloutRequirements } from '../domain/services/runtime-rollout.service.js';
+import { databaseConsumerReadiness, databaseConsumerRolloutRequirements, databaseConsumersUnknown } from '../domain/services/database-consumer-readiness.service.js';
 import { planManagedCiDeploy } from '../domain/services/managed-ci.service.js';
 import { githubActionsCanonicalEnvironment, resolveDevOpsSelection } from '../domain/spec/devops-selection.js';
 import { devOpsProviderRegistry } from '../domain/registry/devops.registry.js';
@@ -760,18 +761,20 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_plan',
-    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. scope="database-credential-aliases" repairs declared database password references while preserving the canonical password and connection targets, without SQL changes or deployment. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Slots with secretDestinations use direct hosted collection or generation and immutable native version references; their values never enter a plan. Legacy Hypervibe-owned slots are generated inside the encrypted plan boundary; legacy delegated slots accept only safe secretRefs. Optional services restricts a full plan to selected services.',
+    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. scope="credentials" reviews value-preserving adoption or one replacement for a declared credential role across its exact aliases and consumers; use credential and intent. scope="database-credential-aliases" repairs declared database password references while preserving the canonical password and connection targets, without SQL changes or deployment. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Slots with secretDestinations use direct hosted collection or generation and immutable native version references; their values never enter a plan. Legacy Hypervibe-owned slots are generated inside the encrypted plan boundary; legacy delegated slots accept only safe secretRefs. Optional services restricts a full plan to selected services.',
     {
       project: projectField,
       env: envField,
-      scope: z.enum(['full', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'secret-destinations']).optional().describe('Default full. secret-destinations prepares reviewed missing empty native secret containers without values, IAM or workload deployment. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
+      credential: z.string().optional().describe('Declared credential role to review across all aliases and environments.'),
+      intent: z.enum(['adopt', 'rotate']).optional().describe('Adopt preserves existing values; rotate reviews one frozen replacement. Requires scope=credentials.'),
+      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'secret-destinations']).optional().describe('Default full. secret-destinations prepares reviewed missing empty native secret containers without values, IAM or workload deployment. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
       envVars: z.record(z.string(), z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
       includeEnvFile: z.boolean().optional().describe('Set false to skip default repo .env deploy input and base-value syncing; the private .env.<env> scaffold is still prepared. Ignored for repository-only plans, which never load deploy env files.'),
       secretRefs: z.record(z.string(), z.string()).optional().describe('Chat-safe local/secret-manager references only for legacy delegated slots without secretDestinations. Values are resolved locally and encrypted into this plan. Destination-backed slots use committed immutable version pins instead; never pass raw secrets here.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, env, scope, services, envVars, envFile, includeEnvFile, secretRefs }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, scope, credential, intent, services, envVars, envFile, includeEnvFile, secretRefs }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       if (scope === 'retained-cleanup' || scope === 'secret-destinations') {
         const incompatibleInputs = [
@@ -802,7 +805,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       // its git-safety and filesystem boundary before PlanService persists an
       // executable plan, so an unsafe tracked .env cannot leave an undisclosed
       // authorization record behind.
-      const preparedLocalEnv = currentSpec && !cloudScopeOnly && !retainedArtifactOnly && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'secret-destinations'
+      const preparedLocalEnv = currentSpec && !cloudScopeOnly && !retainedArtifactOnly && scope !== 'credentials' && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'secret-destinations'
         ? ensureProjectLocalEnv({
           source: currentSpecResult?.source,
           projectName: project.name,
@@ -814,6 +817,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         : undefined;
       const result = await planService.plan(project, plannedEnvironment, {
         ...(scope ? { scope } : {}),
+        ...(credential ? { credential } : {}),
+        ...(intent ? { intent } : {}),
         ...(services !== undefined && (scope === 'secrets' || services.length > 0) ? { serviceFilter: services } : {}),
         ...(envVars !== undefined && (scope === 'secrets' || Object.keys(envVars).length > 0) ? { envVarOverrides: envVars } : {}),
         ...(envFile !== undefined && (scope === 'secrets' || envFile) ? { envFile } : {}),
@@ -845,7 +850,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         : undefined;
       let localEnv: RepoEnvFileWrite | undefined;
       try {
-        localEnv = result.scope === 'cloud-scope' || result.scope === 'operator-artifacts' || scope === 'secrets' || scope === 'secret-destinations' ? undefined : mergeLocalEnvWrites(
+        localEnv = result.scope === 'cloud-scope' || result.scope === 'operator-artifacts' || scope === 'credentials' || scope === 'secrets' || scope === 'secret-destinations' ? undefined : mergeLocalEnvWrites(
           preparedLocalEnv,
           ensureProjectLocalEnv({
             source: currentSpecResult?.source,
@@ -924,12 +929,18 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         hint = [hint, managerHint].filter(Boolean).join(' ');
         hint += hostedCredentialHint;
       } else if (pending.length === 0) {
-        hint = result.scope === 'cloud-scope'
+        hint = result.scope === 'credentials'
+          ? 'The reviewed credential configuration matches or has recorded synchronization. Write-only values, deployment, application operation and revocation still need their own evidence.'
+          : result.scope === 'cloud-scope'
           ? 'The exact empty cloud project is allocated. Billing, API enablement and hosting still require separate reviewed plans.'
           : result.scope === 'secrets'
           ? 'The selected secrets already match. This does not verify deployment or other environment settings.'
           : result.backupCoverage && !result.backupCoverage.complete
           ? 'No executable changes are available, but daily backup coverage has gaps. Review backupCoverage; unsupported protection requires an adapter implementation and unknown protection requires a verified provider observation.'
+          : result.databaseConsumers?.some(consumer => consumer.reason)
+          ? 'No configuration mutation is planned, but database consumer activation is pending or unknown. Review databaseConsumers; fresh SQL authentication and application operation remain separate checks.'
+          : result.databaseConsumers?.length
+          ? 'Provider configuration and database deployment snapshots match; nothing to apply. Fresh SQL authentication and application operation remain unchecked.'
           : 'Everything is in sync — nothing to apply.';
       } else if (softActionScopedBlocked.length > 0) {
         hint = connectionRecoveryHint(softActionScopedBlocked, {
@@ -956,6 +967,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       return commandSuccess(
         {
           planId: result.planRunId,
+          ...(result.credentialReview ? { credentialReview: result.credentialReview } : {}),
+          ...(result.databaseConsumers ? { databaseConsumers: result.databaseConsumers } : {}),
           ...(result.domainSecurity ? { domainSecurity: result.domainSecurity } : {}),
           ...(result.webhookReadiness ? { webhookReadiness: result.webhookReadiness } : {}),
           scope: result.scope,
@@ -1269,11 +1282,17 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         observed.partial
         || Object.values(observed.completeness ?? {}).includes('unknown')
       );
-      const restartRequirements = runtimeRolloutRequirements({
+      const databaseConsumers = databaseConsumerReadiness({ spec: envSpec, environment, observed });
+      const databaseRuntimeUnknown = databaseConsumersUnknown(databaseConsumers);
+      const recordedRestartRequirements = runtimeRolloutRequirements({
         environment,
         provider: envSpec.hosting.provider,
         observed,
       });
+      const restartRequirements = [...new Map([
+        ...databaseConsumerRolloutRequirements(databaseConsumers, observed?.observedAt ?? new Date().toISOString()),
+        ...recordedRestartRequirements,
+      ].map(requirement => [requirement.service, requirement])).values()].sort((a, b) => a.service.localeCompare(b.service));
       const restartRequired = restartRequirements.length > 0;
       const pendingSchedules = planScheduleActivations({ environment, environmentSpec: envSpec, observed });
       const hasConfigurationDrift = pendingSchedules.length > 0 || Boolean(apiPolicy.action || apiPolicy.error)
@@ -1347,7 +1366,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
               }),
             }
             : {}),
-          inSync: !observationIncomplete && databaseAliases?.state !== 'unknown' && !hasConfigurationDrift && !restartRequired,
+          inSync: !observationIncomplete && !databaseRuntimeUnknown && databaseAliases?.state !== 'unknown' && !hasConfigurationDrift && !restartRequired,
+          ...(databaseConsumers.length ? { databaseConsumers } : {}),
           ...(databaseAliases ? { databaseAliases } : {}),
           backupCoverage: { ...backupCoverage, complete: backupPolicy.complete,
             ...backupEvidenceSummary(backupReadiness) },
@@ -1370,7 +1390,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           })) } : {}),
           restartRequired,
           runtimeConfiguration: {
-            status: restartRequired ? 'restart_required' : 'current',
+            status: restartRequired ? 'restart_required' : databaseRuntimeUnknown ? 'unknown' : 'current',
             ...(restartRequired ? { services: restartRequirements } : {}),
           },
           runtimeHealth: runtimeHealthSummary(observed),
@@ -1439,9 +1459,11 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
                   : 'Run hv_plan to get an executable plan for this drift.'
                 : restartRequired
                   ? deployStrategy === 'branch' && deployTrigger === 'ci'
-                    ? `Runtime configuration is attached, but ${restartRequirements.map((entry) => entry.service).join(', ')} still ${restartRequirements.length === 1 ? 'runs' : 'run'} a deployment from before the change. Trigger the managed CI deployment${stringField(ciWorkflow, 'path') ? ` (${stringField(ciWorkflow, 'path')})` : ''} with hv_ci_trigger, inspect it with hv_ci_status, then rerun hv_status. Use hv_health for HTTP services and hv_logs source="service" errorsOnly=true for workers.`
-                    : `Runtime configuration is attached, but ${restartRequirements.map((entry) => entry.service).join(', ')} still ${restartRequirements.length === 1 ? 'runs' : 'run'} a deployment from before the change. Complete a deployment through the configured release path, then rerun hv_status.`
-                : 'Configuration is in sync, but runtime health is unverified. Use hv_health for HTTP services and hv_logs source="service" errorsOnly=true for workers.',
+                    ? `Runtime configuration activation or retirement remains pending for ${restartRequirements.map((entry) => entry.service).join(', ')}. Review each reason and verify intended database credentials before authorizing a release. Use hv_ci_trigger for the managed CI deployment${stringField(ciWorkflow, 'path') ? ` (${stringField(ciWorkflow, 'path')})` : ''}, inspect it with hv_ci_status, then rerun hv_status. Use hv_health for HTTP services and hv_logs source="service" errorsOnly=true for workers.`
+                    : `Runtime configuration activation or retirement remains pending for ${restartRequirements.map((entry) => entry.service).join(', ')}. Review each reason and verify intended database credentials before authorizing a release through the configured path, then rerun hv_status.`
+                : databaseRuntimeUnknown
+                  ? 'Database consumer activation or retirement evidence is unsupported or incomplete. Review databaseConsumers; configuration, fresh SQL authentication and application operation remain separate checks.'
+                  : 'Configuration is in sync, but runtime health is unverified. Use hv_health for HTTP services and hv_logs source="service" errorsOnly=true for workers.',
           next: blocked.length > 0
             ? ['hv_connections']
             : !hasConfigurationDrift && restartRequired && deployStrategy === 'branch' && deployTrigger === 'ci'
@@ -1510,8 +1532,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       }
 
       const { result, envName } = outcome;
-      const secretOnly = asRecord(ctx.repos.runs.findById(planId)?.plan)?.scope === 'secrets';
-      const cloudScopeOnly = asRecord(ctx.repos.runs.findById(planId)?.plan)?.scope === 'cloud-scope';
+      const appliedScope = asRecord(ctx.repos.runs.findById(planId)?.plan)?.scope;
+      const credentialPlan = appliedScope === 'credentials';
+      const secretOnly = appliedScope === 'secrets' || credentialPlan;
+      const cloudScopeOnly = appliedScope === 'cloud-scope';
       const skipped = result.receipts.filter((r) => r.status === 'skipped_requires_confirm');
       const pending = result.receipts.filter((r) => r.status === 'pending');
       const blockedReceipts = result.receipts.filter((r) => r.status === 'blocked');
@@ -1540,7 +1564,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           ...(result.error ? { error: result.error } : {}),
         },
         {
-          hint: skipped.length > 0
+          hint: credentialPlan && !result.success
+            ? `Inspect these credential receipts and resume the same hv_apply planId="${planId}". Retain the frozen replacement; uncertain writes require the explicit retry confirmation identified in the receipt.`
+            : skipped.length > 0
             ? `Skipped confirm-gated actions: ${skipped.map((r) => r.actionId).join(', ')}. Re-run hv_plan, then hv_apply with confirmActions to execute them.`
             : blockedReceipts.length > 0
               ? `Apply is blocked by actions that need user/provider intervention: ${blockedReceipts.map((r) => r.actionId).join(', ')}. Inspect receipts, complete the required action, then re-run hv_plan and hv_apply.`
@@ -1554,7 +1580,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
                 : 'Apply complete. Check hv_status to verify convergence.'
               : 'Apply failed; compensations ran where registered. Inspect receipts and re-run hv_plan.',
           warnings: outcome.actionScopedWarnings,
-          next: [result.success && secretOnly ? 'hv_ci_status' : result.success || pending.length > 0 ? 'hv_status' : 'hv_plan'],
+          next: [credentialPlan && !result.success ? 'hv_apply' : result.success && secretOnly ? 'hv_ci_status' : result.success || pending.length > 0 ? 'hv_status' : 'hv_plan'],
         }
       );
     })

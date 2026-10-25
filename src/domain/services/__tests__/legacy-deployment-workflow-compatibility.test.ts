@@ -12,30 +12,30 @@ import { brokerTarget } from './cloud-deployment-ci.fixture.js';
 const base: BranchDeployTarget = { environmentName: 'production', kind: 'production', branch: 'main',
   autoDeployOnPush: false, serviceNames: ['web'], providerServiceIds: ['web'] };
 
-// Exact serialized emitter results produced independently from committed 7fcb852
+// Exact serialized emitter results produced independently from committed main 3bfe9b98d5d262741de01ef4d6cb8e0c5a0703a1
 // under the normal Vitest transform (the emitters embed helper function source),
-// before the new broker mode. This pins legacy bytes, including YAML whitespace;
+// including its credential rollout receipts. This pins legacy bytes, including YAML whitespace;
 // it is compatibility evidence, not a claim of live provider support.
 describe('legacy deployment workflow compatibility', () => {
   it.each([
     ['ecs', buildEcsExpressGitHubActionsSteps, { ...base,
       providerProjectId: 'arn:aws:ecs:us-west-2:123456789012:cluster/example',
       providerServiceIds: ['arn:aws:ecs:us-west-2:123456789012:service/example/web'],
-    }, 'fa9c6196bed9b6b8bb00609bb660ce7d4d8b949c638dfdcc884a3a71803337eb'],
+    }, '599988816e1acd6ebc0d2665203063fc8944801c898c0515daf17f0f89dfa533'],
     ['cloudrun', buildCloudRunGitHubActionsSteps, { ...base, providerRegion: 'us-west1',
       providerScope: { projectId: 'test-project', region: 'us-west1' },
-    }, 'b797a111b2be98d6b5b728bb3a4e8819dff96c29d5c500d2c21d4daec9dea715'],
+    }, '1e24d640bcd2bb21b2aec5a772b2b692ea66d2f2e7cbbe5e8c723c2c9800b989'],
     ['azure-container-apps', buildAzureContainerAppsGitHubActionsSteps, { ...base,
       providerProjectId: '/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/example',
       providerServiceIds: ['/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/example/providers/Microsoft.App/containerApps/web'],
-    }, '7b4861010e5f1e4fc774102c1ee44198b0eeba06ea00a7c20a78c1f39a8d3048'],
+    }, '9df69efa984bff3272df92bff02911fdd6f11ae94f06dc60f98ab93e2259f3e1'],
   ] as const)('preserves %s legacy emitter bytes', (_provider, render, target, expected) => {
     expect(createHash('sha256').update(JSON.stringify(render({ ...target, providerServiceIds: [...target.providerServiceIds] }))).digest('hex')).toBe(expected);
   });
 
   it('preserves existing provider revisions while the explicit new connection changes semantic inputs', () => {
-    expect(providerRegistry.getMetadata('ecs')?.orchestration?.ci?.rendererRevision).toBeUndefined();
-    expect(providerRegistry.getMetadata('azure-container-apps')?.orchestration?.ci?.rendererRevision).toBeUndefined();
+    expect(providerRegistry.getMetadata('ecs')?.orchestration?.ci?.rendererRevision).toBe(1);
+    expect(providerRegistry.getMetadata('azure-container-apps')?.orchestration?.ci?.rendererRevision).toBe(1);
     expect(providerRegistry.getMetadata('cloudrun')?.orchestration?.ci?.rendererRevision).toBe(2);
     const broker = brokerTarget(), legacy = { ...broker }; delete legacy.deploymentAccess;
     const hash = (target: BranchDeployTarget) => githubActionsWorkflowInputHash({ provider: 'ecs', target, migration: { includeStep: false } });

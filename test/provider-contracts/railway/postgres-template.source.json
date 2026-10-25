@@ -1,0 +1,22 @@
+{
+  "evidenceKind": "recorded-public-response",
+  "observedAt": "2026-10-25T02:30:22.660Z",
+  "sourceUrl": "https://backboard.railway.com/graphql/v2",
+  "request": {
+    "query": "query TemplateDetail($code:String!){template(code:$code){id code name serializedConfig}}",
+    "variables": {
+      "code": "postgres"
+    }
+  },
+  "authentication": "none; public template metadata only",
+  "fixtureFile": "postgres-template.recorded.json",
+  "rawResponseSha256": "e0b562f1be943abcfa8fcf3eec4c45e108512a734ff5384bbd6e7e53514c150c",
+  "fixtureSha256": "c5a6f97097464a870fa5c92483855be38e0e6417db0a3080f30228c6fefc612c",
+  "notes": [
+    "No project or credential was supplied. This captured public template metadata contains reference expressions and secret generators, not generated secret values.",
+    "The provider response is recorded. No template was deployed and no existing infrastructure was read or changed.",
+    "SerializedTemplateConfig is an opaque GraphQL scalar. The pinned CLI source establishes pass-through semantics; this fixture independently establishes the current official Postgres template nested shape.",
+    "Template metadata is mutable upstream. Tests consume this committed fixture and never fetch upstream.",
+    "The current template explicitly sets PGDATA=/var/lib/postgresql/data/pgdata despite its PostgreSQL 18 base, and declares the corresponding required mount and volumeMounts."
+  ]
+}

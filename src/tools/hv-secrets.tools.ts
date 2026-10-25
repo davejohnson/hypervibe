@@ -16,6 +16,7 @@ import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import { getProjectScopeHints } from '../domain/services/project-scope.js';
 import { envField, projectField } from './schemas.js';
 import { suppliedOptionNames } from '../application/command-options.js';
+import { credentialInventory } from '../application/credential-inventory.js';
 
 const REDACTED = '[redacted]';
 
@@ -80,10 +81,11 @@ function resolveHostingService(
 export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_secrets',
-    'Secret read modes: {} or {project} lists sources; {provider,pathPrefix?} lists one manager; {provider,path,key?,version?} checks one manager value; {include:["github"],project?,repo?} lists GitHub Actions names; {project?,env,service?,key?} inspects masked hosting variables. Hosting mode requires explicit env. Values are never returned.',
+    'Secret read modes: {project?,env,view:"inventory"} reports credential sources, exact consumers, configuration, rollout and evidence gaps without writes; {} or {project} lists sources; {provider,pathPrefix?} lists one manager; {provider,path,key?,version?} checks one manager value; {include:["github"],project?,repo?} lists GitHub Actions names; {project?,env,service?,key?} inspects masked hosting variables. Hosting mode requires explicit env; inventory also requires env. Values and private fingerprints are never returned.',
     {
       project: projectField.describe('Optional Hypervibe project name/id for validated context. Project-only still lists sources. Omit to use no project context for source/manager lists or auto-detect only in GitHub/hosting modes.'),
-      env: envField.describe('Exact environment for hosting-variable inspection. Required in hosting mode; never inferred from project alone.'),
+      view: z.literal('inventory').optional().describe('Read-only credential inventory for the exact project/environment. Cannot combine with other secret-mode selectors. Does not adopt, synchronize, validate credentials, or deploy.'),
+      env: envField.describe('Exact environment for hosting-variable inspection or credential inventory. Required in both modes; never inferred from project alone.'),
       key: z.string().min(1).optional().describe('Hosting variable name or key within a manager secret'),
       provider: z.enum(SECRET_MANAGER_PROVIDERS).optional(),
       path: z.string().min(1).optional().describe('Secret-manager path'),
@@ -93,7 +95,13 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
       include: z.array(z.literal('github')).optional().describe('Also list GitHub Actions secret names'),
       repo: z.string().min(1).optional().describe('GitHub owner/name; defaults to the project git remote'),
     },
-    wrapCommandHandler(async ({ project: projectRef, env, key, provider, path, version, service, pathPrefix, include, repo }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, view, key, provider, path, version, service, pathPrefix, include, repo }) => {
+      if (view === 'inventory') {
+        const incompatible = suppliedOptionNames({ key, provider, path, version, service, pathPrefix, include, repo });
+        if (!env || incompatible.length) throw new HvError('VALIDATION', 'Inventory requires env and accepts only project, env, and view.');
+        const project = ctx.resolveProjectOrThrow({ project: projectRef, readOnly: true });
+        return commandSuccess(await credentialInventory(ctx, project, env));
+      }
       const selectedProject = projectRef
         ? ctx.resolveProjectOrThrow({ project: projectRef })
         : null;
@@ -162,16 +170,18 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
         }
         return commandError('PROVIDER_ERROR', result.error);
       }
-      if (key && !(key in result.variables)) {
+      const presentNames = [...new Set([...Object.keys(result.variables), ...(result.unresolvedKeys ?? [])])].sort();
+      if (key && !presentNames.includes(key)) {
         return commandError('NOT_FOUND', `Variable ${key} not set in ${environment.name}.`, {
-          details: { available: Object.keys(result.variables) },
+          details: { available: presentNames },
         });
       }
-      const names = key ? [key] : Object.keys(result.variables);
+      const names = key ? [key] : presentNames;
       return commandSuccess({
         environment: environment.name,
         service: targetService.name,
         vars: Object.fromEntries(names.map((name) => [name, REDACTED])),
+        ...(result.unresolvedKeys?.some(name => names.includes(name)) ? { unresolvedKeys: result.unresolvedKeys.filter(name => names.includes(name)) } : {}),
       });
     })
   );

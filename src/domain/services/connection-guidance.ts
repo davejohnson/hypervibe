@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
+import { redactSensitiveString } from '../../utils/redact-sensitive-string.js';
 
 const CLOUDFLARE_DNS_TOKEN_PERMISSIONS = [
   { key: 'zone', type: 'read' },
@@ -47,6 +49,15 @@ export interface ConnectionGuidance {
   notes?: string[];
 }
 
+/** Non-secret context only; repository identity is a label, not an access grant. */
+export interface ConnectionGuidanceContext {
+  scope?: string;
+  project?: string;
+  repositoryUrl?: string;
+  /** Provider-native non-secret account identity, when independently known. */
+  accountId?: string;
+}
+
 export interface ConnectionSetupDetails {
   provider: string;
   project?: string;
@@ -76,14 +87,13 @@ export interface CredentialFieldDescriptor {
   description?: string;
 }
 
-export function unwrapCredentialSchema(schema: z.ZodType): z.ZodType {
+export function unwrapCredentialSchema(schema: z.core.$ZodType): z.core.$ZodType {
   let current = schema;
   while (true) {
     if (current instanceof z.ZodPipe) {
       // Preprocessing feeds a transform into the declared input schema; a
       // post-parse transform instead leaves that schema on the input side.
       const inner = current.in instanceof z.ZodTransform ? current.out : current.in;
-      if (!(inner instanceof z.ZodType)) return current;
       current = inner;
       continue;
     }
@@ -93,9 +103,9 @@ export function unwrapCredentialSchema(schema: z.ZodType): z.ZodType {
       || current instanceof z.ZodDefault
       || current instanceof z.ZodPrefault
       || current instanceof z.ZodCatch
+      || current instanceof z.ZodReadonly
     ) {
       const inner = current.unwrap();
-      if (!(inner instanceof z.ZodType)) return current;
       current = inner;
       continue;
     }
@@ -130,7 +140,7 @@ function isSensitiveCredentialField(name: string): boolean {
   return /(token|key|secret|password|credential|private|connection(?:url|string))/i.test(name);
 }
 
-function enumOptions(schema: z.ZodTypeAny): string[] | undefined {
+function enumOptions(schema: z.core.$ZodType): string[] | undefined {
   if (schema instanceof z.ZodEnum) {
     const options = schema.options.filter((value): value is string => typeof value === 'string');
     return [...new Set(options)];
@@ -165,12 +175,12 @@ export function credentialFieldsFromSchema(
         : sensitive
           ? 'secret'
           : 'text';
-    const description = field.description ?? unwrapped.description;
+    const description = z.globalRegistry.get(field)?.description ?? z.globalRegistry.get(unwrapped)?.description;
 
     return {
       name,
       label: credentialFieldLabel(name),
-      required: !field.safeParse(undefined).success,
+      required: !z.safeParse(field, undefined).success,
       sensitive,
       inputKind,
       ...(choices ? { options: choices } : {}),
@@ -667,12 +677,12 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     ],
     credentialExample: 'hv_connections provider="github" scope="owner/repository" credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_TOKEN"',
     notes: [
+      'The fine-grained creation link pre-fills the token name, description, 90-day expiry, core repository permissions, and the resource owner when its exact scope is known. Review the owner and select the repositories manually; GitHub does not document a repository-selection URL parameter. For a classic PAT, select expiration manually; its description does not restrict repository access.',
       'Save the repository-management PAT as HYPERVIBE_GITHUB_TOKEN in an existing gitignored .env file, replace /absolute/path in the Connect command with that file\'s directory, and let the agent call hv_connections.',
       'Keep a read:packages-only NODE_AUTH_TOKEN separate from HYPERVIBE_GITHUB_TOKEN. When both roles are needed, map apiToken to HYPERVIBE_GITHUB_TOKEN and packageReadToken to NODE_AUTH_TOKEN.',
       'NODE_AUTH_TOKEN, HYPERVIBE_GITHUB_TOKEN, and HYPERVIBE_GITHUB_PACKAGES_TOKEN remain accepted as aliases for compatibility when one explicitly referenced value supplies the requested scalar credential.',
       'An explicitly referenced variable wins. If it is absent and multiple aliases contain different values, Hypervibe blocks instead of guessing.',
       'A read:packages-only token cannot manage repository infrastructure; use it only as packageReadToken.',
-      'The fine-grained creation link pre-fills the token name, 90-day expiry, and core repository permissions. You must still choose the resource owner and only the repositories Hypervibe should manage.',
       'Fine-grained PAT responses do not expose classic OAuth scopes. Hypervibe verifies identity and discovers missing endpoint permissions during plan/apply.',
       `A classic apiToken remains supported for compatibility and needs repo + workflow (${GITHUB_TOKEN_URLS.api}); security endpoints may also need security_events.`,
     ],
@@ -683,7 +693,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     tokenType: 'GitLab project access token for an existing project, or a personal access token with api for managed project lifecycle; Railway also needs a separate read_registry project deploy token',
     setupUrl: GITLAB_TOKEN_URLS.api,
     setupUrls: [
-      { label: 'Create pre-filled GitLab.com personal access token', url: GITLAB_TOKEN_URLS.api },
+      { label: 'Create pre-filled GitLab personal access token', url: GITLAB_TOKEN_URLS.api },
       { label: 'GitLab personal access token guide', url: GITLAB_TOKEN_URLS.personalTokenDocs },
       { label: 'GitLab project access token guide', url: GITLAB_TOKEN_URLS.projectTokenDocs },
       { label: 'GitLab deploy token guide', url: GITLAB_TOKEN_URLS.deployTokenDocs },
@@ -696,7 +706,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     credentialExample: 'hv_connections provider="gitlab" scope="https://gitlab.com/group/project" credentialsRef="file:/absolute/path/gitlab-connection.json"',
     notes: [
       'The JSON contains apiToken, optional instanceUrl for self-managed GitLab, and registryUsername/registryReadToken for Railway. Keep it outside the repository.',
-      'Choose explicit expiries for both tokens and rotate them before expiry. A GitLab deploy token value is shown only when created.',
+      'Choose expiration manually for both tokens and rotate them before expiry; GitLab documents only name, description, and scopes for personal-token template URLs. A GitLab deploy token value is shown only when created.',
       'For self-managed GitLab, use the same officially documented personal-token path on the declared HTTPS instance and set instanceUrl; do not use the GitLab.com creation link.',
       'GitLab.com 18.1+ can use the observed hosted Linux runner. Self-managed deploys require one exact locked project runner id, one exact online linux/amd64 manager system id, a dedicated tag, protected-ref-only jobs, and the exact hypervibe-capabilities maintenance-note attestation declared in devops.ci.runner.',
       'GitLab does not expose executor type or Docker privileged mode through these project APIs. The docker-privileged capability is therefore an operator attestation, not provider proof; protect runner administration and verify its config.toml out of band.',
@@ -969,8 +979,95 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   },
 };
 
-export function getConnectionGuidance(provider: string): ConnectionGuidance | undefined {
-  return GUIDANCE[provider];
+function formLabel(value?: string): string | undefined {
+  if (!value || value.length > 2048 || /[\u0000-\u001f\u007f]/.test(value)
+    || redactSensitiveString(value) !== value) return undefined;
+  return value.trim() || undefined;
+}
+
+function limitLabel(value: string, length: number): string {
+  return Array.from(value).slice(0, length).join('');
+}
+
+function githubFormScope(options: ConnectionGuidanceContext): string | undefined {
+  const scope = formLabel(options.scope ?? parseGitHubRepoFromRemote(options.repositoryUrl) ?? undefined);
+  return scope && /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/(?:[A-Za-z0-9_.-]{1,100}|\*)$/.test(scope)
+    ? scope : undefined;
+}
+
+function gitlabFormScope(options: ConnectionGuidanceContext): URL | undefined {
+  // Only an explicit provider scope establishes a self-managed instance.
+  const scope = formLabel(options.scope);
+  if (!scope) return undefined;
+  try {
+    const url = new URL(scope);
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash
+      || !/^\/(?:[A-Za-z0-9_.-]+\/)+(?:[A-Za-z0-9_.-]+|\*)\/?$/.test(url.pathname)) return undefined;
+    return url;
+  } catch { return undefined; }
+}
+
+/** Resolve only our reviewed form templates; never add guessed provider fields. */
+export function connectionSetupUrl(
+  template: string,
+  options: ConnectionGuidanceContext = {}
+): string {
+  const project = formLabel(options.project);
+  if ((Object.values(GITHUB_TOKEN_URLS) as string[]).includes(template)) {
+    const scope = githubFormScope(options);
+    const context = scope ?? project;
+    if (!context) return template;
+    const url = new URL(template);
+    const fineGrained = template === GITHUB_TOKEN_URLS.fineGrained;
+    const purpose = fineGrained ? 'Hypervibe repository management' : url.searchParams.get('description')!;
+    url.searchParams.set('description', limitLabel(`${purpose} for ${context}`, fineGrained ? 1024 : 255));
+    if (fineGrained) {
+      url.searchParams.set('name', limitLabel(`Hypervibe repository: ${context}`, 40));
+      if (scope) url.searchParams.set('target_name', scope.split('/')[0]);
+    }
+    return url.href;
+  }
+  if (template === GITLAB_TOKEN_URLS.api) {
+    const scope = gitlabFormScope(options);
+    const context = scope ? `${scope.host}${scope.pathname.replace(/\/$/, '')}` : project;
+    if (!context) return template;
+    const url = new URL(template);
+    if (scope) url.host = scope.host;
+    url.searchParams.set('name', limitLabel(`Hypervibe GitLab: ${context}`, 128));
+    url.searchParams.set('description', limitLabel(`Hypervibe GitLab repository and CI for ${context}`, 255));
+    return url.href;
+  }
+  if ((Object.values(CLOUDFLARE_TOKEN_URLS) as string[]).includes(template)) {
+    const scope = formLabel(options.scope);
+    const context = scope && /^[A-Za-z0-9*.-]{1,253}$/.test(scope) ? scope : project;
+    const accountId = options.accountId && /^[a-f0-9]{32}$/i.test(options.accountId) ? options.accountId : undefined;
+    if (!context && !accountId) return template;
+    const url = new URL(template);
+    if (context) url.searchParams.set('name', limitLabel(`Hypervibe DNS and domains: ${context}`, 120));
+    if (accountId && template === CLOUDFLARE_TOKEN_URLS.user) url.searchParams.set('accountId', accountId);
+    return url.href;
+  }
+  return template;
+}
+
+export function getConnectionGuidance(
+  provider: string,
+  options: ConnectionGuidanceContext = {}
+): ConnectionGuidance | undefined {
+  const guidance = GUIDANCE[provider];
+  if (!guidance || !options.scope && !options.project && !options.repositoryUrl && !options.accountId) return guidance;
+  const templates = provider === 'github' ? Object.values(GITHUB_TOKEN_URLS)
+    : provider === 'gitlab' ? [GITLAB_TOKEN_URLS.api]
+      : provider === 'cloudflare' ? Object.values(CLOUDFLARE_TOKEN_URLS) : [];
+  const replacements = templates.map(template => [template, connectionSetupUrl(template, options)] as const);
+  const resolve = (text: string) => replacements.reduce((result, [template, url]) => result.replaceAll(template, url), text);
+  return {
+    ...guidance,
+    ...(guidance.setupUrl ? { setupUrl: resolve(guidance.setupUrl) } : {}),
+    ...(guidance.setupUrls ? { setupUrls: guidance.setupUrls.map(entry => ({ ...entry, url: resolve(entry.url) })) } : {}),
+    permissions: guidance.permissions.map(resolve),
+    ...(guidance.notes ? { notes: guidance.notes.map(resolve) } : {}),
+  };
 }
 
 function credentialExample(
@@ -1002,6 +1099,9 @@ function credentialExample(
       }
       if (options.scope) example = example.replace('scope="owner/repository"', `scope="${options.scope}"`);
       break;
+    case 'gitlab':
+      if (options.scope) example = example.replace('scope="https://gitlab.com/group/project"', `scope=${JSON.stringify(options.scope)}`);
+      break;
     case 'database':
       if (options.scope) example = example.replace('provider="database"', `provider="database" scope="${options.scope}"`);
       break;
@@ -1028,9 +1128,9 @@ function credentialExample(
 
 export function connectionSetupDetails(
   provider: string,
-  options: { scope?: string; project?: string; requiredCredentialKeys?: string[] } = {}
+  options: ConnectionGuidanceContext & { requiredCredentialKeys?: string[] } = {}
 ): ConnectionSetupDetails {
-  const guidance = getConnectionGuidance(provider);
+  const guidance = getConnectionGuidance(provider, options);
   if (!guidance) {
     return {
       provider,
@@ -1051,9 +1151,9 @@ export function connectionSetupDetails(
     : guidance.setupUrl ? [guidance.setupUrl] : [];
 
   const recommendedSetupUrl = provider === 'github'
-    ? options.requiredCredentialKeys?.includes('packageReadToken')
+    ? connectionSetupUrl(options.requiredCredentialKeys?.includes('packageReadToken')
       ? GITHUB_TOKEN_URLS.combined
-      : GITHUB_TOKEN_URLS.api
+      : GITHUB_TOKEN_URLS.api, options)
     : guidance.setupUrl ?? guidance.setupUrls?.[0]?.url;
 
   return {
@@ -1075,20 +1175,20 @@ export function connectionSetupDetails(
 /** Shared application-boundary payload for one unavailable provider connection. */
 export function connectionSetupOptions(
   provider: string,
-  options: { scope?: string; project?: string } = {}
+  options: ConnectionGuidanceContext = {}
 ) {
   return {
     details: { connectionSetup: connectionSetupDetails(provider, options) },
-    hint: formatConnectionGuidance(provider, { scope: options.scope }),
+    hint: formatConnectionGuidance(provider, options),
     next: ['hv_connections'],
   };
 }
 
 export function formatConnectionGuidance(
   provider: string,
-  options: { scope?: string; intro?: string } = {}
+  options: ConnectionGuidanceContext & { intro?: string } = {}
 ): string {
-  const guidance = getConnectionGuidance(provider);
+  const guidance = getConnectionGuidance(provider, options);
   const scopeText = options.scope ? ` for ${options.scope}` : '';
   if (!guidance) {
     return [
@@ -1105,7 +1205,7 @@ export function formatConnectionGuidance(
       : guidance.setupUrl ? `Create or review it here: ${guidance.setupUrl}.` : undefined,
     `Required permissions: ${guidance.permissions.join(' ')}`,
     guidance.notes?.length ? `Notes: ${guidance.notes.join(' ')}` : undefined,
-    `Connect with: ${credentialExample(guidance, { scope: options.scope })}.`,
+    `Connect with: ${credentialExample(guidance, { scope: options.scope, project: options.project })}.`,
   ].filter(Boolean);
   return parts.join(' ');
 }

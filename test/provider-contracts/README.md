@@ -85,6 +85,22 @@ fell through to ordinary deployment planning, discovery was absent, confirmation
 review omitted destination identities, and pre-create checks accepted changed
 local scope/source. The corrected tests run in normal `npm test`; no live
 provider call or credential value is involved.
+The [database credential rotation review](../../docs/database-credential-rotation.md)
+covers all eight registered PostgreSQL providers. Normal `npm test` checks port
+coverage, native REST and AWS Query serialization, PostgreSQL wire authentication,
+generated-password recovery and Railway's pinned issuer/alias behavior. Password
+updates, fresh authentication, runtime activation and application health remain
+separate evidence. These offline checks do not claim a live credential rotation.
+
+The [database provisioning review](../../docs/database-provisioning-evidence.md)
+and `database-provisioning-provider-matrix.json` cover every registered database
+provider, including hosting-backed databases. The normal acceptance test checks
+registry completeness and runs six real REST adapters through serialized native
+database-create rejection, requiring failure without a generic hosting fallback.
+Railway's separate pinned GraphQL/public-template fixtures establish database
+template configuration and volume requirements; RDS retains its existing
+SDK-command lifecycle coverage. These checks do not certify live persistence,
+backup points or restore success.
 
 `src/application/__tests__/seed-registry-scope.api-contract.test.ts` exercises
 database seed dispatch through real encrypted connection selection and Railway

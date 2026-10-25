@@ -348,3 +348,15 @@ workflow and desired required-check configuration include that path; repository
 files do not establish live branch-protection enforcement. This is instruction
 delivery evidence, not proof of browser authorization, native installation or
 end-to-end cloud compatibility. The existing live walkthrough gates remain open.
+
+## Current-main integration evidence
+
+Integrating the client-specific MCP instruction summaries challenged the assumption
+that full startup guidance covered every client. The user contract requires new
+AWS, Azure and GCP customers to start browser installation without local credentials.
+The real MCP initialization regression failed for all four supported Claude version
+cases: the shorter guidance omitted Connect Cloud, and the longer summary still
+recommended legacy GCP key creation. Both summaries now preserve the browser path
+and their existing character limits; packaged skill guidance agrees. The normal
+server-tool contract checks enforce that boundary. This is instruction-delivery
+evidence, not proof that a coding model follows it or a live installation succeeds.

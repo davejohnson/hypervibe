@@ -22,6 +22,7 @@ import { registerHvCloudConnectionsTools } from '../tools/hv-cloud-connections.t
 import { registerHvCloudSecretsTools } from '../tools/hv-cloud-secrets.tools.js';
 import { registerCloudRequestCommands } from './cloud-requests.js';
 
+/** Commands use the classic public schema API for CLI parsing and guidance. */
 export type CommandInputShape = Record<string, z.ZodType>;
 
 export type CommandAccess = 'read' | 'write';
@@ -91,6 +92,7 @@ const READ_ONLY_COMMANDS = new Set([
   'hv_inspect',
   'hv_logs',
   'hv_health',
+  'hv_db_verify_auth',
   'hv_ci_status',
   'hv_appstore_status',
   'hv_runs',

@@ -32,8 +32,8 @@ export function deriveHypervibeSecretValue(
   const material = deriveMaterial(
     RANDOM_SECRET_DOMAIN,
     projectName,
-    environmentName,
-    key,
+    spec.credential ? "credential-role" : environmentName,
+    spec.credential?.role ?? key,
     spec.generation
   );
   try {

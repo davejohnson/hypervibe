@@ -102,8 +102,20 @@ function projectSupabaseDatabaseRuntime(
   };
 }
 
+import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
+
 export class SupabaseAdapter implements IDatabaseAdapter {
   readonly name = 'supabase';
+  readonly credentialLifecycle = createPostgresCredentialLifecycle(() => this, {
+    rotate: async (_component, target, replacement) => {
+      // Supabase's postgres owner password also belongs to its managed poolers.
+      // Other explicitly bound roles change their own password through SQL.
+      if (target.username !== 'postgres') return undefined;
+      if (!replacement) return { state: 'blocked' };
+      await this.request('PATCH', `/projects/${encodeURIComponent(target.externalId)}/database/password`, { password: replacement });
+      return { state: 'acknowledged' };
+    },
+  });
 
   readonly capabilities: DatabaseCapabilities = {
     supportedDatabases: ['postgres'],

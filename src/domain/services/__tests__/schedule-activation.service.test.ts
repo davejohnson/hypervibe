@@ -89,7 +89,7 @@ function setup() {
   } : realRequire(name);
   function emitEvidence(fingerprint = contract.ok ? contract.target.deploymentContractFingerprint : '') {
     new Function('require', 'process', producer.with.script)(requireFixture, { env: {
-    ...producer.env, GITHUB_REPOSITORY: 'owner/app', HYPERVIBE_RELEASE_SHA: SHA,
+    ...producer.env, HYPERVIBE_CREDENTIAL_OPERATIONS: '{}', HYPERVIBE_CREDENTIAL_DEPLOYMENTS: '[]', GITHUB_REPOSITORY: 'owner/app', HYPERVIBE_RELEASE_SHA: SHA,
     HYPERVIBE_RELEASE_IMAGE_URI: IMAGE,
     HYPERVIBE_RELEASE_DEPLOYMENT_CONTRACT_FINGERPRINT: fingerprint,
     } });

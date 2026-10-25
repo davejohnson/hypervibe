@@ -137,8 +137,9 @@ export async function planDatabaseCredentialAliases(params: { project: Project; 
       const component = currentDatabaseScopeComponent(context);
       // A legacy binding needs the existing independently verified, local-only
       // normalization first. Never fall through to unrelated full-plan actions.
-      // Explicit partial/malformed scope and pending credential work stay blocked.
-      if (component && !Object.hasOwn(component.bindings, 'providerScope')
+      // The shared repair proves every existing key before completing partial
+      // legacy scope. Malformed/conflicting identity and pending work stay blocked.
+      if (component
         && !context.components.some(entry => entry.bindings.credentialAliasRepair !== undefined || activeRotation(entry))) {
         const provider = await adapterFactory.getDatabaseAdapter(spec.database.provider, params.project, params.environmentName);
         if (!provider.success || !provider.adapter?.credentialAliases) {

@@ -1,3 +1,4 @@
+import type { ProviderEnvironmentVariablesRequest, ProviderEnvironmentVariablesResult } from '../../../domain/ports/provider-env-vars.port.js';
 import { createHash } from 'crypto';
 import { resourceName, resourceScopeSuffix } from '../../../domain/services/resource-names.js';
 import type { ComponentType } from '../../../domain/entities/component.entity.js';
@@ -100,6 +101,10 @@ export class VercelAdapter implements IProviderAdapter {
     managedTls: true,
     supportsObserve: true,
     supportsDeferredDeploy: true,
+    credentialUpdateActivation: 'deferred',
+    credentialValueEvidence: 'acknowledgement',
+    registryCredentialModel: 'build-input',
+    registryCredentialGuidance: 'Package-read credentials belong to exact Vercel build environment or managed CI inputs. Vercel container images use its native container registry; there is no reviewed external runtime registry-password copy in this deployment model.',
     supportsMaintenance: true,
   };
 
@@ -316,11 +321,34 @@ export class VercelAdapter implements IProviderAdapter {
     }
   }
 
+  async readProviderEnvironmentVariables(request: ProviderEnvironmentVariablesRequest): Promise<ProviderEnvironmentVariablesResult> {
+    try {
+      if (!this.client) throw new Error();
+      const bindings = parseHostingBindings(request.environment);
+      const serviceId = bindings.services?.[request.service.name]?.serviceId;
+      if (bindings.provider !== this.name || !serviceId) throw new Error();
+      const scope = await this.assertScopeBinding(bindings.projectId);
+      const binding = parseVercelServiceBinding(serviceId);
+      this.assertServiceScopeBinding(binding.scope.binding, scope);
+      const project = await this.client.getProject(binding.projectId);
+      if (!project || project.id !== binding.projectId) throw new Error();
+      this.assertProjectScope(project, scope);
+      const entries = (await this.client.listProjectEnvironmentVariables(project.id)).filter(entry => this.targetsProduction(entry));
+      if (entries.some(entry => typeof entry.key !== 'string') || new Set(entries.map(entry => entry.key)).size !== entries.length) throw new Error();
+      const variables: Record<string, string> = {}; const unresolvedKeys: string[] = [];
+      for (const entry of entries) {
+        if (this.variableValueIsKnown(entry) && typeof entry.value === 'string') variables[entry.key] = entry.value;
+        else unresolvedKeys.push(entry.key);
+      }
+      return { success: true, variables, ...(unresolvedKeys.length ? { unresolvedKeys: unresolvedKeys.sort() } : {}) };
+    } catch { return { success: false, error: 'Exact Vercel production configuration could not be verified.' }; }
+  }
+
   async setEnvVars(
     environment: Environment,
     service: Service,
     vars: Record<string, string>,
-    _options: DeploymentMutationOptions = {}
+    options: DeploymentMutationOptions = {}
   ): Promise<Receipt> {
     const serviceId = parseHostingBindings(environment)
       .services?.[service.name]?.serviceId;
@@ -350,7 +378,7 @@ export class VercelAdapter implements IProviderAdapter {
         };
       }
       this.assertProjectScope(project, scope);
-      await this.syncProjectEnvironmentVariables(project, service, vars);
+      await this.syncProjectEnvironmentVariables(project, service, vars, options.requireCredentialUpdate === true);
       const latest = await this.latestDeployment(project.id);
       return {
         success: true,
@@ -360,6 +388,7 @@ export class VercelAdapter implements IProviderAdapter {
           variableCount: Object.keys(this.runtimeEnvVars(vars)).length,
           deploymentDeferred: true,
           runtimeRolloutRequired: true,
+          ...(options.requireCredentialUpdate ? { credentialUpdateActivation: 'deferred', credentialValueEvidence: 'acknowledgement', configurationUpdated: true } : {}),
           rolloutBaseline: latest
             ? { state: 'present', deploymentId: latest.uid }
             : { state: 'absent' },
@@ -964,6 +993,7 @@ export class VercelAdapter implements IProviderAdapter {
         project: 'complete',
         environment: 'complete',
         services: unknownKeys.length > 0 ? 'unknown' : 'complete',
+        serviceIdentities: 'complete',
         databases: 'unknown',
         caches: 'unknown',
         storage: 'complete',
@@ -1014,10 +1044,11 @@ export class VercelAdapter implements IProviderAdapter {
     serviceBinding: string,
     project: VercelProject
   ): Promise<ObservedVercelService> {
-    const [variables, deployments, domains] = await Promise.all([
+    const [variables, deployments, domains, activeDeploymentIds] = await Promise.all([
       this.client!.listProjectEnvironmentVariables(project.id),
       this.client!.listDeployments(project.id),
       this.client!.listProjectDomains(project.id),
+      this.client!.listActiveAliasDeploymentIds(project.id).catch(() => undefined),
     ]);
     const domainConfigs = new Map<string, VercelDomainConfig>(await Promise.all(
       domains.map(async (domain) => [
@@ -1092,6 +1123,7 @@ export class VercelAdapter implements IProviderAdapter {
           ? {
               deployment: {
                 id: latest.uid,
+                ...(activeDeploymentIds ? { activeDeploymentIds, activeDeploymentCoverage: 'traffic' as const } : {}),
                 status: latest.readyState,
                 createdAt: new Date(latest.createdAt).toISOString(),
               },
@@ -1315,12 +1347,14 @@ export class VercelAdapter implements IProviderAdapter {
   private async syncProjectEnvironmentVariables(
     project: VercelProject,
     service: Service,
-    vars: Record<string, string>
+    vars: Record<string, string>,
+    selectedOnly = false
   ): Promise<void> {
     const current = await this.client!.listProjectEnvironmentVariables(
       project.id
     );
-    const desired = this.desiredVariables(service, vars);
+    const desired = this.desiredVariables(service, vars, !selectedOnly);
+    if (selectedOnly && desired.length !== Object.keys(vars).length) throw new Error('Selected credential names include reserved provider inputs.');
     const desiredKeys = new Set(desired.map((variable) => variable.key));
     for (const variable of desired) {
       const matches = this.productionVariables(current, variable.key);
@@ -1335,6 +1369,7 @@ export class VercelAdapter implements IProviderAdapter {
     }
 
     for (const key of INTERNAL_ENV_KEYS) {
+      if (selectedOnly) continue;
       if (desiredKeys.has(key)) continue;
       const matches = this.productionVariables(current, key);
       this.assertSingleVariableIdentity(key, matches);
@@ -1356,7 +1391,8 @@ export class VercelAdapter implements IProviderAdapter {
 
   private desiredVariables(
     service: Service,
-    vars: Record<string, string>
+    vars: Record<string, string>,
+    includeServiceSettings = true
   ): Array<{
     key: string;
     value: string;
@@ -1364,7 +1400,7 @@ export class VercelAdapter implements IProviderAdapter {
     target: ['production'];
     comment: string;
   }> {
-    const healthCheckPath = service.buildConfig.healthCheckPath?.trim();
+    const healthCheckPath = includeServiceSettings ? service.buildConfig.healthCheckPath?.trim() : undefined;
     const values = {
       ...this.runtimeEnvVars(vars),
       ...(healthCheckPath

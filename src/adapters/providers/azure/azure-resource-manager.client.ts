@@ -310,6 +310,7 @@ export class AzureResourceManagerClient {
     const token = await this.getAccessToken();
     const response = await fetch(url, {
       method,
+      redirect: 'error',
       headers: {
         Accept: 'application/json',
         Authorization: `Bearer ${token}`,
@@ -351,10 +352,25 @@ export class AzureResourceManagerClient {
     }
   }
 
-  private async requestAccessToken(): Promise<string> {
+  /** Exact existing Key Vault references use a data-plane token, never an ARM token. */
+  async requestKeyVault<T>(method: 'GET' | 'PUT', secretUrl: string, body?: unknown): Promise<T> {
+    const url = new URL(secretUrl);
+    if (url.protocol !== 'https:' || !/^[a-zA-Z0-9-]+\.vault\.azure\.net$/.test(url.hostname)
+      || !/^\/secrets\/[a-zA-Z0-9-]+(?:\/[a-zA-Z0-9-]+)?$/.test(url.pathname)
+      || url.username || url.password || url.search || url.hash) throw new Error('Invalid exact Azure Key Vault secret reference.');
+    url.searchParams.set('api-version', '2025-07-01');
+    const accessToken = await this.requestAccessToken('https://vault.azure.net/.default');
+    const response = await fetch(url, { method, redirect: 'error', signal: AbortSignal.timeout(15_000),
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    if (!response.ok) throw new Error(`Azure Key Vault returned HTTP ${response.status}; the selected secret remains unverified.`);
+    return await response.json() as T;
+  }
+
+  private async requestAccessToken(scope = 'https://management.azure.com/.default'): Promise<string> {
     if (this.credentials.authMode === 'federated') throw new Error('Azure transient authorization must use its bounded request.');
     if (this.credentials.authMode === 'default') {
-      const access = await this.defaultCredential!.getToken('https://management.azure.com/.default');
+      const access = await this.defaultCredential!.getToken(scope);
       if (!access?.token) throw new Error('Azure default credential chain did not return an ARM access token.');
       return access.token;
     }
@@ -362,12 +378,13 @@ export class AzureResourceManagerClient {
       client_id: this.credentials.clientId,
       client_secret: this.credentials.clientSecret,
       grant_type: 'client_credentials',
-      scope: 'https://management.azure.com//.default',
+      scope: scope === 'https://management.azure.com/.default' ? 'https://management.azure.com//.default' : scope,
     });
     const response = await fetch(
       `https://login.microsoftonline.com/${encodeURIComponent(this.credentials.tenantId)}/oauth2/v2.0/token`,
       {
         method: 'POST',
+        redirect: 'error',
         headers: {
           Accept: 'application/json',
           'Content-Type': 'application/x-www-form-urlencoded',

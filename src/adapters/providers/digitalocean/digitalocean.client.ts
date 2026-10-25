@@ -42,6 +42,7 @@ export interface DigitalOceanAppImage {
   tag?: string;
   digest?: string;
   deploy_on_push?: { enabled?: boolean };
+  registry_credentials?: string;
 }
 
 export interface DigitalOceanAppComponent {
@@ -663,6 +664,24 @@ export class DigitalOceanClient {
     return { created: true };
   }
 
+  async getDatabaseUserCredentials(clusterId: string, username: string): Promise<{ username: string; password: string }> {
+    const response = await this.request<{ user?: { name?: string; password?: string } }>(
+      'GET', `/v2/databases/${encodeURIComponent(clusterId)}/users/${encodeURIComponent(username)}`
+    );
+    if (response.user?.name !== username || !response.user.password) throw new Error('DigitalOcean did not return the exact database user credential.');
+    return { username, password: response.user.password };
+  }
+
+  async resetDatabaseUserAuthentication(clusterId: string, username: string): Promise<{ username: string; password: string }> {
+    // PostgreSQL reset_auth generates a password; supplied password fields are
+    // not supported. Never automatically retry an ambiguous response.
+    const response = await this.request<{ user?: { name?: string; password?: string } }>(
+      'POST', `/v2/databases/${encodeURIComponent(clusterId)}/users/${encodeURIComponent(username)}/reset_auth`, { body: {} }
+    );
+    if (response.user?.name !== username || !response.user.password) throw new Error('DigitalOcean returned an unknown database credential update.');
+    return { username, password: response.user.password };
+  }
+
   async destroyDatabaseCluster(
     clusterId: string
   ): Promise<{ alreadyAbsent: boolean }> {
@@ -718,6 +737,7 @@ export class DigitalOceanClient {
     }
     const response = await fetch(url.toString(), {
       method,
+      redirect: 'error',
       headers: {
         Accept: 'application/json',
         Authorization: `Bearer ${this.apiToken}`,

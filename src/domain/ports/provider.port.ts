@@ -24,6 +24,9 @@ export interface DeploymentMutationOptions {
    * supportsDeferredSecretUpdates; forbid target discovery/adoption, resource
    * creation, unrelated configuration changes and workload restarts. */
   requireDeferredSecretUpdate?: boolean;
+  /** Reviewed credential-only update of an exact bound workload. Native
+   * configuration rollout effects must be declared in the reviewed plan. */
+  requireCredentialUpdate?: boolean;
   /** Reviewed identity-only stage: create an app namespace, not its workload. */
   deferWorkload?: boolean;
   /** Creation-only admission, distinct from ordinary deferred reconfiguration.
@@ -124,6 +127,13 @@ export interface ProviderCapabilities {
   supportsDeferredDeploy?: boolean;
   /** Selected-key writes to exact bound services without creates or workload restarts. */
   supportsDeferredSecretUpdates?: boolean;
+  /** Native activation behavior of the exact selected-key credential writer. */
+  credentialUpdateActivation?: 'deferred' | 'provider-rollout';
+  /** Readback equality and write acknowledgement are distinct evidence. */
+  credentialValueEvidence?: 'readback' | 'acknowledgement';
+  /** Platforms that consume native registry identity or build inputs have no runtime password-copy destination. */
+  registryCredentialModel?: 'native-workload-identity' | 'build-input';
+  registryCredentialGuidance?: string;
   /** Enforces creation-only admission at the final provider mutation boundary. */
   supportsCreateOnlyDeploy?: boolean;
   /** Prepare an untriggered cron workload, then activate only its verified release. */
@@ -320,5 +330,5 @@ export interface IProviderAdapter {
    * Read back live state for an environment (services, config, env var
    * hashes, databases). Implemented when capabilities.supportsObserve is true.
    */
-  observe?(environment: Environment): Promise<import('./observe.port.js').ObservedState>;
+  observe?(environment: Environment, context?: import('./observe.port.js').HostingObservationContext): Promise<import('./observe.port.js').ObservedState>;
 }

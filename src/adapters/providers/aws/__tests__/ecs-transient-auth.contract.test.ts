@@ -6,6 +6,7 @@ import { observeRuntimeAccess, planRuntimeAccess } from '../../../../domain/serv
 import { awsDeploymentNames } from '../aws-cloud-deployment.js';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../../domain/entities/service.entity.js';
+import { AwsSecretsAdapter } from '../../secretmanagers/aws-secrets.adapter.js';
 
 // Reconstructed official STS Query transport. No real Google/AWS trust or cloud writes.
 // https://docs.aws.amazon.com/STS/latest/APIReference/API_GetCallerIdentity.html
@@ -72,6 +73,29 @@ function fixture(replacement = false, deployment = false) {
   return { input, handler, requests, getCredentials, environment, reference, state };
 }
 describe('ECS transient access real SDK boundary', () => {
+  it('never falls back to machine credentials for registry rotation through hosted deployment authority', async () => {
+    const f = fixture(false, true), adapter = new EcsExpressAdapter();
+    await adapter.connectTransient(f.input, { requestHandler: f.handler });
+    const cluster = f.environment.platformBindings.projectId as string, serviceId = cluster.replace(':cluster/', ':service/') + '/web';
+    const credentialReference = `arn:aws:secretsmanager:${region}:${accountId}:secret:registry-AbCdEf`;
+    f.environment.platformBindings.services = { web: { serviceId } };
+    f.state.created = { primaryContainer: { image: 'registry.example.test/app:existing', repositoryCredentials: { credentialsParameter: credentialReference } } };
+    // Observe the real adapter boundary without permitting the SDK default chain
+    // to read this developer machine. Release federation is not secret-store authority.
+    const connect = vi.spyOn(AwsSecretsAdapter.prototype, 'connect').mockRejectedValue(new Error('Machine credential fallback was attempted'));
+    try {
+      const expected = { provider: 'ecs', projectId: cluster, environmentId: cluster, serviceId, instanceId: serviceId,
+        image: 'registry.example.test/app:existing', credentialReference, registry: 'registry.example.test', activation: 'deferred' as const };
+      for (const action of ['update', 'reconcile'] as const) {
+        const result = await adapter.registryCredentialLifecycle[action]!(f.environment, 'web', expected,
+          { username: 'synthetic-user', token: 'synthetic-value' }, { operationId: 'a'.repeat(32) });
+        expect(result.success).toBe(false);
+        expect(result.data?.mutationAttempted).toBe(false);
+      }
+      expect(connect).not.toHaveBeenCalled();
+      expect(f.requests.filter(item => /^(Create|Put|Attach|Tag|Delete|Update|Register)/.test(item.operation))).toEqual([]);
+    } finally { connect.mockRestore(); await adapter.disconnect(); }
+  });
   it('does not remove an approved secret reference through the retired-variable path', async () => {
     const f = fixture(false, true), adapter = new EcsExpressAdapter(); await adapter.connectTransient(f.input, { requestHandler: f.handler });
     const service: Service = { id: 'local-service', projectId: f.environment.projectId, name: 'web', buildConfig: { workloadKind: 'web' }, envVarSpec: {}, createdAt: new Date(), updatedAt: new Date() };

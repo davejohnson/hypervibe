@@ -277,11 +277,11 @@ describe('prepared Cloud Run first application release', () => {
     const failure = await new AsyncFunction('require', 'core', 'github', 'context', 'fetch', 'process', step.with.script)(
       createRequire(import.meta.url), core, github, { repo: { owner: 'example', repo: 'app' }, sha: 'a'.repeat(40), ref: 'refs/heads/main' }, fetch, { env }).catch((error: unknown) => error);
     if (scenario === 'reverted-holding') {
-      expect(f.writes).toEqual([]); expect(failure).toBeInstanceOf(Error); return;
+      expect(f.writes).toEqual([]); expect(failure).toBeInstanceOf(Error); expect(outputs).toEqual([]); return;
     }
     if (scenario === 'operation-error' || scenario === 'terminal-error' || scenario === 'bounds-lost') {
       expect(f.writes).toHaveLength(1); expect(failure).toBeInstanceOf(Error);
-      expect(failure.message).not.toContain(echoedValue); return;
+      expect(failure.message).not.toContain(echoedValue); expect(outputs).toEqual([]); return;
     }
     expect(f.writes).toHaveLength(1);
     expect(f.writes[0]!.body).toMatchObject({ etag: 'holding-etag', template: { serviceAccount: runtime.serviceAccountEmail,
@@ -289,6 +289,8 @@ describe('prepared Cloud Run first application release', () => {
     expect(new URL(f.writes[0]!.url).searchParams.get('updateMask')).toContain('template');
     expect(failure).toBeUndefined();
     if (bounds) expect(f.writes[0]!.body.scaling).toEqual({ scalingMode: 'AUTOMATIC', minInstanceCount: 0, maxInstanceCount: 1 });
-    expect(outputs).toEqual([]);
+    expect(outputs).toEqual([['credential_deployments', JSON.stringify([{
+      serviceId: nativeServiceName, deploymentIds: [`${resource}/revisions/web-production-00002-app`],
+    }])]]);
   });
 });

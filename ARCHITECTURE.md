@@ -78,12 +78,16 @@ the operation; repositories must never replace it with `{}`/`[]` and continue
 reconciliation. Empty legacy columns may still decode to their declared empty
 shape.
 
-Local schema 12 preserves the historical encrypted provider-login session table
-and active leases. Opening a retained version checks its migration name and
-physical schema before running missing migrations; a version number alone is
-not compatibility evidence. This preservation does not authorize those local
-browser sessions for hosted Connect Cloud or implement their older login driver.
-See [saved-state compatibility](docs/connect-cloud-saved-state.md).
+Canonical local migrations 1–11 and 13 preserve recognized historical version-11
+and version-12 identities through the shared historical-schema validator. New
+profiles never invent a version-12 marker or login table. The monotonic version-13
+bridge preserves original migration rows, encrypted provider-login sessions and
+active leases, while installing or verifying the shared apply-serialization
+indexes. Exact historical schema fingerprints are checked before missing
+migrations; a version number alone is not compatibility evidence. Preservation
+does not authorize local browser sessions for hosted Connect Cloud or implement
+their older login driver. See [saved-state compatibility](docs/connect-cloud-saved-state.md)
+and [local history reconciliation](docs/local-state-migrations.md).
 
 A local project with no environment/provider decision uses the non-provider
 sentinel `unconfigured`. Project creation, adapter lookup, health/log routing,
@@ -190,12 +194,28 @@ MCP ─┘
 - MCP `structuredContent` and CLI `--json` expose the same redacted command envelope.
 - MCP resolves repository-backed project state from the client's declared file roots for each request, never from the long-running server process's launch directory. Multiple project identities, unavailable roots, and roots with unmatched repository identities fail closed instead of selecting unrelated single-project state.
 - The `hypervibe` no-argument entrypoint remains MCP-compatible. Human CLI commands use explicit arguments; `hypervibe mcp` and `hypervibe-mcp` are explicit MCP entrypoints.
-- `hypervibe install claude` is an explicit CLI-only bootstrap exception: it
-  registers this package with Claude Code through `claude mcp add` in user
-  scope. It runs before importing the infrastructure runtime, does not open
-  Hypervibe state or expose an MCP tool, and leaves config writing and existing
-  entry protection to Claude. Installing the client connection must not depend
-  on already having that connection or initialized infrastructure state.
+- `npx -y @hypervibe/hypervibe@latest install <codex|claude|opencode>` is an
+  explicit CLI-only bootstrap exception. It installs the packaged consumer
+  skill and registers a matching MCP server in user scope, before importing
+  the infrastructure runtime. It does not open Hypervibe state, start the
+  server, change tool approvals, or expose an MCP tool. `--skill-only` leaves
+  an existing companion-managed MCP connection intact. Use native client
+  registration where supported and preserving, schema-aware edits otherwise;
+  never overwrite an unrelated or modified installation. Setup must not
+  require a global Hypervibe CLI or an existing Hypervibe connection.
+- Consumer workflows live in `skills/hypervibe/`, independently of this
+  repository's development instructions. npm and native client packages ship
+  the same skill. Codex and Claude plugin manifests are generated separately
+  with their documented launcher placeholders and the package's exact version;
+  OpenCode uses its native skill and MCP configuration instead of an invented
+  shared plugin format. See [agent installation](docs/agent-installation.md).
+- MCP startup instructions adapt only to verified client constraints: Claude
+  Code uses authored summaries within its documented version-dependent limits;
+  Codex, OpenCode, and unknown clients receive the full instructions. Every
+  client retains all tools and can read the complete `hypervibe://guidance`
+  resource. A shorter startup message never reduces application capabilities.
+  Detailed contextual results remain the authoritative next-step guidance;
+  instruction delivery does not establish model compliance.
 - A future HTTP adapter may use this boundary, but remote auth, locking, state ownership, and secret custody are separate product decisions. Do not introduce an unauthenticated remote interface.
 - `@hypervibe/hypervibe/hosted` is a library boundary, not an HTTP interface. Its versioned committed-spec inspector accepts bytes only with a provider-verified repository identity, exact full revision, and matching SHA-256. The trusted host owns account authorization, code-host installation tokens, exact-revision reads, pairing, and tenancy; the inspector owns the existing project schema, repository-claim consistency, secret-shaped-content rejection, and a deterministic import receipt.
 - Committed-spec inspection never reads a checkout, opens SQLite, observes infrastructure, plans, applies, or manufactures provider endpoints. It returns only declared environments, services, provider capabilities, and HTTPS endpoints that are explicit safe domains in desired state. A missing spec repository claim remains visible as unverified; a present mismatched claim fails closed.
@@ -714,6 +734,18 @@ authentication or inspect a running container's environment: an administrative
 proxy query may use a different credential source from the application's URL.
 The diagnostic does not change passwords, variables or deployment state.
 
+Railway database operations never create public TCP proxies. An existing reachable
+endpoint may be used; an earlier operation's recorded proxy remains eligible for
+exact-identity cleanup. Without a reachable endpoint or a verified private
+connection, automation reports unsupported access instead of opening a public
+port. Explicitly authorized operators may use Railway CLI private SSH in their own
+terminal, with exact project/environment scope and the independently verified
+service name. This is a narrow diagnostic access exception, not a Hypervibe runtime
+CLI dependency or authority for key registration, SQL mutations, deployment or
+credential rotation. CLI authentication and SQL authentication remain separate
+from Hypervibe's verified connections and application-runtime evidence. See the
+[installed recovery guidance](skills/hypervibe/references/deployment-and-recovery.md#diagnose-inspect-and-adopt).
+
 Existing database aliases can opt into `database.credentialAliases.mode =
 "issuer-references"`. Its isolated `database-credential-aliases` plan scope
 authorizes only the bound database's reference repair, through an explicit
@@ -724,12 +756,14 @@ deploying. An uncertain write is recovered by readback only. Full planning
 treats unconverged aliases as a prerequisite. See the
 [provider contract](docs/database-credential-aliases.md) for coverage and limits.
 
-Start with ordinary `hv_plan`. If a legacy database lacks durable provider scope,
+Start with ordinary `hv_plan`. If a legacy database lacks complete durable provider scope,
 that plan first offers the existing, independently verified `database-bindings`
 action. Apply it, then plan again for alias repair. Neither stage carries
 deployment overrides or secret inputs; supply those again when ordinary planning
-resumes. An explicit alias-only scope requires complete bindings. Unknown,
-partial or malformed scope, unsupported capabilities and pending credential work
+resumes. Nonconflicting partial scope can be completed only from independently
+verified native identity while preserving every recorded key. An explicit
+alias-only scope requires complete bindings. Unknown, conflicting or malformed scope,
+unsupported capabilities and pending credential work
 remain blocked; they never fall through into unrelated full-plan actions.
 
 New Railway PostgreSQL bootstrap configurations keep `POSTGRES_PASSWORD` as
@@ -785,12 +819,29 @@ alias when explicitly referenced.
 Connection guidance is part of the product contract, not incidental copy. Every provider or secret-manager connection should have a `ConnectionGuidance` entry in `src/domain/services/connection-guidance.ts`, and token/permission errors should route through `formatConnectionGuidance(...)` whenever possible.
 
 Missing-connection results must be directly actionable in both MCP and CLI.
-Return the exact prefilled setup links, identify one `recommendedSetupUrl`, and
-include a project/scoped `credentialExample` using a safe local reference. The
-human renderer keeps clickable links and that command ahead of long permission
-details. Agents reproduce the links, offer to open the recommended page, tell
-the user exactly where to save the credential, and then call `hv_connections`
-themselves. Never hide those steps behind the phrase "credential flow."
+`hv_connections action="describe"` returns contextual setup links and existing
+provider metadata without resolving credentials, observing provider state, or
+writing project/connection state. It accepts only the provider and optional
+non-secret scope/project context. `repositoryContext` explicitly requests the
+current client's bounded repository context instead of an explicit project
+selector; it never falls back to an unrelated cached project. Describe and
+project-context discovery resolve committed intent read-only; opening a form
+must not adopt repository changes. Interfaces refresh guidance when the chosen
+provider/scope changes and preserve the complete returned URL instead of
+constructing their own provider-specific templates.
+
+Return exact prefilled setup links, one `recommendedSetupUrl`, and a project/scoped
+`credentialExample` using a safe local reference. Agents lead with the direct
+clickable form URL and preserve its complete query string, including the name
+and description. Pre-fill every officially supported non-secret field whose
+value is known or safely inferred, using meaningful Hypervibe labels for the
+credential role and known scope. Use documented parameters and URL-encoded
+values; never put secrets in URLs or invent parameters for unsupported fields.
+Explain remaining manual fields, review, and consent instead of replacing a
+direct link with dashboard navigation. The human renderer keeps links and that
+command ahead of permission details. Agents offer to open the recommended page,
+explain where the user can save the credential privately, and then call
+`hv_connections` themselves. Never hide those steps behind "credential flow."
 
 GCP cloud preparation uses a credential-free preview followed by explicit
 confirmation. It accepts `adminAuth: "default"` so an operator's existing
@@ -875,6 +926,38 @@ When adding or changing token guidance, include all of these details:
 Tests should fail if new provider guidance omits these basics. Update `src/domain/services/__tests__/connection-guidance.test.ts` and add provider-specific verification-error assertions for ambiguous or commonly miscreated tokens.
 
 ## Runtime Secrets
+
+Credential roles may explicitly link multiple existing secret slots using the same
+`credential` descriptor (role, purpose, source, intended identity and user evidence).
+`hv_plan scope="credentials" credential=<role> intent="adopt"|"rotate"` is an isolated,
+confirmation-gated stage of the same persisted plan/apply lifecycle. Adoption proves
+existing runtime values match and makes no provider writes. Rotation freezes one
+replacement in the existing encrypted plan, locks every affected environment, and
+records partial/uncertain progress in local-only environment bindings. Tracked
+sources cannot be overwritten by bulk dotenv or ordinary secret inputs. CI uses
+accepted frozen values for exact declared destinations. Registry-copy writes use
+an optional provider capability and preserve source/image/instance identity.
+Readback resolves uncertain runtime writes; write-only ambiguity requires explicit
+review before replay. Registered hosting capabilities distinguish deferred
+updates from native configuration rollouts and value readback from acknowledgement.
+Native database roles use confirmed authentication and issuer/consumer stages;
+endpoint-bound webhook roles preserve the exact endpoint and use the provider's
+supported same-endpoint signing-secret roll. Managed CI release evidence binds
+accepted operations to exact native deployments; traffic and instance coverage
+remain distinct. See
+[credential lifecycle](docs/credential-lifecycle.md) for schemas, provider limits,
+review, recovery, validation evidence and regression coverage.
+
+
+`hv_secrets view="inventory"` is a read-only application-layer projection of
+declared roles/references, local candidates, accepted bindings, action receipts,
+CI destinations and exact hosting observations. It does not adopt credentials or
+hydrate local state. Configuration equality, recorded synchronization, deployment
+identity, credential authentication and application operation remain distinct.
+Write-only values, missing source provenance, rotation/expiry, account identity
+and old-instance retirement remain explicitly unknown without supporting evidence.
+See [credential inventory](docs/credential-inventory.md) for the phase boundary,
+provider evidence and subsequent adoption/rotation work.
 
 `ProjectSpec.secrets` has two explicit ownership modes. Use Hypervibe ownership
 for opaque application values a human should not choose; use delegated
@@ -1198,8 +1281,14 @@ configuration write as non-secret rollout evidence.
 `hv_status` must report `restart_required` and must not report the environment
 in sync while that same deployment is still active. A later provider-observed
 successful deployment with a different exact
-identity satisfies the rollout; an absent, failed, or unobservable deployment
-does not. For CI-triggered environments, the status guidance points back to the
+identity can satisfy an ordinary rollout; an absent, failed, or unobservable
+one does not. Credential rollouts additionally require accepted selected-key
+coverage bound to the exact native or managed deployment, or a matching immutable
+configuration snapshot. Earlier active consumers keep activation pending. Traffic
+coverage and instance retirement remain distinct, and neither proves fresh SQL
+authentication or the application's operation. See
+[credential lifecycle](docs/credential-lifecycle.md) for the evidence contract.
+For CI-triggered environments, the status guidance points back to the
 managed CI trigger/status path instead of bypassing that release authority with
 a provider redeploy.
 
@@ -2029,6 +2118,41 @@ browser/UI inspection, or direct CI/provider APIs; a blocked `hv_ci_trigger` or
 `hv_ci_status` result should surface its connection/error guidance and stop the
 stage.
 
+## Database Provisioning And Persistence
+
+Every database adapter provisions the provider's database product. Railway uses
+the official `postgres` template through `templateDeployV2`, the same API path
+as Railway's database-add CLI, with its provider-owned image, persistent volume,
+variables, generators and metadata preserved. It never falls back to a generic
+PostgreSQL image service. The template must fit the one-database action scope;
+unsupported extra resources or missing storage/reference definitions block before
+creation. A complete workflow is followed by bounded service identity, exact
+environment, image, attached-volume and credential-reference readback. Uncertain
+or incomplete creation retains recovery state and cannot authorize another create.
+See the [eight-provider evidence review](docs/database-provisioning-evidence.md).
+
+Service-backed database observation carries explicit `persistence` configuration
+evidence. Railway verifies the exact instance, volume identity, mount and effective
+`PGDATA`; missing, ambiguous or unknown evidence blocks database and dependent
+changes. Persisted volume bindings and plan fingerprints prevent silently accepting
+a replacement disk. This verifies provider configuration, not database contents,
+restart durability or a successful restore. Existing databases are never replaced,
+restarted or given a new empty volume as an implicit repair.
+
+Railway runtime wiring preserves provider variable references. New template-backed
+bindings record which existing issuer URL key supplies `DIRECT_URL`, since native
+templates need not define `DATABASE_PRIVATE_URL`. Provisioning and subsequent
+runtime projection share the same reference builder. Explicit import observes and
+records that key before adopting the database. Existing bindings without it use
+the isolated `database-bindings` stage, which rechecks the exact native identity
+and variable-key evidence and merges only missing metadata. Explicit selections
+and existing legacy private aliases are preserved; unknown reads block repair.
+Issuer alias repair preserves
+composed user/host/port/database references, keeps `PGPASSWORD` linked to
+`POSTGRES_PASSWORD`, and includes existing `DIRECT_URL` definitions. Raw definitions
+and provider-rendered values are read separately; copied values alone cannot prove
+reference convergence. These repairs remain reviewed spec/plan/apply actions.
+
 ## Database Resilience
 
 Recovery source identities, selected points, operation observations and evidence
@@ -2149,10 +2273,16 @@ manifests or establish a successful restore. Compiler and helper changes must
 ship together as a reviewed workflow and pinned image update; see
 [daily backup defaults](docs/default-backup-policy.md).
 
-Legacy database bindings with absent provider scope use a separate reviewed
+Legacy database bindings with absent or valid nonconflicting partial provider scope use a separate reviewed
 `database-bindings` prerequisite when the native backup observer can independently
 prove the exact existing source. Apply re-observes the pinned source and merges
-only scope metadata into the unchanged component. This stage does not provision,
+only absent scope keys into the unchanged component, preserving and rechecking
+every recorded key. Malformed or conflicting scope remains blocked. An optional provider-owned
+runtime-reference observation can also propose an absent URL variable-name
+binding, including when scope and primary identity are already recorded. Apply
+rechecks exact native source and value-free variable-key evidence, preserves
+existing selections, and merges only the reviewed absent field. Unknown evidence
+blocks dependent work. This stage does not provision,
 deploy, advance deployment markers or rewrite the spec. Conflicting or incomplete
 identity remains blocked; a full import is not a metadata repair. The
 [shared recovery contract](docs/recovery-contract.md#legacy-database-scope-reconciliation)
@@ -2366,3 +2496,7 @@ the requested capability return explicit `UNSUPPORTED`. Contract tests scan the
 registered command surface for these regressions.
 
 Do not introduce dependencies on provider CLIs for infrastructure operations. Hypervibe should use its provider adapters and recorded connections so state, audit history, and drift detection stay coherent. When an MCP client already has Hypervibe tools, agents should call them directly rather than spawning the Hypervibe CLI.
+
+The explicitly authorized operator-managed Railway private SSH exception in
+[Connections And Secrets](#connections-and-secrets) permits a private diagnostic
+connection only; it does not add an automated provider CLI path.

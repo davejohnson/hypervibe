@@ -13,6 +13,12 @@ export type DatabaseType = 'postgres';
  */
 export type ProvisionableType = DatabaseType;
 
+/** Value-free selection of a provider-owned runtime URL variable on an exact
+ * bound database. The fingerprint covers identity and key presence, never values. */
+export type DatabaseRuntimeReferenceBindingObservation =
+  | { state: 'known'; directUrlVariable: string; evidenceFingerprint: string }
+  | { state: 'unknown'; reason: string };
+
 /**
  * Capabilities that a database provider supports.
  */
@@ -34,6 +40,9 @@ export interface DatabaseCapabilities {
 
   /** Whether bounded operations can acquire and release provider-owned access. */
   supportsTemporaryDatabaseAccess?: boolean;
+
+  /** Provider-owned, value-free guidance when no usable database route exists. */
+  databaseAccessHint?: string;
 
   /** Prefer provider-owned access even when a stored public-looking URL exists. */
   prefersTemporaryDatabaseAccess?: boolean;
@@ -197,8 +206,14 @@ export interface DatabaseBindings {
  */
 export interface IDatabaseAdapter {
   readonly name: string;
+  readonly credentialLifecycle?: import('./database-credential.port.js').DatabaseCredentialLifecycle;
   readonly credentialAliases?: import('./database-credential-aliases.port.js').IDatabaseCredentialAliases;
   readonly dailyBackups?: import('./daily-backup.port.js').IDailyBackupPolicy<import('./daily-backup.port.js').DatabaseBackupTarget>;
+
+  /** Optional read-only metadata normalization; absence means unsupported. */
+  observeRuntimeReferenceBinding?(
+    environment: Environment, component: Component
+  ): Promise<DatabaseRuntimeReferenceBindingObservation>;
 
   /** Provider capabilities */
   readonly capabilities: DatabaseCapabilities;
@@ -255,6 +270,14 @@ export interface IDatabaseAdapter {
    * Useful when the URL needs to be refreshed or retrieved.
    */
   getConnectionUrl(component: Component): Promise<string | null>;
+
+  /** Read an already existing external route for this exact component without
+   * creating access or changing its runtime URL. Null means no usable route;
+   * incomplete/failed provider observation must throw. Returned secrets stay
+   * inside the operation and must never be persisted or exposed. */
+  getExistingExternalConnectionUrl?(
+    environment: Environment, component: Component
+  ): Promise<string | null>;
 
   /**
    * Destroy a provisioned database instance.

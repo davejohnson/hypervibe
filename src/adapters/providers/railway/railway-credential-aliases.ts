@@ -6,7 +6,7 @@ import type { Environment } from '../../../domain/entities/environment.entity.js
 import type { Receipt } from '../../../domain/ports/provider.port.js';
 import { databaseCredentialAliasesInspectionSchema, type IDatabaseCredentialAliases } from '../../../domain/ports/database-credential-aliases.port.js';
 import { prepareRailwayDatabaseCredentialAliases, verifyRailwayDatabaseCredentialAliases,
-  railwayDatabaseCredentialAliasFingerprintInput } from './railway-database-credential-aliases.js';
+  railwayDatabaseCredentialAliasFingerprintInput, RAILWAY_DATABASE_ALIAS_EVIDENCE_KEYS } from './railway-database-credential-aliases.js';
 
 const identity = z.string().min(1);
 const scopeSchema = z.object({ projectId: identity, environmentId: identity }).strict();
@@ -14,7 +14,7 @@ const variableMap = z.record(z.string(), z.string());
 const privateSchema = z.object({ instanceId: identity, definitions: variableMap, rendered: variableMap }).strict();
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const relevant = (values: Record<string, string>) => Object.fromEntries(Object.entries(values).filter(([key]) =>
-  ['POSTGRES_PASSWORD', 'PGPASSWORD', 'DATABASE_URL', 'DATABASE_PRIVATE_URL', 'DATABASE_PUBLIC_URL'].includes(key)));
+  RAILWAY_DATABASE_ALIAS_EVIDENCE_KEYS.includes(key)));
 type Input = { component: Component; environment: Environment };
 
 /** Provider-owned configuration repair, separate from SQL password rotation.

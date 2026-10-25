@@ -1,3 +1,4 @@
+import type { ProviderEnvironmentVariablesRequest, ProviderEnvironmentVariablesResult } from '../../../domain/ports/provider-env-vars.port.js';
 import { createHash } from 'node:crypto';
 import { resourceName, resourceScopeSuffix } from '../../../domain/services/resource-names.js';
 import { Buffer } from 'node:buffer';
@@ -87,6 +88,10 @@ export class FlyAdapter implements IProviderAdapter {
     managedTls: true,
     supportsObserve: true,
     supportsDeferredDeploy: true,
+    credentialUpdateActivation: 'deferred',
+    credentialValueEvidence: 'acknowledgement',
+    registryCredentialModel: 'native-workload-identity',
+    registryCredentialGuidance: 'Private deployed images use registry.fly.io and the Fly organization identity. Map external package or image-read tokens to the exact managed CI build inputs; build or mirror the image into the existing Fly registry before rollout.',
     supportsCreateOnlyDeploy: true,
   };
 
@@ -440,6 +445,21 @@ export class FlyAdapter implements IProviderAdapter {
     }
   }
 
+  async readProviderEnvironmentVariables(request: ProviderEnvironmentVariablesRequest): Promise<ProviderEnvironmentVariablesResult> {
+    try {
+      if (!this.client || parseHostingBindings(request.environment).provider !== this.name) throw new Error();
+      const resolved = await this.resolveBoundService(request.environment, request.service.name);
+      if (!resolved?.machine) throw new Error();
+      const secrets = await this.client.listSecrets(resolved.app.name);
+      const unresolvedKeys = secrets.map(secret => secret.name!);
+      if (new Set(unresolvedKeys).size !== unresolvedKeys.length) throw new Error();
+      const literal = resolved.machine.config?.env ?? {};
+      if (!literal || typeof literal !== 'object' || Array.isArray(literal) || Object.values(literal).some(value => typeof value !== 'string')) throw new Error();
+      const variables = Object.fromEntries(Object.entries(literal).filter(([key]) => !unresolvedKeys.includes(key)));
+      return { success: true, variables, ...(unresolvedKeys.length ? { unresolvedKeys: unresolvedKeys.sort() } : {}) };
+    } catch { return { success: false, error: 'Exact Fly Machine configuration could not be verified.' }; }
+  }
+
   async setEnvVars(
     environment: Environment,
     service: Service,
@@ -478,6 +498,14 @@ export class FlyAdapter implements IProviderAdapter {
       const version = Object.keys(runtimeVars).length > 0
         ? await this.client.updateSecrets(resolved.app.name, runtimeVars)
         : undefined;
+      if (options.requireCredentialUpdate) {
+        return { success: true, message: 'Fly acknowledged staged app secrets. Their current values are write-only; the managed Machine rollout is still required.', data: {
+          serviceId: formatFlyServiceBinding(resolved.binding), configurationUpdated: true,
+          credentialUpdateActivation: 'deferred', credentialValueEvidence: 'acknowledgement', deploymentDeferred: true, runtimeRolloutRequired: true,
+          ...(version !== undefined ? { secretsVersion: version, configurationVersion: version } : {}),
+          rolloutBaseline: resolved.machine.instance_id ? { state: 'present', deploymentId: resolved.machine.instance_id } : { state: 'unknown' },
+        } };
+      }
       const metadata = {
         ...(resolved.machine.config?.metadata ?? {}),
         ...this.envHashMetadata(runtimeVars),
@@ -516,7 +544,7 @@ export class FlyAdapter implements IProviderAdapter {
       return {
         success: false,
         message: 'Failed to update Fly.io environment variables',
-        error: this.formatError(error),
+        error: options.requireCredentialUpdate ? 'The selected credential write requires provider inspection before recovery.' : this.formatError(error),
       };
     }
   }
@@ -992,7 +1020,11 @@ export class FlyAdapter implements IProviderAdapter {
         },
         sourceState: 'disconnected',
         envVarKeys: secretNames,
-        envVarHashes,
+        envVarHashes, envVarEvidence: 'recorded-update', envVarState: 'unknown',
+        ...(machine?.instance_id ? { deployment: { id: machine.instance_id, status: machine.state,
+          ...(machines.every(item => typeof item.instance_id === 'string' && ['started', 'stopped', 'suspended', 'destroyed'].includes(item.state ?? ''))
+            ? { activeDeploymentIds: machines.filter(item => item.state === 'started').map(item => item.instance_id!).sort(), activeDeploymentCoverage: 'instances' as const } : {}),
+        } } : {}),
         status: machine ? this.observedRuntimeStatus(machine) : 'empty',
         ...(!machine && !binding.machineId ? { identityOnly: true } : {}),
       },

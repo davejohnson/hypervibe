@@ -7,21 +7,27 @@ import type {
   IProviderAdapter,
   TemporaryDatabaseAccess,
 } from '../../../domain/ports/provider.port.js';
-import type { IDatabaseAdapter, ProvisionResult, ProvisionableType } from '../../../domain/ports/database.port.js';
+import type { DatabaseRuntimeReferenceBindingObservation, IDatabaseAdapter, ProvisionResult, ProvisionableType } from '../../../domain/ports/database.port.js';
 import type { ObservedDatabase, ObservedState } from '../../../domain/ports/observe.port.js';
 import type { DatabaseBackupTarget, DailyBackupReview, IDailyBackupPolicy } from '../../../domain/ports/daily-backup.port.js';
 import type { RailwayDailyBackupTarget } from './railway-daily-backup.js';
+import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
 import { recoveryIdentityStringSchema } from '../../../domain/services/recovery-source.js';
+import { isRailwayPostgresImage, railwayDatabaseReferences, selectRailwayDatabaseDirectUrlVariable } from './railway-postgres-template.js';
+import { bindingIdentityFingerprint } from '../../../domain/services/binding-identity.js';
+import { isExternallyUsableDatabaseUrl } from '../../../domain/services/database-ops.service.js';
 import type { EnvironmentRepository } from '../../db/repositories/environment.repository.js';
 import type { IDatabaseCheckpointAdapter, DatabaseCheckpointIdentity, DatabaseCheckpointSource,
   DatabaseCheckpointBinding, DatabaseCheckpointObservation } from '../../../domain/ports/database-checkpoint.port.js';
 import type {
+  RailwayDatabasePersistenceObservation,
   RailwayServiceInstanceInspection,
   RailwayVolumeResolution,
   RailwayVolumeTarget,
 } from './railway.adapter.js';
 
 interface RailwayHostingOps {
+  synchronizeDatabasePasswordIssuer?: (target: { projectId: string; environmentId: string; serviceId: string }, password: string) => Promise<void>;
   railwayCredentialAliases?: import('../../../domain/ports/database-credential-aliases.port.js').IDatabaseCredentialAliases;
   railwayDailyBackups?: IDailyBackupPolicy<RailwayDailyBackupTarget>;
   observeDatabaseCheckpointSource?: (target: { projectId: string; environmentId: string; serviceId: string }) => Promise<DatabaseCheckpointSource>;
@@ -43,6 +49,12 @@ interface RailwayHostingOps {
     environmentId: string
   ) => Promise<RailwayServiceInstanceInspection>;
   observe?: (environment: Environment) => Promise<ObservedState>;
+  getServiceVariables?: (projectId: string, serviceId: string, environmentId: string) => Promise<Record<string, string>>;
+  getTcpProxy?: (environmentId: string, serviceId: string, applicationPort: number) => Promise<{ domain: string; proxyPort: number } | null>;
+  observeDatabasePersistence?: (
+    target: Pick<RailwayVolumeTarget, 'projectId' | 'environmentId' | 'serviceId'>,
+    options?: { image?: string | null; variables?: Record<string, string> | null; expectedVolumeId?: string }
+  ) => Promise<RailwayDatabasePersistenceObservation>;
   deleteProject?: (projectId: string) => Promise<{ success: boolean; error?: string }>;
   deleteService?: (serviceId: string, target: HostingServiceDeleteScope, options: HostingServiceDeleteOptions) => Promise<{ success: boolean; error?: string; alreadyAbsent?: boolean }>;
   resolveServiceVolume?: (
@@ -53,11 +65,6 @@ interface RailwayHostingOps {
     volumeId: string,
     target: RailwayVolumeTarget
   ) => Promise<{ success: boolean; error?: string; alreadyAbsent?: boolean }>;
-  acquireTemporaryDatabaseAccess?: (
-    environment: Environment,
-    component: Component,
-    applicationPort: number
-  ) => Promise<TemporaryDatabaseAccess>;
   releaseTemporaryDatabaseAccess?: (
     environment: Environment,
     component: Component,
@@ -66,8 +73,8 @@ interface RailwayHostingOps {
 }
 
 /**
- * Railway has no standalone database product: databases are services inside a
- * Railway hosting project. This factory wraps a connected Railway hosting
+ * Railway's database templates produce services and persistent volumes inside
+ * a hosting project. This factory wraps a connected Railway hosting
  * adapter in the IDatabaseAdapter port, including auth-recovery retry and
  * cleanup of projects it created itself.
  */
@@ -79,13 +86,9 @@ export function createRailwayDatabaseAdapter(params: {
   const { hostingAdapter, envRepo, project } = params;
   const railway = hostingAdapter as unknown as RailwayHostingOps;
 
-  const makePluginVarRefs = (pluginName: string, type: ProvisionableType): Record<string, string> => {
-    const ref = (varName: string) => '${{' + pluginName + '.' + varName + '}}';
+  const makePluginVarRefs = (pluginName: string, type: ProvisionableType, directUrlVariable?: unknown): Record<string, string> => {
     if (type === 'postgres') {
-      return {
-        DATABASE_URL: ref('DATABASE_URL'),
-        DIRECT_URL: ref('DATABASE_PRIVATE_URL'),
-      };
+      return railwayDatabaseReferences(pluginName, directUrlVariable);
     }
     // Railway plugin provisioning currently supports postgres in DB flows.
     return {};
@@ -136,7 +139,9 @@ export function createRailwayDatabaseAdapter(params: {
       if (typeof record.projectId !== 'string' || record.projectId.trim().length === 0
         || typeof record.environmentId !== 'string' || record.environmentId.trim().length === 0
         || typeof record.serviceId !== 'string' || record.serviceId.trim().length === 0
-        || typeof record.mountPath !== 'string' || record.mountPath.trim().length === 0) {
+        || typeof record.mountPath !== 'string' || !record.mountPath.startsWith('/')
+        || /[\u0000-\u001f\u007f]/.test(record.mountPath) || record.mountPath.includes('${')
+        || record.mountPath.split('/').some(segment => segment === '.' || segment === '..')) {
         return { error: 'The Railway database volume target marker is incomplete.' };
       }
       const target: RailwayVolumeTarget = {
@@ -150,7 +155,7 @@ export function createRailwayDatabaseAdapter(params: {
         : undefined;
       if (target.projectId !== scopedProjectId
         || target.serviceId !== component.externalId
-        || target.mountPath !== expectedMountPath
+        || (componentEnvironmentId(component) !== undefined && target.environmentId !== componentEnvironmentId(component))
         || (typeof boundEnvironmentId === 'string' && target.environmentId !== boundEnvironmentId)) {
         return {
           error: 'The Railway database volume target marker does not match the durable project, environment, service, and mount identities.',
@@ -247,7 +252,7 @@ export function createRailwayDatabaseAdapter(params: {
     }
     if (instance.state === 'present') {
       const image = instance.sourceImage?.trim().toLowerCase();
-      if (!image || !/(^|\/)postgres(?::|@|$)/.test(image)) {
+      if (!isRailwayPostgresImage(image)) {
         throw new Error(
           `Railway service ${component.externalId} in environment ${retainedEnvironmentId} is not provider-verified as a PostgreSQL database image.`
         );
@@ -304,8 +309,6 @@ export function createRailwayDatabaseAdapter(params: {
           `Railway database ${component.externalId} was observed outside the current environment project scope.`
         );
       }
-      if (match) return match;
-
       if (
         observed.completeness?.services !== 'complete'
         || !currentProjectId
@@ -318,7 +321,7 @@ export function createRailwayDatabaseAdapter(params: {
       const serviceMatches = observed.services.filter((service) =>
         service.externalId === component.externalId
       );
-      if (serviceMatches.length > 1) {
+      if (serviceMatches.length > 1 || (match && serviceMatches.length > 0)) {
         throw new Error(`Multiple Railway services match durable database id ${component.externalId}`);
       }
       const currentEnvironmentId = environment.platformBindings.environmentId;
@@ -326,35 +329,44 @@ export function createRailwayDatabaseAdapter(params: {
       if (typeof currentEnvironmentId !== 'string' || !currentEnvironmentId.trim()
         || observed.completeness?.environment !== 'complete'
         || observed.environmentId !== currentEnvironmentId
+        || (match && match.providerScope?.environmentId !== currentEnvironmentId)
         || (boundEnvironmentId !== undefined && boundEnvironmentId !== currentEnvironmentId)) {
         throw new Error(
           `Railway database service ${component.externalId} was not completely observed in its exact environment scope.`
         );
       }
       const service = serviceMatches[0];
-      if (!service) return null;
+      if (!service && !match) return null;
       if (typeof railway.inspectServiceInstance !== 'function') {
         throw new Error('Railway hosting adapter does not expose exact database instance observation.');
       }
-      // Custom database images remain services in the aggregate inventory. Verify
-      // their exact live instance before preserving scope for a bound database.
-      const instance = await railway.inspectServiceInstance(service.externalId, observed.environmentId);
+      // Aggregate image classification and custom-image fallback must prove the
+      // same exact live instance before preserving scope for a bound database.
+      const instance = await railway.inspectServiceInstance(component.externalId, observed.environmentId);
       if (instance.state !== 'present') {
         throw new Error(
           `Railway database service ${component.externalId} could not be verified in its exact environment scope.`
         );
       }
+      const expectedVolumeId = component.bindings.volumeId === undefined ? undefined
+        : recoveryIdentityStringSchema.parse(component.bindings.volumeId);
+      const persistence = typeof railway.observeDatabasePersistence === 'function'
+        ? (await railway.observeDatabasePersistence({ projectId: observed.projectId,
+          environmentId: instance.environmentId, serviceId: component.externalId }, { image: instance.sourceImage, expectedVolumeId })).persistence
+        : { state: 'unknown' as const, reason: 'Railway database persistence observation is unavailable.' };
+      if (match) return { ...match, persistence };
       return {
         provider: 'railway',
         engine: 'postgres',
-        externalId: service.externalId,
+        externalId: component.externalId,
         providerScope: { projectId: observed.projectId, environmentId: instance.environmentId },
-        name: service.name,
-        status: service.status === 'running'
+        name: service!.name,
+        persistence,
+        status: service!.status === 'running'
           ? 'running'
-          : service.status === 'failed'
+          : service!.status === 'failed'
             ? 'error'
-            : service.status === 'empty'
+            : service!.status === 'empty'
               ? 'stopped'
               : 'unknown',
       };
@@ -393,8 +405,77 @@ export function createRailwayDatabaseAdapter(params: {
       mountPath: '/var/lib/postgresql/data' }, ...(volumeId ? { externalId: volumeId } : {}) };
   };
 
-  return {
+  const observeRuntimeReferenceBinding = async (
+    environment: Environment, component: Component
+  ): Promise<DatabaseRuntimeReferenceBindingObservation> => {
+    const unknown = { state: 'unknown' as const,
+      reason: 'The exact database runtime URL variable selection could not be verified.' };
+    try {
+      const current = envRepo.findById(environment.id) ?? environment;
+      const target = dailyBackupTarget({ environment: current, component }).target;
+      if (!railway.getServiceVariables || !railway.observeDatabasePersistence) return unknown;
+      const evidence = await railway.observeDatabasePersistence(target,
+        { expectedVolumeId: typeof component.bindings.volumeId === 'string' ? component.bindings.volumeId : undefined });
+      if (evidence.persistence.state !== 'configured' || typeof component.bindings.pluginName !== 'string'
+        || component.bindings.pluginName !== evidence.serviceName) return unknown;
+      const variables = await railway.getServiceVariables(target.projectId, target.serviceId, target.environmentId);
+      const explicit = Object.hasOwn(component.bindings, 'directUrlVariable');
+      // Preserve the issuer previously projected by legacy bindings whenever
+      // that key exists. A present but unusable key never permits rerouting.
+      const selected = explicit ? component.bindings.directUrlVariable
+        : Object.hasOwn(variables, 'DATABASE_PRIVATE_URL') ? 'DATABASE_PRIVATE_URL'
+          : selectRailwayDatabaseDirectUrlVariable(variables);
+      if (!variables.DATABASE_URL?.trim() || typeof selected !== 'string'
+        || !['DATABASE_URL', 'DATABASE_PRIVATE_URL', 'DIRECT_URL'].includes(selected)
+        || !variables[selected]?.trim()) return unknown;
+      railwayDatabaseReferences(component.bindings.pluginName, selected);
+      return { state: 'known', directUrlVariable: selected,
+        evidenceFingerprint: bindingIdentityFingerprint({ projectId: target.projectId,
+          environmentId: target.environmentId, serviceId: target.serviceId,
+          serviceName: evidence.serviceName,
+          selectedVariable: selected, keys: ['DATABASE_URL', 'DATABASE_PRIVATE_URL', 'DIRECT_URL']
+            .filter(key => Object.hasOwn(variables, key)) }) };
+    } catch { return unknown; }
+  };
+
+  const databaseAdapter: IDatabaseAdapter & IDatabaseCheckpointAdapter = {
     name: 'railway',
+    get credentialLifecycle() {
+      return createPostgresCredentialLifecycle(() => databaseAdapter, {
+        rotate: async (_component, _target, password) => {
+          // Existing native aliases interpolate this issuer into URL password
+          // positions. Refuse characters that would alter URL structure before
+          // changing SQL authentication. Hypervibe's generator is base64url.
+          if (!password || !/^[A-Za-z0-9._~-]+$/.test(password)) return { state: 'blocked' };
+          return undefined;
+        },
+        validateInspection: async (environment, component) => {
+          if (!railway.railwayCredentialAliases) throw new Error('Database password issuer alias inspection is unavailable.');
+          const aliases = await railway.railwayCredentialAliases.inspect({ environment, component });
+          if (aliases.changeNames.length) throw new Error('Database password aliases must follow their issuer before rotation. Run hv_plan scope="database-credential-aliases", review hv_apply, then resume the credential rotation plan.');
+        },
+        connectionUrl: async (environment, component) => {
+          const target = dailyBackupTarget({ environment, component }).target;
+          if (!railway.getServiceVariables) throw new Error('Database credential inspection is unavailable.');
+          const variables = await railway.getServiceVariables(target.projectId, target.serviceId, target.environmentId);
+          const key = typeof component.bindings.directUrlVariable === 'string' ? component.bindings.directUrlVariable
+            : selectRailwayDatabaseDirectUrlVariable(variables);
+          return (key ? variables[key] : undefined) ?? variables.DATABASE_URL ?? null;
+        },
+        synchronizeIssuer: async (environment, component, password) => {
+          if (!railway.synchronizeDatabasePasswordIssuer) throw new Error('Database password issuer synchronization is unavailable.');
+          const target = dailyBackupTarget({ environment, component }).target;
+          await railway.synchronizeDatabasePasswordIssuer(target, password);
+        },
+        inspectIssuer: async (environment, component, password) => {
+          if (!railway.getServiceVariables) return 'unknown';
+          const target = dailyBackupTarget({ environment, component }).target;
+          const variables = await railway.getServiceVariables(target.projectId, target.serviceId, target.environmentId);
+          return variables.POSTGRES_PASSWORD === password ? 'match' : variables.POSTGRES_PASSWORD ? 'different' : 'unknown';
+        },
+      });
+    },
+    ...(railway.getServiceVariables ? { observeRuntimeReferenceBinding } : {}),
     ...(railway.railwayCredentialAliases ? { credentialAliases: railway.railwayCredentialAliases } : {}),
     ...(railway.railwayDailyBackups ? { dailyBackups: {
       observe: async (input: DatabaseBackupTarget) => {
@@ -448,7 +529,8 @@ export function createRailwayDatabaseAdapter(params: {
       supportsReadReplicas: false,
       supportsPointInTimeRecovery: false,
       serverlessOptimized: false,
-      supportsTemporaryDatabaseAccess: true,
+      supportsTemporaryDatabaseAccess: false,
+      databaseAccessHint: 'Railway public TCP proxy creation is disabled. For operator-managed private access, use a current Railway CLI with railway connect <database-service-name> --project <project-id> --environment <environment-id> --ssh in your own terminal. Verify the service name and existing CLI/SSH access first; Hypervibe does not open the tunnel or register keys. Keep credentials private and use a verified loopback database connection for Hypervibe operations.',
     },
     async connect() {
       // Already connected via factory; no-op for compatibility.
@@ -580,7 +662,7 @@ export function createRailwayDatabaseAdapter(params: {
         }
       }
 
-      const envVars = makePluginVarRefs(pluginName, type);
+      const envVars = makePluginVarRefs(pluginName, type, componentBindings.directUrlVariable);
       const connectionUrl = envVars.DATABASE_URL;
 
       return {
@@ -617,18 +699,51 @@ export function createRailwayDatabaseAdapter(params: {
       const value = bindings.connectionUrl;
       return typeof value === 'string' ? value : null;
     },
+    async getExistingExternalConnectionUrl(environment, component) {
+      const current = envRepo.findById(environment.id) ?? environment;
+      const projectId = assertCurrentProjectScope(current, component);
+      const environmentId = current.platformBindings.environmentId;
+      if (component.bindings.provider !== 'railway' || component.type !== 'postgres'
+        || component.environmentId !== current.id || !component.externalId
+        || component.bindings.retainedCleanup === true
+        || typeof environmentId !== 'string' || !environmentId.trim()
+        || (componentEnvironmentId(component) !== undefined && componentEnvironmentId(component) !== environmentId)) {
+        throw new Error('Railway database access requires the exact bound project, environment and service.');
+      }
+      if (!railway.getServiceVariables || !railway.getTcpProxy) {
+        throw new Error('Railway existing database access observation is unavailable.');
+      }
+      const variables = await railway.getServiceVariables(projectId, component.externalId, environmentId);
+      const key = typeof component.bindings.directUrlVariable === 'string' ? component.bindings.directUrlVariable
+        : selectRailwayDatabaseDirectUrlVariable(variables);
+      const configured = key ? variables[key] : undefined;
+      if (!configured || configured.includes('${{')) throw new Error('The selected Railway database connection is unresolved.');
+      const url = new URL(configured);
+      if (!['postgres:', 'postgresql:'].includes(url.protocol)) throw new Error('The selected Railway database connection is invalid.');
+      if (isExternallyUsableDatabaseUrl(configured)) return configured;
+      // Reuse only an observed ACTIVE endpoint for this exact service. Public
+      // URL aliases are not credential authority. Preserve the selected URL's
+      // user, password, database and options; replace only its transport address.
+      if (['host', 'hostaddr', 'port'].some(key => url.searchParams.has(key))) {
+        throw new Error('The selected Railway database connection has an unsupported address override.');
+      }
+      const proxy = await railway.getTcpProxy(environmentId, component.externalId, Number(url.port || 5432));
+      if (!proxy) return null;
+      url.hostname = proxy.domain.replace(/\.+$/, '');
+      url.port = String(proxy.proxyPort);
+      return url.toString();
+    },
     async observeDatabase(environment, component, options) {
       const retainedCleanup = component?.bindings.retainedCleanup === true;
       const currentEnvironment = retainedCleanup
         ? environment
         : envRepo.findById(environment.id) ?? environment;
-      return observeRailwayDatabase(currentEnvironment, component, options);
-    },
-    async acquireTemporaryDatabaseAccess(environment, component, applicationPort) {
-      if (typeof railway.acquireTemporaryDatabaseAccess !== 'function') {
-        throw new Error('Railway does not expose temporary database access.');
-      }
-      return railway.acquireTemporaryDatabaseAccess(environment, component, applicationPort);
+      const observed = await observeRailwayDatabase(currentEnvironment, component, options);
+      if (!observed || !component || retainedCleanup || !railway.getServiceVariables) return observed;
+      const reference = await observeRuntimeReferenceBinding(currentEnvironment, component);
+      return { ...observed, runtimeReferenceBinding: reference.state === 'unknown'
+        ? reference : { state: Object.hasOwn(component.bindings, 'directUrlVariable') ? 'configured' : 'missing',
+          evidenceFingerprint: reference.evidenceFingerprint } };
     },
     async releaseTemporaryDatabaseAccess(environment, component, access) {
       if (typeof railway.releaseTemporaryDatabaseAccess !== 'function') {
@@ -806,4 +921,5 @@ export function createRailwayDatabaseAdapter(params: {
       };
     },
   };
+  return databaseAdapter;
 }

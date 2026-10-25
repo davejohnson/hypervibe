@@ -1,0 +1,155 @@
+{
+  "schemaVersion": 1,
+  "reviewedAt": "2026-10-24",
+  "purpose": "Named database persistence design review. Native storage contracts, offline request conformance, backup coverage and live recovery are separate claims. No live certification is established by this matrix.",
+  "providers": [
+    {
+      "provider": "railway",
+      "model": "service-volume",
+      "provisioningMode": "database-template",
+      "nativeCreate": "GraphQL templateDeployV2 for the reviewed official PostgreSQL template in the exact project/environment",
+      "durability": "PostgreSQL data directory must be inside the observed attached volume; image, service name and icon do not prove this.",
+      "identity": "projectId, environmentId, serviceId and attached volume identity",
+      "completion": "Wait for the exact template workflow Complete result, then observe exact service instance, attachment and mount/data-directory alignment before reporting a usable persistent database.",
+      "recovery": "Preserve existing identity and data on unknown reads; a missing or wrong mount requires reviewed recovery, never automatic replacement or an empty-volume attachment.",
+      "prerequisites": "Authorized project/environment, reviewed official database template, volume capacity and scoped private runtime references.",
+      "coverage": "Pinned GraphQL transport and database persistence regressions; no live restart/data-retention proof.",
+      "officialSources": [
+        "https://docs.railway.com/databases/build-a-database-service",
+        "https://docs.railway.com/volumes",
+        "https://docs.railway.com/volumes/backups",
+        "https://github.com/docker-library/docs/blob/master/postgres/README.md",
+        "https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/commands/add.rs",
+        "https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/commands/deploy.rs"
+      ],
+      "runtimeReferenceBinding": "implemented",
+      "runtimeReferenceEvidence": "Exact scoped service variable names select the existing direct connection reference; only an absent local variable-name marker can be normalized through the isolated database-bindings stage. No credential values are persisted or fingerprinted."
+    },
+    {
+      "provider": "supabase",
+      "model": "managed-database",
+      "provisioningMode": "native-database",
+      "nativeCreate": "POST https://api.supabase.com/v1/projects",
+      "durability": "Each hosted project has a dedicated PostgreSQL instance and provider-managed database disk.",
+      "identity": "project reference with organization identity and region",
+      "completion": "Observe database readiness on the exact project; create acknowledgement alone is insufficient.",
+      "recovery": "Retain exact acknowledged project or unresolved-create state; project deletion deletes its database. Backup entitlement is separate.",
+      "prerequisites": "Authorized organization id and provider-returned slug, available region and plan entitlement.",
+      "coverage": "Pinned OpenAPI create request and serialized rejected-create/no-hosting-fallback checks; disk contents and live recovery unverified.",
+      "officialSources": [
+        "https://supabase.com/docs/reference/api/v1-create-a-project",
+        "https://supabase.com/docs/guides/platform/compute-and-disk"
+      ],
+      "runtimeReferenceBinding": "unsupported",
+      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred."
+    },
+    {
+      "provider": "neon",
+      "model": "managed-database",
+      "provisioningMode": "native-database",
+      "nativeCreate": "POST https://console.neon.tech/api/v2/projects",
+      "durability": "Branches own database state in durable storage separated from replaceable or suspended compute endpoints.",
+      "identity": "organization, project and branch; endpoint identity is not the durable data identity",
+      "completion": "Wait for the create operations and exact project/endpoint readiness before connection use.",
+      "recovery": "Non-idempotent ambiguous create must retain exact project or unresolved scope; compute suspension is not data deletion. Branch history is not a tested restore.",
+      "prerequisites": "Authorized organization, region and project allowance.",
+      "coverage": "Pinned OpenAPI request and serialized rejected-create/no-hosting-fallback checks; live storage and retention unverified.",
+      "officialSources": [
+        "https://api-docs.neon.tech/reference/createproject",
+        "https://neon.com/docs/introduction/architecture-overview"
+      ],
+      "runtimeReferenceBinding": "unsupported",
+      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred."
+    },
+    {
+      "provider": "cloudsql",
+      "model": "managed-database",
+      "provisioningMode": "native-database",
+      "nativeCreate": "POST https://sqladmin.googleapis.com/v1/projects/{project}/instances",
+      "durability": "Cloud SQL owns database storage; the adapter provisions a native instance with provider-default disk settings, not a Cloud Run container.",
+      "identity": "cloud project and instance name, with region and provider connection name",
+      "completion": "Correlate operation completion with exact instance RUNNABLE state, engine and region.",
+      "recovery": "Retain exact instance/unresolved attempt after uncertain creation; backups and PITR configuration require separate observed recovery evidence.",
+      "prerequisites": "Authorized cloud project, SQL Admin API, billing, regional capacity and workload connectivity.",
+      "coverage": "Serialized rejected-create/no-hosting-fallback check and existing lifecycle tests; disk sizing is a native default, no live durability proof.",
+      "officialSources": [
+        "https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1/instances/insert",
+        "https://docs.cloud.google.com/sql/docs/postgres/instance-settings"
+      ],
+      "runtimeReferenceBinding": "unsupported",
+      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred."
+    },
+    {
+      "provider": "rds",
+      "model": "managed-database",
+      "provisioningMode": "native-database",
+      "nativeCreate": "Amazon RDS CreateDBInstance",
+      "durability": "RDS PostgreSQL uses EBS for database/log storage; the adapter requests 20 GiB gp3 encrypted storage.",
+      "identity": "AWS account, region and DB instance identifier/ARN",
+      "completion": "Wait for the exact available instance, endpoint and approved workload-network attachment.",
+      "recovery": "Preserve exact instance and owned security-group recovery state on uncertainty; backup retention is distinct from a recoverable snapshot and tested restore.",
+      "prerequisites": "Authorized account/region and exact applied ECS network, security groups and database capacity.",
+      "coverage": "Existing adapter SDK-command lifecycle tests; this review does not add RDS create wire-schema validation or live persistence evidence.",
+      "officialSources": [
+        "https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBInstance.html",
+        "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html"
+      ],
+      "runtimeReferenceBinding": "unsupported",
+      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred."
+    },
+    {
+      "provider": "azure-postgres",
+      "model": "managed-database",
+      "provisioningMode": "native-database",
+      "nativeCreate": "PUT Microsoft.DBforPostgreSQL/flexibleServers/{serverName}, API 2025-08-01",
+      "durability": "Flexible Server uses Azure managed disks; the adapter requests 32 GiB storage with auto-grow enabled.",
+      "identity": "Full server ARM id including subscription and resource group",
+      "completion": "Observe the exact server Ready, approved placement/SKU, database and firewall readiness.",
+      "recovery": "Preserve scoped server identity after uncertain PUT; destructive restoration and backup points remain separate from server readiness.",
+      "prerequisites": "Authorized subscription and owned applied Container Apps resource group, supported region/SKU and runtime network access.",
+      "coverage": "Serialized rejected-create/no-hosting-fallback check and existing lifecycle tests; live disk/backup/restore unverified.",
+      "officialSources": [
+        "https://learn.microsoft.com/en-us/rest/api/postgresql/servers/create-or-update?view=rest-postgresql-2025-08-01",
+        "https://learn.microsoft.com/en-us/azure/postgresql/compute-storage/concepts-storage"
+      ],
+      "runtimeReferenceBinding": "unsupported",
+      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred."
+    },
+    {
+      "provider": "fly",
+      "model": "managed-database",
+      "provisioningMode": "native-database",
+      "nativeCreate": "POST https://api.machines.dev/v1/postgres",
+      "durability": "Fly Managed Postgres cluster owns database storage; the adapter requests 10 GiB, not a PostgreSQL app Machine.",
+      "identity": "Organization slug and Managed Postgres cluster id",
+      "completion": "Wait for exact cluster ready with expected organization, name, region and plan before database/user initialization.",
+      "recovery": "MPG cluster survives application deletion. Preserve exact cluster/unresolved-create evidence; do not switch to unmanaged Fly Postgres on failure.",
+      "prerequisites": "Authorized organization, supported MPG plan/region and private network connectivity. Machines MPG API applies to v2 clusters; v1 remains outside this API contract.",
+      "coverage": "Serialized rejected-create/no-hosting-fallback check and existing lifecycle tests; successful live MPG provisioning and restore unverified.",
+      "officialSources": [
+        "https://fly.io/changelog/managed-postgres-machines-api/",
+        "https://fly.io/docs/about/pricing/"
+      ],
+      "runtimeReferenceBinding": "unsupported",
+      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred."
+    },
+    {
+      "provider": "digitalocean",
+      "model": "managed-database",
+      "provisioningMode": "native-database",
+      "nativeCreate": "POST https://api.digitalocean.com/v2/databases, engine pg",
+      "durability": "Managed PostgreSQL cluster size includes database disk capacity; the adapter does not provision an App Platform development database or app container.",
+      "identity": "Account UUID, cluster UUID and region",
+      "completion": "Wait for the exact cluster online, then initialize the requested logical database.",
+      "recovery": "Retain exact acknowledged cluster or unresolved-create state; automatic backup product capability is not evidence a particular recovery point exists.",
+      "prerequisites": "Authorized account, managed-database create/read permissions and supported region/size/version.",
+      "coverage": "Serialized rejected-create/no-hosting-fallback check and existing lifecycle tests; successful live provisioning and retained recovery points unverified.",
+      "officialSources": [
+        "https://docs.digitalocean.com/products/databases/postgresql/how-to/create/",
+        "https://docs.digitalocean.com/products/databases/postgresql/reference/api/"
+      ],
+      "runtimeReferenceBinding": "unsupported",
+      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred."
+    }
+  ]
+}

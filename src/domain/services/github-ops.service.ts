@@ -61,7 +61,7 @@ export type {
   BranchDeployWorkflow,
 };
 
-export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 6;
+export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 7;
 const GITHUB_ACTIONS_PROMOTION_RENDERER_REVISION = 2;
 export const GITHUB_ACTIONS_SERVER_PROGRAM_REVISION = 1;
 
@@ -223,6 +223,10 @@ function buildWorkflowTrigger(target: BranchDeployTarget): string {
     inputs:
       commit_sha:
         description: 'Commit SHA to deploy. Defaults to the selected ref when omitted.'
+        required: false
+        type: string
+      credential_operations:
+        description: 'Non-secret accepted credential operation bindings supplied by Hypervibe.'
         required: false
         type: string
       rollback:
@@ -469,12 +473,43 @@ function expectedReleaseTarget(provider, environment, serviceNamesValue, scopeVa
   return { scope, resources, bindingsFingerprint: fingerprint };
 }
 
+function normalizeCredentialActivation(value, resources) {
+  if (!exactEvidenceKeys(value, ['version', 'operations']) || value.version !== 1 || !Array.isArray(value.operations)) throw new Error('Credential activation evidence is malformed');
+  const seen = new Set();
+  const identity = (id) => typeof id === 'string' && id.length > 0 && id.length <= 1024 && !/[\\s\\x00-\\x1f]/.test(id);
+  const operations = value.operations.map((entry) => {
+    if (!exactEvidenceKeys(entry, ['service', 'serviceId', 'operationId', 'deploymentIds', ...(entry && entry.configurationVersion !== undefined ? ['configurationVersion'] : [])]) || !identity(entry.service) || !identity(entry.serviceId) || !identity(entry.operationId)
+      || entry.configurationVersion !== undefined && (!Number.isSafeInteger(entry.configurationVersion) || entry.configurationVersion < 0)
+      || seen.has(entry.service) || !Array.isArray(entry.deploymentIds) || !entry.deploymentIds.length || entry.deploymentIds.some((id) => !identity(id)) || new Set(entry.deploymentIds).size !== entry.deploymentIds.length
+      || !resources.some((resource) => resource.logicalName === entry.service && resource.providerResourceId === entry.serviceId)) throw new Error('Credential activation does not match exact reviewed resources');
+    seen.add(entry.service); return { service: entry.service, serviceId: entry.serviceId, operationId: entry.operationId, deploymentIds: [...entry.deploymentIds].sort(), ...(entry.configurationVersion !== undefined ? { configurationVersion: entry.configurationVersion } : {}) };
+  });
+  return { version: 1, operations };
+}
+
+function credentialActivationForRelease(operations, deployments, resources) {
+  if (!asEvidenceRecord(operations) || !Array.isArray(deployments)) throw new Error('Credential activation input is malformed');
+  const seen = new Set();
+  for (const entry of deployments) {
+    if (!exactEvidenceKeys(entry, ['serviceId', 'deploymentIds', ...(entry && entry.configurationVersion !== undefined ? ['configurationVersion'] : [])]) || seen.has(entry.serviceId) || !resources.some((resource) => resource.providerResourceId === entry.serviceId)) throw new Error('Credential deployment is not an exact reviewed resource');
+    seen.add(entry.serviceId);
+  }
+  const result = [];
+  for (const [service, operation] of Object.entries(operations)) {
+    if (!exactEvidenceKeys(operation, ['serviceId', 'operationId', ...(operation && operation.configurationVersion !== undefined ? ['configurationVersion'] : [])]) || !resources.some((resource) => resource.logicalName === service && resource.providerResourceId === operation.serviceId)) throw new Error('Credential operation is not an exact reviewed resource');
+    const deployment = deployments.find((entry) => entry.serviceId === operation.serviceId);
+    if (deployment && deployment.configurationVersion !== operation.configurationVersion) throw new Error('Credential deployment does not prove the accepted configuration version');
+    if (deployment) result.push({ service, serviceId: operation.serviceId, operationId: operation.operationId, deploymentIds: deployment.deploymentIds, ...(operation.configurationVersion !== undefined ? { configurationVersion: operation.configurationVersion } : {}) });
+  }
+  return normalizeCredentialActivation({ version: 1, operations: result }, resources);
+}
+
 function validateReleaseEvidence(evidence, expected) {
   const failure = () => {
     throw new Error(expected.label + ' release evidence does not match the exact reviewed provider, environment, repository, SHA, scope, bindings fingerprint, resources, program, deployment contract provenance, and immutable image');
   };
   try {
-    if (!exactEvidenceKeys(evidence, ['deploymentContractFingerprint', 'environment', 'programFingerprint', 'provider', 'source', 'target', 'verifiedAt', 'version'])
+    if (!exactEvidenceKeys(evidence, ['deploymentContractFingerprint', 'environment', 'programFingerprint', 'provider', 'source', 'target', 'verifiedAt', 'version', ...(evidence && evidence.credentialActivation !== undefined ? ['credentialActivation'] : [])])
         || evidence.version !== ${MANAGED_CI_RELEASE_EVIDENCE_VERSION}
         || evidence.provider !== expected.provider
         || evidence.environment !== expected.environment
@@ -500,6 +535,7 @@ function validateReleaseEvidence(evidence, expected) {
         && (images.some((imageUri) => imageUri === null) || new Set(images).size !== 1)) {
       failure();
     }
+    if (evidence.credentialActivation !== undefined) normalizeCredentialActivation(evidence.credentialActivation, resources);
     return { resources, imageUri: images[0] ?? null };
   } catch (error) {
     if (error instanceof Error && error.message.startsWith(expected.label + ' release evidence')) throw error;
@@ -511,6 +547,7 @@ module.exports = {
   deploymentContractFingerprint,
   expectedReleaseTarget,
   validateReleaseEvidence,
+  credentialActivationForRelease,
 };
 `;
 
@@ -889,10 +926,12 @@ function buildServerReleaseEvidenceStep(
           HYPERVIBE_RELEASE_DEPLOYMENT_CONTRACT_FINGERPRINT: \${{ steps.deployment_contract.outputs.fingerprint }}
           HYPERVIBE_RELEASE_REQUIRES_IMMUTABLE_IMAGE: ${releaseImageUri ? 'true' : 'false'}
           HYPERVIBE_RELEASE_IMAGE_URI: ${releaseImageUri ?? "''"}
+          HYPERVIBE_CREDENTIAL_OPERATIONS: \${{ inputs.credential_operations || '{}' }}
+          HYPERVIBE_CREDENTIAL_DEPLOYMENTS: \${{ steps.runtime_deploy.outputs.credential_deployments || '[]' }}
         with:
           script: |
 ${indentWorkflowJavaScript(RELEASE_EVIDENCE_VALIDATION_LOADER)}
-            const { expectedReleaseTarget } = validatorModule.exports;
+            const { expectedReleaseTarget, credentialActivationForRelease } = validatorModule.exports;
             const { writeFileSync } = require('fs');
             const sha = String(process.env.HYPERVIBE_RELEASE_SHA || '').trim().toLowerCase();
             const repository = String(process.env.GITHUB_REPOSITORY || '').trim();
@@ -934,6 +973,9 @@ ${indentWorkflowJavaScript(RELEASE_EVIDENCE_VALIDATION_LOADER)}
                   imageUri: imageUri || null,
                 })),
               },
+              ...(process.env.HYPERVIBE_CREDENTIAL_OPERATIONS ? { credentialActivation: credentialActivationForRelease(
+                JSON.parse(process.env.HYPERVIBE_CREDENTIAL_OPERATIONS), JSON.parse(process.env.HYPERVIBE_CREDENTIAL_DEPLOYMENTS || '[]'), expectedTarget.resources
+              ) } : {}),
               programFingerprint: process.env.HYPERVIBE_RELEASE_PROGRAM_FINGERPRINT,
               verifiedAt: new Date().toISOString(),
             }, null, 2) + '\\n');

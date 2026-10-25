@@ -10,7 +10,9 @@ import { connectionSetupOptions } from '../domain/services/connection-guidance.j
 import { getProjectScopeHints } from '../domain/services/project-scope.js';
 import type { Component } from '../domain/entities/component.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
-import type { ObservedState } from '../domain/ports/observe.port.js';
+import type { HostingObservationContext, ObservedState } from '../domain/ports/observe.port.js';
+import { SpecStore } from '../domain/spec/spec.store.js';
+import type { EnvironmentSpec } from '../domain/spec/spec.schema.js';
 import { parseHostingBindings } from '../domain/ports/hosting.port.js';
 
 export interface InspectProviderInput {
@@ -732,15 +734,23 @@ export async function inspectProvider(
     if (environment) {
       const standardResource = input.resource;
       const observe = adapter.observe;
+      let acceptedSpec: EnvironmentSpec | undefined;
+      try { acceptedSpec = project ? new SpecStore().getForInspection(project)?.spec.environments[environment.name] : undefined; }
+      catch { /* Independent provider forensics remains available without adopting changed desired state. */ }
+      const databaseAliasCoverage = acceptedSpec ? 'declared' : 'unknown';
+      const observationContext: HostingObservationContext = { databaseEnvAliases: Object.fromEntries(
+        Object.entries(acceptedSpec?.services ?? {}).map(([name, service]) => [name, service.databaseEnvAliases ?? {}])
+      ) };
       if ((!standardResource || standardResource === 'environment') && typeof observe === 'function') {
-        const observed = await (observe as (environment: Environment) => Promise<ObservedState>)
-          .call(resolved.adapter, environment);
+        const observed = await (observe as (environment: Environment, context?: HostingObservationContext) => Promise<ObservedState>)
+          .call(resolved.adapter, environment, observationContext);
         return {
           provider: providerName,
           category: registered.metadata.category,
           mode: 'environment',
           project: project?.name,
           environment: environment.name,
+          databaseAliasCoverage,
           observed: boundedObservation(observed),
         };
       }
@@ -838,8 +848,8 @@ export async function inspectProvider(
         (standardResource === 'database' || standardResource === 'cache')
         && typeof observe === 'function'
       ) {
-        const observed = await (observe as (environment: Environment) => Promise<ObservedState>)
-          .call(resolved.adapter, environment);
+        const observed = await (observe as (environment: Environment, context?: HostingObservationContext) => Promise<ObservedState>)
+          .call(resolved.adapter, environment, observationContext);
         const collection = standardResource === 'database' ? 'databases' : 'caches';
         const resources = (standardResource === 'database'
           ? observed.databases
@@ -851,6 +861,7 @@ export async function inspectProvider(
           mode: standardResource,
           project: project?.name,
           environment: environment.name,
+          databaseAliasCoverage,
           observed: {
             [collection]: resources,
             completeness: observed.completeness?.[collection] ?? 'unknown',
@@ -861,8 +872,8 @@ export async function inspectProvider(
       }
 
       if (standardResource === 'storage' && typeof observe === 'function') {
-        const observed = await (observe as (environment: Environment) => Promise<ObservedState>)
-          .call(resolved.adapter, environment);
+        const observed = await (observe as (environment: Environment, context?: HostingObservationContext) => Promise<ObservedState>)
+          .call(resolved.adapter, environment, observationContext);
         const storage = (observed.storage ?? [])
           .filter((item) => !input.id || item.externalId === input.id)
           .filter((item) => !input.name || item.name === input.name)

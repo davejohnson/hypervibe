@@ -130,15 +130,15 @@ describe('provider-scoped managed workflow migrations', () => {
   };
   const migration = { includeStep: false };
 
-  it('preserves the previous input hash for every other named hosting provider', () => {
-    const unchanged = ['azure-container-apps', 'digitalocean', 'ecs', 'fly', 'railway', 'vercel'];
-    expect(providerRegistry.namesFor('hosting').sort()).toEqual([...unchanged, 'cloudrun'].sort());
-    for (const provider of unchanged) {
+  it('requires reviewed credential evidence producer migrations for every hosting provider', () => {
+    // Shared revision 7 adds operation-bound activation evidence to every native
+    // deploy producer. Each existing revision 6 workflow must be reviewed again.
+    const changed = ['azure-container-apps', 'cloudrun', 'ecs', 'digitalocean', 'fly', 'railway', 'vercel'];
+    expect(providerRegistry.namesFor('hosting').sort()).toEqual(changed.sort());
+    for (const provider of changed) {
       expect(githubActionsWorkflowInputHash({ provider, target, migration }), provider)
-        .toBe(previousInputHash(provider, target, migration));
+        .not.toBe(previousInputHash(provider, target, migration));
     }
-    expect(githubActionsWorkflowInputHash({ provider: 'cloudrun', target, migration }))
-      .not.toBe(previousInputHash('cloudrun', target, migration));
   });
 
   it('uses declared provider revisions generically without changing the server program', () => {

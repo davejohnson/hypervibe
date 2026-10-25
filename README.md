@@ -61,10 +61,33 @@ Lifecycle maturity is reported by `hv_inspect {}` and `hv_connections {}`. Every
 - **Environment management** - Staging, production, PR previews
 - **Migration support** - Run Prisma, Drizzle, TypeORM migrations
 - **Local development** - Generate Docker Compose for local parity
-- **Secret rotation** - Rotate once, propagate to all environments
-- **Audit trail** - Track secret access across deploys
+- **Credential inventory** - Inspect sources, exact consumers, drift, and deployment evidence without exposing values or changing state
+- **Guided rotation** - Review one replacement, synchronize its selected destinations, and verify the affected deployments through the [existing lifecycle](docs/credential-lifecycle.md)
+- **Audit trail** - Keep source pickup, acceptance, validation, activation, and application-operation evidence distinct
 
 ## Quick Start
+
+### Install for your coding agent
+
+With Node.js/npm and your coding agent installed, run **one** of:
+
+```bash
+npx -y @hypervibe/hypervibe@latest install codex
+npx -y @hypervibe/hypervibe@latest install claude
+npx -y @hypervibe/hypervibe@latest install opencode
+```
+
+This installs the shared Hypervibe skill and registers its matching MCP server
+for your user across projects. Restart your agent after setup. There is no
+global Hypervibe CLI prerequisite, hosted account, or provider login required
+for installation. Existing project settings may override your user settings.
+See [agent installation](docs/agent-installation.md) for client versions,
+configuration preservation, and verification limits. These commands acquire
+the new integration after the release containing it is published.
+
+The macOS companion includes Codex skill setup through its bundled runtime.
+For another existing managed MCP connection, add `--skill-only` to install the
+skill without registering another server.
 
 ### Download the macOS Companion
 
@@ -73,7 +96,7 @@ Download the latest installer from
 Choose `arm64` for Apple Silicon Macs or `x86_64` for Intel Macs. Each DMG has
 an adjacent `.sha256` checksum file.
 
-### 1. Install the CLI
+### Optional standalone CLI
 
 Published releases are public on the npm registry. Installation does not
 require GitHub access, a package token, or custom npm registry configuration.
@@ -147,41 +170,9 @@ npm run build
 node dist/index.js --help
 ```
 
-### 2. Install As Codex MCP
+### Connect providers
 
-```bash
-codex mcp add hypervibe -- npx -y @hypervibe/hypervibe@latest
-codex mcp list
-```
-
-### 3. Install As Claude Code MCP
-
-With [Claude Code](https://code.claude.com/docs/en/setup) installed, run:
-
-```bash
-npx -y @hypervibe/hypervibe@latest install claude
-```
-
-This registers Hypervibe for your user account across projects. Claude Code
-writes its own configuration; no JSON editing or hosted account is needed.
-Restart Claude Code, then open `/mcp` to check the connection.
-
-The equivalent built-in command also works with Hypervibe releases that predate
-the installer:
-
-```bash
-claude mcp add --scope user --transport stdio hypervibe -- npx -y @hypervibe/hypervibe@latest mcp
-```
-
-An existing user-level server named `hypervibe` is left unchanged. Inspect it
-with `claude mcp get hypervibe`. If you intend to replace it, run
-`claude mcp remove --scope user hypervibe`, then rerun the installer. Local and
-project-scoped entries can take precedence over the user entry; `/mcp` shows the
-active connection. This command targets Claude Code, not Claude Desktop.
-
-### 4. Connect Providers
-
-Restart Claude Code, then:
+After restarting your configured agent:
 
 ```
 You: "Show me which provider connections this staging spec requires"
@@ -1605,15 +1596,24 @@ Hypervibe has three kinds of state to keep current:
 - **Local Hypervibe state** in `~/.hypervibe`, especially the SQLite database schema and encrypted provider connections.
 - **Repo-backed project state** in `.hypervibe/spec.json` and `.hypervibe/bindings.json`, which should be committed with the app.
 
-The default install command uses `@hypervibe/hypervibe@latest`, so users should not need to know or remember a package-upgrade command. When Codex, Claude, or another MCP client restarts the Hypervibe server, `npx` resolves the latest published package and Hypervibe automatically runs any pending SQLite migrations at startup.
+The agent installer uses `@hypervibe/hypervibe@latest` to acquire the current
+release, then pins the registered server to that release so its skill and
+runtime match. Rerun the same `npx ... install <client>` command to update an
+untouched installer-managed setup. Modified skills, unrelated MCP entries and
+companion-managed runtimes are preserved; see [installation and updates](docs/agent-installation.md).
+Hypervibe automatically runs pending SQLite migrations when the updated server
+starts. Older manually configured `@latest` servers still resolve the newest
+published package on restart, but do not install or update the consumer skill.
 
 Normal update flow:
 
-1. Restart the MCP client/server so `npx -y @hypervibe/hypervibe@latest` starts the newest published package.
+1. Rerun `npx -y @hypervibe/hypervibe@latest install <client>`, then restart the
+   agent. For a companion-managed server, update through the companion and use
+   `--skill-only` for its separately installed skill.
 2. In each app repo, pull the latest `.hypervibe/spec.json` and `.hypervibe/bindings.json`, then run `hv_status` or `hv_plan`.
 3. Commit any intended changes Hypervibe makes to `.hypervibe/spec.json`, `.hypervibe/bindings.json`, generated CI workflows, or other repo files.
 
-Provider credentials remain local and encrypted. Database component bindings (connection URLs, passwords) are also encrypted at rest. The encryption key lives in `~/.hypervibe/.secret-key` (0600); back it up — regenerating it makes previously encrypted data unrecoverable. Set `HYPERVIBE_SECRET_KEY` (64 hex chars) to supply the key externally (CI, containers). Teammates may still need to run `hv_connections` for their own AWS, Azure, Cloudflare, GCP, GitHub, Railway, or SendGrid access after installing Hypervibe, but ordinary Hypervibe package and SQLite schema upgrades should happen on restart.
+Provider credentials remain local and encrypted. Database component bindings (connection URLs, passwords) are also encrypted at rest. The encryption key lives in `~/.hypervibe/.secret-key` (0600); back it up — regenerating it makes previously encrypted data unrecoverable. Set `HYPERVIBE_SECRET_KEY` (64 hex chars) to supply the key externally (CI, containers). Teammates may still need to run `hv_connections` for their own AWS, Azure, Cloudflare, GCP, GitHub, Railway, or SendGrid access after installing Hypervibe. SQLite schema upgrades run when their updated server starts.
 
 `workloadKind: "job"` was removed from the service spec — it never had run-to-completion deploy semantics. Specs using it fail validation; choose `worker` (always-on, internal-only on Cloud Run with a minimum of one instance — note Cloud Run workers must still listen on `PORT`) or `cron` (scheduled). Railway, Cloud Run, and DigitalOcean implement `web`, `worker`, and `cron`; Fly implements `web` and `worker`; ECS Express, Azure Container Apps, and Vercel currently implement `web` only. Registry-backed spec validation rejects an unsupported provider/workload combination before provider project or environment mutation. Railway's observe cannot distinguish `web` from `worker`, so kind drift is not detected there.
 

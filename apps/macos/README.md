@@ -13,6 +13,8 @@ The current v0 slice contains:
 - per-project MCP sessions over stdio using the official Swift SDK;
 - safe one-click registration of every configured project with Claude Desktop
   and Codex / ChatGPT desktop clients;
+- bundled Hypervibe skill installation for Codex, with separate guidance status
+  and preservation of custom skills;
 - update checks against the latest published GitHub release, with a verified
   in-place **Restart and Update** flow for the matching Mac architecture;
 - first-run onboarding that registers any git repository, connects Claude
@@ -27,6 +29,8 @@ The current v0 slice contains:
   `hv_connections`;
 - project-scoped provider add, verify, and remove through the existing
   `hv_connections` MCP tool;
+- contextual credential links refreshed through read-only connection guidance,
+  and chat handoff for supported cloud bootstrap or local sign-in;
 - read-only masked runtime-variable inventory through `hv_secrets`;
 - an explicit production deploy review window that routes direct deployments
   through plan-gated `hv_deploy` and managed-CI promotions through a reviewed
@@ -89,6 +93,18 @@ Hypervibe adds one stdio MCP server entry per project. Each entry invokes the
 bundled launcher with an absolute repository path, so the server resolves that
 project's repo-backed spec and bindings. Existing unrelated MCP entries and
 other host settings are preserved.
+
+Codex setup also installs the Hypervibe skill included with the app. This uses
+the bundled runtime, so it requires no npm download or separate CLI. Settings
+shows guidance status separately from the MCP connection and offers **Install
+guidance** or **Update guidance** when needed. An app update can supply newer
+guidance; custom edits are preserved. Disconnecting a project does not delete
+the shared skill used by other projects.
+
+Claude Desktop receives guidance through MCP; the app does not invent a local
+skill directory for that client. Claude Code and OpenCode use the separate
+[npx agent installer](../../docs/agent-installation.md). They are not additional
+one-click targets in this version of the companion.
 
 The host configuration files are:
 

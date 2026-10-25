@@ -302,6 +302,7 @@ ${GITHUB_EPHEMERAL_DOCKER_LOGIN_RUNTIME.trimEnd().split('\n').map(line => '     
             const repository = tag.replace(/:[^/:]+$/, '');
             core.setOutput('image_uri', repository + '@' + digest);
       - name: Deploy image to Cloud Run
+        id: runtime_deploy
         uses: actions/github-script@v9
         env:
 ${transient ? '' : '          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}\n'}          GCP_PROJECT_ID: ${transient ? projectId : '${{ secrets.GCP_PROJECT_ID }}'}
@@ -315,6 +316,7 @@ ${transient ? '' : '          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_
           IMAGE_URI: \${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}
         with:
           script: |
+            const credentialDeployments = [];
 ${tokenRuntime()}
 ${transient ? '            try {\n' : ''}
             const required = [${transient ? '' : "'GCP_SERVICE_ACCOUNT_JSON', "}'GCP_PROJECT_ID', 'GCP_BOUND_PROJECT_ID', 'GCP_REGION', 'CLOUDRUN_RELEASE_COMMANDS_B64', 'CLOUDRUN_RUNTIME_RESOURCES_B64', 'IMAGE_URI'];
@@ -512,7 +514,8 @@ ${prepared ? `              if (firstRelease) { filesystem.runtimePrincipal = fi
                 body: JSON.stringify({ ${prepared ? `...(firstRelease ? { ingress: firstRelease.configuration.ingress${instanceBounds ? ', ...(firstRelease.configuration.scaling ? { scaling: firstRelease.configuration.scaling } : {})' : ''} } : {}), ` : ''}...(annotations ? { annotations } : {}), ...(filesystem.etag ? { etag: filesystem.etag } : {}), template }),
               }, 'Cloud Run service deployment for ' + serviceName);
               await waitOperation(operation, 'service ' + serviceName + ' deployment');
-              await waitReady(url, serviceName, 'service', process.env.IMAGE_URI, runtimeResource, filesystem);
+              const ready = await waitReady(url, serviceName, 'service', process.env.IMAGE_URI, runtimeResource, filesystem);
+              if (ready.latestReadyRevision) credentialDeployments.push({ serviceId: serviceName, deploymentIds: [ready.latestReadyRevision.includes('/') ? ready.latestReadyRevision : ready.name + '/revisions/' + ready.latestReadyRevision] });
             }
 
             for (const jobName of jobNames) {
@@ -536,6 +539,7 @@ ${prepared ? `              if (firstRelease) { filesystem.runtimePrincipal = fi
               await waitOperation(operation, 'job ' + jobName + ' deployment');
               await waitReady(url, jobName, 'job', process.env.IMAGE_URI, runtimeResource, filesystem);
             }
+            core.setOutput('credential_deployments', JSON.stringify(credentialDeployments));
 ${transient ? "            } catch { throw new Error('Cloud Run release could not be verified.'); }\n" + GITHUB_EPHEMERAL_DOCKER_CLEANUP_STEP : ''}`,
     requiredSecrets: transient ? [] : CLOUDRUN_CI_REQUIRED_SECRETS,
     requiredVariables,

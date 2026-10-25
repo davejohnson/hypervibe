@@ -28,7 +28,7 @@ afterEach(() => {
 function historicalState(): Database.Database {
   SqliteAdapter.resetInstance();
   const db = new Database(databasePath);
-  db.exec('DROP TABLE IF EXISTS provider_login_sessions; DELETE FROM schema_migrations WHERE version = 12;');
+  db.exec('DROP TABLE IF EXISTS provider_login_sessions; DELETE FROM schema_migrations WHERE version >= 12;');
   db.exec(readFileSync(new URL('./fixtures/schema-12-login.sql', import.meta.url), 'utf8'));
   return db;
 }
@@ -45,7 +45,7 @@ it('opens and reopens historical schema 12 without changing encrypted sessions, 
   db.prepare('INSERT INTO provider_login_sessions VALUES (?, ?, ?, ?, ?, ?, ?)').run(
     'synthetic-session', 'azure-container-apps', 'example/preserved-test-app', encrypted, 'active-owner', Date.now() + 120_000, 1700000000000);
   const rows = (connection: Database.Database) => ({
-    migrations: connection.prepare('SELECT * FROM schema_migrations ORDER BY version').all(),
+    migrations: connection.prepare('SELECT * FROM schema_migrations WHERE version <= 12 ORDER BY version').all(),
     sessions: connection.prepare('SELECT * FROM provider_login_sessions').all(),
     connections: connection.prepare('SELECT * FROM connections').all(),
     runs: connection.prepare('SELECT * FROM runs').all(),
@@ -56,21 +56,25 @@ it('opens and reopens historical schema 12 without changing encrypted sessions, 
     const adapter = initializeDatabase(databasePath);
     expect(adapter.migrate()).toEqual([]);
     expect(rows(adapter.getDb())).toEqual(before);
+    expect(adapter.getDb().prepare('SELECT version, name FROM schema_migrations WHERE version > 12').all()).toEqual([
+      { version: 13, name: 'reconcile_historical_apply_serialization' },
+    ]);
     expect(new ConnectionRepository().findById(connection.id)?.credentialsEncrypted).toBe(credentialsEncrypted);
     expect(new RunRepository().findById(recovery.id)?.plan).toEqual(recovery.plan);
     SqliteAdapter.resetInstance();
   }
 });
 
-it('installs the same additive table on schema 11 without changing existing records', () => {
+it('bridges canonical schema 11 to 13 without fabricating historical login state or changing records', () => {
   const db = SqliteAdapter.getInstance().getDb();
-  db.exec('DROP TABLE IF EXISTS provider_login_sessions; DELETE FROM schema_migrations WHERE version = 12;');
+  db.exec('DROP TABLE IF EXISTS provider_login_sessions; DELETE FROM schema_migrations WHERE version >= 12;');
   const before = db.prepare('SELECT * FROM schema_migrations ORDER BY version').all();
   expect(SqliteAdapter.getInstance().migrate().map(({ version, name }) => ({ version, name }))).toEqual([
-    { version: 12, name: 'provider_login_sessions' },
+    { version: 13, name: 'reconcile_historical_apply_serialization' },
   ]);
   expect(db.prepare('SELECT * FROM schema_migrations WHERE version < 12 ORDER BY version').all()).toEqual(before);
-  expect(db.prepare('SELECT * FROM provider_login_sessions').all()).toEqual([]);
+  expect(db.prepare("SELECT name FROM sqlite_master WHERE name LIKE '%provider_login%'").all()).toEqual([]);
+  expect(db.prepare('SELECT * FROM schema_migrations WHERE version = 12').all()).toEqual([]);
 });
 
 it.each(['name', 'missing-table', 'missing-column', 'wrong-index'] as const)('rejects incompatible schema 12 (%s) before applying any missing migration', (corruption) => {
@@ -82,6 +86,6 @@ it.each(['name', 'missing-table', 'missing-column', 'wrong-index'] as const)('re
   if (corruption === 'wrong-index') db.exec('DROP INDEX idx_provider_login_scope; CREATE INDEX idx_provider_login_scope ON provider_login_sessions(scope, provider);');
   const before = db.prepare('SELECT * FROM schema_migrations ORDER BY version').all();
   db.close();
-  expect(() => initializeDatabase(databasePath)).toThrow(/incompatible.*schema 12/i);
+  expect(() => initializeDatabase(databasePath)).toThrow(/historical schema|migration identity|base migration history/i);
   expect(SqliteAdapter.getInstance().getDb().prepare('SELECT * FROM schema_migrations ORDER BY version').all()).toEqual(before);
 });

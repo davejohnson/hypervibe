@@ -136,7 +136,7 @@ ${azureObservedPreparedApplicationConfiguration.toString()}
 const hvPreparedReleases = ${JSON.stringify(entries)};
 const hvPreparedScope = ${JSON.stringify({ environmentId: c.managedEnvironment, registryServer: c.registryServer, owner: c.owner, installationId: connection.installationId })};
 const hvPreparedDigest = value => require('node:crypto').createHash('sha256').update(JSON.stringify(value)).digest('hex');
-async function hvPreparedRelease(current, id, exactImage, sha) {
+async function hvPreparedRelease(current, id, exactImage, sha, operations) {
   const fail = () => { throw new Error('Azure prepared release could not be verified.'); };
   const same = (a, b) => typeof a === 'string' && a.toLowerCase() === b.toLowerCase();
   const entry = hvPreparedReleases.find(item => item.prepared.id === id); if (!entry) fail();
@@ -180,12 +180,14 @@ async function hvPreparedRelease(current, id, exactImage, sha) {
       || p?.principalType !== 'ServicePrincipal' || p?.condition != null || p?.description !== grant.description) fail();
   }
   const digest = exactImage.split('@')[1], container = configuration.properties.template.containers[0];
-  const body = { ...configuration, properties: { ...configuration.properties, template: { ...configuration.properties.template, revisionSuffix: 'hv-' + sha.slice(0, 10),
+  const revisionSuffix = 'hv-' + sha.slice(0, 10) + (operations.length ? '-c-' + hvPreparedDigest([...new Set(operations)].sort()).slice(0, 12) : '');
+  const expectedRevision = operations.length ? id.split('/').at(-1) + '--' + revisionSuffix : undefined;
+  const body = { ...configuration, properties: { ...configuration.properties, template: { ...configuration.properties.template, revisionSuffix,
     containers: [{ ...container, image: exactImage, env: [...container.env, { name: 'HYPERVIBE_DEPLOY_SHA', value: sha }, { name: 'HYPERVIBE_IMAGE_DIGEST', value: digest }] }] } } };
   const isReady = app => {
     verifyLifetime(app); verifyPrincipal(app, entry.runtime);
     const p = app.properties, active = p.template?.containers?.[0], env = active?.env || [];
-    return p.provisioningState === 'Succeeded' && typeof p.latestRevisionName === 'string' && p.latestReadyRevisionName === p.latestRevisionName
+    return (!expectedRevision || p.latestReadyRevisionName === expectedRevision) && p.provisioningState === 'Succeeded' && typeof p.latestRevisionName === 'string' && p.latestReadyRevisionName === p.latestRevisionName
       && active.image === exactImage && env.find(item => item.name === 'HYPERVIBE_DEPLOY_SHA')?.value === sha
       && env.find(item => item.name === 'HYPERVIBE_IMAGE_DIGEST')?.value === digest
       && hvPreparedDigest(azureObservedPreparedApplicationConfiguration(app)) === expectedConfiguration;
@@ -208,6 +210,7 @@ async function hvPreparedRelease(current, id, exactImage, sha) {
   if (!fqdn || !/^[a-z0-9.-]+$/.test(fqdn) || !health?.startsWith('/')) fail();
   const response = await fetch('https://' + fqdn + health, { redirect: 'error', signal: AbortSignal.timeout(15000) });
   void response.body?.cancel().catch(() => {}); if (!response.ok) fail();
+  return ready.properties.latestReadyRevisionName;
 }
 `;
 }

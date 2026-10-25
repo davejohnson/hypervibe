@@ -64,7 +64,7 @@ async function release(replaceRuntime: boolean) {
   const reviewed = target(), runtime = reviewed.deploymentAccess!.connection.runtimeIdentities[0].principal;
   if (runtime.kind !== 'azure-managed-identity') throw new Error('Invalid synthetic fixture');
   const script = extractGitHubScript(`jobs:\n  deploy:\n    steps:\n${buildAzureContainerAppsGitHubActionsSteps(reviewed).steps}`, 'Release exact digest to bound Azure Container Apps');
-  const digest = `sha256:${'d'.repeat(64)}`, mutations: any[] = [], calls: string[] = [];
+  const digest = `sha256:${'d'.repeat(64)}`, mutations: any[] = [], calls: string[] = [], outputs: unknown[][] = [];
   let app: any = { id: reviewed.providerServiceIds[0], systemData: { createdAt: reviewed.runtimeResources![0].providerResourceUid },
     identity: { type: 'UserAssigned', userAssignedIdentities: { [runtime.identityResourceId]: { clientId: runtime.clientId, principalId: replaceRuntime ? '63345678-1234-4678-8678-123456789012' : runtime.principalId } } },
     properties: { provisioningState: 'Succeeded', latestRevisionName: 'revision', latestReadyRevisionName: 'revision',
@@ -78,18 +78,19 @@ async function release(replaceRuntime: boolean) {
     if (init?.method === 'PATCH') { const body = JSON.parse(String(init.body)); mutations.push(body); app = { ...app, properties: { ...app.properties, template: body.properties.template } }; }
     return Response.json(app);
   };
-  const context = { repo: { owner: 'example', repo: 'app' }, ref: 'refs/heads/main', sha: 'a'.repeat(40) }, core = { getIDToken: async () => 'ci-proof', setSecret: () => {} };
+  const context = { repo: { owner: 'example', repo: 'app' }, ref: 'refs/heads/main', sha: 'a'.repeat(40) }, core = { getIDToken: async () => 'ci-proof', setSecret: () => {}, setOutput: (...args: unknown[]) => outputs.push(args) };
   const github = { rest: { repos: { getContent: async () => ({ data: { type: 'file', encoding: 'base64', content: 'e30=', size: 2 } }) } } };
   const process = { env: { AZURE_RESOURCE_GROUP_ID: reviewed.providerProjectId, AZURE_CONTAINER_APP_IDS_JSON: JSON.stringify(reviewed.providerServiceIds), IMAGE_URI: `${reviewed.providerScope!.registryServer}/app@${digest}`, DEPLOY_SHA: 'a'.repeat(40) } };
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
   let failure: unknown;
   try { await new AsyncFunction('require', 'core', 'github', 'context', 'fetch', 'process', script)(createRequire(import.meta.url), core, github, context, fetch, process); }
   catch (error) { failure = error; }
-  return { mutations, calls, failure, app };
+  return { mutations, calls, failure, app, outputs };
 }
 describe('Azure emitted broker authentication', () => {
   it('uses fresh ARM sessions for exact image rollout while retaining native secret references and rejecting a replaced runtime principal before mutation', async () => {
     const valid = await release(false); expect(valid.failure).toBeUndefined(); expect(valid.mutations).toHaveLength(1);
+    expect(valid.outputs).toEqual([['credential_deployments', JSON.stringify([{ serviceId: valid.app.id, deploymentIds: ['revision'] }])]]);
     expect(valid.mutations[0].properties.template.containers[0].env).toContainEqual({ name: 'API_TOKEN', secretRef: 'api-token' });
     expect(valid.mutations[0].properties).not.toHaveProperty('configuration');
     expect(valid.calls.filter(url => url.includes('/release-sessions'))).toHaveLength(3);

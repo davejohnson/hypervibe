@@ -1,3 +1,4 @@
+import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
 import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { z } from 'zod';
 import type { Component } from '../../../domain/entities/component.entity.js';
@@ -110,6 +111,8 @@ class NeonApiError extends Error {
 
 export class NeonAdapter implements IDatabaseAdapter {
   readonly name = 'neon';
+
+  readonly credentialLifecycle = createPostgresCredentialLifecycle(() => this);
 
   readonly capabilities: DatabaseCapabilities = {
     supportedDatabases: ['postgres'],

@@ -98,7 +98,7 @@ describe('connection guidance', () => {
     expect(guidance).toContain('DNS, custom domains, and email routing');
     expect(guidance).toContain('Registrar/domain purchase');
     expect(guidance).toContain('Create pre-filled Account API Token');
-    expect(guidance).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
+    expect(guidance).toContain('https://dash.cloudflare.com/?to=%2F%3Aaccount%2Fapi-tokens');
     expect(guidance).toContain('permissionGroupKeys=');
     expect(guidance).toContain('Create pre-filled User API Token');
     expect(guidance).toContain('https://dash.cloudflare.com/profile/api-tokens');
@@ -172,12 +172,13 @@ describe('connection guidance', () => {
       scope: 'davejohnson/livetrainer',
     });
 
-    expect(setup.recommendedSetupUrl).toBe(GITHUB_TOKEN_URLS.api);
+    expect(new URL(setup.recommendedSetupUrl!).searchParams.get('description')).toBe('Hypervibe GitHub API for davejohnson/livetrainer');
+    expect(new URL(setup.recommendedSetupUrl!).searchParams.get('scopes')).toBe('repo,workflow');
     expect(setup.setupUrls).toEqual(expect.arrayContaining([
-      `Create recommended combined classic token: ${GITHUB_TOKEN_URLS.combined}`,
-      `Create pre-filled classic API token: ${GITHUB_TOKEN_URLS.api}`,
-      `Create pre-filled fine-grained repository token: ${GITHUB_TOKEN_URLS.fineGrained}`,
-      `Create optional classic GHCR package token: ${GITHUB_TOKEN_URLS.packageRead}`,
+      expect.stringContaining('Create recommended combined classic token: https://github.com/settings/tokens/new?'),
+      expect.stringContaining('Create pre-filled classic API token: https://github.com/settings/tokens/new?'),
+      expect.stringContaining('Create pre-filled fine-grained repository token: https://github.com/settings/personal-access-tokens/new?'),
+      expect.stringContaining('Create optional classic GHCR package token: https://github.com/settings/tokens/new?'),
     ]));
     expect(setup.credentialExample).toBe(
       'hv_connections project="livetrainer" provider="github" scope="davejohnson/livetrainer" credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_TOKEN"'
@@ -192,7 +193,8 @@ describe('connection guidance', () => {
       requiredCredentialKeys: ['apiToken', 'packageReadToken'],
     });
 
-    expect(setup.recommendedSetupUrl).toBe(GITHUB_TOKEN_URLS.combined);
+    expect(new URL(setup.recommendedSetupUrl!).searchParams.get('description')).toBe('Hypervibe CI deploys for davejohnson/livetrainer');
+    expect(new URL(setup.recommendedSetupUrl!).searchParams.get('scopes')).toBe('repo,workflow,read:packages');
     expect(setup.credentialExample).toBe(
       'hv_connections project="livetrainer" provider="github" scope="davejohnson/livetrainer" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"NODE_AUTH_TOKEN"}'
     );
@@ -234,7 +236,7 @@ describe('connection guidance', () => {
     expect(apiUrl.searchParams.get('name')).toBe('Hypervibe');
     expect(apiUrl.searchParams.get('description')).toContain('Hypervibe');
     expect(apiUrl.searchParams.get('scopes')).toBe('api');
-    expect(guidance).toContain(GITLAB_TOKEN_URLS.api);
+    expect(guidance).toContain('https://gitlab.com/-/user_settings/personal_access_tokens?');
     expect(guidance).toContain('Maintainer');
     expect(guidance).toContain('Owner');
     expect(guidance).toContain('read_registry');

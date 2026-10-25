@@ -39,6 +39,8 @@ const SENSITIVE_KEY_PATTERN = /(^|_)?(secret|token|password|connectionstring|con
 const LOCAL_ONLY_BINDING_KEYS = new Set([
   'delegatedEnvBindings',
   'recoveryRuntimeSecretInputs',
+  'credentialUpdates',
+  'runtimeRollouts',
   'delegatedActionsBindings',
 ]);
 
@@ -95,6 +97,8 @@ export function mergeRepoPlatformBindings(
   repoBindings: Record<string, unknown>
 ): Record<string, unknown> {
   if (Object.hasOwn(repoBindings, 'recoveryRuntimeSecretInputs')) throw new Error('Private recovery inputs are local only and cannot be imported.');
+  if (Object.hasOwn(repoBindings, 'credentialUpdates')) throw new Error('Credential acceptance and recovery state are local only and cannot be imported.');
+  if (Object.hasOwn(repoBindings, 'runtimeRollouts')) throw new Error('Runtime configuration expectations and activation requirements are local only and cannot be imported.');
   if (existing.recoveryDatabases !== undefined) recoveryDatabaseBindings(existing.recoveryDatabases);
   if (repoBindings.recoveryDatabases !== undefined) recoveryDatabaseBindings(repoBindings.recoveryDatabases);
   const localVolumes = parseServiceVolumeBindings({ platformBindings: existing });

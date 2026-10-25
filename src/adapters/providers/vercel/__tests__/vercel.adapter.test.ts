@@ -723,6 +723,10 @@ describe('VercelAdapter', () => {
           },
         ]));
       }
+      if (url.pathname === '/v4/aliases') {
+        expect(url.searchParams.get('projectId')).toBe(PROJECT_ID);
+        return jsonResponse({ aliases: [{ uid: 'alias-current', alias: 'invoiceperfect.com', projectId: PROJECT_ID, deployment: { id: 'dpl_1234567890' } }, { uid: 'alias-old', alias: 'old.example.invalid', projectId: PROJECT_ID, deployment: { id: 'dpl_old' } }], pagination: { next: null } });
+      }
       if (url.pathname === '/v7/deployments') {
         return jsonResponse({
           deployments: [deployment()],
@@ -778,6 +782,7 @@ describe('VercelAdapter', () => {
         status: 'running',
         deployment: {
           id: 'dpl_1234567890',
+          activeDeploymentIds: ['dpl_1234567890', 'dpl_old'], activeDeploymentCoverage: 'traffic',
           status: 'READY',
           createdAt: '2023-11-14T22:13:20.000Z',
         },
@@ -825,6 +830,7 @@ describe('VercelAdapter', () => {
 
     expect(observed.partial).toBe(true);
     expect(observed.completeness?.services).toBe('unknown');
+    expect(observed.completeness?.serviceIdentities).toBe('complete');
     expect(observed.services[0]?.envVarKeys).toEqual(['SESSION_SECRET']);
     expect(observed.services[0]?.envVarHashes).toEqual({});
     expect(observed.warnings[0]).toContain('web:SESSION_SECRET');

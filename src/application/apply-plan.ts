@@ -1,5 +1,6 @@
 import { applyRecoveryRuntimeAction } from '../domain/services/recovery-runtime.service.js';
 import { applyRuntimeAccessAction, observeRuntimeAccess, planRuntimeAccess, projectRuntimeAccessInput } from '../domain/services/runtime-access.service.js';
+import { applyCredentialLifecycle, pendingCredentialUpdate } from '../domain/services/credential-lifecycle.service.js';
 import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from '../domain/services/database-credential-aliases.service.js';
 import { applySecretContainer, assertReadySecretContainers } from '../domain/services/secret-container-setup.js';
 import { applySecretReference, assertDeploymentSecretReferences } from './apply-secret-references.js';
@@ -97,7 +98,9 @@ import {
 import {
   credentialFieldsFromSchema,
   connectionSetupDetails,
+  connectionSetupUrl,
   GITHUB_TOKEN_URLS,
+  type ConnectionGuidanceContext,
 } from '../domain/services/connection-guidance.js';
 import { removeServiceBinding, serviceBindingFor } from '../domain/services/spec.service.js';
 import { removeHostingEnvVars, syncHostingEnvVars } from '../domain/services/hosting-env.service.js';
@@ -562,7 +565,8 @@ function bootstrapSuccessData(summary: Record<string, unknown>): Record<string, 
 
 export function splitActionScopedConnectionBlocks(
   blocked: ConnectionBlock[],
-  actions: PlanAction[]
+  actions: PlanAction[],
+  context: ConnectionGuidanceContext = {}
 ): {
   hardBlocked: ConnectionBlock[];
   actionScopedBlocked: ConnectionBlock[];
@@ -594,7 +598,7 @@ export function splitActionScopedConnectionBlocks(
         ? { requiredCredentialKeys: ['apiToken', 'packageReadToken'] }
         : {}),
       reason: hasImageRegistrySecret
-        ? `GitHub Actions deploy ${action.resource.name} is missing GHCR image pull credentials (${missing.join(', ')}). Connect GitHub with apiToken for repo/workflow API access plus packageReadToken for read:packages (create: ${GITHUB_TOKEN_URLS.packageRead}) before relying on push-to-deploy.`
+        ? `GitHub Actions deploy ${action.resource.name} is missing GHCR image pull credentials (${missing.join(', ')}). Connect GitHub with apiToken for repo/workflow API access plus packageReadToken for read:packages (create: ${connectionSetupUrl(GITHUB_TOKEN_URLS.packageRead, context)}) before relying on push-to-deploy.`
         : `GitHub Actions deploy ${action.resource.name} is missing provider secrets (${missing.join(', ')}). Connect and verify ${String(action.metadata?.provider ?? action.resource.provider)} before relying on push-to-deploy.`,
     }];
   });
@@ -678,7 +682,9 @@ async function executeRepositoryPlanApply(
   const projectForApply = syncProjectGitRemoteUrl(ctx, params.project, params.spec);
   const planService = new PlanService();
   const blocked = planService.projectPreflight(projectForApply, params.spec, params.envName);
-  const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, params.actions);
+  const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, params.actions, {
+    project: projectForApply.name, repositoryUrl: projectForApply.gitRemoteUrl,
+  });
   const applyBlocked = [
     ...hardBlocked,
     ...actionScopedBlocksRequiringConnectBeforeApply(actionScopedBlocked),
@@ -882,6 +888,24 @@ export async function executePlanApply(ctx: CommandContext, params: {
       requirements: loaded.document.inputRequired,
     };
   }
+  const projectForPreflight = spec.gitRemoteUrl
+    ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
+    : project;
+  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  const pendingDatabaseAliases = environment ? ctx.repos.components.findByEnvironmentId(environment.id)
+    .some(component => component.bindings.credentialAliasRepair !== undefined) : false;
+  if (pendingDatabaseAliases && planScope !== 'database-credential-aliases') {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'A database reference repair needs readback verification. Recover its isolated plan before other mutations.' }] };
+  }
+  if (planScope === 'credentials') {
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'Credential plans require the exact existing environment and cannot bootstrap.' }] };
+    const result = await applyCredentialLifecycle(ctx, { project: projectForPreflight, spec, specRevision: params.specRevision, planId, confirmActions: params.confirmActions });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Use the managed rollout, then status/health. Configuration, authentication, deployment and application operation are separate outcomes. Revocation remains pending.'] };
+  }
+  const pendingCredential = pendingCredentialUpdate(project.id);
+  if (pendingCredential) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: `Recover credential plan ${pendingCredential} before other lifecycle mutations.` }] };
+
   const rawEnvironmentSpec = spec.environments[envName];
   const envSpec = rawEnvironmentSpec ? withBackupStorageDefaults(rawEnvironmentSpec) : undefined;
   if (!envSpec) {
@@ -913,16 +937,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
       : { kind: 'env_missing', envName };
   }
 
-  const projectForPreflight = spec.gitRemoteUrl
-    ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
-    : project;
-  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
-  const pendingDatabaseAliases = environment ? ctx.repos.components.findByEnvironmentId(environment.id)
-    .some(component => component.bindings.credentialAliasRepair !== undefined) : false;
-  if (pendingDatabaseAliases && planScope !== 'database-credential-aliases') {
-    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
-      reason: 'A database reference repair needs readback verification. Recover its isolated plan before other mutations.' }] };
-  }
   if (planScope === 'database-credential-aliases') {
     if (loaded.document.databaseCredentialAliasesReady !== true || !environment || loaded.run.projectId !== project.id
       || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap) {
@@ -1151,7 +1165,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
         ...planService.projectPreflight(projectForPreflight, spec, envName),
         ...planService.providerPreflight(cleanupProviders, projectForPreflight, envName),
       ];
-  const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, loaded.document.actions);
+  const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, loaded.document.actions, {
+    project: projectForPreflight.name, repositoryUrl: projectForPreflight.gitRemoteUrl,
+  });
   const connectBeforeApply = actionScopedBlocksRequiringConnectBeforeApply(actionScopedBlocked);
   const applyBlocked = [...hardBlocked, ...connectBeforeApply];
   if (applyBlocked.length > 0) {

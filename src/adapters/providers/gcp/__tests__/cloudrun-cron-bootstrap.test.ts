@@ -191,7 +191,7 @@ async function runCi(kind: 'github' | 'portable', fetchImpl: typeof fetch) {
   };
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
   await new AsyncFunction('require', 'process', 'fetch', 'Buffer', 'core', 'createSign', 'execFileSync', 'readFile', 'writeFile', script)(
-    () => crypto, { env, stdout: { write: vi.fn() } }, fetchImpl, Buffer, { info: vi.fn() }, crypto.createSign,
+    () => crypto, { env, stdout: { write: vi.fn() } }, fetchImpl, Buffer, { info: vi.fn(), setOutput: vi.fn() }, crypto.createSign,
     (_file: string, args: string[]) => args[0] === 'push' ? 'digest: sha256:' + 'e'.repeat(64) : '',
     async (file: string) => file === '.hypervibe-deploy-sha' ? 'a'.repeat(40) : 'registry.example.test/source:tag', vi.fn());
 }
@@ -238,7 +238,7 @@ describe('Cloud Run managed-CI cron bootstrap', () => {
       CLOUDRUN_SERVICE_NAMES: '', CLOUDRUN_JOB_NAMES: prepared.externalId, IMAGE_URI: candidateImage, DEPLOY_OPERATION: 'deploy',
       CLOUDRUN_RELEASE_COMMANDS_B64: Buffer.from('[]').toString('base64'),
       CLOUDRUN_RUNTIME_RESOURCES_B64: Buffer.from(JSON.stringify([{ logicalName: 'cron', workloadKind: 'cron', providerResourceType: 'job', providerResourceId: prepared.externalId!, startCommand: 'npm run cron', healthCheckPath: null }])).toString('base64'),
-    } }, fetchMock, Buffer, { info: vi.fn() });
+    } }, fetchMock, Buffer, { info: vi.fn(), setOutput: vi.fn() });
     const beforeActivation = fetchMock.mock.calls.filter(([url, init]) => String(url).includes('cloudscheduler.googleapis.com') && (init?.method ?? 'GET') !== 'GET');
     expect(beforeActivation).toHaveLength(0);
     expect((await adapter.activateSchedule(service, bound, { expectedImage: candidateImage, expectedJobUid: scheduleActivation.jobUid, sourceCommitSha: 'a'.repeat(40) })).receipt.success).toBe(true);

@@ -1,4 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
+import { buildAzureContainerAppsGitHubActionsSteps } from '../../src/adapters/providers/azure/azure-container-apps-ci.workflow.js';
+import { extractGitHubScript } from '../../src/domain/services/__tests__/managed-ci-workflow.test-utils.js';
+import type { BranchDeployTarget } from '../../src/domain/ports/ci-deploy.port.js';
+import '../../src/adapters/providers/azure/azure-container-apps.adapter.js';
 import { azurePreparedFixture } from './helpers/azure-prepared-fixture.js';
 import { verifyCloudDeploymentReleaseTargetsV1 } from '../../src/application/hosted/cloud-deployment-session.js';
 import { projectSpecSchema } from '../../src/domain/spec/spec.schema.js';
@@ -39,7 +45,77 @@ async function fixture() {
   return { ...f, connection, prepared, coordinates, desired, runtime, input, bindings, authorize,
     verify: () => verifyCloudDeploymentReleaseTargetsV1(input) };
 }
+
+function applicationResponse(f: Awaited<ReturnType<typeof fixture>>, image: string, sha: string, revision: string) {
+    const app = structuredClone(f.resources.get(f.prepared.workloads[0].id));
+    // Independently authored native ACA 2026-01-01 projection, not the renderer's result.
+    app.identity = { type: 'UserAssigned', userAssignedIdentities: { [f.runtime.identityResourceId]: {
+      clientId: f.runtime.clientId, principalId: f.runtime.principalId } } };
+    app.properties.latestRevisionName = app.properties.latestReadyRevisionName = revision;
+    app.properties.configuration = { activeRevisionsMode: 'Single', ingress: { external: true, targetPort: 8080, transport: 'auto', allowInsecure: false },
+      identitySettings: [{ identity: f.runtime.identityResourceId, lifecycle: 'None' }], registries: [{ server: f.coordinates.registryServer, identity: f.runtime.identityResourceId }],
+      secrets: [{ name: 'reference-0', identity: f.runtime.identityResourceId, keyVaultUrl: `https://reviewed-secrets.vault.azure.net/secrets/api-token/${'b'.repeat(32)}` }] };
+    app.properties.template = { containers: [{ name: 'main', image, env: [{ name: 'NODE_ENV', value: 'production' }, { name: 'API_TOKEN', secretRef: 'reference-0' },
+      { name: 'HYPERVIBE_START_COMMAND', value: 'node server.js' }, { name: 'HYPERVIBE_HEALTH_CHECK_PATH', value: '/health' },
+      { name: 'HYPERVIBE_DEPLOY_SHA', value: sha }, { name: 'HYPERVIBE_IMAGE_DIGEST', value: `sha256:${'e'.repeat(64)}` }],
+      resources: { cpu: 0.25, memory: '0.5Gi' }, command: ['sh'], args: ['-lc', 'node server.js'],
+      probes: [{ type: 'Liveness', httpGet: { path: '/health', port: 8080, scheme: 'HTTP' }, initialDelaySeconds: 10, periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 6 }] }],
+      scale: { minReplicas: 0, maxReplicas: 4 } };
+    app.properties.workloadProfileName = 'Consumption';
+    app.properties.configuration.ingress.fqdn = 'web.example.test';
+    return app;
+}
 describe('Azure prepared release target enrollment', () => {
+  it.each(['first', 'same-image-credential', 'lost-ack'] as const)('emits verified native deployment receipts for prepared %s rollout', async mode => {
+    const f = await fixture(), p = f.bindings.environments.staging.platformBindings, id = f.prepared.workloads[0].id;
+    const sha = 'a'.repeat(40), image = `${f.coordinates.registryServer}/app@sha256:${'e'.repeat(64)}`;
+    const operationId = 'reviewed-credential-operation';
+    const suffix = 'hv-' + sha.slice(0, 10) + (mode === 'same-image-credential' ? '-c-' + createHash('sha256').update(JSON.stringify([operationId])).digest('hex').slice(0, 12) : '');
+    const revision = id.split('/').at(-1) + '--' + suffix;
+    if (mode === 'same-image-credential') {
+      f.resources.set(id, applicationResponse(f, image, sha, id.split('/').at(-1) + '--previous'));
+      p.preparedHosting.pendingFirstRelease = [];
+      p.preparedHosting.firstReleaseConfigurationDigests = {} as any;
+    }
+    const target: BranchDeployTarget = { environmentName: 'staging', kind: 'staging', branch: 'main', autoDeployOnPush: false,
+      serviceNames: ['web'], providerProjectId: f.coordinates.group, providerServiceIds: [id], providerRegion: 'eastus', providerScope: p.providerScope,
+      runtimeResources: [{ logicalName: 'web', workloadKind: 'web', providerResourceType: 'service', providerResourceId: id,
+        providerResourceUid: f.prepared.workloads[0].lifetimeId, startCommand: 'node server.js', healthCheckPath: '/health' }],
+      deploymentAccess: { origin: 'https://hypercloud.example', projectId: f.connection.appId, connectionId: f.connection.installationId,
+        environment: 'staging', sourceBranch: 'main', connection: f.connection }, preparedRuntime: { envVars: { NODE_ENV: 'production' }, preparation: p.preparedHosting as any } };
+    const generated = buildAzureContainerAppsGitHubActionsSteps(target);
+    const script = extractGitHubScript(`jobs:\n  deploy:\n    steps:\n${generated.steps}`, 'Release exact digest to bound Azure Container Apps');
+    const writes: any[] = [], outputs: unknown[][] = [];
+    const fetch = async (input: string, init?: RequestInit) => {
+      if (input.includes('/release-sessions')) return Response.json({ kind: 'azure-federation', principal: f.connection.principals.release,
+        target: 'resource-manager', token: 'synthetic-private-arm', expiresAt: new Date(Date.now() + 300000).toISOString() });
+      if (input.startsWith('https://web.example.test/')) return new Response('ok');
+      const path = new URL(input).pathname;
+      if (init?.method === 'PATCH') {
+        expect(path).toBe(id); writes.push(JSON.parse(String(init.body)));
+        f.resources.set(id, applicationResponse(f, image, sha, revision));
+        if (mode === 'lost-ack') throw new Error('Synthetic response lost after server accepted update');
+      }
+      const resource = f.resources.get(path); if (!resource) throw new Error('Unexpected native read: ' + path);
+      return Response.json(resource);
+    };
+    const core = { getIDToken: async () => 'synthetic-ci-proof', setSecret: () => {}, setOutput: (...args: unknown[]) => outputs.push(args) };
+    const github = { rest: { repos: { getContent: async () => ({ data: { type: 'file', encoding: 'base64', content: 'e30=', size: 2 } }) } } };
+    const run = () => new (Object.getPrototypeOf(async function () {}).constructor)('require', 'core', 'github', 'context', 'fetch', 'process', script)(
+      createRequire(import.meta.url), core, github, { repo: { owner: 'studio', repo: 'sequence' }, ref: 'refs/heads/main', sha }, fetch,
+      { env: { AZURE_RESOURCE_GROUP_ID: f.coordinates.group, AZURE_CONTAINER_APP_IDS_JSON: JSON.stringify([id]), IMAGE_URI: image, DEPLOY_SHA: sha,
+        HYPERVIBE_CREDENTIAL_OPERATIONS: JSON.stringify(mode === 'same-image-credential' ? { registry: { serviceId: id, operationId } } : {}) } });
+    if (mode === 'lost-ack') {
+      await expect(run()).rejects.toThrow(); expect(outputs).toEqual([]);
+      // A later execution observes the exact accepted deployment and emits its
+      // receipt without replaying the uncertain write.
+      await run();
+      expect(outputs).toContainEqual(['credential_deployments', JSON.stringify([{ serviceId: id, deploymentIds: [revision] }])]);
+    }
+    else { await run(); expect(outputs).toContainEqual(['credential_deployments', JSON.stringify([{ serviceId: id, deploymentIds: [revision] }])]); }
+    expect(writes).toHaveLength(1);
+    expect(writes[0].properties.template.revisionSuffix).toBe(suffix);
+  });
   it('verifies exact applied native app and registry lifetimes without infrastructure writes', async () => {
     const f = await fixture();
     expect(await f.verify()).toMatchObject({ provider: 'azure', environment: 'staging', targets: [{ workload: 'web', kind: 'service',

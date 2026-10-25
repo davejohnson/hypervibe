@@ -1,5 +1,7 @@
 import { isRecoveryRuntimeAction } from '../services/recovery-runtime.service.js';
 import { isRuntimeAccessAction } from '../services/runtime-access.service.js';
+import { DATABASE_PASSWORD_OPERATIONS, isDatabasePasswordPlan } from './database-password-plan.contract.js';
+import { isCredentialAction, CREDENTIAL_OPERATION } from './credential-plan.contract.js';
 import { databaseCredentialAliasesActionSchema, databaseCredentialAliasesMetadataSchema,
   DATABASE_CREDENTIAL_ALIASES_OPERATION } from '../services/database-credential-aliases.service.js';
 import { isDeepStrictEqual } from 'node:util';
@@ -228,6 +230,7 @@ export const planRunDocumentSchema = z.object({
     'secret-destinations',
     'cloud-scope',
     'operator-artifacts',
+    'credentials',
     'api-policy',
     'retained-cleanup',
     'managed-ci-bindings',
@@ -306,6 +309,18 @@ export const planRunDocumentSchema = z.object({
   }
   if (document.actions.some(action => action.metadata?.operation === 'secretDestinationPrepare'))
     ctx.addIssue({ code: 'custom', message: 'Secret container preparation requires its isolated scope.' });
+  if (document.scope === 'credentials') {
+    if (!document.actions.length || (!isDatabasePasswordPlan(document.actions) && document.actions.some(a => !isCredentialAction(a)))
+      || new Set(document.actions.map(a => a.id)).size !== document.actions.length
+      || !document.overrides?.delegatedSecretVarsEncrypted
+      || Object.keys(document.overrides).some(k => k !== 'delegatedSecretVarsEncrypted')
+      || !document.lockEnvironmentIds?.length || document.observedFingerprint !== null
+      || document.sourceCommitSha || document.integrationFingerprints || document.inputRequired?.length) {
+      ctx.addIssue({ code: 'custom', message: 'Credential plans contain only reviewed credential actions, exact environment locks and one encrypted replacement.' });
+    }
+  } else if (document.actions.some(a => a.metadata?.operation === CREDENTIAL_OPERATION || DATABASE_PASSWORD_OPERATIONS.includes(a.metadata?.operation as typeof DATABASE_PASSWORD_OPERATIONS[number]))) {
+    ctx.addIssue({ code: 'custom', message: 'Credential updates require their isolated scope.' });
+  }
   if (document.scope === 'database-credential-aliases') {
     const m = document.databaseCredentialAliasesVerification;
     if (document.actions.length > 1 || document.actions.some(action => !databaseCredentialAliasesActionSchema.safeParse(action).success
@@ -635,6 +650,14 @@ export function fingerprintObservedState(observed: ObservedState): string {
         engine: d.engine,
         externalId: d.externalId,
         status: d.status,
+        ...(d.persistence ? { persistence: {
+          state: d.persistence.state,
+          configurationFingerprint: d.persistence.configurationFingerprint ?? null,
+        } } : {}),
+        ...(d.runtimeReferenceBinding ? { runtimeReferenceBinding: {
+          state: d.runtimeReferenceBinding.state,
+          evidenceFingerprint: d.runtimeReferenceBinding.evidenceFingerprint ?? null,
+        } } : {}),
         providerScope: d.providerScope
           ? Object.fromEntries(Object.entries(d.providerScope).sort(([a], [b]) => a.localeCompare(b)))
           : null,

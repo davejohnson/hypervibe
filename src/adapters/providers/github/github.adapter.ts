@@ -513,6 +513,58 @@ export class GitHubAdapter {
     return response.secrets.map((secret) => secret.name);
   }
 
+  /** Inventory is strictly read-only. A 404 alone cannot distinguish hidden
+   * resources from deleted ones; absence requires a complete environment list. */
+  async observeSecretInventory(owner: string, repo: string, environmentName?: string): Promise<{
+    state: 'present' | 'absent' | 'unknown';
+    environmentId?: number;
+    secrets: Array<{ name: string; created_at: string; updated_at: string }>;
+  }> {
+    try {
+      const base = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+      const identitySchema = z.object({ id: z.number().int().positive().safe(), name: z.string().min(1) });
+      const secretSchema = z.object({ name: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+        created_at: z.string().datetime({ offset: true }), updated_at: z.string().datetime({ offset: true }) });
+      const list = async <T>(endpoint: string, field: string, schema: z.ZodType<T>, identity: (item: T) => string): Promise<T[]> => {
+        const result: T[] = []; const seen = new Set<string>(); let total: number | undefined;
+        for (let page = 1; page <= 10; page++) {
+          const response = z.object({ total_count: z.number().int().min(0).max(1000),
+            [field]: z.array(schema).max(100) }).parse(await this.request('GET', `${endpoint}?per_page=100&page=${page}`));
+          const count = response.total_count as number;
+          if (total !== undefined && total !== count) throw new Error('Inventory changed');
+          total = count;
+          const items = response[field] as T[];
+          for (const item of items) {
+            const key = identity(item).toLowerCase();
+            if (seen.has(key)) throw new Error('Duplicate identity');
+            seen.add(key); result.push(item);
+          }
+          if (result.length > total) throw new Error('Invalid count');
+          if (result.length === total) return result;
+          if (items.length < 100) throw new Error('Incomplete inventory');
+        }
+        throw new Error('Inventory limit');
+      };
+      let environment: z.infer<typeof identitySchema> | undefined;
+      if (environmentName !== undefined) {
+        const environments = await list(`${base}/environments`, 'environments', identitySchema, item => item.name);
+        environment = environments.find(item => item.name.toLowerCase() === environmentName.toLowerCase());
+        if (!environment) return { state: 'absent', secrets: [] };
+      }
+      const scope = environment ? `${base}/environments/${encodeURIComponent(environment.name)}` : `${base}/actions`;
+      const secrets = await list(`${scope}/secrets`, 'secrets', secretSchema, item => item.name);
+      if (environment) {
+        const current = identitySchema.parse(await this.request('GET', scope));
+        if (current.id !== environment.id || current.name.toLowerCase() !== environment.name.toLowerCase()) {
+          throw new Error('Environment replaced');
+        }
+      }
+      return { state: 'present', ...(environment ? { environmentId: environment.id } : {}), secrets };
+    } catch {
+      return { state: 'unknown', secrets: [] };
+    }
+  }
+
   async getVulnerabilityAlertsEnabled(owner: string, repo: string): Promise<boolean> {
     try {
       await this.request('GET', `/repos/${owner}/${repo}/vulnerability-alerts`);
@@ -698,12 +750,15 @@ export class GitHubAdapter {
     repo: string,
     environmentName: string,
     secretName: string,
-    secretValue: string
+    secretValue: string,
+    options?: { expectedEnvironmentId: number }
   ): Promise<void> {
     const environment = encodeURIComponent(environmentName);
     try {
-      await this.request<unknown>('GET', `/repos/${owner}/${repo}/environments/${environment}`);
+      const current = await this.request<{ id: number }>('GET', `/repos/${owner}/${repo}/environments/${environment}`);
+      if (options && current.id !== options.expectedEnvironmentId) throw new Error('The reviewed GitHub environment identity changed.');
     } catch (error) {
+      if (options) throw new Error('The reviewed GitHub environment cannot be verified.');
       if (!isGitHubNotFound(error)) throw error;
       await this.request<unknown>('PUT', `/repos/${owner}/${repo}/environments/${environment}`, {});
     }
@@ -859,6 +914,12 @@ export class GitHubAdapter {
   }
 
   // ============= Workflows =============
+
+  async getWorkflow(owner: string, repo: string, definition: string): Promise<{ id: number; path: string; state: string }> {
+    const identity = definition.startsWith('.github/workflows/') ? definition.slice('.github/workflows/'.length) : definition;
+    if (!identity.trim() || identity.includes('/')) throw new Error('Exact workflow id or file name is required.');
+    return this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/workflows/${encodeURIComponent(identity)}`);
+  }
 
   /**
    * List workflows in a repository.

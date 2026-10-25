@@ -1,4 +1,5 @@
 import { gcpGithubRecoveryAuthentication } from './gcp-github-automation.js';
+import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
 import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { z } from 'zod';
 import { randomInt, randomUUID } from 'crypto';
@@ -122,6 +123,8 @@ const preservedDailyBackupFields = ['startTime', 'pointInTimeRecoveryEnabled', '
 
 interface CloudSqlOperation {
   name?: string;
+  targetProject?: string;
+  targetId?: string;
   status?: string;
   error?: {
     errors?: Array<{ code?: string; message?: string }>;
@@ -246,6 +249,22 @@ function projectCloudSqlDatabaseRuntime(
 
 export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, IDatabaseResilienceAdapter {
   readonly name = 'cloudsql';
+
+  readonly credentialLifecycle = createPostgresCredentialLifecycle(() => this, {
+    rotate: async (_component, target, replacement) => {
+      if (!this.credentials || !replacement) return { state: 'blocked' };
+      const projectId = this.credentials.projectId;
+      const token = await this.getAccessToken();
+      const url = new URL(`https://sqladmin.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/instances/${encodeURIComponent(target.externalId)}/users`);
+      url.searchParams.set('name', target.username);
+      const response = await fetch(url, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: target.username, password: replacement }) });
+      if (!response.ok) return { state: 'unknown' };
+      const operation = await response.json() as { name?: string; targetProject?: string; targetId?: string; status?: string; error?: unknown };
+      if (!operation.name || !/^[A-Za-z0-9_-]+$/.test(operation.name) || operation.targetProject !== projectId || operation.targetId !== target.externalId || operation.error) return { state: 'unknown' };
+      if (operation.status !== 'DONE') await this.waitForOperation(token, operation.name, 'database password update', { targetProject: projectId, targetId: target.externalId });
+      return { state: 'acknowledged', operationId: operation.name };
+    },
+  });
 
   readonly dailyBackups: IDailyBackupPolicy<DatabaseBackupTarget> = {
     observe: target => this.observeDailyBackupPolicy(target),
@@ -1900,7 +1919,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     return true;
   }
 
-  private async waitForOperation(token: string, operationName: string, description: string): Promise<void> {
+  private async waitForOperation(token: string, operationName: string, description: string, expected?: { targetProject: string; targetId: string }): Promise<void> {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }
@@ -1923,6 +1942,9 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
       }
 
       const operation = await response.json() as CloudSqlOperation;
+      if (expected && (operation.name !== operationName || operation.targetProject !== expected.targetProject || operation.targetId !== expected.targetId)) {
+        throw new Error('Cloud SQL operation completion did not match the reviewed database.');
+      }
       const status = (operation.status ?? '').toUpperCase();
       if (status === 'DONE') {
         if (operation.error?.errors?.length) {

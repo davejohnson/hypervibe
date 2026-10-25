@@ -1,9 +1,11 @@
 # Connect Cloud saved-state compatibility
 
-The draft now recognizes the historical additive SQLite migration 12,
-`provider_login_sessions`. It creates the same empty table on schema 11 and
-preserves existing ciphertext, active lease ownership/expiry, connections and
-recovery runs when reopening schema 12. It does not copy credentials into a
+The draft recognizes the historical additive SQLite migration 12,
+`provider_login_sessions`, through the shared historical-migration validator.
+The monotonic migration 13 preserves existing ciphertext, active lease
+ownership/expiry, connections and recovery runs when opening schema 12. New
+profiles and canonical schema-11 profiles receive migration 13 without inventing
+a version-12 login table or marker. It does not copy credentials into a
 different store, decrypt login sessions, discard migration history or reset
 outstanding operations.
 
@@ -26,12 +28,24 @@ upgrade cases both failed before the change. Four incompatible-schema cases
 also exercised the old rejection; their expected diagnostic changed with the
 new distinction between recognized and incompatible version 12.
 
-After the fix, the focused preservation, prior-version upgrade and apply
-reservation group passes 14 tests. It covers repeated open, unchanged encrypted
-session/connection bytes and active leases, retained recovery plans, additive
-upgrade, incompatible migration name/table/column/index, and rejection of future
-schema versions before missing migrations run. These tests run through ordinary
-`npm test`; no live cloud compatibility follows from these local checks.
+Integration with main's historical reconciliation challenged a second assumption:
+that the draft's canonical version-12 creation could coexist with main's monotonic
+version-13 bridge. An actual SQLite boundary run of the partially merged code
+failed 12 cases: fresh profiles installed 13 and then 12, alternative historical
+objects lost their recognized identity, and treating login migration 12 as
+canonical bypassed its exact historical schema validation. The fix removes the
+version-12 creation and duplicate login-only validator, retaining main's shared
+identity/fingerprint checks and migration 13.
+
+The retained schema-12 fixture still exercises encrypted sessions, active leases,
+connections and saved recovery runs. Their bytes and original migration rows must
+remain unchanged across initial upgrade and repeated opens; the only new history
+entry is the version-13 bridge. Canonical schema-11 profiles must not acquire a
+login table or version-12 marker. Corrupt historical name/table/column/index and
+future schema versions remain blocked before missing migrations execute. The
+shared historical suite also preserves both known historical version-12
+identities and companion version-11 history. These tests use the real SQLite
+engine in ordinary `npm test`; no live cloud compatibility follows from them.
 
 ## Authentication boundary
 
@@ -48,3 +62,16 @@ it did not establish a production authentication migration. New Connect Cloud
 customers use the hosted browser installation and do not need these local
 sessions. An isolated operator test store can use explicitly selected native
 authentication where the relevant provider adapter supports it.
+
+## Merge validation
+
+The focused preservation/history/reservation group passed all 26 checks against
+the resolved SQLite adapter. A separate 2026-10-25 copy-only check used the frozen
+actual operator test profile created by the prior schema-12 candidate. Its closed
+database had no nonempty WAL. A disposable byte copy opened through the resolved
+adapter, gained only migration 13, passed `integrity_check`, and reopened without
+another migration. All original schema objects, table rows, encrypted bytes and
+migration timestamps remained unchanged. The source database hash stayed exact;
+no original state, key or provider was written, and the disposable copy was
+removed. This establishes compatibility with that retained profile, not every
+unrecorded historical schema.

@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { z } from 'zod';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import { verifyPostgresApplicationAuthentication } from './database-authentication.js';
 import type {
   DatabaseQueryOptions,
   DatabaseQueryResult,
@@ -33,6 +34,7 @@ export const DEFAULT_MAX_QUERY_RESPONSE_BYTES = 512 * 1024;
 export const MAX_QUERY_STATEMENT_TIMEOUT_MS = 30_000;
 
 export class DatabaseAdapter implements IDatabaseQueryAdapter {
+  readonly verifyAuthentication = verifyPostgresApplicationAuthentication;
   private credentials: DatabaseCredentials | null = null;
 
   connect(credentials: DatabaseCredentials): void {

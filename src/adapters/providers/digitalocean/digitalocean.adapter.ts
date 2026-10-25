@@ -1,3 +1,5 @@
+import type { ProviderEnvironmentVariablesRequest, ProviderEnvironmentVariablesResult } from '../../../domain/ports/provider-env-vars.port.js';
+import { createDigitalOceanRegistryCredentialLifecycle } from './digitalocean-registry-credential.js';
 import { createHash } from 'crypto';
 import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
@@ -82,6 +84,7 @@ interface DigitalOceanMaintenanceSnapshotState {
 
 export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenanceAdapter {
   readonly name = 'digitalocean';
+  readonly registryCredentialLifecycle = createDigitalOceanRegistryCredentialLifecycle(() => this.client);
 
   readonly capabilities: ProviderCapabilities = {
     supportedBuilders: ['dockerfile', 'buildpack', 'static'],
@@ -94,6 +97,8 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
     managedTls: true,
     supportsObserve: true,
     supportsDeferredDeploy: true,
+    credentialUpdateActivation: 'provider-rollout',
+    credentialValueEvidence: 'acknowledgement',
     supportsMaintenance: true,
   };
 
@@ -430,12 +435,45 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
     }
   }
 
+  async readProviderEnvironmentVariables(request: ProviderEnvironmentVariablesRequest): Promise<ProviderEnvironmentVariablesResult> {
+    try {
+      if (!this.client) throw new Error();
+      const bindings = parseHostingBindings(request.environment);
+      const serviceId = bindings.services?.[request.service.name]?.serviceId;
+      const target = serviceId && this.parseServiceExternalId(serviceId);
+      if (bindings.provider !== this.name || !target || target.appId !== bindings.projectId) throw new Error();
+      const app = await this.client.getApp(target.appId);
+      if (!app || app.id !== target.appId || app.spec.region && this.credentials && app.spec.region !== this.credentials.appRegion) throw new Error();
+      const matches = this.componentMatches(app.spec, target.componentName);
+      if (matches.length !== 1 || matches[0].collection !== target.collection) throw new Error();
+      const global = app.spec.envs ?? []; const component = matches[0].component.envs ?? [];
+      for (const entries of [global, component]) if (!Array.isArray(entries) || entries.some(entry => typeof entry.key !== 'string') || new Set(entries.map(entry => entry.key)).size !== entries.length) throw new Error();
+      const entries = new Map([...global, ...component].filter(entry => entry.scope !== 'BUILD_TIME').map(entry => [entry.key, entry]));
+      const variables: Record<string, string> = {}; const unresolvedKeys: string[] = [];
+      for (const [key, entry] of entries) {
+        if (entry.type !== 'SECRET' && typeof entry.value === 'string') variables[key] = entry.value;
+        else unresolvedKeys.push(key);
+      }
+      return { success: true, variables, ...(unresolvedKeys.length ? { unresolvedKeys: unresolvedKeys.sort() } : {}) };
+    } catch { return { success: false, error: 'Exact DigitalOcean component configuration could not be verified.' }; }
+  }
+
   async setEnvVars(
     environment: Environment,
     service: Service,
     vars: Record<string, string>,
-    _options: DeploymentMutationOptions = {}
+    options: DeploymentMutationOptions = {}
   ): Promise<Receipt> {
+    if (options.requireCredentialUpdate) {
+      const binding = parseHostingBindings(environment);
+      if (binding.provider !== this.name || !binding.services?.[service.name]?.serviceId) return { success: false, message: 'Exact DigitalOcean credential target is not bound; no write attempted.', data: { mutationAttempted: false } };
+      return this.mutateComponentEnvironment(environment, service, existing => {
+        const byName = new Map(existing.map(entry => [entry.key, entry]));
+        if (byName.size !== existing.length) throw new Error('Ambiguous credential environment keys.');
+        for (const [key, value] of Object.entries(vars)) byName.set(key, { ...byName.get(key), key, value, scope: byName.get(key)?.scope ?? 'RUN_TIME', type: 'SECRET' });
+        return [...byName.values()];
+      }, true);
+    }
     return this.mutateComponentEnvironment(environment, service, (existing) =>
       this.mergeEnv(existing, this.runtimeEnvVars(service, vars), service)
     );
@@ -1438,7 +1476,8 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
   private async mutateComponentEnvironment(
     environment: Environment,
     service: Service,
-    mutate: (env: DigitalOceanAppEnv[]) => DigitalOceanAppEnv[]
+    mutate: (env: DigitalOceanAppEnv[]) => DigitalOceanAppEnv[],
+    credentialUpdate = false
   ): Promise<Receipt> {
     if (!this.client) {
       return { success: false, message: 'Not connected' };
@@ -1486,7 +1525,7 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
       );
       const baselineDeploymentId = app.active_deployment?.id;
       const updated = await this.client.updateApp(app.id, nextSpec);
-      await this.waitForConfigurationDeployment({
+      const activated = await this.waitForConfigurationDeployment({
         appId: app.id,
         baselineDeploymentId,
         expectedDeploymentId: updated.in_progress_deployment?.id
@@ -1501,13 +1540,15 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
           appId: app.id,
           componentName,
           variableCount: nextComponent.envs.length,
+          ...(credentialUpdate ? { configurationUpdated: true, credentialUpdateActivation: 'provider-rollout', credentialValueEvidence: 'acknowledgement', runtimeRolloutRequired: true,
+            rolloutBaseline: baselineDeploymentId ? { state: 'present', deploymentId: baselineDeploymentId } : { state: 'unknown' }, deploymentId: activated.active_deployment?.id } : {}),
         },
       };
     } catch (error) {
       return {
         success: false,
         message: `Failed to update DigitalOcean environment variables for ${service.name}`,
-        error: this.formatError(error),
+        error: credentialUpdate ? 'The selected credential write requires provider inspection before recovery.' : this.formatError(error),
       };
     }
   }
@@ -1848,6 +1889,10 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
           .map((entry) => [entry.key, hashEnvValue(entry.value!)])
       ),
       status,
+      ...(app.active_deployment?.id ? { deployment: { id: app.active_deployment.id, status: app.active_deployment.phase,
+        ...(!app.in_progress_deployment || typeof app.in_progress_deployment.id === 'string'
+          ? { activeDeploymentIds: [...new Set([app.active_deployment.id, ...(app.in_progress_deployment?.id ? [app.in_progress_deployment.id] : [])])].sort(), activeDeploymentCoverage: 'traffic' as const } : {}),
+      } } : {}),
     };
   }
 

@@ -1,6 +1,8 @@
 import { isRecoveryRuntimeAction } from '../services/recovery-runtime.service.js';
 import { recoveryRuntimeStepSchema } from '../ports/recovery-runtime.port.js';
 import { isRuntimeAccessAction, RUNTIME_ACCESS_OPERATIONS } from '../services/runtime-access.service.js';
+import { isDatabasePasswordAction, DATABASE_PASSWORD_OPERATIONS } from './database-password-plan.contract.js';
+import { isCredentialAction, CREDENTIAL_OPERATION } from './credential-plan.contract.js';
 import { databaseCredentialAliasesActionSchema, DATABASE_CREDENTIAL_ALIASES_OPERATION } from '../services/database-credential-aliases.service.js';
 import { secretReferenceActionMetadataSchema, SECRET_REFERENCE_OPERATION } from '../services/secret-reference-plan.js';
 import { secretContainerActionMetadataSchema, SECRET_DESTINATION_PREPARE } from '../ports/secret-destination-lifecycle.port.js';
@@ -102,6 +104,7 @@ import {
 export type PlanMutationCapability =
   | 'cloud.scope.prepare'
   | 'operator.artifact.publish'
+  | 'credential.lifecycle.update'
   | 'database.credential-aliases.repair'
   | 'database.scope.bind'
   | 'hosting.prepared.bind'
@@ -492,6 +495,8 @@ export function resolvePlanActionAuthority(
   action: PlanAction
 ): PlanActionAuthority | null {
   if (action.type === 'noop') return null;
+  if (DATABASE_PASSWORD_OPERATIONS.includes(action.metadata?.operation as typeof DATABASE_PASSWORD_OPERATIONS[number])) return isDatabasePasswordAction(action) ? authority(action, 'credential.lifecycle.update') : null;
+  if (action.metadata?.operation === CREDENTIAL_OPERATION) return isCredentialAction(action) ? authority(action, 'credential.lifecycle.update') : null;
   if (!action.id.trim() || !action.resource.name.trim() || !action.resource.provider.trim()) {
     return null;
   }

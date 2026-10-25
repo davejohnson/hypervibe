@@ -3,6 +3,7 @@ import { azureVolumeFingerprint } from './azure-volume-runtime.js';
 import { azureDeploymentCiBinding, azureBrokerRuntime, azureBrokerRegistryLogin } from './azure-deployment-ci-broker.js';
 import { buildAzurePreparedReleaseRuntime } from './azure-prepared-release.js';
 import { GITHUB_EPHEMERAL_DOCKER_CLEANUP_STEP } from '../../../domain/services/cloud-deployment-ci.js';
+import { azureRuntimeIdentityFingerprint } from './azure-runtime-identity.js';
 import type {
   BranchDeployStepResult,
   BranchDeployTarget,
@@ -129,8 +130,10 @@ ${broker ? `        uses: actions/github-script@v9
             }
             core.setOutput('image_uri', tag.replace(/:[^/:]+$/, '') + '@' + digest);
       - name: Release exact digest to bound Azure Container Apps
+        id: runtime_deploy
         uses: actions/github-script@v9
         env:
+          HYPERVIBE_CREDENTIAL_OPERATIONS: \${{ inputs.credential_operations || '{}' }}
 ${broker ? `          AZURE_SUBSCRIPTION_ID: ${yamlSingleQuoted(broker.principal.subscriptionId)}` : `          AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: \${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
@@ -141,8 +144,13 @@ ${broker ? `          AZURE_SUBSCRIPTION_ID: ${yamlSingleQuoted(broker.principal
           DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
+            const credentialDeployments = [];
+            const { createHash } = require('node:crypto');
+            const credentialOperations = JSON.parse(process.env.HYPERVIBE_CREDENTIAL_OPERATIONS || '{}');
+            if (!credentialOperations || typeof credentialOperations !== 'object' || Array.isArray(credentialOperations)) throw new Error('Credential operation bindings are malformed');
             const management = 'https://management.azure.com';
             const volumeFingerprint = ${azureVolumeFingerprint.toString().replace(/\n/g, '\n            ')};
+            const identityFingerprint = ${azureRuntimeIdentityFingerprint.toString().replace(/\n/g, '\n            ')};
             const apiVersion = '2026-01-01';
 ${broker ? `            ${script(azureBrokerRuntime(target))}
 ${preparedRuntime ? `            ${script(preparedRuntime)}\n` : ''}            const expectedLifetimes = ${JSON.stringify(broker.apps)};
@@ -221,14 +229,22 @@ ${broker ? `              const token = (await hvDeploymentSession('resource-man
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
             for (const appId of appIds) {
               const app = await request('GET', appId);
-${preparedRuntime ? `              await hvPreparedRelease(app, appId, exactImage, sha);
+${preparedRuntime ? `              const preparedOperations = Object.values(credentialOperations).filter((entry) => entry?.serviceId === appId).map((entry) => entry.operationId);
+              if (preparedOperations.some((id) => typeof id !== 'string' || !id || id.length > 1024)) throw new Error('Credential operation identity is malformed');
+              const revision = await hvPreparedRelease(app, appId, exactImage, sha, preparedOperations);
+              credentialDeployments.push({ serviceId: appId, deploymentIds: [revision] });
               continue;
 ` : ''}${broker ? `              verifyWorkload(app, appId);
 ` : ''}              if (app?.id?.toLowerCase() !== appId.toLowerCase()) {
                 throw new Error('Azure returned the wrong Container App identity for ' + appId);
               }
+              const operations = Object.values(credentialOperations).filter((entry) => entry?.serviceId === appId).map((entry) => entry.operationId);
+              if (operations.some((id) => typeof id !== 'string' || !id || id.length > 1024)) throw new Error('Credential operation identity is malformed');
+              const revisionSuffix = 'hv-' + sha.slice(0, 10) + (operations.length ? '-c-' + createHash('sha256').update(JSON.stringify([...new Set(operations)].sort())).digest('hex').slice(0, 12) : '');
+              const expectedRevision = operations.length ? appId.split('/').at(-1) + '--' + revisionSuffix : undefined;
               const template = app.properties?.template;
               const expectedVolumes = volumeFingerprint(template);
+              const expectedIdentity = identityFingerprint(app);
               const containers = [...(template?.containers || [])];
               if (containers.length !== 1) throw new Error('Hypervibe expects exactly one Container App container');
               const env = [...(containers[0].env || [])]
@@ -259,7 +275,7 @@ ${preparedRuntime ? `              await hvPreparedRelease(app, appId, exactImag
                 properties: {
                   template: {
                     ...template,
-                    revisionSuffix: 'hv-' + sha.slice(0, 10),
+                    revisionSuffix,
                     containers,
                   },
                 },
@@ -271,22 +287,25 @@ ${broker ? `                verifyWorkload(observed, appId);
 ` : ''}                const active = observed?.properties?.template?.containers?.[0];
                 const activeEnv = active?.env || [];
                 const markerValue = (name) => activeEnv.find((item) => item.name === name)?.value;
-                if (observed?.properties?.provisioningState === 'Succeeded'
+                if ((!expectedRevision || observed?.properties?.latestReadyRevisionName === expectedRevision) && observed?.properties?.provisioningState === 'Succeeded'
                   && observed.properties.latestReadyRevisionName === observed.properties.latestRevisionName
                   && active?.image === exactImage
                   && markerValue('HYPERVIBE_DEPLOY_SHA') === sha
                   && markerValue('HYPERVIBE_IMAGE_DIGEST') === digest) {
                   if (volumeFingerprint(observed.properties.template) !== expectedVolumes) throw new Error('Azure volume mounts changed during release.');
+                  if (identityFingerprint(observed) !== expectedIdentity) throw new Error('Azure workload identity changed during release.');
                   ready = observed;
                   break;
                 }
                 if (attempt < 120) await sleep(5000);
               }
+              if (ready?.properties?.latestReadyRevisionName) credentialDeployments.push({ serviceId: appId, deploymentIds: [ready.properties.latestReadyRevisionName] });
               const fqdn = ready?.properties?.configuration?.ingress?.fqdn;
               if (!fqdn) throw new Error('Azure did not verify the exact image or return a public FQDN for ' + appId);
               const response = await fetch('https://' + fqdn + healthPath, { redirect: 'follow' });
               if (!response.ok) throw new Error('Azure Container App health check failed with HTTP ' + response.status);
             }
+            core.setOutput('credential_deployments', JSON.stringify(credentialDeployments));
 ${broker ? GITHUB_EPHEMERAL_DOCKER_CLEANUP_STEP : ''}`,
   };
 }

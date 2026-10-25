@@ -1129,6 +1129,33 @@ export function diffEnvironment(input: {
           detail: `${database.provider} datastore ${database.externalId} does not match the durable local binding ${localDbExternalId ?? '(missing)'}`,
         });
       }
+    } else if (observedDb && currentDbProvider === wanted && observedDb.persistence
+      && observedDb.persistence.state !== 'configured') {
+      const persistence = observedDb.persistence;
+      actions.push({
+        id: createId,
+        type: 'update',
+        resource: { kind: 'database', name: spec.database.engine, provider: wanted },
+        verified: persistence.state === 'missing',
+        reason: persistence.state === 'missing'
+          ? 'The bound database has no verified persistent storage for its configured data directory'
+          : 'Persistent storage for the bound database could not be verified',
+        metadata: {
+          blockedReason: `database_persistence_${persistence.state}`,
+          externalId: observedDb.externalId,
+          ...(observedDb.providerScope ? { providerScope: observedDb.providerScope } : {}),
+        },
+      });
+      warnings.push(`${persistence.reason ?? 'Database persistence is unverified.'} Preserve the existing database and recover its data before any storage change; Hypervibe will not attach a volume, restart, or replace it automatically.`);
+    } else if (observedDb && currentDbProvider === wanted && observedDb.runtimeReferenceBinding
+      && observedDb.runtimeReferenceBinding.state !== 'configured') {
+      actions.push({ id: createId, type: 'update',
+        resource: { kind: 'database', name: spec.database.engine, provider: wanted },
+        verified: observedDb.runtimeReferenceBinding.state === 'missing',
+        reason: 'The existing database runtime URL variable needs verified binding metadata before dependent changes',
+        metadata: { blockedReason: `database_runtime_reference_${observedDb.runtimeReferenceBinding.state}`,
+          externalId: observedDb.externalId } });
+      warnings.push('Run hv_plan to review the existing database runtime reference binding; uncertain provider evidence blocks repair.');
     } else if (
       observedDb
       && currentDbProvider === wanted

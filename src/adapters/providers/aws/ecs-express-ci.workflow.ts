@@ -145,6 +145,7 @@ ${GITHUB_EPHEMERAL_DOCKER_LOGIN_RUNTIME.trimEnd().split('\n').map(line => '     
       - name: Install pinned ECS SDK
         run: npm install --no-save --ignore-scripts ${HYPERVIBE_MANAGED_NPM_PACKAGES.awsEcs}
       - name: Release exact digest to bound ECS Express services
+        id: runtime_deploy
         uses: actions/github-script@v9
         env:
           AWS_ECS_CLUSTER_ARN: ${clusterArn}
@@ -153,7 +154,8 @@ ${GITHUB_EPHEMERAL_DOCKER_LOGIN_RUNTIME.trimEnd().split('\n').map(line => '     
           DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
-${broker ? sessionRuntime + '\n            try {\n' : ''}            const {
+${broker ? sessionRuntime + '\n            try {\n' : ''}            const credentialDeployments = [];
+            const {
               DescribeExpressGatewayServiceCommand,
               ECSClient,
               UpdateExpressGatewayServiceCommand,
@@ -193,13 +195,7 @@ ${buildEcsExpressTaskDefinitionRuntime().split('\n').filter(Boolean).map(line =>
               const session = await hvDeploymentSession(); return { accessKeyId: session.accessKeyId, secretAccessKey: session.secretAccessKey, sessionToken: session.sessionToken, expiration: new Date(session.expiresAt) };
             }` : ''} });
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-            const currentConfig = (service) => {
-              const configs = service?.activeConfigurations || [];
-              return configs.find((item) => item.serviceRevisionArn === service.currentDeployment)
-                || configs.toSorted((a, b) =>
-                  new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
-                )[0];
-            };
+            const currentConfig = ecsCurrentConfiguration;
             for (const serviceArn of serviceArns) {
               const before = (await client.send(
                 new DescribeExpressGatewayServiceCommand({ serviceArn })
@@ -218,12 +214,14 @@ ${buildEcsExpressTaskDefinitionRuntime().split('\n').filter(Boolean).map(line =>
               const healthPath = release.healthPath;
               await client.send(new UpdateExpressGatewayServiceCommand(release.update));
               let endpoint;
+              let deployedRevision;
               for (let attempt = 1; attempt <= 120; attempt += 1) {
                 const observed = (await client.send(
                   new DescribeExpressGatewayServiceCommand({ serviceArn })
                 )).service;
                 const active = currentConfig(observed);
                 const deployed = await ecsReleaseContainer(client, active, serviceArn);
+                if (deployed.taskRoleArn !== release.taskRoleArn) throw new Error('ECS deployed task role changed from the reviewed runtime identity');
                 const activeEnv = deployed.container.environment || [];
                 const markerValue = (name) => activeEnv.find((item) => item.name === name)?.value;
                 if (observed?.serviceArn === serviceArn && observed.cluster === clusterArn && observed.status?.statusCode === 'ACTIVE'
@@ -231,6 +229,7 @@ ${buildEcsExpressTaskDefinitionRuntime().split('\n').filter(Boolean).map(line =>
                   && deployed.container.image === exactImage
                   && markerValue('HYPERVIBE_DEPLOY_SHA') === sha
                   && markerValue('HYPERVIBE_IMAGE_DIGEST') === digest) {
+                  deployedRevision = observed.currentDeployment;
                   endpoint = active.ingressPaths?.find((item) => item.accessType === 'PUBLIC')?.endpoint
                     || active.ingressPaths?.[0]?.endpoint;
                   break;
@@ -240,12 +239,14 @@ ${buildEcsExpressTaskDefinitionRuntime().split('\n').filter(Boolean).map(line =>
               if (!endpoint) {
                 throw new Error('ECS Express did not verify the exact digest for ' + serviceArn);
               }
+              if (deployedRevision) credentialDeployments.push({ serviceId: serviceArn, deploymentIds: [deployedRevision] });
               const url = new URL(healthPath, endpoint.startsWith('http') ? endpoint : 'https://' + endpoint);
               const response = await fetch(url, { redirect: 'follow' });
               if (!response.ok) {
                 throw new Error('ECS Express health check failed with HTTP ' + response.status);
               }
             }
+            core.setOutput('credential_deployments', JSON.stringify(credentialDeployments));
 ${broker ? "            } catch { throw new Error('AWS release could not be verified.'); }\n" + GITHUB_EPHEMERAL_DOCKER_CLEANUP_STEP : ''}`,
   };
 }

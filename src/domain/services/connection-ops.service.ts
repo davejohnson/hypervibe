@@ -5,6 +5,7 @@ import { providerRegistry } from '../registry/provider.registry.js';
 import { secretManagerRegistry } from '../registry/secretmanager.registry.js';
 import { githubCiDeployPermissionProblem } from './ci-deploy.service.js';
 import { normalizeConnectionScope } from '../entities/connection.entity.js';
+import { redactExactValues } from '../../utils/redact-exact-values.js';
 
 const connectionRepo = new ConnectionRepository();
 const auditRepo = new AuditRepository();
@@ -32,7 +33,8 @@ export async function saveConnection(
   provider: string,
   credentials: Record<string, unknown>,
   scope?: string,
-  options: { credentialsSource?: string } = {}
+  options: { credentialsSource?: string; credentialsRef?: string; credentialsKey?: string; credentialsMap?: Record<string, string>;
+    credentialsResolution?: Record<string, { resolvedRef: string; sourceKey?: string; sourceField?: string }> } = {}
 ): Promise<SaveConnectionOutcome> {
   scope = normalizeConnectionScope(scope) ?? undefined;
   const secretStore = getSecretStore();
@@ -64,15 +66,21 @@ export async function saveConnection(
     depsResult = await registeredProvider.ensureDependencies();
   }
 
+  const suppliedStrings = (value: unknown): string[] => typeof value === 'string' ? [value]
+    : value && typeof value === 'object' ? Object.values(value).flatMap(suppliedStrings) : [];
   auditRepo.create({
     action: 'connection.created',
     resourceType: 'connection',
     resourceId: connection.id,
-    details: {
+    details: redactExactValues({
       provider,
       scope: scope || null,
       ...(options.credentialsSource ? { credentialsSource: options.credentialsSource } : {}),
-    },
+      ...(options.credentialsRef ? { credentialsRef: options.credentialsRef } : {}),
+      ...(options.credentialsKey ? { credentialsKey: options.credentialsKey } : {}),
+      ...(options.credentialsMap ? { credentialsMap: options.credentialsMap } : {}),
+      ...(options.credentialsResolution ? { credentialsResolution: options.credentialsResolution } : {}),
+    }, suppliedStrings(credentials)),
   });
 
   return {
@@ -115,11 +123,29 @@ export async function verifyConnection(provider: string, scope?: string): Promis
 
   const secretStore = getSecretStore();
   const registeredProvider = providerRegistry.get(provider);
+  const suppliedValues: string[] = [];
+  const collectSuppliedValues = (value: unknown): void => {
+    if (typeof value === 'string') {
+      suppliedValues.push(value);
+      // Service-account credentials may themselves be serialized JSON.
+      if (/^[\[{]/.test(value.trim())) {
+        try { collectSuppliedValues(JSON.parse(value)); } catch { /* Ordinary scalar credential. */ }
+      }
+    } else if (value && typeof value === 'object') {
+      Object.values(value).forEach(collectSuppliedValues);
+    }
+  };
+  const readCredentials = () => {
+    const credentials = secretStore.decryptObject<Record<string, unknown>>(connection.credentialsEncrypted);
+    collectSuppliedValues(credentials);
+    return credentials;
+  };
+  const safeOutcome = (outcome: VerifyConnectionOutcome): VerifyConnectionOutcome => redactExactValues(outcome, suppliedValues);
 
   // Secret managers verify through their own registry/adapter interface.
   if (!registeredProvider && secretManagerRegistry.has(provider)) {
     try {
-      const decryptedCreds = secretStore.decryptObject(connection.credentialsEncrypted);
+      const decryptedCreds = readCredentials();
       const adapter = secretManagerRegistry.createAdapter(provider, decryptedCreds);
       await adapter.connect(decryptedCreds);
       const result = await adapter.verify();
@@ -129,25 +155,25 @@ export async function verifyConnection(provider: string, scope?: string): Promis
           action: 'connection.verified',
           resourceType: 'connection',
           resourceId: connection.id,
-          details: { provider, scope: scope || null },
+          details: redactExactValues({ provider, scope: scope || null }, suppliedValues),
         });
-        return {
+        return safeOutcome({
           kind: 'verified',
           message: `${provider} connection (${scopeDisplay}) verified${result.identity ? ` as ${result.identity}` : ''}`,
           data: { ...(result.identity ? { identity: result.identity } : {}) },
-        };
+        });
       }
       connectionRepo.updateStatus(connection.id, 'failed');
-      return {
+      return safeOutcome({
         kind: 'failed',
         error: result.error ?? 'Verification failed',
-      };
+      });
     } catch (error) {
       connectionRepo.updateStatus(connection.id, 'failed');
-      return {
+      return safeOutcome({
         kind: 'threw',
         error: error instanceof Error ? error.message : String(error),
-      };
+      });
     }
   }
 
@@ -156,18 +182,18 @@ export async function verifyConnection(provider: string, scope?: string): Promis
   }
 
   try {
-    const decryptedCreds = secretStore.decryptObject(connection.credentialsEncrypted);
+    const decryptedCreds = readCredentials();
     const adapter = await registeredProvider.factory(decryptedCreds);
 
     // Check if adapter has a verify method
     if (typeof (adapter as { verify?: () => Promise<unknown> }).verify !== 'function') {
       // For providers without verify (like local, tunnel), just mark as verified
       connectionRepo.updateStatus(connection.id, 'verified');
-      return {
+      return safeOutcome({
         kind: 'verified',
         message: `${provider} connection (${scopeDisplay}) saved`,
         data: {},
-      };
+      });
     }
 
     // Call verify on the adapter
@@ -239,7 +265,7 @@ export async function verifyConnection(provider: string, scope?: string): Promis
         action: 'connection.verified',
         resourceType: 'connection',
         resourceId: connection.id,
-        details: { provider, scope: scope || null, email: result.email, accountId: result.accountId, version: result.version },
+        details: redactExactValues({ provider, scope: scope || null, email: result.email, accountId: result.accountId, version: result.version }, suppliedValues),
       });
 
       const displayName = registeredProvider.metadata.displayName;
@@ -258,7 +284,7 @@ export async function verifyConnection(provider: string, scope?: string): Promis
         githubPermissionProblem?.hint,
       ].filter(Boolean).join(' ');
 
-      return {
+      return safeOutcome({
         kind: 'verified',
         message,
         data: {
@@ -271,19 +297,19 @@ export async function verifyConnection(provider: string, scope?: string): Promis
           ...(result.workspaceId && { workspaceId: result.workspaceId }),
           ...(result.workspaces && result.workspaces.length > 0 && { workspaces: result.workspaces }),
         },
-      };
+      });
     } else {
       connectionRepo.updateStatus(connection.id, 'failed');
       auditRepo.create({
         action: 'connection.failed',
         resourceType: 'connection',
         resourceId: connection.id,
-        details: { provider, scope: scope || null, reason: result.error },
+        details: redactExactValues({ provider, scope: scope || null, reason: result.error }, suppliedValues),
       });
 
       const errorMsg = `${registeredProvider.metadata.displayName} verification failed: ${result.error}.`;
 
-      return { kind: 'failed', error: errorMsg };
+      return safeOutcome({ kind: 'failed', error: errorMsg });
     }
   } catch (error) {
     connectionRepo.updateStatus(connection.id, 'failed');
@@ -291,10 +317,10 @@ export async function verifyConnection(provider: string, scope?: string): Promis
       action: 'connection.failed',
       resourceType: 'connection',
       resourceId: connection.id,
-      details: { provider, scope: scope || null, error: String(error) },
+      details: redactExactValues({ provider, scope: scope || null, error: String(error) }, suppliedValues),
     });
 
-    return { kind: 'threw', error: `Verification failed: ${error}.` };
+    return safeOutcome({ kind: 'threw', error: `Verification failed: ${error}.` });
   }
 }
 

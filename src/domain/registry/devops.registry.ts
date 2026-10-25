@@ -24,6 +24,8 @@ export interface CiApplyResult {
 }
 
 export interface CiLifecyclePort {
+  prepareCredentialRollout?(params: { project: Project; spec: ProjectSpec; definition: string; ref: string; inputs?: Record<string, string> }): Promise<Record<string, string>>;
+  observeCredentialRollout?(params: { project: Project; spec: ProjectSpec; runId: string }): Promise<Array<{ service: string; operationId: string; deploymentIds: string[] }>>;
   planDeploy(params: {
     project: Project;
     spec: ProjectSpec;

@@ -211,7 +211,7 @@ ${options.instanceBounds ? '  assertCloudRunInstanceBounds(current.scaling, runt
   const updateMask = releaseHash ? 'annotations,template.containers' : 'template.containers';
   await waitOperation(await json(url + '?updateMask=' + updateMask, { method: 'PATCH', headers, body: JSON.stringify({ ...(annotations ? { annotations } : {}), ...(filesystem.etag ? { etag: filesystem.etag } : {}), template }) }, 'Cloud Run service update'), 'Cloud Run service update');
   const observed = await waitReady(url, name, 'service', exactImage, runtimeResource, filesystem);
-  deployments.push({ kind: 'service', name, imageUri: exactImage, imageDigest: digest, uri: observed.uri || null });
+  deployments.push({ kind: 'service', name, serviceId: name, deploymentId: observed.latestReadyRevision && (observed.latestReadyRevision.includes('/') ? observed.latestReadyRevision : observed.name + '/revisions/' + observed.latestReadyRevision), imageUri: exactImage, imageDigest: digest, uri: observed.uri || null });
 }
 for (const name of jobs) {
   const url = 'https://run.googleapis.com/v2/projects/' + encodeURIComponent(process.env.GCP_PROJECT_ID) + '/locations/' + encodeURIComponent(process.env.GCP_REGION) + '/jobs/' + encodeURIComponent(name);

@@ -1,11 +1,13 @@
 import type { BranchDeployTarget, PortableCiDeployRecipe } from '../../../domain/ports/ci-deploy.port.js';
 import { azureRegistryName } from './azure-container-apps-ci.workflow.js';
 import { azureVolumeFingerprint } from './azure-volume-runtime.js';
+import { azureRuntimeIdentityFingerprint } from './azure-runtime-identity.js';
 
 export const AZURE_CONTAINER_APPS_PORTABLE_RUNTIME_PATH = '.gitlab/hypervibe/azure-container-apps-deploy.mjs';
 
 export function buildAzureContainerAppsPortableRuntime(): string {
-  return `import { execFileSync } from 'node:child_process';
+  return `import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 
 const required = ['AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET', 'AZURE_RESOURCE_GROUP_ID', 'AZURE_CONTAINER_APP_IDS_JSON', 'AZURE_REGISTRY_SERVER', 'CI_REGISTRY', 'CI_REGISTRY_USER', 'CI_REGISTRY_PASSWORD', 'CI_PROJECT_PATH', 'HYPERVIBE_REPOSITORY', 'HYPERVIBE_ENVIRONMENT', 'HYPERVIBE_PROGRAM_FINGERPRINT'];
@@ -53,12 +55,20 @@ const exactImage = image.replace(/:[^/:]+$/, '') + '@' + digest;
 execFileSync(docker, ['logout', process.env.CI_REGISTRY], { stdio: 'ignore' });
 execFileSync(docker, ['logout', process.env.AZURE_REGISTRY_SERVER], { stdio: 'ignore' });
 const deployments = [];
+const credentialOperations = JSON.parse(process.env.HYPERVIBE_CREDENTIAL_OPERATIONS || '{}');
+if (!credentialOperations || typeof credentialOperations !== 'object' || Array.isArray(credentialOperations)) throw new Error('Credential operation bindings are malformed');
 const volumeFingerprint = ${azureVolumeFingerprint.toString()};
+const identityFingerprint = ${azureRuntimeIdentityFingerprint.toString()};
 for (const appId of appIds) {
   const app = await arm('GET', appId);
   if (app?.id?.toLowerCase() !== appId.toLowerCase()) throw new Error('Azure returned a different Container App identity');
+  const operations = Object.values(credentialOperations).filter((entry) => entry?.serviceId === appId).map((entry) => entry.operationId);
+  if (operations.some((id) => typeof id !== 'string' || !id || id.length > 1024)) throw new Error('Credential operation identity is malformed');
+  const revisionSuffix = 'hv-' + sha.slice(0, 10) + (operations.length ? '-c-' + createHash('sha256').update(JSON.stringify([...new Set(operations)].sort())).digest('hex').slice(0, 12) : '');
+  const expectedRevision = operations.length ? appId.split('/').at(-1) + '--' + revisionSuffix : undefined;
   const template = app.properties?.template;
   const expectedVolumes = volumeFingerprint(template);
+  const expectedIdentity = identityFingerprint(app);
   const containers = [...(template?.containers || [])];
   if (containers.length !== 1) throw new Error('Hypervibe expects exactly one Container App container');
   const env = [...(containers[0].env || [])].filter((entry) => !['HYPERVIBE_DEPLOY_SHA', 'HYPERVIBE_IMAGE_DIGEST'].includes(entry.name));
@@ -67,15 +77,16 @@ for (const appId of appIds) {
   const startCommand = marker('HYPERVIBE_START_COMMAND');
   env.push({ name: 'HYPERVIBE_DEPLOY_SHA', value: sha }, { name: 'HYPERVIBE_IMAGE_DIGEST', value: digest });
   containers[0] = { ...containers[0], image: exactImage, env, command: startCommand ? ['sh'] : undefined, args: startCommand ? ['-lc', startCommand] : undefined, probes: [{ type: 'Liveness', httpGet: { path: healthPath, port: 8080, scheme: 'HTTP' }, initialDelaySeconds: 10, periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 6 }] };
-  await arm('PATCH', appId, { properties: { template: { ...template, revisionSuffix: 'hv-' + sha.slice(0, 10), containers } } });
+  await arm('PATCH', appId, { properties: { template: { ...template, revisionSuffix, containers } } });
   let ready;
   for (let attempt = 0; attempt < 120; attempt++) {
     const observed = await arm('GET', appId);
     const active = observed?.properties?.template?.containers?.[0];
     const activeEnv = active?.env || [];
     const value = (name) => activeEnv.find((entry) => entry.name === name)?.value;
-    if (observed?.properties?.provisioningState === 'Succeeded' && observed.properties.latestReadyRevisionName === observed.properties.latestRevisionName && active?.image === exactImage && value('HYPERVIBE_DEPLOY_SHA') === sha && value('HYPERVIBE_IMAGE_DIGEST') === digest) {
+    if ((!expectedRevision || observed?.properties?.latestReadyRevisionName === expectedRevision) && observed?.properties?.provisioningState === 'Succeeded' && observed.properties.latestReadyRevisionName === observed.properties.latestRevisionName && active?.image === exactImage && value('HYPERVIBE_DEPLOY_SHA') === sha && value('HYPERVIBE_IMAGE_DIGEST') === digest) {
       if (volumeFingerprint(observed.properties.template) !== expectedVolumes) throw new Error('Azure volume mounts changed during release.');
+      if (identityFingerprint(observed) !== expectedIdentity) throw new Error('Azure workload identity changed during release.');
       ready = observed; break;
     }
     if (attempt === 119) throw new Error('Azure Container App did not converge to exact image');
@@ -85,7 +96,7 @@ for (const appId of appIds) {
   if (!fqdn) throw new Error('Azure returned no public Container App FQDN');
   const health = await fetch('https://' + fqdn + healthPath, { redirect: 'follow' });
   if (!health.ok) throw new Error('Azure Container App health check failed with HTTP ' + health.status);
-  deployments.push({ appId, revision: ready.properties.latestReadyRevisionName, imageDigest: digest, url: 'https://' + fqdn });
+  deployments.push({ appId, serviceId: appId, deploymentId: ready.properties.latestReadyRevisionName, revision: ready.properties.latestReadyRevisionName, imageDigest: digest, url: 'https://' + fqdn });
 }
 await writeFile('.hypervibe-release.json', JSON.stringify({ version: 1, provider: 'azure-container-apps', repository: process.env.HYPERVIBE_REPOSITORY, environment: process.env.HYPERVIBE_ENVIRONMENT, sha, programFingerprint: process.env.HYPERVIBE_PROGRAM_FINGERPRINT, deployments }) + '\\n', { mode: 0o600 });
 `;

@@ -50,6 +50,8 @@ export async function syncHostingEnvVars(params: {
   /** Keep exact-SHA CI as the next code release boundary when supported. */
   deferDeployment?: boolean;
   requireDeferredSecretUpdate?: boolean;
+  /** Exact selected-key credential authority; native activation effects were reviewed. */
+  requireCredentialUpdate?: boolean;
 }): Promise<Receipt & { provider?: string }> {
   const reservedError = reservedRuntimeEnvError(params.vars);
   if (reservedError) return { success: false, message: reservedError, error: reservedError };
@@ -83,6 +85,9 @@ export async function syncHostingEnvVars(params: {
     secretVersionRefs = validateRuntimeSecretReferences(params.secretVersionRefs, params.vars,
       destination => adapter.capabilities?.runtimeSecretReferenceProviders?.includes(destination.provider) === true);
   } catch { return { success: false, message: 'The hosting provider cannot install the declared native secret references.', provider }; }
+  if (params.requireCredentialUpdate && !adapter.capabilities?.credentialUpdateActivation) {
+    return { success: false, message: 'This adapter has no reviewed credential update capability.', provider };
+  }
   if (params.requireDeferredSecretUpdate && (params.deferDeployment !== true || adapter.capabilities?.supportsDeferredSecretUpdates !== true)) {
     return { success: false, message: 'This adapter cannot update selected secrets without restarting workloads.', provider };
   }
@@ -100,7 +105,13 @@ export async function syncHostingEnvVars(params: {
   const exactValues = Object.values(params.vars);
   try {
     const referenceOptions = Object.keys(secretVersionRefs).length ? { secretVersionRefs } : {};
-    const receipt = deferDeployment || Object.keys(referenceOptions).length
+    const receipt = params.requireCredentialUpdate
+      ? await adapter.setEnvVars(params.environment, params.service, params.vars, {
+        requireCredentialUpdate: true,
+        ...referenceOptions,
+        deferDeployment: adapter.capabilities?.credentialUpdateActivation === 'deferred',
+      })
+      : deferDeployment || Object.keys(referenceOptions).length
       ? await adapter.setEnvVars(
         params.environment,
         params.service,
@@ -207,8 +218,9 @@ export async function readHostingEnvVars(params: {
   project: Project;
   environment: Environment;
   service: Service;
+  preserveReferences?: boolean;
 }): Promise<
-  { success: true; provider: string; variables: Record<string, string> }
+  { success: true; provider: string; variables: Record<string, string>; unresolvedKeys?: string[] }
   | { success: false; provider: string; error: string; connectionUnavailable?: boolean }
 > {
   const provider = hostingProviderForEnvironment(params.project, params.environment);
@@ -244,8 +256,9 @@ export async function readHostingEnvVars(params: {
   const readResult = await adapter.readProviderEnvironmentVariables({
     environment: params.environment,
     service: params.service,
+    ...(params.preserveReferences ? { preserveReferences: true } : {}),
   });
   return readResult.success
-    ? { success: true, provider, variables: readResult.variables }
+    ? { success: true, provider, variables: readResult.variables, ...(readResult.unresolvedKeys?.length ? { unresolvedKeys: readResult.unresolvedKeys } : {}) }
     : { success: false, provider, error: readResult.error };
 }

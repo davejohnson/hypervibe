@@ -1,3 +1,4 @@
+import { prepareGitHubCredentialRollout, observeGitHubCredentialRollout } from '../adapters/providers/github/github-credential-activation.js';
 import {
   GitHubAdapter,
   type GitHubCredentials,
@@ -41,6 +42,8 @@ devOpsProviderRegistry.registerCiProvider({
     return new GitHubActionsOperationsAdapter(adapter);
   },
   lifecycle: {
+    prepareCredentialRollout: params => prepareGitHubCredentialRollout(params),
+    observeCredentialRollout: params => observeGitHubCredentialRollout(params),
     async planDeploy(params) {
       return planGitHubActionsDeploy(params);
     },

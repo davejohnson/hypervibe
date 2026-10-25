@@ -54,7 +54,8 @@ to restore a separate instance, run the existing SQL check and perform cleanup.
 
 ## Legacy database scope reconciliation
 
-An existing database whose `providerScope` is wholly absent may receive one
+An existing database whose `providerScope` is absent or a valid, nonconflicting
+partial identity may receive one
 confirmed `database-bindings` action. The shared planner uses the native
 `dailyBackups.observe` source, before any managed-program projection. Every
 scope coordinate must agree with the legacy component or its same-provider
@@ -63,7 +64,11 @@ to infer placement, adopt another database or overwrite existing scope.
 
 The action pins the exact component, provider, engine, external ID, complete
 recovery source and a credential-free binding fingerprint. Apply rechecks the
-current binding and freshly observed source before merging only `providerScope`.
+current binding and freshly observed source before merging only missing scope
+coordinates. A reviewed partial scope must still match exactly, or already equal
+the complete reviewed scope after an earlier persistence attempt. Recorded keys
+are never replaced. The optional runtime-reference metadata capability can add
+an absent URL variable-name binding under the same isolated source checks.
 It preserves the spec, services, credentials, checkpoint history and deployment
 markers, and reports applied/skipped counts with zero provider mutations. Re-plan
 after applying the prerequisite; it does not enable a schedule or verify a

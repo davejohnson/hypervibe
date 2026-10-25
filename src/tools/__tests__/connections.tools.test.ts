@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { expectActionableConnectionSetup, parseToolEnvelope } from './tool-result.js';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'os';
 import path from 'path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -10,8 +11,11 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
+import { ProjectSpecRepository } from '../../adapters/db/repositories/spec.repository.js';
+import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import * as envParser from '../../utils/env-parser.js';
 // Importing adapters registers providers in the registry.
 import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
@@ -86,6 +90,204 @@ async function makeClient() {
 }
 
 describe('hv_connections', () => {
+  it.each(['catalog', 'describe'])('%s uses a fresh repository Git remote only for form labels, without creating project or credential scope', async mode => {
+    const previousCwd = process.cwd();
+    process.chdir(tempDir);
+    execFileSync('git', ['init', '--quiet'], { cwd: tempDir });
+    execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:acme/storefront.git'], { cwd: tempDir });
+    const db = SqliteAdapter.getInstance().getDb(); const before = db.prepare('select total_changes() as count').get();
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_connections', { repositoryContext: true, ...(mode === 'describe' ? { provider: 'github', action: 'describe' } : {}) });
+      expect(result.ok).toBe(true);
+      const provider = mode === 'describe' ? result.data.provider : result.data.availableProviders.deployment.find((entry: { name: string }) => entry.name === 'github');
+      const link = provider.setupHelpUrls.find((entry: { url: string }) => entry.url.includes('/personal-access-tokens/new'));
+      const url = new URL(link.url);
+      expect(url.searchParams.get('target_name')).toBe('acme');
+      expect(url.searchParams.get('name')).toBe('Hypervibe repository: acme/storefront');
+      expect(url.searchParams.get('description')).toBe('Hypervibe repository management for acme/storefront');
+      if (mode === 'describe') {
+        expect(result.data.connectionSetup.scope).toBeUndefined();
+        expect(result.data.connectionSetup.project).toBeUndefined();
+      } else expect(result.data.project).toBeUndefined();
+      expect(new ProjectRepository().findAll()).toEqual([]);
+      expect(db.prepare('select total_changes() as count').get()).toEqual(before);
+      expect(existsSync(path.join(tempDir, '.hypervibe'))).toBe(false);
+    } finally { await t.close(); process.chdir(previousCwd); }
+  });
+
+  it('blocks malformed repository remote context instead of inventing form ownership', async () => {
+    const previousCwd = process.cwd(); process.chdir(tempDir);
+    execFileSync('git', ['init', '--quiet'], { cwd: tempDir });
+    execFileSync('git', ['remote', 'add', 'origin', 'not-a-remote'], { cwd: tempDir });
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_connections', { repositoryContext: true, provider: 'github', action: 'describe' });
+      expect(result.ok).toBe(false);
+      expect(result.error.code).toBe('VALIDATION');
+      expect(new ProjectRepository().findAll()).toEqual([]);
+    } finally { await t.close(); process.chdir(previousCwd); }
+  });
+
+  it.each(['catalog', 'describe'])('%s does not initialize an unrecorded repository project', async mode => {
+    const previousCwd = process.cwd();
+    const previousDisabled = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    process.chdir(tempDir);
+    process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+    mkdirSync(path.join(tempDir, '.git'));
+    mkdirSync(path.join(tempDir, '.hypervibe'));
+    const file = path.join(tempDir, '.hypervibe/spec.json');
+    writeFileSync(file, JSON.stringify(projectSpecSchema.parse({ version: 1, project: 'context-app',
+      environments: { production: { hosting: { provider: 'railway' }, services: { web: { workloadKind: 'web' } } } } })));
+    const beforeFile = readFileSync(file, 'utf8');
+    const db = SqliteAdapter.getInstance().getDb();
+    const before = db.prepare('select total_changes() as count').get();
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_connections', { project: 'context-app', ...(mode === 'describe' ? { provider: 'github', action: 'describe' } : {}) });
+      expect(result.ok).toBe(false);
+      expect(result.error.code).toBe('NOT_FOUND');
+      expect(new ProjectRepository().findAll()).toEqual([]);
+      expect(db.prepare('select total_changes() as count').get()).toEqual(before);
+      expect(readFileSync(file, 'utf8')).toBe(beforeFile);
+    } finally {
+      await t.close(); process.chdir(previousCwd);
+      if (previousDisabled === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = previousDisabled;
+    }
+  });
+
+  it.each(['catalog', 'describe'])('%s leaves changed repository desired state and its journal unchanged', async mode => {
+    const previousCwd = process.cwd();
+    const previousDisabled = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    process.chdir(tempDir);
+    process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+    mkdirSync(path.join(tempDir, '.git'));
+    mkdirSync(path.join(tempDir, '.hypervibe'));
+    const project = new ProjectRepository().create({ name: 'context-app', defaultPlatform: 'railway' });
+    const spec = projectSpecSchema.parse({ version: 1, project: project.name,
+      environments: { production: { hosting: { provider: 'railway' }, services: { web: { workloadKind: 'web' } } } } });
+    const journal = new ProjectSpecRepository(); journal.insert(project.id, 1, spec);
+    const file = path.join(tempDir, '.hypervibe/spec.json');
+    writeFileSync(file, JSON.stringify({ ...spec, environments: { ...spec.environments, staging: spec.environments.production } }));
+    const beforeFile = readFileSync(file, 'utf8');
+    const db = SqliteAdapter.getInstance().getDb();
+    const before = db.prepare('select total_changes() as count').get();
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_connections', { project: project.name, ...(mode === 'describe' ? { provider: 'github', action: 'describe' } : {}) });
+      expect(result.ok).toBe(true);
+      expect(journal.findLatest(project.id)?.revision).toBe(1);
+      expect(journal.findLatest(project.id)?.document).toEqual(spec);
+      expect(db.prepare('select total_changes() as count').get()).toEqual(before);
+      expect(readFileSync(file, 'utf8')).toBe(beforeFile);
+    } finally {
+      await t.close(); process.chdir(previousCwd);
+      if (previousDisabled === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = previousDisabled;
+    }
+  });
+
+  it.each(['catalog', 'describe'])('%s resolves the selected repository without adopting its spec or bindings', async mode => {
+    const previousCwd = process.cwd();
+    const previousDisabled = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    process.chdir(tempDir); process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+    mkdirSync(path.join(tempDir, '.git')); mkdirSync(path.join(tempDir, '.hypervibe'));
+    const project = new ProjectRepository().create({ name: 'selected-app', defaultPlatform: 'railway', gitRemoteUrl: 'https://github.com/acme/selected-app' });
+    const spec = projectSpecSchema.parse({ version: 1, project: project.name, gitRemoteUrl: project.gitRemoteUrl,
+      environments: { production: { hosting: { provider: 'railway' }, services: { web: { workloadKind: 'web' } } } } });
+    const journal = new ProjectSpecRepository(); journal.insert(project.id, 1, spec);
+    const file = path.join(tempDir, '.hypervibe/spec.json');
+    writeFileSync(file, JSON.stringify({ ...spec, environments: { ...spec.environments, staging: spec.environments.production } }));
+    const db = SqliteAdapter.getInstance().getDb(); const before = db.prepare('select total_changes() as count').get();
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_connections', { repositoryContext: true, ...(mode === 'describe' ? { provider: 'github', action: 'describe' } : {}) });
+      expect(result.ok).toBe(true);
+      if (mode === 'catalog') expect(result.data.project.name).toBe(project.name);
+      else expect(result.data.connectionSetup.project).toBe(project.name);
+      expect(journal.findLatest(project.id)?.revision).toBe(1);
+      expect(journal.findLatest(project.id)?.document).toEqual(spec);
+      expect(db.prepare('select total_changes() as count').get()).toEqual(before);
+    } finally {
+      await t.close(); process.chdir(previousCwd);
+      if (previousDisabled === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = previousDisabled;
+    }
+  });
+
+  it.each(['catalog', 'describe'])('%s never selects an unrelated sole cached project for a fresh repository', async mode => {
+    const previousCwd = process.cwd(); process.chdir(tempDir);
+    new ProjectRepository().create({ name: 'unrelated', defaultPlatform: 'railway' });
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_connections', { repositoryContext: true, ...(mode === 'describe' ? { provider: 'github', action: 'describe' } : {}) });
+      expect(result.ok).toBe(true);
+      expect(mode === 'catalog' ? result.data.project : result.data.connectionSetup.project).toBeUndefined();
+      expect(JSON.stringify(result.data)).not.toContain('unrelated');
+    } finally { await t.close(); process.chdir(previousCwd); }
+  });
+
+  it('rejects repository context mixed with an explicit project or a connection mutation', async () => {
+    const t = await makeClient();
+    try {
+      for (const input of [
+        { repositoryContext: true, project: 'some-app' },
+        { repositoryContext: true, provider: 'github', action: 'add' },
+      ]) {
+        const result = await t.call('hv_connections', input);
+        expect(result.ok).toBe(false);
+        expect(result.error.code).toBe('VALIDATION');
+      }
+    } finally { await t.close(); }
+  });
+
+  it('describes scoped credential forms without resolving credentials or writing connection state', async () => {
+    const project = new ProjectRepository().create({ name: 'storefront', defaultPlatform: 'railway', gitRemoteUrl: 'git@github.com:acme/storefront.git' });
+    const fetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Provider access must not occur during describe'));
+    const db = SqliteAdapter.getInstance().getDb();
+    const before = db.prepare('select total_changes() as count').get();
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_connections', { action: 'describe', provider: 'github', project: project.name, scope: 'acme/checkout' });
+      expect(result.ok).toBe(true);
+      expect(result.data.provider.name).toBe('github');
+      const url = new URL(result.data.connectionSetup.recommendedSetupUrl);
+      expect(url.searchParams.get('description')).toBe('Hypervibe GitHub API for acme/checkout');
+      const fine = result.data.provider.setupHelpUrls.find((link: { url: string }) => link.url.includes('/personal-access-tokens/new'));
+      expect(new URL(fine.url).searchParams.get('target_name')).toBe('acme');
+      expect(result.data.connectionSetup.agentSetup).toBeUndefined();
+      expect(new ConnectionRepository().findAll()).toEqual([]);
+      expect(db.prepare('select total_changes() as count').get()).toEqual(before);
+      expect(fetch).not.toHaveBeenCalled();
+    } finally { await t.close(); }
+  });
+
+  it('describes provider-owned cloud setup without creating a preview or reading local credentials', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Describe must stay local'));
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_connections', { action: 'describe', provider: 'cloudrun' });
+      expect(result.ok).toBe(true);
+      expect(result.data.provider.name).toBe('cloudrun');
+      expect(result.data.connectionSetup.requiredPermissions.length).toBeGreaterThan(0);
+      expect(result.data.connectionSetup.agentSetup).toBeUndefined();
+      expect(runGcpBootstrap).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    } finally { await t.close(); }
+  });
+
+  it('rejects credentials and confirmation on the read-only description path', async () => {
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_connections', { action: 'describe', provider: 'github', credentialsRef: 'file:/must-not-be-read', confirm: true });
+      expect(result.ok).toBe(false);
+      expect(result.error.code).toBe('VALIDATION');
+      expect(result.error.message).toContain('describe does not accept');
+      expect(new ConnectionRepository().findAll()).toEqual([]);
+    } finally { await t.close(); }
+  });
+
   it('adds a Stripe Projects credential source without storing a credential value', async () => {
     vi.spyOn(StripeProjectsAdapter.prototype, 'verify').mockResolvedValue({
       success: true,
@@ -451,6 +653,9 @@ describe('hv_connections', () => {
       provider: 'railway',
       scope: null,
       credentialsSource: 'env',
+      credentialsRef: 'env:HV_TEST_RAILWAY_TOKEN',
+      credentialsKey: 'apiToken',
+      credentialsResolution: { apiToken: { resolvedRef: 'env:HV_TEST_RAILWAY_TOKEN', sourceKey: 'HV_TEST_RAILWAY_TOKEN' } },
     });
     await t.close();
   });
@@ -479,6 +684,7 @@ describe('hv_connections', () => {
     const connection = new ConnectionRepository().findByProvider('railway')!;
     const decrypted = getSecretStore().decryptObject<{ apiToken: string }>(connection.credentialsEncrypted);
     expect(decrypted.apiToken).toBe('token-from-dotenv-ref');
+    expect(new AuditRepository().findByAction('connection.created')[0]?.details).toMatchObject({ credentialsRef: `dotenv:${envPath}#HYPERVIBE_RAILWAY_TOKEN` });
     await t.close();
   });
 
@@ -537,10 +743,16 @@ describe('hv_connections', () => {
     }>(connection.credentialsEncrypted);
     expect(decrypted.apiToken).toBe('gh-combined-token');
     expect(decrypted.packageReadToken).toBe('gh-combined-token');
+    expect(new AuditRepository().findByAction('connection.created')[0]?.details).toMatchObject({
+      credentialsRef: 'env:HYPERVIBE_GITHUB_TOKEN',
+      credentialsResolution: { apiToken: { resolvedRef: 'env:NODE_AUTH_TOKEN', sourceKey: 'NODE_AUTH_TOKEN' } },
+    });
+    expect(result.data).not.toHaveProperty('credentialsResolution');
     await t.close();
   });
 
   it('maps both GitHub credential roles from one supported dotenv alias', async () => {
+    const readSource = vi.spyOn(envParser, 'parseEnvFile');
     const envPath = path.join(tempDir, '.env');
     writeFileSync(envPath, 'NODE_AUTH_TOKEN=gh-combined-dotenv-token\n');
     vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
@@ -568,6 +780,58 @@ describe('hv_connections', () => {
     }>(connection.credentialsEncrypted);
     expect(decrypted.apiToken).toBe('gh-combined-dotenv-token');
     expect(decrypted.packageReadToken).toBe('gh-combined-dotenv-token');
+    expect(readSource).toHaveBeenCalledTimes(1);
+    expect(new AuditRepository().findByAction('connection.created')[0]?.details).toMatchObject({
+      credentialsRef: `dotenv:${envPath}`,
+      credentialsMap: { apiToken: 'HYPERVIBE_GITHUB_TOKEN', packageReadToken: 'HYPERVIBE_GITHUB_PACKAGES_TOKEN' },
+      credentialsResolution: {
+        apiToken: { resolvedRef: `dotenv:${envPath}#NODE_AUTH_TOKEN`, sourceKey: 'NODE_AUTH_TOKEN' },
+        packageReadToken: { resolvedRef: `dotenv:${envPath}#NODE_AUTH_TOKEN`, sourceKey: 'NODE_AUTH_TOKEN' },
+      },
+    });
+    await t.close();
+  });
+
+  it('records the resolved dotenv fragment without replacing the declared alias', async () => {
+    const envPath = path.join(tempDir, '.env');
+    writeFileSync(envPath, 'NODE_AUTH_TOKEN=synthetic-alias-credential\n');
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, login: 'reader' });
+    const t = await makeClient();
+    const result = await t.call('hv_connections', { provider: 'github', credentialsRef: `dotenv:${envPath}#HYPERVIBE_GITHUB_TOKEN` });
+    expect(result.ok).toBe(true);
+    expect(new AuditRepository().findByAction('connection.created')[0]?.details).toMatchObject({
+      credentialsRef: `dotenv:${envPath}#HYPERVIBE_GITHUB_TOKEN`,
+      credentialsResolution: { apiToken: { resolvedRef: `dotenv:${envPath}#NODE_AUTH_TOKEN`, sourceKey: 'NODE_AUTH_TOKEN' } },
+    });
+    expect(JSON.stringify(result)).not.toContain('synthetic-alias-credential');
+    expect(JSON.stringify(new AuditRepository().findByAction('connection.created'))).not.toContain('synthetic-alias-credential');
+    await t.close();
+  });
+
+  it('does not expose malformed private JSON in credential-reference parse diagnostics', async () => {
+    process.env.HV_TEST_RAILWAY_TOKEN = '{private-malformed-json';
+    const t = await makeClient();
+    const result = await t.call('hv_connections', { provider: 'railway', credentialsRef: 'env:HV_TEST_RAILWAY_TOKEN' });
+    expect(result.ok).toBe(false);
+    expect(result.error.message).toBe('credentialsRef JSON must resolve to a valid object.');
+    expect(JSON.stringify(result)).not.toContain('private-malformed-json');
+    expect(new ConnectionRepository().findByProvider('railway')).toBeNull();
+    expect(new AuditRepository().findByAction('connection.created')).toEqual([]);
+    await t.close();
+  });
+
+  it('scrubs exact credential values from declared and resolved source metadata before auditing', async () => {
+    process.env.HV_TEST_RAILWAY_TOKEN = 'HV_TEST_RAILWAY_TOKEN';
+    vi.spyOn(RailwayAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(RailwayAdapter.prototype, 'verify').mockResolvedValue({ success: true });
+    const t = await makeClient();
+    const result = await t.call('hv_connections', { provider: 'railway', credentialsRef: 'env:HV_TEST_RAILWAY_TOKEN' });
+    expect(result.ok).toBe(true);
+    const details = new AuditRepository().findByAction('connection.created')[0]?.details;
+    expect(details).toMatchObject({ credentialsRef: 'env:[redacted]',
+      credentialsResolution: { apiToken: { resolvedRef: 'env:[redacted]', sourceKey: '[redacted]' } } });
+    expect(JSON.stringify(details)).not.toContain('HV_TEST_RAILWAY_TOKEN');
+    expect(JSON.stringify(result)).not.toContain('HV_TEST_RAILWAY_TOKEN');
     await t.close();
   });
 

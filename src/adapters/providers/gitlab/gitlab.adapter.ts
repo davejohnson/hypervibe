@@ -1116,6 +1116,19 @@ export class GitLabAdapter implements CodeHostPort, CodeRepositoryLifecyclePort,
     return pipelines.map((pipeline) => this.runSummary(pipeline));
   }
 
+  async observeManagedCredentialRun(repository: CodeRepositoryIdentity, runId: string, branch: string): Promise<Observation<CiRunSummary>> {
+    if (!/^[1-9]\d*$/.test(runId)) return { state: 'unknown', reason: 'Invalid pipeline identity.' };
+    try {
+      const pipeline = await this.request<GitLabPipeline & { project_id?: number; tag?: boolean }>('GET', `${this.projectRoute(repository.nativeId)}/pipelines/${runId}`);
+      if (String(pipeline.id) !== runId || String(pipeline.project_id) !== repository.nativeId || pipeline.ref !== branch
+        || pipeline.tag !== false || !['api', 'web', 'push'].includes(pipeline.source ?? '') || pipeline.status !== 'success'
+        || !/^[a-f0-9]{40}$/i.test(pipeline.sha)) return { state: 'unknown', reason: 'Pipeline is not the exact successful managed branch producer.' };
+      const refs = await this.paginated<{ type: string; name: string }>(`${this.projectRoute(repository.nativeId)}/repository/commits/${pipeline.sha}/refs`, new URLSearchParams({ type: 'branch' }));
+      if (!refs.some(ref => ref.type === 'branch' && ref.name === branch)) return { state: 'unknown', reason: 'Pipeline commit is not a member of the reviewed branch.' };
+      return { state: 'present', value: this.runSummary(pipeline) };
+    } catch { return { state: 'unknown', reason: 'Managed pipeline provenance could not be verified.' }; }
+  }
+
   async listJobs(repository: CodeRepositoryIdentity, runId: string, limit: number): Promise<CiJobSummary[]> {
     if (!/^\d+$/.test(runId)) throw new Error('GitLab pipeline id must be numeric');
     const jobs = await this.request<GitLabJob[]>(

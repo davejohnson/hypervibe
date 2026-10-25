@@ -1,4 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import { withClientInstructions } from './interfaces/mcp/client-instructions.js';
 import { createCommandContext } from './application/context.js';
 import { createCommandRegistry } from './application/commands.js';
 import { registerCommandRegistry } from './interfaces/mcp/adapter.js';
@@ -9,6 +11,7 @@ export const HYPERVIBE_SERVER_INSTRUCTIONS = [
   'Hypervibe exposes one desired-state infrastructure engine (hosting, databases, DNS, email, secrets, CI) through its hv_* MCP tools and the Hypervibe CLI.',
   'When these MCP tools are available, use them directly instead of spawning the Hypervibe CLI. Do NOT shell out to provider CLIs (railway, gcloud, vercel, doppler, op, bws, gh, etc.) or call provider APIs directly: those bypass Hypervibe state, reviewed plans, and audit history.',
   'Core workflow: hv_spec (desired state) → hv_plan (diff against live infrastructure, returns planId) → hv_apply planId=... → hv_status / hv_logs / hv_health to verify.',
+  'When the user must complete a web form, first obtain read-only contextual setup guidance with hv_connections action="describe" using the known provider and scope, plus project only when initialized. Generic provider discovery is not completed scoped setup. Hypervibe prepares every supported non-secret field whose value is known, including name and description, using officially documented, encoded parameters. Lead with the returned direct clickable form URL. Preserve the complete query string exactly; do not rewrite labels or permissions, invent parameters, or replace it with dashboard navigation. Report a missing supported prefill as a guidance gap. Explain remaining manual fields, review and consent. Never put secrets in URLs. Provider-owned bootstrap and browser authentication take precedence when available.',
   'Hypervibe is for nontechnical users bringing projects to the web. Choose routine names and supported economical defaults from repository evidence. For a new web app, prepare production and isolated staging unless the user or existing spec says otherwise; explain the chosen setup instead of asking naming questions. Ask only for missing access, ambiguous ownership or billing scope, and consequential plan confirmations. Report unattempted actions as skipped or aborted, with their prerequisite; reserve failed for attempted actions that failed.',
   'Explain changes by their practical benefit in everyday language. For example, say "I will help protect your code on GitHub from accidental overwrites" instead of "enable branch protection on main." Explain reviews or automated checks when they affect how the user publishes changes. For routine safeguards already declared in the project or authorized by the user, explain the benefit and proceed through spec/plan/apply without asking for another confirmation just because a technical setting appears in the plan. Preserve explicit user choices and confirmations required for consequential changes.',
   'In a fresh git repository, begin with hv_spec({}). Its successful initialized=false result is a normal bootstrap state: inspect the repository, call hv_spec again with the complete initial desired state, then continue to hv_plan. Do not treat the absence of an existing Hypervibe project as a missing capability.',
@@ -26,8 +29,14 @@ export const HYPERVIBE_SERVER_INSTRUCTIONS = [
   'If a capability seems missing, check the other hv_* tools (most have action/target parameters) before reaching for anything outside Hypervibe.',
 ].join('\n');
 
+class HypervibeMcpServer extends McpServer {
+  override connect(transport: Transport): Promise<void> {
+    return super.connect(withClientInstructions(transport, HYPERVIBE_SERVER_INSTRUCTIONS));
+  }
+}
+
 export function createServer(): McpServer {
-  const server = new McpServer(
+  const server = new HypervibeMcpServer(
     {
       name: 'hypervibe',
       version: HYPERVIBE_VERSION,
@@ -36,6 +45,12 @@ export function createServer(): McpServer {
       instructions: HYPERVIBE_SERVER_INSTRUCTIONS,
     }
   );
+
+  server.registerResource('hypervibe-guidance', 'hypervibe://guidance', {
+    title: 'Complete Hypervibe operating guidance',
+    description: 'Full connection, deployment, cloud setup and recovery guidance, including details summarized for client startup limits.',
+    mimeType: 'text/plain',
+  }, async uri => ({ contents: [{ uri: uri.href, mimeType: 'text/plain', text: HYPERVIBE_SERVER_INSTRUCTIONS }] }));
 
   const ctx = createCommandContext();
   registerCommandRegistry(server, createCommandRegistry(ctx));

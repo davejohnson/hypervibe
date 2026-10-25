@@ -1,0 +1,1319 @@
+{
+  "formatVersion": 1,
+  "purpose": "Auditable migration of maintainer instructions. This records preserved text and explicit resolution of stale Claude guidance; it does not claim agent compliance or runtime enforcement.",
+  "source": {
+    "path": "AGENTS.md",
+    "sourceBytes": 50681,
+    "sourceSha256": "82b4c9ad87ce104b4b18632c1a3d0309bf6d876ffa7c651a690bd6bd4de7724d",
+    "ruleCount": 129,
+    "proseDisposition": "Product identity and audience retained in AGENTS.md. Mandatory architecture reading replaced with explicit task-based routing while architecture remains authoritative.",
+    "revision": "09fd75f3519d3a8dde1635f33f59727f33f7a1a6"
+  },
+  "rules": [
+    {
+      "id": "DG-003",
+      "sourceLine": 11,
+      "summary": "Never require another person's approval to merge by default on any repository",
+      "originalSha256": "9f26e4bbe36e3e717808638199f10fb24d4b7eb5f16c37a9be78c90a15f2e713",
+      "destination": "docs/development-guidance-product.md#dg-003",
+      "destinationSha256": "9f26e4bbe36e3e717808638199f10fb24d4b7eb5f16c37a9be78c90a15f2e713",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-004",
+      "sourceLine": 12,
+      "summary": "Explain infrastructure changes by their practical benefit",
+      "originalSha256": "d49060a0109dc8fb452eba69e8ec5d3dbd82fd1a80bff314efc234d4be1365b9",
+      "destination": "docs/development-guidance-product.md#dg-004",
+      "destinationSha256": "d49060a0109dc8fb452eba69e8ec5d3dbd82fd1a80bff314efc234d4be1365b9",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-005",
+      "sourceLine": 13,
+      "summary": "For routine safeguards already declared in the project or authorized by the user, explain the benefit and proceed through spec/plan/apply",
+      "originalSha256": "521f2d1a3fc24899ceec831cb1f79d84f035ee271ca05ac5b58d180a3f2400fe",
+      "destination": "docs/development-guidance-product.md#dg-005",
+      "destinationSha256": "521f2d1a3fc24899ceec831cb1f79d84f035ee271ca05ac5b58d180a3f2400fe",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-006",
+      "sourceLine": 17,
+      "summary": "Make routine decisions instead of asking users to design infrastructure",
+      "originalSha256": "2dac784e4ca993fce3db71dc4d28d2826b3d4bb1cc4c1837e129a3c59043e8bd",
+      "destination": "docs/development-guidance-product.md#dg-006",
+      "destinationSha256": "2dac784e4ca993fce3db71dc4d28d2826b3d4bb1cc4c1837e129a3c59043e8bd",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-007",
+      "sourceLine": 18,
+      "summary": "When the application declares owner/contact settings, infer initial non-secret defaults from the repository's git identity and persist the reviewed values in its spec",
+      "originalSha256": "d8195a993fdb335d8991f5019616216eef550aff5ff3f2eaa0b6d1f5b2d9a05e",
+      "destination": "docs/development-guidance-product.md#dg-007",
+      "destinationSha256": "d8195a993fdb335d8991f5019616216eef550aff5ff3f2eaa0b6d1f5b2d9a05e",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-008",
+      "sourceLine": 19,
+      "summary": "For a new web project without an existing environment policy, prepare `production` and `staging` together under the application project and state the proposed setup directly",
+      "originalSha256": "a739fd57a3c0b56eb8a9b582dfe5dcd7f9d68ae106da9ea990db2ac32b4da6b9",
+      "destination": "docs/development-guidance-product.md#dg-008",
+      "destinationSha256": "a739fd57a3c0b56eb8a9b582dfe5dcd7f9d68ae106da9ea990db2ac32b4da6b9",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-009",
+      "sourceLine": 20,
+      "summary": "Surface cross-environment resource notes before claiming one environment validates another",
+      "originalSha256": "f977f40e0313ba93d91de95b0847e1db3f9ed82d435612f4492587546ccd41cd",
+      "destination": "docs/development-guidance-product.md#dg-009",
+      "destinationSha256": "f977f40e0313ba93d91de95b0847e1db3f9ed82d435612f4492587546ccd41cd",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-010",
+      "sourceLine": 21,
+      "summary": "Prefer HTTPS, private datastores, least-privilege workload identities, generated application secrets, managed CI deploys, and economical staging capacity wherever implemented",
+      "originalSha256": "d8c281eb039c2adf6e4dc5810f197f831bf6c336fedaad40a227c437ed4a0eb2",
+      "destination": "docs/development-guidance-product.md#dg-010",
+      "destinationSha256": "d8c281eb039c2adf6e4dc5810f197f831bf6c336fedaad40a227c437ed4a0eb2",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-011",
+      "sourceLine": 22,
+      "summary": "Default backup intent must cover every persistent database, declared or retained service mount, and object bucket through the shared provider contract",
+      "originalSha256": "20c01a76c550cbb20f78b696b8aeb73ce4d019390bf368dcb28cdbd9e46a58e6",
+      "destination": "docs/development-guidance-recovery.md#dg-011",
+      "destinationSha256": "20c01a76c550cbb20f78b696b8aeb73ce4d019390bf368dcb28cdbd9e46a58e6",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-012",
+      "sourceLine": 23,
+      "summary": "Hide provider setup complexity behind the desired-state lifecycle where possible",
+      "originalSha256": "0e79ddd6cabb6cb5f35f5ac051dcc1415178f8198f9074dad58d8410d2d50407",
+      "destination": "docs/development-guidance-product.md#dg-012",
+      "destinationSha256": "0e79ddd6cabb6cb5f35f5ac051dcc1415178f8198f9074dad58d8410d2d50407",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-013",
+      "sourceLine": 24,
+      "summary": "Ask only for missing access, genuinely ambiguous ownership or billing choices, external-party secrets, or consequential approvals required by the lifecycle contract",
+      "originalSha256": "27def5c96ba6dc20a50efbe9295156ba1bf8ab7e76516879bcedddb54a096ad0",
+      "destination": "docs/development-guidance-product.md#dg-013",
+      "destinationSha256": "27def5c96ba6dc20a50efbe9295156ba1bf8ab7e76516879bcedddb54a096ad0",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-014",
+      "sourceLine": 25,
+      "summary": "When a missing capability forces a user to perform routine provider setup manually, treat it as an onboarding product gap to fix in the shared application/provider path",
+      "originalSha256": "c8bebfebf7c47022958e2ea30d0c865a0c35c7c1cb323c3f83781e1f257e9df7",
+      "destination": "docs/development-guidance-product.md#dg-014",
+      "destinationSha256": "c8bebfebf7c47022958e2ea30d0c865a0c35c7c1cb323c3f83781e1f257e9df7",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-017",
+      "sourceLine": 29,
+      "summary": "Before implementing a provider-facing capability, define or extend the shared contract and check it against every named supported provider in the affected registry category, using official contracts/source",
+      "originalSha256": "c915a15588fbb6cdc8114f65bf231e098fec4562eb5026b58f9ac44087eaa510",
+      "destination": "docs/development-guidance-provider-evidence.md#dg-017",
+      "destinationSha256": "c915a15588fbb6cdc8114f65bf231e098fec4562eb5026b58f9ac44087eaa510",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-018",
+      "sourceLine": 30,
+      "summary": "Treat existing code, comments, mocks, and previous agent conclusions as hypotheses, not independent proof of provider behavior",
+      "originalSha256": "5821e95ce08f0c2eea9d42645f816cf7564f0111f8dd9608cb496f4060998667",
+      "destination": "docs/development-guidance-provider-evidence.md#dg-018",
+      "destinationSha256": "5821e95ce08f0c2eea9d42645f816cf7564f0111f8dd9608cb496f4060998667",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-019",
+      "sourceLine": 31,
+      "summary": "Follow `test/provider-contracts/README.md`",
+      "originalSha256": "4acad75a37859b61fc24db546e1aa61476ee95862718421cb8eb75ad61545ef3",
+      "destination": "docs/development-guidance-provider-evidence.md#dg-019",
+      "destinationSha256": "4acad75a37859b61fc24db546e1aa61476ee95862718421cb8eb75ad61545ef3",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-020",
+      "sourceLine": 32,
+      "summary": "Check what the pinned schema actually constrains",
+      "originalSha256": "06450512bf3e1ee852992ff4394103c0b37657c50a0e503f55860f7cec1a885f",
+      "destination": "docs/development-guidance-provider-evidence.md#dg-020",
+      "destinationSha256": "06450512bf3e1ee852992ff4394103c0b37657c50a0e503f55860f7cec1a885f",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-021",
+      "sourceLine": 33,
+      "summary": "For protobuf JSON responses, distinguish implicit scalar defaults from missing resource identity",
+      "originalSha256": "8393565f2a3903ae5565f0d65299054bd0a67e26dee8bd82ef4b17da70323990",
+      "destination": "docs/development-guidance-provider-evidence.md#dg-021",
+      "destinationSha256": "8393565f2a3903ae5565f0d65299054bd0a67e26dee8bd82ef4b17da70323990",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-022",
+      "sourceLine": 34,
+      "summary": "Compare every affected interpretation across plan, apply, observation/status, and retry/recovery",
+      "originalSha256": "d096f74e6f7eea47ae601e0a62c0e1f97edcd64fd697b0fb6a42b6d539fc1f73",
+      "destination": "docs/development-guidance-provider-evidence.md#dg-022",
+      "destinationSha256": "d096f74e6f7eea47ae601e0a62c0e1f97edcd64fd697b0fb6a42b6d539fc1f73",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-023",
+      "sourceLine": 35,
+      "summary": "Execute generated operational scripts in contract tests, including rejected and uncertain writes, operation/target correlation, terminal absence and secret-safe diagnostics",
+      "originalSha256": "5a310613d43e24d8a1853d0b49c5f9350ba3e33ff4cb74a992ab7544acff17b1",
+      "destination": "docs/development-guidance-provider-evidence.md#dg-023",
+      "destinationSha256": "5a310613d43e24d8a1853d0b49c5f9350ba3e33ff4cb74a992ab7544acff17b1",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-024",
+      "sourceLine": 36,
+      "summary": "Complete the PR template's assumption/evidence/counterexample/test record, including observed failure before the fix and the passing result afterward",
+      "originalSha256": "914c7ad76ade5b3cbcd64e3d3c4c273b6c7ee2fcfce58ce6268b6edb5db6f122",
+      "destination": "docs/development-guidance-provider-evidence.md#dg-024",
+      "destinationSha256": "914c7ad76ade5b3cbcd64e3d3c4c273b6c7ee2fcfce58ce6268b6edb5db6f122",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-025",
+      "sourceLine": 37,
+      "summary": "Keep regression tests in the ordinary `npm test` acceptance gate, not only an opt-in or scheduled suite",
+      "originalSha256": "252399dcf6276d5d1ff98aaec6efe94758121f8764bdf5383796d950ca5dbb5c",
+      "destination": "docs/development-guidance-provider-evidence.md#dg-025",
+      "destinationSha256": "252399dcf6276d5d1ff98aaec6efe94758121f8764bdf5383796d950ca5dbb5c",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-026",
+      "sourceLine": 41,
+      "summary": "Keep known public endpoints separate from desired DNS management",
+      "originalSha256": "cf179e5802c4f0d2edd2898e2f3954c049ab8ea8f96215bb0a0d4c734e6623d2",
+      "destination": "docs/development-guidance-lifecycle.md#dg-026",
+      "destinationSha256": "cf179e5802c4f0d2edd2898e2f3954c049ab8ea8f96215bb0a0d4c734e6623d2",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-027",
+      "sourceLine": 43,
+      "summary": "Add the least code needed for the requested behavior",
+      "originalSha256": "fbc88429435a45a5ab834b16c85ffa274158bdb54d4b6d7fd34f595f783f1ca3",
+      "destination": "docs/development-guidance-workflow.md#dg-027",
+      "destinationSha256": "fbc88429435a45a5ab834b16c85ffa274158bdb54d4b6d7fd34f595f783f1ca3",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-028",
+      "sourceLine": 44,
+      "summary": "Keep MCP and CLI as thin adapters over `src/application`",
+      "originalSha256": "ffce9995d7c7a64fdf9775a6425839a265e337a1b13f79e1b85aa78d7579ddf8",
+      "destination": "docs/development-guidance-workflow.md#dg-028",
+      "destinationSha256": "ffce9995d7c7a64fdf9775a6425839a265e337a1b13f79e1b85aa78d7579ddf8",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-029",
+      "sourceLine": 45,
+      "summary": "Every supported command must be reachable through both adapters unless architecture documentation explicitly declares it interface-specific",
+      "originalSha256": "7354d4918db60426051b1609d27d77a858f0a40b7be337a7f12691cedfc5ab96",
+      "destination": "docs/development-guidance-workflow.md#dg-029",
+      "destinationSha256": "7354d4918db60426051b1609d27d77a858f0a40b7be337a7f12691cedfc5ab96",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-030",
+      "sourceLine": 46,
+      "summary": "Redact command results before they reach any interface",
+      "originalSha256": "00e54a0dd4915dce0ea375f306ae04d4f2d92c07a0ca1abc5feee66941d95ba8",
+      "destination": "docs/development-guidance-connections.md#dg-030",
+      "destinationSha256": "00e54a0dd4915dce0ea375f306ae04d4f2d92c07a0ca1abc5feee66941d95ba8",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-031",
+      "sourceLine": 47,
+      "summary": "Credential handoffs must bind the approved origin and exact destinations, reject cross-origin redirects and request paths, bound response streaming through the body deadline, and render only validated value-free outcomes; an upstream error or receipt may echo the uploaded credential.",
+      "originalSha256": "a218b0b7a9ed99382b48fbd22ef7a23b72ff63bdffc49bb303acac705c077b82",
+      "destination": "docs/development-guidance-connections.md#dg-031",
+      "destinationSha256": "a218b0b7a9ed99382b48fbd22ef7a23b72ff63bdffc49bb303acac705c077b82",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-032",
+      "sourceLine": 48,
+      "summary": "Cached credential expiry does not prove continuing authorization",
+      "originalSha256": "4e38c7802b12e955ddda0afbe9a5b9dd3d36c57fb6566635207eb75cc8cb964f",
+      "destination": "docs/development-guidance-connections.md#dg-032",
+      "destinationSha256": "4e38c7802b12e955ddda0afbe9a5b9dd3d36c57fb6566635207eb75cc8cb964f",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-033",
+      "sourceLine": 49,
+      "summary": "Request externally owned credentials from the current plan's eligible input requirements, not every declared secret",
+      "originalSha256": "620609ad07e4ef21e61f19ec93675374d4fe1171a23c9eb62de3d5970b63ef42",
+      "destination": "docs/development-guidance-connections.md#dg-033",
+      "destinationSha256": "620609ad07e4ef21e61f19ec93675374d4fe1171a23c9eb62de3d5970b63ef42",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-034",
+      "sourceLine": 50,
+      "summary": "The `hypervibe` CLI is safe to use because it shares Hypervibe state and reconciliation",
+      "originalSha256": "1dbdb0768206b3d72c9021eed7990165c7232e2188ef352c1a4452f58fd346f6",
+      "destination": "docs/development-guidance-connections.md#dg-034",
+      "destinationSha256": "18ce0e40ced5d4e0d3ea6efd7cd1d60090d0a97552374946acdc18992f7cc965",
+      "transformation": "explicit-user-requested-policy-exception",
+      "policyChange": "Permit explicitly authorized operator-managed Railway private SSH diagnostics only; no automated provider CLI dependency, public TCP proxy creation, implicit key registration or infrastructure/data mutation. Preserve recorded-access cleanup and secret output boundaries."
+    },
+    {
+      "id": "DG-035",
+      "sourceLine": 51,
+      "summary": "Keep the desired-state loop central: `hv_spec` defines intent, `hv_plan` computes drift and blocked work, `hv_apply` converges a specific plan, and `hv_status` verifies convergence.",
+      "originalSha256": "a176342606300d16661fa19bc3519202ffdf1c2e1424f0fe4981b5f64fa5e9ad",
+      "destination": "docs/development-guidance-lifecycle.md#dg-035",
+      "destinationSha256": "a176342606300d16661fa19bc3519202ffdf1c2e1424f0fe4981b5f64fa5e9ad",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-036",
+      "sourceLine": 52,
+      "summary": "Lifecycle infrastructure changes belong in spec/plan/apply",
+      "originalSha256": "1b941ab833d39d6b36399bf24a97b7a649b5d880ad7634b28e3b1b0c0b67eb6d",
+      "destination": "docs/development-guidance-lifecycle.md#dg-036",
+      "destinationSha256": "1b941ab833d39d6b36399bf24a97b7a649b5d880ad7634b28e3b1b0c0b67eb6d",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-037",
+      "sourceLine": 53,
+      "summary": "Treat the persisted plan as an authorization boundary",
+      "originalSha256": "0e1dcffd2bff4bf907b8bbdb56df541b6973488f6116a49eff55527f33c9b87a",
+      "destination": "docs/development-guidance-lifecycle.md#dg-037",
+      "destinationSha256": "0e1dcffd2bff4bf907b8bbdb56df541b6973488f6116a49eff55527f33c9b87a",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-038",
+      "sourceLine": 54,
+      "summary": "A noop action must cause zero provider mutations",
+      "originalSha256": "185581f0114d76a45662574ddb04925e6311e34725e9b08c52f1eb3e233e093a",
+      "destination": "docs/development-guidance-lifecycle.md#dg-038",
+      "destinationSha256": "185581f0114d76a45662574ddb04925e6311e34725e9b08c52f1eb3e233e093a",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-039",
+      "sourceLine": 55,
+      "summary": "Treat observation as present/absent/unknown",
+      "originalSha256": "87124638d00e21d8fd11531e4f85b8714823e01e64b2e45a174ccf29483b6364",
+      "destination": "docs/development-guidance-lifecycle.md#dg-039",
+      "destinationSha256": "87124638d00e21d8fd11531e4f85b8714823e01e64b2e45a174ccf29483b6364",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-040",
+      "sourceLine": 56,
+      "summary": "Hosted observation must verify exact source provenance and independently authorized provider scope",
+      "originalSha256": "02789c235ba9097a8e2ec1090107bc6b71b37b2acf6fe0212ccea6dcf9949f60",
+      "destination": "docs/development-guidance-lifecycle.md#dg-040",
+      "destinationSha256": "02789c235ba9097a8e2ec1090107bc6b71b37b2acf6fe0212ccea6dcf9949f60",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-041",
+      "sourceLine": 57,
+      "summary": "Test first deployment with no local environment row as well as existing and partially bound environments",
+      "originalSha256": "14c16e6cb5aeca0d7b29ac36ec30c686430feed4009fd93b99b62e5469690acf",
+      "destination": "docs/development-guidance-lifecycle.md#dg-041",
+      "destinationSha256": "14c16e6cb5aeca0d7b29ac36ec30c686430feed4009fd93b99b62e5469690acf",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-042",
+      "sourceLine": 58,
+      "summary": "Resolve resource identity by durable provider id first",
+      "originalSha256": "ecf35c834fe3130f62fa28fc1924b8c6a2bedf66c4bff7e82336b3395c11fbaf",
+      "destination": "docs/development-guidance-lifecycle.md#dg-042",
+      "destinationSha256": "ecf35c834fe3130f62fa28fc1924b8c6a2bedf66c4bff7e82336b3395c11fbaf",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-043",
+      "sourceLine": 59,
+      "summary": "Keep resource naming in the shared deterministic naming policy",
+      "originalSha256": "f8f6ed3b7a188be3eea2cbfb6747970f926b36a856c41d85f8e75d70b47160a2",
+      "destination": "docs/development-guidance-lifecycle.md#dg-043",
+      "destinationSha256": "f8f6ed3b7a188be3eea2cbfb6747970f926b36a856c41d85f8e75d70b47160a2",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-044",
+      "sourceLine": 60,
+      "summary": "Treat naming changes as lifecycle changes, not cosmetic string edits",
+      "originalSha256": "f9b82d39b734ad397b4964dbd315ba7b8e31ef4ac0953b7d9c0fa475d0ab79bf",
+      "destination": "docs/development-guidance-lifecycle.md#dg-044",
+      "destinationSha256": "f9b82d39b734ad397b4964dbd315ba7b8e31ef4ac0953b7d9c0fa475d0ab79bf",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-045",
+      "sourceLine": 61,
+      "summary": "A cross-provider naming change is incomplete until tests cover the affected native namespaces, two environments with the same logical names, normalization/truncation collisions, preserved legacy bindings, and mutation-free noop",
+      "originalSha256": "bf37fbb082ebd06a534476e417b7a769b2ca991ba5844b7eac81cc11c3e244b1",
+      "destination": "docs/development-guidance-lifecycle.md#dg-045",
+      "destinationSha256": "bf37fbb082ebd06a534476e417b7a769b2ca991ba5844b7eac81cc11c3e244b1",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-046",
+      "sourceLine": 62,
+      "summary": "When a provider resource id is scoped by project, account, region, or environment, preserve the provider-native id and present its scope beside it in bindings, observations, and human output",
+      "originalSha256": "93b3c992e4d438ae562006662af3c8995d5e9ba2618997d37a82f6f1f2e18026",
+      "destination": "docs/development-guidance-lifecycle.md#dg-046",
+      "destinationSha256": "93b3c992e4d438ae562006662af3c8995d5e9ba2618997d37a82f6f1f2e18026",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-047",
+      "sourceLine": 63,
+      "summary": "When a new prerequisite rejects legacy metadata, provide a reviewed, preservation-safe normalization path where independent observation can prove the missing identity",
+      "originalSha256": "e69f6262476935c696fd05f33e625196200b51fc2e4f9158201ae419b7413af2",
+      "destination": "docs/development-guidance-lifecycle.md#dg-047",
+      "destinationSha256": "e69f6262476935c696fd05f33e625196200b51fc2e4f9158201ae419b7413af2",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-048",
+      "sourceLine": 64,
+      "summary": "On request-scaled platforms, background workers must explicitly receive continuous/instance CPU and a nonzero runtime floor; web services must explicitly preserve request-based CPU when the provider requires a value",
+      "originalSha256": "121a91adbcb29a20278bc60ca71e247ec4057e46bba55d428e76a133efa71669",
+      "destination": "docs/development-guidance-lifecycle.md#dg-048",
+      "destinationSha256": "121a91adbcb29a20278bc60ca71e247ec4057e46bba55d428e76a133efa71669",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-049",
+      "sourceLine": 65,
+      "summary": "Treat health probes as per-service runtime configuration",
+      "originalSha256": "84024e7e95a7c5d5abf6551a7b9caea85a7d4b9762f3c005dba6c5098f519e42",
+      "destination": "docs/development-guidance-lifecycle.md#dg-049",
+      "destinationSha256": "84024e7e95a7c5d5abf6551a7b9caea85a7d4b9762f3c005dba6c5098f519e42",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-050",
+      "sourceLine": 66,
+      "summary": "Release commands must run from the exact candidate image with its reviewed runtime configuration before any runtime workload changes",
+      "originalSha256": "edd843474bd41120fcce32f303d4b8bcdf29d305b179fe88b3c9362f00d28412",
+      "destination": "docs/development-guidance-lifecycle.md#dg-050",
+      "destinationSha256": "edd843474bd41120fcce32f303d4b8bcdf29d305b179fe88b3c9362f00d28412",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-051",
+      "sourceLine": 67,
+      "summary": "Any reviewed plan that asks a provider to build from a mutable branch must freeze the full source commit first and require provider-resolved provenance to match it before creating or updating release resources",
+      "originalSha256": "740b535b03ae1d1669434e767d4110b2d8b7f74c90167b9163a35cfd4803b7f5",
+      "destination": "docs/development-guidance-lifecycle.md#dg-051",
+      "destinationSha256": "740b535b03ae1d1669434e767d4110b2d8b7f74c90167b9163a35cfd4803b7f5",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-052",
+      "sourceLine": 68,
+      "summary": "Preserve a live workload's provider-observed runtime identity on updates",
+      "originalSha256": "4d6a01a2d7fea4f322906596a1734ad329eb4e3c4e867eda825ab2d3c8aab5f0",
+      "destination": "docs/development-guidance-connections.md#dg-052",
+      "destinationSha256": "4d6a01a2d7fea4f322906596a1734ad329eb4e3c4e867eda825ab2d3c8aab5f0",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-053",
+      "sourceLine": 69,
+      "summary": "Treat provider-generated, non-retrievable credentials as a write-only transaction: validate the exact creation identity, verify all consumers before storing, persist the complete connection set atomically, and best-effort delete the exact new credential on every intervening failure",
+      "originalSha256": "f9f342a3a2c9947d036be16d9bb24efd5415c56cfdb3ac33fdd7568fd37a5b8c",
+      "destination": "docs/development-guidance-connections.md#dg-053",
+      "destinationSha256": "f9f342a3a2c9947d036be16d9bb24efd5415c56cfdb3ac33fdd7568fd37a5b8c",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-054",
+      "sourceLine": 70,
+      "summary": "Generate passwords, tokens, and other secret material only with a cryptographically secure random source; `Math.random()` is never an acceptable secret generator.",
+      "originalSha256": "c0bbb4545145973e83eb30584c2eb27d5cb06cbbc040ae484075aaa4f4d6214a",
+      "destination": "docs/development-guidance-connections.md#dg-054",
+      "destinationSha256": "c0bbb4545145973e83eb30584c2eb27d5cb06cbbc040ae484075aaa4f4d6214a",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-055",
+      "sourceLine": 71,
+      "summary": "Select deployment credentials with the exact repository scope",
+      "originalSha256": "3670d170caddfcf09611e676515091406e6c9d86aefdaa933eb122f3800fba85",
+      "destination": "docs/development-guidance-connections.md#dg-055",
+      "destinationSha256": "3670d170caddfcf09611e676515091406e6c9d86aefdaa933eb122f3800fba85",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-056",
+      "sourceLine": 72,
+      "summary": "Generated CI may build an application image and update or execute exact provider resources that a reviewed apply already created and bound",
+      "originalSha256": "7ece0f40f010b814145767c67398961247468823fac3cfea56d857c33ccda00c",
+      "destination": "docs/development-guidance-ci.md#dg-056",
+      "destinationSha256": "7ece0f40f010b814145767c67398961247468823fac3cfea56d857c33ccda00c",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-057",
+      "sourceLine": 73,
+      "summary": "For auto-deploy workflows, a first push with no applied desired-state marker must end as a neutral no-deploy bootstrap",
+      "originalSha256": "81a65bc2dbb731c0c016c38766f80534c23f62ad8d111308441dd83626a04f10",
+      "destination": "docs/development-guidance-ci.md#dg-057",
+      "destinationSha256": "81a65bc2dbb731c0c016c38766f80534c23f62ad8d111308441dd83626a04f10",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-058",
+      "sourceLine": 74,
+      "summary": "Keep application workload kind separate from provider resource type",
+      "originalSha256": "81d04d14280bc4493f5c36ddeaf670d7c79a66012f7df3cb0c335ed499c49ab2",
+      "destination": "docs/development-guidance-lifecycle.md#dg-058",
+      "destinationSha256": "81d04d14280bc4493f5c36ddeaf670d7c79a66012f7df3cb0c335ed499c49ab2",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-059",
+      "sourceLine": 75,
+      "summary": "For scheduled workloads that require an initial CI release, separate untriggered resource preparation from reviewed trigger activation",
+      "originalSha256": "81dbe9009b586c244e15edff54836e406cea67dd9cff07b4c135bfc221cb8735",
+      "destination": "docs/development-guidance-lifecycle.md#dg-059",
+      "destinationSha256": "81dbe9009b586c244e15edff54836e406cea67dd9cff07b4c135bfc221cb8735",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-060",
+      "sourceLine": 76,
+      "summary": "Reusing a control-plane connection never establishes authority to copy its credential into application runtime",
+      "originalSha256": "5e6b5783d39cb463b7e60f01f7c73bc1e8ed44517c22514319ce88188e2ffafa",
+      "destination": "docs/development-guidance-connections.md#dg-060",
+      "destinationSha256": "5e6b5783d39cb463b7e60f01f7c73bc1e8ed44517c22514319ce88188e2ffafa",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-061",
+      "sourceLine": 77,
+      "summary": "Keep environment-owned CI credentials and database URLs in the CI provider's exact environment scope",
+      "originalSha256": "c441414f49a8e07ecf2fc867b861c1ced7c4b2773275537ae22490da9ed908af",
+      "destination": "docs/development-guidance-connections.md#dg-061",
+      "destinationSha256": "c441414f49a8e07ecf2fc867b861c1ced7c4b2773275537ae22490da9ed908af",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-062",
+      "sourceLine": 78,
+      "summary": "For existing-project CI savings, follow the project template's [adoption guide](https://github.com/davejohnson/project-template/blob/main/docs/ci-efficiency.md) and [testing skill](https://github.com/davejohnson/project-template/blob/main/.agents/skills/project-template-testing/SKILL.md)",
+      "originalSha256": "67c33999a6b503e81861d6a16ef8e7af354c44233bbe7efba911c69ff45e20f4",
+      "destination": "docs/development-guidance-ci.md#dg-062",
+      "destinationSha256": "67c33999a6b503e81861d6a16ef8e7af354c44233bbe7efba911c69ff45e20f4",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-063",
+      "sourceLine": 79,
+      "summary": "Evaluate CI conditions only where their required context exists",
+      "originalSha256": "b3f6f90df91e88f6fbb7da30e852391f806cbda825d02e3e503760ed3302f0ff",
+      "destination": "docs/development-guidance-ci.md#dg-063",
+      "destinationSha256": "b3f6f90df91e88f6fbb7da30e852391f806cbda825d02e3e503760ed3302f0ff",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-064",
+      "sourceLine": 80,
+      "summary": "Treat a managed GitHub Actions workflow's reviewed content hash plus semantic input hash as its lock",
+      "originalSha256": "6a5b720eee63bad0dbbeeba3b27abd2e7ff00aa37ea3c2a11ee0a5bb17450a53",
+      "destination": "docs/development-guidance-ci.md#dg-064",
+      "destinationSha256": "6a5b720eee63bad0dbbeeba3b27abd2e7ff00aa37ea3c2a11ee0a5bb17450a53",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-065",
+      "sourceLine": 81,
+      "summary": "Require a managed GitHub Actions deploy branch to equal the provider-observed repository default branch",
+      "originalSha256": "28b1ee09511c1d686d63d3e155f3a8fb4897fcff9b04829f25d4a599e72f5fdb",
+      "destination": "docs/development-guidance-ci.md#dg-065",
+      "destinationSha256": "28b1ee09511c1d686d63d3e155f3a8fb4897fcff9b04829f25d4a599e72f5fdb",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-066",
+      "sourceLine": 82,
+      "summary": "Treat a project-level generated CI program as one shared multi-environment contract",
+      "originalSha256": "b5cef36f1a449da2a76fc5cc946f0ec9acf0882039065313d3d9c5d481d29e90",
+      "destination": "docs/development-guidance-ci.md#dg-066",
+      "destinationSha256": "b5cef36f1a449da2a76fc5cc946f0ec9acf0882039065313d3d9c5d481d29e90",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-067",
+      "sourceLine": 83,
+      "summary": "Make creates and destroys retry-safe and honest",
+      "originalSha256": "c6e4c57c63adc4919cebf42755202a0c397a91054554a4a70186da98bb3974a5",
+      "destination": "docs/development-guidance-lifecycle.md#dg-067",
+      "destinationSha256": "c6e4c57c63adc4919cebf42755202a0c397a91054554a4a70186da98bb3974a5",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-068",
+      "sourceLine": 84,
+      "summary": "Order multi-resource destroys by dependency and stop on unknown or failed deletion",
+      "originalSha256": "871be7a749238b18adedbf3348bda4f7a544ba75f7583188a65f77f91cd0b5a2",
+      "destination": "docs/development-guidance-lifecycle.md#dg-068",
+      "destinationSha256": "871be7a749238b18adedbf3348bda4f7a544ba75f7583188a65f77f91cd0b5a2",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-069",
+      "sourceLine": 85,
+      "summary": "Require lifecycle contract tests for noop mutation freedom, action-scoped mutation authority, observation errors, duplicate identities, import round trips, billable/data-bearing confirmation, and idempotent deletion",
+      "originalSha256": "22864e54d9fe54772d634ae0ffcead85ba7c20d9464e827d71264d2f0f7951b2",
+      "destination": "docs/development-guidance-provider-evidence.md#dg-069",
+      "destinationSha256": "22864e54d9fe54772d634ae0ffcead85ba7c20d9464e827d71264d2f0f7951b2",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-070",
+      "sourceLine": 86,
+      "summary": "A storage provider id is supported only with a registered adapter covering private creation, ownership-safe observation, runtime wiring, streaming list/get/put, and confirmed teardown",
+      "originalSha256": "58b4c9d0d8e323c6d225017c39e08fb0e76c7f5ae0a1fa8aba4248f6a2c68d17",
+      "destination": "docs/development-guidance-lifecycle.md#dg-070",
+      "destinationSha256": "58b4c9d0d8e323c6d225017c39e08fb0e76c7f5ae0a1fa8aba4248f6a2c68d17",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-071",
+      "sourceLine": 87,
+      "summary": "Storage placement belongs in desired state, not connection credentials",
+      "originalSha256": "c2d674cb7d6dc1c53daa52153606765b1f927ea56914db9c7d3fd0cd69cc5ba0",
+      "destination": "docs/development-guidance-lifecycle.md#dg-071",
+      "destinationSha256": "c2d674cb7d6dc1c53daa52153606765b1f927ea56914db9c7d3fd0cd69cc5ba0",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-072",
+      "sourceLine": 88,
+      "summary": "Cloud storage must accept the provider-native local credential path (AWS default profile/SSO chain, Google Application Default Credentials, and the Azure default credential chain) as well as explicit automation credentials",
+      "originalSha256": "747257cc6fe88567e799ba18ad58f5c9ba53c03a7cf3c6dfe2233098c447aaeb",
+      "destination": "docs/development-guidance-connections.md#dg-072",
+      "destinationSha256": "747257cc6fe88567e799ba18ad58f5c9ba53c03a7cf3c6dfe2233098c447aaeb",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-073",
+      "sourceLine": 89,
+      "summary": "Keep provider behavior behind the provider boundary",
+      "originalSha256": "e642169f249080420e66b2867aa64b014b51241933b6666330a3c6e6125cf5bf",
+      "destination": "docs/development-guidance-workflow.md#dg-073",
+      "destinationSha256": "e642169f249080420e66b2867aa64b014b51241933b6666330a3c6e6125cf5bf",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-074",
+      "sourceLine": 90,
+      "summary": "Generic commands such as `hv_inspect` and `hv_import` must not default to, narrow their schema to, expose identifier fields for, or dispatch directly to one provider",
+      "originalSha256": "bc4a211cee088b48cb3d0ce14c645395913201447528ad0aa2954d0a1e0d1305",
+      "destination": "docs/development-guidance-lifecycle.md#dg-074",
+      "destinationSha256": "bc4a211cee088b48cb3d0ce14c645395913201447528ad0aa2954d0a1e0d1305",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-075",
+      "sourceLine": 91,
+      "summary": "Report honestly",
+      "originalSha256": "afae7a9251df58a04ddc1cfbbc5277c679083eb8dc42874ca308acf9be788110",
+      "destination": "docs/development-guidance-lifecycle.md#dg-075",
+      "destinationSha256": "afae7a9251df58a04ddc1cfbbc5277c679083eb8dc42874ca308acf9be788110",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-076",
+      "sourceLine": 92,
+      "summary": "Before replacing a release-evidence format, preserve a read-only way to inspect an existing recovery baseline",
+      "originalSha256": "9d2c02939beb49b37f6d6e85f233f3e4e3ec5b6fb03bb25795dbb8b538b2fd39",
+      "destination": "docs/development-guidance-recovery.md#dg-076",
+      "destinationSha256": "9d2c02939beb49b37f6d6e85f233f3e4e3ec5b6fb03bb25795dbb8b538b2fd39",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-077",
+      "sourceLine": 93,
+      "summary": "Read-only inspection must not adopt repository edits, bootstrap legacy desired state, or write local environment files",
+      "originalSha256": "264906accc224f3a58cd51c3eaf7c4e1cd6f6f9a1bbfd08e503ceba14ef2da4a",
+      "destination": "docs/development-guidance-lifecycle.md#dg-077",
+      "destinationSha256": "264906accc224f3a58cd51c3eaf7c4e1cd6f6f9a1bbfd08e503ceba14ef2da4a",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-078",
+      "sourceLine": 94,
+      "summary": "Run-to-completion markers must be standalone provider log entries; caller-controlled values echoed in ordinary output cannot prove an exit",
+      "originalSha256": "2b37fac09ab885440c4abd3b76930752482fd6fd170c6085666ece73cf66e65c",
+      "destination": "docs/development-guidance-lifecycle.md#dg-078",
+      "destinationSha256": "2b37fac09ab885440c4abd3b76930752482fd6fd170c6085666ece73cf66e65c",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-079",
+      "sourceLine": 95,
+      "summary": "Treat provider support as an evidence ladder",
+      "originalSha256": "454821a8e8f8f827075296d982b489fe93fe279a7a2f22d0aa9cdd997357b81f",
+      "destination": "docs/development-guidance-provider-evidence.md#dg-079",
+      "destinationSha256": "454821a8e8f8f827075296d982b489fe93fe279a7a2f22d0aa9cdd997357b81f",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-080",
+      "sourceLine": 96,
+      "summary": "Carry every declarative provider field through validation, observation, fingerprints, drift, action stale checks, create/update requests, receipts, and durable state; partial field support is not reconciliation.",
+      "originalSha256": "40ea91c21acc7f3774925f472d561adccb03f3419563353781c3ab6f336b3615",
+      "destination": "docs/development-guidance-lifecycle.md#dg-080",
+      "destinationSha256": "40ea91c21acc7f3774925f472d561adccb03f3419563353781c3ab6f336b3615",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-081",
+      "sourceLine": 97,
+      "summary": "Work stage-by-stage",
+      "originalSha256": "e0239d5d0196b42883c0ed1d6a8e2369a7751b23b3e951263a6671628f7d4faf",
+      "destination": "docs/development-guidance-product.md#dg-081",
+      "destinationSha256": "e0239d5d0196b42883c0ed1d6a8e2369a7751b23b3e951263a6671628f7d4faf",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-082",
+      "sourceLine": 98,
+      "summary": "Use `hv_inspect` for read-only provider forensics",
+      "originalSha256": "b417bcd7c3abc23d196079505648a7e2532ec4ba01afdf0c151e0c71c49a26f4",
+      "destination": "docs/development-guidance-product.md#dg-082",
+      "destinationSha256": "b417bcd7c3abc23d196079505648a7e2532ec4ba01afdf0c151e0c71c49a26f4",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-083",
+      "sourceLine": 99,
+      "summary": "Secrets never cross output boundaries",
+      "originalSha256": "35d96fec9a719e94f3cfc33da784c8d5b88b4dd7d3a73b8b9024b33a682e5198",
+      "destination": "docs/development-guidance-connections.md#dg-083",
+      "destinationSha256": "35d96fec9a719e94f3cfc33da784c8d5b88b4dd7d3a73b8b9024b33a682e5198",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-084",
+      "sourceLine": 100,
+      "summary": "Deployment declarations describe managed resources, not every service an application uses",
+      "originalSha256": "c12103eb91fd55f3c063b08d14df8d97421b73398e006d66dac0c9e3a593cb3d",
+      "destination": "docs/development-guidance-product.md#dg-084",
+      "destinationSha256": "c12103eb91fd55f3c063b08d14df8d97421b73398e006d66dac0c9e3a593cb3d",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-085",
+      "sourceLine": 101,
+      "summary": "For one-time external handoffs, persist intent before consuming, retain received values encrypted until the local destination is committed, and reconcile a completed write whose receipt failed",
+      "originalSha256": "48a1923f667fe80f8ee9cf081443d79269469e02d4a8ea32894d47899f528a32",
+      "destination": "docs/development-guidance-connections.md#dg-085",
+      "destinationSha256": "48a1923f667fe80f8ee9cf081443d79269469e02d4a8ea32894d47899f528a32",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-086",
+      "sourceLine": 102,
+      "summary": "Never ask a user to invent an opaque application secret that Hypervibe can generate safely",
+      "originalSha256": "32d75af0e30847bca8b95d616939d3ae055392e478e23ae2ad019df82f06cfb3",
+      "destination": "docs/development-guidance-product.md#dg-086",
+      "destinationSha256": "32d75af0e30847bca8b95d616939d3ae055392e478e23ae2ad019df82f06cfb3",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-087",
+      "sourceLine": 103,
+      "summary": "Provider errors can echo request inputs",
+      "originalSha256": "66ea880d1f5fb35ef97694010d5fa95413bf92e02362ff8bf7c5c179cc4c65d7",
+      "destination": "docs/development-guidance-connections.md#dg-087",
+      "destinationSha256": "66ea880d1f5fb35ef97694010d5fa95413bf92e02362ff8bf7c5c179cc4c65d7",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-088",
+      "sourceLine": 104,
+      "summary": "Provider delivery diagnostics must keep connection-selection context separate from message provenance",
+      "originalSha256": "52a66e1d17a1ff06ed528a0047a63f9e20225a01208ef3d9677f65e29ed7f081",
+      "destination": "docs/development-guidance-connections.md#dg-088",
+      "destinationSha256": "52a66e1d17a1ff06ed528a0047a63f9e20225a01208ef3d9677f65e29ed7f081",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-089",
+      "sourceLine": 105,
+      "summary": "Redacting a failed provider observation must preserve a closed, locally classified failure category and observation stage through orchestration receipts and their final alert consumer",
+      "originalSha256": "800395ebf0a1ca5721d410ce3b493c94c3354ac959baeb3e74e401f4c332b9b2",
+      "destination": "docs/development-guidance-connections.md#dg-089",
+      "destinationSha256": "800395ebf0a1ca5721d410ce3b493c94c3354ac959baeb3e74e401f4c332b9b2",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-090",
+      "sourceLine": 106,
+      "summary": "Stale-plan fingerprints must include both environment-variable hashes and sorted key presence",
+      "originalSha256": "b562e288ce0ac4d0ea51157dda1416e0b13cb1e48e928c56218574a7df59d391",
+      "destination": "docs/development-guidance-lifecycle.md#dg-090",
+      "destinationSha256": "b562e288ce0ac4d0ea51157dda1416e0b13cb1e48e928c56218574a7df59d391",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-091",
+      "sourceLine": 107,
+      "summary": "Consequential confirmation is part of mutation authority, not a caller-only flag",
+      "originalSha256": "1e3f92ac2bffebc7e39d2f2d87eaba641f92bdf0cd2fd9a07a822d1caf497fc0",
+      "destination": "docs/development-guidance-lifecycle.md#dg-091",
+      "destinationSha256": "1e3f92ac2bffebc7e39d2f2d87eaba641f92bdf0cd2fd9a07a822d1caf497fc0",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-092",
+      "sourceLine": 108,
+      "summary": "Prefer `credentialsRef` with exported environment variables, `dotenv:` references, local JSON files, or secret-manager refs when asking users for credentials",
+      "originalSha256": "ffd654388f15cf3894f15f04c4fbcdb67c36048c0335109793f712e19d77ab0d",
+      "destination": "docs/development-guidance-product.md#dg-092",
+      "destinationSha256": "ffd654388f15cf3894f15f04c4fbcdb67c36048c0335109793f712e19d77ab0d",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-093",
+      "sourceLine": 109,
+      "summary": "Generated dotenv placeholders must be commented, idempotent, value-free, and receipt-bearing: never overwrite an existing value, never write before proving each exact private env path is untracked and repository-ignored, never make an ignored template trackable until every assignment is proven empty, reject symlinks and special files, remove group/world access without adding owner permissions, treat blanks as missing, and never copy provider credentials into runtime or environment-specific deploy files",
+      "originalSha256": "5afb42a198a0854067b7dbd395cecef4bef015ab6b8283f79d5d655cbbac3f06",
+      "destination": "docs/development-guidance-connections.md#dg-093",
+      "destinationSha256": "5afb42a198a0854067b7dbd395cecef4bef015ab6b8283f79d5d655cbbac3f06",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-094",
+      "sourceLine": 110,
+      "summary": "Provider-declared local credential inputs must have one opinionated env slot per credential role, and every such slot must be classified as control-plane-only by the deploy-env boundary",
+      "originalSha256": "01d0c23bcbed9559732cd329895c1419de1c6539163ead9850ce806534cf7dce",
+      "destination": "docs/development-guidance-connections.md#dg-094",
+      "destinationSha256": "01d0c23bcbed9559732cd329895c1419de1c6539163ead9850ce806534cf7dce",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-095",
+      "sourceLine": 111,
+      "summary": "Before writing repo-backed desired state or derived files, prove the current checkout belongs to the selected project using its committed spec or normalized repository identity; a spec-less unrelated checkout is not an empty canvas",
+      "originalSha256": "16a22d9a40207e9f6aa6fb78f862d89ec520a6fde351d7dfb5a986306e0e1d83",
+      "destination": "docs/development-guidance-lifecycle.md#dg-095",
+      "destinationSha256": "16a22d9a40207e9f6aa6fb78f862d89ec520a6fde351d7dfb5a986306e0e1d83",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-096",
+      "sourceLine": 112,
+      "summary": "Token and permission guidance must include the exact credential type, official creation URL, required permissions/scopes, resource scope, caveats, and a safe `hv_connections` example.",
+      "originalSha256": "9cdc5231932b9b17b9e82f5409c1450a8c937cf3b445e7202e6f93d87a851cbf",
+      "destination": "docs/development-guidance-product.md#dg-096",
+      "destinationSha256": "9cdc5231932b9b17b9e82f5409c1450a8c937cf3b445e7202e6f93d87a851cbf",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-097",
+      "sourceLine": 113,
+      "summary": "For an application's SendGrid sending key, give the [exact runtime-key instructions](docs/email-sender-readiness.md#application-sending-key-permissions): Restricted/Custom Access, Mail Send > Mail Send > Full Access (`mail.send`), and every other permission No Access",
+      "originalSha256": "0043f54b20b5c45cf547231601a66f7f391af52b71e9cd7940e46d700a580edc",
+      "destination": "docs/development-guidance-product.md#dg-097",
+      "destinationSha256": "b7ae23f34acbbbf709343b47a8539737570bb97736b93044e556a8d0e6ca38d2",
+      "transformation": "relative-link-rebased"
+    },
+    {
+      "id": "DG-132",
+      "destination": "docs/development-guidance-product.md#dg-132",
+      "sourceLine": 114,
+      "summary": "Whenever a GitHub PAT is required, provide a role-specific pre-filled creation URL with its name/description and required scopes or fine-grained permissions already selected",
+      "originalSha256": "4a0ca7aa860bc77ee81116e025a234aca1211f57d57102aa413e84d3ef9db909",
+      "destinationSha256": "4a0ca7aa860bc77ee81116e025a234aca1211f57d57102aa413e84d3ef9db909",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-098",
+      "sourceLine": 115,
+      "summary": "A successful administrative database query does not validate a workload's connection URL",
+      "originalSha256": "8d2e6c84d42010a37f12121250267212d3c0ef00c958e303c30f6e165591ec9a",
+      "destination": "docs/development-guidance-lifecycle.md#dg-098",
+      "destinationSha256": "8d2e6c84d42010a37f12121250267212d3c0ef00c958e303c30f6e165591ec9a",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-099",
+      "sourceLine": 116,
+      "summary": "When a provider rotates a canonical database password, bootstrap its dependent credential aliases and connection URLs using supported references rather than copied password literals",
+      "originalSha256": "d937953cbd49689b2332c24f95efeefb22f55f2cbacf14b9ebbc8a4b4e1130b7",
+      "destination": "docs/development-guidance-lifecycle.md#dg-099",
+      "destinationSha256": "d937953cbd49689b2332c24f95efeefb22f55f2cbacf14b9ebbc8a4b4e1130b7",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-100",
+      "sourceLine": 117,
+      "summary": "Repair existing credential aliases through an exact database action with raw-reference and resolved-value readback",
+      "originalSha256": "82bbb8213c7b99fbfc921cd79520fd97f5e9ce6e53a8c5d4ccc97cc7b8b5d15a",
+      "destination": "docs/development-guidance-lifecycle.md#dg-100",
+      "destinationSha256": "82bbb8213c7b99fbfc921cd79520fd97f5e9ce6e53a8c5d4ccc97cc7b8b5d15a",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-101",
+      "sourceLine": 118,
+      "summary": "Provider setup connections are never implicit application runtime secrets",
+      "originalSha256": "763bd0d2c817330002b5384c2d3db74c444406753a8c05bea385e295aa3f09d8",
+      "destination": "docs/development-guidance-connections.md#dg-101",
+      "destinationSha256": "763bd0d2c817330002b5384c2d3db74c444406753a8c05bea385e295aa3f09d8",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-133",
+      "destination": "docs/development-guidance-product.md#dg-133",
+      "sourceLine": 119,
+      "summary": "Whenever a provider officially documents credential-template URLs, use them with the known required name and least-privilege permissions pre-filled",
+      "originalSha256": "4d2c19fc2780a4ff901a8d8daa613a25d1e189a05453b392796cd6a74bb0c020",
+      "destinationSha256": "4d2c19fc2780a4ff901a8d8daa613a25d1e189a05453b392796cd6a74bb0c020",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-102",
+      "sourceLine": 120,
+      "summary": "For push deploys, `deploy.trigger: \"ci\"` is the portable default",
+      "originalSha256": "fd57f31ccab403bfb9ea367afea37898224957bc3264e1b7240cb6d25dd80f24",
+      "destination": "docs/development-guidance-ci.md#dg-102",
+      "destinationSha256": "fd57f31ccab403bfb9ea367afea37898224957bc3264e1b7240cb6d25dd80f24",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-103",
+      "sourceLine": 121,
+      "summary": "Dispatch Hypervibe-managed CI deploys only through `hv_ci_trigger`",
+      "originalSha256": "8b4507516c44837da56ec50ed20e5471cf7314ede0666e087da476562a8d2103",
+      "destination": "docs/development-guidance-ci.md#dg-103",
+      "destinationSha256": "8b4507516c44837da56ec50ed20e5471cf7314ede0666e087da476562a8d2103",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-104",
+      "sourceLine": 122,
+      "summary": "Automated repair must fail closed when its declared failure evidence is absent or incomplete",
+      "originalSha256": "0c85fff8e088990b6f00d62bc809b134f5d597d2c95e75260b19c73edfa00ac4",
+      "destination": "docs/development-guidance-ci.md#dg-104",
+      "destinationSha256": "0c85fff8e088990b6f00d62bc809b134f5d597d2c95e75260b19c73edfa00ac4",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-105",
+      "sourceLine": 123,
+      "summary": "Do not use temporary release-command changes for one-off data operations",
+      "originalSha256": "31aef06057ffcb6337694c07fd6f8895751885671d8da4b04bbf7997e30f5592",
+      "destination": "docs/development-guidance-lifecycle.md#dg-105",
+      "destinationSha256": "31aef06057ffcb6337694c07fd6f8895751885671d8da4b04bbf7997e30f5592",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-106",
+      "sourceLine": 124,
+      "summary": "Before a backup mutation, persist its exact scoped source and unique operation identity",
+      "originalSha256": "d249708c398697d4cb2da440fffc65de170d4efa261c26b4e7374e1988e0b10d",
+      "destination": "docs/development-guidance-recovery.md#dg-106",
+      "destinationSha256": "d249708c398697d4cb2da440fffc65de170d4efa261c26b4e7374e1988e0b10d",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-107",
+      "sourceLine": 125,
+      "summary": "Recurring recovery programs require exact published source/destination identities and a pinned helper artifact",
+      "originalSha256": "04ca1ec87184574a4834e19be742229176e83c6d67c9b819b677a07d34749c03",
+      "destination": "docs/development-guidance-recovery.md#dg-107",
+      "destinationSha256": "04ca1ec87184574a4834e19be742229176e83c6d67c9b819b677a07d34749c03",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-108",
+      "sourceLine": 126,
+      "summary": "Bind prior restore proof to native revisions captured from checksum-verified retained bytes",
+      "originalSha256": "c560568acf8e7165345bd3cdc4cd06c2d3c894e04c224072f5c4a9ec0817609c",
+      "destination": "docs/development-guidance-recovery.md#dg-108",
+      "destinationSha256": "c560568acf8e7165345bd3cdc4cd06c2d3c894e04c224072f5c4a9ec0817609c",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-109",
+      "sourceLine": 127,
+      "summary": "Admit provider combinations through shared capability metadata, not the independent existence of two adapters",
+      "originalSha256": "1fd6832dfd577ae4af60fb2934706e6ddbeeafe289879dceef256903f834bc73",
+      "destination": "docs/development-guidance-recovery.md#dg-109",
+      "destinationSha256": "1fd6832dfd577ae4af60fb2934706e6ddbeeafe289879dceef256903f834bc73",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-110",
+      "sourceLine": 128,
+      "summary": "Define persisted safety evidence with one runtime schema and derive its type from that schema",
+      "originalSha256": "bef43b1f818b9f66f772090c5e56951a7d9067155209110f57f3f8f3471b2cba",
+      "destination": "docs/development-guidance-recovery.md#dg-110",
+      "destinationSha256": "bef43b1f818b9f66f772090c5e56951a7d9067155209110f57f3f8f3471b2cba",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-111",
+      "sourceLine": 129,
+      "summary": "Cross-cutting deployment gates must preserve reviewed prerequisite stages without admitting workload or data writes",
+      "originalSha256": "ee684f1847870a9047da9902e8e2e9421946eb8cbd0b38b0b3485004c212dfe7",
+      "destination": "docs/development-guidance-lifecycle.md#dg-111",
+      "destinationSha256": "ee684f1847870a9047da9902e8e2e9421946eb8cbd0b38b0b3485004c212dfe7",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-112",
+      "sourceLine": 130,
+      "summary": "Dependency edges must represent actual prerequisites",
+      "originalSha256": "dd2c03d0e25a7d231b017a85502271550d5abf46189fc4e9191acf4a8648cacd",
+      "destination": "docs/development-guidance-lifecycle.md#dg-112",
+      "destinationSha256": "dd2c03d0e25a7d231b017a85502271550d5abf46189fc4e9191acf4a8648cacd",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-113",
+      "sourceLine": 131,
+      "summary": "Classify prerequisite failures separately from missing connections at their source",
+      "originalSha256": "9e189c42bf9007b94c3cc5093cf81410d28da20846017544bd332af668429efb",
+      "destination": "docs/development-guidance-lifecycle.md#dg-113",
+      "destinationSha256": "9e189c42bf9007b94c3cc5093cf81410d28da20846017544bd332af668429efb",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-114",
+      "sourceLine": 132,
+      "summary": "Portable execution authority must compare its source against a current, strict non-secret binding export",
+      "originalSha256": "8c0add371254ae0edd43a8fcb668452d93c842d6b708c027ee2367fb55afb4d4",
+      "destination": "docs/development-guidance-ci.md#dg-114",
+      "destinationSha256": "8c0add371254ae0edd43a8fcb668452d93c842d6b708c027ee2367fb55afb4d4",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-115",
+      "sourceLine": 133,
+      "summary": "Do not introduce dependencies on provider CLIs for infrastructure operations",
+      "originalSha256": "ece90e56383c0e25edce2c794466992656a18e02e22be87ba1767732c9b25f55",
+      "destination": "docs/development-guidance-connections.md#dg-115",
+      "destinationSha256": "eb39c134dda555121eed0b2429895cf4bbf6e56c4554645a4715f2753ddb6a0a",
+      "transformation": "explicit-user-requested-policy-exception",
+      "policyChange": "Permit explicitly authorized operator-managed Railway private SSH diagnostics only; no automated provider CLI dependency, public TCP proxy creation, implicit key registration or infrastructure/data mutation. Preserve recorded-access cleanup and secret output boundaries."
+    },
+    {
+      "id": "DG-116",
+      "sourceLine": 134,
+      "summary": "Do not run Hypervibe's full release gate, bump a version, or publish a release for every small change or merged pull request",
+      "originalSha256": "aab07829492547cff97d47f01ac7e6c9df4ea0e0ebbdee68d780ad48d6380498",
+      "destination": "docs/development-guidance-workflow.md#dg-116",
+      "destinationSha256": "aab07829492547cff97d47f01ac7e6c9df4ea0e0ebbdee68d780ad48d6380498",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-117",
+      "sourceLine": 135,
+      "summary": "A successful dependency install does not establish a clean security audit",
+      "originalSha256": "291db4e4b424f76a6ad96c04d5ffb0b77543a02f5ef4d9ed544d38d6085197ea",
+      "destination": "docs/development-guidance-workflow.md#dg-117",
+      "destinationSha256": "291db4e4b424f76a6ad96c04d5ffb0b77543a02f5ef4d9ed544d38d6085197ea",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-118",
+      "sourceLine": 136,
+      "summary": "When a release requires a separately deployed helper artifact, gate package publication on building, testing and verifying that exact helper",
+      "originalSha256": "bc3f400cfb776766db31c2e203057c219175fb9c5c8f93e7acfb81fe35959c22",
+      "destination": "docs/development-guidance-workflow.md#dg-118",
+      "destinationSha256": "bc3f400cfb776766db31c2e203057c219175fb9c5c8f93e7acfb81fe35959c22",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-119",
+      "sourceLine": 137,
+      "summary": "When building or releasing Hypervibe, update the configured local MCP runtime first and verify that it reports the new version",
+      "originalSha256": "22e255970630916d35ba11017d099583a698580ecf487d582c66f44dfef7a230",
+      "destination": "docs/development-guidance-workflow.md#dg-119",
+      "destinationSha256": "22e255970630916d35ba11017d099583a698580ecf487d582c66f44dfef7a230",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-120",
+      "sourceLine": 138,
+      "summary": "On macOS, configure every parent write descriptor used for child-process IPC with `F_SETNOSIGPIPE` before handing it to an async transport",
+      "originalSha256": "b72c52d37a825a51b45b89cffa456bee12d74034fdb60ca2fd4b7e62a2a7a8a8",
+      "destination": "docs/development-guidance-workflow.md#dg-120",
+      "destinationSha256": "b72c52d37a825a51b45b89cffa456bee12d74034fdb60ca2fd4b7e62a2a7a8a8",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-121",
+      "sourceLine": 139,
+      "summary": "Release macOS advisory instance locks explicitly with `flock(LOCK_UN)` before closing their descriptor",
+      "originalSha256": "406b35d96829e7d8907d09fb93dc243a19a73aa3912f823fd7ca5ba03495237c",
+      "destination": "docs/development-guidance-workflow.md#dg-121",
+      "destinationSha256": "406b35d96829e7d8907d09fb93dc243a19a73aa3912f823fd7ca5ba03495237c",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-122",
+      "sourceLine": 140,
+      "summary": "After creating a pull request, always provide its URL and explicitly offer to open it in the user's browser",
+      "originalSha256": "f192876ff2a6b0040eb142b839bb2cf68e8d9c351ac2d98bdec6ed4f365516fc",
+      "destination": "docs/development-guidance-workflow.md#dg-122",
+      "destinationSha256": "f192876ff2a6b0040eb142b839bb2cf68e8d9c351ac2d98bdec6ed4f365516fc",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-123",
+      "sourceLine": 141,
+      "summary": "When the complete, nonempty pull-request diff is limited to Hypervibe specs or files generated from them, prefix the title with exactly `[hypervibe] `",
+      "originalSha256": "d8e32f9cd90a63961cbcdd33247c6a0287cf769e61bff2fdb86192d8b235da97",
+      "destination": "docs/development-guidance-workflow.md#dg-123",
+      "destinationSha256": "d8e32f9cd90a63961cbcdd33247c6a0287cf769e61bff2fdb86192d8b235da97",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-124",
+      "sourceLine": 143,
+      "summary": "A shared container image default is distinct from each workload's runtime command",
+      "originalSha256": "adb46860bac9d1ac2d323bf674fed1df775a0aea7241624159f909f41dc7c77f",
+      "destination": "docs/development-guidance-ci.md#dg-124",
+      "destinationSha256": "adb46860bac9d1ac2d323bf674fed1df775a0aea7241624159f909f41dc7c77f",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-125",
+      "sourceLine": 144,
+      "summary": "Generated-workflow tests must execute the emitted shell and JavaScript against a realistic multi-service fixture",
+      "originalSha256": "5adff2e1291b26206e67d53c7a1778d34527645fa0f11df874756d55abb02aa4",
+      "destination": "docs/development-guidance-ci.md#dg-125",
+      "destinationSha256": "5adff2e1291b26206e67d53c7a1778d34527645fa0f11df874756d55abb02aa4",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-126",
+      "sourceLine": 145,
+      "summary": "Keep workflow-source provenance separate from deployed-source identity",
+      "originalSha256": "77206df408af4a07a738e3caaf6ca9d36478d8d864c08f7d7ec2f12db64460c3",
+      "destination": "docs/development-guidance-ci.md#dg-126",
+      "destinationSha256": "77206df408af4a07a738e3caaf6ca9d36478d8d864c08f7d7ec2f12db64460c3",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-127",
+      "sourceLine": 146,
+      "summary": "Version release evidence and operational receipts from their shared validators and migrate every producer, generated consumer, runtime consumer, and fixture together",
+      "originalSha256": "76685d831ecaa36d3cb5f5c5fffd10866fc30af8d134ddd2568fa23925e5c83e",
+      "destination": "docs/development-guidance-ci.md#dg-127",
+      "destinationSha256": "76685d831ecaa36d3cb5f5c5fffd10866fc30af8d134ddd2568fa23925e5c83e",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-128",
+      "sourceLine": 147,
+      "summary": "The managed iOS runtime (`templates/ios/hypervibe-ios-release.mjs`) must validate server evidence before provider effects and must never reuse an existing Apple build solely by version/build number",
+      "originalSha256": "86f8acc6dcba97a1286a4813c448ee8d41dabfe031bcd03a97976a1a0d816772",
+      "destination": "docs/development-guidance-ci.md#dg-128",
+      "destinationSha256": "86f8acc6dcba97a1286a4813c448ee8d41dabfe031bcd03a97976a1a0d816772",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-129",
+      "sourceLine": 148,
+      "summary": "The managed iOS runtime owns build-number selection from a complete paginated App Store build listing; unknown, malformed, unsafe, or exhausted evidence must block rather than guess",
+      "originalSha256": "1404a3b10ab8f33166881cbe440ecc9a1e5af70744f9e52f36880c3d0ac64e11",
+      "destination": "docs/development-guidance-ci.md#dg-129",
+      "destinationSha256": "1404a3b10ab8f33166881cbe440ecc9a1e5af70744f9e52f36880c3d0ac64e11",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-130",
+      "sourceLine": 149,
+      "summary": "Keep generated iOS `run` scripts within GitHub's 21,000-character limit",
+      "originalSha256": "9d9279bc8f994eb963465a4cf049a9fc2ae3455ba14b710b2ed34ffae6c7d4c1",
+      "destination": "docs/development-guidance-ci.md#dg-130",
+      "destinationSha256": "9d9279bc8f994eb963465a4cf049a9fc2ae3455ba14b710b2ed34ffae6c7d4c1",
+      "transformation": "verbatim"
+    },
+    {
+      "id": "DG-131",
+      "sourceLine": 150,
+      "summary": "Distinguish failed execution from work that was never attempted",
+      "originalSha256": "513f5ca9bc815eb5733cf16266fd2b204f9e2bd869099f6dc67d6c0d9f61f4b4",
+      "destination": "docs/development-guidance-lifecycle.md#dg-131",
+      "destinationSha256": "513f5ca9bc815eb5733cf16266fd2b204f9e2bd869099f6dc67d6c0d9f61f4b4",
+      "transformation": "verbatim"
+    }
+  ],
+  "claudeSource": {
+    "path": "CLAUDE.md",
+    "sourceBytes": 9567,
+    "sourceSha256": "f1de9d2270a9d215599e65b01e3d641cb176391441ee89879a2bf67172c9f284",
+    "sections": [
+      {
+        "heading": "Behavioral Guidelines",
+        "sourceLine": 3,
+        "originalSha256": "1aad6180fe1ab956a79a4c9d731f2553af1ac1593eec67248c87b6f35eae7e0b",
+        "status": "merged",
+        "destination": "AGENTS.md#working-method",
+        "reason": "Retain narrow scope, stated assumptions, concrete verification, and minimal changes. Clarification remains proportional to material ambiguity."
+      },
+      {
+        "heading": "Think Before Coding",
+        "sourceLine": 7,
+        "originalSha256": "fe08d612092312e7b7fa25c58ce7bff538781f6cb79eb79e315d3b57844ecf4d",
+        "status": "merged",
+        "destination": "AGENTS.md#working-method",
+        "reason": "Preserve explicit uncertainty and evidence; current user-authorized routine choices do not require a redundant stop."
+      },
+      {
+        "heading": "Simplicity First",
+        "sourceLine": 17,
+        "originalSha256": "1119fd3a7a7a6304033b718b6c920d35fa0496be5360d6e63554da2fcc3d834c",
+        "status": "merged",
+        "destination": "AGENTS.md#working-method",
+        "reason": "Preserve minimal changes and no speculative layers; numeric line-count examples were illustrative, not an implementation contract."
+      },
+      {
+        "heading": "Surgical Changes",
+        "sourceLine": 29,
+        "originalSha256": "c7bd29f29b5fee0abc91e042d05318b27f3d69da5071ce5496d8c139bc4b4935",
+        "status": "merged",
+        "destination": "AGENTS.md#working-method",
+        "reason": "Preserve unrelated work and trace changes to the requested outcome."
+      },
+      {
+        "heading": "Goal-Driven Execution",
+        "sourceLine": 45,
+        "originalSha256": "03fedca9107de0c542cfba0108640e81a9a07b943dd591747a27a2a6f0a70a99",
+        "status": "merged",
+        "destination": "AGENTS.md#working-method",
+        "reason": "Preserve concrete success criteria and observed failure/passing evidence."
+      },
+      {
+        "heading": "Design Principles",
+        "sourceLine": 65,
+        "originalSha256": "26952f39e703c5614d0847e01fe371ded3d8aa2665c7b07179b4329966777036",
+        "status": "superseded",
+        "destination": "AGENTS.md#non-negotiable-boundaries",
+        "reason": "Use the current desired-state, exact identity, redaction, and authorization contracts."
+      },
+      {
+        "heading": "Let LLMs Handle Fuzzy Matching",
+        "sourceLine": 67,
+        "originalSha256": "7671daea349d25c0249f0844d34b1e9c2cee212833a0b80c42a95d756291303f",
+        "status": "clarified",
+        "destination": "AGENTS.md#non-negotiable-boundaries",
+        "reason": "Semantic interpretation may propose mappings; it cannot prove resource identity, scope, ownership, permissions, or adoption authority. Never return unredacted raw provider data."
+      },
+      {
+        "heading": "Simple Shortcuts Are OK",
+        "sourceLine": 91,
+        "originalSha256": "db541e2b01d8816c3f792f9c1b254365350398daaad17aee04ca95d7dca38c97",
+        "status": "clarified",
+        "destination": "AGENTS.md#non-negotiable-boundaries",
+        "reason": "Name interpretation is a proposal, not authority; durable scoped provider identity and ambiguity rules govern execution."
+      },
+      {
+        "heading": "Two-Step Import Flow",
+        "sourceLine": 100,
+        "originalSha256": "10641d3fca056e63a48743cd1c5b30dbe66e74e8def6f126a90e3a543422d631",
+        "status": "merged",
+        "destination": "ARCHITECTURE.md#product-model",
+        "reason": "Keep explicit read-only inspection, proposed exact mapping, and confirmed adoption; hv_import is not a generic read tool."
+      },
+      {
+        "heading": "Architecture",
+        "sourceLine": 108,
+        "originalSha256": "de14fc3a7ca0856743559a2aff73a406626ff54ab1274298dabf705d6ad4a355",
+        "status": "corrected",
+        "destination": "ARCHITECTURE.md#interface-boundary",
+        "reason": "Replace stale src/tools/respond.ts and server ToolContext wiring with the command registry/context/results model. ToolContext remains a compatibility alias, not the active architecture."
+      },
+      {
+        "heading": "The spec \u2192 plan \u2192 apply loop",
+        "sourceLine": 129,
+        "originalSha256": "282bc116236abb34c1135ec1e054b79470e10779f419e680d4d44d9240608ad0",
+        "status": "corrected",
+        "destination": "ARCHITECTURE.md#reconciliation-safety-invariants",
+        "reason": "Keep the desired-state loop; replace broad no-approval/local-fallback wording with exact action confirmation and unknown-observation rules."
+      },
+      {
+        "heading": "Reconciliation safety",
+        "sourceLine": 139,
+        "originalSha256": "2dcc8cccfbd2799654b17d0cb43cc187625bdb7daf5d8641c1b60491a2457b0a",
+        "status": "merged",
+        "destination": "docs/development-guidance-lifecycle.md",
+        "reason": "Preserved by the exact original AGENTS lifecycle rules and architecture contract."
+      },
+      {
+        "heading": "Platform Bindings",
+        "sourceLine": 170,
+        "originalSha256": "0076654b045d5c788c75cb49d09c5730f9fd8b4f47585efceafd4911e27a2823",
+        "status": "merged",
+        "destination": "ARCHITECTURE.md#platform-bindings",
+        "reason": "Use the complete current durable binding contract rather than an incomplete example shape."
+      },
+      {
+        "heading": "Environment Variables: Local Dev Exceptions",
+        "sourceLine": 184,
+        "originalSha256": "d4b337061a2ec4e331817284518f9a07e5bfa630f375de29bf9384b122224f80",
+        "status": "superseded",
+        "destination": "docs/reserved-runtime-env.md",
+        "reason": "The application-specific reCAPTCHA bypass and recaptcha_sync advice has no corresponding current Hypervibe command. Runtime configuration follows the current generic declared-env contract; no application validation bypass is introduced."
+      }
+    ],
+    "revision": "09fd75f3519d3a8dde1635f33f59727f33f7a1a6"
+  },
+  "additions": [
+    {
+      "id": "DG-001",
+      "destination": "docs/development-guidance-product.md#dg-001",
+      "destinationSha256": "d1edbec198165783ac6f74d5a5f29942ac5ce3516b0395f0ff588ad7b513cce5",
+      "reason": "User-requested direct forms with every supported known non-secret field prefilled; preserve contextual tool URLs across clients."
+    },
+    {
+      "id": "DG-002",
+      "destination": "docs/development-guidance-product.md#dg-002",
+      "destinationSha256": "a3e16a038a534a277f74f1eeabea409069355c24d54fad1e06aeb1f5ef5cfc53",
+      "reason": "User-requested direct forms with every supported known non-secret field prefilled; preserve contextual tool URLs across clients."
+    }
+  ],
+  "postMigrationAdditions": [
+    {
+      "sourceRevision": "99bf0b0ab18fba9214e32a93ad49dc5ffe11f728",
+      "sourcePath": "AGENTS.md",
+      "destination": "docs/development-guidance-lifecycle.md#connect-cloud-project-allocation-exception",
+      "reason": "Preserve the owner-approved 2026-10-25 create-exclusive-v1 exception when integrating the maintainer guidance migration; existing DG-039 remains unchanged."
+    }
+  ]
+}

@@ -19,6 +19,7 @@ import '../../application/devops-providers.js';
 import { createToolContext } from '../../application/context.js';
 import { registerHvCiTools } from '../hv-ci.tools.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
+import * as credentialActivation from '../../adapters/providers/github/github-credential-activation.js';
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 
 let tempDir: string;
@@ -580,6 +581,23 @@ describe('hv_ci_status', () => {
 });
 
 describe('hv_ci_trigger', () => {
+  it('uses the shared credential preparation and evidence hooks for legacy GitHub commands', async () => {
+    const project = seedProject();
+    new SpecStore().replace(project, { version: 1, project: project.name, environments: { production: { hosting: { provider: 'railway' }, services: { web: {} } } } });
+    const prepared = { credential_operations: JSON.stringify({ web: { operationId: 'op', serviceId: 'service' } }) };
+    const prepare = vi.spyOn(credentialActivation, 'prepareGitHubCredentialRollout').mockResolvedValue(prepared);
+    const observe = vi.spyOn(credentialActivation, 'observeGitHubCredentialRollout').mockResolvedValue([{ service: 'web', operationId: 'op', deploymentIds: ['new'] }]);
+    const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockResolvedValue();
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunArtifacts').mockResolvedValue({ total_count: 0, artifacts: [] });
+    const t = await makeClient();
+    const dispatched = await t.call('hv_ci_trigger', { project: project.name, definition: 'deploy.yml', ref: 'main' });
+    expect(dispatched.ok).toBe(true); expect(prepare).toHaveBeenCalled();
+    expect(trigger).toHaveBeenCalledWith('davejohnson', 'billforge', 'deploy.yml', 'main', prepared);
+    const status = await t.call('hv_ci_status', { project: project.name, include: ['artifacts'], runId: '20' });
+    expect(observe).toHaveBeenCalled(); expect(status.data.credentialActivation).toEqual([{ service: 'web', operationId: 'op', deploymentIds: ['new'] }]);
+    await t.close();
+  });
+
   it('dispatches a workflow run on the observed repository default branch', async () => {
     seedProject();
     vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'trunk' });

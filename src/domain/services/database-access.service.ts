@@ -323,6 +323,16 @@ export async function acquireDatabaseComponentAccess(
     // provider access path below without copying provider errors into output.
   }
 
+  if (!existing && adapter.getExistingExternalConnectionUrl) {
+    try {
+      const candidate = await adapter.getExistingExternalConnectionUrl(environment, component);
+      existing = isExternallyUsableDatabaseUrl(candidate) ? candidate : null;
+    } catch {
+      return { ok: false, code: 'provider_error', error: 'Existing database access could not be verified.',
+        provider, resourceCreated: false, cleanup: 'not_needed', hint: adapter.capabilities.databaseAccessHint };
+    }
+  }
+
   const supportsTemporaryAccess = Boolean(
     adapter.capabilities.supportsTemporaryDatabaseAccess
     && typeof adapter.acquireTemporaryDatabaseAccess === 'function'
@@ -359,6 +369,7 @@ export async function acquireDatabaseComponentAccess(
     ok: false,
     code: 'no_external_access',
     error: `${provider} cannot provide externally usable access for the migration target.`,
+    hint: adapter.capabilities.databaseAccessHint,
     provider,
     resourceCreated: false,
     cleanup: 'not_needed',
@@ -448,7 +459,8 @@ export async function acquireManagedDatabaseAccess(
       connectionUnavailable: !adapterResult.success,
       resourceCreated: false,
       cleanup: 'not_needed',
-      hint: 'Use a verified database connection or a provider that supports private or ephemeral diagnostic access.',
+      hint: adapter?.capabilities.databaseAccessHint
+        ?? 'Use a verified database connection or a provider that supports private or ephemeral diagnostic access.',
     };
   }
 

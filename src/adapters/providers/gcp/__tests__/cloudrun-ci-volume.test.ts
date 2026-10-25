@@ -16,14 +16,15 @@ const credentials = { client_email: 'ci@example.test', private_key: crypto.gener
 const encoded = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64');
 
 it('preserves deployed legacy CI bytes when service instance bounds are omitted', () => {
-  // Captured independently from the unchanged e9c5e0a source archive before
-  // accepting the capacity renderer changes. No provider/template regeneration
-  // is allowed merely because this optional field became available.
+  // Captured from the exact fetched main 3bfe9b98d5d262741de01ef4d6cb8e0c5a0703a1
+  // source archive, independently of this merge. Main intentionally added
+  // credential rollout outputs (renderer revision 2); optional capacity alone
+  // must not cause any additional provider/template regeneration.
   const sha = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
   const target = { environmentName: 'staging', kind: 'staging' as const, branch: 'main', autoDeployOnPush: true,
     serviceNames: ['web'], providerServiceIds: ['web'], providerScope: { projectId: 'legacy-project', region: 'us-central1' }, providerRegion: 'us-central1' };
-  expect(sha(JSON.stringify(buildCloudRunGitHubActionsSteps(target)))).toBe('b37fce8fd3733003e51c6ccccc581c6654889eb28532793811bf43e654649e2e');
-  expect(sha(buildCloudRunPortableRuntime())).toBe('4fee770c0bf9a83f3094042ccbe206534233b97242f248f126904fc4e29e08f2');
+  expect(sha(JSON.stringify(buildCloudRunGitHubActionsSteps(target)))).toBe('7b6b96ab1b1312a06bf2e597e7666ce3fc956d17808b5ecb767a3b87b5dc1973');
+  expect(sha(buildCloudRunPortableRuntime())).toBe('275ef86ff71e47d43fdc36ac06fb8eba5c3f7f186d2ca793d7446e37246d1a56');
   expect(sha(buildCloudRunReleaseRuntime())).toBe('3e0729e6d5f0034943d7f3bbfe509352d4fc333f1e7b397d7d185e359dff7ab7');
 });
 
@@ -72,7 +73,7 @@ function fixture(kind: 'github' | 'portable', fault?: string, rollback = false, 
     providerResourceId: name, startCommand: null, healthCheckPath: null, ...(bounds ? { instanceBounds: { min: 0, max: 1 } } : {}) }];
   env.CLOUDRUN_RUNTIME_RESOURCES_B64 = encoded(runtimeResources);
   const script = kind === 'portable' ? buildCloudRunPortableRuntime({ instanceBounds: bounds }).replace(/^import .*;\n/gm, '') : extractGitHubScript('jobs:\n  deploy:\n    steps:\n' + buildCloudRunGitHubActionsSteps({ environmentName: 'staging', kind: 'staging', branch: 'main', autoDeployOnPush: true, serviceNames: ['web'], providerServiceIds: ['web'], providerScope: { projectId: project, region }, providerRegion: region, runtimeResources }).steps, 'Deploy image to Cloud Run');
-  const run = () => new AsyncFunction('require', 'process', 'fetch', 'Buffer', 'core', 'createSign', 'execFileSync', 'readFile', 'writeFile', script)(() => crypto, { env, stdout: { write: vi.fn() } }, fetchImpl, Buffer, { info: vi.fn() }, crypto.createSign, (_file: string, args: string[]) => args[0] === 'push' ? 'digest: sha256:' + 'b'.repeat(64) : '', async (file: string) => file === '.hypervibe-deploy-sha' ? 'a'.repeat(40) : 'registry.example.test/source:tag', vi.fn());
+  const run = () => new AsyncFunction('require', 'process', 'fetch', 'Buffer', 'core', 'createSign', 'execFileSync', 'readFile', 'writeFile', script)(() => crypto, { env, stdout: { write: vi.fn() } }, fetchImpl, Buffer, { info: vi.fn(), setOutput: vi.fn() }, crypto.createSign, (_file: string, args: string[]) => args[0] === 'push' ? 'digest: sha256:' + 'b'.repeat(64) : '', async (file: string) => file === '.hypervibe-deploy-sha' ? 'a'.repeat(40) : 'registry.example.test/source:tag', vi.fn());
   return { run, patches, original };
 }
 

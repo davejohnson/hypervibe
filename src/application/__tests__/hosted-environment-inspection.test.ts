@@ -376,15 +376,16 @@ describe('hosted desired/current inspection v1', () => {
   });
 
   it('never adopts a database-looking service without a committed database identity', async () => {
-    await databaseFixture();
+    const fixture = await databaseFixture();
     const report = await inspectHostedEnvironmentV1(databaseRequest(), { now });
     expect(report.resources.find(resource => resource.id === 'database:database')).toMatchObject({
       status: 'unknown', reasonCode: 'binding_missing', current: { exists: null },
     });
     expect(report.resources.find(resource => resource.status === 'unmanaged')).toMatchObject({
-      name: 'Postgres', externalId: 'staging-postgres', reasonCode: 'not_bound',
+      kind: 'database', name: 'Postgres', externalId: 'staging-postgres', reasonCode: 'not_bound',
     });
     expect(report.coverage.status).toBe('partial');
+    expect(fixture.mutations).toEqual([]);
   });
 
   it('reports a bound database missing only after a complete exact-scope inventory', async () => {

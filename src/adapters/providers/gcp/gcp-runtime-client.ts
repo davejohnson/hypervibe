@@ -26,7 +26,7 @@ export function gcpRuntimeError(error: unknown): string {
 
 export async function gcpRuntimeRequest(url: string, token: string, init: RequestInit = {}, request: typeof fetch = fetch): Promise<unknown | null> {
   const parsed = new URL(url);
-  if (parsed.protocol !== 'https:' || !['iam.googleapis.com', 'cloudresourcemanager.googleapis.com', 'run.googleapis.com', 'storage.googleapis.com', 'sqladmin.googleapis.com', 'secretmanager.googleapis.com', 'compute.googleapis.com', 'pubsub.googleapis.com'].includes(parsed.hostname)
+  if (parsed.protocol !== 'https:' || !['iam.googleapis.com', 'cloudresourcemanager.googleapis.com', 'run.googleapis.com', 'storage.googleapis.com', 'sqladmin.googleapis.com', 'secretmanager.googleapis.com', 'artifactregistry.googleapis.com', 'compute.googleapis.com', 'pubsub.googleapis.com'].includes(parsed.hostname)
     || parsed.username || parsed.password || parsed.hash) throw new GcpRuntimeError('Invalid Google runtime API destination.');
   const budget = new DestinationBudget({ signal: init.signal ?? undefined, deadlineMs: 15_000 });
   try {

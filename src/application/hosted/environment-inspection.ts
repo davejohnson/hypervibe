@@ -268,15 +268,18 @@ function compareHosting(input: {
   }
   const boundNames = new Map(Object.entries(bindings.services).map(([name, binding]) => [binding.serviceId, name]));
   let omittedResources = 0;
-  for (const live of observed.services) {
+  for (const { live, kind } of [
+    ...observed.services.map(live => ({ live, kind: 'service' })),
+    ...(observed.databases ?? []).map(live => ({ live, kind: 'database' })),
+  ]) {
     if (databaseBinding && live.externalId === databaseBinding.externalId) continue;
     const boundName = boundNames.get(live.externalId);
     if (boundName && Object.hasOwn(input.spec.services, boundName)) continue;
     if (resources.length >= input.maxResources) { omittedResources += 1; continue; }
     const externalId = safeProviderIdentity(live.externalId);
     if (!externalId) continue;
-    resources.push({ id: boundName ? `service:${boundName}` : `unmanaged:${externalId}`, kind: 'service',
-      name: boundName ?? safeProviderIdentity(live.name) ?? 'Unmanaged service',
+    resources.push({ id: boundName ? `service:${boundName}` : `unmanaged:${externalId}`, kind,
+      name: boundName ?? safeProviderIdentity(live.name ?? '') ?? `Unmanaged ${kind}`,
       provider: spec.hosting.provider, externalId, status: boundName ? 'drifted' : 'unmanaged', desired: { exists: false },
       current: { exists: true }, fields: [], reasonCode: boundName ? 'undesired_managed_resource' : 'not_bound' });
   }

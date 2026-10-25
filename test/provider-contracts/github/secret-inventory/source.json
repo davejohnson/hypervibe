@@ -1,0 +1,12 @@
+{
+  "sourceUrl": "https://raw.githubusercontent.com/github/rest-api-description/755ee33b4a81d51f6f07a902cce26cbec3b822f2/descriptions/api.github.com/api.github.com.json",
+  "sourceCommit": "755ee33b4a81d51f6f07a902cce26cbec3b822f2",
+  "sourceSha256": "3177ad6a86ca04c57a9bef3fc24e28a339efb8eb040c6f950af3d3ed2fee7fa3",
+  "schemaFile": "inventory.openapi.json",
+  "schemaSha256": "b1b867a372d9bff1f11991c8f8c6873976ebc325b14628b9c157bea506d8f3df",
+  "extraction": "Four unmodified read-only GET operations with recursive component closure. Reconstructed examples; no live observations.",
+  "docs": [
+    "https://docs.github.com/en/rest/actions/secrets",
+    "https://docs.github.com/en/rest/deployments/environments"
+  ]
+}

@@ -18,6 +18,7 @@ import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { normalizeGitRemoteIdentity } from '../lib/git-remote.js';
 import type { CiOperationsPort, CodeRepositoryIdentity } from '../domain/ports/devops.port.js';
 import { ignoredOptionWarnings } from '../application/command-options.js';
+import { pendingCredentialUpdate } from '../domain/services/credential-lifecycle.service.js';
 
 type ConnectedGitHubAdapter = Extract<
   ReturnType<typeof getGitHubAdapter>,
@@ -324,7 +325,7 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
       const canonical = await canonicalCiContextOrNull(ctx, projectRef, repoOverride);
       if (canonical) {
         const sections = include?.length ? include : ['definitions' as const];
-        const warnings = ciStatusOptionWarnings(sections, { definition, workflow, runId, jobId, logLines, branch });
+        const warnings = ciStatusOptionWarnings(sections, { definition, workflow, runId, jobId, logLines, branch }) ?? [];
         const data: Record<string, unknown> = {
           codeProvider: canonical.repository.provider,
           ciProvider: canonical.ciProvider,
@@ -387,13 +388,21 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
             };
           }
         }
+        if (runId) {
+          const lifecycle = devOpsProviderRegistry.ciProvider(canonical.ciProvider)?.lifecycle;
+          const stored = new SpecStore().get(canonical.project);
+          if (stored && lifecycle?.observeCredentialRollout) {
+            try { data.credentialActivation = await lifecycle.observeCredentialRollout({ project: canonical.project, spec: stored.spec, runId }); }
+            catch { warnings.push('Credential activation evidence could not be verified for this run. Existing rollout requirements remain pending.'); }
+          }
+        }
         return commandSuccess(data, { warnings });
       }
       const repoRef = resolveRepoOrThrow(ctx, projectRef, repoOverride);
       const { owner, repo } = repoRef;
       const adapter = githubAdapterOrThrow(repoRef);
       const sections = include?.length ? include : ['workflows' as const];
-      const warnings = ciStatusOptionWarnings(sections, { definition, workflow, runId, jobId, logLines, branch });
+      const warnings = ciStatusOptionWarnings(sections, { definition, workflow, runId, jobId, logLines, branch }) ?? [];
       const data: Record<string, unknown> = { repository: `${owner}/${repo}` };
 
       for (const section of sections) {
@@ -554,6 +563,15 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
         }
       }
 
+      if (runId) {
+        const project = ctx.resolveProjectOrThrow({ project: projectRef });
+        const stored = new SpecStore().get(project);
+        if (stored) {
+          try { data.credentialActivation = await devOpsProviderRegistry.ciProvider('github-actions')?.lifecycle.observeCredentialRollout?.({ project, spec: stored.spec, runId }); }
+          catch { data.credentialActivation = { state: 'unknown', nextAction: 'Credential activation evidence could not be verified for this run. Existing rollout requirements remain pending.' }; }
+        }
+      }
+
       return commandSuccess(data, { warnings });
     })
   );
@@ -571,6 +589,9 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
       inputs: z.record(z.string(), z.string()).optional().describe('Typed, non-secret CI inputs as key-value pairs. Values are not written to audit output.'),
     },
     wrapCommandHandler(async ({ project: projectRef, repo: repoOverride, definition, workflow, ref, sha, inputs }) => {
+      const project = ctx.resolveProjectOrThrow({ project: projectRef });
+      const pending = pendingCredentialUpdate(project.id);
+      if (pending) throw new HvError('VALIDATION', `Credential synchronization is incomplete. Resume hv_apply planId="${pending}" before dispatching deployment.`);
       if (definition && workflow && definition !== workflow) {
         throw new HvError('VALIDATION', 'definition and workflow select different CI definitions.', {
           details: { definition, workflow },
@@ -582,11 +603,16 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
       const canonical = await canonicalCiContextOrNull(ctx, projectRef, repoOverride);
       if (canonical) {
         const selectedRef = ref ?? canonical.repository.defaultBranch;
+        const stored = new SpecStore().get(canonical.project);
+        const lifecycle = devOpsProviderRegistry.ciProvider(canonical.ciProvider)?.lifecycle;
+        const preparedInputs = stored && lifecycle?.prepareCredentialRollout
+          ? await lifecycle.prepareCredentialRollout({ project: canonical.project, spec: stored.spec, definition: selectedDefinition, ref: selectedRef, inputs })
+          : inputs;
         const run = await canonical.ci.dispatch(canonical.repository, {
           definition: selectedDefinition,
           ref: selectedRef,
           ...(sha ? { sha } : {}),
-          ...(inputs ? { inputs } : {}),
+          ...(preparedInputs ? { inputs: preparedInputs } : {}),
         });
         ctx.repos.audit.create({
           action: 'hv.ci_trigger',
@@ -627,7 +653,9 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
           hint: 'Pass ref explicitly, or verify the repository default branch before dispatching.',
         });
       }
-      await adapter.triggerWorkflow(owner, repo, selectedDefinition, selectedRef, inputs);
+      const stored = new SpecStore().get(project);
+      const preparedInputs = stored ? await devOpsProviderRegistry.ciProvider('github-actions')?.lifecycle.prepareCredentialRollout?.({ project, spec: stored.spec, definition: selectedDefinition, ref: selectedRef, inputs }) ?? inputs : inputs;
+      await adapter.triggerWorkflow(owner, repo, selectedDefinition, selectedRef, preparedInputs);
       ctx.repos.audit.create({
         action: 'hv.ci_trigger',
         resourceType: 'github_workflow',

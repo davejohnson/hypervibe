@@ -134,6 +134,7 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
           secrets: |
             npm_token=\${{ secrets.NODE_AUTH_TOKEN }}
       - name: Deploy exact-SHA image to existing DigitalOcean components
+        id: runtime_deploy
         uses: actions/github-script@v9
         env:
           DIGITALOCEAN_TOKEN: \${{ secrets.DIGITALOCEAN_TOKEN }}
@@ -145,6 +146,7 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
           DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
+            const credentialDeployments = [];
             const endpoint = 'https://api.digitalocean.com';
             const terminalFailures = new Set(['ERROR', 'CANCELED', 'SUPERSEDED']);
             const collections = ['services', 'workers', 'jobs'];
@@ -391,10 +393,12 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
                 );
               }
             }
+            for (const key of targetKeys) credentialDeployments.push({ serviceId: appId + ':' + key, deploymentIds: [deploymentId] });
             core.info(
               'DigitalOcean deployment ' + deploymentId
               + ' is ACTIVE on exact SHA ' + process.env.DEPLOY_SHA
             );
+            core.setOutput('credential_deployments', JSON.stringify(credentialDeployments));
 `,
     requiredSecrets: [...DIGITALOCEAN_CI_REQUIRED_SECRETS],
     requiredVariables,
