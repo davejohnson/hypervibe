@@ -473,7 +473,6 @@ describe('command presentation', () => {
       'hv_cloud_secrets',
       'hv_connections',
       'hv_db_query',
-      'hv_db_verify_auth',
       'hv_deploy',
       'hv_destroy',
       'hv_health',

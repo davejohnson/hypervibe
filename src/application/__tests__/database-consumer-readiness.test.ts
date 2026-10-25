@@ -14,7 +14,7 @@ import { hashEnvValue, type ObservedState } from '../../domain/ports/observe.por
 // Synthetic application-boundary observations. Independent incident requirement:
 // unchanged raw references and resolved configuration equality do not establish
 // deployed configuration or SQL authentication. Real SCRAM coverage lives in
-// database-authentication.test.ts; these tests do not claim live Railway evidence.
+// database-credential.postgres.test.ts; these tests do not claim live Railway evidence.
 let root: string;
 beforeEach(() => {
   root = mkdtempSync(path.join(tmpdir(), 'hv-db-consumers-'));
