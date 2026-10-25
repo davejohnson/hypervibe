@@ -11,7 +11,7 @@ export const SERVICE_VOLUME_OPERATIONS = { create: 'serviceVolumeCreate', finali
 // Repository exports restore these identity coordinates without generic key
 // redaction. New coordinates require explicit review; credential slots never fit.
 const scopeKeys = new Set(['account', 'accountId', 'projectId', 'projectNumber', 'subscriptionId', 'resourceGroup', 'location', 'region', 'zone', 'serviceName', 'sizeGb', 'capacityGb', 'tier', 'network', 'subnetwork', 'instanceName', 'shareName', 'vpcId', 'workloadSecurityGroupId', 'subnets', 'taskRoleArn', 'taskRoleOwned']);
-const instanceScopeSchema = z.record(z.string().min(1).max(8192).refine(v => !/[\r\n]/.test(v) && !/https?:\/\/[^/]*@/i.test(v)))
+const instanceScopeSchema = z.record(z.string(), z.string().min(1).max(8192).refine(v => !/[\r\n]/.test(v) && !/https?:\/\/[^/]*@/i.test(v)))
   .refine(scope => Object.keys(scope).length > 0 && Object.keys(scope).every(key => scopeKeys.has(key)));
 const targetSchema = z.object({ projectId: z.string().min(1), environmentId: z.string().min(1), serviceId: z.string().min(1), mountPath: z.string().min(1), instanceScope: instanceScopeSchema.optional() }).strict();
 const componentBindingSchema = z.object({ state: z.enum(['creating', 'identified', 'bound']), externalId: z.string().min(1).optional() }).strict()
@@ -20,8 +20,8 @@ const legacyBindingSchema = z.object({
   provider: z.string().min(1), target: targetSchema,
   state: z.enum(['creating', 'identified', 'bound']), externalId: z.string().min(1).optional(),
 }).strict().refine((v) => v.state === 'creating' ? v.externalId === undefined : Boolean(v.externalId));
-const bindingSchema = z.union([legacyBindingSchema, z.object({ provider: z.string().min(1), target: targetSchema, state: z.literal('staged'), components: z.record(componentBindingSchema) }).strict()]);
-const bindingsSchema = z.record(bindingSchema);
+const bindingSchema = z.union([legacyBindingSchema, z.object({ provider: z.string().min(1), target: targetSchema, state: z.literal('staged'), components: z.record(z.string(), componentBindingSchema) }).strict()]);
+const bindingsSchema = z.record(z.string(), bindingSchema);
 type VolumeEnvironment = Pick<Environment, 'platformBindings'> | null;
 
 export function hasRetainedServiceVolumes(environment: VolumeEnvironment): boolean {

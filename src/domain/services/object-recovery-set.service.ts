@@ -9,7 +9,7 @@ import { recoveryIdentityStringSchema } from './recovery-source.js';
 export const objectRecoveryIdentitySchema = z.object({
   provider: recoveryIdentityStringSchema,
   externalId: recoveryIdentityStringSchema,
-  instanceScope: z.record(recoveryIdentityStringSchema).refine(value => Object.keys(value).length > 0
+  instanceScope: z.record(z.string(), recoveryIdentityStringSchema).refine(value => Object.keys(value).length > 0
     && Object.keys(value).every(key => /^[a-zA-Z][a-zA-Z0-9_]*$/.test(key) && !/secret|password|token|credential|key/i.test(key))),
 }).strict();
 export type ObjectRecoveryIdentity = z.infer<typeof objectRecoveryIdentitySchema>;
@@ -47,7 +47,7 @@ const httpSchema = z.object({ contentType: z.string().optional(), contentEncodin
   cacheControl: z.string().optional(), contentDisposition: z.string().optional() }).strict();
 const entrySchema = z.object({ key: keySchema, backupKey: keySchema, size: z.number().int().nonnegative().safe(),
   sha256: z.string().regex(/^[a-f0-9]{64}$/), revision: revisionSchema, backupRevision: storedObjectRevisionSchema, http: httpSchema,
-  metadata: z.record(z.string()) }).strict();
+  metadata: z.record(z.string(), z.string()) }).strict();
 export const OBJECT_RECOVERY_FORMAT_VERSION = 2 as const;
 export const objectRecoveryManifestSchema = z.object({ version: z.literal(OBJECT_RECOVERY_FORMAT_VERSION), setId: executionIdSchema,
   sourceIdentity: objectRecoveryIdentitySchema, destinationIdentity: objectRecoveryIdentitySchema,
@@ -83,7 +83,7 @@ function readable(body: StorageObjectPayload['body']): Readable {
 function metadata(payload: StorageObjectPayload) {
   const http = httpSchema.parse(Object.fromEntries(['contentType', 'contentEncoding', 'cacheControl', 'contentDisposition']
     .flatMap(key => payload[key as keyof StorageObjectPayload] === undefined ? [] : [[key, payload[key as keyof StorageObjectPayload]]])));
-  const custom = z.record(z.string()).parse(payload.metadata ?? {});
+  const custom = z.record(z.string(), z.string()).parse(payload.metadata ?? {});
   if (Buffer.byteLength(JSON.stringify({ http, custom })) > 32 * 1024) throw new Error('Object metadata exceeds the recovery limit.');
   return { http, metadata: custom };
 }

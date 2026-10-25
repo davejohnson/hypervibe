@@ -130,10 +130,11 @@ export const standardDatabaseRuntimeProjection: ProviderDatabaseRuntimeProjectio
 };
 
 function credentialSchemaKeys(schema: z.ZodTypeAny): Set<string> | null {
-  let current = schema;
+  let current: z.core.$ZodType = schema;
   while (true) {
-    if (current instanceof z.ZodEffects) {
-      current = current.innerType();
+    if (current instanceof z.ZodPipe) {
+      // Refinements and brands retain their schema in v4; transforms use pipes.
+      current = current.in instanceof z.ZodTransform ? current.out : current.in;
       continue;
     }
     if (
@@ -141,12 +142,10 @@ function credentialSchemaKeys(schema: z.ZodTypeAny): Set<string> | null {
       || current instanceof z.ZodNullable
       || current instanceof z.ZodDefault
       || current instanceof z.ZodCatch
+      || current instanceof z.ZodPrefault
+      || current instanceof z.ZodReadonly
     ) {
-      current = current._def.innerType;
-      continue;
-    }
-    if (current instanceof z.ZodBranded) {
-      current = current._def.type;
+      current = current.unwrap();
       continue;
     }
     break;

@@ -14,7 +14,7 @@ export const localCredentialsSchema = z.object({
 
 export const createConnectionSchema = z.object({
   provider: providerSchema,
-  credentials: z.union([railwayCredentialsSchema, localCredentialsSchema, z.record(z.unknown())]),
+  credentials: z.union([railwayCredentialsSchema, localCredentialsSchema, z.record(z.string(), z.unknown())]),
 });
 
 export type CreateConnectionSchema = z.infer<typeof createConnectionSchema>;

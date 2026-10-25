@@ -14,7 +14,7 @@ const logicalName = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,100}$/);
 const selectedStorage = z.object({ name: logicalName, identity: objectRecoveryIdentitySchema }).strict();
 /** The published recurring authority names every source, destination, query and immutable runner. */
 export const managedBackupTargetSchema = z.object({ version: z.literal(1), project: logicalName, environment: logicalName,
-  hosting: z.object({ provider: z.string().min(1), providerScope: z.record(z.string().min(1)) }).strict(),
+  hosting: z.object({ provider: z.string().min(1), providerScope: z.record(z.string(), z.string().min(1)) }).strict(),
   runnerImage: z.string().regex(/^[^@\s]+@sha256:[a-f0-9]{64}$/),
   destination: selectedStorage,
   database: z.object({ componentId: z.string().min(1), source: recoverySourceIdentitySchema }).strict().optional(),

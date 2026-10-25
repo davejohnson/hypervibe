@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 const DigitalOceanAuthenticationSchema = z.object({
   apiToken: z
-    .string({ required_error: 'DigitalOcean personal access token is required' })
+    .string({ error: issue => issue.input === undefined ? 'DigitalOcean personal access token is required' : undefined })
     .min(1, 'DigitalOcean personal access token is required'),
 }).strict();
 

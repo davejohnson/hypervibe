@@ -5,7 +5,7 @@ export const createProjectSchema = z.object({
   name: z.string().min(1).max(100),
   defaultPlatform: z.string().default(UNCONFIGURED_HOSTING_PROVIDER),
   gitRemoteUrl: z.string().optional(),
-  policies: z.record(z.unknown()).optional(),
+  policies: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const updateProjectSchema = createProjectSchema.partial();

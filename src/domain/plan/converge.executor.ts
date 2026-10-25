@@ -36,7 +36,7 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
   billable: z.boolean().optional(),
   requiresConfirm: z.boolean().optional(),
   dependsOn: z.array(z.string().min(1)).optional(),
-  metadata: z.record(z.unknown()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 }).passthrough().superRefine((action, ctx) => {
   const billableDataResource = ['database', 'cache', 'storage', 'volume'].includes(action.resource.kind);
   const destructiveDataResource = ['database', 'cache', 'storage', 'volume'].includes(action.resource.kind)
@@ -240,7 +240,7 @@ export const planRunDocumentSchema = z.object({
   /** Immutable application revision reviewed with this deployment plan. */
   sourceCommitSha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
   observedFingerprint: z.string().nullable(),
-  integrationFingerprints: z.record(z.string()).optional(),
+  integrationFingerprints: z.record(z.string(), z.string()).optional(),
   lockEnvironmentIds: z.array(z.string().min(1)).optional(),
   actions: z.array(planActionSchema),
   unmanaged: z.array(z.object({ kind: z.string(), name: z.string(), detail: z.string().optional() })).optional(),

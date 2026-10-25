@@ -36,7 +36,7 @@ export function parseBackupHelperEnvironment(environment: NodeJS.ProcessEnv) {
       || !privateHost || source.hostname !== privateHost || !privateHost.endsWith('.internal')))
       || endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash
       || credentials.bucket !== config.archiveBucket) throw new Error('invalid scope');
-    const sourceCredentials = z.record(credentialsSchema).parse(JSON.parse(environment.HYPERVIBE_BACKUP_OBJECTS_CREDENTIALS_JSON ?? '{}'));
+    const sourceCredentials = z.record(z.string(), credentialsSchema).parse(JSON.parse(environment.HYPERVIBE_BACKUP_OBJECTS_CREDENTIALS_JSON ?? '{}'));
     if (Object.keys(sourceCredentials).length !== config.objects.length || new Set(config.objects.map(item => item.name)).size !== config.objects.length) throw new Error('invalid source scope');
     for (const object of config.objects) {
       const selected = sourceCredentials[object.name];

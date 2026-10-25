@@ -75,10 +75,10 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
       project: projectField,
       env: envField,
       services: z.array(z.string()).optional().describe('Specific services to deploy (default: all)'),
-      envVars: z.record(z.string()).optional().describe('Additional one-off environment variables; values are encrypted in the stored plan and win over .env and spec envVars.'),
+      envVars: z.record(z.string(), z.string()).optional().describe('Additional one-off environment variables; values are encrypted in the stored plan and win over .env and spec envVars.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. Defaults to .env.<env>, creating it from repo .env when missing and syncing newly added base keys when present. Selection follows spec envFile policy; values are encrypted in the stored plan and never returned.'),
       includeEnvFile: z.boolean().optional().describe('Set false to skip the default repo .env deploy input.'),
-      secretRefs: z.record(z.string()).optional().describe('Chat-safe local/secret-manager references for delegated secret slots, keyed by declared env var name. Never pass raw secret values.'),
+      secretRefs: z.record(z.string(), z.string()).optional().describe('Chat-safe local/secret-manager references for delegated secret slots, keyed by declared env var name. Never pass raw secret values.'),
       confirm: confirmField,
     },
     wrapCommandHandler(async ({ project: projectRef, env, services, envVars, envFile, includeEnvFile, secretRefs, confirm }) => {

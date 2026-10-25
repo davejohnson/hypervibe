@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -45,18 +46,41 @@ describe('released agent packages', () => {
     }
   });
 
-  it('includes the portable skill in the npm package without consumer project instructions', () => {
+  it('ships the skill and reviewed credential runtime without consumer project instructions', () => {
     const cache = mkdtempSync(path.join(tmpdir(), 'hypervibe-pack-cache-'));
     directories.push(cache);
-    const result = spawnSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
+    const result = spawnSync('npm', ['pack', '--json', '--ignore-scripts', '--pack-destination', cache], {
       cwd: root, encoding: 'utf8', timeout: 20_000,
       env: { ...process.env, npm_config_cache: cache },
     });
     expect(result.status, result.stderr).toBe(0);
-    const files = (JSON.parse(result.stdout)[0].files as { path: string }[]).map(file => file.path);
+    const packed = JSON.parse(result.stdout)[0];
+    const files = (packed.files as { path: string }[]).map(file => file.path);
     expect(files).toContain('skills/hypervibe/SKILL.md');
     expect(files.some(file => file.startsWith('skills/hypervibe/references/'))).toBe(true);
     expect(files).not.toContain('AGENTS.md');
     expect(files).not.toContain('CLAUDE.md');
+    // Root-only overrides do not constrain a downstream npm/npx installation.
+    // Bundle the reviewed credential dependency closure; inspect the actual
+    // artifact and resolve MSAL from Azure Identity's location, not this repo.
+    // https://docs.npmjs.com/cli/v11/configuring-npm/package-json#bundledependencies
+    expect(files).toContain('node_modules/@azure/identity/package.json');
+    expect(files).toContain('node_modules/@azure/msal-node/package.json');
+    const extracted = spawnSync('tar', ['-xzf', path.join(cache, packed.filename), '-C', cache], {
+      encoding: 'utf8', timeout: 10_000,
+    });
+    expect(extracted.status, extracted.stderr).toBe(0);
+    const installed = path.join(cache, 'package');
+    const metadata = JSON.parse(readFileSync(path.join(installed, 'package.json'), 'utf8'));
+    expect(metadata.bundleDependencies).toContain('@azure/identity');
+    expect(metadata.dependencies.zod).toMatch(/^\^?4\.6\.7$/);
+    const identityRequire = createRequire(path.join(installed, 'node_modules/@azure/identity/package.json'));
+    const msalPath = identityRequire.resolve('@azure/msal-node/package.json');
+    expect(msalPath.startsWith(`${realpathSync(installed)}${path.sep}`), msalPath).toBe(true);
+    expect(JSON.parse(readFileSync(msalPath, 'utf8')).version).toBe('7.1.1');
+    // A root Zod4 declaration must never be undermined by a bundled Zod3 copy.
+    for (const filename of files.filter(file => /(?:^|\/)node_modules\/zod\/package\.json$/.test(file))) {
+      expect(JSON.parse(readFileSync(path.join(installed, filename), 'utf8')).version).toMatch(/^4\./);
+    }
   });
 });

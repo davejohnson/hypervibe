@@ -36,7 +36,7 @@ const serverManifestSchema = z.object({
   version: z.literal(MANAGED_CI_RELEASE_EVIDENCE_VERSION), provider: string, environment: string,
   source: identity, programFingerprint: hash, deploymentContractFingerprint: hash,
   target: z.object({
-    scope: z.record(z.unknown()), bindingsFingerprint: hash,
+    scope: z.record(z.string(), z.unknown()), bindingsFingerprint: hash,
     resources: z.array(z.object({
       logicalName: string, workloadKind: z.enum(['web', 'worker', 'cron']),
       providerResourceType: z.enum(['service', 'job']), providerResourceId: string,
