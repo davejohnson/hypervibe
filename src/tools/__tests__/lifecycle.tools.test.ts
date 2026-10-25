@@ -2396,7 +2396,7 @@ describe('hv_inspect / hv_import', () => {
           provider: 'railway',
           engine: 'postgres',
           externalId: 'svc-postgres',
-          providerScope: { projectId: 'rp-service-backed' },
+          providerScope: { projectId: 'rp-service-backed', environmentId: 'env-prod' },
           name: 'Postgres',
           status: 'running',
         }],

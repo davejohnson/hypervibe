@@ -561,6 +561,14 @@ export function fingerprintObservedState(observed: ObservedState): string {
         engine: d.engine,
         externalId: d.externalId,
         status: d.status,
+        ...(d.persistence ? { persistence: {
+          state: d.persistence.state,
+          configurationFingerprint: d.persistence.configurationFingerprint ?? null,
+        } } : {}),
+        ...(d.runtimeReferenceBinding ? { runtimeReferenceBinding: {
+          state: d.runtimeReferenceBinding.state,
+          evidenceFingerprint: d.runtimeReferenceBinding.evidenceFingerprint ?? null,
+        } } : {}),
         providerScope: d.providerScope
           ? Object.fromEntries(Object.entries(d.providerScope).sort(([a], [b]) => a.localeCompare(b)))
           : null,

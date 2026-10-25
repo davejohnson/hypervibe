@@ -1,0 +1,133 @@
+{
+  "data": {
+    "template": {
+      "id": "b55da7dc-09be-4140-bc65-1284d15d349c",
+      "code": "postgres",
+      "name": "PostgreSQL",
+      "serializedConfig": {
+        "services": {
+          "f685ce60-490a-4bec-8ac0-3ab3e89b42d2": {
+            "icon": "https://devicons.railway.app/i/postgresql.svg",
+            "name": "Postgres",
+            "build": {},
+            "deploy": {
+              "requiredMountPath": "/var/lib/postgresql/data"
+            },
+            "source": {
+              "image": "ghcr.io/railwayapp-templates/postgres-ssl:18"
+            },
+            "variables": {
+              "PGDATA": {
+                "isOptional": false,
+                "description": "Location where the database will be initialized",
+                "defaultValue": "/var/lib/postgresql/data/pgdata"
+              },
+              "PGHOST": {
+                "isOptional": false,
+                "description": "Railway Private Domain Name.",
+                "defaultValue": "${{RAILWAY_PRIVATE_DOMAIN}}"
+              },
+              "PGPORT": {
+                "isOptional": false,
+                "description": "Port to connect to Postgres.",
+                "defaultValue": "5432"
+              },
+              "PGUSER": {
+                "isOptional": false,
+                "description": "Required variable for Data panel",
+                "defaultValue": "${{ POSTGRES_USER }}"
+              },
+              "PGDATABASE": {
+                "isOptional": false,
+                "description": "Required variable for the data panel.",
+                "defaultValue": "${{POSTGRES_DB}}"
+              },
+              "PGPASSWORD": {
+                "isOptional": false,
+                "description": "Required variable for Data panel",
+                "defaultValue": "${{POSTGRES_PASSWORD}}"
+              },
+              "POSTGRES_DB": {
+                "isOptional": false,
+                "description": "Default database created when image is started.",
+                "defaultValue": "railway"
+              },
+              "DATABASE_URL": {
+                "isOptional": false,
+                "description": "URL to connect to Postgres database.",
+                "defaultValue": "postgresql://${{PGUSER}}:${{POSTGRES_PASSWORD}}@${{RAILWAY_PRIVATE_DOMAIN}}:5432/${{PGDATABASE}}"
+              },
+              "POSTGRES_USER": {
+                "isOptional": false,
+                "description": "User to connect to Postgres DB",
+                "defaultValue": "postgres"
+              },
+              "SSL_CERT_DAYS": {
+                "isOptional": true,
+                "description": "SSL certificate expiry in days.",
+                "defaultValue": "820"
+              },
+              "POSTGRES_PASSWORD": {
+                "isOptional": false,
+                "description": "Password to connect to DB",
+                "defaultValue": "${{ secret(32, \"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\") }}"
+              },
+              "RAILWAY_DEPLOYMENT_DRAINING_SECONDS": {
+                "isOptional": false,
+                "description": "Allow Postgres to cleanly shut down",
+                "defaultValue": "60"
+              }
+            },
+            "networking": {},
+            "volumeMounts": {
+              "f685ce60-490a-4bec-8ac0-3ab3e89b42d2": {
+                "mountPath": "/var/lib/postgresql/data"
+              }
+            },
+            "haTemplateCode": "postgres-ha",
+            "haConversionConfig": {
+              "edge": {
+                "label": "Reverse Proxy",
+                "options": [
+                  2,
+                  3,
+                  4,
+                  5
+                ],
+                "nodeLabel": "HAProxy",
+                "description": "Routes traffic to the primary",
+                "defaultValue": 3
+              },
+              "replica": {
+                "label": "Replicas",
+                "options": [
+                  2,
+                  3,
+                  4,
+                  5,
+                  6,
+                  7
+                ],
+                "nodeLabel": "Postgres",
+                "description": "Streaming replicas for automatic failover",
+                "defaultValue": 2
+              },
+              "internal": {
+                "label": "Coordinator Nodes",
+                "options": [
+                  3,
+                  5,
+                  7,
+                  9
+                ],
+                "nodeLabel": "etcd",
+                "defaultValue": 3
+              },
+              "description": "This will convert your Postgres database to an HA cluster with Patroni failover and etcd consensus."
+            }
+          }
+        }
+      }
+    }
+  }
+}

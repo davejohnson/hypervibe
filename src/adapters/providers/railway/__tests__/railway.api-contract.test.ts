@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLClient } from 'graphql-request';
 import { execute, parse, validate } from 'graphql';
-import { projectId, productionId, stagingId, schema, railwayHttpFixture } from './railway-http.fixture.js';
+import { postgresTemplate, projectId, productionId, stagingId, schema, railwayHttpFixture } from './railway-http.fixture.js';
 import type { Service } from '../../../../domain/entities/service.entity.js';
 import { environmentSpecSchema } from '../../../../domain/spec/spec.schema.js';
 import { planStorage } from '../../../../domain/services/storage-plan.service.js';
@@ -88,36 +88,40 @@ describe('pinned provider API contract', () => {
     expect([...fixture.services.values()].filter((entry) => entry.instances.has(stagingId))).toHaveLength(3);
     expect([...fixture.services.values()].filter((entry) => entry.instances.has(productionId))).toHaveLength(3);
     expect(fixture.mutations.filter(({ field }) => field === 'environmentCreate')).toHaveLength(1);
-    expect(fixture.mutations.filter(({ field }) => field === 'serviceCreate')).toHaveLength(3);
+    expect(fixture.mutations.filter(({ field }) => field === 'serviceCreate')).toHaveLength(2);
+    expect(fixture.mutations.filter(({ field }) => field === 'templateDeployV2')).toHaveLength(1);
     expect(fixture.contractErrors).toEqual([]);
   });
 
-  it('references the issuer password in every PostgreSQL bootstrap alias', async () => {
+  it('preserves the official PostgreSQL template password generator and issuer references', async () => {
     const fixture = await railwayHttpFixture();
     const result = await fixture.adapter.ensureComponent('postgres', fixture.environment);
     expect(result.receipt.success).toBe(true);
-    const writes = fixture.requests.filter(({ query }) => query.includes('mutation UpsertVariables'));
-    expect(writes).toHaveLength(1);
-    expect(writes[0].variables).toMatchObject({ projectId, environmentId: stagingId, serviceId: 'staging-postgres-db' });
-    const variables = writes[0].variables.variables as Record<string, string>;
+    expect(fixture.mutations.map(({ field }) => field)).toEqual(['templateDeployV2']);
+    const input = fixture.mutations[0].args.input;
+    expect(input).toMatchObject({ projectId, environmentId: stagingId, templateId: postgresTemplate.id });
+    const serviceKey = Object.keys(postgresTemplate.serializedConfig.services)[0];
+    const variables = input.serializedConfig.services[serviceKey].variables as Record<string, { defaultValue: string; value: string }>;
 
     // Independent Railway contracts: same-service references and the password
     // regeneration guide require aliases to follow POSTGRES_PASSWORD.
     // https://docs.railway.com/variables#referencing-variables-in-the-same-service
     // https://blog.railway.com/p/security-disclosure-recommendation-rotate-postgresql-database-credentials
-    // This validates serialized expressions through the pinned GraphQL schema;
-    // the synthetic provider does not prove live Railway reference resolution.
+    // Nested template expectations come from the recorded public template,
+    // because GraphQL's opaque SerializedTemplateConfig does not constrain them.
+    // The synthetic provider does not prove live Railway reference resolution.
     expect(variables).toMatchObject({
-      PGPASSWORD: '${{POSTGRES_PASSWORD}}',
-      DATABASE_URL: 'postgresql://postgres:${{POSTGRES_PASSWORD}}@postgres-db.railway.internal:5432/postgres',
-      DATABASE_PRIVATE_URL: 'postgresql://postgres:${{POSTGRES_PASSWORD}}@postgres-db.railway.internal:5432/postgres',
-      POSTGRES_USER: 'postgres', POSTGRES_DB: 'postgres',
-      PGHOST: 'postgres-db.railway.internal', PGPORT: '5432', PGUSER: 'postgres', PGDATABASE: 'postgres',
-      PGDATA: '/var/lib/postgresql/data/pgdata',
+      PGPASSWORD: { value: '${{POSTGRES_PASSWORD}}' },
+      DATABASE_URL: { value: 'postgresql://${{PGUSER}}:${{POSTGRES_PASSWORD}}@${{RAILWAY_PRIVATE_DOMAIN}}:5432/${{PGDATABASE}}' },
+      POSTGRES_USER: { value: 'postgres' }, POSTGRES_DB: { value: 'railway' },
+      PGHOST: { value: '${{RAILWAY_PRIVATE_DOMAIN}}' }, PGPORT: { value: '5432' },
+      PGUSER: { value: '${{ POSTGRES_USER }}' }, PGDATABASE: { value: '${{POSTGRES_DB}}' },
+      PGDATA: { value: '/var/lib/postgresql/data/pgdata' },
     });
-    expect(variables.POSTGRES_PASSWORD).toMatch(/^[A-Za-z0-9_-]+$/);
-    expect(Object.entries(variables).filter(([, value]) => value.includes(variables.POSTGRES_PASSWORD))
-      .map(([key]) => key)).toEqual(['POSTGRES_PASSWORD']);
+    expect(variables.POSTGRES_PASSWORD.value).toBe(
+      postgresTemplate.serializedConfig.services[serviceKey].variables.POSTGRES_PASSWORD.defaultValue,
+    );
+    expect(variables.POSTGRES_PASSWORD.value).toContain('secret(32,');
     expect(fixture.contractErrors).toEqual([]);
   });
 
@@ -144,10 +148,14 @@ describe('pinned provider API contract', () => {
       : fixture.adapter.ensureComponent(kind, fixture.environment);
     const first = await create();
     expect(first.receipt, JSON.stringify(fixture.contractErrors)).toMatchObject({ success: true });
-    const created = fixture.mutations.filter(({ field }) => field === 'serviceCreate');
+    const created = fixture.mutations.filter(({ field }) => field === (kind === 'postgres' ? 'templateDeployV2' : 'serviceCreate'));
     expect(created).toHaveLength(1);
     expect(created[0].args.input.environmentId).toBe(stagingId);
-    expect(created[0].args.input.name).toBe(kind === 'web' ? 'web' : `${kind}-db`);
+    if (kind === 'postgres') {
+      expect(created[0].args.input.templateId).toBe(postgresTemplate.id);
+    } else {
+      expect(created[0].args.input.name).toBe(kind === 'web' ? 'web' : `${kind}-db`);
+    }
     const before = fixture.mutations.length;
     // A repeated create without binding must request adoption, never duplicate.
     expect((await create()).receipt).toMatchObject({ success: false });
@@ -353,9 +361,9 @@ describe('pinned provider API contract', () => {
     expect(fixture.mutations).toEqual([]);
   });
 
-  it('retains recovery identity without retrying a write whose response was lost', async () => {
+  it('retains generic Redis service recovery identity without retrying a write whose response was lost', async () => {
     const fixture = await railwayHttpFixture({ dropCreateResponse: true });
-    const result = await fixture.adapter.ensureComponent('postgres', fixture.environment);
+    const result = await fixture.adapter.ensureComponent('redis', fixture.environment);
     expect(result.receipt.success).toBe(false);
     expect(result.component.externalId).toBeTruthy();
     expect(fixture.mutations.map(({ field }) => field)).toEqual(['serviceCreate']);

@@ -1,6 +1,6 @@
 # Database credential aliases
 
-Reviewed 2026-10-22. This is the provider review and implementation contract for
+Reviewed 2026-10-24. This is the provider review and implementation contract for
 repairing references to an existing database credential. It is separate from
 SQL password rotation. Railway is the only provider
 supported to implement initially; this review does not establish live support.
@@ -48,7 +48,7 @@ alias write. Revalidate that scope and the reviewed raw aliases and canonical
 value before writing. A matching display name or hostname is insufficient identity.
 Missing, sealed, unresolved, malformed, inaccessible or ambiguous inputs block;
 unknown observations never mean absent aliases or a successful repair. Preserve
-URI escaping and non-password URL components; if the native template cannot
+URI escaping and resolved non-password URL components; if the native template cannot
 represent the existing credential safely, block instead of replacing it.
 
 Completion requires a fresh raw read proving the approved reference structure,
@@ -72,7 +72,7 @@ permissions, completion and uncertain-write recovery through real transport.
 
 | Provider | Admission | Native identity and credential boundary | Prerequisites, completion and recovery limits |
 | --- | --- | --- | --- |
-| railway | Supported to implement | Bound project ID, environment ID and database service ID. Same-service `${{POSTGRES_PASSWORD}}` references can replace copied password material in `PGPASSWORD`, `DATABASE_URL` and `DATABASE_PRIVATE_URL`. [Reference syntax](https://docs.railway.com/variables#referencing-variables-in-the-same-service). | Read raw and resolved variables; patch only these aliases with deployment suppressed; preserve `POSTGRES_PASSWORD`. Fresh raw/resolved readback decides convergence; uncertain responses require observation. See the scoped transport boundary below. |
+| railway | Supported to implement | Bound project ID, environment ID and database service ID. Same-service `${{POSTGRES_PASSWORD}}` references can replace copied password material in `PGPASSWORD`, `DATABASE_URL`, `DATABASE_PRIVATE_URL` and `DIRECT_URL`. Independently matched user, host, port and database variables can replace copied URL components. [Reference syntax](https://docs.railway.com/variables#referencing-variables-in-the-same-service). | Read raw and resolved variables; patch only these aliases with deployment suppressed; preserve `POSTGRES_PASSWORD` and each resolved URL destination. Fresh raw/resolved readback decides convergence; uncertain responses require observation. See the scoped transport boundary below. |
 | supabase | Unsupported | Exact project ref and database login, including the selected direct or pooler endpoint. Supabase connection strings require the database password; shared poolers use a different username from direct connections. [Connection methods](https://supabase.com/docs/guides/database/connecting-to-postgres). | No native alias repair is admitted. Establish the authoritative credential and every endpoint before designing delivery; direct/pooler configuration agreement and authentication are separate. A copied connection string or completed password reset is not reference-repair evidence. |
 | cloudsql | Unsupported | Exact project, instance and user. `users.update` changes a user and returns an Operation. [User update API](https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1/users/update). | That update is an issuer mutation, outside this capability. Review password versus IAM authentication, an authoritative reference source and consumer delivery before admission; native operation completion cannot substitute for alias readback or fresh SQL authentication. |
 | rds | Unsupported | Exact AWS account/region, instance and master login; when RDS manages its password, `MasterUserSecret` identifies a Secrets Manager ARN and status. [RDS-managed credentials](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-secrets-manager.html). | Review the existing credential mode, secret version, permissions and workload reference mechanism. Secret status and retrieval alone do not prove consumers use the credential. Do not enable managed passwords or rotate the secret as an alias repair; uncertain changes require native recovery. |
@@ -83,11 +83,27 @@ permissions, completion and uncertain-write recovery through real transport.
 
 ## Railway transport boundary
 
-Initial admission covers existing aliases only, a literal canonical password,
-literal URL targets and the reviewed same-service password references. URL query
-options are limited to `sslmode`, `application_name` and `connect_timeout`.
-Whole-URL references, other template locations and any `DATABASE_PUBLIC_URL`
-evidence block this repair. No absent alias is created.
+Admission covers existing aliases only and a literal canonical password. The
+[recorded public PostgreSQL template](../test/provider-contracts/railway/postgres-template.recorded.json)
+independently establishes composed same-service references for the user,
+password, host and database. Repair preserves these definitions and verifies
+their independently observed rendering. Copied URLs use `PGUSER`, `PGHOST`,
+`PGPORT` and `PGDATABASE` references only when every component matches exactly;
+otherwise their destination remains unchanged. Existing `DIRECT_URL` receives
+the same repair and verification as the database URL aliases. A changed,
+unresolved or cyclic dependency blocks mutation. URL query options are limited
+to `sslmode`, `application_name` and `connect_timeout`. Whole-URL references,
+foreign-service references and any `DATABASE_PUBLIC_URL` evidence block this
+repair. No absent alias is created.
+
+The regression counterexample was the recorded official template's composed
+`DATABASE_URL`: the earlier parser rejected it as `unsupported_reference`, and
+ignored `DIRECT_URL`. Both new real-client/serialized-transport cases failed
+before the fix. They now cover a mutation-free template read, copied direct URL
+repair, unchanged destinations, dependency drift, issuer updates and lost-write
+readback. Provider rendering in these tests is synthetic; the public template
+configuration is recorded. This does not claim live SQL access or a deployed
+application's current environment.
 
 The [variable API](https://docs.railway.com/integrations/api/manage-variables)
 supports raw reads using `unrendered: true` and resolved reads without that flag.
@@ -120,6 +136,18 @@ Matching literal host/port/database fields also does not prove physical database
 identity. Report configuration convergence, any separately performed login check,
 and application rollout independently. No live repair or SQL authentication is
 claimed by this document or its registry test.
+
+The read-only comparison includes issuer `PGPASSWORD` and `DIRECT_URL` when
+present and checks each bound application's present `DIRECT_URL`. For that
+application alias, the comparison target is issuer `DIRECT_URL`, otherwise
+`DATABASE_PRIVATE_URL`, otherwise `DATABASE_URL`. It reports the chosen key and
+keeps unusable present values unknown. Absent optional aliases are not errors:
+the recorded native template has neither `DIRECT_URL` nor `DATABASE_PRIVATE_URL`.
+Five serialized-transport counterexamples failed before extending the previous
+URL-only diagnostic; API observation and registered-command regressions now
+cover these aliases and value-free output. These comparisons examine resolved
+configuration only; raw reference verification belongs to the isolated alias
+capability above.
 
 The normal `npm test` gate includes
 `test/provider-contracts/database-credential-aliases-contracts.test.ts`. It checks
