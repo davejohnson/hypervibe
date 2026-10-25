@@ -1,5 +1,6 @@
 import { applyInboundSigningKey, inboundSigningTargetBlock, INBOUND_SIGNING_KEY_OPERATION } from './email-inbound-signing.service.js';
-import { applyEventSigning, EMAIL_SIGNING_OPERATIONS } from './email-signing.service.js';
+import { applyEventSigning, EMAIL_SIGNING_OPERATIONS, observeHosting } from './email-signing.service.js';
+import { resolveInboundCallback } from './email-inbound-url.service.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
@@ -30,7 +31,6 @@ import {
   emailInboundConfigHash,
   emailRuntimeConfigHash,
   emailRuntimeKeysForService,
-  inboundParseUrl,
   type SendGridInboundParseRoute,
 } from './email-plan.service.js';
 import {
@@ -585,7 +585,15 @@ async function applyInbound(params: {
   if (params.action.type === 'create' && inbound.signatureVerification !== undefined) {
     return {success: false, status: 'blocked', message: 'An existing signed Inbound Parse route is required; automatic security-policy setup is not supported.'};
   }
-  const expectedUrl = inboundParseUrl(params.environment, inbound);
+  let callback = resolveInboundCallback({ environment: params.environment, spec: params.environmentSpec });
+  if (callback.blockedReason) {
+    try {
+      callback = resolveInboundCallback({ environment: params.environment, spec: params.environmentSpec,
+        observed: await observeHosting(params.project, params.environment, params.environmentSpec) });
+    } catch { return staleAction('The accepted inbound callback attachment could not be observed.'); }
+  }
+  if (callback.blockedReason) return staleAction(callback.blockedReason);
+  const expectedUrl = callback.url;
   if (!expectedUrl) {
     return { success: false, status: 'blocked', message: `Inbound service ${inbound.service} has no public provider URL`, error: 'Apply its service action first, then re-run hv_plan.' };
   }

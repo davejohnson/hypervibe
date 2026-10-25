@@ -1315,6 +1315,15 @@ its provider URL is derived from that service's durable hosting binding. Alias
 local parts are application routing intent because SendGrid delivers all mail
 for one parse hostname to one endpoint.
 
+An already accepted Inbound Parse callback on the declared custom domain is
+preserved when its hostname, service and path are unchanged and complete hosting
+observation verifies that domain on the same scoped service. Refreshing the
+provider-issued service URL is not a request to move that callback. The shared
+`email-inbound-url.service.ts` decision is used by planning, apply, signing and
+readiness; missing or conflicting attachment evidence blocks changes. Existing
+signing identity hashes are not migrated by callback preservation. Transport and
+deliberately invalid identity/URL regressions run in ordinary `npm test`.
+
 The SendGrid connection is a management credential, conventionally supplied as
 `HYPERVIBE_SENDGRID_API_KEY`. Supply the application's separate `SENDGRID_API_KEY`
 as a delegated runtime secret, issuing it with `mail.send` only. Legacy explicit

@@ -5,6 +5,7 @@ import type { EnvironmentSpec } from '../spec/spec.schema.js';
 import { serviceBindingFor } from './spec.service.js';
 import type { EventSigningReadiness } from './email-signing.service.js';
 import { SENDGRID_EVENT_PUBLIC_KEY, SENDGRID_INBOUND_PUBLIC_KEY } from '../spec/spec.schema.js';
+import { resolveInboundCallback } from './email-inbound-url.service.js';
 
 type MaterialStatus = 'present' | 'missing' | 'unknown' | 'not_managed';
 interface WebhookCheck {
@@ -93,7 +94,9 @@ export function inspectWebhookReadiness(params: {
   }
   if (spec.email.enabled) {
     if (spec.email.inbound) {
-      addBound('sendgrid', 'inbound parse', spec.email.inbound);
+      const callback = resolveInboundCallback({ environment, spec, observed });
+      add('sendgrid', 'inbound parse', spec.email.inbound.service, callback.url,
+        callback.url ? 'binding' : 'unavailable');
       if (spec.email.inbound.signatureVerification !== undefined) {
         const item = webhooks[webhooks.length - 1];
         const signing = params.inboundSigningReadiness;
