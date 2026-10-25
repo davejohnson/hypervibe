@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseToolEnvelope } from './tool-result.js';
+import { expectActionableConnectionSetup, parseToolEnvelope } from './tool-result.js';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
@@ -50,11 +50,11 @@ const EXPECTED_TOOLS = [
   'hv_cloud_pair', 'hv_cloud_requests', 'hv_cloud_secrets', 'hv_cloud_connections',
 ].sort();
 
-async function makeClient(workspaceRoot?: string) {
+async function makeClient(workspaceRoot?: string, identity = { name: 'server-contract-client', version: '1.0.0' }) {
   const { createServer } = await import('../../server.js');
   const server = createServer();
   const client = new Client(
-    { name: 'server-contract-client', version: '1.0.0' },
+    identity,
     workspaceRoot ? { capabilities: { roots: {} } } : undefined
   );
   if (workspaceRoot) {
@@ -68,6 +68,48 @@ async function makeClient(workspaceRoot?: string) {
 }
 
 describe('server tool surface', () => {
+  // Independent client contract: Claude truncates startup instructions at
+  // 4,096 characters since 2.1.296, and at 2,048 on older versions.
+  // https://code.claude.com/docs/en/mcp#tool-search-for-mcp-server-authors
+  // Other clients retain complete guidance; this is no capability restriction.
+  it.each([
+    ['claude-code', '2.1.295', 2048],
+    ['claude-code', '2.1.296', 4096],
+    ['claude-code', '2.2.0', 4096],
+    ['claude-code', 'unknown', 2048],
+  ])('fits %s %s startup while retaining full discoverable guidance', async (name, version, limit) => {
+    const { client, server } = await makeClient(undefined, { name, version });
+    try {
+      const instructions = client.getInstructions()!;
+      expect(instructions.length).toBeLessThanOrEqual(limit);
+      expect(instructions).toContain('hv_spec');
+      expect(instructions).toContain('complete query string');
+      expect(instructions).toContain('action="describe"');
+      expect(instructions).toContain('hypervibe://guidance');
+      const resources = await client.listResources();
+      expect(resources.resources).toContainEqual(expect.objectContaining({ uri: 'hypervibe://guidance' }));
+      const guidance = await client.readResource({ uri: 'hypervibe://guidance' });
+      const { HYPERVIBE_SERVER_INSTRUCTIONS } = await import('../../server.js');
+      expect(guidance.contents).toContainEqual(expect.objectContaining({ text: HYPERVIBE_SERVER_INSTRUCTIONS }));
+      expect((await client.listTools()).tools.map(tool => tool.name).sort()).toEqual(EXPECTED_TOOLS);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it.each(['codex-mcp-client', 'opencode', 'another-mcp-client'])('preserves full startup guidance for %s', async name => {
+    const { client, server } = await makeClient(undefined, { name, version: '1.0.0' });
+    try {
+      const { HYPERVIBE_SERVER_INSTRUCTIONS } = await import('../../server.js');
+      expect(client.getInstructions()).toBe(HYPERVIBE_SERVER_INSTRUCTIONS);
+      expect(client.getInstructions()!.length).toBeGreaterThan(4096);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it('identifies the MCP server with the package version', async () => {
     const { client, server } = await makeClient();
     expect(client.getServerVersion()).toEqual({
@@ -76,6 +118,61 @@ describe('server tool surface', () => {
     });
     await client.close();
     await server.close();
+  });
+
+  it('delivers the complete form-link policy during MCP initialization', async () => {
+    const { client, server } = await makeClient();
+    try {
+      const instructions = client.getInstructions();
+      expect(instructions).toContain('direct clickable form URL');
+      expect(instructions).toContain('every supported non-secret field');
+      expect(instructions).toContain('name and description');
+      expect(instructions).toContain('Preserve the complete query string');
+      expect(instructions).toContain('officially documented');
+      expect(instructions).toContain('Never put secrets in URLs');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('preserves GitHub form fields and the link policy through a real connection response', async () => {
+    const { client, server } = await makeClient(tempDir);
+    try {
+      const response = await client.callTool({
+        name: 'hv_connections',
+        arguments: { action: 'add', provider: 'github', scope: 'acme/storefront' },
+      });
+      const body = parseToolEnvelope(response);
+      expect(body.ok).toBe(false);
+      const setup = expectActionableConnectionSetup(
+        (body.error?.details as { connectionSetup: unknown }).connectionSetup,
+        { provider: 'github', scope: 'acme/storefront' }
+      );
+      const recommended = new URL(setup.recommendedSetupUrl);
+      expect(recommended.pathname).toBe('/settings/tokens/new');
+      expect(recommended.searchParams.get('description')).toBe('Hypervibe GitHub API for acme/storefront');
+      expect(recommended.searchParams.get('scopes')).toBe('repo,workflow');
+
+      // GitHub documents these form parameters independently of Hypervibe:
+      // https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#pre-filling-fine-grained-personal-access-token-details-using-url-parameters
+      // This checks emitted guidance, not the authenticated GitHub browser form.
+      const fineGrainedLink = (setup.setupUrls as string[]).find(link => link.includes('/personal-access-tokens/new'))!;
+      const fineGrained = new URL(fineGrainedLink.slice(fineGrainedLink.indexOf('https://')));
+      expect(fineGrained.searchParams.get('name')).toBe('Hypervibe repository: acme/storefront');
+      expect(fineGrained.searchParams.get('description')).toBe('Hypervibe repository management for acme/storefront');
+      expect(fineGrained.searchParams.get('target_name')).toBe('acme');
+      expect(fineGrained.searchParams.get('expires_in')).toBe('90');
+      expect(fineGrained.searchParams.get('contents')).toBe('write');
+      expect(fineGrained.searchParams.get('workflows')).toBe('write');
+      expect(JSON.stringify(response.content)).toContain(fineGrained.href);
+      expect(body.agentInstruction?.action).toBe('ask_user');
+      expect(body.agentInstruction?.message).toContain('Preserve the complete query string');
+      expect(body.agentInstruction?.message).toContain('name and description');
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
 
   it('registers exactly the 23 pinned hv_* tools', async () => {

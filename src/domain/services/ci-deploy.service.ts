@@ -27,7 +27,7 @@ import {
 } from './ios-release-workflow.service.js';
 import { getVerifiedAppStoreConnectCredentials } from './appstore-ops.service.js';
 import { proposeGitHubInfrastructureFiles } from './github-infrastructure.service.js';
-import { formatConnectionGuidance, GITHUB_TOKEN_URLS } from './connection-guidance.js';
+import { connectionSetupUrl, formatConnectionGuidance, GITHUB_TOKEN_URLS } from './connection-guidance.js';
 import { resolveExternalDatabaseUrl } from './database-ops.service.js';
 import {
   APPLIED_SPEC_HASH_OPERATION,
@@ -56,7 +56,7 @@ export function requiredProviderSecretNamesForGitHubActions(provider: string): s
   return Array.from(new Set(names));
 }
 
-export function missingProviderSecretsMessage(provider: string, missingProviderSecrets: string[]): string {
+export function missingProviderSecretsMessage(provider: string, missingProviderSecrets: string[], options: { project?: string; scope?: string } = {}): string {
   const missingDatabaseUrl = missingProviderSecrets.includes('DATABASE_URL');
   const providerSecrets = missingProviderSecrets.filter((name) => name !== 'DATABASE_URL');
   const parts = providerSecrets.length > 0
@@ -68,11 +68,11 @@ export function missingProviderSecretsMessage(provider: string, missingProviderS
     parts.push('Missing managed database secret: DATABASE_URL. Hypervibe could not resolve an externally reachable database URL for the GitHub Actions migration step; reconcile the database and re-run hv_plan.');
   }
   if (missingProviderApiSecrets) {
-    parts.push(`Connect and verify ${provider} so Hypervibe can sync its API credentials into GitHub Actions. ${formatConnectionGuidance(provider)}`);
+    parts.push(`Connect and verify ${provider} so Hypervibe can sync its API credentials into GitHub Actions. ${formatConnectionGuidance(provider, options)}`);
   }
   if (missingImageRegistrySecrets) {
     const displayName = providerRegistry.getMetadata(provider)?.displayName ?? provider;
-    parts.push(`For ${displayName} GHCR image pulls, reconnect GitHub with both GitHub API and package-read credentials (create the read:packages PAT here: ${GITHUB_TOKEN_URLS.packageRead}). The GitHub apiToken needs repo + workflow for workflow/secrets management; packageReadToken needs read:packages for durable package/image pulls. ${formatConnectionGuidance('github', { intro: 'Confirm the GitHub token type and CI deploy permissions.' })}`);
+    parts.push(`For ${displayName} GHCR image pulls, reconnect GitHub with both GitHub API and package-read credentials (create the read:packages PAT here: ${connectionSetupUrl(GITHUB_TOKEN_URLS.packageRead, options)}). The GitHub apiToken needs repo + workflow for workflow/secrets management; packageReadToken needs read:packages for durable package/image pulls. ${formatConnectionGuidance('github', { ...options, intro: 'Confirm the GitHub token type and CI deploy permissions.' })}`);
   }
   return parts.join(' ');
 }
@@ -819,7 +819,7 @@ export async function planGitHubActionsDeploy(params: {
   if (missingProviderSecrets.length > 0) {
     warnings.push(
       `GitHub Actions deploy workflow ${workflow.path} requires provider secrets that Hypervibe cannot sync: ${missingProviderSecrets.join(', ')}. `
-      + missingProviderSecretsMessage(environmentSpec.hosting.provider, missingProviderSecrets)
+      + missingProviderSecretsMessage(environmentSpec.hosting.provider, missingProviderSecrets, { project: project.name, scope: repo })
     );
   }
   if (missingDatabaseSecrets.length > 0) {
@@ -1102,7 +1102,7 @@ export async function applyGitHubActionsDeploy(params: {
       success: false,
       status: 'blocked',
       message: `Cannot sync ${workflow.path} because required managed secrets are missing`,
-      error: missingProviderSecretsMessage(environmentSpec.hosting.provider, missingManagedSecrets),
+      error: missingProviderSecretsMessage(environmentSpec.hosting.provider, missingManagedSecrets, { project: project.name, scope: repo }),
       data: {
         workflow: workflow.path,
         syncedEnvironmentSecrets: [],

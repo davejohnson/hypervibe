@@ -150,12 +150,28 @@ MCP ─┘
 - MCP `structuredContent` and CLI `--json` expose the same redacted command envelope.
 - MCP resolves repository-backed project state from the client's declared file roots for each request, never from the long-running server process's launch directory. Multiple project identities, unavailable roots, and roots with unmatched repository identities fail closed instead of selecting unrelated single-project state.
 - The `hypervibe` no-argument entrypoint remains MCP-compatible. Human CLI commands use explicit arguments; `hypervibe mcp` and `hypervibe-mcp` are explicit MCP entrypoints.
-- `hypervibe install claude` is an explicit CLI-only bootstrap exception: it
-  registers this package with Claude Code through `claude mcp add` in user
-  scope. It runs before importing the infrastructure runtime, does not open
-  Hypervibe state or expose an MCP tool, and leaves config writing and existing
-  entry protection to Claude. Installing the client connection must not depend
-  on already having that connection or initialized infrastructure state.
+- `npx -y @hypervibe/hypervibe@latest install <codex|claude|opencode>` is an
+  explicit CLI-only bootstrap exception. It installs the packaged consumer
+  skill and registers a matching MCP server in user scope, before importing
+  the infrastructure runtime. It does not open Hypervibe state, start the
+  server, change tool approvals, or expose an MCP tool. `--skill-only` leaves
+  an existing companion-managed MCP connection intact. Use native client
+  registration where supported and preserving, schema-aware edits otherwise;
+  never overwrite an unrelated or modified installation. Setup must not
+  require a global Hypervibe CLI or an existing Hypervibe connection.
+- Consumer workflows live in `skills/hypervibe/`, independently of this
+  repository's development instructions. npm and native client packages ship
+  the same skill. Codex and Claude plugin manifests are generated separately
+  with their documented launcher placeholders and the package's exact version;
+  OpenCode uses its native skill and MCP configuration instead of an invented
+  shared plugin format. See [agent installation](docs/agent-installation.md).
+- MCP startup instructions adapt only to verified client constraints: Claude
+  Code uses authored summaries within its documented version-dependent limits;
+  Codex, OpenCode, and unknown clients receive the full instructions. Every
+  client retains all tools and can read the complete `hypervibe://guidance`
+  resource. A shorter startup message never reduces application capabilities.
+  Detailed contextual results remain the authoritative next-step guidance;
+  instruction delivery does not establish model compliance.
 - A future HTTP adapter may use this boundary, but remote auth, locking, state ownership, and secret custody are separate product decisions. Do not introduce an unauthenticated remote interface.
 - `@hypervibe/hypervibe/hosted` is a library boundary, not an HTTP interface. Its versioned committed-spec inspector accepts bytes only with a provider-verified repository identity, exact full revision, and matching SHA-256. The trusted host owns account authorization, code-host installation tokens, exact-revision reads, pairing, and tenancy; the inspector owns the existing project schema, repository-claim consistency, secret-shaped-content rejection, and a deterministic import receipt.
 - Committed-spec inspection never reads a checkout, opens SQLite, observes infrastructure, plans, applies, or manufactures provider endpoints. It returns only declared environments, services, provider capabilities, and HTTPS endpoints that are explicit safe domains in desired state. A missing spec repository claim remains visible as unverified; a present mismatched claim fails closed.
@@ -746,12 +762,29 @@ alias when explicitly referenced.
 Connection guidance is part of the product contract, not incidental copy. Every provider or secret-manager connection should have a `ConnectionGuidance` entry in `src/domain/services/connection-guidance.ts`, and token/permission errors should route through `formatConnectionGuidance(...)` whenever possible.
 
 Missing-connection results must be directly actionable in both MCP and CLI.
-Return the exact prefilled setup links, identify one `recommendedSetupUrl`, and
-include a project/scoped `credentialExample` using a safe local reference. The
-human renderer keeps clickable links and that command ahead of long permission
-details. Agents reproduce the links, offer to open the recommended page, tell
-the user exactly where to save the credential, and then call `hv_connections`
-themselves. Never hide those steps behind the phrase "credential flow."
+`hv_connections action="describe"` returns contextual setup links and existing
+provider metadata without resolving credentials, observing provider state, or
+writing project/connection state. It accepts only the provider and optional
+non-secret scope/project context. `repositoryContext` explicitly requests the
+current client's bounded repository context instead of an explicit project
+selector; it never falls back to an unrelated cached project. Describe and
+project-context discovery resolve committed intent read-only; opening a form
+must not adopt repository changes. Interfaces refresh guidance when the chosen
+provider/scope changes and preserve the complete returned URL instead of
+constructing their own provider-specific templates.
+
+Return exact prefilled setup links, one `recommendedSetupUrl`, and a project/scoped
+`credentialExample` using a safe local reference. Agents lead with the direct
+clickable form URL and preserve its complete query string, including the name
+and description. Pre-fill every officially supported non-secret field whose
+value is known or safely inferred, using meaningful Hypervibe labels for the
+credential role and known scope. Use documented parameters and URL-encoded
+values; never put secrets in URLs or invent parameters for unsupported fields.
+Explain remaining manual fields, review, and consent instead of replacing a
+direct link with dashboard navigation. The human renderer keeps links and that
+command ahead of permission details. Agents offer to open the recommended page,
+explain where the user can save the credential privately, and then call
+`hv_connections` themselves. Never hide those steps behind "credential flow."
 
 GCP cloud preparation uses a credential-free preview followed by explicit
 confirmation. It accepts `adminAuth: "default"` so an operator's existing
