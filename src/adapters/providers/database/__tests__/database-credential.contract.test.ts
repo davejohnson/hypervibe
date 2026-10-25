@@ -69,9 +69,12 @@ it.each(['127.0.0.1', 'explicit.railway.internal'])('preserves an explicit direc
   vi.spyOn(pg.Client.prototype, 'query').mockResolvedValue({ rows: [{ username: 'app', database: 'appdb' }] } as never);
   const port = createPostgresCredentialLifecycle(() => scopedAdapter);
   const target = await port.inspect(environment, bound, selection);
-  expect(await port.probe(environment, bound, target, 'replacement')).toMatchObject({ state: 'authenticated' });
+  // This fixture proves route selection only: connect is stubbed and no
+  // PostgreSQL password challenge occurred, so authentication stays unknown.
+  expect(await port.probe(environment, bound, target, 'replacement')).toMatchObject({ state: 'unknown' });
   expect(hosts).toEqual([host]);
   expect(external).not.toHaveBeenCalled();
+  expect(pg.Client.prototype.query).not.toHaveBeenCalled();
 });
 
 it('replaces only the password of a reviewed URL while preserving encoded options and identity', () => {

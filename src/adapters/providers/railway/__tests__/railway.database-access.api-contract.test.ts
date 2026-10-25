@@ -179,7 +179,10 @@ describe('Railway operations never create public database access', () => {
     const lifecycle = adapter.credentialLifecycle!;
     const target = await lifecycle.inspect(f.environment, f.component, { environment: 'production', component: f.component.id, username: 'postgres', database: 'app' });
     expect(target.connection.host).toBe('postgres.railway.internal');
-    expect(await lifecycle.probe(f.environment, f.component, target, 'replacement')).toMatchObject({ state: 'authenticated' });
+    // This route fixture stubs connect without a password challenge. Correct
+    // endpoint selection does not establish authentication compatibility.
+    expect(await lifecycle.probe(f.environment, f.component, target, 'replacement')).toMatchObject({ state: 'unknown' });
+    expect(pg.Client.prototype.query).not.toHaveBeenCalled();
     expect(await lifecycle.rotate(f.environment, f.component, target, 'replacement')).toEqual({ state: 'acknowledged' });
     expect(connections).toHaveLength(2);
     expect(connections[0]).toMatchObject({ host: 'synthetic.proxy.rlwy.net', port: 23456, user: 'postgres', password: 'replacement', database: 'app', application_name: 'rotation proof' });

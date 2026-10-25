@@ -38,6 +38,21 @@ Railway's authored password references require URI-unreserved password character
 Hypervibe's existing base64url generator satisfies that constraint. A replacement
 that would break those references is refused before changing SQL authentication.
 
+Native password probes require a password challenge from the real PostgreSQL
+driver before a completed session can prove the candidate password. This shared
+boundary applies to all eight adapters: `trust`, peer, or certificate-only
+authentication remains unknown, even when the selected user and database match.
+
+Railway's SQL fallback sends a salted SCRAM-SHA-256 verifier instead of the
+plaintext replacement in its bound parameter. Its existing URI-unreserved
+password restriction avoids unsupported SASLprep differences. PostgreSQL accepts
+that verifier independently of the role's `password_encryption` default. The
+verifier can still appear in private server logs; no verifier is returned or
+persisted in Hypervibe's public results. Other providers' SQL fallback paths
+retain their previous encoding; their server-side parameter logging remains a
+separate gap. Provider-native REST/SDK resets and temporary access ownership are
+unchanged.
+
 ## Independent official sources
 
 - PostgreSQL [ALTER ROLE](https://www.postgresql.org/docs/18/sql-alterrole.html),
@@ -68,6 +83,25 @@ that would break those references is refused before changing SQL authentication.
   make a universal administrative SQL assumption unsafe.
 
 ## Executable evidence and limits
+
+The logging/password-challenge regressions use disposable real PostgreSQL with
+`log_statement=all`, unlimited parameter logging, both SCRAM and `trust` access,
+and a role defaulting to MD5 password storage. Six of seven cases failed on the
+pre-fix code; all seven pass after the fix. The independent contracts are
+PostgreSQL 17's [parameter logging](https://www.postgresql.org/docs/17/runtime-config-logging.html),
+[pre-encrypted password handling](https://www.postgresql.org/docs/17/sql-createrole.html),
+[trust authentication](https://www.postgresql.org/docs/17/auth-trust.html), and
+the pinned [REL_17_6 SCRAM implementation](https://github.com/postgres/postgres/blob/REL_17_6/src/common/scram-common.c).
+Three separate shared rollout/readiness regressions failed because traffic
+selection cleared credential deployment requirements; they now retain pending
+work until retirement evidence is sufficient. A private malformed-plan regression
+also exposed decrypted input in a JSON parsing error before the action executor;
+the narrow decoding boundary now returns an authored value-free error. Inventory
+guidance no longer suggests deployment as a remedy for unsupported retirement
+observation. The combined focused run passes 234 tests across 17 files, plus
+TypeScript checking. These checks run in the
+ordinary acceptance suite and do not establish live provider compatibility or
+the cause of the Invoice Perfect incident.
 
 `test/provider-contracts/database-credential-provider-contracts.test.ts` requires
 every registered PostgreSQL provider to implement the port. It exercises real REST

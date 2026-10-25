@@ -61,6 +61,15 @@ encrypted recovery record. Old active deployments stay pending, and providers
 that only observe routing or revisions do not establish individual process
 retirement. A successful deployment status alone is insufficient.
 
+Traffic-only retirement evidence keeps credential rollout requirements pending,
+including when native or managed CI receipts identify the exact new deployment.
+The current Cloud Run service, ECS Express, DigitalOcean App Platform and Vercel
+observers report traffic coverage; they cannot clear this requirement until an
+instance-retirement capability is available. Cloud Run jobs, Fly Machines and
+Azure revision/replica observations retain their existing instance evidence.
+Railway retains its scoped active-deployment inventory contract. None of these
+observations independently proves application SQL authentication.
+
 The source is resolved once and frozen in encrypted plan storage. Private
 configuration expectations and the original deployment baseline are encrypted.
 Database recovery markers are in encrypted component bindings. An attempted

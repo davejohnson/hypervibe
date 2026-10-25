@@ -535,6 +535,8 @@ export async function credentialInventory(ctx: CommandContext, project: Project,
       entry.nextAction = 'The exact destination scope is absent. Review desired state with hv_spec and hv_plan; inventory will not recreate it.';
     } else if (entry.consumers.some(consumer => consumer.configuration.comparison === 'different' || consumer.configuration.recordedValueComparison === 'different')) {
       entry.nextAction = 'Configuration differs from the candidate or accepted credential. Review synchronization of the exact affected destinations with hv_plan before completing rollout; preserve the accepted input.';
+    } else if (entry.consumers.some(consumer => consumer.activation.state === 'pending' && consumer.activation.coverage === 'traffic')) {
+      entry.nextAction = 'The provider reports only traffic routing for a pending consumer. Keep this credential rollout pending until exact old-instance retirement can be observed; the current provider capability cannot prove it. Preserve the accepted input.';
     } else if (entry.consumers.some(consumer => consumer.activation.state === 'pending')) {
       entry.nextAction = 'Finish the accepted configuration rollout: inspect hv_status and hv_ci_status, then complete the existing managed rollout through hv_ci_trigger if required. Verify the application operation after activation; preserve the accepted input.';
     } else if (acceptedRole && runtimeConsumers.some(consumer => consumer.activation.state === 'unknown')) {

@@ -210,7 +210,13 @@ export async function applyDatabasePasswordRotation(params: { project: Project; 
   const executor = new ConvergeExecutor(); const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) throw new Error(loaded.error);
   if (loaded.run.projectId !== params.project.id || !isDatabasePasswordPlan(loaded.document.actions)) throw new RotationError('The exact native database plan authority is invalid.');
-  const frozen = getSecretStore().decryptObject<Frozen>(loaded.document.overrides!.delegatedSecretVarsEncrypted!);
+  let frozen: Frozen;
+  try { frozen = getSecretStore().decryptObject<Frozen>(loaded.document.overrides!.delegatedSecretVarsEncrypted!); }
+  catch {
+    // JSON decoding errors can quote decrypted input before the action handler
+    // starts. Keep that private material behind the same authored error boundary.
+    throw new RotationError('Native database rotation could not read its retained encrypted authority. Recovery is preserved; no private input or diagnostic was returned.');
+  }
   const persistFrozen = () => {
     const currentRun = runs.findById(params.planId)!;
     runs.updatePlan(params.planId, { ...currentRun.plan, overrides: { ...record(record(currentRun.plan).overrides), delegatedSecretVarsEncrypted: getSecretStore().encryptObject(frozen) } });

@@ -62,7 +62,7 @@ export function databaseConsumerReadiness(params: {
     // A complete provider inventory with only the selected deployment is the
     // conservative retirement boundary. Multiple active revisions stay pending.
     const active = snapshot?.activeDeploymentIds;
-    const oldDeployments = !identityKnown || !snapshot?.id || !active?.length
+    const oldDeployments = !identityKnown || !snapshot?.id || !active?.length || snapshot.activeDeploymentCoverage === 'traffic'
       || new Set(active).size !== active.length || !active.includes(snapshot.id)
       ? 'unknown' : active.every(id => id === snapshot.id) ? 'drained' : 'pending';
     const ready = deployedConfiguration === 'match' && oldDeployments === 'drained' && service?.status === 'running';

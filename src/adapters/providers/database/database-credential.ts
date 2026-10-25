@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { isDeepStrictEqual } from 'node:util';
+import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
 import type { Component } from '../../../domain/entities/component.entity.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { IDatabaseAdapter } from '../../../domain/ports/database.port.js';
@@ -14,6 +15,8 @@ import { isExternallyUsableDatabaseUrl } from '../../../domain/services/database
 export { replaceDatabasePassword, replaceDatabaseCredentialBindings } from '../../../domain/services/database-credential-value.js';
 
 type NativeOptions = {
+  /** SQL-only opt-in: never send the replacement as a logged Bind parameter. */
+  passwordEncoding?: 'scram-sha-256';
   inputMode?: 'supplied' | 'provider-generated';
   identity?: (component: Component) => Promise<{ inputMode: 'supplied' | 'provider-generated'; providerScope?: Record<string, string> }>;
   validateInspection?: (environment: Environment, component: Component) => Promise<void>;
@@ -24,6 +27,29 @@ type NativeOptions = {
   synchronizeIssuer?: (environment: Environment, component: Component, replacement: string) => Promise<void>;
   inspectIssuer?: (environment: Environment, component: Component, replacement: string) => Promise<'match' | 'different' | 'unknown'>;
 };
+
+/** PostgreSQL's scram_build_secret algorithm and defaults, pinned to REL_17_6:
+ * https://github.com/postgres/postgres/blob/REL_17_6/src/common/scram-common.c
+ * https://github.com/postgres/postgres/blob/REL_17_6/src/include/common/scram-common.h
+ * ASCII URL-safe input is unchanged by SASLprep; other input is rejected rather
+ * than inventing a Unicode normalization contract. This private verifier can
+ * still be logged by PostgreSQL, but plaintext never enters SQL or its Bind.
+ */
+function postgresScramVerifier(password: string): string {
+  if (!/^[A-Za-z0-9._~-]+$/.test(password)) throw new Error('Unsupported PostgreSQL password encoding.');
+  const salt = randomBytes(16);
+  const passwordBytes = Buffer.from(password, 'ascii');
+  let salted: Buffer | undefined, client: Buffer | undefined, stored: Buffer | undefined, server: Buffer | undefined;
+  try {
+    salted = pbkdf2Sync(passwordBytes, salt, 4096, 32, 'sha256');
+    client = createHmac('sha256', salted).update('Client Key', 'ascii').digest();
+    stored = createHash('sha256').update(client).digest();
+    server = createHmac('sha256', salted).update('Server Key', 'ascii').digest();
+    return `SCRAM-SHA-256$4096:${salt.toString('base64')}$${stored.toString('base64')}:${server.toString('base64')}`;
+  } finally {
+    passwordBytes.fill(0); salted?.fill(0); client?.fill(0); stored?.fill(0); server?.fill(0);
+  }
+}
 
 /** Common PostgreSQL proof/recovery boundary; providers own native reset APIs.
  * Inspection is read-only. Only apply/probe acquire existing operation-scoped
@@ -102,8 +128,18 @@ export function createPostgresCredentialLifecycle(adapterFor: () => IDatabaseAda
           const parsed = new URL(original);
           const candidate = replaceDatabasePassword(original, replacement, { username: decodeURIComponent(parsed.username), database: target.database });
           const client = clientFor(candidate);
+          // AuthenticationOk alone can mean trust/peer/certificate access. A
+          // native replacement proof requires the actual driver's password
+          // challenge followed by a completed authenticated connection.
+          let passwordChallenge = false;
+          client.connection.once('authenticationCleartextPassword', () => { passwordChallenge = true; });
+          client.connection.once('authenticationMD5Password', () => { passwordChallenge = true; });
+          client.connection.once('authenticationSASL', (message: { mechanisms?: string[] }) => {
+            passwordChallenge = message.mechanisms?.some(value => value === 'SCRAM-SHA-256' || value === 'SCRAM-SHA-256-PLUS') === true;
+          });
           try {
             await client.connect();
+            if (!passwordChallenge) return { state: 'unknown', tested };
             const response = await client.query('SELECT session_user AS username, current_database() AS database');
             return { state: response.rows.length === 1 && response.rows[0].username === target.username && response.rows[0].database === target.database ? 'authenticated' as const : 'unknown' as const, tested };
           } finally { await client.end().catch(() => {}); }
@@ -114,6 +150,7 @@ export function createPostgresCredentialLifecycle(adapterFor: () => IDatabaseAda
       let attempted = false;
       try {
         await verifyTarget(environment, component, target);
+        if (native.passwordEncoding === 'scram-sha-256' && (!replacement || !/^[A-Za-z0-9._~-]+$/.test(replacement))) return { state: 'blocked' };
         if (native.rotate) {
           attempted = true;
           const result = await native.rotate(component, target, replacement);
@@ -121,6 +158,7 @@ export function createPostgresCredentialLifecycle(adapterFor: () => IDatabaseAda
           attempted = false;
         }
         if (!replacement || replacement.includes('\0')) return { state: 'blocked' };
+        const sqlPassword = native.passwordEncoding === 'scram-sha-256' ? postgresScramVerifier(replacement) : replacement;
         await connection(environment, component, async url => {
           const client = clientFor(url);
           try {
@@ -128,7 +166,7 @@ export function createPostgresCredentialLifecycle(adapterFor: () => IDatabaseAda
             const identity = await client.query('SELECT session_user AS username, current_database() AS database');
             if (identity.rows.length !== 1 || identity.rows[0].username !== target.username || identity.rows[0].database !== target.database) throw new Error('Database authenticated identity changed.');
             await client.query('BEGIN');
-            await client.query("SELECT set_config('hypervibe.credential_rotation_password', $1, true)", [replacement]);
+            await client.query("SELECT set_config('hypervibe.credential_rotation_password', $1, true)", [sqlPassword]);
             attempted = true;
             await client.query("DO $hypervibe$ BEGIN EXECUTE format('ALTER ROLE %I PASSWORD %L', session_user, current_setting('hypervibe.credential_rotation_password')); END $hypervibe$");
             await client.query('COMMIT');

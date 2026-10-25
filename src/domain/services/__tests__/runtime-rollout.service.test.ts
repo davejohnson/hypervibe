@@ -137,20 +137,24 @@ describe('runtime rollout state', () => {
     expect(runtimeRolloutRequirements({ environment: updated, provider: 'railway', observed: deployed('unrelated-newer') })).toHaveLength(1);
   });
 
-  it('accepts exact acknowledged native deployment while retaining traffic-only coverage', () => {
+  it('keeps exact acknowledged native deployment pending until instances retire', () => {
     const updated = nativeRequirement();
     const next = deployed('native-replacement');
     delete next.services[0].deployment!.envVarHashes;
     next.services[0].deployment!.configurationState = 'unknown';
     next.services[0].deployment!.activeDeploymentCoverage = 'traffic';
+    expect(runtimeRolloutRequirements({ environment: updated, provider: 'railway', observed: next })).toHaveLength(1);
+    next.services[0].deployment!.configurationState = 'resolved';
+    next.services[0].deployment!.envVarHashes = intendedHashes;
+    expect(runtimeRolloutRequirements({ environment: updated, provider: 'railway', observed: next })).toHaveLength(1);
+    next.services[0].deployment!.activeDeploymentCoverage = 'instances';
     expect(runtimeRolloutRequirements({ environment: updated, provider: 'railway', observed: next })).toEqual([]);
-    expect(next.services[0].deployment!.activeDeploymentCoverage).toBe('traffic');
     next.services[0].deployment!.activeDeploymentIds = ['old', 'native-replacement'];
     expect(runtimeRolloutRequirements({ environment: updated, provider: 'railway', observed: next })).toHaveLength(1);
   });
 
   it('does not add the acknowledged replacement to the old-instance baseline during readback', () => {
-    const next = deployed('native-replacement'); next.services[0].deployment!.activeDeploymentCoverage = 'traffic';
+    const next = deployed('native-replacement'); next.services[0].deployment!.activeDeploymentCoverage = 'instances';
     const updated = recordRuntimeRolloutRequirements({ environment, provider: 'railway', observed: next,
       actions: [action], receipts: [{ actionId: action.id, status: 'succeeded', data: { runtimeRolloutRequired: true, configurationUpdated: true, credentialValueEvidence: 'readback', credentialKeys: Object.keys(intendedHashes), deploymentId: 'native-replacement', credentialUpdateActivation: 'provider-rollout', rolloutBaseline: { state: 'present', deploymentId: 'old' } } }], applyRunId: 'native-change',
       expectedConfiguration: { worker: { operationId: 'native-change', envVarHashes: intendedHashes } },
@@ -211,6 +215,8 @@ describe('runtime rollout state', () => {
     const after = new EnvironmentRepository().findById(environment.id)!;
     const deployedState = deployed('exact-ci-deployment'); delete deployedState.services[0].deployment!.envVarHashes;
     deployedState.services[0].deployment!.activeDeploymentCoverage = 'traffic';
+    expect(runtimeRolloutRequirements({ environment: after, provider: 'railway', observed: deployedState })).toHaveLength(1);
+    deployedState.services[0].deployment!.activeDeploymentCoverage = 'instances';
     expect(runtimeRolloutRequirements({ environment: after, provider: 'railway', observed: deployedState })).toEqual([]);
     expect(JSON.stringify(evidence)).not.toContain(intendedHashes.DATABASE_URL);
     expect(() => acceptManagedCredentialActivation({ environment: after, provider: 'railway', evidence: { ...evidence, operations: [{ ...evidence.operations[0], operationId: 'other-operation' }] }, expectedOperations })).toThrow(/different accepted/);
