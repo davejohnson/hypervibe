@@ -75,25 +75,21 @@ describe('resolveExternalDatabaseUrl via Railway TCP proxy', () => {
       proxyPort: 33333,
       applicationPort: 5432,
     });
-    const ensureProxy = vi.spyOn(RailwayAdapter.prototype, 'ensureTcpProxy');
 
     const url = await resolveExternalDatabaseUrl(project, environment);
 
     expect(url).toBe(`postgresql://postgres:${encodeURIComponent('p@ss/w:rd')}@db.proxy.rlwy.net:33333/appdb`);
     expect(getProxy).toHaveBeenCalledWith('rail-env-1', 'rail-svc-db-1', 5432);
     // Plan-time resolution must never create a proxy.
-    expect(ensureProxy).not.toHaveBeenCalled();
   });
 
   it('returns null when no TCP proxy exists (never creates one)', async () => {
     vi.spyOn(RailwayAdapter.prototype, 'getServiceVariables').mockResolvedValue(INTERNAL_VARS);
     vi.spyOn(RailwayAdapter.prototype, 'getTcpProxy').mockResolvedValue(null);
-    const ensureProxy = vi.spyOn(RailwayAdapter.prototype, 'ensureTcpProxy');
 
     const url = await resolveExternalDatabaseUrl(project, environment);
 
     expect(url).toBeNull();
-    expect(ensureProxy).not.toHaveBeenCalled();
   });
 
   it('prefers DATABASE_PUBLIC_URL over the proxy lookup', async () => {

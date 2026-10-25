@@ -82,9 +82,9 @@ describe('Railway TCP proxy terminal removal contract', () => {
     expect(f.counts().deletes).toBe(1);
   });
 
-  it.each(['CREATING', 'DELETING', 'UPDATING', 'UNSPECIFIED'])('does not reuse or create around an existing %s proxy', async state => {
+  it.each(['CREATING', 'DELETING', 'UPDATING', 'UNSPECIFIED'])('does not resolve a transitional %s proxy as usable access', async state => {
     const f = await fixture({ states: [state] });
-    await expect(f.adapter.ensureTcpProxy('environment-production', 'service-postgres', 5432)).rejects.toThrow();
+    await expect(f.adapter.getTcpProxy('environment-production', 'service-postgres', 5432)).rejects.toThrow();
     expect(f.counts().creates).toBe(0);
   });
 

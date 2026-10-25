@@ -222,6 +222,8 @@ describe('hv_db_query', () => {
 
   it('returns hosting-provider setup when managed database access lacks a connection', async () => {
     seedInternalRailwayDbProject();
+    const readVariables = vi.spyOn(RailwayAdapter.prototype, 'getServiceVariables').mockResolvedValue({});
+    const query = vi.spyOn(DatabaseAdapter.prototype, 'query');
     const t = await makeClient();
     const result = await t.call('hv_db_query', {
       project: 'rail-db-app',
@@ -235,6 +237,8 @@ describe('hv_db_query', () => {
       project: 'rail-db-app',
     });
     expect(result.next).toEqual(['hv_connections']);
+    expect(readVariables).not.toHaveBeenCalled();
+    expect(query).not.toHaveBeenCalled();
     await t.close();
   });
 
@@ -285,7 +289,7 @@ describe('hv_db_query', () => {
     await t.close();
   });
 
-  it('creates a TCP proxy for an internal managed database and removes it after the query', async () => {
+  it('blocks a private Railway database query without creating public access', async () => {
     seedInternalRailwayDbProject();
     seedVerifiedRailwayConnection();
     vi.spyOn(RailwayAdapter.prototype, 'getServiceVariables').mockResolvedValue({
@@ -295,104 +299,99 @@ describe('hv_db_query', () => {
       DATABASE_URL: 'postgresql://postgres:secret@postgres.railway.internal:5432/app',
     });
     vi.spyOn(RailwayAdapter.prototype, 'getTcpProxy').mockResolvedValue(null);
-    const ensureProxy = vi.spyOn(RailwayAdapter.prototype, 'ensureTcpProxy').mockResolvedValue({
-      id: 'proxy-temp',
-      domain: 'temp.proxy.rlwy.net',
-      proxyPort: 33333,
-      created: true,
-    });
     const deleteProxy = vi.spyOn(RailwayAdapter.prototype, 'deleteTcpProxy').mockResolvedValue();
-    vi.spyOn(DatabaseAdapter.prototype, 'query').mockResolvedValue({
-      success: true,
-      rowCount: 1,
-      rows: [{ one: 1 }],
-      fields: [{ name: 'one', dataType: '23' }],
-    });
+    const query = vi.spyOn(DatabaseAdapter.prototype, 'query');
     const t = await makeClient();
     const result = await t.call('hv_db_query', { project: 'rail-db-app', env: 'production', sql: 'SELECT 1' });
 
-    expect(result.ok).toBe(true);
-    expect(result.data).toMatchObject({
-      rows: [{ one: 1 }],
-      access: {
-        mode: 'ephemeral_proxy',
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatchObject({
+      code: 'NOT_FOUND',
+      details: {
         provider: 'railway',
-        leaseCreated: true,
-        cleanup: 'completed',
-        resourceId: 'proxy-temp',
+        resourceCreated: false,
+        cleanup: 'not_needed',
       },
     });
-    expect(JSON.stringify(result)).not.toContain('temp.proxy.rlwy.net');
+    expect(result.hint).toContain('--ssh');
     expect(JSON.stringify(result)).not.toContain('secret');
-    expect(ensureProxy).toHaveBeenCalledWith('rail-env-1', 'rail-db-svc-1', 5432);
-    expect(deleteProxy).toHaveBeenCalledWith('rail-env-1', 'rail-db-svc-1', 'proxy-temp');
+    expect(query).not.toHaveBeenCalled();
+    expect(deleteProxy).not.toHaveBeenCalled();
     await t.close();
   });
 
-  it('removes the temporary proxy when the database query fails', async () => {
-    seedInternalRailwayDbProject();
-    seedVerifiedRailwayConnection();
-    vi.spyOn(RailwayAdapter.prototype, 'getServiceVariables').mockResolvedValue({
-      PGUSER: 'postgres', POSTGRES_PASSWORD: 'secret', PGDATABASE: 'app',
+  it('releases the private connector when the database query fails', async () => {
+    seedCloudSqlDbProject();
+    vi.spyOn(CloudSqlAdapter.prototype, 'getConnectionUrl').mockResolvedValue(null);
+    vi.spyOn(CloudSqlAdapter.prototype, 'acquireTemporaryDatabaseAccess').mockResolvedValue({
+      connectionUrl: 'postgresql://postgres:db-secret@localhost/app?host=%2Ftmp%2Fhv-cloudsql-test',
+      source: 'private_connector',
+      temporary: true,
+      releaseToken: 'cloudsql-lease',
     });
-    vi.spyOn(RailwayAdapter.prototype, 'getTcpProxy').mockResolvedValue(null);
-    vi.spyOn(RailwayAdapter.prototype, 'ensureTcpProxy').mockResolvedValue({
-      id: 'proxy-temp', domain: 'temp.proxy.rlwy.net', proxyPort: 33333, created: true,
-    });
-    const deleteProxy = vi.spyOn(RailwayAdapter.prototype, 'deleteTcpProxy').mockResolvedValue();
+    const release = vi.spyOn(CloudSqlAdapter.prototype, 'releaseTemporaryDatabaseAccess').mockResolvedValue();
     vi.spyOn(DatabaseAdapter.prototype, 'query').mockResolvedValue({ success: false, error: 'query exploded' });
     const t = await makeClient();
 
-    const result = await t.call('hv_db_query', { project: 'rail-db-app', env: 'production', sql: 'SELECT 1' });
+    const result = await t.call('hv_db_query', { project: 'cloudsql-db-app', env: 'production', sql: 'SELECT 1' });
 
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('PROVIDER_ERROR');
     expect(result.error.message).toContain('query exploded');
     expect(result.error.details.access).toMatchObject({
-      mode: 'ephemeral_proxy',
+      provider: 'cloudsql',
+      mode: 'private_connector',
       leaseCreated: true,
       cleanup: 'completed',
-      resourceId: 'proxy-temp',
+      resourceId: 'cloudsql-lease',
     });
-    expect(deleteProxy).toHaveBeenCalledWith('rail-env-1', 'rail-db-svc-1', 'proxy-temp');
+    expect(release).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'production' }),
+      expect.objectContaining({ externalId: 'production-postgres' }),
+      expect.objectContaining({ releaseToken: 'cloudsql-lease' })
+    );
+    expect(JSON.stringify(result)).not.toContain('db-secret');
     await t.close();
   });
 
-  it('preserves a successful query result but stops when temporary proxy cleanup fails', async () => {
-    seedInternalRailwayDbProject();
-    seedVerifiedRailwayConnection();
-    vi.spyOn(RailwayAdapter.prototype, 'getServiceVariables').mockResolvedValue({
-      PGUSER: 'postgres', POSTGRES_PASSWORD: 'secret', PGDATABASE: 'app',
+  it('preserves a successful query result but stops when private connector cleanup fails', async () => {
+    seedCloudSqlDbProject();
+    vi.spyOn(CloudSqlAdapter.prototype, 'getConnectionUrl').mockResolvedValue(null);
+    vi.spyOn(CloudSqlAdapter.prototype, 'acquireTemporaryDatabaseAccess').mockResolvedValue({
+      connectionUrl: 'postgresql://postgres:db-secret@localhost/app?host=%2Ftmp%2Fhv-cloudsql-test',
+      source: 'private_connector',
+      temporary: true,
+      releaseToken: 'cloudsql-lease',
     });
-    vi.spyOn(RailwayAdapter.prototype, 'getTcpProxy').mockResolvedValue(null);
-    vi.spyOn(RailwayAdapter.prototype, 'ensureTcpProxy').mockResolvedValue({
-      id: 'proxy-temp', domain: 'temp.proxy.rlwy.net', proxyPort: 33333, created: true,
-    });
-    vi.spyOn(RailwayAdapter.prototype, 'deleteTcpProxy').mockRejectedValue(new Error('cleanup denied'));
+    vi.spyOn(CloudSqlAdapter.prototype, 'releaseTemporaryDatabaseAccess').mockRejectedValue(new Error('cleanup denied'));
     vi.spyOn(DatabaseAdapter.prototype, 'query').mockResolvedValue({ success: true, rowCount: 1, rows: [{ one: 1 }] });
     const t = await makeClient();
 
-    const result = await t.call('hv_db_query', { project: 'rail-db-app', env: 'production', sql: 'SELECT 1' });
+    const result = await t.call('hv_db_query', { project: 'cloudsql-db-app', env: 'production', sql: 'SELECT 1' });
 
     expect(result.ok).toBe(true);
     expect(result.data).toMatchObject({
       rows: [{ one: 1 }],
       access: {
-        mode: 'ephemeral_proxy',
+        provider: 'cloudsql',
+        mode: 'private_connector',
         leaseCreated: true,
         cleanup: 'failed',
-        resourceId: 'proxy-temp',
+        resourceId: 'cloudsql-lease',
       },
     });
     expect(result.agentInstruction.action).toBe('stop_and_report');
     expect(result.warnings.join(' ')).toContain('cleanup failed');
     expect(result.hint).toContain('hv_inspect');
+    expect(JSON.stringify(result)).not.toContain('db-secret');
     await t.close();
   });
 
-  it('rejects unsafe SQL before creating temporary database access', async () => {
+  it('rejects unsafe SQL before reading provider configuration or querying the database', async () => {
     seedInternalRailwayDbProject();
-    const ensureProxy = vi.spyOn(RailwayAdapter.prototype, 'ensureTcpProxy');
+    seedVerifiedRailwayConnection();
+    const readVariables = vi.spyOn(RailwayAdapter.prototype, 'getServiceVariables').mockResolvedValue({});
+    const query = vi.spyOn(DatabaseAdapter.prototype, 'query');
     const t = await makeClient();
 
     const result = await t.call('hv_db_query', {
@@ -401,7 +400,8 @@ describe('hv_db_query', () => {
 
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('VALIDATION');
-    expect(ensureProxy).not.toHaveBeenCalled();
+    expect(readVariables).not.toHaveBeenCalled();
+    expect(query).not.toHaveBeenCalled();
     await t.close();
   });
 
@@ -487,7 +487,7 @@ describe('hv_db_query', () => {
 
   it('uses an already reachable managed database without creating provider access', async () => {
     seedDbProject();
-    const ensureProxy = vi.spyOn(RailwayAdapter.prototype, 'ensureTcpProxy');
+    const connect = vi.spyOn(DatabaseAdapter.prototype, 'connect');
     const query = vi.spyOn(DatabaseAdapter.prototype, 'query').mockResolvedValue({
       success: true,
       rowCount: 1,
@@ -504,7 +504,7 @@ describe('hv_db_query', () => {
       leaseCreated: false,
       cleanup: 'no_op',
     });
-    expect(ensureProxy).not.toHaveBeenCalled();
+    expect(connect).toHaveBeenCalledWith({ connectionUrl: 'postgres://user:secretpw@db.example.com:5432/app' });
     expect(query).toHaveBeenCalledWith('SELECT true AS healthy', undefined, { readOnly: true });
     await t.close();
   });

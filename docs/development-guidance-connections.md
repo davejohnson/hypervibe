@@ -33,6 +33,8 @@ Request externally owned credentials from the current plan's eligible input requ
 
 The `hypervibe` CLI is safe to use because it shares Hypervibe state and reconciliation. Direct provider CLIs remain prohibited for infrastructure operations, and MCP agents should use available `hv_*` tools instead of spawning the CLI.
 
+Narrow exception: an explicitly authorized operator may use Railway CLI private SSH in their own terminal for a scoped diagnostic database connection. Follow the [installed recovery guidance](../skills/hypervibe/references/deployment-and-recovery.md#diagnose-inspect-and-adopt). This permits neither public access creation nor infrastructure, key-registration, credential or data changes. Keep CLI authentication separate from recorded Hypervibe connections and never capture credential-bearing output.
+
 ## DG-052
 
 Preserve a live workload's provider-observed runtime identity on updates. When a provider distinguishes control-plane and workload identities, a deploy/admin connection must never seed or become the runtime principal, even for a new resource; use a deterministic least-privilege runtime identity and fail closed when it is unavailable.
@@ -96,3 +98,5 @@ Provider setup connections are never implicit application runtime secrets. Model
 ## DG-115
 
 Do not introduce dependencies on provider CLIs for infrastructure operations. Use provider adapters and recorded Hypervibe connections so state, audit history, and drift detection stay coherent.
+
+The DG-034 operator-managed Railway private SSH exception is not a runtime dependency or automatic fallback. Private-only database automation remains unsupported without a verified connection; it must not create a public TCP proxy to proceed. Preserve exact-identity cleanup of access recorded by earlier operations.
