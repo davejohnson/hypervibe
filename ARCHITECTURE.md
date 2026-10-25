@@ -61,6 +61,13 @@ the operation; repositories must never replace it with `{}`/`[]` and continue
 reconciliation. Empty legacy columns may still decode to their declared empty
 shape.
 
+Local schema 12 preserves the historical encrypted provider-login session table
+and active leases. Opening a retained version checks its migration name and
+physical schema before running missing migrations; a version number alone is
+not compatibility evidence. This preservation does not authorize those local
+browser sessions for hosted Connect Cloud or implement their older login driver.
+See [saved-state compatibility](docs/connect-cloud-saved-state.md).
+
 A local project with no environment/provider decision uses the non-provider
 sentinel `unconfigured`. Project creation, adapter lookup, health/log routing,
 and legacy bootstrap must never turn a missing choice into Cloud Run, Railway,

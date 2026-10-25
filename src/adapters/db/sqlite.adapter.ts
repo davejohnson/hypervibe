@@ -377,6 +377,24 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    // Preserve the historical local-login schema. This migration does not
+    // authorize or consume those sessions in the hosted connection flow.
+    version: 12,
+    name: 'provider_login_sessions',
+    up: `
+      CREATE TABLE provider_login_sessions (
+        id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        scope TEXT,
+        state_encrypted TEXT NOT NULL,
+        lease_id TEXT,
+        lease_until INTEGER,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX idx_provider_login_scope ON provider_login_sessions(provider, scope, created_at);
+    `,
+  },
 ];
 
 export class SqliteAdapter {
@@ -457,6 +475,8 @@ export class SqliteAdapter {
         );
       }
 
+      if (appliedVersions.has(12)) this.verifyHistoricalLoginSchema();
+
       const appliedNow: Migration[] = [];
       for (const migration of migrations) {
         if (!appliedVersions.has(migration.version)) {
@@ -474,6 +494,27 @@ export class SqliteAdapter {
       return appliedNow;
     } finally {
       this.hardenDatabaseFiles();
+    }
+  }
+
+  private verifyHistoricalLoginSchema(): void {
+    // Version alone is insufficient: another development branch may have used
+    // the same number for unrelated state. Inspect metadata only; never decrypt,
+    // normalize or clear retained login state or its outstanding lease.
+    const migration = this.db.prepare('SELECT name FROM schema_migrations WHERE version = 12').get() as { name: string };
+    const columns = this.db.prepare("SELECT name, type, [notnull], dflt_value, pk FROM pragma_table_info('provider_login_sessions')").all();
+    const expected = [
+      ['id', 'TEXT', 0, 1], ['provider', 'TEXT', 1, 0], ['scope', 'TEXT', 0, 0],
+      ['state_encrypted', 'TEXT', 1, 0], ['lease_id', 'TEXT', 0, 0],
+      ['lease_until', 'INTEGER', 0, 0], ['created_at', 'INTEGER', 1, 0],
+    ].map(([name, type, notnull, pk]) => ({ name, type, notnull, dflt_value: null, pk }));
+    const index = this.db.prepare("SELECT [unique], partial FROM pragma_index_list('provider_login_sessions') WHERE name = 'idx_provider_login_scope'").get();
+    const indexColumns = this.db.prepare("SELECT name FROM pragma_index_info('idx_provider_login_scope') ORDER BY seqno").all();
+    if (migration.name !== 'provider_login_sessions'
+      || JSON.stringify(columns) !== JSON.stringify(expected)
+      || JSON.stringify(index) !== JSON.stringify({ unique: 0, partial: 0 })
+      || JSON.stringify(indexColumns) !== JSON.stringify(['provider', 'scope', 'created_at'].map(name => ({ name })))) {
+      throw new Error('Incompatible local schema 12. Keep the database and login history intact; use the runtime that created it before upgrading.');
     }
   }
 
