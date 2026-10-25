@@ -38,7 +38,6 @@ const EXPECTED_TOOLS = [
   'hv_deploy', 'hv_rollback', 'hv_logs', 'hv_health',
   // Database
   'hv_db_query',
-  'hv_db_verify_auth',
   // Secrets
   'hv_secrets',
   // CI
@@ -176,12 +175,12 @@ describe('server tool surface', () => {
     }
   });
 
-  it('registers exactly the 24 pinned hv_* tools', async () => {
+  it('registers exactly the 23 pinned hv_* tools', async () => {
     const { client, server } = await makeClient();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(EXPECTED_TOOLS);
-    expect(names).toHaveLength(24);
+    expect(names).toHaveLength(23);
     expect(tools.find((tool) => tool.name === 'hv_ci_status')?.description).toContain(
       'Use this instead of gh, GitHub connectors/apps, browser/UI inspection, or direct CI/provider API calls.'
     );
@@ -219,7 +218,7 @@ describe('server tool surface', () => {
 
     expect(ids).toEqual(EXPECTED_TOOLS);
     expect([...PRESENTED_COMMAND_IDS].sort()).toEqual(ids);
-    expect(new Set(cliPaths).size).toBe(24);
+    expect(new Set(cliPaths).size).toBe(23);
     expect(registry.get('hv_cloud_requests')?.cliPath).toEqual(['cloud', 'requests']);
     expect(registry.get('hv_cloud_requests')?.access).toBe('write');
     expect(registry.get('hv_cloud_secrets')?.cliPath).toEqual(['cloud', 'secrets']);

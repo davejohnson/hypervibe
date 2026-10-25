@@ -1,4 +1,3 @@
-import { registerDatabaseAuthenticationCommand } from '../application/database-authentication.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import { createHash } from 'crypto';
 import { z } from 'zod';
@@ -150,7 +149,6 @@ async function resolveTemporaryExternalTarget(
 }
 
 export function registerHvDbTools(commands: CommandRegistrar, ctx: CommandContext): void {
-  registerDatabaseAuthenticationCommand(commands);
   commands.register(
     'hv_db_query',
     'Run one bounded SQL statement against a database. Hypervibe uses an existing reachable endpoint or acquires provider-owned operation-scoped access (such as a connector, TCP proxy, or temporary firewall rule), then releases only access it created and reports cleanup status. SELECT is database-enforced read-only by default; allowMutations=true enables INSERT/UPDATE/DELETE/DDL. Multi-statement SQL is always rejected.',
