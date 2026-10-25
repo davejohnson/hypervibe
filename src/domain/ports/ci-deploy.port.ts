@@ -1,6 +1,6 @@
 import type { ApiReleaseSpec } from '../spec/spec.schema.js';
 import type { ProjectRuntime } from '../spec/project-runtime.js';
-import type { CloudDeploymentConnectionV1 } from './cloud-deployment.port.js';
+import type { CloudDeploymentConnectionV1, CloudDeploymentSourceAuthorizationV1 } from './cloud-deployment.port.js';
 
 /** Stable nonsecret broker binding. Approval is resolved server-side to avoid a workflow/policy hash cycle. */
 export interface CloudDeploymentCiAccessV1 {
@@ -10,6 +10,7 @@ export interface CloudDeploymentCiAccessV1 {
   environment: string;
   sourceBranch: string;
   connection: CloudDeploymentConnectionV1;
+  sourceAuthorization?: CloudDeploymentSourceAuthorizationV1;
 }
 
 export type BranchDeployProvider = string;

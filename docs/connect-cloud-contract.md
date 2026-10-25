@@ -31,6 +31,12 @@ administrator refresh tokens or submitted application values. Existing
 connections remain explicitly legacy until a reviewed keyless replacement has
 been verified; replacing their authorization is a separate migration action.
 
+[`mode=connect-existing`](connect-cloud-existing-destinations.md) separately
+authorizes the first hosted writer for committed existing destinations. It needs
+no old writer credentials and never bypasses prior-writer recovery or Azure's
+dedicated-vault checks. `mode=migrate` retains the explicit previous-writer
+authorization and switch contract.
+
 `mode=migrate` binds the exact existing destinations. It never creates a
 replacement secret, reads its value, moves a version or edits the committed
 reference. Google pins the existing container's `createTime` before review;

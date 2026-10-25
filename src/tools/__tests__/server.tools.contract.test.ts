@@ -127,6 +127,8 @@ describe('server tool surface', () => {
     expect(registry.get('hv_cloud_secrets')?.cliPath).toEqual(['cloud', 'secrets']);
     expect(registry.get('hv_cloud_connections')?.cliPath).toEqual(['cloud', 'connections']);
     expect(registry.get('hv_cloud_connections')?.inputShape.credentials).toBeUndefined();
+    expect(registry.get('hv_cloud_connections')?.inputShape.action.safeParse('propose-source').success).toBe(true);
+    expect(registry.get('hv_cloud_connections')?.description).not.toContain('New Azure installation remains blocked');
     expect(registry.get('hv_spec')?.cliPath).toEqual(['spec']);
     expect(registry.get('hv_connections')?.cliPath).toEqual(['connections']);
     expect(registry.get('hv_secrets')?.cliPath).toEqual(['secrets']);

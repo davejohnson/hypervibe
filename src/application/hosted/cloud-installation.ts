@@ -28,7 +28,7 @@ const intentSchema = z.object({ schemaVersion: z.literal(1), installationId: z.s
   environment: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),
   source: z.object({ repository: z.string().max(500).regex(/^[a-z0-9.-]+(?::\d+)?\/[a-z0-9_.-]+(?:\/[a-z0-9_.-]+)+$/), branch: text,
     revision: z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/), specDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
-  provider: z.enum(CLOUD_INSTALLATION_PROVIDERS), mode: z.enum(['connect', 'migrate', 'disconnect']), nativeScope: strings, hostIdentity: hostSchema,
+  provider: z.enum(CLOUD_INSTALLATION_PROVIDERS), mode: z.enum(['connect', 'connect-existing', 'migrate', 'disconnect']), nativeScope: strings, hostIdentity: hostSchema,
   purpose: z.enum(['collection', 'deployment']).optional(),
   deployment: cloudDeploymentTopologySchema.optional(),
   stage: z.enum(['scope-preparation', 'collection', 'deployment']).optional(),
@@ -84,16 +84,16 @@ export function parseCloudInstallationIntentV1(value: unknown, driver: CloudInst
     const parsed = intentSchema.parse(value);
     if (parsed.provider !== driver.provider || !parsed.hostIdentity.serviceAccountEmail.endsWith(`@${parsed.hostIdentity.projectId}.iam.gserviceaccount.com`)) throw new Error();
     if (parsed.purpose === 'deployment') {
-      if (!driver.deployment || parsed.keys.length || parsed.mode === 'migrate' || parsed.migrationTargets) throw new Error();
+      if (!driver.deployment || parsed.keys.length || ['migrate', 'connect-existing'].includes(parsed.mode) || parsed.migrationTargets) throw new Error();
       if (parsed.stage === 'scope-preparation') { if (parsed.deployment) throw new Error(); }
       else if (parsed.stage !== 'deployment' || !parsed.deployment || parsed.deployment.hostingProvider !== driver.deployment.hostingProvider) throw new Error();
     } else if (!parsed.keys.length || parsed.stage === 'deployment' || parsed.deployment) throw new Error();
-    if (parsed.stage === 'scope-preparation' && (!driver.scopePreparation || parsed.mode === 'migrate' || parsed.mode === 'connect' && parsed.installed || parsed.migrationTargets)) throw new Error();
+    if (parsed.stage === 'scope-preparation' && (!driver.scopePreparation || ['migrate', 'connect-existing'].includes(parsed.mode) || parsed.mode === 'connect' && parsed.installed || parsed.migrationTargets)) throw new Error();
     if (parsed.scopePreparation && (parsed.mode !== 'connect' || parsed.scopePreparation.installationId === parsed.installationId || !driver.scopePreparation)) throw new Error();
     parsed.nativeScope = strings.parse(driver.parseScope(parsed.nativeScope));
     parsed.installed = parsed.installed?.map(item => parseEvidence(item, parsed, driver));
     if (parsed.mode === 'disconnect' && !parsed.installed?.length) throw new Error();
-    if (parsed.mode === 'migrate' && !parsed.migrationTargets?.length) throw new Error();
+    if (['migrate', 'connect-existing'].includes(parsed.mode) && !parsed.migrationTargets?.length) throw new Error();
     if (parsed.migrationTargets) {
       const targets = parsed.migrationTargets;
       if (parsed.mode === 'connect' || targets.length !== parsed.keys.length || new Set(targets.map(item => item.key)).size !== parsed.keys.length
@@ -110,7 +110,7 @@ function parseActions(value: unknown, intent: CloudInstallationIntent, driver: C
       if (action.resource.provider !== intent.provider || (!action.verified && !blockedReason) || (action.type !== 'noop' && action.requiresConfirm !== true)) throw new Error();
       if (intent.mode === 'disconnect' && action.type !== 'noop' && (action.metadata.category !== 'trust' || !['update', 'destroy'].includes(action.type))) throw new Error();
       if (intent.mode !== 'disconnect' && ['destroy', 'replace'].includes(action.type)) throw new Error();
-      if (intent.mode === 'migrate' && action.metadata.category === 'secret-container' && action.type !== 'noop') throw new Error();
+      if (['migrate', 'connect-existing'].includes(intent.mode) && action.metadata.category === 'secret-container' && action.type !== 'noop') throw new Error();
       if (intent.stage === 'scope-preparation' && action.metadata.category === 'secret-container') throw new Error();
       if (intent.purpose === 'deployment' && action.metadata.category === 'secret-container') throw new Error();
     }
@@ -154,7 +154,7 @@ export function cloudInstallationConnectionsV1(value: unknown, driver: CloudInst
     const results = z.array(z.object({ key: text, destination: secretDestinationSchema, writerAuthorization: strings }).strict()).max(100).parse(driver.connections(record));
     if (new Set(results.map(result => result.key)).size !== record.intent.keys.length || results.length !== record.intent.keys.length
       || results.some(result => !record.intent.keys.includes(result.key))) throw new Error();
-    if (record.intent.mode === 'migrate' && results.some(result => {
+    if (['migrate', 'connect-existing'].includes(record.intent.mode) && results.some(result => {
       const reviewed = record.intent.migrationTargets?.find(target => target.key === result.key);
       return !reviewed || canonical(reviewed.destination) !== canonical(result.destination);
     })) throw new Error();

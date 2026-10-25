@@ -474,13 +474,15 @@ it('discovers a migration scope from the authorized legacy vault instead of inve
   expect(f.events.every(event => event.method === 'GET')).toBe(true);
 });
 
-it.each([{}, {hypervibeCustomerId:'another-customer',hypervibeAppId:'sequence',hypervibeEnvironment:'staging'}, {hypervibeCustomerId:'studio',hypervibeAppId:'sequence',hypervibeEnvironment:'production'}])('blocks vault-wide migration when the existing vault is not verified as dedicated to this customer/app/environment (%j)',async ownership=>{
+it.each(['migrate', 'connect-existing'] as const)('%s preserves dedicated-vault isolation', async mode => {
+for (const ownership of [{}, {hypervibeCustomerId:'another-customer',hypervibeAppId:'sequence',hypervibeEnvironment:'staging'}, {hypervibeCustomerId:'studio',hypervibeAppId:'sequence',hypervibeEnvironment:'production'}]) {
   const f=fixture();const legacyVault=`${group}/providers/Microsoft.KeyVault/vaults/legacy-app-vault`;
   f.responses.set(legacyVault,{...structuredClone(nativeResources[vault]),id:legacyVault,tags:ownership,
     properties:{...nativeResources[vault].properties,vaultUri:'https://legacy-app-vault.vault.azure.net/'}});
-  const migration={...intent,mode:'migrate' as const,migrationTargets:[{key:'API_TOKEN',destination:{provider:'azure-key-vault' as const,tenantId,subscriptionId,resourceGroup:'sequence-staging',vaultName:'legacy-app-vault',secretName:'preserved-key-name'}}]};
+  const migration={...intent,mode,migrationTargets:[{key:'API_TOKEN',destination:{provider:'azure-key-vault' as const,tenantId,subscriptionId,resourceGroup:'sequence-staging',vaultName:'legacy-app-vault',secretName:'preserved-key-name'}}]};
   await expect(f.driver.plan({...f.context,intent:migration})).rejects.toThrow('ownership_mismatch');
   expect(f.events.every(event=>event.method==='GET')).toBe(true);
+}
 });
 
 it.each(['writer','vault'])('blocks first %s PUT while its atomic create ownership contract is unverified',async kind=>{

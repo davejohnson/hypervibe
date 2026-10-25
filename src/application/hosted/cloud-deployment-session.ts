@@ -2,9 +2,11 @@ import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { sourceBranchSchema } from '../cloud-source-branch.js';
 import type { CloudInstallationAuthentication, CloudInstallationDriver } from '../../domain/ports/cloud-installation.port.js';
-import type { CloudDeploymentCapability, CloudDeploymentConnectionV1, CloudDeploymentSessionV1, CloudDeploymentReleaseTargetsV1 } from '../../domain/ports/cloud-deployment.port.js';
+import type { CloudDeploymentCapability, CloudDeploymentConnectionV1, CloudDeploymentSessionV1, CloudDeploymentReleaseTargetsV1, CloudDeploymentSourceAuthorizationV1 } from '../../domain/ports/cloud-deployment.port.js';
 import type { ProjectSpec } from '../../domain/spec/spec.schema.js';
-import { CloudDeploymentAccessError, parseCloudDeploymentConnectionV1, parseCloudDeploymentSessionV1 } from '../../domain/services/cloud-deployment-authentication.js';
+import { CloudDeploymentAccessError, parseCloudDeploymentConnectionV1, parseCloudDeploymentSessionV1,
+  parseCloudDeploymentSourceAuthorizationV1, cloudDeploymentEffectiveSourceV1, cloudDeploymentSourceAuthorityDigestV1 } from '../../domain/services/cloud-deployment-authentication.js';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { parseCloudInstallationIntentV1 } from './cloud-installation.js';
 import type { CloudInstallationIntent } from '../../domain/ports/cloud-installation.port.js';
 
@@ -28,6 +30,22 @@ export function assertCloudDeploymentSourcePlacementV1(spec: ProjectSpec, connec
     if (!driver.deployment?.assertSourcePlacement) throw new CloudDeploymentAccessError('unsupported');
     driver.deployment.assertSourcePlacement(spec, parsed);
   } catch (error) { if (error instanceof CloudDeploymentAccessError) throw error; throw new CloudDeploymentAccessError('scope_mismatch'); }
+}
+
+/** Pure proposal. Caller independently verifies native repository/default branch/source and owns approval/CAS. */
+export function prepareCloudDeploymentSourceAuthorizationV1(input: {
+  connection: CloudDeploymentConnectionV1; previous?: CloudDeploymentSourceAuthorizationV1; id: string;
+  source: CloudInstallationIntent['source']; spec: ProjectSpec; driver: CloudInstallationDriver;
+}): CloudDeploymentSourceAuthorizationV1 {
+  try {
+    const connection = parseConnection(input.connection, input.driver);
+    assertCloudDeploymentSourcePlacementV1(input.spec, connection, input.driver);
+    const fields = { schemaVersion: 1 as const, id: input.id, connectionDigest: canonicalJsonSha256(connection),
+      previousDigest: cloudDeploymentSourceAuthorityDigestV1(connection, input.previous),
+      from: cloudDeploymentEffectiveSourceV1(connection, input.previous), source: input.source };
+    if (input.previous?.id === input.id) throw new CloudDeploymentAccessError('scope_mismatch');
+    return parseCloudDeploymentSourceAuthorizationV1({ ...fields, digest: canonicalJsonSha256(fields) }, connection);
+  } catch (error) { if (error instanceof CloudDeploymentAccessError) throw error; throw new CloudDeploymentAccessError('invalid_contract'); }
 }
 
 interface DeploymentAuthorityInput {
@@ -110,11 +128,12 @@ const releaseTargetsSchema = z.array(z.object({ workload: z.string().regex(/^[A-
 
 /** Native target proof, never adoption or an assertion that the application candidate equals the workflow SHA. */
 export async function verifyCloudDeploymentReleaseTargetsV1(input: DeploymentAuthorityInput & {
-  spec: ProjectSpec; bindings: unknown; source: CloudInstallationIntent['source'];
+  spec: ProjectSpec; bindings: unknown; source: CloudInstallationIntent['source']; sourceAuthorization?: CloudDeploymentSourceAuthorizationV1;
 }): Promise<CloudDeploymentReleaseTargetsV1> {
   return withDeploymentAuthority(input, async ({ connection, host, signal, verify, wait }) => {
     const source = sourceSchema.parse(input.source);
-    if (source.repository !== connection.source.repository || source.branch !== connection.source.branch)
+    const effective = cloudDeploymentEffectiveSourceV1(connection, input.sourceAuthorization);
+    if (source.repository !== effective.repository || source.branch !== effective.branch)
       throw new CloudDeploymentAccessError('scope_mismatch');
     assertCloudDeploymentSourcePlacementV1(input.spec, connection, input.driver);
     const capability = input.driver.deployment;

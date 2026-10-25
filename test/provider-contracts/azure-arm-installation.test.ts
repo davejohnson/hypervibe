@@ -245,9 +245,9 @@ describe('Azure reviewed exclusive namespace through ARM deployment provenance',
     expect((await applyCloudInstallationV1({ ...input, driver: createAzureCloudInstallationDriver({ fetch: f.request as typeof fetch }) })).status).toBe('pending');
     expect(f.events.filter(event => event.method !== 'GET')).toHaveLength(1);
   });
-  it('migrates writer trust through native deployments while preserving the existing vault and target names', async () => {
+  it.each(['migrate', 'connect-existing'] as const)('%s installs writer trust without an old writer while preserving the existing vault and target names', async mode => {
     const f = fixture(true, true), h = hosted(f), existing = structuredClone(f.resources.get(`${group}/providers/Microsoft.KeyVault/vaults/legacy-app-vault`));
-    const planned = await planCloudInstallationV1({ ...h.context, intent: f.context.intent });
+    const planned = await planCloudInstallationV1({ ...h.context, intent: { ...f.context.intent, mode } });
     const result = await applyCloudInstallationV1({ ...h.context, installationId: planned.installationId, planDigest: planned.plan.digest,
       confirmActions: planned.plan.actions.map(action => action.id) });
     expect(result).toMatchObject({ status: 'ready', reason: undefined });
@@ -257,6 +257,15 @@ describe('Azure reviewed exclusive namespace through ARM deployment provenance',
         'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials', 'Microsoft.Authorization/roleAssignments']));
     expect(f.events.filter(event => event.method === 'PUT')).toHaveLength(4);
     expect(f.driver.connections(result)[0].destination).toMatchObject({ vaultName: 'legacy-app-vault', secretName: 'existing-key' });
+    const cleanupIntent = cloudInstallationDisconnectionIntentV1(result, f.driver, '55555555-5555-4555-8555-555555555555');
+    if (!cleanupIntent) throw new Error('Verified hosted trust needs cleanup');
+    const cleanup = await planCloudInstallationV1({ ...h.context, intent: cleanupIntent });
+    expect((await applyCloudInstallationV1({ ...h.context, installationId: cleanup.installationId, planDigest: cleanup.plan.digest,
+      confirmActions: cleanup.plan.actions.map(action => action.id) })).status).toBe('disconnected');
+    expect(f.events.filter(event => event.method === 'DELETE').map(event => event.path)).toEqual([
+      `${group}/providers/Microsoft.KeyVault/vaults/legacy-app-vault/providers/Microsoft.Authorization/roleAssignments/4632693b-185f-5b24-8241-49de864f54dd`, federation,
+    ]);
+    expect(f.resources.get(`${group}/providers/Microsoft.KeyVault/vaults/legacy-app-vault`)).toEqual(existing);
   });
   it('disconnects exactly the completed federation after a definitely rejected writer grant', async () => {
     const f = fixture(true), h = hosted(f); f.rejectGrant();

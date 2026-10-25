@@ -38,6 +38,23 @@ Shared SQLite and executed generated-CI first-release tests are maintained by th
 prepared-hosting lifecycle and Cloud Run suites. These are ordinary `npm test` tests;
 repository workflow configuration is not proof of live branch protection.
 
+The remote acceptance run for checkpoint `a9d682b` (GitHub run `40164072225`)
+reported 6,761 passing tests and one failure: the compound create/disconnect case
+took 12.285 seconds and exceeded the global 10-second test limit. A subsequent
+isolated local measurement completed in 4.87 seconds: review 52 ms/7 HTTP calls,
+creation 2.53 s/1,724 calls across 62 actions, cleanup review 27 ms/7 calls, and
+cleanup 2.25 s/1,034 calls across 34 actions. These are reconstructed-transport
+measurements; they do not predict live API latency.
+
+That case now has a 30-second test-only budget and transport-enforced finite call
+caps of 16/2,000/16/1,200 for those four phases. It still requires terminal
+disconnection, unchanged resources and runtime reader grants, and zero DELETEs.
+Production timeouts and authorization/recovery guarantees are unchanged. The
+full action graph still performs substantial repeated verification; the separate
+60-request hosted final-proof bound does not describe all installation requests.
+Native latency and request-volume suitability remain live acceptance evidence,
+not consequences of a larger test timeout.
+
 The first application release uses the previously reviewed configuration hash and
 original holding revision/generation. Both the direct adapter and executed emitted
 CI replace the candidate image, final runtime identity and immutable references in

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createGcpCloudInstallationDriver } from '../../src/adapters/providers/gcp/gcp-cloud-installation.js';
-import { prepareCloudDeploymentIntentV1, issueCloudDeploymentSessionV1, verifyCloudDeploymentReleaseTargetsV1 } from '../../src/application/hosted/cloud-deployment-session.js';
+import { prepareCloudDeploymentIntentV1, issueCloudDeploymentSessionV1, verifyCloudDeploymentReleaseTargetsV1, prepareCloudDeploymentSourceAuthorizationV1 } from '../../src/application/hosted/cloud-deployment-session.js';
 import { projectSpecSchema } from '../../src/domain/spec/spec.schema.js';
 import type { CloudInstallationIntent } from '../../src/domain/ports/cloud-installation.port.js';
 import { planCloudInstallationV1, applyCloudInstallationV1, reconcileCloudInstallationV1, cloudInstallationDeploymentConnectionV1 } from '../../src/application/hosted/cloud-installation.js';
@@ -40,10 +40,10 @@ const nativeAdministratorPermissions = [
   'run.services.getIamPolicy', 'run.services.setIamPolicy', 'artifactregistry.repositories.create',
   'artifactregistry.repositories.get', 'artifactregistry.repositories.getIamPolicy', 'artifactregistry.repositories.setIamPolicy',
 ];
-function nativeFixture() {
+function nativeFixture(callLimit = Number.POSITIVE_INFINITY) {
   const calls: Array<{ url: string; method: string; body: any; authorization?: string }> = [];
   const resources = new Map<string, any>(), policies = new Map<string, any>(); let serial = 0;
-  const state = { parent: '', lostServiceAcknowledgment: false, deniedPath: '', issued: 0, policyReadHook: undefined as ((name: string) => void) | undefined };
+  const state = { parent: '', lostServiceAcknowledgment: false, deniedPath: '', issued: 0, callLimit, policyReadHook: undefined as ((name: string) => void) | undefined };
   const tokens = new Map<string, { uid: string; expiresAt: string }>();
   const alias = (name: string) => [...resources.values()].find(item => item.uniqueId === name.split('/').at(-1))?.name ?? name;
   const policy = (name: string) => policies.get(alias(name)) ?? { etag: 'original', version: 3, bindings: [{ role: 'roles/viewer', members: ['user:administrator@example.test'],
@@ -53,6 +53,7 @@ function nativeFixture() {
     const url = String(input), parsed = new URL(url), method = init.method ?? 'GET';
     const body = init.body ? JSON.parse(String(init.body)) : undefined;
     calls.push({ url, method, body, authorization: new Headers(init.headers).get('Authorization') ?? undefined });
+    if (calls.length > state.callLimit) throw new Error('Reconstructed transport exceeded its finite phase call budget');
     if (state.deniedPath && parsed.pathname.includes(state.deniedPath)) return new Response(null, { status: 403 });
     const native = decodeURIComponent(parsed.pathname.replace(/^\/v[123]\//, ''));
     if (native.endsWith(':getIamPolicy')) {
@@ -129,8 +130,8 @@ function nativeFixture() {
 const authentication = { administrator: { getAccessToken: async () => 'synthetic-admin-token' },
   host: { verifyIdentity: async () => intent.hostIdentity, getAccessToken: async () => 'synthetic-host-token',
     getIdToken: async () => { throw new Error('No Google web identity exchange is needed'); } } };
-async function setupNative() {
-  const f = nativeFixture(), driver = createGcpCloudInstallationDriver({ fetch: f.request, holdingImage: image });
+async function setupNative(callLimit?: number) {
+  const f = nativeFixture(callLimit), driver = createGcpCloudInstallationDriver({ fetch: f.request, holdingImage: image });
   const records = new Map<string, CloudInstallationRecord>();
   const store = { read: async (id: string) => structuredClone(records.get(id) ?? null),
     compareAndSwap: async (id: string, revision: number | null, next: CloudInstallationRecord) => {
@@ -253,14 +254,25 @@ describe('native Google prepared deployment installation', () => {
       authorize: async () => true, signal: AbortSignal.timeout(5000) })).rejects.toThrow();
     expect(t.f.state.issued).toBe(1);
   });
-  it('disconnects exact hosted grants while retaining resources and separately authorized runtime readers', async () => {
-    const t = await setupNative(), ready = await t.apply();
+  // This compound test executes both complete native action graphs. Remote CI
+  // took 12.285s against the global 10s limit. The larger test-only budget does
+  // not relax production deadlines; finite phase transport caps reject loops.
+  it('disconnects exact hosted grants while retaining resources and separately authorized runtime readers', { timeout: 30_000 }, async () => {
+    const t = await setupNative(16), plannedCalls = t.f.calls.length;
+    t.f.state.callLimit = plannedCalls + 2000;
+    const ready = await t.apply(), createdCalls = t.f.calls.length;
+    expect(ready.status).toBe('ready'); expect(createdCalls - plannedCalls).toBeLessThanOrEqual(2000);
+    t.f.state.callLimit = createdCalls + 16;
     const cleanup = await planCloudInstallationV1({ ...t.shared, intent: { ...ready.intent, installationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
       mode: 'disconnect', installed: Object.values(ready.completed) } });
+    const cleanupPlannedCalls = t.f.calls.length;
+    expect(cleanupPlannedCalls - createdCalls).toBeLessThanOrEqual(16);
+    t.f.state.callLimit = cleanupPlannedCalls + 1200;
     const count = t.f.resources.size;
     const removed = await applyCloudInstallationV1({ ...t.shared, installationId: cleanup.installationId, planDigest: cleanup.plan.digest,
       confirmActions: cleanup.plan.actions.map(action => action.id) });
     expect(removed.status).toBe('disconnected'); expect(t.f.resources.size).toBe(count);
+    expect(t.f.calls.length - cleanupPlannedCalls).toBeLessThanOrEqual(1200);
     const secretPolicy = t.f.policies.get('projects/123456789012/secrets/api-key');
     expect(secretPolicy.bindings.some((item: any) => item.role === 'roles/secretmanager.secretAccessor')).toBe(true);
     expect(t.f.calls.some(call => call.method === 'DELETE')).toBe(false);
@@ -321,11 +333,14 @@ describe('native Google prepared deployment installation', () => {
     expect(replaced).not.toBe(''); expect(result.status).not.toBe('ready');
     expect(t.f.calls.some(call => call.url === `https://run.googleapis.com/v2/${replaced}:setIamPolicy`)).toBe(false);
   });
-  it('retires first rollout only with independently verified release provenance and the previously reviewed native configuration', async () => {
+  it.each([false, true])('retires first rollout only with verified effective-source provenance and prior native configuration (transferred: %s)', async transferred => {
     const { CloudRunPreparedHosting } = await import('../../src/adapters/providers/gcp/cloudrun-prepared-hosting.js');
     const { gcpPreparedApplicationConfiguration } = await import('../../src/adapters/providers/gcp/gcp-prepared-release.js');
     const t = await setupNative(), ready = await t.apply(), connection = cloudInstallationDeploymentConnectionV1(ready, t.driver);
-    const capability = new CloudRunPreparedHosting(() => connection, async () => 'synthetic-provision-token', t.f.request);
+    const original = structuredClone(connection);
+    const sourceAuthorization = transferred ? prepareCloudDeploymentSourceAuthorizationV1({ connection, driver: t.driver, spec,
+      id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', source: { ...connection.source, branch: 'trunk', revision: 'c'.repeat(40) } }) : undefined;
+    const capability = new CloudRunPreparedHosting(() => connection, async () => 'synthetic-provision-token', t.f.request, () => sourceAuthorization);
     const environment = { id: 'local-staging', projectId: 'local-project', name: 'staging', platformBindings: { provider: 'cloudrun', projectId: 'customer-project' } } as any;
     const initial = await capability.inspect({ environment, environmentSpec: spec.environments.staging });
     expect(initial.state).toBe('verified'); if (initial.state !== 'verified') return;
@@ -339,12 +354,15 @@ describe('native Google prepared deployment installation', () => {
     native.latestCreatedRevision = native.latestReadyRevision = `${item.id}/revisions/web-00002-app`;
     const absent = await capability.inspect({ environment, environmentSpec: spec.environments.staging });
     expect(absent.state === 'verified' && absent.preparation.pendingFirstRelease).toEqual(['web', 'worker']);
-    const releaseEvidence = { schemaVersion: 1 as const, repository: intent.source.repository, workflow: '.github/workflows/hypervibe.yml', branch: 'main',
+    const releaseEvidence = { schemaVersion: 1 as const, repository: intent.source.repository, workflow: '.github/workflows/hypervibe.yml', branch: transferred ? 'trunk' : 'main',
       sourceCommitSha: 'a'.repeat(40), workflowSourceCommitSha: 'a'.repeat(40), runId: 123, runAttempt: 1 as const, artifactId: 456,
       workflowInputHash: '1'.repeat(64), workflowContentHash: '2'.repeat(64), programFingerprint: '3'.repeat(64), deploymentContractFingerprint: '4'.repeat(64),
       imageUri, targets: [{ workload: 'web', kind: 'service' as const, resourceId: item.id.split('/').at(-1)!, resourceUid: item.lifetimeId }] };
     const observed = await capability.inspect({ environment, environmentSpec: spec.environments.staging, releaseEvidence });
     expect(observed.state === 'verified' && observed.preparation.pendingFirstRelease).toEqual(['worker']);
+    expect(connection).toEqual(original); expect(observed.state === 'verified' && observed.preparation.receiptDigest).toBe(initial.preparation.receiptDigest);
+    if (transferred) expect((await capability.inspect({ environment, environmentSpec: spec.environments.staging,
+      releaseEvidence: { ...releaseEvidence, branch: 'main' } })).state).toBe('unknown');
     const changed = structuredClone(spec.environments.staging); changed.envVars.EXTRA = 'unreviewed';
     native.template.containers[0].env.push({ name: 'EXTRA', value: 'unreviewed' });
     const drifted = await capability.inspect({ environment, environmentSpec: changed, releaseEvidence });

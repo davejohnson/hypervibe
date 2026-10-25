@@ -1,4 +1,5 @@
-import type { CloudDeploymentConnectionV1 } from '../../../domain/ports/cloud-deployment.port.js';
+import type { CloudDeploymentConnectionV1, CloudDeploymentSourceAuthorizationV1 } from '../../../domain/ports/cloud-deployment.port.js';
+import { cloudDeploymentEffectiveSourceV1 } from '../../../domain/services/cloud-deployment-authentication.js';
 import { preparedHostingMarkerSchema, preparedHostingReleaseEvidenceSchema, type IPreparedHosting, type PreparedHostingBindings } from '../../../domain/ports/hosting-prepared.port.js';
 import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
 import { createGcpCloudDeploymentDriver, parseGcpPreparedResources } from './gcp-cloud-deployment.js';
@@ -8,7 +9,8 @@ import type { ProjectSpec } from '../../../domain/spec/spec.schema.js';
 /** Native read proof for the isolated local metadata frontier. It never adopts
  * or writes cloud resources, and holding readiness is not app convergence. */
 export class CloudRunPreparedHosting implements IPreparedHosting {
-  constructor(private readonly connection: () => CloudDeploymentConnectionV1, private readonly token: () => Promise<string>, private readonly request: typeof fetch = fetch) {}
+  constructor(private readonly connection: () => CloudDeploymentConnectionV1, private readonly token: () => Promise<string>, private readonly request: typeof fetch = fetch,
+    private readonly sourceAuthorization: () => CloudDeploymentSourceAuthorizationV1 | undefined = () => undefined) {}
   async inspect({ environment, environmentSpec, releaseEvidence }: Parameters<IPreparedHosting['inspect']>[0]): ReturnType<IPreparedHosting['inspect']> {
     try {
       const connection = this.connection(), prepared = parseGcpPreparedResources(connection.preparedResources, connection);
@@ -18,8 +20,9 @@ export class CloudRunPreparedHosting implements IPreparedHosting {
       const receiptDigest = canonicalJsonSha256(connection), previous = environment.platformBindings.preparedHosting === undefined ? undefined
         : preparedHostingMarkerSchema.parse(environment.platformBindings.preparedHosting);
       const release = releaseEvidence === undefined ? undefined : preparedHostingReleaseEvidenceSchema.parse(releaseEvidence);
-      if (release && (release.repository.replace(/^github\.com\//, '') !== connection.source.repository.replace(/^github\.com\//, '')
-        || release.branch !== connection.source.branch)) return { state: 'unknown' };
+      const source = cloudDeploymentEffectiveSourceV1(connection, this.sourceAuthorization());
+      if (release && (release.repository.replace(/^github\.com\//, '') !== source.repository.replace(/^github\.com\//, '')
+        || release.branch !== source.branch)) return { state: 'unknown' };
       if (previous && (previous.installationId !== connection.installationId || previous.planDigest !== connection.planDigest || previous.receiptDigest !== receiptDigest)) return { state: 'unknown' };
       const observed = await driver.readPrepared(connection, await this.token(), AbortSignal.timeout(30000));
       const pending = previous ? [...previous.pendingFirstRelease] : prepared.workloads.map(item => item.workload);

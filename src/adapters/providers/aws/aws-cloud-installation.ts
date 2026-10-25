@@ -97,7 +97,7 @@ function settings(intent: CloudInstallationIntent) {
   const stackName = resourceName('hypervibe-secrets', { scope: parts, maxLength: 100 });
   const writerName = resourceName('writer', { scope: parts, maxLength: 64 });
   const disconnectorName = resourceName('disconnect', { scope: parts, maxLength: 64 });
-  if (intent.mode === 'migrate' && !intent.migrationTargets?.length) throw new InstallationError('ownership_mismatch');
+  if (['migrate', 'connect-existing'].includes(intent.mode) && !intent.migrationTargets?.length) throw new InstallationError('ownership_mismatch');
   const secrets = [...intent.keys].sort().map(key => {
     const target = intent.migrationTargets?.find(item => item.key === key)?.destination;
     if (intent.migrationTargets && (!target || target.provider !== 'aws-secrets' || target.accountId !== scope.accountId || target.region !== scope.region))
@@ -319,7 +319,8 @@ export function createAwsCloudInstallationDriver(options: { templateUrl?: string
           { principal: s.writerRoleArn, scope: s.stackName, actions: ['cloudformation:DescribeStacks', 'cloudformation:GetTemplate', 'cloudformation:ListStackResources', 'iam:GetRole', 'iam:GetRolePolicy', 'iam:ListRolePolicies', 'iam:ListAttachedRolePolicies'], purpose: 'installation-verification' },
           { principal: s.disconnectorRoleArn, scope: `${s.writerRoleArn},${s.disconnectorRoleArn}`, actions: ['iam:GetRole', 'iam:GetRolePolicy', 'iam:ListRolePolicies', 'iam:ListAttachedRolePolicies', 'iam:UpdateAssumeRolePolicy'], purpose: 'hosted-trust-removal' },
         ], costs: [{ resource: `${s.secrets.length} Secrets Manager containers`, description: 'AWS secret and API-request charges apply. Secrets and their charges remain after disconnect.', pricingUrl: 'https://aws.amazon.com/secrets-manager/pricing/' }],
-        warnings: ['The supplied AWS account number is unverified until the installed role proves its native account. Review the signed-in account in the AWS console.',
+        warnings: [...(context.intent.mode === 'connect-existing' ? ['Authorize the first hosted writer for these exact existing secret ARNs. Existing values, versions and unrelated permissions are preserved; the stack does not acquire ownership of those containers.'] : []),
+          'The supplied AWS account number is unverified until the installed role proves its native account. Review the signed-in account in the AWS console.',
           'IAM trust updates have no etag precondition. Hypervibe preserves observed unrelated statements and blocks observed ownership changes; concurrent out-of-band trust edits cannot be atomically protected.',
           'Disconnect removes hosted trust but issued STS sessions can remain valid for up to 15 minutes. If the final acknowledgment is lost and the process restarts, cleanup verification can remain pending.'] } };
     },

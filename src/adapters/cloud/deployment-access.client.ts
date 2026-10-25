@@ -10,8 +10,9 @@ import { findRepoRoot, readRepoSpecFile } from '../../domain/spec/repo-spec-file
 import { detectGitRemoteUrl, normalizeGitRemoteIdentity, resolveGitHeadCommitSha } from '../../lib/git-remote.js';
 import { currentWorkspaceDirectories, primaryWorkspaceDirectory } from '../../lib/workspace-context.js';
 import { providerRegistry } from '../../domain/registry/provider.registry.js';
-import { CloudDeploymentAccessError, parseCloudDeploymentConnectionV1, parseCloudDeploymentSessionV1 } from '../../domain/services/cloud-deployment-authentication.js';
-import type { CloudDeploymentAuthenticationV1, CloudDeploymentConnectionV1 } from '../../domain/ports/cloud-deployment.port.js';
+import { CloudDeploymentAccessError, parseCloudDeploymentConnectionV1, parseCloudDeploymentSessionV1,
+  parseCloudDeploymentSourceAuthorizationV1, cloudDeploymentEffectiveSourceV1, cloudDeploymentSourceAuthorityDigestV1 } from '../../domain/services/cloud-deployment-authentication.js';
+import type { CloudDeploymentAuthenticationV1, CloudDeploymentConnectionV1, CloudDeploymentSourceAuthorizationV1 } from '../../domain/ports/cloud-deployment.port.js';
 import type { ConnectionRepository } from '../db/repositories/connection.repository.js';
 import type { ConnectionStatus } from '../../domain/entities/connection.entity.js';
 import type { getSecretStore } from '../secrets/secret-store.js';
@@ -19,12 +20,23 @@ import type { getSecretStore } from '../secrets/secret-store.js';
 export const DEPLOYMENT_ACCESS_PROVIDER = 'hypervibe-deployment-access';
 export const DEPLOYMENT_BINDING_PROVIDER = 'hypervibe-deployment-binding';
 const source = z.object({ branch: sourceBranchSchema, revision: z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/), digest: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
+const pendingPairing = z.object({ sourceBranch: sourceBranchSchema, expiresAt: z.string().datetime(), deviceCode: z.string(), userCode: z.string(),
+  verificationUrl: z.string().url(), exchangeAttempted: z.boolean().optional() }).strict();
+const exchangedAccess = z.object({ sourceBranch: sourceBranchSchema, expiresAt: z.string().datetime(), token: z.string().regex(/^hvc_[0-9a-f-]{36}_[A-Za-z0-9_-]{43}$/),
+  project: z.object({ id: z.string().min(1), name: z.string() }).strict(), environment: z.object({ id: z.string().min(1), key: z.string(), name: z.string() }).strict() }).strict();
 export const deploymentGrantSchema = z.object({ version: z.literal(1), baseUrl: z.string(), repository: z.string(), env: z.string(), sourceBranch: sourceBranchSchema,
   status: z.enum(['pending', 'verified', 'revoked']), expiresAt: z.string().datetime(), deviceCode: z.string().optional(), userCode: z.string().optional(), verificationUrl: z.string().url().optional(),
+  exchangeAttempted: z.boolean().optional(), pendingPairing: pendingPairing.optional(), exchangeRecovery: exchangedAccess.optional(),
+  revocation: z.object({ primary: z.enum(['pending', 'verified', 'rejected']), replacement: z.enum(['pending', 'verified', 'rejected']).optional(),
+    pendingApproval: z.object({ expiresAt: z.string().datetime(), exchangeUncertain: z.boolean() }).strict().optional() }).strict().optional(),
   token: z.string().regex(/^hvc_[0-9a-f-]{36}_[A-Za-z0-9_-]{43}$/).optional(), project: z.object({ id: z.string().min(1), name: z.string() }).strict().optional(),
   environment: z.object({ id: z.string().min(1), key: z.string(), name: z.string() }).strict().optional() }).strict();
 export const deploymentBindingSchema = z.object({ version: z.literal(1), baseUrl: z.string(), repository: z.string(), env: z.string(), projectId: z.string().min(1),
   connectionId: z.string().guid(), source, hostingProvider: z.string().min(1).max(128), status: z.enum(['pending', 'ready', 'revoked']), receipt: z.unknown().optional(),
+  sourceAuthorization: z.custom<CloudDeploymentSourceAuthorizationV1>().optional(),
+  sourceProposal: z.object({ id: z.string().guid(), from: source, source, previousDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    status: z.enum(['pending', 'review-required', 'approved', 'superseded', 'revoked', 'unavailable']), digest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+    receipt: z.custom<CloudDeploymentSourceAuthorizationV1>().optional() }).strict().optional(),
   releasePolicy: z.object({ id: z.string().guid(), source, workflowPath: z.string().optional(),
     status: z.enum(['pending', 'review-required', 'approved', 'superseded', 'revoked', 'unavailable']), digest: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict().optional() }).strict();
 export type DeploymentGrant = z.infer<typeof deploymentGrantSchema>;
@@ -63,6 +75,12 @@ export function parseDeploymentReceipt(value: unknown): CloudDeploymentConnectio
   if (!contract) throw new CloudDeploymentAccessError('unsupported');
   return parseCloudDeploymentConnectionV1(value, contract);
 }
+/** Original installation source and native receipt remain immutable. */
+export function deploymentBindingEffectiveSource(binding: DeploymentBinding, receipt = parseDeploymentReceipt(binding.receipt)) {
+  const authorization = binding.sourceAuthorization === undefined ? undefined : parseCloudDeploymentSourceAuthorizationV1(binding.sourceAuthorization, receipt);
+  const selected = cloudDeploymentEffectiveSourceV1(receipt, authorization);
+  return { branch: selected.branch, revision: selected.revision, digest: selected.specDigest };
+}
 export function revokeMatchingDeploymentGrant(store: DeploymentPersistence, binding: DeploymentBinding, grant: DeploymentGrant, cipher: string) {
   const accessScope = deploymentGrantScope(binding.baseUrl, binding.repository, binding.env);
   const current = store.connections.findByProviderAndScope(DEPLOYMENT_ACCESS_PROVIDER, accessScope);
@@ -87,13 +105,15 @@ export function selectedDeploymentAccess(input: { providerName: string; scopeHin
   if (receipt.hostingProvider !== input.providerName || receipt.hostingProvider !== binding.hostingProvider || receipt.environment !== binding.env || receipt.appId !== binding.projectId
     || receipt.source.repository !== binding.repository || receipt.source.branch !== binding.source.branch
     || receipt.source.revision !== binding.source.revision || receipt.source.specDigest !== binding.source.digest) throw failure();
+  const sourceAuthorization = binding.sourceAuthorization === undefined ? undefined : parseCloudDeploymentSourceAuthorizationV1(binding.sourceAuthorization, receipt);
+  const effectiveSource = deploymentBindingEffectiveSource(binding, receipt);
   const scope = deploymentGrantScope(binding.baseUrl, binding.repository, binding.env);
   const access = input.store.connections.findByProviderAndScope(DEPLOYMENT_ACCESS_PROVIDER, scope);
   if (!access) throw failure();
   const accessCipher = access.credentialsEncrypted;
   const grant = deploymentGrantSchema.parse(input.store.secretStore.decryptObject(access.credentialsEncrypted));
   if (grant.status !== 'verified' || access.status !== 'verified' || !grant.token || grant.repository !== binding.repository || grant.env !== binding.env
-    || grant.baseUrl !== binding.baseUrl || grant.sourceBranch !== binding.source.branch || grant.project?.id !== binding.projectId || grant.environment?.key !== binding.env
+    || grant.baseUrl !== binding.baseUrl || grant.sourceBranch !== effectiveSource.branch || grant.project?.id !== binding.projectId || grant.environment?.key !== binding.env
     || Date.parse(grant.expiresAt) <= Date.now()) throw failure();
   const local = deploymentSource(binding.env, binding.repository);
   if (local.source.branch !== grant.sourceBranch || local.spec.environments[binding.env].hosting.provider !== input.providerName) throw failure();
@@ -104,13 +124,13 @@ export function selectedDeploymentAccess(input: { providerName: string; scopeHin
       || Date.parse(grant.expiresAt) <= Date.now() || !isDeepStrictEqual(deploymentSource(binding.env, binding.repository).source, local.source)) throw failure();
   };
   assertCurrent();
-  return { row, binding, receipt, access, accessCipher, grant, local, assertCurrent };
+  return { row, binding, receipt, sourceAuthorization, access, accessCipher, grant, local, assertCurrent };
 }
 
 export async function resolveDeploymentAdapter<T>(input: { providerName: string; scopeHints?: string[]; environment?: string; store: DeploymentPersistence; fetchImpl?: typeof fetch }): Promise<{ selected: boolean; adapter?: T }> {
   const selected = selectedDeploymentAccess(input);
   if (!selected) return { selected: false };
-  const { binding, receipt, accessCipher, grant, local, assertCurrent } = selected;
+  const { binding, receipt, sourceAuthorization, accessCipher, grant, local, assertCurrent } = selected;
   const request = createCloudJsonClient(binding.baseUrl, input.fetchImpl ?? fetch, 15_000);
   async function session(signal: AbortSignal, target?: 'resource-manager' | 'container-registry') {
     if (signal.aborted) throw failure(); assertCurrent();
@@ -118,7 +138,7 @@ export async function resolveDeploymentAdapter<T>(input: { providerName: string;
     try {
       raw = await request(`/api/v1/projects/${encodeURIComponent(binding.projectId)}/cloud-deployments/${binding.connectionId}/deployment-sessions`, {
         token: grant.token, signal, body: { installationPlanDigest: receipt.planDigest, expectedSourceRevision: local.source.revision,
-          expectedSourceDigest: local.source.digest, ...(target ? { target } : {}) } });
+          expectedSourceDigest: local.source.digest, sourceAuthorityDigest: cloudDeploymentSourceAuthorityDigestV1(receipt, sourceAuthorization), ...(target ? { target } : {}) } });
     } catch (error) {
       if (cloudAccessRejected(error)) revokeMatchingDeploymentGrant(input.store, binding, grant, accessCipher);
       throw failure();
@@ -141,7 +161,8 @@ export async function resolveDeploymentAdapter<T>(input: { providerName: string;
     const result = await session(signal, target); if (result.kind !== 'azure-federation') throw failure(); return { token: result.token, expiresAt: result.expiresAt };
   } };
   assertCurrent();
-  const adapter = await providerRegistry.createTransientAdapter<T>(input.providerName, { connection: receipt, capability: 'provision', authentication });
+  const adapter = await providerRegistry.createTransientAdapter<T>(input.providerName, { connection: receipt, capability: 'provision', authentication,
+    ...(sourceAuthorization ? { sourceAuthorization } : {}) });
   assertCurrent();
   return { selected: true, adapter };
 }

@@ -209,7 +209,7 @@ describe('owner-approved cloud secret setup through the real command boundary', 
     expect(JSON.stringify(result)).not.toContain('private-provider-response'); expect(JSON.stringify(result)).not.toContain('provider-echoed-private-token');
   });
 
-  it('migrates a legacy writer using the unchanged committed destination and immutable version', async () => {
+  it.each(['migrate', 'connect-existing'] as const)('%s uses browser installation with unchanged committed destinations and immutable versions', async mode => {
     const file = path.join(root, '.hypervibe/spec.json'); const spec = JSON.parse(readFileSync(file, 'utf8'));
     spec.environments.staging.secretDestinations.API_KEY.version = '7'; writeFileSync(file, JSON.stringify(spec));
     git('add', '.hypervibe/spec.json'); git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false', 'commit', '-m', 'pinned legacy reference');
@@ -218,8 +218,8 @@ describe('owner-approved cloud secret setup through the real command boundary', 
     let connection: any; let accepts = 0;
     f.fetchImpl.mockImplementation(async (url, init) => {
       if (String(url).endsWith('/cloud-connections') && init?.method === 'POST') {
-        const body = JSON.parse(String(init.body)); expect(body.mode).toBe('migrate');
-        connection = { id: body.connectionId, mode: 'migrate', status: 'source-required', provider: 'gcp', keys: ['API_KEY'], environment: 'staging', source: f.remote.source,
+        const body = JSON.parse(String(init.body)); expect(body.mode).toBe(mode);
+        connection = { id: body.connectionId, mode, status: 'source-required', provider: 'gcp', keys: ['API_KEY'], environment: 'staging', source: f.remote.source,
           expiresAt: new Date(Date.now() + 86400_000).toISOString(), connectUrl: `https://hypervibe.dev/apps/app-id/cloud-connections/${body.connectionId}`,
           deployment: 'not-authorized', destinations: [{ key: 'API_KEY', destination }] };
         return Response.json({ connection });
@@ -238,8 +238,8 @@ describe('owner-approved cloud secret setup through the real command boundary', 
     });
     const run = (input: Record<string, unknown>) => f.run({ purpose: 'connect-cloud', ...input });
     await run({ action: 'start' }); await run({ action: 'status' });
-    expect(await run({ action: 'connect', mode: 'migrate' })).toMatchObject({ ok: true, data: { status: 'source-required',
-      connection: { mode: 'migrate' }, nextStep: { command: 'hv_cloud_connections' } } });
+    expect(await run({ action: 'connect', mode })).toMatchObject({ ok: true, data: { status: 'source-required',
+      connection: { mode }, nextStep: { command: 'hv_cloud_connections' } } });
     expect(await run({ action: 'accept-source' })).toMatchObject({ ok: false });
     expect(await run({ action: 'accept-source' })).toMatchObject({ ok: true, data: { status: 'ready' } });
     expect(accepts).toBe(2); expect(adapter).not.toHaveBeenCalled(); expect(readFileSync(file, 'utf8')).toBe(before);

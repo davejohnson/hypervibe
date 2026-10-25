@@ -51,6 +51,16 @@ export interface CloudDeploymentConnectionV1 {
   /** Native preparation is identity evidence, never application/runtime convergence. */
   preparedResources?: CloudDeploymentPreparedResourcesV1;
 }
+/** Separately owner-approved source authority; never part of the immutable native receipt. */
+export interface CloudDeploymentSourceAuthorizationV1 {
+  schemaVersion: 1;
+  id: string;
+  connectionDigest: string;
+  previousDigest: string;
+  from: CloudInstallationIntent['source'];
+  source: CloudInstallationIntent['source'];
+  digest: string;
+}
 export interface CloudDeploymentConnectionContractV1 {
   provider: CloudInstallationProvider;
   hostingProvider: string;
@@ -70,6 +80,7 @@ export type CloudDeploymentAuthenticationV1 =
     getAccessToken(target: 'resource-manager' | 'container-registry', signal: AbortSignal): Promise<{ token: string; expiresAt: string }> };
 export interface CloudDeploymentAdapterInputV1 {
   connection: CloudDeploymentConnectionV1;
+  sourceAuthorization?: CloudDeploymentSourceAuthorizationV1;
   capability: CloudDeploymentCapability;
   /** Transient callbacks and results must never enter local persistence, plans or command output. */
   authentication: CloudDeploymentAuthenticationV1;

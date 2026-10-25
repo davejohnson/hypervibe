@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import type { BranchDeployTarget, CloudDeploymentCiAccessV1 } from '../ports/ci-deploy.port.js';
 import { providerRegistry } from '../registry/provider.registry.js';
-import { parseCloudDeploymentConnectionV1 } from './cloud-deployment-authentication.js';
+import { cloudDeploymentEffectiveSourceV1, cloudDeploymentSourceAuthorityDigestV1,
+  parseCloudDeploymentConnectionV1, parseCloudDeploymentSourceAuthorizationV1 } from './cloud-deployment-authentication.js';
 
 /** Caller supplies provider-verified registry/username/password variables; only the temporary path is exported. */
 export const GITHUB_EPHEMERAL_DOCKER_LOGIN_RUNTIME = `const fs = require('node:fs'), path = require('node:path');
@@ -29,24 +30,29 @@ export const GITHUB_EPHEMERAL_DOCKER_CLEANUP_STEP = `      - name: Remove tempor
 /** A workflow contains only the approved broker location and immutable native identities. */
 export function reviewedCloudDeploymentCiAccess(target: BranchDeployTarget): CloudDeploymentCiAccessV1 {
   const access = z.object({ origin: z.string().url(), projectId: z.string().min(1).max(128), connectionId: z.string().guid(),
-    environment: z.string(), sourceBranch: z.string().min(1).max(240).regex(/^[^\s~^:?*\[\\]+$/), connection: z.unknown() }).strict().parse(target.deploymentAccess);
+    environment: z.string(), sourceBranch: z.string().min(1).max(240).regex(/^[^\s~^:?*\[\\]+$/), connection: z.unknown(),
+    sourceAuthorization: z.unknown().optional() }).strict().parse(target.deploymentAccess);
   const value = access.connection as CloudDeploymentCiAccessV1['connection'];
   const provider = providerRegistry.get(value?.hostingProvider), contract = provider?.transientAuthentication;
   if (!contract || provider.metadata.orchestration?.ci?.transientDeployment !== 'github-oidc-broker-v1') throw new Error('This provider has no reviewed transient CI deployment capability.');
   const connection = parseCloudDeploymentConnectionV1(value, contract), origin = new URL(access.origin);
+  const sourceAuthorization = access.sourceAuthorization === undefined ? undefined : parseCloudDeploymentSourceAuthorizationV1(access.sourceAuthorization, connection);
+  const source = cloudDeploymentEffectiveSourceV1(connection, sourceAuthorization);
   if (origin.protocol !== 'https:' || origin.origin !== access.origin || origin.username || origin.password
     || access.environment !== target.environmentName || access.sourceBranch !== target.branch || connection.environment !== access.environment
-    || connection.source.branch !== access.sourceBranch || connection.appId !== access.projectId
+    || source.branch !== access.sourceBranch || connection.appId !== access.projectId
     || !/^github\.com\/[^/]+\/[^/]+$/.test(connection.source.repository)
     || target.providerRegion && target.providerRegion !== connection.deployment.region) throw new Error('CI deployment access does not match the reviewed environment.');
-  return { ...access, connection };
+  const { sourceAuthorization: _unparsed, ...reviewed } = access;
+  return { ...reviewed, connection, ...(sourceAuthorization ? { sourceAuthorization } : {}) };
 }
 
 /** Executed inside actions/github-script; no credentials enter outputs, files or workflow declarations. */
 export function buildGitHubDeploymentSessionRuntime(target: BranchDeployTarget): string {
   const access = reviewedCloudDeploymentCiAccess(target);
   const proof = { origin: access.origin, projectId: access.projectId, connectionId: access.connectionId, environment: access.environment,
-    branch: access.sourceBranch, repository: access.connection.source.repository.slice('github.com/'.length), principal: access.connection.principals.release };
+    branch: access.sourceBranch, repository: access.connection.source.repository.slice('github.com/'.length), principal: access.connection.principals.release,
+    ...(access.sourceAuthorization ? { sourceAuthorityDigest: cloudDeploymentSourceAuthorityDigestV1(access.connection, access.sourceAuthorization) } : {}) };
   return `const hvDeploymentAccess = ${JSON.stringify(proof)};
 async function hvDeploymentSession(target) {
   const unavailable = () => new Error('Cloud deployment release access could not be verified.');
@@ -77,7 +83,7 @@ async function hvDeploymentSession(target) {
     const url = hvDeploymentAccess.origin + '/api/v1/projects/' + encodeURIComponent(hvDeploymentAccess.projectId) + '/cloud-deployments/' + hvDeploymentAccess.connectionId + '/release-sessions';
     const response = await bounded(fetch(url, { method: 'POST', redirect: 'error', signal: controller.signal,
       headers: { authorization: 'Bearer ' + oidc, 'content-type': 'application/json' },
-      body: JSON.stringify({ expectedSourceRevision: context.sha, expectedSourceDigest, ...(target ? { target } : {}) }) }));
+      body: JSON.stringify({ expectedSourceRevision: context.sha, expectedSourceDigest, ${access.sourceAuthorization ? 'sourceAuthorityDigest: hvDeploymentAccess.sourceAuthorityDigest, ' : ''}...(target ? { target } : {}) }) }));
     if (!response.ok || response.redirected || response.url && response.url !== url || !response.body) { void response.body?.cancel().catch(() => {}); throw unavailable(); }
     const reader = response.body.getReader(), chunks = []; let size = 0;
     try { for (;;) { const chunk = await bounded(reader.read()); if (chunk.done) break; size += chunk.value.byteLength; if (size > 65536) throw unavailable(); chunks.push(chunk.value); } }

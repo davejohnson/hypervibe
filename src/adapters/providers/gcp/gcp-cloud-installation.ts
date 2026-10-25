@@ -82,7 +82,7 @@ function names(intent: CloudInstallationIntent) {
       seen.add(target.key); secrets[target.key] = `projects/${native.projectNumber}/secrets/${destination.secretId}`;
     }
     if (new Set(Object.values(secrets)).size !== intent.keys.length) throw new InstallationError('identity_mismatch');
-  } else if (intent.mode === 'migrate') throw new InstallationError('identity_mismatch');
+  } else if (['migrate', 'connect-existing'].includes(intent.mode)) throw new InstallationError('identity_mismatch');
   return { ...native, owner, accountId, email, account: `projects/${native.projectId}/serviceAccounts/${email}`, roles, secrets };
 }
 function makeAction(id: string, operation: typeof operations[number], name: string, category: CloudInstallationAction['metadata']['category'],
@@ -109,7 +109,7 @@ function actionsFor(intent: CloudInstallationIntent, existing: Record<string, st
   for (const role of Object.keys(permissions) as Array<keyof typeof permissions>) actions.push(makeAction(`gcp:role:${role}`, 'create-role',
     n.roles[role], 'identity', { role }, ['gcp:api:iam.googleapis.com']));
   for (const key of [...intent.keys].sort()) {
-    actions.push(intent.mode === 'migrate'
+    actions.push(['migrate', 'connect-existing'].includes(intent.mode)
       ? makeAction(`gcp:secret:${key}`, 'inspect-existing-secret', n.secrets[key], 'secret-container', { key, createTime: existing[key] }, ['gcp:api:secretmanager.googleapis.com'])
       : makeAction(`gcp:secret:${key}`, 'create-secret', n.secrets[key], 'secret-container', { key }, ['gcp:api:secretmanager.googleapis.com']));
     actions.push(makeAction(`gcp:grant:${key}`, 'grant', n.secrets[key], 'trust', { policyKind: 'secret', key, role: 'writer' },
@@ -363,13 +363,13 @@ export function createGcpCloudInstallationDriver(options: { fetch?: typeof fetch
       const n = names(context.intent);
       let actions: CloudInstallationAction[] = [];
       await withClient(context, async client => {
-        const required = context.intent.mode === 'disconnect' ? installPermissions.filter(value => /getIamPolicy|setIamPolicy|\.get$/.test(value)) : installPermissions.filter(value => context.intent.mode !== 'migrate' || value !== 'secretmanager.secrets.create');
+        const required = context.intent.mode === 'disconnect' ? installPermissions.filter(value => /getIamPolicy|setIamPolicy|\.get$/.test(value)) : installPermissions.filter(value => !context.intent.migrationTargets || value !== 'secretmanager.secrets.create');
         const result = await client.json(`https://cloudresourcemanager.googleapis.com/v3/projects/${n.projectNumber}:testIamPermissions`,
           { method: 'POST', body: JSON.stringify({ permissions: required }) });
         const actual = result.permissions;
         if (!Array.isArray(actual) || !required.every(permission => actual.includes(permission))) throw new InstallationError('insufficient_permissions');
         const existing: Record<string, string> = {};
-        if (context.intent.mode === 'migrate') for (const [key, name] of Object.entries(n.secrets)) {
+        if (['migrate', 'connect-existing'].includes(context.intent.mode)) for (const [key, name] of Object.entries(n.secrets)) {
           const observed = await client.json(`https://secretmanager.googleapis.com/v1/${name}`);
           if (observed.name !== name || !z.string().datetime().safeParse(observed.createTime).success) throw new InstallationError('identity_mismatch');
           existing[key] = String(observed.createTime);
@@ -386,7 +386,8 @@ export function createGcpCloudInstallationDriver(options: { fetch?: typeof fetch
           { principal: n.email, scope: `projects/${n.projectNumber}`, actions: permissions.verifier, purpose: 'installation-verification' },
           { principal: context.intent.hostIdentity.serviceAccountEmail, scope: n.account, actions: permissions.impersonator, purpose: 'writer' },
         ], costs: [{ resource: 'Secret Manager', description: 'Active secret versions and API operations may incur charges after values are submitted.', pricingUrl: 'https://cloud.google.com/secret-manager/pricing' }],
-        warnings: ['Hypercloud handles submitted secret values transiently while delivering them to Google Secret Manager.',
+        warnings: [...(context.intent.mode === 'connect-existing' ? ['Authorize the first hosted writer for these exact existing secret containers. Existing values, versions and unrelated permissions are preserved; this does not establish container creation or deletion ownership.'] : []),
+          'Hypercloud handles submitted secret values transiently while delivering them to Google Secret Manager.',
           'Removing collection access preserves stored versions and separately authorized runtime readers. Previously minted tokens may remain valid until expiry; IAM changes can take time to propagate.'],
       } };
     },

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { isDeepStrictEqual } from 'node:util';
-import type { CloudDeploymentAdapterInputV1, CloudDeploymentConnectionV1 } from '../../../domain/ports/cloud-deployment.port.js';
+import type { CloudDeploymentAdapterInputV1, CloudDeploymentConnectionV1, CloudDeploymentSourceAuthorizationV1 } from '../../../domain/ports/cloud-deployment.port.js';
 import { validateCloudDeploymentAdapterInputV1 } from '../../../domain/services/cloud-deployment-authentication.js';
 import { GcpDeploymentAuthentication, gcpDeploymentScopeSchema } from './gcp-deployment-authentication.js';
 import { getGcpNativeAdminToken } from './gcp-runtime-client.js';
@@ -515,6 +515,7 @@ export class CloudRunAdapter implements
   private tokenExpiry: Date | null = null;
   private transientAuthentication: GcpDeploymentAuthentication | null = null;
   private deploymentConnection: CloudDeploymentConnectionV1 | null = null;
+  private deploymentSourceAuthorization: CloudDeploymentSourceAuthorizationV1 | undefined;
   private get deploymentEmail(): string | undefined {
     return this.transientAuthentication?.authentication.principal.serviceAccountEmail ?? this.serviceAccountCreds?.client_email;
   }
@@ -542,7 +543,7 @@ export class CloudRunAdapter implements
   private readonly installedPreparedHosting = new CloudRunPreparedHosting(() => {
     if (!this.deploymentConnection?.preparedResources) throw new Error('Reviewed Google prepared resources are unavailable.');
     return this.deploymentConnection;
-  }, () => this.getAccessToken());
+  }, () => this.getAccessToken(), fetch, () => this.deploymentSourceAuthorization);
   get preparedHosting() { return this.deploymentConnection?.preparedResources ? this.installedPreparedHosting : undefined; }
 
   async connectDeployment(input: CloudDeploymentAdapterInputV1): Promise<void> {
@@ -552,6 +553,7 @@ export class CloudRunAdapter implements
     this.credentials = { projectId: checked.connection.nativeScope.projectId, region: checked.connection.deployment.region };
     this.transientAuthentication = new GcpDeploymentAuthentication(checked.authentication);
     this.deploymentConnection = checked.connection;
+    this.deploymentSourceAuthorization = checked.sourceAuthorization;
     try { await this.getAccessToken(); }
     catch (error) { await this.disconnect(); throw error; }
   }
@@ -684,6 +686,7 @@ export class CloudRunAdapter implements
     this.tokenExpiry = null;
     this.transientAuthentication = null;
     this.deploymentConnection = null;
+    this.deploymentSourceAuthorization = undefined;
   }
 
   async repairLoggingAccess(): Promise<Receipt> {

@@ -77,7 +77,7 @@ function settings(intent: CloudInstallationIntent) {
   const subscription = `/subscriptions/${scope.subscriptionId}`;
   const group = `${subscription}/resourceGroups/${scope.resourceGroup}`;
   const migrationTargets = intent.migrationTargets?.map(target => ({ key: target.key, destination: validated(() => azureSecretDestinationSchema.parse(target.destination)) }));
-  if (intent.mode === 'migrate' && !migrationTargets?.length || intent.mode === 'connect' && migrationTargets) throw new InstallationError('identity_mismatch');
+  if (['migrate', 'connect-existing'].includes(intent.mode) && !migrationTargets?.length || intent.mode === 'connect' && migrationTargets) throw new InstallationError('identity_mismatch');
   if (migrationTargets && (migrationTargets.length !== intent.keys.length || new Set(migrationTargets.map(target => target.key)).size !== intent.keys.length
     || migrationTargets.some(target => !intent.keys.includes(target.key) || !sameId(target.destination.tenantId, scope.tenantId)
       || !sameId(target.destination.subscriptionId, scope.subscriptionId) || !sameId(target.destination.resourceGroup, scope.resourceGroup))
@@ -336,7 +336,7 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
         if (!permissions || !Array.isArray(permissions.value) || permissions.nextLink) throw new InstallationError('insufficient_permissions');
         const needed = context.intent.mode === 'disconnect' ? buildActions(context.intent, Boolean(group)).map(action => action.id === 'azure:grant'
           ? 'Microsoft.Authorization/roleAssignments/delete' : 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/delete')
-          : [...requiredActions.filter(permission => context.intent.mode !== 'migrate' || permission !== 'Microsoft.KeyVault/vaults/write'),
+          : [...requiredActions.filter(permission => !context.intent.migrationTargets || permission !== 'Microsoft.KeyVault/vaults/write'),
             'Microsoft.Resources/deployments/write', 'Microsoft.Resources/deployments/read', 'Microsoft.Resources/deployments/operations/read',
             ...(!group ? ['Microsoft.Resources/subscriptions/resourceGroups/write'] : [])];
         if (!needed.every(permission => permissions.value.some((entry: any) => Array.isArray(entry.actions) && Array.isArray(entry.notActions)
@@ -371,7 +371,7 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
             || owned.has('grant') && (!owned.has('vault') || !owned.has('role'))) throw new InstallationError('ownership_mismatch');
         }
         let existingVaultCreatedAt: string | undefined;
-        if (context.intent.mode === 'migrate') {
+        if (['migrate', 'connect-existing'].includes(context.intent.mode)) {
           if (!group) throw new InstallationError('not_installed');
           const vault = await read(budget, token, config.ids.vault, VAULT_API);
           if (!vault) throw new InstallationError('not_installed');
@@ -394,7 +394,9 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
             'ARM uses create-or-update: an independently authorized concurrent writer can cause an overwrite between the absence check and native dispatch. Native deployment receipts detect conflicting outcomes after the write; they are not an atomic no-overwrite fence. Hypervibe serializes its own installation actions.',
             'Each new target uses a unique native deployment name. Missing native acknowledgment or incomplete operation evidence stays unknown without automatic resubmission. Uncertain resources are retained for review, never deleted by name.',
             ...(blockedReason ? ['A selected resource already exists outside this reviewed new installation. No installation writes are authorized by this blocked plan.'] : []),
-          ] : []), ...(config.migration ? ['Migration prepares new writer trust on the exact dedicated RBAC vault without changing its secrets, retention settings or unrelated grants. The previous writer stays active until Hypercloud verifies and explicitly switches delivery. The reviewed writer role can set every secret in this vault; target names are an additional host restriction.'] : []), 'Required resource providers are registered at subscription scope and remain registered on disconnect; registration may continue region by region while each resource is independently verified.', 'The isolated vault is the native writer scope; reviewed target names are an additional Hypervibe restriction.',
+          ] : []), ...(config.migration ? [context.intent.mode === 'connect-existing'
+            ? 'Authorize the first hosted writer for this verified dedicated app/environment RBAC vault. Existing secrets, versions, retention and unrelated grants are preserved. This does not establish vault creation or deletion ownership. The writer can set every secret in this vault; target names are an additional host restriction.'
+            : 'Migration prepares new writer trust on the exact dedicated RBAC vault without changing its secrets, retention settings or unrelated grants. The previous writer stays active until Hypercloud verifies and explicitly switches delivery. The reviewed writer role can set every secret in this vault; target names are an additional host restriction.'] : []), 'Required resource providers are registered at subscription scope and remain registered on disconnect; registration may continue region by region while each resource is independently verified.', 'The isolated vault is the native writer scope; reviewed target names are an additional Hypervibe restriction.',
             'Permission discovery is a readiness check; Azure enforces current authority on every installation operation.',
             'Removing federation does not instantly expire already issued tokens. Secrets and separately authorized runtime access are preserved.'],
         } };
@@ -489,7 +491,7 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
         return { state: started && failure !== 'insufficient_permissions' ? 'uncertain' : 'rejected', reason: failure }; }
     },
     connections(record) {
-      if (record.status !== 'ready' || !['connect', 'migrate'].includes(record.intent.mode)) throw new InstallationError('not_converged');
+      if (record.status !== 'ready' || !['connect', 'connect-existing', 'migrate'].includes(record.intent.mode)) throw new InstallationError('not_converged');
       const verified = driver.parseEvidence(record.completed['azure:verify'], record.intent); const config = settings(record.intent);
       const writer = verified.resources.find(item => item.kind === 'writer');
       if (!writer || !verified.native.destinations) throw new InstallationError('not_converged');

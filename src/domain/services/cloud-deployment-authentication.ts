@@ -1,7 +1,9 @@
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
-import type { CloudDeploymentAdapterInputV1, CloudDeploymentAuthenticationV1, CloudDeploymentConnectionContractV1, CloudDeploymentConnectionV1, CloudDeploymentSessionV1, CloudDeploymentTopologyV1 } from '../ports/cloud-deployment.port.js';
+import type { CloudDeploymentAdapterInputV1, CloudDeploymentAuthenticationV1, CloudDeploymentConnectionContractV1, CloudDeploymentConnectionV1, CloudDeploymentSessionV1, CloudDeploymentSourceAuthorizationV1, CloudDeploymentTopologyV1 } from '../ports/cloud-deployment.port.js';
 import { runtimeSecretReferenceSchema } from '../ports/secret-destination.port.js';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
+import { sourceBranchSchema } from '../../lib/source-branch.js';
 
 export class CloudDeploymentAccessError extends Error {
   constructor(readonly code: 'invalid_contract' | 'scope_mismatch' | 'authorization_expired' | 'authorization_unavailable' | 'unsupported') {
@@ -54,6 +56,32 @@ const receipt = z.object({ schemaVersion: z.literal(1), purpose: z.literal('depl
   runtimeIdentities: z.array(z.object({ workload: text, installationId: z.string().guid(), owner: z.string().regex(/^[a-f0-9]{64}$/), principal: runtimePrincipal }).strict()).min(1).max(150),
   preparedResources: cloudDeploymentPreparedResourcesSchema.optional(),
 }).strict();
+
+const sourceAuthoritySource = receipt.shape.source.extend({ branch: sourceBranchSchema }).strict();
+const sourceAuthorizationSchema = z.object({ schemaVersion: z.literal(1), id: z.string().guid(),
+  connectionDigest: z.string().regex(/^[a-f0-9]{64}$/), previousDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  from: sourceAuthoritySource, source: sourceAuthoritySource, digest: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+
+/** Shape/correlation only. Possession is not approval; the host must verify its active durable owner decision. */
+export function parseCloudDeploymentSourceAuthorizationV1(value: unknown, connection: CloudDeploymentConnectionV1): CloudDeploymentSourceAuthorizationV1 {
+  try {
+    const result = sourceAuthorizationSchema.parse(value), { digest, ...fields } = result;
+    if (result.connectionDigest !== canonicalJsonSha256(connection) || digest !== canonicalJsonSha256(fields)
+      || result.source.repository !== connection.source.repository || result.from.repository !== connection.source.repository
+      || result.source.branch === result.from.branch) throw new Error();
+    return result;
+  } catch { throw new CloudDeploymentAccessError('invalid_contract'); }
+}
+
+/** Returns a copy; the original receipt and its prepared-resource digest never change. */
+export function cloudDeploymentEffectiveSourceV1(connection: CloudDeploymentConnectionV1, authorization?: CloudDeploymentSourceAuthorizationV1): CloudDeploymentConnectionV1['source'] {
+  return structuredClone(authorization === undefined ? connection.source : parseCloudDeploymentSourceAuthorizationV1(authorization, connection).source);
+}
+export function cloudDeploymentSourceAuthorityDigestV1(connection: CloudDeploymentConnectionV1, authorization?: CloudDeploymentSourceAuthorizationV1): string {
+  return authorization === undefined ? canonicalJsonSha256({ schemaVersion: 1, connectionDigest: canonicalJsonSha256(connection), source: connection.source })
+    : parseCloudDeploymentSourceAuthorizationV1(authorization, connection).digest;
+}
 
 /** Public nonsecret boundary; provider scope parsing is required, never optional. */
 export function parseCloudDeploymentConnectionV1(value: unknown, contract: CloudDeploymentConnectionContractV1): CloudDeploymentConnectionV1 {
@@ -157,6 +185,7 @@ async function checked<T>(signal: AbortSignal, get: () => Promise<T>, parse: (va
 /** Only wraps callbacks; never obtains, stores or returns credentials during adapter resolution. */
 export function validateCloudDeploymentAdapterInputV1(value: CloudDeploymentAdapterInputV1, contract: CloudDeploymentConnectionContractV1): CloudDeploymentAdapterInputV1 {
   const connection = parseCloudDeploymentConnectionV1(value.connection, contract);
+  const sourceAuthorization = value.sourceAuthorization === undefined ? undefined : parseCloudDeploymentSourceAuthorizationV1(value.sourceAuthorization, connection);
   if (!['provision', 'release'].includes(value.capability)) throw new CloudDeploymentAccessError('scope_mismatch');
   const auth = value.authentication;
   if (!auth || !isDeepStrictEqual(auth.principal, connection.principals[value.capability])) throw new CloudDeploymentAccessError('scope_mismatch');
@@ -178,5 +207,5 @@ export function validateCloudDeploymentAdapterInputV1(value: CloudDeploymentAdap
       });
     } };
   } else throw new CloudDeploymentAccessError('invalid_contract');
-  return { connection, capability: value.capability, authentication };
+  return { connection, ...(sourceAuthorization ? { sourceAuthorization } : {}), capability: value.capability, authentication };
 }

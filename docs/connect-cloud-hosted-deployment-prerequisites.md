@@ -71,6 +71,40 @@ it cannot approve the policy. Managed CI receives a stable nonsecret connection 
 not a policy digest, avoiding a workflow/approval hash dependency cycle. Release approval
 is checked by the broker independently from the local device's provisioning grant.
 
+After merging an installation branch, `action="propose-source"` proposes moving
+the same connection to the repository's independently verified default branch.
+Run it from the clean merged checkout using the retained device grant. The owner
+reviews the exact commit and app/environment in the browser. The proposal ID is
+saved before POST; status recovers that exact request even after the old branch
+is deleted or the checkout has uncommitted edits. The original installation
+source, native receipt, principals, runtime identities and recovery journal remain
+unchanged. A separate approved source authorization selects the active branch.
+
+After approval, status supplies the next `start` action for separate device
+pairing on the new branch. Its pending browser approval coexists with the old
+encrypted device grant. A received one-time exchange is encrypted for recovery
+before replacing the old grant. An uncertain exchange is never sent again;
+starting another pairing requires explicit confirmation. Neither the transition
+nor re-pairing approves CI release: the new branch must publish its reviewed
+workflow and obtain a separate release-policy approval. Device and CI session
+requests pin the active source-authority digest; already issued native tokens
+retain their provider expiry limits.
+
+Device revocation disables local issuance before awaiting the broker. When a
+replacement token has already been received, removal covers both exact saved
+device grants. Uncertain removal retains its encrypted recovery record. A
+rejected token without a validated removal receipt is reported as incomplete
+cleanup, and an unconsumed browser pairing has no remote cancellation guarantee.
+Its local exchange proof is discarded; an unacknowledged exchange may have issued
+an additional grant whose remote expiry could not be verified. These limits do
+not remove hosted cloud trust or affect running applications.
+
+Local regressions use real Git, SQLite, command/adapter routing and serialized
+broker responses. They cover deletion of the old branch, lost proposal responses,
+separate pairing, encrypted received-token recovery, unchanged native receipt
+hashes and managed CI projection. This is protocol/lifecycle evidence, not a
+live cloud walkthrough.
+
 Azure's generated GitHub mode now executes the shared CI proof exchange, reads the exact
 applied registry ID, login server and creation timestamp, and performs Microsoft's
 [ACR access-token exchange](https://learn.microsoft.com/en-us/rest/api/registry-dataplane/authentication/exchange-aad-access-token-for-acr-refresh-token?view=rest-registry-dataplane-2021-07-01).

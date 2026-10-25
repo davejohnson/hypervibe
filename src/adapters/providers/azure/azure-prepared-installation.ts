@@ -56,7 +56,7 @@ function original(intent: CloudInstallationIntent) {
 }
 function settings(intent: CloudInstallationIntent) {
   const source = original(intent), c = azurePreparedCoordinates(source), topology = parseCloudDeploymentTopologyV1(source.deployment);
-  if (source.provider !== 'azure' || source.purpose !== 'deployment' || source.stage !== 'deployment' || source.keys.length || source.mode === 'migrate'
+  if (source.provider !== 'azure' || source.purpose !== 'deployment' || source.stage !== 'deployment' || source.keys.length || !['connect', 'disconnect'].includes(source.mode)
     || topology.hostingProvider !== 'azure-container-apps' || topology.region !== source.nativeScope.location || !topology.preparation
     || topology.workloads.length > 8 || topology.workloads.some(workload => workload.kind !== 'web' || workload.public !== true)) fail();
   azureHoldingImageSchema.parse(topology.preparation.image);

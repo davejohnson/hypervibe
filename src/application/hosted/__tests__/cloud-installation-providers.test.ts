@@ -29,4 +29,26 @@ describe('hosted installation provider roster', () => {
       }, driver)).toThrow('invalid_contract');
     }
   });
+  it('requires exact existing native targets for first-writer authorization across the complete provider roster', () => {
+    const matrix = {
+      aws: { scope: { accountId: '123456789012', region: 'us-west-2' }, destination: { provider: 'aws-secrets', accountId: '123456789012', region: 'us-west-2', secretArn: 'arn:aws:secretsmanager:us-west-2:123456789012:secret:retained-AbCdEf' } },
+      azure: { scope: { tenantId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', subscriptionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', resourceGroup: 'app-production', location: 'westus2' },
+        destination: { provider: 'azure-key-vault', tenantId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', subscriptionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', resourceGroup: 'app-production', vaultName: 'app-production', secretName: 'retained' } },
+      gcp: { scope: { projectId: 'customer-project', projectNumber: '123456789' }, destination: { provider: 'gcp-secret-manager', projectId: 'customer-project', projectNumber: '123456789', secretId: 'retained' } },
+    };
+    expect(Object.keys(matrix).sort()).toEqual([...CLOUD_INSTALLATION_PROVIDERS].sort());
+    for (const provider of CLOUD_INSTALLATION_PROVIDERS) {
+      const driver = cloudInstallationDriverFactories[provider]();
+      const intent = { schemaVersion: 1, installationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', customerId: 'customer-a', appId: 'sequence',
+        environment: 'production', provider, mode: 'connect-existing', keys: ['API_KEY'], nativeScope: matrix[provider].scope,
+        source: { repository: 'github.com/example/sequence', branch: 'main', revision: 'a'.repeat(40), specDigest: 'b'.repeat(64) },
+        hostIdentity: { kind: 'gcp-service-account', projectId: 'hosting-project', projectNumber: '123456789',
+          serviceAccountEmail: 'delivery@hosting-project.iam.gserviceaccount.com', subject: '123456789012345678901', issuer: 'https://accounts.google.com' },
+        migrationTargets: [{ key: 'API_KEY', destination: matrix[provider].destination }] };
+      expect(parseCloudInstallationIntentV1(intent, driver).mode).toBe('connect-existing');
+      expect(() => parseCloudInstallationIntentV1({ ...intent, migrationTargets: undefined }, driver)).toThrow('invalid_contract');
+      expect(() => parseCloudInstallationIntentV1({ ...intent, stage: 'scope-preparation' }, driver)).toThrow('invalid_contract');
+      expect(() => parseCloudInstallationIntentV1({ ...intent, purpose: 'deployment', stage: 'deployment', keys: [] }, driver)).toThrow('invalid_contract');
+    }
+  });
 });

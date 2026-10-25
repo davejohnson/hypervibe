@@ -43,7 +43,7 @@ function failure(error: unknown): CloudInstallationReason {
   return 'provider_error';
 }
 function names(intent: CloudInstallationIntent) {
-  if (intent.provider !== 'gcp' || intent.stage !== 'scope-preparation' || intent.mode === 'migrate') throw new BillingError('identity_mismatch');
+  if (intent.provider !== 'gcp' || intent.stage !== 'scope-preparation' || !['connect', 'disconnect'].includes(intent.mode)) throw new BillingError('identity_mismatch');
   const native = gcpBillingPreparationScopeSchema.parse(intent.nativeScope);
   if (intent.mode === 'connect' && intent.scopePreparation?.installationId !== native.projectInstallationId) throw new BillingError('ownership_mismatch');
   const connectionId = intent.mode === 'disconnect' ? z.string().guid().parse(intent.installed?.[0]?.native.installationId) : intent.installationId;

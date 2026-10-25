@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createAwsCloudInstallationDriver, createAwsCloudInstallationTemplateV1 } from '../aws-cloud-installation.js';
 import type { CloudInstallationIntent, CloudInstallationProviderContext } from '../../../../domain/ports/cloud-installation.port.js';
+import { parseCloudInstallationIntentV1 } from '../../../../application/hosted/cloud-installation.js';
 
 // Reconstructed CloudFormation/IAM contracts. Template assertions check independent
 // required security properties; serialized native verification fixtures follow below.
@@ -24,10 +25,10 @@ function driver() {
   return createAwsCloudInstallationDriver({ templateUrl: `https://hypervibe-templates.s3.us-west-2.amazonaws.com/${artifact.sha256}.json?versionId=immutable-v1`,
     fetch: async () => publishedTemplate(artifact.body) });
 }
-async function nativeFixture(migrate = false) {
+async function nativeFixture(migrate = false, mode: 'migrate' | 'connect-existing' = 'migrate') {
   const ctx = context(), artifact = createAwsCloudInstallationTemplateV1(), template = JSON.parse(artifact.body);
-  if (migrate) ctx.intent = { ...intent, mode: 'migrate', migrationTargets: [{ key: 'API_KEY', destination: { provider: 'aws-secrets',
-    accountId: '123456789012', region: 'us-west-2', secretArn: 'arn:aws:secretsmanager:us-west-2:123456789012:secret:legacy-api-key-AbCdEf' } }] };
+  if (migrate) ctx.intent = parseCloudInstallationIntentV1({ ...intent, mode, migrationTargets: [{ key: 'API_KEY', destination: { provider: 'aws-secrets',
+    accountId: '123456789012', region: 'us-west-2', secretArn: 'arn:aws:secretsmanager:us-west-2:123456789012:secret:legacy-api-key-AbCdEf' } }] }, driver());
   const requests: string[] = [], nativeParameters: Record<string, string> = {};
   const createdAt = '2026-10-24T00:00:00Z';
   const attempt = { id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', actionId: 'aws:install', status: 'pending' as const,
@@ -155,10 +156,10 @@ describe('AWS reviewed console installation', () => {
     const f = await nativeFixture(); f.state[field] = true;
     expect((await f.d.recover({ ...f.ctx, action: f.action, attempt: f.attempt })).state).toBe('unknown');
   });
-  it('disconnects separate writer and self trust while retaining secrets and reports lost-session recovery honestly', async () => {
-    const f = await nativeFixture(); const installed = await f.d.recover({ ...f.ctx, action: f.action, attempt: f.attempt });
+  it.each([false, true])('disconnects separate writer and self trust while preserving existing targets (%s) and lost-session recovery', async existing => {
+    const f = await nativeFixture(existing, 'connect-existing'); const installed = await f.d.recover({ ...f.ctx, action: f.action, attempt: f.attempt });
     expect(installed.state).toBe('satisfied'); if (installed.state !== 'satisfied') return;
-    const disconnect = { ...f.ctx, intent: { ...intent, installationId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', mode: 'disconnect' as const, installed: [installed.evidence] } };
+    const disconnect = { ...f.ctx, intent: { ...f.ctx.intent, installationId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', mode: 'disconnect' as const, installed: [installed.evidence] } };
     const plan = await f.d.plan(disconnect);
     for (const action of plan.actions) {
       const attempt = { ...f.attempt, actionId: action.id };
@@ -170,8 +171,8 @@ describe('AWS reviewed console installation', () => {
     const restarted = createAwsCloudInstallationDriver({ requestHandler: f.handler });
     expect((await restarted.recover({ ...disconnect, action: plan.actions[1], attempt: { ...f.attempt, actionId: plan.actions[1].id } })).state).toBe('unknown');
   });
-  it('migrates only writer authority for the exact existing native ARN without creating or overwriting a secret', async () => {
-    const f = await nativeFixture(true);
+  it.each(['migrate', 'connect-existing'] as const)('%s installs only writer authority for the exact native ARN without an old writer or secret mutation', async mode => {
+    const f = await nativeFixture(true, mode);
     expect(f.nativeParameters.SecretName000).toBe('');
     expect(f.nativeParameters.ExistingSecretArn000).toBe('arn:aws:secretsmanager:us-west-2:123456789012:secret:legacy-api-key-AbCdEf');
     const result = await f.d.recover({ ...f.ctx, action: f.action, attempt: f.attempt });

@@ -128,7 +128,7 @@ export function awsDeploymentNames(input: Pick<CloudInstallationIntent, 'install
     roles: Object.fromEntries(kinds.map(kind => [kind, resourceName(kind, { scope: parts, maxLength: 64 })])) as Record<Kind, string> };
 }
 function settings(intent: CloudInstallationIntent) {
-  if (intent.provider !== 'aws' || intent.purpose !== 'deployment' || intent.stage !== 'deployment' || intent.mode === 'migrate' || intent.keys.length) fail();
+  if (intent.provider !== 'aws' || intent.purpose !== 'deployment' || intent.stage !== 'deployment' || !['connect', 'disconnect'].includes(intent.mode) || intent.keys.length) fail();
   const deployment = parseCloudDeploymentTopologyV1(intent.deployment);
   const ids = intent.mode === 'disconnect' ? (intent.installed ?? []).map(item => evidenceSchema.parse(item).native.installationId) : [intent.installationId];
   if (!ids.length || new Set(ids).size !== 1) fail();

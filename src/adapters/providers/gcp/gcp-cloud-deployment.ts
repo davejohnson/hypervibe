@@ -61,7 +61,7 @@ const evidenceSchema = z.object({ resources: z.array(z.object({ kind: z.enum(['p
 }).strict();
 
 function settings(intent: CloudInstallationIntent) {
-  if (intent.provider !== 'gcp' || intent.purpose !== 'deployment' || intent.stage !== 'deployment' || intent.mode === 'migrate' || intent.keys.length) fail();
+  if (intent.provider !== 'gcp' || intent.purpose !== 'deployment' || intent.stage !== 'deployment' || !['connect', 'disconnect'].includes(intent.mode) || intent.keys.length) fail();
   const scope = scopeSchema.parse(intent.nativeScope), topology = parseCloudDeploymentTopologyV1(intent.deployment);
   // Every retained item is strictly validated by parseEvidence, including the
   // same original installation ID. Avoid reparsing the entire journal for each

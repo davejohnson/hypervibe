@@ -30,7 +30,7 @@ export interface CloudInstallationIntent {
   purpose?: 'collection' | 'deployment';
   /** Exact committed hosting topology and immutable runtime references, separately reviewed. */
   deployment?: CloudDeploymentTopologyV1;
-  mode: 'connect' | 'migrate' | 'disconnect';
+  mode: 'connect' | 'connect-existing' | 'migrate' | 'disconnect';
   /** Omitted on historical collection records; scope preparation never authorizes writers. */
   stage?: CloudInstallationStage;
   /** Immutable predecessor, separately reviewed before the collection installation. */
@@ -40,7 +40,7 @@ export interface CloudInstallationIntent {
   hostIdentity: CloudInstallationHostIdentity;
   /** Collection keys; deployment installation requires the explicit empty list. */
   keys: string[];
-  /** Reviewed existing destinations; migration replaces writer authorization, never native values or references. */
+  /** Reviewed existing destinations. connect-existing authorizes the first hosted writer; migrate replaces an authorized old writer. Neither changes native values or references. */
   migrationTargets?: Array<{ key: string; destination: SecretDestination }>;
   /** Exact previously verified resources for a separate disconnect review. */
   installed?: CloudInstallationEvidence[];

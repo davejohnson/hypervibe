@@ -217,12 +217,12 @@ describe('GCP hosted installation through serialized transport', () => {
     const action = ready.plan.actions.find(action => action.id === 'gcp:grant:project')!;
     expect(await driver.inspect({ ...context(), completed, action })).toEqual({ state: 'conflict', reason: 'ownership_mismatch' });
   });
-  it('migrates an exact existing container without replacing its lifetime or requiring container-create permission', async () => {
+  it.each(['migrate', 'connect-existing'] as const)('%s preserves an exact existing container without requiring container-create permission or an old writer', async mode => {
     const api = transport(); const driver = createGcpCloudInstallationDriver({ fetch: api.request });
     const resource = 'projects/123456789012/secrets/EXISTING_token';
     const original = { name: resource, createTime: '2024-01-01T00:00:00Z', replication: { automatic: {} }, labels: { customer: 'retained' } };
     api.objects.set('/v1/' + resource, structuredClone(original));
-    const migration: CloudInstallationIntent = { ...intent, mode: 'migrate', migrationTargets: [{ key: 'API_TOKEN', destination: {
+    const migration: CloudInstallationIntent = { ...intent, mode, migrationTargets: [{ key: 'API_TOKEN', destination: {
       provider: 'gcp-secret-manager', projectId: 'customer-sequence', projectNumber: '123456789012', secretId: 'EXISTING_token',
     } }] };
     const records = new Map<string, CloudInstallationRecord>();
@@ -266,11 +266,11 @@ describe('GCP hosted installation through serialized transport', () => {
     expect(planned.plan.review.permissions.filter(item => item.actions.includes('secretmanager.versions.add'))).toHaveLength(16);
   });
 
-  it('rejects a recreated migration container between review and inspection', async () => {
+  it.each(['migrate', 'connect-existing'] as const)('%s rejects a recreated container between review and inspection', async mode => {
     const api = transport(); const driver = createGcpCloudInstallationDriver({ fetch: api.request });
     const name = 'projects/123456789012/secrets/EXISTING_token';
     api.objects.set('/v1/' + name, { name, createTime: '2024-01-01T00:00:00Z' });
-    const ctx = context({ ...intent, mode: 'migrate', migrationTargets: [{ key: 'API_TOKEN', destination: {
+    const ctx = context({ ...intent, mode, migrationTargets: [{ key: 'API_TOKEN', destination: {
       provider: 'gcp-secret-manager', projectId: 'customer-sequence', projectNumber: '123456789012', secretId: 'EXISTING_token',
     } }] });
     const plan = await driver.plan(ctx);

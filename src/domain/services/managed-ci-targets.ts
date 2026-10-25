@@ -23,6 +23,7 @@ import { ConnectionRepository } from '../../adapters/db/repositories/connection.
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { getProjectScopeHints } from './project-scope.js';
 import { reviewedCloudDeploymentCiAccess } from './cloud-deployment-ci.js';
+import { cloudDeploymentEffectiveSourceV1 } from './cloud-deployment-authentication.js';
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -367,8 +368,9 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
       scopeHints: getProjectScopeHints(project), store: { connections: new ConnectionRepository(), get secretStore() { return getSecretStore(); } } });
     if (deployment) {
       target.deploymentAccess = { origin: deployment.binding.baseUrl, projectId: deployment.binding.projectId,
-        connectionId: deployment.binding.connectionId, environment: environmentName, sourceBranch: deployment.binding.source.branch,
-        connection: deployment.receipt };
+        connectionId: deployment.binding.connectionId, environment: environmentName,
+        sourceBranch: cloudDeploymentEffectiveSourceV1(deployment.receipt, deployment.sourceAuthorization).branch,
+        connection: deployment.receipt, ...(deployment.sourceAuthorization ? { sourceAuthorization: deployment.sourceAuthorization } : {}) };
       // Separate browser approval still controls release. Rendering carries no
       // device/native token or mutable policy digest into the managed program.
       target.deploymentAccess = reviewedCloudDeploymentCiAccess(target);

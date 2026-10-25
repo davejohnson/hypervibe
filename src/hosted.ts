@@ -34,8 +34,10 @@ export { cloudSecretSetupSchema, cloudSecretSetupReceiptSchema, type CloudSecret
 export * from './domain/ports/cloud-installation.port.js';
 export * from './domain/ports/cloud-deployment.port.js';
 export { createAwsCloudDeploymentTemplateV1 } from './adapters/providers/aws/aws-cloud-deployment.js';
-export { CloudDeploymentAccessError, parseCloudDeploymentTopologyV1, parseCloudDeploymentConnectionV1, parseCloudDeploymentSessionV1, validateCloudDeploymentAdapterInputV1 } from './domain/services/cloud-deployment-authentication.js';
-export { issueCloudDeploymentSessionV1, prepareCloudDeploymentIntentV1, assertCloudDeploymentSourcePlacementV1, verifyCloudDeploymentReleaseTargetsV1 } from './application/hosted/cloud-deployment-session.js';
+export { CloudDeploymentAccessError, parseCloudDeploymentTopologyV1, parseCloudDeploymentConnectionV1, parseCloudDeploymentSessionV1, validateCloudDeploymentAdapterInputV1,
+  parseCloudDeploymentSourceAuthorizationV1, cloudDeploymentEffectiveSourceV1, cloudDeploymentSourceAuthorityDigestV1 } from './domain/services/cloud-deployment-authentication.js';
+export { issueCloudDeploymentSessionV1, prepareCloudDeploymentIntentV1, assertCloudDeploymentSourcePlacementV1, verifyCloudDeploymentReleaseTargetsV1,
+  prepareCloudDeploymentSourceAuthorizationV1 } from './application/hosted/cloud-deployment-session.js';
 export {
   CloudInstallationError, parseCloudInstallationIntentV1, parseCloudInstallationRecordV1,
   planCloudInstallationV1, applyCloudInstallationV1, reconcileCloudInstallationV1, cloudInstallationConnectionsV1,

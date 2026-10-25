@@ -3,6 +3,7 @@ import {
   planCloudInstallationV1, applyCloudInstallationV1, reconcileCloudInstallationV1,
   parseCloudInstallationRecordV1,
   cloudInstallationDisconnectionIntentV1,
+  cloudInstallationConnectionsV1,
 } from '../cloud-installation.js';
 import type {
   CloudInstallationAction, CloudInstallationContext, CloudInstallationDriver, CloudInstallationIntent,
@@ -53,6 +54,23 @@ function fixture(actions = [action()]) {
 }
 
 describe('hosted installation lifecycle (synthetic provider boundary)', () => {
+  it('reviews first-writer authorization distinctly while preserving exact existing targets', async () => {
+    const f = fixture();
+    const destination = { provider: 'gcp-secret-manager' as const, projectId: 'customer-project', projectNumber: '123456789', secretId: 'retained-key' };
+    const existing = { ...intent, mode: 'connect-existing' as const, migrationTargets: [{ key: 'API_KEY', destination }] };
+    const planned = await planCloudInstallationV1({ ...f.context, intent: existing });
+    const changed = structuredClone(planned); changed.intent.mode = 'migrate';
+    expect(() => parseCloudInstallationRecordV1(changed, f.driver)).toThrow('invalid_contract');
+    const ready = await f.apply();
+    vi.mocked(f.driver.connections).mockReturnValue([{ key: 'API_KEY', destination, writerAuthorization: { writerId: 'native-writer' } }]);
+    expect(cloudInstallationConnectionsV1(ready, f.driver)[0].destination).toEqual(destination);
+    vi.mocked(f.driver.connections).mockReturnValue([{ key: 'API_KEY', destination: { ...destination, secretId: 'replacement' }, writerAuthorization: { writerId: 'native-writer' } }]);
+    expect(() => cloudInstallationConnectionsV1(ready, f.driver)).toThrow('invalid_contract');
+    const unsafe = fixture([{ ...action(), metadata: { ...action().metadata, category: 'secret-container' } }]);
+    await expect(planCloudInstallationV1({ ...unsafe.context, intent: existing })).rejects.toMatchObject({ code: 'invalid_contract' });
+    expect(unsafe.store.compareAndSwap).not.toHaveBeenCalled();
+    await expect(planCloudInstallationV1({ ...fixture().context, intent: { ...existing, migrationTargets: undefined } })).rejects.toMatchObject({ code: 'invalid_contract' });
+  });
   it('cannot omit an accepted trust grant whose acknowledgment was lost when projecting disconnect', async () => {
     const first = action('account'); const grant = { ...action('host-trust'), dependsOn: ['account'], type: 'update' as const,
       metadata: { ...action().metadata, category: 'trust' as const, operation: 'grant-host' } };

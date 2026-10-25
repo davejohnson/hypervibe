@@ -22,7 +22,7 @@ const hash = (value: string | Buffer) => createHash('sha256').update(value).dige
 const canonical = (value: unknown) => JSON.stringify(canonicalizeJson(value));
 const writerSchema = z.object({ serviceAccountEmail: secretSetupServiceAccountSchema, uniqueId: z.string().regex(/^\d{1,30}$/) }).strict();
 const browserSource = z.object({ branch: sourceBranchSchema, revision: z.string().regex(/^[a-f0-9]{40}$/), digest: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
-const browserMode = z.enum(['connect', 'migrate']);
+const browserMode = z.enum(['connect', 'connect-existing', 'migrate']);
 const browserKeys = z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/)).min(1).max(16).refine(keys => new Set(keys).size === keys.length);
 // Deliberately project only value-free device fields. Browser review also has
 // installation details and administrator invitations; those are not agent data.
@@ -56,7 +56,7 @@ const stateSchema = z.object({
 type State = z.infer<typeof stateSchema>;
 export interface CloudSecretSetupInput {
   action?: 'discover' | 'start' | 'status' | 'preview' | 'prepare' | 'connect' | 'revoke' | 'accept-source';
-  browser?: boolean; keys?: string[]; mode?: 'connect' | 'migrate';
+  browser?: boolean; keys?: string[]; mode?: 'connect' | 'connect-existing' | 'migrate';
   env?: string; sourceBranch?: string; baseUrl?: string; previewId?: string; confirm?: boolean; adminAuth?: 'default';
   provider?: string; credentialsRef?: string; credentialKind?: string; connectionId?: string;
 }
@@ -246,8 +246,8 @@ export function createCloudSecretSetups({ context, fetchImpl = fetch, directory 
         throw new HvError('PROVIDER_ERROR', 'The hosted cloud connection receipt differs from the exact reviewed app, environment, source or targets.');
       const nextStep = remote.status === 'scope-ready' ? { command: 'hv_cloud_connections',
         instruction: 'Open this connection’s browser link to review the next setup step in the verified cloud project. Scope preparation does not authorize collection or deployment.' }
-        : remote.status === 'source-required' && remote.mode === 'migrate' ? { command: 'hv_cloud_connections',
-        instruction: 'Use purpose="connect-cloud" action="accept-source" to approve the reviewed writer switch. Preserve the committed destinations and immutable versions.' }
+        : remote.status === 'source-required' && remote.mode !== 'connect' ? { command: 'hv_cloud_connections',
+        instruction: 'Use purpose="connect-cloud" action="accept-source" to approve the reviewed hosted writer authorization. Preserve the committed destinations and immutable versions.' }
         : remote.status === 'source-required' ? { command: 'hv_spec',
         instruction: 'Apply only these value-free destinations to this environment, preserving all other settings and secret ownership. Commit the spec, then use hv_cloud_connections purpose="connect-cloud" action="accept-source".' }
         : remote.status === 'ready' ? { command: 'hv_cloud_requests', instruction: 'Authorize collection separately, then request only eligible missing inputs from the current plan.' } : undefined;
@@ -295,7 +295,7 @@ export function createCloudSecretSetups({ context, fetchImpl = fetch, directory 
           throw new HvError('VALIDATION', 'The exact installation must finish before accepting its committed destination patch.');
         for (const slot of current.connection.destinations) {
           const declared = local.spec.environments[local.env].secretDestinations?.[slot.key];
-          if (!declared || current.connection.mode !== 'migrate' && declared.version || canonical(declared.destination) !== canonical(slot.destination))
+          if (!declared || current.connection.mode === 'connect' && declared.version || canonical(declared.destination) !== canonical(slot.destination))
             throw new HvError('VALIDATION', 'Commit the exact proposed native destinations without introducing values or versions.');
         }
         if (saved.installation.acceptance) return { ...current, status: 'pending',
@@ -345,10 +345,10 @@ export function createCloudSecretSetups({ context, fetchImpl = fetch, directory 
       const reconnectsTargets = archive && archive.keys.every(key => desired.secretDestinations?.[key]);
       const mode = input.mode ?? (reconnectsTargets ? 'migrate' : 'connect');
       const keys = browserKeys.parse(input.keys ?? (reconnectsTargets && mode === 'migrate' ? archive?.keys : undefined) ?? Object.entries(local.spec.secrets)
-        .filter(([key, slot]) => slot.ownership === 'delegated' && slot.environments.includes(local.env) && (mode === 'migrate' ? !!desired.secretDestinations?.[key] : !desired.secretDestinations?.[key]))
+        .filter(([key, slot]) => slot.ownership === 'delegated' && slot.environments.includes(local.env) && (mode !== 'connect' ? !!desired.secretDestinations?.[key] : !desired.secretDestinations?.[key]))
         .map(([key]) => key)).sort();
-      if (keys.some(key => !local.spec.secrets[key]?.environments.includes(local.env) || (mode === 'migrate' ? !desired.secretDestinations?.[key] : !!desired.secretDestinations?.[key])))
-        throw new HvError('VALIDATION', 'Select declared environment secrets matching this mode: connect prepares missing destinations; migrate preserves existing destinations and reviews a writer replacement.');
+      if (keys.some(key => !local.spec.secrets[key]?.environments.includes(local.env) || (mode !== 'connect' ? !desired.secretDestinations?.[key] : !!desired.secretDestinations?.[key])))
+        throw new HvError('VALIDATION', 'Select declared environment secrets matching this mode: connect prepares missing destinations; connect-existing authorizes their first hosted writer; migrate replaces a verified writer while preserving existing destinations.');
       if (archive) saved.installationHistory = [...(saved.installationHistory ?? []), archive];
       saved.installation = { id: randomUUID(), mode, keys, source: local.source, pending: true };
       // Save before POST. A timeout can only read this ID; it cannot send another installation.
