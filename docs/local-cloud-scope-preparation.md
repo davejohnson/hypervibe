@@ -111,6 +111,24 @@ not prove the original journal has recovered in GCP, authorize another create,
 or establish complete cloud onboarding. Recovery must use the retained original
 operation, fresh native ownership/lifetime evidence and read-only requests.
 
+### Historical review warnings and current observations
+
+The live verified zero-action plan exposed a separate projection defect: its
+warnings still stated the original denied lookup and unverified create authority
+as present facts. The approved review must remain immutable, while the current
+native observation determines readiness. The counterexamples are successful
+recovery after the original GET403 and a fresh permission failure after success.
+
+Real `hv_plan`/`hv_apply`/`hv_status` command regressions, using serialized Google
+responses and SQLite, failed in all three ready/pending/newly-denied cases before
+the fix (**3 failed**). After an attempt, projected review warnings now carry
+`Historical approval review:` on both the nested review and top-level warning
+surfaces. The saved approval plan is unchanged. Current recovery failures remain
+separate, readiness remains false and apply stays unsuccessful while unresolved.
+The three focused application/local-allocation/journal suites passed **29 tests**
+afterward. No provider behavior, extra mutation authority or cloud resources were
+changed by this projection fix; its regressions run in normal `npm test`.
+
 The regression assumption was that retaining the completed-resource map forever
 was sufficient recovery protection. The counterexamples were a completed native
 project becoming unreadable or having a different lifetime: the real shared

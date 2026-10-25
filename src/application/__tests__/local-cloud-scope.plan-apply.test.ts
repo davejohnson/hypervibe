@@ -172,6 +172,47 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
     expect(status).toMatchObject({ ok: true, data: { scope: 'cloud-scope', allocationComplete: true, hostingReady: false } });
   });
 
+  it.each(['ready', 'pending', 'forbidden'] as const)('distinguishes the immutable approval review from current %s observations in both command warning surfaces', async state => {
+    // Product evidence: approval history is immutable, but a later native read
+    // determines current readiness. A historical GET403 cannot remain a present
+    // blocker after success, or conceal a newly denied read after success.
+    const f = fixture({ denied: true, pending: state === 'pending' });
+    const registry = new CommandRegistry(); registerCoreTools(registry, f.ctx);
+    const first = await registry.execute('hv_plan', { project: f.project.name, env: 'staging' });
+    expect(first.ok).toBe(true);
+    const firstData = first.data as any;
+    const savedPlan = f.ctx.repos.runs.findById(firstData.planId)!.plan as any;
+    const installationId = savedPlan.cloudScope.installationId;
+    const approval = structuredClone((f.ctx.repos.runs.findById(installationId)!.plan as any).plan);
+    expect(firstData.cloudScopeReview.warnings).toEqual(approval.review.warnings);
+    expect(firstData.cloudScopeReview.warnings.join(' ')).toMatch(/lookup is unknown|creation authority is unverified/);
+    await registry.execute('hv_apply', { project: f.project.name, planId: firstData.planId, confirmActions: ['gcp:project'] });
+    if (state === 'forbidden') {
+      const original = f.request.getMockImplementation()!;
+      f.request.mockImplementation((input, init) => String(input).endsWith(`/projects/${nativeId}`)
+        ? Promise.resolve(Response.json({}, { status: 403 })) : original(input, init));
+    }
+    const next = await registry.execute('hv_plan', { project: f.project.name, env: 'staging' });
+    expect(next.ok).toBe(true);
+    const data = next.data as any;
+    const historical = approval.review.warnings.map((warning: string) => `Historical approval review: ${warning}`);
+    expect(data.cloudScopeReview.warnings).toEqual(historical);
+    expect(next.warnings).toEqual(expect.arrayContaining(historical));
+    for (const warning of approval.review.warnings) expect(next.warnings).not.toContain(warning);
+    expect((f.ctx.repos.runs.findById(installationId)!.plan as any).plan).toEqual(approval);
+    const status = await registry.execute('hv_status', { project: f.project.name, env: 'staging' });
+    expect(status).toMatchObject({ ok: true, data: { allocationComplete: state === 'ready', verified: state === 'ready', hostingReady: false } });
+    if (state === 'ready') {
+      expect(data.actions).toEqual([]);
+      expect(next.warnings?.some(warning => warning.startsWith('The retained allocation reports '))).toBe(false);
+    } else {
+      expect(data.actions).toMatchObject([{ type: 'update', requiresConfirm: false }]);
+      expect(next.warnings).toEqual(expect.arrayContaining([expect.stringMatching(/^The retained allocation reports /)]));
+      expect(await f.apply(data.planId, [])).toMatchObject({ kind: 'executed', result: { success: false } });
+    }
+    expect(f.writes).toHaveLength(1);
+  });
+
   it.each(['azure-container-apps', 'unsupported-local-review'])('recovers the historical operation after current hosting changes to %s', async provider => {
     const f = fixture({ pending: true }); const first = await f.plan(); if ('error' in first) throw new Error(first.error);
     await f.apply(first.planRunId);

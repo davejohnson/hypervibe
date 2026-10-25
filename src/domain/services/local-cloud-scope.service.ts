@@ -126,8 +126,12 @@ export async function planLocalCloudScope(input: { project: Project; environment
   }
   if (record.plan.blockedReason && !record.attempts.length) throw unavailable();
   const mode = record.status === 'scope-ready' ? 'verified' : record.attempts.length ? 'recover' : 'allocate';
-  return { ...projection(record, mode), environment, review: record.plan.review, warnings: [
-    ...record.plan.review.warnings,
+  // Preserve the approved plan while distinguishing its observations from the
+  // current reconciliation result on both public warning surfaces.
+  const review = mode === 'allocate' ? record.plan.review : { ...record.plan.review,
+    warnings: record.plan.review.warnings.map(warning => `Historical approval review: ${warning}`) };
+  return { ...projection(record, mode), environment, review, warnings: [
+    ...review.warnings,
     ...record.plan.review.costs.map(item => item.description),
     'This stage allocates an empty cloud project only. Billing, API enablement, cloud connections and hosting are separate reviewed work.',
     'An allocated but unbound project remains in this isolated stage until a separate reviewed lifecycle handoff records its connection and binding; removing this declaration does not adopt it.',
