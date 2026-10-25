@@ -65,7 +65,7 @@ async function originalLoginAccess(origin: AzureProbeOrigin, signal: AbortSignal
 }
 
 selected('runs only the explicitly selected disposable Azure probe lifecycle stage', async () => {
-  expect(['plan', 'apply', 'recover', 'cleanup-plan', 'cleanup-apply', 'status']).toContain(mode);
+  expect(['plan', 'apply', 'recover', 'cleanup-plan', 'cleanup-apply', 'cleanup-recover', 'status']).toContain(mode);
   const directory = process.env.HYPERVIBE_AZURE_PROBE_RUN_DIR ?? '';
   if (!path.isAbsolute(directory) || !/^hv-azure-disposable-probe-[a-z0-9-]+$/.test(path.basename(directory))) throw new Error('probe_directory_invalid');
   mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -108,11 +108,12 @@ selected('runs only the explicitly selected disposable Azure probe lifecycle sta
         environmentId: manifest.environmentId, preparationPlanId: manifest.plan.id });
       save(manifestPath, manifest);
     }
-    if (['apply', 'cleanup-apply', 'recover'].includes(mode!)) {
-      const selectedPlan = mode === 'cleanup-apply' ? manifest.cleanup : manifest.plan;
+    if (['apply', 'cleanup-apply', 'recover', 'cleanup-recover'].includes(mode!)) {
+      const cleanup = mode === 'cleanup-apply' || mode === 'cleanup-recover';
+      const selectedPlan = cleanup ? manifest.cleanup : manifest.plan;
       if (!selectedPlan) throw new Error('probe_plan_missing');
-      const approvalPath = path.join(directory, mode === 'cleanup-apply' ? 'cleanup-approval.json' : 'approval.json');
-      const readOnly = mode === 'recover';
+      const approvalPath = path.join(directory, cleanup ? 'cleanup-approval.json' : 'approval.json');
+      const readOnly = mode === 'recover' || mode === 'cleanup-recover';
       const authorized = async (input: { planId: string; planDigest: string; actionId: string }) => {
         try {
           if (azureProbeOriginDigest(JSON.parse(readFileSync(originPath, 'utf8'))) !== authorizationOriginDigest) return false;

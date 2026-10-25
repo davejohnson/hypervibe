@@ -31,8 +31,9 @@ export interface AzureDisposableProbeSpec extends Input {
   resources: Record<Kind, { id: string; apiVersion: string; body: Record<string, unknown> }>;
 }
 interface Snapshot { id: string; lifetime: Record<string, string>; fingerprint: string }
-interface Event { phase: 'attempted' | 'acknowledged' | 'complete'; attemptId: string; requestId: string;
-  status?: number; nativeRequestId?: string; echoedClientRequestId?: string; baseline?: Snapshot; observed?: Snapshot; guard?: 'verified' | 'not-supported' }
+interface Event { phase: 'attempted' | 'acknowledged' | 'complete' | 'rejected'; attemptId: string; requestId: string;
+  status?: number; nativeRequestId?: string; echoedClientRequestId?: string; baseline?: Snapshot; observed?: Snapshot; guard?: 'verified' | 'not-supported';
+  absence?: { status: 404; observedAt: string } }
 interface Access {
   authorizationOriginDigest: string;
   fetch: typeof fetch;
@@ -104,9 +105,14 @@ function events(planId: string, environmentId: string, actionId: string): Event[
 }
 function lastEvent(planId: string, environmentId: string, actionId: string): Event | undefined {
   const all = events(planId, environmentId, actionId);
-  const complete = all.filter(event => event.phase === 'complete');
-  if (complete.length) return complete.at(-1);
+  const terminal = all.filter(event => event.phase === 'complete' || event.phase === 'rejected');
+  if (terminal.length) return terminal.at(-1);
   return all.filter(event => event.phase === 'acknowledged').at(-1) ?? all.at(-1);
+}
+function rejectedVaultAbsence(event: Event | undefined, item: PlanAction): boolean {
+  return event?.phase === 'rejected' && item.metadata?.resourceKind === 'vault' && item.metadata?.step === 'prepare'
+    && event.status === 409 && guid.safeParse(event.nativeRequestId).success && !event.baseline && !event.observed
+    && event.absence?.status === 404 && z.string().datetime().safeParse(event.absence.observedAt).success;
 }
 function completeSnapshot(planId: string, environmentId: string, kind: Kind): Snapshot {
   const complete = lastEvent(planId, environmentId, `probe:${kind}:prepare`);
@@ -123,10 +129,12 @@ export async function planAzureDisposableProbeCleanup(input: { projectId: string
   // resources do not establish ownership and are simply absent from cleanup.
   for (const item of document.actions) {
     const retained = lastEvent(prior.id, input.environmentId, item.id);
-    if (retained && retained.phase !== 'complete') fail('probe_ownership_unverified');
+    if (retained && retained.phase !== 'complete' && !rejectedVaultAbsence(retained, item)) fail('probe_ownership_unverified');
   }
   for (const kind of [...kinds].reverse()) {
-    if (!lastEvent(prior.id, input.environmentId, `probe:${kind}:prepare`)) continue;
+    const preparation = document.actions.find(item => item.id === `probe:${kind}:prepare`)!;
+    const retained = lastEvent(prior.id, input.environmentId, preparation.id);
+    if (!retained || rejectedVaultAbsence(retained, preparation)) continue;
     const expected = completeSnapshot(prior.id, input.environmentId, kind);
     actions.push(action(spec, kind, 'delete', actions.length ? [actions.at(-1)!.id] : undefined, expected));
   }
@@ -257,6 +265,19 @@ export async function applyAzureDisposableProbe(input: Access & { planId: string
           journal(acknowledged); retained = acknowledged;
         }
         const after = await observe();
+        // Key Vault 2024-11-01 defines non-200/201 responses as failed
+        // operations; ARM async acceptance is 201/202. A retained native 409
+        // plus fresh exact 404 settles rejection, not creation ownership. Keep
+        // the original acknowledgment/request IDs and append absence evidence.
+        // Lost acknowledgments, 2xx/5xx, unknown reads and present targets never
+        // enter this branch. A later invocation cannot replay the rejected PUT.
+        if (kind === 'vault' && step === 'prepare' && ['acknowledged', 'rejected'].includes(retained.phase)
+          && retained.status === 409 && guid.safeParse(retained.nativeRequestId).success && !retained.baseline && !retained.observed) {
+          if (after !== null) fail('probe_identity_mismatch');
+          journal({ ...retained, phase: 'rejected', absence: { status: 404, observedAt: new Date().toISOString() } });
+          return { success: false, message: 'Vault creation was rejected and the exact target is absent; no vault ownership or retry authorized',
+            data: { outcome: 'rejected-absent' } };
+        }
         if (step === 'delete') {
           if (after !== null || !retained.baseline || ![200, 202, 204, 404].includes(retained.status ?? 0))
             return { success: false, status: 'pending', message: 'Exact fixture deletion not yet verified' };

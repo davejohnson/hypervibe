@@ -2,9 +2,11 @@
 
 This is a test-only saved-plan experiment. It does not enable Azure production
 creation, install cloud trust, or constitute the required Connect Cloud live
-walkthrough. No cloud writes have been made. The local preparation below produced
-an actual `hv_plan` document in a separate journal using `RunRepository` and the
-ordinary `ConvergeExecutor`; it did not copy a credential or open the login store.
+walkthrough. The owner-approved Phase A run on 2026-10-25 produced negative
+conditional-header evidence for resource groups and managed identities, a rejected
+vault creation, and verified cleanup of the two created fixtures. The saved
+`hv_plan` used a separate journal, `RunRepository` and the ordinary
+`ConvergeExecutor`; credentials remained in the original login store.
 
 ## Private reviewed scope
 
@@ -93,12 +95,13 @@ claim that each proposed ARM call is a billed vault data operation. The retrieve
 price evidence is retained in the private owner-review artifact directory.
 See [Key Vault pricing](https://azure.microsoft.com/en-us/pricing/details/key-vault/).
 
-Proposed approval: the exact private review plan, **USD 1 operational ceiling and a maximum
+Approval covers the exact private review plan, **USD 1 operational ceiling and a maximum
 one-hour execution window**. This is a stop policy, not an Azure-enforced billing
-cap. Approval is not yet given. The runner requires a separate exact confirmation
+cap. The 2026-10-25 approval included scoped cleanup. The runner requires a separate exact confirmation
 document covering every action and rechecks it after asynchronous authentication
 and native reads immediately before each PUT/DELETE. It never generates approval.
-No live `apply` invocation has been made.
+The initial approved review bytes and consent remain separate from the later
+cleanup plan and its exact confirmation.
 
 Cleanup is a separate saved plan with `destroy` actions ordered vault, identity,
 then empty group. It includes only independently completed owned fixtures; a later
@@ -113,7 +116,7 @@ fence: an independently authorized actor could add a resource between them. The
 owner must reserve this exact disposable namespace for the experiment; the check
 does not establish production-safe deletion under concurrent unrelated writes.
 A resource replacement, unknown write or missing evidence stops
-cleanup and retains its journal. The vault remains soft-deleted for seven days;
+cleanup and retains its journal. If a vault was created, it remains soft-deleted for seven days;
 the runner never purges it or disables purge protection. This retention is explicit
 in [Azure's soft-delete contract](https://learn.microsoft.com/en-us/azure/key-vault/general/soft-delete-overview).
 
@@ -123,6 +126,61 @@ recovery can finish a retained acknowledged request, but a missing acknowledgmen
 cannot become ownership merely because the proposed name and tags now exist.
 Cleanup may therefore remain incomplete after an ambiguous initial write; the
 report must retain that limitation instead of issuing another upsert or delete.
+
+The test-only recovery contract also distinguishes a rejected vault creation from
+an owned fixture. Only a retained Key Vault preparation acknowledgment with HTTP
+409 and a native request ID, followed by fresh exact GET 404, can record
+`rejected-absent`. It retains the original attempt and acknowledgment, appends the
+absence observation time, and never invents a vault lifetime or permits replay.
+The [Key Vault API](https://learn.microsoft.com/en-us/rest/api/keyvault/keyvault/vaults/create-or-update?view=rest-keyvault-keyvault-2024-11-01)
+defines responses outside 200/201 as failed operations, while
+[ARM asynchronous acceptance](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/async-operations)
+starts with 201/202. This does not identify the cause of a 409 or establish absence
+from the error alone. Lost acknowledgments, successful/accepted writes followed by
+404, server failures, unreadable state and a present vault remain unresolved.
+`cleanup-recover` selects the saved cleanup plan with `readOnly: true`; a retained
+DELETE acknowledgment is re-observed without sending another DELETE.
+
+## Live Phase A result — 2026-10-25
+
+The exact approved namespace in Canada Central was used between 06:09 and 06:27
+UTC, within the one-hour window. There were **seven setup/test PUT attempts and
+two cleanup DELETE attempts**, with no replay, registration, IAM/RBAC change,
+secret value, workload, vault deletion or purge.
+
+| Resource / API | Preparation | Same-body control | `If-None-Match: *` | Outcome |
+| --- | --- | --- | --- | --- |
+| Resource group / `2021-04-01` | 201 | 200 | 200 | Header did not reject the write; reviewed configuration unchanged. No immutable group lifetime is exposed. |
+| User-assigned identity / `2024-11-30` | 201 | 200 | 200 | Header did not reject the write; retained client/principal/tenant IDs and configuration unchanged. |
+| Vault / `2024-11-01` | 409 | Not attempted | Not attempted | Creation rejected; fresh GET 404 established absence. The conflict cause is unknown. |
+
+Read-only forensics confirmed the group and identity matched their retained
+evidence, the vault was absent, and the complete group inventory contained only
+the reviewed identity. Recovery settled the vault as rejected and absent, so the
+separate cleanup plan contained only identity deletion followed by empty-group
+deletion. Identity DELETE returned 200 and group DELETE returned 202. GET-only
+cleanup recovery verified terminal absence for both at 06:26:53 UTC. Thus all
+three exact reviewed IDs were checked absent: vault during rejection recovery,
+identity and group during cleanup recovery.
+
+The pre-delete empty-group inventory guard ran and is covered by the lifecycle
+test, but its native inventory fields were not separately serialized in this
+run. Retained DELETE acknowledgments and terminal-absence completion receipts
+are present. Raw error bodies and asynchronous response headers were not retained;
+their absence and the specific vault conflict cause are not asserted.
+
+The private run directory retains `approved-review.snapshot.json`, exact consent
+and cleanup approval, `journal.db`, `readonly-observation.json`,
+`recover-result.json`, `cleanup-apply-result.json`, `cleanup-recover-result.json`
+and `final-evidence.json`. The cost estimate remains below USD 0.01 for this
+bounded phase; no billing export was inspected, so this is not an invoice
+or a measured-cost claim. The operational ceiling was USD 1.
+
+These results cover only the tested APIs and scoped cleanup. They do not verify
+Container Apps, a concurrent absent-target creation race, new-customer Connect
+Cloud installation, collaborative collection, runtime secret consumption, or
+the required walkthroughs across AWS, Azure and GCP. No production capability
+or live-support status was promoted.
 
 ## Independent evidence and checks
 
@@ -139,14 +197,19 @@ failed because the probe lifecycle was absent; intermediate seven-case failures
 also exposed durable JSON optional-field normalization. Review regressions then
 failed on a GUID-shaped credential echo, changed private origin, partial cleanup
 and cancellation during authorization; their fixes pass through the same boundary.
-Fourteen offline tests now
+Twenty-three offline lifecycle tests now
 exercise the real executor and SQLite plus reconstructed serialized ARM transport:
 confirmation absence, retained attempt boundaries, ignored headers, side effect
 followed by lost acknowledgment, revocation during reads, pre-existing lookalikes,
 changed native principal after 412, stale digest and dependency-ordered cleanup.
 Raw response echo canaries and the synthetic bearer are absent from durable output.
 These tests run in ordinary `npm test`; the live runner is skipped unless explicitly
-selected. The plan-only runner also passed and created the reviewable journal.
+selected. Together with the separate Container Apps probe tests, the focused
+group has 27 passing tests. The live rejection initially reproduced a missing
+terminal-rejection path; its regression now recovers without ownership or replay
+and permits only independently owned cleanup. The live runner initially rejected
+`cleanup-recover`; the added selection uses the already read-only executor path.
+A serialized 202-to-404 regression verifies one DELETE followed only by reads.
 
 Successful live observations would establish only the tested resource/API/header
 behavior in this subscription and region. HTTP 200/201 on the conditional request
@@ -154,5 +217,6 @@ means the guard was not enforced. HTTP 412 with changed state, other statuses,
 missing lifetime evidence or timeout remain unknown. Even three positive results
 do not verify ACA's separate API, an atomic two-contender absent-target race, complete
 first deployment, runtime reference consumption or collaborative collection.
-Those require their own reviewed experiment and walkthrough. Azure remains blocked
-for a new customer until those production lifecycle requirements are met.
+Those require their own reviewed experiment and walkthrough. The production
+reviewed-namespace installer has separate evidence and does not rely on this
+conditional-header experiment.

@@ -64,6 +64,32 @@ async function planned() { return planAzureDisposableProbe({ projectId, environm
 function access(t: ReturnType<typeof transport>, authorize = async () => true) {
   return { authorizationOriginDigest, fetch: t.request, getAccessToken: async () => 'synthetic-transient-token', authorize };
 }
+// Redacted live observation: vault PUT 409, native request ID, later exact GET
+// 404; the enclosing inventory contained only the already-created identity.
+// Key Vault 2024-11-01 documents non-200/201 responses as operation failure;
+// ARM async acceptance uses 201/202. Other shapes below are synthetic negatives.
+// https://learn.microsoft.com/en-us/rest/api/keyvault/keyvault/vaults/create-or-update?view=rest-keyvault-keyvault-2024-11-01
+// https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/async-operations
+function rejectedVault(status = 409, readStatus = 404, lostAcknowledgment = false) {
+  const t = transport({ ignoreHeader: true }), original = t.request;
+  let attempted = false;
+  t.request = vi.fn(async (url, init) => {
+    const id = new URL(String(url)).pathname, method = init?.method ?? 'GET';
+    if (id !== spec().resources.vault.id) return original(url, init);
+    if (method === 'PUT') {
+      attempted = true;
+      const headers = { 'x-ms-request-id': '88888888-8888-4888-8888-888888888888' };
+      let native: any;
+      if (status === 201 || status === 202 || readStatus === 200) native = await (await original(url, init)).json();
+      else t.writes.push({ id, method, headers: new Headers(init?.headers) });
+      if (lostAcknowledgment) throw new Error('synthetic lost acknowledgment');
+      return Response.json(status === 201 || status === 202 ? native : { error: { code: 'Conflict', message: 'DO-NOT-PERSIST' } }, { status, headers });
+    }
+    if (method === 'GET' && attempted && readStatus !== 200) return Response.json({ error: { code: 'ResourceNotFound' } }, { status: readStatus });
+    return original(url, init);
+  });
+  return { ...t, setReadStatus: (value: number) => { readStatus = value; } };
+}
 describe('disposable Azure probes through the real saved-plan executor', () => {
   it('persists exact synthetic targets and confirmation gates without any native call', async () => {
     const plan = await planned();
@@ -163,6 +189,32 @@ describe('disposable Azure probes through the real saved-plan executor', () => {
     ]);
     expect(t.state.size).toBe(0);
   });
+  it('recovers acknowledged asynchronous cleanup by reading terminal absence without another DELETE', async () => {
+    const t = transport(); const plan = await planned();
+    await applyAzureDisposableProbe({ ...access(t), planId: plan.id, planDigest: plan.digest, confirmActions: plan.actions.map(a => a.id) });
+    const cleanup = await planAzureDisposableProbeCleanup({ projectId, environmentId, preparationPlanId: plan.id });
+    const original = t.request, group = structuredClone(t.state.get(spec().resources.group.id));
+    let deleting = false, complete = false;
+    t.request = vi.fn(async (url, init) => {
+      const id = new URL(String(url)).pathname, method = init?.method ?? 'GET';
+      if (id === group.id && method === 'DELETE') {
+        await original(url, init); deleting = true;
+        return new Response(null, { status: 202, headers: { 'x-ms-request-id': '99999999-9999-4999-8999-999999999999' } });
+      }
+      if (id === group.id && method === 'GET' && deleting && !complete) return Response.json(group);
+      return original(url, init);
+    });
+    const input = { ...access(t), planId: cleanup.id, planDigest: cleanup.digest, confirmActions: cleanup.actions.map(a => a.id) };
+    const pending = await applyAzureDisposableProbe(input);
+    expect(pending.receipts.at(-1)?.status).toBe('pending');
+    const before = t.writes.length; complete = true;
+    const recovered = await applyAzureDisposableProbe({ ...input, readOnly: true });
+    expect(recovered.success).toBe(true); expect(t.writes).toHaveLength(before);
+    expect(t.writes.filter(write => write.method === 'DELETE' && write.id === group.id)).toHaveLength(1);
+    const receipts = new RunRepository().findByEnvironmentId(environmentId).flatMap(run => run.receipts);
+    expect(receipts.find(row => row.step === 'probe-journal:probe:group:delete' && row.result?.phase === 'complete')?.result)
+      .toMatchObject({ status: 202, nativeRequestId: '99999999-9999-4999-8999-999999999999' });
+  });
   it('can clean the independently completed group after a later pre-write observation failure', async () => {
     const t = transport({ denyIdentityRead: true }); const plan = await planned();
     const prepared = await applyAzureDisposableProbe({ ...access(t), planId: plan.id, planDigest: plan.digest, confirmActions: plan.actions.map(a => a.id) });
@@ -177,6 +229,51 @@ describe('disposable Azure probes through the real saved-plan executor', () => {
     const prepared = await applyAzureDisposableProbe({ ...access(t), planId: plan.id, planDigest: plan.digest, confirmActions: plan.actions.map(a => a.id) });
     expect(prepared.success).toBe(false); expect(t.state.size).toBe(2);
     await expect(planAzureDisposableProbeCleanup({ projectId, environmentId, preparationPlanId: plan.id })).rejects.toThrow('probe_ownership_unverified');
+    expect(t.writes.some(write => write.method === 'DELETE')).toBe(false);
+  });
+  it('recovers a rejected vault create as absent without inventing ownership or replay, then cleans only completed fixtures', async () => {
+    const t = rejectedVault(409, 403); const plan = await planned();
+    const input = { ...access(t), planId: plan.id, planDigest: plan.digest, confirmActions: plan.actions.map(a => a.id) };
+    const first = await applyAzureDisposableProbe(input);
+    expect(first.receipts.find(row => row.actionId === 'probe:vault:prepare')?.status).toBe('pending');
+    const old = new RunRepository().findByEnvironmentId(environmentId).flatMap(run => run.receipts)
+      .find(row => row.step === 'probe-journal:probe:vault:prepare' && row.result?.phase === 'acknowledged')!;
+    t.setReadStatus(404);
+    const recovered = await applyAzureDisposableProbe({ ...input, readOnly: true });
+    expect(recovered.receipts.find(row => row.actionId === 'probe:vault:prepare')).toMatchObject({ status: 'failed', data: { outcome: 'rejected-absent' } });
+    const rejected = new RunRepository().findByEnvironmentId(environmentId).flatMap(run => run.receipts)
+      .find(row => row.step === 'probe-journal:probe:vault:prepare' && row.result?.phase === 'rejected')!;
+    expect(rejected.result).toMatchObject({ attemptId: old.result?.attemptId, requestId: old.result?.requestId,
+      nativeRequestId: old.result?.nativeRequestId, status: 409, absence: { status: 404 } });
+    expect(rejected.result?.observed).toBeUndefined();
+    expect((rejected.result?.absence as { observedAt: string }).observedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect((await applyAzureDisposableProbe(input)).success).toBe(false);
+    expect(t.writes).toHaveLength(7);
+    const cleanup = await planAzureDisposableProbeCleanup({ projectId, environmentId, preparationPlanId: plan.id });
+    expect(cleanup.actions.map(action => action.id)).toEqual(['probe:identity:delete', 'probe:group:delete']);
+    const result = await applyAzureDisposableProbe({ ...access(t), planId: cleanup.id, planDigest: cleanup.digest, confirmActions: cleanup.actions.map(a => a.id) });
+    expect(result.success).toBe(true);
+    expect(t.writes.filter(write => write.method === 'DELETE').map(write => write.id)).toEqual([spec().resources.identity.id, spec().resources.group.id]);
+    expect(t.state.size).toBe(0);
+    expect(JSON.stringify(new RunRepository().findByEnvironmentId(environmentId))).not.toContain('DO-NOT-PERSIST');
+  });
+  it.each([
+    { name: 'lost acknowledgment', status: 409, read: 404, lost: true },
+    { name: 'accepted async operation', status: 202, read: 404 },
+    { name: 'successful create followed by missing resource', status: 201, read: 404 },
+    { name: 'server failure', status: 500, read: 404 },
+    { name: 'unauthorized observation', status: 409, read: 401 },
+    { name: 'forbidden observation', status: 409, read: 403 },
+    { name: 'present vault after conflict', status: 409, read: 200 },
+  ])('keeps $name unresolved and forbids cleanup/replay', async ({ status, read, lost }) => {
+    const t = rejectedVault(status, read, lost); const plan = await planned();
+    const input = { ...access(t), planId: plan.id, planDigest: plan.digest, confirmActions: plan.actions.map(a => a.id) };
+    await applyAzureDisposableProbe(input);
+    const recovery = await applyAzureDisposableProbe({ ...input, readOnly: true });
+    expect(recovery.success).toBe(false);
+    expect(['pending', 'blocked']).toContain(recovery.receipts.find(row => row.actionId === 'probe:vault:prepare')?.status);
+    await expect(planAzureDisposableProbeCleanup({ projectId, environmentId, preparationPlanId: plan.id })).rejects.toThrow('probe_ownership_unverified');
+    expect(t.writes).toHaveLength(7);
     expect(t.writes.some(write => write.method === 'DELETE')).toBe(false);
   });
 });
