@@ -216,7 +216,7 @@ export async function applyProviderNativeDeploySourceAction(params: {
     };
   }
 
-  const hosting = await adapterFactory.getHostingAdapterByName(action.resource.provider, project);
+  const hosting = await adapterFactory.getHostingAdapterByName(action.resource.provider, project, environment.name);
   if (!hosting.success || !hosting.adapter) {
     return {
       success: false,

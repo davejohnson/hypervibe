@@ -11,7 +11,7 @@ export function registerHvCloudSecretsTools(commands: CommandRegistrar, ctx: Com
     'Import one approved hosted credential request into the current project’s gitignored .env.<env> exactly once. Start returns a browser approval link and comparison code; after owner approval, receive with confirm=true retrieves values privately. Existing populated keys block. Values and device proof never enter output. A lost consuming response requires a new request. Returned secretRefs are inputs to a fresh hv_plan, not deployment approval.',
     {
       action: z.enum(['start', 'receive']).optional(),
-      requestId: z.string().uuid(),
+      requestId: z.string().guid(),
       env: z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/),
       baseUrl: z.string().optional(),
       confirm: z.boolean().optional(),

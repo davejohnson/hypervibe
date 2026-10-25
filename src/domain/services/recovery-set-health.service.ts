@@ -9,7 +9,7 @@ import { readRecoveryJson, RECOVERY_LIMITS, recoverySetManifestSchema, recoveryS
 
 const MAX_EXECUTIONS = 256;
 const MAX_EXECUTION_OBJECTS = 8;
-const uuid = z.string().uuid();
+const uuid = z.string().guid();
 const timestamp = z.string().datetime();
 export const recoveryExecutionSchema = z.object({ version: z.literal(1), setId: uuid,
   contractHash: z.string().regex(/^[a-f0-9]{64}$/), completedAt: timestamp,

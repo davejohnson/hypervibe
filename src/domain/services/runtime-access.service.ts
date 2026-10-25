@@ -21,8 +21,8 @@ const grantSchema = z.object({ id: coordinate, attemptId: coordinate, evidence: 
 const targetSchema = z.object({ provider: coordinate, externalId: coordinate, context: coordinates, identity: identitySchema }).strict();
 const baseRecordSchema = targetSchema.extend({ binding: grantSchema.optional(), pending: z.object({ attemptId: coordinate, operation: z.enum(['grant', 'revoke']) }).strict().optional() }).strict();
 const recordSchema = baseRecordSchema.extend({ retiring: baseRecordSchema.optional() }).strict();
-const identitiesSchema = z.record(identityBindingSchema);
-const grantsSchema = z.record(z.record(recordSchema));
+const identitiesSchema = z.record(z.string(), identityBindingSchema);
+const grantsSchema = z.record(z.string(), z.record(z.string(), recordSchema));
 type AccessRecord = z.infer<typeof recordSchema>;
 export const RUNTIME_ACCESS_OPERATIONS = { identity: 'runtimeIdentity', grant: 'storageRuntimeGrant', revoke: 'storageRuntimeRevoke', recover: 'storageRuntimeRecover' } as const;
 const operations = new Set<string>(Object.values(RUNTIME_ACCESS_OPERATIONS));
@@ -271,7 +271,7 @@ export async function projectRuntimeAccessInput(project: Project, environment: E
   }
   const needsHosting = providers.size > 0 || Boolean(identityCapability && Object.keys(environmentSpec.services).length) || Object.keys(retained?.runtimeIdentities ?? {}).length > 0;
   if (!hosting && needsHosting) {
-    const result = await adapterFactory.getProviderAdapter(environmentSpec.hosting.provider, project);
+    const result = await adapterFactory.getProviderAdapter(environmentSpec.hosting.provider, project, undefined, environment?.name);
     if (result.success && result.adapter?.name === environmentSpec.hosting.provider) hosting = result.adapter;
   }
   if (needsHosting) await hosting?.configureTarget?.({ region: environmentSpec.hosting.region });

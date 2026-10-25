@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import type { ProjectSpec } from '../../domain/spec/spec.schema.js';
 import { orderActions } from '../../domain/plan/order-actions.js';
 import { hasExactPlanActionConfirmationAuthority } from '../../domain/plan/action-confirmation.js';
 import { secretDestinationSchema, secretDestinationIdentity } from '../../domain/ports/secret-destination.port.js';
+import { cloudDeploymentTopologySchema, parseCloudDeploymentConnectionV1 } from '../../domain/services/cloud-deployment-authentication.js';
 import {
   CLOUD_INSTALLATION_PROVIDERS, CLOUD_INSTALLATION_SECRET_PROVIDERS, CLOUD_INSTALLATION_REASONS, CloudInstallationBoundaryError, type CloudInstallationAction, type CloudInstallationApplyInput,
   type CloudInstallationContext, type CloudInstallationDriver, type CloudInstallationEvidence,
@@ -15,21 +17,23 @@ export class CloudInstallationError extends Error {
   constructor(readonly code: string) { super(`Cloud installation: ${code}.`); this.name = 'CloudInstallationError'; }
 }
 const text = z.string().min(1).max(2048);
-const strings = z.record(text);
+const strings = z.record(z.string(), text);
 const reasonSchema = z.enum(CLOUD_INSTALLATION_REASONS);
 const hostSchema = z.object({ kind: z.literal('gcp-service-account'), projectId: z.string().regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/),
   projectNumber: z.string().regex(/^[1-9]\d{5,19}$/), serviceAccountEmail: z.string().max(254).regex(/^[a-z][a-z0-9-]+@[a-z][a-z0-9-]+\.iam\.gserviceaccount\.com$/),
   subject: z.string().regex(/^[1-9]\d{5,29}$/), issuer: z.literal('https://accounts.google.com') }).strict();
 const evidenceSchema = z.object({ resources: z.array(z.object({ kind: text, id: text, identity: strings }).strict()).max(300),
-  native: z.record(z.unknown()) }).strict();
-const intentSchema = z.object({ schemaVersion: z.literal(1), installationId: z.string().uuid(), customerId: text, appId: text,
+  native: z.record(z.string(), z.unknown()) }).strict();
+const intentSchema = z.object({ schemaVersion: z.literal(1), installationId: z.string().guid(), customerId: text, appId: text,
   environment: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),
   source: z.object({ repository: z.string().max(500).regex(/^[a-z0-9.-]+(?::\d+)?\/[a-z0-9_.-]+(?:\/[a-z0-9_.-]+)+$/), branch: text,
     revision: z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/), specDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   provider: z.enum(CLOUD_INSTALLATION_PROVIDERS), mode: z.enum(['connect', 'migrate', 'disconnect']), nativeScope: strings, hostIdentity: hostSchema,
-  stage: z.enum(['scope-preparation', 'collection']).optional(),
-  scopePreparation: z.object({ installationId: z.string().uuid(), planDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
-  keys: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/)).min(1).max(100).refine(keys => new Set(keys).size === keys.length),
+  purpose: z.enum(['collection', 'deployment']).optional(),
+  deployment: cloudDeploymentTopologySchema.optional(),
+  stage: z.enum(['scope-preparation', 'collection', 'deployment']).optional(),
+  scopePreparation: z.object({ installationId: z.string().guid(), planDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
+  keys: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/)).max(100).refine(keys => new Set(keys).size === keys.length),
   migrationTargets: z.array(z.object({ key: text, destination: secretDestinationSchema }).strict()).min(1).max(100).optional(),
   installed: z.array(evidenceSchema).max(300).optional() }).strict();
 const actionSchema = z.object({ id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9:_.\/-]{0,255}$/).refine(value => !['constructor', 'prototype', '__proto__'].includes(value)), type: z.enum(['create', 'update', 'replace', 'destroy', 'noop']),
@@ -38,16 +42,16 @@ const actionSchema = z.object({ id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9:_.\
   verified: z.boolean(), reason: text, diff: z.array(z.object({ field: text, from: z.string().max(2048).optional(), to: z.string().max(2048).optional() }).strict()).max(100).optional(),
   dataBearing: z.boolean().optional(), billable: z.boolean().optional(), requiresConfirm: z.boolean().optional(), dependsOn: z.array(text).max(300).optional(),
   metadata: z.object({ operation: text, category: z.enum(['scope', 'identity', 'trust', 'secret-container', 'verification']),
-    execution: z.enum(['api', 'external']), native: z.record(z.unknown()) }).strict() }).strict();
+    execution: z.enum(['api', 'external']), native: z.record(z.string(), z.unknown()) }).strict() }).strict();
 const reviewSchema = z.object({ resources: z.array(z.object({ kind: text, name: text, scope: text }).strict()).max(300).optional(),
   permissions: z.array(z.object({ principal: text, scope: text, actions: z.array(text).max(100),
-  purpose: z.enum(['writer', 'installation-verification', 'hosted-trust-removal']) }).strict()).max(300),
+  purpose: z.enum(['writer', 'installation-verification', 'hosted-trust-removal', 'deployment-provision', 'deployment-release', 'runtime-reader']) }).strict()).max(300),
   costs: z.array(z.object({ resource: text, description: text, pricingUrl: z.string().url().max(2048) }).strict()).max(300), warnings: z.array(text).max(100) }).strict();
-const attemptSchema = z.object({ id: z.string().uuid(), actionId: text, status: z.enum(['attempted', 'acknowledged', 'pending', 'uncertain', 'rejected', 'succeeded']),
+const attemptSchema = z.object({ id: z.string().guid(), actionId: text, status: z.enum(['attempted', 'acknowledged', 'pending', 'uncertain', 'rejected', 'succeeded']),
   startedAt: z.string().datetime(), updatedAt: z.string().datetime(), evidence: evidenceSchema.optional(), externalUrl: z.string().url().max(16384).optional(), reason: reasonSchema.optional() }).strict();
-const recordSchema = z.object({ schemaVersion: z.literal(1), installationId: z.string().uuid(), revision: z.number().int().nonnegative(), intent: intentSchema,
+const recordSchema = z.object({ schemaVersion: z.literal(1), installationId: z.string().guid(), revision: z.number().int().nonnegative(), intent: intentSchema,
   plan: z.object({ digest: z.string().regex(/^[a-f0-9]{64}$/), actions: z.array(actionSchema).min(1).max(300), review: reviewSchema, blockedReason: reasonSchema.optional() }).strict(),
-  status: z.enum(['review-required', 'pending', 'blocked', 'scope-ready', 'ready', 'disconnected']), attempts: z.array(attemptSchema).max(3000), completed: z.record(evidenceSchema), reason: reasonSchema.optional() }).strict();
+  status: z.enum(['review-required', 'pending', 'blocked', 'scope-ready', 'ready', 'disconnected']), attempts: z.array(attemptSchema).max(3000), completed: z.record(z.string(), evidenceSchema), reason: reasonSchema.optional() }).strict();
 
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
@@ -79,6 +83,11 @@ export function parseCloudInstallationIntentV1(value: unknown, driver: CloudInst
   return contract(() => {
     const parsed = intentSchema.parse(value);
     if (parsed.provider !== driver.provider || !parsed.hostIdentity.serviceAccountEmail.endsWith(`@${parsed.hostIdentity.projectId}.iam.gserviceaccount.com`)) throw new Error();
+    if (parsed.purpose === 'deployment') {
+      if (!driver.deployment || parsed.keys.length || parsed.mode === 'migrate' || parsed.migrationTargets) throw new Error();
+      if (parsed.stage === 'scope-preparation') { if (parsed.deployment) throw new Error(); }
+      else if (parsed.stage !== 'deployment' || !parsed.deployment || parsed.deployment.hostingProvider !== driver.deployment.hostingProvider) throw new Error();
+    } else if (!parsed.keys.length || parsed.stage === 'deployment' || parsed.deployment) throw new Error();
     if (parsed.stage === 'scope-preparation' && (!driver.scopePreparation || parsed.mode === 'migrate' || parsed.mode === 'connect' && parsed.installed || parsed.migrationTargets)) throw new Error();
     if (parsed.scopePreparation && (parsed.mode !== 'connect' || parsed.scopePreparation.installationId === parsed.installationId || !driver.scopePreparation)) throw new Error();
     parsed.nativeScope = strings.parse(driver.parseScope(parsed.nativeScope));
@@ -103,6 +112,7 @@ function parseActions(value: unknown, intent: CloudInstallationIntent, driver: C
       if (intent.mode !== 'disconnect' && ['destroy', 'replace'].includes(action.type)) throw new Error();
       if (intent.mode === 'migrate' && action.metadata.category === 'secret-container' && action.type !== 'noop') throw new Error();
       if (intent.stage === 'scope-preparation' && action.metadata.category === 'secret-container') throw new Error();
+      if (intent.purpose === 'deployment' && action.metadata.category === 'secret-container') throw new Error();
     }
     orderActions(actions);
     return actions;
@@ -139,7 +149,7 @@ export function parseCloudInstallationRecordV1(value: unknown, driver: CloudInst
 }
 export function cloudInstallationConnectionsV1(value: unknown, driver: CloudInstallationDriver) {
   const record = parseCloudInstallationRecordV1(value, driver);
-  if (record.status !== 'ready' || record.intent.mode === 'disconnect' || record.intent.stage === 'scope-preparation') throw new CloudInstallationError('not_ready');
+  if (record.status !== 'ready' || record.intent.mode === 'disconnect' || record.intent.stage === 'scope-preparation' || record.intent.purpose === 'deployment') throw new CloudInstallationError('not_ready');
   return contract(() => {
     const results = z.array(z.object({ key: text, destination: secretDestinationSchema, writerAuthorization: strings }).strict()).max(100).parse(driver.connections(record));
     if (new Set(results.map(result => result.key)).size !== record.intent.keys.length || results.length !== record.intent.keys.length
@@ -151,6 +161,20 @@ export function cloudInstallationConnectionsV1(value: unknown, driver: CloudInst
     return results;
   });
 }
+export function cloudInstallationDeploymentConnectionV1(value: unknown, driver: CloudInstallationDriver) {
+  const record = parseCloudInstallationRecordV1(value, driver);
+  if (record.status !== 'ready' || record.intent.mode === 'disconnect' || record.intent.purpose !== 'deployment' || record.intent.stage !== 'deployment' || !driver.deployment)
+    throw new CloudInstallationError('not_ready');
+  return contract(() => {
+    const connection = parseCloudDeploymentConnectionV1(driver.deployment!.connection(record), {
+      provider: driver.provider, hostingProvider: driver.deployment!.hostingProvider, parseScope: scope => driver.parseScope(scope),
+    });
+    for (const key of ['installationId', 'customerId', 'appId', 'environment', 'source', 'provider', 'nativeScope', 'hostIdentity', 'deployment'] as const)
+      if (canonical(connection[key]) !== canonical(record.intent[key])) throw new Error();
+    if (connection.planDigest !== record.plan.digest) throw new Error();
+    return connection;
+  });
+}
 
 /** Pure value-free projection; scope readiness is never collection authorization. */
 export function cloudInstallationResolvedScopeV1(value: unknown, driver: CloudInstallationDriver): Record<string, string> {
@@ -158,16 +182,21 @@ export function cloudInstallationResolvedScopeV1(value: unknown, driver: CloudIn
   if (record.status !== 'scope-ready' || record.intent.stage !== 'scope-preparation' || !driver.scopePreparation) throw new CloudInstallationError('not_ready');
   return contract(() => strings.parse(driver.parseScope(driver.scopePreparation!.resolvedScope(record))));
 }
-export function cloudInstallationNextStageV1(value: unknown, driver: CloudInstallationDriver): 'scope-preparation' | 'collection' {
+export function cloudInstallationNextStageV1(value: unknown, driver: CloudInstallationDriver): 'scope-preparation' | 'collection' | 'deployment' {
   const record = parseCloudInstallationRecordV1(value, driver);
   cloudInstallationResolvedScopeV1(record, driver);
-  return contract(() => z.enum(['scope-preparation', 'collection']).parse(driver.scopePreparation?.continuationStage?.(record) ?? 'collection'));
+  return contract(() => {
+    const stage = z.enum(['scope-preparation', 'collection', 'deployment']).parse(driver.scopePreparation?.continuationStage?.(record) ?? 'collection');
+    if (stage === 'scope-preparation') return stage;
+    if (stage === 'deployment' && record.intent.purpose !== 'deployment') throw new Error();
+    return record.intent.purpose === 'deployment' ? 'deployment' : 'collection';
+  });
 }
 /** Caller first reconciles exact historical attempts. This pure projection cannot invent ownership. */
 export function cloudInstallationDisconnectionIntentV1(value: unknown, driver: CloudInstallationDriver, installationId: string): CloudInstallationIntent | null {
   const record = parseCloudInstallationRecordV1(value, driver);
   if (record.intent.mode === 'disconnect' || record.installationId === installationId) throw new CloudInstallationError('scope_mismatch');
-  z.string().uuid().parse(installationId);
+  z.string().guid().parse(installationId);
   if (record.intent.stage === 'scope-preparation') {
     if (!driver.scopePreparation?.disconnectionIntent) throw new CloudInstallationError('unsupported');
     const intent = driver.scopePreparation.disconnectionIntent(record, installationId);
@@ -177,13 +206,14 @@ export function cloudInstallationDisconnectionIntentV1(value: unknown, driver: C
     || attempt.status === 'succeeded' && !record.completed[attempt.actionId])) throw new CloudInstallationError('not_converged');
   if (!record.attempts.length && !Object.keys(record.completed).length) return null;
   const { scopePreparation: _predecessor, stage: _stage, ...original } = record.intent;
-  return parseCloudInstallationIntentV1({ ...original, installationId, mode: 'disconnect', installed: Object.values(record.completed) }, driver);
+  return parseCloudInstallationIntentV1({ ...original, ...(original.purpose === 'deployment' ? { stage: 'deployment' } : {}), installationId, mode: 'disconnect', installed: Object.values(record.completed) }, driver);
 }
 async function verifyScopePreparation(context: CloudInstallationContext, intent: CloudInstallationIntent, lineage: string[]): Promise<void> {
   if (lineage.length >= 4 || lineage.includes(intent.installationId)) throw new CloudInstallationError('scope_mismatch');
   if (!intent.scopePreparation) return;
   const previous = await read(context, intent.scopePreparation.installationId);
-  if (!previous || previous.plan.digest !== intent.scopePreparation.planDigest) throw new CloudInstallationError('scope_mismatch');
+  if (!previous || previous.plan.digest !== intent.scopePreparation.planDigest
+    || (previous.intent.purpose ?? 'collection') !== (intent.purpose ?? 'collection')) throw new CloudInstallationError('scope_mismatch');
   for (const key of ['customerId', 'appId', 'environment', 'provider', 'source', 'hostIdentity', 'keys'] as const)
     if (canonical(previous.intent[key]) !== canonical(intent[key])) throw new CloudInstallationError('scope_mismatch');
   if (canonical(cloudInstallationResolvedScopeV1(previous, context.driver)) !== canonical(intent.nativeScope)) throw new CloudInstallationError('scope_mismatch');
@@ -242,7 +272,7 @@ async function save(context: CloudInstallationContext, record: CloudInstallation
   return next;
 }
 async function read(context: CloudInstallationContext, id: string): Promise<CloudInstallationRecord | null> {
-  if (!z.string().uuid().safeParse(id).success) throw new CloudInstallationError('invalid_contract');
+  if (!z.string().guid().safeParse(id).success) throw new CloudInstallationError('invalid_contract');
   let raw;
   try { raw = await context.store.read(id); } catch { throw new CloudInstallationError('store_unavailable'); }
   if (raw === null) return null;
@@ -266,7 +296,8 @@ export async function planCloudInstallationV1(input: CloudInstallationContext & 
   const review = contract(() => reviewSchema.parse(proposal.review));
   if (intent.scopePreparation) {
     const previous = await read(input, intent.scopePreparation.installationId);
-    if (!previous || previous.plan.digest !== intent.scopePreparation.planDigest) throw new CloudInstallationError('scope_mismatch');
+    if (!previous || previous.plan.digest !== intent.scopePreparation.planDigest
+    || (previous.intent.purpose ?? 'collection') !== (intent.purpose ?? 'collection')) throw new CloudInstallationError('scope_mismatch');
     review.resources = contract(() => reviewSchema.shape.resources.parse([
       ...(input.driver.scopePreparation!.reviewResources(previous)), ...(review.resources ?? []),
     ]));
@@ -401,14 +432,21 @@ export function reconcileCloudInstallationV1(input: CloudInstallationContext & {
   return execute({ ...input, confirmActions: [] }, true);
 }
 
-/** Re-observe the prepared scope, then persist a separately reviewed writer plan. */
+/** Re-observe the prepared scope, then persist separately reviewed collection or deployment access. */
 export async function planCloudInstallationContinuationV1(input: CloudInstallationContext & {
   scopePreparationId: string; scopePreparationDigest: string; installationId: string;
+  /** Exact independently read source; required to derive final deployment topology. */
+  spec?: ProjectSpec;
 }): Promise<CloudInstallationRecord> {
   if (input.installationId === input.scopePreparationId) throw new CloudInstallationError('scope_mismatch');
   const previous = await reconcileCloudInstallationV1({ ...input, installationId: input.scopePreparationId, planDigest: input.scopePreparationDigest });
   const nativeScope = cloudInstallationResolvedScopeV1(previous, input.driver);
   const stage = cloudInstallationNextStageV1(previous, input.driver);
-  return planCloudInstallationV1({ ...input, intent: { ...previous.intent, installationId: input.installationId, stage, nativeScope,
-    scopePreparation: { installationId: previous.installationId, planDigest: previous.plan.digest } } });
+  const intent: CloudInstallationIntent = { ...previous.intent, installationId: input.installationId, stage, nativeScope,
+    scopePreparation: { installationId: previous.installationId, planDigest: previous.plan.digest } };
+  if (stage === 'deployment') {
+    if (!input.spec || !input.driver.deployment?.prepareIntent) throw new CloudInstallationError('invalid_contract');
+    intent.deployment = contract(() => input.driver.deployment!.prepareIntent!(input.spec!, intent));
+  }
+  return planCloudInstallationV1({ ...input, intent });
 }

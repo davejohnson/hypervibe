@@ -27,7 +27,7 @@ export function createGcpSecretContainerSetup(authentication: { projectId: strin
       throw error;
     }
     if (secret.name !== resource || !z.string().datetime().safeParse(secret.createTime).success) throw new DestinationBoundaryError('invalid_response');
-    const labels = z.record(z.string()).parse(secret.labels ?? {});
+    const labels = z.record(z.string(), z.string()).parse(secret.labels ?? {});
     let pageToken: string | undefined; const seen = new Set<string>(); let hasVersions = false;
     for (let page = 0; page < 20; page++) {
       const query = new URLSearchParams({ pageSize: '100', ...(pageToken ? { pageToken } : {}) });

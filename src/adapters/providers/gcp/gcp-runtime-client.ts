@@ -1,5 +1,6 @@
 import { GoogleAuth } from 'google-auth-library';
 import { z } from 'zod';
+import { redactExactValues } from '../../../utils/redact-exact-values.js';
 import { DestinationBoundaryError, DestinationBudget, destinationJson } from '../secret-destination-http.js';
 
 export class GcpRuntimeError extends Error {
@@ -29,7 +30,9 @@ export async function gcpRuntimeRequest(url: string, token: string, init: Reques
     || parsed.username || parsed.password || parsed.hash) throw new GcpRuntimeError('Invalid Google runtime API destination.');
   const budget = new DestinationBudget({ signal: init.signal ?? undefined, deadlineMs: 15_000 });
   try {
-    return await destinationJson(request, budget, url, token, init);
+    const result = await destinationJson(request, budget, url, token, init);
+    if (JSON.stringify(redactExactValues(result, [token])) !== JSON.stringify(result)) throw new DestinationBoundaryError('invalid_response');
+    return result;
   } catch (error) {
     if (error instanceof DestinationBoundaryError && error.status) {
       if (error.status === 404 && (init.method === undefined || init.method === 'GET' || init.method === 'DELETE')) return null;

@@ -3,7 +3,7 @@ import { DestinationBoundaryError, DestinationBudget } from '../secret-destinati
 export const AZURE_HOST_FEDERATION_AUDIENCE = 'api://AzureADTokenExchange';
 export interface AzureFederatedAuthentication {
   tenantId: string;
-  /** Customer writer UAMI client id, never the installer or runtime reader. */
+  /** Exact purpose-specific customer UAMI client id, never a runtime reader. */
   clientId: string;
   /** Must mint from the independently verified hosted Google service identity. */
   getGoogleIdToken: (audience: string, signal: AbortSignal) => Promise<string>;
@@ -12,14 +12,33 @@ export interface AzureFederatedAuthentication {
 /** No cache, refresh credential, customer secret, or ambient credential chain. */
 export function createAzureFederatedTokenProvider(authentication: AzureFederatedAuthentication,
   options: { fetch?: typeof fetch; deadlineMs?: number } = {}) {
-  const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
-  if (!uuid.test(authentication.tenantId) || !uuid.test(authentication.clientId)
-    || typeof authentication.getGoogleIdToken !== 'function') throw new DestinationBoundaryError('invalid_input');
-  const request = options.fetch ?? fetch;
+  const exchange = createExchange(authentication, options);
   return async (scope: string, signal: AbortSignal): Promise<string> => {
     if (!['https://management.azure.com/.default', 'https://vault.azure.net/.default'].includes(scope)) {
       throw new DestinationBoundaryError('invalid_input');
     }
+    return (await exchange(scope, signal)).token;
+  };
+}
+
+/** Deployment targets cannot request writer or arbitrary resource audiences. */
+export function createAzureDeploymentTokenProvider(authentication: AzureFederatedAuthentication,
+  options: { fetch?: typeof fetch; deadlineMs?: number } = {}) {
+  const exchange = createExchange(authentication, options);
+  return async (target: 'resource-manager' | 'container-registry', signal: AbortSignal) => {
+    if (target !== 'resource-manager' && target !== 'container-registry') throw new DestinationBoundaryError('invalid_input');
+    return exchange(target === 'resource-manager' ? 'https://management.azure.com/.default'
+      : 'https://containerregistry.azure.net/.default', signal);
+  };
+}
+
+function createExchange(authentication: AzureFederatedAuthentication,
+  options: { fetch?: typeof fetch; deadlineMs?: number }) {
+  const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+  if (!uuid.test(authentication.tenantId) || !uuid.test(authentication.clientId)
+    || typeof authentication.getGoogleIdToken !== 'function') throw new DestinationBoundaryError('invalid_input');
+  const request = options.fetch ?? fetch;
+  return async (scope: string, signal: AbortSignal): Promise<{ token: string; expiresAt: string }> => {
     const budget = new DestinationBudget({ signal, deadlineMs: options.deadlineMs });
     try {
       const assertion = await budget.wait(authentication.getGoogleIdToken(AZURE_HOST_FEDERATION_AUDIENCE, budget.signal));
@@ -27,6 +46,7 @@ export function createAzureFederatedTokenProvider(authentication: AzureFederated
         throw new DestinationBoundaryError('access_denied');
       }
       if (budget.signal.aborted) throw new DestinationBoundaryError('deadline_exceeded');
+      const requestedAt = Date.now();
       const response = await budget.wait(request(`https://login.microsoftonline.com/${authentication.tenantId}/oauth2/v2.0/token`, {
         method: 'POST', redirect: 'error', signal: budget.signal,
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -56,8 +76,9 @@ export function createAzureFederatedTokenProvider(authentication: AzureFederated
         if (typeof result.access_token !== 'string' || !result.access_token || result.access_token.length > 65_536
           || /[\r\n]/.test(result.access_token) || typeof result.token_type !== 'string'
           || result.token_type.toLowerCase() !== 'bearer' || !Number.isSafeInteger(result.expires_in)
-          || (result.expires_in as number) <= 0) throw new DestinationBoundaryError('invalid_response');
-        return result.access_token;
+          || (result.expires_in as number) <= 0 || (result.expires_in as number) > 86_400
+          || requestedAt + (result.expires_in as number) * 1000 <= Date.now()) throw new DestinationBoundaryError('invalid_response');
+        return { token: result.access_token, expiresAt: new Date(requestedAt + (result.expires_in as number) * 1000).toISOString() };
       } catch (error) {
         void reader.cancel().catch(() => {});
         throw error instanceof DestinationBoundaryError ? error : new DestinationBoundaryError('invalid_response');

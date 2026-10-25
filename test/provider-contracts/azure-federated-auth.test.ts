@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createAzureFederatedTokenProvider } from '../../src/adapters/providers/azure/azure-federated-auth.js';
+import { createAzureDeploymentTokenProvider, createAzureFederatedTokenProvider } from '../../src/adapters/providers/azure/azure-federated-auth.js';
 
 // Reconstructed from Microsoft's federated client-credentials wire contract,
 // not copied from our transport implementation or a live Azure recording:
@@ -9,6 +9,30 @@ const clientId = '66666666-7777-4888-8999-000000000000';
 const assertion = 'synthetic.google.assertion';
 
 describe('Azure hosted federation serialized contract', () => {
+  it('keeps deployment ARM and registry audiences separate from writer access and retains expiry without parsing the token', async () => {
+    const scopes: string[] = [];
+    const request = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const form = new URLSearchParams(String(init?.body));
+      scopes.push(form.get('scope')!);
+      expect(form.get('client_id')).toBe(clientId);
+      expect(form.has('client_secret')).toBe(false);
+      return Response.json({ token_type: 'Bearer', expires_in: 3599, access_token: 'opaque-not-a-jwt' });
+    });
+    const before = Date.now();
+    const provider = createAzureDeploymentTokenProvider({ tenantId, clientId, getGoogleIdToken: async () => assertion }, { fetch: request });
+    for (const target of ['resource-manager', 'container-registry'] as const) {
+      const result = await provider(target, new AbortController().signal);
+      expect(result.token).toBe('opaque-not-a-jwt');
+      expect(Date.parse(result.expiresAt)).toBeGreaterThanOrEqual(before + 3599_000);
+      expect(Date.parse(result.expiresAt)).toBeLessThanOrEqual(Date.now() + 3599_000);
+    }
+    expect(scopes).toEqual(['https://management.azure.com/.default', 'https://containerregistry.azure.net/.default']);
+    await expect(provider('https://vault.azure.net/.default' as any, new AbortController().signal)).rejects.toThrow('invalid_input');
+    expect(request).toHaveBeenCalledTimes(2);
+    const writer = createAzureFederatedTokenProvider({ tenantId, clientId, getGoogleIdToken: async () => assertion }, { fetch: request });
+    await expect(writer('https://containerregistry.azure.net/.default', new AbortController().signal)).rejects.toThrow('invalid_input');
+  });
+
   it('exchanges a transient Google assertion for the exact Azure resource without a client secret', async () => {
     const request = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       expect(String(_url)).toBe(`https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`);

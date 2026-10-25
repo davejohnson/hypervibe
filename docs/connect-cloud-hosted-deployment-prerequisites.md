@@ -1,7 +1,11 @@
 # Hosted deployment dependency cut
 
-This records an execution gap and a proposed implementation boundary. It is not
-an implemented execution engine or permission to widen collection-writer access.
+The selected implementation uses existing Hypervibe plan/apply and managed CI with
+Hypercloud brokering separately authorized temporary credentials. See the current
+[deployment contract and provider matrix](connect-cloud-deployment-contract.md).
+The extraction proposal below records the alternative full hosted reconciler and
+its unresolved dependencies; it is not part of the selected deployment path.
+Neither approach permits widening collection-writer access.
 Connect Cloud installation and collaborative collection do not complete runtime integration.
 Keep Hypervibe #469 and Hypercloud #138 in draft until the full criteria are met.
 
@@ -13,6 +17,75 @@ first deployment, native-reference consumption and recovery for all three provid
 The extraction below is needed only if full hosted application reconciliation is selected.
 Keyless deployment authority and the native first-deployment gaps still need resolution
 regardless of where application deployment executes.
+
+### Azure transient authentication checkpoint
+
+The Azure adapter now accepts the internal, authenticated broker callback through the
+shared transient-provider registry. Its ordinary credential schema still rejects that
+shape. ARM and registry token targets are closed; neither requests a Key Vault writer
+token. The provider-owned issuer uses the exact reviewed tenant/UAMI client ID and
+Google assertion, reads current UAMI client/principal IDs and exact federation trust,
+then rechecks host and source authority before a final exchange. ARM access tokens stay
+opaque, as required by [Microsoft's access-token contract](https://learn.microsoft.com/en-us/entra/identity-platform/access-tokens).
+An ARM identity read proves native identity and access, not arbitrary token introspection;
+caller provenance additionally relies on the authenticated broker response and the
+[native federation exchange](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-client-creds-grant-flow).
+
+Transient ARM requests refresh through the callback, bound acquisition and body reads,
+reject redirects and unreviewed scopes, and redact exact bearer material echoed in
+successful metadata. They cannot mutate installation IAM or retrieve secret values.
+Prepared runtime UAMIs use installer identities and ownership markers instead of local
+project UUID naming. Explicit shared plan/apply binding independently verifies native
+IDs and existing reader grants, including a separate collection resource group. Missing
+or replaced identities and revoked grants remain unknown; binding performs no cloud writes.
+
+This is not complete Azure onboarding. New Azure deployment installation is a
+digest-bound, zero-write `create_ownership_unverified` plan; it cannot project a ready
+receipt. First namespace and workload creation remain blocked. Positive session and
+prepared-reader tests use synthetic retained receipts and reconstructed official HTTP
+contracts, not a completed installer or live Azure evidence. Initial regressions were
+observed failing for missing federation/adapter support, reader scope, token echo and
+deadline handling before implementation. Managed CI's broker/registry exchange and
+native installation grants require separate acceptance evidence.
+
+### Local deployment and managed CI checkpoint
+
+`hv_cloud_connections purpose="deployment-access"` now pairs a separate exact
+repository/environment/branch grant, starts the deployment installation, and stores a
+strict nonsecret native receipt separately from the encrypted device grant. The real
+command/factory path carries environment scope through plan, apply, observation and
+isolated prerequisites, including a first project with no local environment row.
+Native sessions are bounded callback results and never enter local bindings or command
+output. A revoked or changed selected grant blocks fallback to saved cloud credentials.
+Revision/status CAS and final authority checks reject delayed receipts after revocation.
+The pending binding also saves its reviewed hosting provider before the first POST.
+Status/preview can recover that exact installation and policy after dirty spec edits or
+a branch change using repository identity and currently authorized device access. They
+do not adopt checkout contents or permit new operations on the changed branch; those
+operations and native token callbacks still require the clean, approved source.
+
+`action="propose-release"` saves a policy request ID before POST and recovers a lost
+acknowledgment through its exact historical GET. It returns the browser review URL;
+it cannot approve the policy. Managed CI receives a stable nonsecret connection binding,
+not a policy digest, avoiding a workflow/approval hash dependency cycle. Release approval
+is checked by the broker independently from the local device's provisioning grant.
+
+Azure's generated GitHub mode now executes the shared CI proof exchange, reads the exact
+applied registry ID, login server and creation timestamp, and performs Microsoft's
+[ACR access-token exchange](https://learn.microsoft.com/en-us/rest/api/registry-dataplane/authentication/exchange-aad-access-token-for-acr-refresh-token?view=rest-registry-dataplane-2021-07-01).
+The temporary registry password goes only to Docker stdin in a private temporary config
+directory with unconditional cleanup. Each ARM request obtains a fresh scoped broker
+session. Rollout checks the applied app creation timestamp and the exact runtime UAMI,
+preserving native secret references. Missing lifetime bindings block rendering; portable
+GitLab broker authentication remains explicitly unsupported, with no copied-key fallback.
+
+Executed-script regressions covered copied-key selection, replaced registry and runtime
+identity, echoed exchange errors, and exact-image updates preserving references. Adapter
+regressions reproduced changed, omitted and deleted approved reference maps mutating an
+existing app, then verified all three reject before provider access. These are synthetic
+retained receipts with reconstructed official ARM/ACR transport contracts. Azure native
+installation, release-target verification/approved policy, first deployment, and the live
+walkthrough remain incomplete; passing these tests does not establish live support.
 
 ## Observed execution gap
 

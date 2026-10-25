@@ -8,6 +8,15 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+`cloud-deployment-provider-roster.test.ts` pins every hosting provider against the
+[keyless deployment contract](../../docs/connect-cloud-deployment-contract.md).
+The shared deployment/install/session suites distinguish provision, release and runtime
+authority; emitted CI tests execute broker exchanges and native registry transports.
+All run through ordinary Vitest discovery in `npm test`. GCP native scoped deployment
+installation, fresh Azure creation, GitLab broker authentication, AWS template publication
+and all three new-customer live walkthroughs remain explicit gates. Callback, renderer
+or registry presence does not establish a complete first deployment.
+
 Azure Connect Cloud preparation, federation, historical recovery, runtime readers and
 migration preservation are covered by `azure-cloud-installation.test.ts`,
 `azure-federated-auth.test.ts`, `azure-runtime-identities.test.ts` and the real

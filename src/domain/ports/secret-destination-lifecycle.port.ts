@@ -9,7 +9,7 @@ export const secretContainerOwnerSchema = z.object({
   key: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
 }).strict();
 export const secretContainerIntentSchema = z.object({
-  destination: secretDestinationSchema, owner: secretContainerOwnerSchema, attemptId: z.string().uuid(),
+  destination: secretDestinationSchema, owner: secretContainerOwnerSchema, attemptId: z.string().guid(),
 }).strict();
 export type SecretContainerIntent = z.infer<typeof secretContainerIntentSchema>;
 export const secretContainerBindingSchema = secretContainerIntentSchema.extend({
@@ -24,7 +24,7 @@ export const secretContainerBindingSchema = secretContainerIntentSchema.extend({
 });
 export type SecretContainerBinding = z.infer<typeof secretContainerBindingSchema>;
 export function secretContainerBindings(raw: unknown): Record<string, SecretContainerBinding> {
-  return z.record(secretContainerBindingSchema).parse(raw ?? {});
+  return z.record(z.string(), secretContainerBindingSchema).parse(raw ?? {});
 }
 export function secretContainerScopeDigest(input: Pick<SecretContainerIntent, 'destination' | 'owner'>): string {
   // 63 lowercase hex characters fit native label limits. This is a scope
@@ -49,7 +49,7 @@ export interface SecretDestinationSetup {
 }
 export const secretContainerActionMetadataSchema = z.object({ operation: z.literal(SECRET_DESTINATION_PREPARE),
   destination: secretDestinationSchema, owner: secretContainerOwnerSchema,
-  mode: z.enum(['create', 'reconcile']), attemptId: z.string().uuid().optional(),
+  mode: z.enum(['create', 'reconcile']), attemptId: z.string().guid().optional(),
 }).strict().superRefine((value, ctx) => {
   if ((value.mode === 'reconcile') !== Boolean(value.attemptId)) ctx.addIssue({ code: 'custom', message: 'Reconciliation requires an exact retained attempt.' });
 });

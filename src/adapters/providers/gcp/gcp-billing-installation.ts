@@ -12,7 +12,7 @@ const SCOPE = 'https://www.googleapis.com/auth/cloud-platform';
 export const gcpBillingPreparationScopeSchema = z.object({ scopeKind: z.literal('project-billing'),
   projectId: z.string().regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/), projectNumber: z.string().regex(/^[1-9]\d{5,29}$/),
   projectCreateTime: z.string().datetime(), projectParent: z.string().regex(/^(?:none|(?:organizations|folders)\/[1-9]\d*)$/),
-  projectInstallationId: z.string().uuid(), projectAttemptId: z.string().uuid(),
+  projectInstallationId: z.string().guid(), projectAttemptId: z.string().guid(),
   billingAccountName: z.string().regex(/^billingAccounts\/[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}$/) }).strict();
 const rolePermissions = {
   link: ['resourcemanager.projects.get', 'resourcemanager.projects.createBillingAssignment', 'serviceusage.services.list', 'serviceusage.effectivepolicy.get'],
@@ -22,9 +22,9 @@ const apiNames = ['iam.googleapis.com', 'iamcredentials.googleapis.com', 'cloudb
 const operations = ['enable-api', 'create-account', 'create-role', 'grant', 'attach-billing', 'revoke', 'verify-existing-billing'] as const;
 const proofSchema = z.object({ resources: z.array(z.object({ kind: z.enum(['project', 'service', 'serviceAccount', 'role']), id: z.string().max(1024),
   identity: z.object({ uniqueId: z.string().regex(/^[1-9]\d{5,29}$/).optional(), owner: z.string().regex(/^[a-f0-9]{64}$/).optional(),
-    attemptId: z.string().uuid().optional(), createTime: z.string().datetime().optional(), parent: z.string().max(256).optional() }).strict() }).strict()).max(3),
-  native: z.object({ operation: z.enum(operations), actionId: z.string().max(256), installationId: z.string().uuid(), owner: z.string().regex(/^[a-f0-9]{64}$/),
-    attemptId: z.string().uuid().optional(), operationName: z.string().regex(/^operations\/[A-Za-z0-9._~-]{1,255}$/).optional(),
+    attemptId: z.string().guid().optional(), createTime: z.string().datetime().optional(), parent: z.string().max(256).optional() }).strict() }).strict()).max(3),
+  native: z.object({ operation: z.enum(operations), actionId: z.string().max(256), installationId: z.string().guid(), owner: z.string().regex(/^[a-f0-9]{64}$/),
+    attemptId: z.string().guid().optional(), operationName: z.string().regex(/^operations\/[A-Za-z0-9._~-]{1,255}$/).optional(),
     billingAccountName: z.string().max(100).optional(), policyResource: z.string().max(1024).optional(), role: z.string().max(1024).optional(), member: z.string().max(1024).optional(),
   }).strict() }).strict();
 type Context = CloudInstallationProviderContext;
@@ -44,7 +44,7 @@ function names(intent: CloudInstallationIntent) {
   if (intent.provider !== 'gcp' || intent.stage !== 'scope-preparation' || intent.mode === 'migrate') throw new BillingError('identity_mismatch');
   const native = gcpBillingPreparationScopeSchema.parse(intent.nativeScope);
   if (intent.mode === 'connect' && intent.scopePreparation?.installationId !== native.projectInstallationId) throw new BillingError('ownership_mismatch');
-  const connectionId = intent.mode === 'disconnect' ? z.string().uuid().parse(intent.installed?.[0]?.native.installationId) : intent.installationId;
+  const connectionId = intent.mode === 'disconnect' ? z.string().guid().parse(intent.installed?.[0]?.native.installationId) : intent.installationId;
   const parts = [intent.customerId, intent.appId, intent.environment];
   const owner = createHash('sha256').update(JSON.stringify([...parts, connectionId])).digest('hex');
   const projectOwner = createHash('sha256').update(JSON.stringify([...parts, native.projectInstallationId])).digest('hex');

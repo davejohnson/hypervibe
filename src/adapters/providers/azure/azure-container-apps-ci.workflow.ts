@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 import { azureVolumeFingerprint } from './azure-volume-runtime.js';
+import { azureDeploymentCiBinding, azureBrokerRuntime, azureBrokerRegistryLogin } from './azure-deployment-ci-broker.js';
+import { GITHUB_EPHEMERAL_DOCKER_CLEANUP_STEP } from '../../../domain/services/cloud-deployment-ci.js';
 import type {
   BranchDeployStepResult,
   BranchDeployTarget,
@@ -24,6 +26,8 @@ export function azureRegistryName(resourceGroupId: string): string {
 export function buildAzureContainerAppsGitHubActionsSteps(
   target: BranchDeployTarget
 ): BranchDeployStepResult {
+  const broker = target.deploymentAccess ? azureDeploymentCiBinding(target) : null;
+  const script = (value: string) => value.trimEnd().replace(/\n/g, '\n            ');
   const buildCondition = target.promoteFromEnvironment
     ? "steps.deploy.outputs.operation != 'rollback' && !steps.promotion_release.outputs.image_uri"
     : "steps.deploy.outputs.operation != 'rollback'";
@@ -35,11 +39,11 @@ export function buildAzureContainerAppsGitHubActionsSteps(
   const serviceIdsValue = serviceIds.length > 0
     ? yamlSingleQuoted(JSON.stringify(serviceIds))
     : '${{ vars.AZURE_CONTAINER_APP_IDS_JSON }}';
-  const registry = projectId ? `${azureRegistryName(projectId)}.azurecr.io` : null;
+  const registry = broker?.registry.server ?? (projectId ? `${azureRegistryName(projectId)}.azurecr.io` : null);
 
   return {
     displayName: 'Azure Container Apps',
-    requiredSecrets: [...AZURE_CONTAINER_APPS_CI_REQUIRED_SECRETS],
+    requiredSecrets: broker ? [] : [...AZURE_CONTAINER_APPS_CI_REQUIRED_SECRETS],
     releaseImageUri: "${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}",
     requiredVariables: [
       ...(projectId ? [] : ['AZURE_RESOURCE_GROUP_ID']),
@@ -48,7 +52,7 @@ export function buildAzureContainerAppsGitHubActionsSteps(
     permissions: `    permissions:
       actions: read
       contents: read
-`,
+${broker ? '      id-token: write\n' : ''}`,
     reviewDetails: [
       'Builds one linux/amd64 image tagged with the full checked-out Git SHA and pushes it to the Hypervibe-managed Azure Container Registry.',
       'Updates only Container Apps already planned, applied, and bound by full ARM resource ID; CI never creates resource groups, registries, environments, apps, role assignments, or domains.',
@@ -58,7 +62,7 @@ export function buildAzureContainerAppsGitHubActionsSteps(
         id: azure_target
         uses: actions/github-script@v9
         env:
-          AZURE_SUBSCRIPTION_ID: \${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_SUBSCRIPTION_ID: ${broker ? yamlSingleQuoted(broker.principal.subscriptionId) : '\${{ secrets.AZURE_SUBSCRIPTION_ID }}'}
           AZURE_RESOURCE_GROUP_ID: ${projectValue}
           AZURE_REGISTRY_SERVER: ${registry ? yamlSingleQuoted(registry) : "''"}
           DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
@@ -73,8 +77,7 @@ export function buildAzureContainerAppsGitHubActionsSteps(
               throw new Error('The bound Azure resource group is outside AZURE_SUBSCRIPTION_ID');
             }
             const crypto = await import('node:crypto');
-            const generated = 'hv' + crypto.createHash('sha256')
-              .update(id.toLowerCase(), 'utf8').digest('hex').slice(0, 30) + '.azurecr.io';
+            const generated = ${broker ? JSON.stringify(broker.registry.server) : "'hv' + crypto.createHash('sha256')\n              .update(id.toLowerCase(), 'utf8').digest('hex').slice(0, 30) + '.azurecr.io'"};
             const registry = (process.env.AZURE_REGISTRY_SERVER || generated).trim().toLowerCase();
             if (registry !== generated) throw new Error('Azure registry identity does not match the bound resource group');
             core.setOutput('registry', registry);
@@ -85,12 +88,16 @@ export function buildAzureContainerAppsGitHubActionsSteps(
             );
       - name: Authenticate to Hypervibe-managed ACR
         if: ${buildCondition}
-        uses: docker/login-action@v3
+${broker ? `        uses: actions/github-script@v9
+        with:
+          script: |
+            ${script(azureBrokerRegistryLogin(target))}
+` : `        uses: docker/login-action@v3
         with:
           registry: \${{ steps.azure_target.outputs.registry }}
           username: \${{ secrets.AZURE_CLIENT_ID }}
           password: \${{ secrets.AZURE_CLIENT_SECRET }}
-${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-action@v3
+`}${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-action@v3
         if: ${buildCondition}
       - name: Publish exact-SHA Azure image
         id: azure_publish
@@ -122,10 +129,10 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
       - name: Release exact digest to bound Azure Container Apps
         uses: actions/github-script@v9
         env:
-          AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
+${broker ? `          AZURE_SUBSCRIPTION_ID: ${yamlSingleQuoted(broker.principal.subscriptionId)}` : `          AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: \${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: \${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_CLIENT_SECRET: \${{ secrets.AZURE_CLIENT_SECRET }}`}
           AZURE_RESOURCE_GROUP_ID: ${projectValue}
           AZURE_CONTAINER_APP_IDS_JSON: ${serviceIdsValue}
           IMAGE_URI: \${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}
@@ -135,7 +142,17 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
             const management = 'https://management.azure.com';
             const volumeFingerprint = ${azureVolumeFingerprint.toString().replace(/\n/g, '\n            ')};
             const apiVersion = '2026-01-01';
-            const tokenResponse = await fetch(
+${broker ? `            ${script(azureBrokerRuntime(target))}
+            const expectedLifetimes = ${JSON.stringify(broker.apps)};
+            const verifyWorkload = (app, id) => {
+              const expected = expectedLifetimes.find(item => item.id === id);
+              const assigned = Object.entries(app?.identity?.userAssignedIdentities || {});
+              const native = assigned.find(([key]) => key.toLowerCase() === expected?.identity.identityResourceId.toLowerCase())?.[1];
+              if (!expected || app?.id?.toLowerCase() !== id.toLowerCase() || app?.systemData?.createdAt !== expected.createdAt
+                || app?.identity?.type !== 'UserAssigned' || assigned.length !== 1 || native?.clientId !== expected.identity.clientId
+                || native?.principalId !== expected.identity.principalId) throw new Error('Azure workload identity could not be verified.');
+            };
+` : `            const tokenResponse = await fetch(
               'https://login.microsoftonline.com/'
                 + encodeURIComponent(process.env.AZURE_TENANT_ID)
                 + '/oauth2/v2.0/token',
@@ -153,8 +170,12 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
             if (!tokenResponse.ok) throw new Error('Azure authentication failed: ' + tokenResponse.status);
             const token = (await tokenResponse.json()).access_token;
             if (!token) throw new Error('Azure authentication returned no access token');
-            const request = async (method, resourceId, body) => {
-              const response = await fetch(
+`}            const request = async (method, resourceId, body) => {
+${broker ? `              const token = (await hvDeploymentSession('resource-manager')).token;
+              return hvAzureJson(management + resourceId + '?api-version=' + apiVersion, { method,
+                headers: { Authorization: 'Bearer ' + token, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+                ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+` : `              const response = await fetch(
                 management + resourceId + '?api-version=' + apiVersion,
                 {
                   method,
@@ -172,7 +193,7 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
               catch { throw new Error('Azure returned non-JSON for ' + resourceId); }
               if (!response.ok) throw new Error('Azure ARM ' + response.status + ' for ' + resourceId);
               return payload;
-            };
+`}            };
             let appIds;
             try { appIds = JSON.parse(process.env.AZURE_CONTAINER_APP_IDS_JSON || ''); }
             catch { throw new Error('AZURE_CONTAINER_APP_IDS_JSON must be a JSON array'); }
@@ -198,7 +219,8 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
             for (const appId of appIds) {
               const app = await request('GET', appId);
-              if (app?.id?.toLowerCase() !== appId.toLowerCase()) {
+${broker ? `              verifyWorkload(app, appId);
+` : ''}              if (app?.id?.toLowerCase() !== appId.toLowerCase()) {
                 throw new Error('Azure returned the wrong Container App identity for ' + appId);
               }
               const template = app.properties?.template;
@@ -241,7 +263,8 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
               let ready;
               for (let attempt = 1; attempt <= 120; attempt += 1) {
                 const observed = await request('GET', appId);
-                const active = observed?.properties?.template?.containers?.[0];
+${broker ? `                verifyWorkload(observed, appId);
+` : ''}                const active = observed?.properties?.template?.containers?.[0];
                 const activeEnv = active?.env || [];
                 const markerValue = (name) => activeEnv.find((item) => item.name === name)?.value;
                 if (observed?.properties?.provisioningState === 'Succeeded'
@@ -260,6 +283,6 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
               const response = await fetch('https://' + fqdn + healthPath, { redirect: 'follow' });
               if (!response.ok) throw new Error('Azure Container App health check failed with HTTP ' + response.status);
             }
-`,
+${broker ? GITHUB_EPHEMERAL_DOCKER_CLEANUP_STEP : ''}`,
   };
 }

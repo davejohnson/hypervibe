@@ -10,6 +10,7 @@ import { supportsStorageLifecycle, type IStorageAdapter } from '../ports/storage
 import { supportsLoadBalancer, type ILoadBalancerAdapter } from '../ports/load-balancer.port.js';
 import { getProjectScopeHints } from './project-scope.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
+import { resolveDeploymentAdapter } from '../../adapters/cloud/deployment-access.client.js';
 
 /**
  * Result of resolving an adapter
@@ -40,7 +41,7 @@ export class AdapterFactory {
    * Get a hosting adapter for a project based on its defaultPlatform.
    * Looks up the verified connection and instantiates the adapter.
    */
-  async getHostingAdapter(project: Project): Promise<AdapterResult<IHostingAdapter>> {
+  async getHostingAdapter(project: Project, environment?: string): Promise<AdapterResult<IHostingAdapter>> {
     const platform = project.defaultPlatform?.trim();
     if (!platform || platform === UNCONFIGURED_HOSTING_PROVIDER) {
       return {
@@ -48,20 +49,22 @@ export class AdapterFactory {
         error: `Project ${project.name} has no reviewed hosting provider. Initialize desired state with hv_spec first.`,
       };
     }
-    return this.getHostingAdapterByName(platform, project);
+    return this.getHostingAdapterByName(platform, project, environment);
   }
 
   /** Resolve the exact hosting provider named by a reviewed environment/action. */
   async getHostingAdapterByName(
     providerName: string,
-    project?: Project
+    project?: Project,
+    environment?: string
   ): Promise<AdapterResult<IHostingAdapter>> {
     const maturityBlock = this.lifecycleMutationBlock<IHostingAdapter>(providerName, 'hosting');
     if (maturityBlock) return maturityBlock;
     return this.getAdapter<IHostingAdapter>(
       providerName,
       'deployment',
-      project ? getProjectScopeHints(project) : undefined
+      project ? getProjectScopeHints(project) : undefined,
+      environment
     );
   }
 
@@ -135,12 +138,14 @@ export class AdapterFactory {
   async getProviderAdapter(
     providerName: string,
     project?: Project,
-    scopeHints?: string[]
+    scopeHints?: string[],
+    environment?: string
   ): Promise<AdapterResult<IProviderAdapter>> {
     return this.getAdapter<IProviderAdapter>(
       providerName,
       undefined,
-      scopeHints ?? (project ? getProjectScopeHints(project) : undefined)
+      scopeHints ?? (project ? getProjectScopeHints(project) : undefined),
+      environment
     );
   }
 
@@ -212,7 +217,8 @@ export class AdapterFactory {
   private async getAdapter<T>(
     providerName: string,
     expectedCategory?: string,
-    scopeHints?: string[]
+    scopeHints?: string[],
+    environment?: string
   ): Promise<AdapterResult<T>> {
     // Check if provider is registered
     const provider = providerRegistry.get(providerName);
@@ -229,6 +235,16 @@ export class AdapterFactory {
         success: false,
         error: `Provider ${providerName} is not a ${expectedCategory} provider (it's a ${provider.metadata.category} provider)`,
       };
+    }
+
+    if (provider.metadata.category === 'deployment') {
+      try {
+        const resolved = await resolveDeploymentAdapter<T>({ providerName, scopeHints, environment,
+          store: { connections: this.connectionRepo, get secretStore() { return getSecretStore(); } } });
+        if (resolved.selected) return { success: true, adapter: resolved.adapter, connectionProvider: 'hypervibe-deployment-binding' };
+      } catch {
+        return { success: false, error: 'Exact environment deployment access is unavailable. Inspect or renew its browser approval; no other cloud credentials were selected.' };
+      }
     }
 
     // Look up connection

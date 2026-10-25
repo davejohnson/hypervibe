@@ -1,5 +1,16 @@
 import type { ApiReleaseSpec } from '../spec/spec.schema.js';
 import type { ProjectRuntime } from '../spec/project-runtime.js';
+import type { CloudDeploymentConnectionV1 } from './cloud-deployment.port.js';
+
+/** Stable nonsecret broker binding. Approval is resolved server-side to avoid a workflow/policy hash cycle. */
+export interface CloudDeploymentCiAccessV1 {
+  origin: string;
+  projectId: string;
+  connectionId: string;
+  environment: string;
+  sourceBranch: string;
+  connection: CloudDeploymentConnectionV1;
+}
 
 export type BranchDeployProvider = string;
 export type BranchDeployEnvironmentKind = 'development' | 'test' | 'staging' | 'production' | 'custom';
@@ -31,6 +42,7 @@ export interface BranchDeployReleaseTarget {
 }
 
 export interface BranchDeployTarget {
+  deploymentAccess?: CloudDeploymentCiAccessV1;
   environmentName: string;
   api?: ApiReleaseSpec;
   kind: BranchDeployEnvironmentKind;
@@ -134,6 +146,8 @@ export interface CiWorkflowDiagnostic {
 
 export interface ProviderCiDeployMetadata {
   displayName: string;
+  /** Explicit emitted identity protocol; absence cannot fall back to copied cloud credentials. */
+  transientDeployment?: 'github-oidc-broker-v1';
   /** Opt-in migration of accepted GitHub workflow inputs for this provider only. */
   rendererRevision?: number;
   requiredSecrets: string[];

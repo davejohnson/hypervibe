@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { unwrapCredentialSchema } from '../services/connection-guidance.js';
 import type { ProviderCiDeployMetadata } from '../ports/ci-deploy.port.js';
 import type { ProviderDatabaseRestoreDrillMetadata } from '../ports/database-restore-drill.port.js';
 import type { Project } from '../entities/project.entity.js';
@@ -7,6 +8,8 @@ import type { Component } from '../entities/component.entity.js';
 import type { WorkloadKind } from '../entities/service.entity.js';
 import type { Receipt } from '../ports/provider.port.js';
 import type { HostedObservationCapability } from '../ports/hosted-observation.port.js';
+import type { CloudDeploymentAdapterCapabilityV1, CloudDeploymentAdapterInputV1 } from '../ports/cloud-deployment.port.js';
+import { CloudDeploymentAccessError, validateCloudDeploymentAdapterInputV1 } from '../services/cloud-deployment-authentication.js';
 
 export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'messaging' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
 export type ProviderLifecycleCapability =
@@ -130,27 +133,7 @@ export const standardDatabaseRuntimeProjection: ProviderDatabaseRuntimeProjectio
 };
 
 function credentialSchemaKeys(schema: z.ZodTypeAny): Set<string> | null {
-  let current = schema;
-  while (true) {
-    if (current instanceof z.ZodEffects) {
-      current = current.innerType();
-      continue;
-    }
-    if (
-      current instanceof z.ZodOptional
-      || current instanceof z.ZodNullable
-      || current instanceof z.ZodDefault
-      || current instanceof z.ZodCatch
-    ) {
-      current = current._def.innerType;
-      continue;
-    }
-    if (current instanceof z.ZodBranded) {
-      current = current._def.type;
-      continue;
-    }
-    break;
-  }
+  const current = unwrapCredentialSchema(schema);
   return current instanceof z.ZodObject
     ? new Set(Object.keys(current.shape))
     : null;
@@ -349,6 +332,8 @@ export interface ProviderOrchestrationMetadata {
 export interface RegisteredProvider {
   metadata: ProviderMetadata;
   factory: (credentials: unknown) => unknown | Promise<unknown>;
+  /** Separate callback-only deployment authority; never falls back to a credential factory. */
+  transientAuthentication?: CloudDeploymentAdapterCapabilityV1;
   /** Optional hook to install CLI tools or other dependencies when a connection is created. */
   ensureDependencies?: () => Promise<{ installed: string[]; errors: string[] }>;
   /** Optional provider-owned raw forensic reads used by hv_inspect. */
@@ -389,6 +374,14 @@ export class ProviderRegistry {
     this.assertCapabilityMaturity(provider);
     this.assertDatabaseRuntimeProjection(provider);
     this.assertInspectionContract(provider);
+    if (provider.transientAuthentication) {
+      const capability = provider.transientAuthentication;
+      if (provider.metadata.category !== 'deployment' || capability.hostingProvider !== provider.metadata.name
+        || !['aws', 'azure', 'gcp'].includes(capability.provider)
+        || typeof capability.parseScope !== 'function' || typeof capability.createAdapter !== 'function') {
+        throw new CloudDeploymentAccessError('invalid_contract');
+      }
+    }
     this.providers.set(provider.metadata.name, provider);
   }
 
@@ -880,6 +873,14 @@ export class ProviderRegistry {
       throw new Error(`Unknown provider: ${name}`);
     }
     return await provider.factory(creds) as T;
+  }
+
+  /** Explicit short-lived access path. Absence is unsupported, never a legacy-key fallback. */
+  async createTransientAdapter<T = unknown>(name: string, input: CloudDeploymentAdapterInputV1): Promise<T> {
+    const capability = this.providers.get(name)?.transientAuthentication;
+    if (!capability) throw new CloudDeploymentAccessError('unsupported');
+    const validated = validateCloudDeploymentAdapterInputV1(input, capability);
+    return await capability.createAdapter(validated) as T;
   }
 
   /**

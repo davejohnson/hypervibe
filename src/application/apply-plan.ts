@@ -903,7 +903,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
       return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
         reason: 'Container setup requires the exact reviewed environment and cannot deploy workloads.' }] };
     }
-    const blocked = loaded.document.actions.length ? planService.providerPreflight([envSpec.hosting.provider]) : [];
+    const blocked = loaded.document.actions.length ? planService.providerPreflight([envSpec.hosting.provider], projectForPreflight, envName) : [];
     if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
     if (!loaded.document.actions.length) {
       const keys = Object.entries(envSpec.secretDestinations ?? {}).filter(([, value]) => value.version === undefined).map(([key]) => key);
@@ -928,7 +928,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
       reason: 'Secret-only apply requires the reviewed existing project/environment and managed CI; it cannot deploy or repair bindings.' }] };
   }
   if (secretsOnly) {
-    const adapter = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, projectForPreflight);
+    const adapter = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, projectForPreflight, undefined, envName);
     if (!adapter.success || adapter.adapter?.capabilities.supportsDeferredSecretUpdates !== true) {
       return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: envSpec.hosting.provider,
         reason: 'The hosting adapter cannot verify secret-only updates without restarting workloads.' }] };
@@ -948,7 +948,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
       return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The database binding plan belongs to another project or environment.' }] };
     }
-    const blocked = planService.providerPreflight(loaded.document.actions.map(action => action.resource.provider));
+    const blocked = planService.providerPreflight(loaded.document.actions.map(action => action.resource.provider), projectForPreflight, envName);
     if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
     const result = await executor.execute({ planRunId: planId, confirmActions: params.confirmActions,
       currentSpecRevision: params.specRevision, handler: async action => {
@@ -990,7 +990,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     if (loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
       return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The reviewed backup policy plan belongs to another project or environment.' }] };
     }
-    const blocked = planService.providerPreflight(loaded.document.actions.map(action => action.resource.provider));
+    const blocked = planService.providerPreflight(loaded.document.actions.map(action => action.resource.provider), projectForPreflight, envName);
     if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
     const result = await executor.execute({
       planRunId: planId, confirmActions: params.confirmActions, currentSpecRevision: params.specRevision,
@@ -1009,7 +1009,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     if (loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
       return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The snapshot plan belongs to a different project or environment.' }] };
     }
-    const blocked = planService.providerPreflight([envSpec.database?.provider ?? 'unconfigured']);
+    const blocked = planService.providerPreflight([envSpec.database?.provider ?? 'unconfigured'], projectForPreflight, envName);
     if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
     const result = await executor.execute({
       planRunId: planId, confirmActions: params.confirmActions, currentSpecRevision: params.specRevision,
@@ -1075,29 +1075,29 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const credentialConnectionProvider = selectedCi
     ? devOpsProviderRegistry.ciProvider(selectedCi.provider)?.connectionProvider : undefined;
   const blocked = secretsOnly
-    ? planService.providerPreflight([envSpec.hosting.provider])
+    ? planService.providerPreflight([envSpec.hosting.provider], projectForPreflight, envName)
     : retainedCleanupOnly
     ? planService.providerPreflight([
         envSpec.hosting.provider,
         ...cleanupProviders,
-      ])
+      ], projectForPreflight, envName)
     : migrationActions.length > 0
-    ? planService.providerPreflight(migrationProviders)
+    ? planService.providerPreflight(migrationProviders, projectForPreflight, envName)
     : workflowPublicationOnly
-    ? planService.providerPreflight(workflowPublicationProviders)
+    ? planService.providerPreflight(workflowPublicationProviders, projectForPreflight, envName)
     : ciCredentialsOnly
     ? planService.providerPreflight(credentialConnectionProvider ? [credentialConnectionProvider]
-      : loaded.document.actions.map(action => action.resource.provider))
+      : loaded.document.actions.map(action => action.resource.provider), projectForPreflight, envName)
     : managedCiBindingsOnly || backupProvisioningOnly
     ? planService.providerPreflight(
         loaded.document.actions
           .filter((action) => action.type !== 'noop')
           .map((action) => action.resource.provider)
-      )
+      , projectForPreflight, envName)
     : [
-        ...planService.preflight(envSpec, envName, spec),
+        ...planService.preflight(envSpec, envName, spec, projectForPreflight),
         ...planService.projectPreflight(projectForPreflight, spec, envName),
-        ...planService.providerPreflight(cleanupProviders),
+        ...planService.providerPreflight(cleanupProviders, projectForPreflight, envName),
       ];
   const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, loaded.document.actions);
   const connectBeforeApply = actionScopedBlocksRequiringConnectBeforeApply(actionScopedBlocked);
@@ -1401,7 +1401,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     const volumeSafetyBlock = retainedVolumeHostingBlock(volumeEnvironment, envSpec, action);
     if (volumeSafetyBlock) return { success: false, status: 'blocked', message: volumeSafetyBlock };
     if (capability === 'hosting.volume.mutate') {
-      const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject);
+      const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject, undefined, envName);
       const volumes = (result.adapter as IProviderAdapter | undefined)?.serviceVolumes;
       if (!result.success || result.adapter?.name !== envSpec.hosting.provider || !volumes || !volumeEnvironment) return { success: false, status: 'blocked', message: 'Volume adapter or bound environment unavailable.' };
       return applyServiceVolumeAction({ environment: volumeEnvironment, environmentSpec: envSpec, action, volumes, confirmedActionIds,
@@ -1432,7 +1432,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
         || access.identities.some(identity => identity.observation.state !== 'ready')) return { success: false, status: 'blocked', message: 'Deployment requires verified workload identities and permissions. Re-plan to prepare the missing access.' };
     }
     if (deployNeedsVolumes && (volumeEnvironment?.platformBindings.serviceVolumes !== undefined || Object.values(envSpec.services).some((s) => s.volume))) {
-      const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject);
+      const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject, undefined, envName);
       const liveVolumes = await observeServiceVolumes({ environment: volumeEnvironment, environmentSpec: envSpec, volumes: (result.adapter as IProviderAdapter | undefined)?.serviceVolumes });
       const pendingVolume = planServiceVolumes({ environment: volumeEnvironment, environmentSpec: envSpec, observed: { serviceVolumes: liveVolumes } as ObservedState }).actions.find((a) => a.type !== 'noop');
       if (pendingVolume) return { success: false, status: 'blocked', message: `Deployment requires verified retained volume attachment: ${pendingVolume.reason}` };
@@ -2588,7 +2588,7 @@ async function ensureHostingProject(
     environment = ctx.repos.environments.findById(environment.id) ?? environment;
   }
 
-  const adapterResult = await adapterFactory.getHostingAdapter(project);
+  const adapterResult = await adapterFactory.getHostingAdapter(project, envName);
   if (!adapterResult.success || !adapterResult.adapter) {
     return {
       success: false,
@@ -2707,7 +2707,7 @@ async function ensureHostingEnvironment(
     };
   }
 
-  const adapterResult = await adapterFactory.getHostingAdapter(project);
+  const adapterResult = await adapterFactory.getHostingAdapter(project, envName);
   if (
     !adapterResult.success
     || !adapterResult.adapter
@@ -2913,7 +2913,9 @@ async function applyDomain(
 
     const adapterResult = await ctx.adapterFactory.getProviderAdapter(
       action.resource.provider,
-      project
+      project,
+      undefined,
+      envName
     );
     if (!adapterResult.success || !adapterResult.adapter) {
       return {
@@ -3210,7 +3212,7 @@ async function destroyTaskService(
     };
   }
 
-  const adapterResult = await adapterFactory.getProviderAdapter(action.resource.provider, project);
+  const adapterResult = await adapterFactory.getProviderAdapter(action.resource.provider, project, undefined, envName);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: `${action.resource.provider} adapter unavailable`, error: adapterResult.error };
   }
@@ -3321,7 +3323,7 @@ async function destroyPreviousHostingService(
     };
   }
 
-  const adapterResult = await adapterFactory.getProviderAdapter(action.resource.provider, project);
+  const adapterResult = await adapterFactory.getProviderAdapter(action.resource.provider, project, undefined, envName);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: `${action.resource.provider} adapter unavailable`, error: adapterResult.error };
   }
@@ -3485,7 +3487,7 @@ async function destroyPreviousHostingBoundary(
     };
   }
 
-  const adapterResult = await adapterFactory.getProviderAdapter(action.resource.provider, project);
+  const adapterResult = await adapterFactory.getProviderAdapter(action.resource.provider, project, undefined, envName);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: `${action.resource.provider} adapter unavailable`, error: adapterResult.error };
   }
@@ -3672,7 +3674,7 @@ async function destroyService(
     };
   }
 
-  const adapterResult = await adapterFactory.getHostingAdapter(project);
+  const adapterResult = await adapterFactory.getHostingAdapter(project, envName);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: 'Hosting adapter unavailable', error: adapterResult.error };
   }
@@ -4333,7 +4335,7 @@ async function destroyRetainedResource(
     };
   }
   const collectionKey = contract.collectionKey;
-  const adapterResult = await adapterFactory.getProviderAdapter(provider!, project);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider!, project, undefined, envName);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, status: 'blocked', message: 'Retained provider adapter unavailable', error: adapterResult.error };
   }

@@ -663,7 +663,7 @@ async function storageRuntimeTarget(params: {
     connectionProvider: params.connectionProvider };
   if (!params.usesWorkloadIdentity) return target;
   const result = params.hosting ? { success: true, adapter: params.hosting }
-    : await adapterFactory.getProviderAdapter(target.hostingProvider, params.project);
+    : await adapterFactory.getProviderAdapter(target.hostingProvider, params.project, undefined, params.environment.name);
   if (!result.success || !result.adapter || result.adapter.name !== target.hostingProvider) {
     throw new Error('Storage runtime identity requires the selected hosting connection.');
   }
@@ -1300,7 +1300,7 @@ export async function applyStorageAction(params: {
   const serviceName = String(params.action.metadata?.serviceName ?? '');
   const service = serviceRepo.findByProjectAndName(params.project.id, serviceName);
   if (!service) return { success: false, message: `Service "${serviceName}" not found locally` };
-  const hostingResult = await adapterFactory.getProviderAdapter(params.environmentSpec.hosting.provider, params.project);
+  const hostingResult = await adapterFactory.getProviderAdapter(params.environmentSpec.hosting.provider, params.project, undefined, params.envName);
   const hosting = hostingResult.adapter as IProviderAdapter | undefined;
   if (!hostingResult.success || !hosting?.setEnvVars) return { success: false, message: 'Hosting adapter cannot sync storage variables', error: hostingResult.error };
   if (hosting.name !== params.environmentSpec.hosting.provider) {

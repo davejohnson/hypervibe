@@ -14,10 +14,15 @@ const intent: CloudInstallationIntent = { schemaVersion: 1, installationId: 'aaa
 const context = (): CloudInstallationProviderContext => ({ intent, signal: AbortSignal.timeout(5000), completed: {}, beforeMutation: vi.fn(async () => {}),
   authentication: { host: { verifyIdentity: async () => intent.hostIdentity, getAccessToken: async () => { throw new Error('No Google OAuth needed'); },
     getIdToken: async () => { throw new Error('No customer AWS credentials before console install'); } } } });
+function publishedTemplate(body: string): Response {
+  const response = new Response(body, { headers: { 'x-amz-version-id': 'immutable-v1' } });
+  Object.defineProperty(response, 'url', { value: `https://hypervibe-templates.s3.us-west-2.amazonaws.com/${createAwsCloudInstallationTemplateV1().sha256}.json?versionId=immutable-v1` });
+  return response;
+}
 function driver() {
   const artifact = createAwsCloudInstallationTemplateV1();
   return createAwsCloudInstallationDriver({ templateUrl: `https://hypervibe-templates.s3.us-west-2.amazonaws.com/${artifact.sha256}.json?versionId=immutable-v1`,
-    fetch: async () => new Response(artifact.body) });
+    fetch: async () => publishedTemplate(artifact.body) });
 }
 async function nativeFixture(migrate = false) {
   const ctx = context(), artifact = createAwsCloudInstallationTemplateV1(), template = JSON.parse(artifact.body);
@@ -87,7 +92,7 @@ async function nativeFixture(migrate = false) {
     throw new Error(`Unimplemented synthetic transport operation ${operation}`);
   } };
   const d = createAwsCloudInstallationDriver({ templateUrl: `https://hypervibe-templates.s3.us-west-2.amazonaws.com/${artifact.sha256}.json?versionId=immutable-v1`, requestHandler: handler,
-    fetch: async () => new Response(artifact.body) });
+    fetch: async () => publishedTemplate(artifact.body) });
   const proposal = await d.plan(ctx), action = proposal.actions[0];
   const handoff = await d.mutate({ ...ctx, action, attempt });
   if (handoff.state !== 'external') throw new Error('Missing console link');

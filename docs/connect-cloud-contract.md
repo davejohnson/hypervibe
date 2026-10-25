@@ -204,9 +204,30 @@ deployment is authorized by this design document.
 Hosted operator configuration pins the native service account email,
 `SECRET_DELIVERY_GCP_HOST_SUBJECT` and
 `SECRET_DELIVERY_GCP_HOST_PROJECT_NUMBER`; metadata and Google JWT verification
-must match all three. `SECRET_DELIVERY_AWS_TEMPLATE_URL` selects the reviewed
-published template version. Blank values leave new connections unavailable;
-the existing Railway staging declaration supplies no native Cloud Run identity.
+must match all three. `SECRET_DELIVERY_AWS_TEMPLATE_URL` and
+`SECRET_DELIVERY_AWS_DEPLOYMENT_TEMPLATE_URL` select the reviewed collection and
+deployment template versions. Blank values leave the corresponding new connection
+unavailable; the existing Railway staging declaration supplies no native Cloud Run
+identity.
+
+The supported publication strategy is a nonsecret object in a versioned S3 bucket,
+using `https://<dotless-bucket>.s3.<region>.amazonaws.com/<sha256>.json?versionId=<URL-encoded-version>`
+(an object-key prefix is allowed; the complete template URL must fit the console's
+1,024-character limit). Configure exactly one nonempty version ID, never
+the overwriteable literal `null` version. The publisher must approve version-specific
+read access usable by Hypercloud and CloudFormation; neither driver uploads templates
+or falls back to customer keys. The hosted verifier requires the exact native
+`x-amz-version-id`, final response URL and generated SHA-256, rejects redirects, and
+bounds body reads to 15 seconds and 1 MiB. Standard HTTPS wildcard certificates do not
+support dotted bucket names. Arbitrary HTTPS hosts, S3 website endpoints, presigned
+URLs and Systems Manager document URLs are outside this chosen publication strategy.
+CloudFormation limits inline `TemplateBody` to 51,200 bytes; these generated templates
+are larger, so inline submission is not a fallback. See the official
+[CreateStack contract](https://docs.aws.amazon.com/AWSCloudFormation/latest/APIReference/API_CreateStack.html),
+[console template URL and version contract](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-console-create-stack.html),
+[S3 HTTPS host rules](https://docs.aws.amazon.com/AmazonS3/latest/userguide/VirtualHosting.html),
+[null-version overwrite behavior](https://docs.aws.amazon.com/AmazonS3/latest/userguide/AddingObjectstoVersionSuspendedBuckets.html),
+and [version-specific GetObject contract](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html).
 
 
 ### AWS runtime reader acceptance and native limits

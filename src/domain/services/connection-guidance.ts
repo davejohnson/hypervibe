@@ -76,24 +76,27 @@ export interface CredentialFieldDescriptor {
   description?: string;
 }
 
-function unwrapSchema(schema: z.ZodTypeAny): z.ZodTypeAny {
+export function unwrapCredentialSchema(schema: z.ZodType): z.ZodType {
   let current = schema;
   while (true) {
-    if (current instanceof z.ZodEffects) {
-      current = current.innerType();
+    if (current instanceof z.ZodPipe) {
+      // Preprocessing feeds a transform into the declared input schema; a
+      // post-parse transform instead leaves that schema on the input side.
+      const inner = current.in instanceof z.ZodTransform ? current.out : current.in;
+      if (!(inner instanceof z.ZodType)) return current;
+      current = inner;
       continue;
     }
     if (
       current instanceof z.ZodOptional
       || current instanceof z.ZodNullable
       || current instanceof z.ZodDefault
+      || current instanceof z.ZodPrefault
       || current instanceof z.ZodCatch
     ) {
-      current = current._def.innerType;
-      continue;
-    }
-    if (current instanceof z.ZodBranded) {
-      current = current._def.type;
+      const inner = current.unwrap();
+      if (!(inner instanceof z.ZodType)) return current;
+      current = inner;
       continue;
     }
     return current;
@@ -129,10 +132,7 @@ function isSensitiveCredentialField(name: string): boolean {
 
 function enumOptions(schema: z.ZodTypeAny): string[] | undefined {
   if (schema instanceof z.ZodEnum) {
-    return [...schema.options];
-  }
-  if (schema instanceof z.ZodNativeEnum) {
-    const options = Object.values(schema.enum).filter((value): value is string => typeof value === 'string');
+    const options = schema.options.filter((value): value is string => typeof value === 'string');
     return [...new Set(options)];
   }
   return undefined;
@@ -147,7 +147,7 @@ export function credentialFieldsFromSchema(
   schema: z.ZodTypeAny,
   options: { exclude?: readonly string[] } = {}
 ): CredentialFieldDescriptor[] | undefined {
-  const objectSchema = unwrapSchema(schema);
+  const objectSchema = unwrapCredentialSchema(schema);
   if (!(objectSchema instanceof z.ZodObject)) {
     return undefined;
   }
@@ -155,7 +155,7 @@ export function credentialFieldsFromSchema(
   const excluded = new Set(options.exclude ?? []);
   return Object.entries(objectSchema.shape).filter(([name]) => !excluded.has(name)).map(([name, rawField]) => {
     const field = rawField as z.ZodTypeAny;
-    const unwrapped = unwrapSchema(field);
+    const unwrapped = unwrapCredentialSchema(field);
     const options = enumOptions(unwrapped);
     const sensitive = isSensitiveCredentialField(name);
     const inputKind: CredentialInputKind = options

@@ -23,7 +23,7 @@ import {
 
 export const NeonCredentialsSchema = z.object({
   apiKey: z
-    .string({ required_error: 'Neon API key is required' })
+    .string({ error: issue => issue.input === undefined ? 'Neon API key is required' : undefined })
     .min(1, 'Neon API key is required'),
   organizationId: z.string().min(1).optional(),
   regionId: z.string().min(1).optional(),

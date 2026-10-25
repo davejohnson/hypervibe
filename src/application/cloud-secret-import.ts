@@ -34,7 +34,7 @@ const keySchema = z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/);
 const metadataSchema = z
   .object({
     schemaVersion: z.literal(1),
-    requestId: z.string().uuid(),
+    requestId: z.string().guid(),
     repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
     environment: z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/),
     sourceRevision: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/),
@@ -54,7 +54,7 @@ const stateSchema = z
     version: z.literal(1),
     status: z.enum(['pending', 'consuming', 'received', 'imported']),
     root: z.string(),
-    requestId: z.string().uuid(),
+    requestId: z.string().guid(),
     environment: z.string(),
     repository: z.string(),
     sourceRevision: z.string(),
@@ -305,7 +305,7 @@ export function createCloudSecretImport({
 
   async function run(input: SecretImportInput): Promise<Record<string, unknown>> {
     if (
-      !z.string().uuid().safeParse(input.requestId).success ||
+      !z.string().guid().safeParse(input.requestId).success ||
       !/^[a-z0-9][a-z0-9-]{0,79}$/.test(input.env) ||
       input.env === 'example'
     )

@@ -19,8 +19,8 @@ const sourceSchema = z.object({
   retainedSecretIds: z.array(gcpSecretDestinationSchema.shape.secretId).max(100).default([]),
 }).strict();
 const recordSchema = z.object({ version: z.literal(1), repository: z.string(), environmentName: z.string(), projectId: z.string(), projectNumber: z.string(),
-  hostServiceAccountEmail: z.string(), attemptId: z.string().uuid(), uniqueId: z.string().regex(/^[1-9]\d*$/).optional(),
-  mutations: z.record(z.enum(['attempted', 'confirmed', 'rejected'])), state: z.enum(['pending', 'ready']),
+  hostServiceAccountEmail: z.string(), attemptId: z.string().guid(), uniqueId: z.string().regex(/^[1-9]\d*$/).optional(),
+  mutations: z.record(z.string(), z.enum(['attempted', 'confirmed', 'rejected'])), state: z.enum(['pending', 'ready']),
   sourceRevision: z.string(), sourceDigest: z.string(), secretIds: z.array(z.string()),
 }).strict();
 type WriterRecord = z.infer<typeof recordSchema>;

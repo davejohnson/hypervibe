@@ -158,7 +158,7 @@ export async function assertDeploymentSecretReferences(input: { ctx: CommandCont
     if (error) throw new Error(error);
   }
   if (creationOnlyServices.size) {
-    const adapter = await adapterFactory.getProviderAdapter(env.hosting.provider, project);
+    const adapter = await adapterFactory.getProviderAdapter(env.hosting.provider, project, undefined, environment.name);
     if (!adapter.success || adapter.adapter?.capabilities.supportsCreateOnlyDeploy !== true) {
       throw new Error('This provider cannot safely initialize native references without conditional workload creation.');
     }

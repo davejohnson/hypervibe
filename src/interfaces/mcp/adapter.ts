@@ -1,7 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { z, type ZodRawShape } from 'zod';
+import { z } from 'zod';
 import type {
   CommandDefinition,
+  CommandInputShape,
   CommandRegistrar,
 } from '../../application/commands.js';
 import { CommandRegistry } from '../../application/commands.js';
@@ -88,7 +89,7 @@ export function registerCommandRegistry(
  */
 export function createMcpCommandRegistrar(server: McpServer): CommandRegistrar {
   return {
-    register<Args extends ZodRawShape>(
+    register<Args extends CommandInputShape>(
       name: string,
       description: string,
       inputShape: Args,

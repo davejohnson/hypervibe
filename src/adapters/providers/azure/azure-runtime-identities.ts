@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type { IRuntimeIdentities, RuntimeIdentityBinding, RuntimeIdentityRequest, RuntimeIdentityObservation, RuntimeIdentityStep } from '../../../domain/ports/runtime-identity.port.js';
 import type { ProviderRuntimeIdentity } from '../../../domain/ports/provider.port.js';
+import type { CloudDeploymentConnectionV1 } from '../../../domain/ports/cloud-deployment.port.js';
 import { runtimeSecretReferenceSchema } from '../../../domain/ports/secret-destination.port.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
 import { AzureResourceManagerClient } from './azure-resource-manager.client.js';
@@ -14,10 +15,10 @@ const same=(a:unknown,b:unknown)=>typeof a==='string'&&typeof b==='string'&&a.to
 const hash=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const guid=(value:unknown)=>{const h=hash(value);return `${h.slice(0,8)}-${h.slice(8,12)}-5${h.slice(13,16)}-8${h.slice(17,20)}-${h.slice(20,32)}`;};
 type Native=Record<string,any>;
-interface Connection {client:AzureResourceManagerClient;tenantId:string;subscriptionId:string;deployClientId:string;location:string}
+interface Connection {client:AzureResourceManagerClient;tenantId:string;subscriptionId:string;deployClientId:string;location:string;deployment?:CloudDeploymentConnectionV1}
 interface ReaderGrant {vaultId:string;createdAt:string;assignmentId:string;principalId:string}
 const readerGrantSchema=z.object({vaultId:z.string().regex(/^\/subscriptions\/[a-f0-9-]+\/resourceGroups\/[A-Za-z0-9_().-]+\/providers\/Microsoft\.KeyVault\/vaults\/[A-Za-z0-9-]+$/i),
- createdAt:z.string().datetime({offset:true}),assignmentId:z.string().min(1),principalId:z.string().uuid()}).strict().refine(value=>value.assignmentId.toLowerCase().startsWith(`${value.vaultId}/providers/Microsoft.Authorization/roleAssignments/`.toLowerCase())&&uuid(value.assignmentId.split('/').at(-1)));
+ createdAt:z.string().datetime({offset:true}),assignmentId:z.string().min(1),principalId:z.string().guid()}).strict().refine(value=>value.assignmentId.toLowerCase().startsWith(`${value.vaultId}/providers/Microsoft.Authorization/roleAssignments/`.toLowerCase())&&uuid(value.assignmentId.split('/').at(-1)));
 const failure=()=>new Error('Exact Azure runtime identity, ownership, or reader authority could not be verified.');
 /** One identity/reader frontier per reviewed action. No secret data-plane requests. */
 export class AzureRuntimeIdentities implements IRuntimeIdentities {
@@ -29,14 +30,17 @@ export class AzureRuntimeIdentities implements IRuntimeIdentities {
   const managed=environment.platformBindings.environmentId;
   if(typeof managed!=='string'||!managed.toLowerCase().startsWith(`${group}/providers/Microsoft.App/managedEnvironments/`.toLowerCase())||managed.split('/').length!==9)throw failure();
   const retained=request.binding?.evidence;
-  const owner=hash([connection.tenantId,connection.subscriptionId,environment.projectId,environment.id,service.name]);
+  const prepared=connection.deployment?.runtimeIdentities.find(item=>item.workload===service.name);
+  if(connection.deployment&&(!prepared||prepared.principal.kind!=='azure-managed-identity'||connection.deployment.environment!==environment.name
+   ||!same(group,`/subscriptions/${connection.subscriptionId}/resourceGroups/${connection.deployment.nativeScope.resourceGroup}`)))throw failure();
+  const owner=prepared?.owner??hash([connection.tenantId,connection.subscriptionId,environment.projectId,environment.id,service.name]);
   const name=resourceName('runtime',{scope:[environment.projectId,environment.id,service.name],minLength:3,maxLength:128});
-  const identityId=`${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${name}`;
+  const identityId=prepared?.principal.kind==='azure-managed-identity'?prepared.principal.identityResourceId:`${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${name}`;
   const bound=(environment.platformBindings.services as Record<string,{serviceId?:string}>|undefined)?.[service.name]?.serviceId;
   const workloadId=bound??`${group}/providers/Microsoft.App/containerApps/${resourceName(service.name,{minLength:2,maxLength:32})}`;
   if(!workloadId.toLowerCase().startsWith(`${group}/providers/Microsoft.App/containerApps/`.toLowerCase())||workloadId.split('/').length!==9)throw failure();
   if(request.binding&&(request.binding.provider!=='azure-container-apps'||Object.entries({tenantId:connection.tenantId,subscriptionId:connection.subscriptionId,environmentId:environment.id,serviceName:service.name,owner,workloadId}).some(([key,value])=>retained?.[key]!==undefined&&!same(retained[key],value))))throw failure();
-  return {...connection,group,managed,identityId,owner,workloadId,bound};
+  return {...connection,group,managed,identityId,owner,workloadId,bound,prepared};
  }
  private async read(request:RuntimeIdentityRequest){
   const scope=this.coordinates(request), retained=request.binding?.evidence;
@@ -49,7 +53,7 @@ export class AzureRuntimeIdentities implements IRuntimeIdentities {
     if(!namespace||!same(namespace.id,id)||namespace.tags?.['managed-by']!=='hypervibe'||namespace.tags?.['hypervibe-environment-id']!==request.environment.id||namespace.properties?.provisioningState!=='Succeeded')throw failure();
    }
   }
-  const kind=retained?.kind??(app?'system':'user');
+  const kind=retained?.kind??(scope.prepared?'user':app?'system':'user');
   if(!['system','user'].includes(kind))throw failure();
   let native:Native|null=null, principalId:string|undefined,clientId:string|undefined;
   if(kind==='system'){
@@ -60,16 +64,27 @@ export class AzureRuntimeIdentities implements IRuntimeIdentities {
    if(native){
     const properties=native.properties;
     if(!same(native.id,scope.identityId)||!uuid(properties?.principalId)||!uuid(properties?.clientId)||!same(properties?.tenantId,scope.tenantId)||same(properties.clientId,scope.deployClientId)||native.systemData?.createdAt!==undefined&&typeof native.systemData.createdAt!=='string')throw failure();
-    const creationAttempt=retained?.creationAttempt??request.binding?.pending?.step.target.recoverAttemptId??request.binding?.pending?.attemptId;
-    if(!creationAttempt||native.tags?.hypervibeRuntime!==scope.owner||native.tags?.hypervibeAttempt!==creationAttempt)throw failure();
+    if(scope.prepared){
+     const expected=scope.prepared.principal;if(expected.kind!=='azure-managed-identity'||!same(properties.clientId,expected.clientId)||!same(properties.principalId,expected.principalId)
+      ||native.tags?.hypervibeInstallation!==scope.prepared.installationId||native.tags?.hypervibeDeployment!==scope.owner||native.tags?.hypervibePurpose!==`runtime-${request.service.name}`
+      ||retained?.installationId&&retained.installationId!==scope.prepared.installationId)throw failure();
+    }else{
+     const creationAttempt=retained?.creationAttempt??request.binding?.pending?.step.target.recoverAttemptId??request.binding?.pending?.attemptId;
+     if(!creationAttempt||native.tags?.hypervibeRuntime!==scope.owner||native.tags?.hypervibeAttempt!==creationAttempt)throw failure();
+    }
     principalId=properties.principalId;clientId=properties.clientId;
     if(app&&!Object.keys(app.identity?.userAssignedIdentities??{}).some(id=>same(id,scope.identityId)))throw failure();
-   } else if(retained?.principalId)throw failure();
+   } else if(retained?.principalId||scope.prepared)throw failure();
   }
   if(retained?.principalId&&!same(principalId,retained.principalId)||retained?.clientId&&!same(clientId,retained.clientId)||retained?.createdAt&&native?.systemData?.createdAt!==retained.createdAt)throw failure();
   let grants:ReaderGrant[]=[];
   if(retained?.readerGrants){grants=z.array(readerGrantSchema).max(100).parse(JSON.parse(retained.readerGrants));if(grants.some(g=>!same(g.principalId,principalId)))throw failure();}
   const desired=new Set<string>();
+  if(scope.prepared){
+   const approved=scope.deployment!.deployment.workloads.find(item=>item.name===request.service.name)!.runtimeSecrets;
+   const supplied=Object.entries(request.environmentSpec?.secretDestinations??{}).sort(([a],[b])=>a.localeCompare(b)).map(([key,value])=>({key,reference:runtimeSecretReferenceSchema.parse(value)}));
+   if(!isDeepStrictEqual(supplied,[...approved].sort((a,b)=>a.key.localeCompare(b.key))))throw failure();
+  }
   for(const raw of Object.values(request.environmentSpec?.secretDestinations??{})){
    const parsed=runtimeSecretReferenceSchema.safeParse(raw);if(!parsed.success)throw failure();const d=parsed.data.destination;
    if(d.provider!=='azure-key-vault'||!same(d.tenantId,scope.tenantId)||!same(d.subscriptionId,scope.subscriptionId))throw failure();
@@ -84,12 +99,19 @@ export class AzureRuntimeIdentities implements IRuntimeIdentities {
    if(previous&&!same(previous.assignmentId,assignmentId))throw failure();
    vaults.push({vaultId,createdAt:vault.systemData.createdAt,assignmentId,principalId});
   }
-  return{scope,app,native,kind,principalId,clientId,grants,vaults};
+  const state={scope,app,native,kind,principalId,clientId,grants,vaults};
+  if(scope.prepared){
+   // Administrator installation owns these grants. Local plan/apply may bind
+   // exact observed proof, never repair them using deployment authority.
+   for(const grant of vaults)if(!await this.assignment(state,grant))throw failure();
+   state.grants=vaults;
+  }
+  return state;
  }
  private binding(request:RuntimeIdentityRequest,state:Awaited<ReturnType<AzureRuntimeIdentities['read']>>,grants=state.grants):RuntimeIdentityBinding{
   const {scope}=state;if(!state.principalId)throw failure();
   return{provider:'azure-container-apps',evidence:{tenantId:scope.tenantId,subscriptionId:scope.subscriptionId,environmentId:request.environment.id,serviceName:request.service.name,owner:scope.owner,workloadId:scope.workloadId,kind:state.kind,principalId:state.principalId,
-   ...(state.kind==='user'?{identityId:scope.identityId,clientId:state.clientId!,...(state.native!.systemData?.createdAt?{createdAt:state.native!.systemData.createdAt}:{}),creationAttempt:state.native!.tags.hypervibeAttempt}:{}),readerGrants:JSON.stringify(grants)}};
+   ...(state.kind==='user'?{identityId:scope.identityId,clientId:state.clientId!,...(state.native!.systemData?.createdAt?{createdAt:state.native!.systemData.createdAt}:{}),...(scope.prepared?{installationId:scope.prepared.installationId}:{creationAttempt:state.native!.tags.hypervibeAttempt})}:{}),readerGrants:JSON.stringify(grants)}};
  }
  private identity(request:RuntimeIdentityRequest,state:Awaited<ReturnType<AzureRuntimeIdentities['read']>>):ProviderRuntimeIdentity{
   if(!state.principalId)throw failure();const {scope}=state;return{provider:'azure',principal:state.principalId,source:state.app?'observed':'configured',scope:{tenantId:scope.tenantId,subscriptionId:scope.subscriptionId,environmentId:request.environment.id,serviceName:request.service.name,workloadResource:scope.workloadId,...(state.kind==='user'?{identityResourceId:scope.identityId,clientId:state.clientId!}:{} )}};
@@ -97,7 +119,7 @@ export class AzureRuntimeIdentities implements IRuntimeIdentities {
  private step(state:Awaited<ReturnType<AzureRuntimeIdentities['read']>>,phase:string,grant?:ReaderGrant):RuntimeIdentityStep{
   return{operation:phase==='create'?'create':'attach',requiresConfirm:true,target:{phase,identityId:state.scope.identityId,owner:state.scope.owner,workloadId:state.scope.workloadId,...(state.principalId?{principalId:state.principalId}:{}),...(grant??{})},description:phase==='create'?'Prepare an isolated Azure user-assigned runtime identity before creating this workload.':phase==='bind-existing'?'Record the existing Azure runtime principal without replacing it.':`Grant this runtime principal read access to every secret in the selected app and environment vault ${grant?.vaultId}.`};
  }
- private async assignment(state:Awaited<ReturnType<AzureRuntimeIdentities['read']>>,grant:ReaderGrant){
+ private async assignment(state:{scope:ReturnType<AzureRuntimeIdentities['coordinates']>;principalId?:string},grant:ReaderGrant){
   const native=await state.scope.client.getNullable<Native>(grant.assignmentId,RBAC_API);if(!native)return null;
   const p=native.properties;if(!same(native.id,grant.assignmentId)||!same(p?.principalId,state.principalId)||!same(p?.roleDefinitionId,`/subscriptions/${state.scope.subscriptionId}/providers/Microsoft.Authorization/roleDefinitions/${READER_ROLE}`)||!same(p?.scope,grant.vaultId)||p?.principalType!=='ServicePrincipal'||p?.description!==`Hypervibe runtime ${state.scope.owner}`||p?.condition!=null)throw failure();return native;
  }

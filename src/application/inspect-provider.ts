@@ -613,7 +613,8 @@ export async function inspectProvider(
   const resolved = await ctx.adapterFactory.getProviderAdapter(
     providerName,
     project ?? undefined,
-    scopeHints
+    scopeHints,
+    input.env
   );
   if (!resolved.success || !resolved.adapter) {
     throw new HvError('MISSING_CONNECTION', resolved.error ?? `No ${providerName} connection configured.`, {

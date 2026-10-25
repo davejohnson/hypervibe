@@ -9,6 +9,7 @@ import {
 } from '../../../domain/services/github-actions-workflow.js';
 import { HYPERVIBE_MANAGED_NPM_PACKAGES } from '../../../domain/services/managed-runtime.js';
 import { buildEcsExpressTaskDefinitionRuntime } from './ecs-express-ci.recipe.js';
+import { buildGitHubDeploymentSessionRuntime, GITHUB_EPHEMERAL_DOCKER_CLEANUP_STEP, GITHUB_EPHEMERAL_DOCKER_LOGIN_RUNTIME } from '../../../domain/services/cloud-deployment-ci.js';
 
 export const ECS_EXPRESS_CI_REQUIRED_SECRETS = [
   'AWS_ACCESS_KEY_ID',
@@ -18,6 +19,8 @@ export const ECS_EXPRESS_CI_REQUIRED_SECRETS = [
 export function buildEcsExpressGitHubActionsSteps(
   target: BranchDeployTarget
 ): BranchDeployStepResult {
+  const broker = Boolean(target.deploymentAccess);
+  const sessionRuntime = broker ? buildGitHubDeploymentSessionRuntime(target).trimEnd().split('\n').map(line => '            ' + line).join('\n') : '';
   const buildCondition = target.promoteFromEnvironment
     ? "steps.deploy.outputs.operation != 'rollback' && !steps.promotion_release.outputs.image_uri"
     : "steps.deploy.outputs.operation != 'rollback'";
@@ -38,13 +41,13 @@ export function buildEcsExpressGitHubActionsSteps(
 
   return {
     displayName: 'AWS ECS Express Mode',
-    requiredSecrets: [...ECS_EXPRESS_CI_REQUIRED_SECRETS],
+    requiredSecrets: broker ? [] : [...ECS_EXPRESS_CI_REQUIRED_SECRETS],
     requiredVariables,
     releaseImageUri: "${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}",
     permissions: `    permissions:
       actions: read
       contents: read
-`,
+${broker ? '      id-token: write\n' : ''}`,
     reviewDetails: [
       'Builds one linux/amd64 image tagged with the full checked-out Git SHA and pushes it to the Hypervibe-managed ECR repository.',
       'Updates only ECS Express services already planned, applied, and bound by ARN; CI never creates clusters, repositories, IAM roles, networking, load balancers, or domains.',
@@ -74,7 +77,34 @@ export function buildEcsExpressGitHubActionsSteps(
               account + '.dkr.ecr.' + region + '.amazonaws.com/hypervibe/'
                 + cluster.toLowerCase() + ':' + process.env.DEPLOY_SHA.toLowerCase()
             );
-      - name: Configure AWS credentials
+${broker ? `      - name: Install pinned ECR SDK
+        if: ${buildCondition}
+        run: npm install --no-save --ignore-scripts ${HYPERVIBE_MANAGED_NPM_PACKAGES.awsEcr}
+      - name: Authenticate to Hypervibe-managed ECR
+        if: ${buildCondition}
+        uses: actions/github-script@v9
+        env:
+          AWS_ECS_CLUSTER_ARN: ${clusterArn}
+        with:
+          script: |
+${sessionRuntime}
+            const { ECRClient, GetAuthorizationTokenCommand } = require('@aws-sdk/client-ecr');
+            const parts = process.env.AWS_ECS_CLUSTER_ARN.split(':');
+            const region = parts[3], registry = parts[4] + '.dkr.ecr.' + region + '.amazonaws.com';
+            const client = new ECRClient({ region, maxAttempts: 1, credentials: async () => {
+              const session = await hvDeploymentSession(); return { accessKeyId: session.accessKeyId, secretAccessKey: session.secretAccessKey, sessionToken: session.sessionToken, expiration: new Date(session.expiresAt) };
+            } });
+            let password, username;
+            try {
+              const response = await client.send(new GetAuthorizationTokenCommand({ registryIds: [parts[4]] }));
+              const auth = response.authorizationData?.length === 1 ? response.authorizationData[0] : null;
+              if (!auth?.authorizationToken || auth.proxyEndpoint !== 'https://' + registry || !(auth.expiresAt instanceof Date) || auth.expiresAt.getTime() <= Date.now()) throw new Error();
+              const decoded = Buffer.from(auth.authorizationToken, 'base64').toString('utf8');
+              username = decoded.slice(0, decoded.indexOf(':')); password = decoded.slice(decoded.indexOf(':') + 1);
+              if (username !== 'AWS' || !password || /[\\r\\n]/.test(password)) throw new Error();
+            } catch { throw new Error('AWS registry access could not be verified.'); } finally { client.destroy(); }
+${GITHUB_EPHEMERAL_DOCKER_LOGIN_RUNTIME.trimEnd().split('\n').map(line => '            ' + line).join('\n')}
+` : `      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v5
         with:
           aws-access-key-id: \${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -83,7 +113,7 @@ export function buildEcsExpressGitHubActionsSteps(
       - name: Authenticate to Hypervibe-managed ECR
         if: ${buildCondition}
         uses: aws-actions/amazon-ecr-login@v2
-${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-action@v3
+`}${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-action@v3
         if: ${buildCondition}
       - name: Publish exact-SHA AWS image
         id: aws_publish
@@ -123,7 +153,7 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
           DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
-            const {
+${broker ? sessionRuntime + '\n            try {\n' : ''}            const {
               DescribeExpressGatewayServiceCommand,
               ECSClient,
               UpdateExpressGatewayServiceCommand,
@@ -159,7 +189,9 @@ ${buildEcsExpressTaskDefinitionRuntime().split('\n').filter(Boolean).map(line =>
             if (!/^[0-9a-f]{40}$/.test(sha)) {
               throw new Error('DEPLOY_SHA must be a full Git SHA');
             }
-            const client = new ECSClient({ region });
+            const client = new ECSClient({ region${broker ? `, maxAttempts: 1, credentials: async () => {
+              const session = await hvDeploymentSession(); return { accessKeyId: session.accessKeyId, secretAccessKey: session.secretAccessKey, sessionToken: session.sessionToken, expiration: new Date(session.expiresAt) };
+            }` : ''} });
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
             const currentConfig = (service) => {
               const configs = service?.activeConfigurations || [];
@@ -214,6 +246,6 @@ ${buildEcsExpressTaskDefinitionRuntime().split('\n').filter(Boolean).map(line =>
                 throw new Error('ECS Express health check failed with HTTP ' + response.status);
               }
             }
-`,
+${broker ? "            } catch { throw new Error('AWS release could not be verified.'); }\n" + GITHUB_EPHEMERAL_DOCKER_CLEANUP_STEP : ''}`,
   };
 }

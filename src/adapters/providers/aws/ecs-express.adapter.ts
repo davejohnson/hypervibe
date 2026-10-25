@@ -1,5 +1,6 @@
 import type { ProviderRuntimeIdentity } from '../../../domain/ports/provider.port.js';
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { EcsRuntimeIdentities } from './ecs-runtime-identities.js';
 import { validateRuntimeSecretReferences, runtimeSecretReferenceIdentity } from '../../../domain/services/runtime-secret-references.js';
 import type { RuntimeSecretReference } from '../../../domain/ports/secret-destination.port.js';
@@ -79,7 +80,14 @@ import {
   ListAttachedRolePoliciesCommand,
   TagRoleCommand,
 } from '@aws-sdk/client-iam';
-import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
+import { GetCallerIdentityCommand, STSClient, type STSClientConfig } from '@aws-sdk/client-sts';
+import type { CloudDeploymentAdapterInputV1 } from '../../../domain/ports/cloud-deployment.port.js';
+import { CloudDeploymentAccessError, validateCloudDeploymentAdapterInputV1 } from '../../../domain/services/cloud-deployment-authentication.js';
+import { awsDeploymentScopeSchema, createAwsDeploymentCredentialProvider } from './aws-deployment-auth.js';
+import { boundAwsSdkResponses } from './aws-secret-destination.js';
+import { awsDeploymentNames } from './aws-cloud-deployment.js';
+import { EcsInstalledRuntimeIdentities, verifyAwsInstalledRoles } from './ecs-installed-runtime.js';
+import type { IRuntimeIdentities } from '../../../domain/ports/runtime-identity.port.js';
 import { z } from 'zod';
 import type { ComponentType } from '../../../domain/entities/component.entity.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
@@ -154,7 +162,7 @@ export type EcsExpressCredentials = z.infer<typeof EcsExpressCredentialsSchema>;
 
 const DEFAULT_ECS_REGION = 'us-west-2';
 const EcsRegionSchema = z.string().trim().regex(/^[a-z]{2}(?:-gov)?-[a-z]+-\d$/, 'AWS region is invalid');
-type ConnectedEcsExpressCredentials = EcsExpressCredentials & { region: string };
+type ConnectedEcsExpressCredentials = Partial<EcsExpressCredentials> & { region: string };
 
 type AwsClients = {
   efs: EFSClient;
@@ -194,7 +202,12 @@ type ExpressRouting = {
 
 export class EcsExpressAdapter implements IProviderAdapter {
   readonly name = 'ecs';
-  readonly runtimeIdentities = new EcsRuntimeIdentities(() => ({ clients: this.connected().clients, region: this.connected().credentials.region }), request => this.resolveRuntimeIdentity(request.environment, request.service), clusterArn => { const scope = this.parseClusterArn(clusterArn); return this.projectResources(scope.accountId, scope.clusterName).executionRoleArn; });
+  private readonly legacyRuntimeIdentities = new EcsRuntimeIdentities(() => ({ clients: this.connected().clients, region: this.connected().credentials.region }), request => this.resolveRuntimeIdentity(request.environment, request.service), clusterArn => { const scope = this.parseClusterArn(clusterArn); return this.projectResources(scope.accountId, scope.clusterName).executionRoleArn; });
+  private readonly installedRuntimeIdentities = new EcsInstalledRuntimeIdentities(() => this.transient!.input.connection, () => this.connected().clients);
+  readonly runtimeIdentities: IRuntimeIdentities = {
+    inspect: request => (this.transient ? this.installedRuntimeIdentities : this.legacyRuntimeIdentities).inspect(request),
+    apply: request => (this.transient ? this.installedRuntimeIdentities : this.legacyRuntimeIdentities).apply(request),
+  };
   readonly serviceVolumes = new EcsServiceVolumes(() => ({ clients: this.connected().clients, region: this.connected().credentials.region }), () => this.resolveAccountId());
 
   readonly capabilities: ProviderCapabilities = {
@@ -215,6 +228,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
   private credentials: ConnectedEcsExpressCredentials | null = null;
   private clients: AwsClients | null = null;
   private accountId: string | null = null;
+  private transient: { input: CloudDeploymentAdapterInputV1; credentials: ReturnType<typeof createAwsDeploymentCredentialProvider>; requestHandler?: STSClientConfig['requestHandler'] } | null = null;
 
   async resolveRuntimeIdentity(environment: Environment, service: Pick<Service, 'name' | 'buildConfig'>): Promise<ProviderRuntimeIdentity> {
     try {
@@ -272,6 +286,16 @@ export class EcsExpressAdapter implements IProviderAdapter {
       ? (credentials as Record<string, string>).region
       : DEFAULT_ECS_REGION;
     this.credentials = { ...parsed, region: EcsRegionSchema.parse(legacyRegion) };
+    this.transient = null;
+    this.replaceClients();
+  }
+
+  async connectTransient(input: CloudDeploymentAdapterInputV1, options: { requestHandler?: STSClientConfig['requestHandler'] } = {}): Promise<void> {
+    const validated = validateCloudDeploymentAdapterInputV1(input, { provider: 'aws', hostingProvider: 'ecs', parseScope: value => awsDeploymentScopeSchema.parse(value) });
+    const credentials = createAwsDeploymentCredentialProvider(validated, options);
+    this.transient = { input: validated, credentials, requestHandler: options.requestHandler };
+    this.credentials = { region: validated.connection.deployment.region };
+    this.accountId = null;
     this.replaceClients();
   }
 
@@ -280,6 +304,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
     const credentials = this.connected().credentials;
     const region = EcsRegionSchema.parse(target.region);
     if (region === credentials.region) return;
+    if (this.transient) throw new CloudDeploymentAccessError('scope_mismatch');
     this.credentials = { ...credentials, region };
     this.accountId = null;
     this.replaceClients();
@@ -290,10 +315,10 @@ export class EcsExpressAdapter implements IProviderAdapter {
     for (const client of Object.values(this.clients ?? {})) client.destroy();
     const config = {
       region: this.credentials.region,
-      credentials: {
-        accessKeyId: this.credentials.accessKeyId,
-        secretAccessKey: this.credentials.secretAccessKey,
+      credentials: this.transient ? () => this.transient!.credentials(AbortSignal.timeout(30_000)) : {
+        accessKeyId: this.credentials.accessKeyId!, secretAccessKey: this.credentials.secretAccessKey!,
       },
+      ...(this.transient ? { maxAttempts: 1, requestHandler: this.transient.requestHandler } : {}),
     };
     this.clients = {
       efs: new EFSClient(config),
@@ -305,6 +330,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
       iam: new IAMClient(config),
       sts: new STSClient(config),
     };
+    if (this.transient) for (const client of Object.values(this.clients)) boundAwsSdkResponses(client);
   }
 
   async verify(): Promise<VerifyResult> {
@@ -333,11 +359,16 @@ export class EcsExpressAdapter implements IProviderAdapter {
     this.clients = null;
     this.credentials = null;
     this.accountId = null;
+    this.transient = null;
   }
 
   async ensureProject(projectName: string, environment: Environment): Promise<Receipt> {
     const boundArn = parseHostingBindings(environment).projectId;
     try {
+      if (this.transient) {
+        if (environment.name !== this.transient.input.connection.environment || this.transient.input.capability !== 'provision') throw new CloudDeploymentAccessError('scope_mismatch');
+        await verifyAwsInstalledRoles(this.transient.input.connection, this.connected().clients, this.transient.input.connection.deployment.workloads[0].name);
+      }
       const accountId = await this.resolveAccountId();
       const clusterName = boundArn
         ? this.parseClusterArn(boundArn).clusterName
@@ -408,6 +439,12 @@ export class EcsExpressAdapter implements IProviderAdapter {
       if (!cluster || cluster.status !== 'ACTIVE') {
         throw new Error(`ECS cluster ${resources.clusterArn} is not active after project reconciliation.`);
       }
+      let installedRegistry: { id: string; createdAt: string } | undefined;
+      if (this.transient) {
+        const repository = await this.getRepository(resources.repositoryName);
+        if (repository?.repositoryArn !== resources.repositoryArn || !repository.createdAt) throw new CloudDeploymentAccessError('scope_mismatch');
+        installedRegistry = { id: repository.repositoryArn, createdAt: repository.createdAt.toISOString() };
+      }
       return {
         success: true,
         message: created
@@ -420,6 +457,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
           created,
           providerBindings: {
             [AWS_WORKLOAD_NETWORK_BINDING]: workloadNetwork,
+            ...(installedRegistry ? { awsDeploymentRegistry: installedRegistry } : {}),
           },
         },
       };
@@ -485,6 +523,18 @@ export class EcsExpressAdapter implements IProviderAdapter {
         this.parseClusterArn(clusterArn).accountId,
         this.parseClusterArn(clusterArn).clusterName
       );
+      let preparedTaskRoleArn: string | undefined;
+      if (this.transient) {
+        const configured = this.transient.input.connection.deployment.workloads.find(item => item.name === service.name);
+        const binding = (environment.platformBindings.runtimeIdentities as Record<string, { evidence?: Record<string, string> }> | undefined)?.[service.name];
+        const task = this.transient.input.connection.runtimeIdentities.find(item => item.workload === service.name && item.principal.kind === 'aws-role' && item.principal.purpose === 'task');
+        if (!configured || !isDeepStrictEqual(Object.fromEntries(configured.runtimeSecrets.map(item => [item.key, item.reference])), { ...secretVersionRefs })
+          || task?.principal.kind !== 'aws-role' || binding?.evidence?.runtimeInstallationId !== this.transient.input.connection.installationId
+          || binding.evidence.roleId !== task.principal.roleId || binding.evidence.runtimePlanDigest !== this.transient.input.connection.planDigest)
+          throw new CloudDeploymentAccessError('scope_mismatch');
+        await verifyAwsInstalledRoles(this.transient.input.connection, this.connected().clients, service.name);
+        preparedTaskRoleArn = task.principal.roleArn;
+      }
       const workloadNetwork = await this.assertProjectResources(resources, environment);
       const binding = parseHostingBindings(environment).services?.[service.name]?.serviceId;
       const environmentValues = this.containerEnvironment(service, envVars);
@@ -547,6 +597,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
             serviceName,
             executionRoleArn: resources.executionRoleArn,
             infrastructureRoleArn: resources.infrastructureRoleArn,
+            ...(preparedTaskRoleArn ? { taskRoleArn: preparedTaskRoleArn } : {}),
             cpu: '256',
             memory: '512',
             healthCheckPath: '/',
@@ -580,6 +631,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
         }
       }
       const url = this.expressUrl(express);
+      if (this.transient && !express.createdAt) throw new CloudDeploymentAccessError('scope_mismatch');
       return {
         serviceId: service.id,
         externalId: serviceArn,
@@ -594,6 +646,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
             serviceId: serviceArn,
             serviceName: express.serviceName,
             resourceType: 'web',
+            ...(this.transient ? { resourceUid: express.createdAt!.toISOString() } : {}),
             createdService,
             deploymentDeferred: true,
             pendingImage: (await this.runtimeConfiguration(this.currentConfiguration(express), serviceArn)).container.image === BOOTSTRAP_IMAGE,
@@ -621,6 +674,12 @@ export class EcsExpressAdapter implements IProviderAdapter {
     service: Service,
     keys: string[]
   ): Promise<Receipt> {
+    if (this.transient) {
+      const workload = this.transient.input.connection.deployment.workloads.find(item => item.name === service.name);
+      if (!workload || environment.name !== this.transient.input.connection.environment || workload.runtimeSecrets.some(item => keys.includes(item.key))) {
+        return this.failedReceipt('Failed to delete ECS Express environment variables', 'Approved runtime secret references require a new deployment review before removal.');
+      }
+    }
     const bindings = parseHostingBindings(environment);
     const serviceArn = bindings.services?.[service.name]?.serviceId;
     if (!serviceArn) {
@@ -1031,6 +1090,10 @@ export class EcsExpressAdapter implements IProviderAdapter {
   }
 
   private clusterName(_projectName: string, environment: Environment): string {
+    if (this.transient) {
+      if (environment.name !== this.transient.input.connection.environment) throw new CloudDeploymentAccessError('scope_mismatch');
+      return awsDeploymentNames(this.transient.input.connection).clusterName;
+    }
     // Bound cluster names also seed IAM names; retain the scope discriminator
     // inside their shortest prefix limit instead of truncating it downstream.
     return resourceName(environment.name, { maxLength: 42, scope: [environment.projectId] });
@@ -1049,8 +1112,14 @@ export class EcsExpressAdapter implements IProviderAdapter {
     const { region } = this.connected().credentials;
     const roleBase = clusterName.slice(0, 42);
     const repositoryName = `hypervibe/${clusterName.toLowerCase()}`;
-    const executionRoleName = `${roleBase}-task-execution`;
-    const infrastructureRoleName = `${roleBase}-infrastructure`;
+    const installed = this.transient?.input.connection.runtimeIdentities;
+    if (this.transient && (accountId !== this.transient.input.connection.nativeScope.accountId || clusterName !== awsDeploymentNames(this.transient.input.connection).clusterName)) throw new CloudDeploymentAccessError('scope_mismatch');
+    const installedRole = (purpose: string) => {
+      const identities = installed?.filter(item => item.principal.kind === 'aws-role' && item.principal.purpose === purpose).map(item => item.principal.kind === 'aws-role' ? item.principal.roleArn : '');
+      if (identities && new Set(identities).size !== 1) throw new CloudDeploymentAccessError('scope_mismatch'); return identities?.[0];
+    };
+    const executionRoleName = installedRole('execution')?.split('/').at(-1) ?? `${roleBase}-task-execution`;
+    const infrastructureRoleName = installedRole('infrastructure')?.split('/').at(-1) ?? `${roleBase}-infrastructure`;
     return {
       accountId,
       clusterName,
@@ -1078,6 +1147,8 @@ export class EcsExpressAdapter implements IProviderAdapter {
     return [
       { key: 'managed-by', value: 'hypervibe' },
       { key: 'hypervibe-environment-id', value: environment.id },
+      ...(this.transient ? [{ key: 'hypervibe-owner', value: awsDeploymentNames(this.transient.input.connection).owner },
+        { key: 'hypervibe-installation', value: this.transient.input.connection.installationId }] : []),
     ];
   }
 
@@ -1120,6 +1191,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
   private async ensureDefaultVpc(): Promise<Vpc> {
     const current = await this.describeDefaultVpc();
     if (current) return current;
+    if (this.transient) throw new CloudDeploymentAccessError('unsupported');
     const created = await this.connected().clients.ec2.send(new CreateDefaultVpcCommand({}));
     if (!created.Vpc?.VpcId || !created.Vpc.IsDefault) {
       throw new Error('AWS did not confirm creation of the default VPC required by ECS Express Mode.');
@@ -1265,7 +1337,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
           VpcId: vpcId,
           TagSpecifications: [{
             ResourceType: 'security-group',
-            Tags: workloadSecurityGroupTags(environment.id, resources.clusterArn),
+            Tags: [...workloadSecurityGroupTags(environment.id, resources.clusterArn), ...(this.transient ? [{ Key: 'hypervibe-owner', Value: awsDeploymentNames(this.transient.input.connection).owner }] : [])],
           }],
         }));
         returnedGroupId = created.GroupId;
@@ -1376,6 +1448,12 @@ export class EcsExpressAdapter implements IProviderAdapter {
     policyArn: string,
     environment: Environment
   ): Promise<void> {
+    if (this.transient) {
+      const verified = await verifyAwsInstalledRoles(this.transient.input.connection, this.connected().clients, this.transient.input.connection.deployment.workloads[0].name);
+      const kind = policyArn === EXECUTION_POLICY ? 'execution' : policyArn === INFRASTRUCTURE_POLICY ? 'infrastructure' : '';
+      if (!kind || verified[kind].arn !== roleArn || !roleArn.endsWith('/' + roleName)) throw new CloudDeploymentAccessError('scope_mismatch');
+      return;
+    }
     let role = await this.getRole(roleName);
     if (role) {
       if (role.Arn !== roleArn) throw new Error(`IAM role ${roleName} resolved outside ${roleArn}.`);
@@ -1428,6 +1506,11 @@ export class EcsExpressAdapter implements IProviderAdapter {
   }
 
   private async roleReady(name: string, arn: string, policyArn: string, environmentId: string): Promise<boolean> {
+    if (this.transient) {
+      const verified = await verifyAwsInstalledRoles(this.transient.input.connection, this.connected().clients, this.transient.input.connection.deployment.workloads[0].name);
+      const kind = policyArn === EXECUTION_POLICY ? 'execution' : policyArn === INFRASTRUCTURE_POLICY ? 'infrastructure' : '';
+      return !!kind && verified[kind].arn === arn && arn.endsWith('/' + name);
+    }
     const role = await this.getRole(name);
     if (!role) return false;
     if (role.Arn !== arn) throw new Error(`IAM role ${name} resolved outside ${arn}.`);
@@ -1715,6 +1798,11 @@ export class EcsExpressAdapter implements IProviderAdapter {
       [resources.executionRoleName, resources.executionRoleArn],
       [resources.infrastructureRoleName, resources.infrastructureRoleArn],
     ] as const) {
+      if (this.transient) {
+        const installed = await verifyAwsInstalledRoles(this.transient.input.connection, this.connected().clients, this.transient.input.connection.deployment.workloads[0].name);
+        if (![installed.execution.arn, installed.infrastructure.arn].includes(roleArn)) throw new CloudDeploymentAccessError('scope_mismatch');
+        continue;
+      }
       const role = await this.getRole(roleName);
       if (role && (role.Arn !== roleArn || !this.hasManagedTag(role.Tags))) {
         throw new Error(`IAM role ${roleName} is outside its reviewed Hypervibe identity.`);
@@ -1749,6 +1837,11 @@ export class EcsExpressAdapter implements IProviderAdapter {
   }
 
   private async deleteRole(name: string, policyArn: string): Promise<void> {
+    if (this.transient) {
+      const expected = this.transient.input.connection.runtimeIdentities.some(item => item.principal.kind === 'aws-role' && item.principal.roleArn.endsWith('/' + name));
+      if (!expected) throw new CloudDeploymentAccessError('scope_mismatch');
+      return; // Separately approved runtime identities and reader grants survive workload teardown.
+    }
     const role = await this.getRole(name);
     if (!role) return;
     if (!this.hasManagedTag(role.Tags)) throw new Error(`IAM role ${name} is not Hypervibe-managed.`);
@@ -2036,6 +2129,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
   }
 
   private formatError(error: unknown): string {
+    if (this.transient) return error instanceof CloudDeploymentAccessError ? error.message : 'AWS deployment operation could not be verified.';
     return error instanceof Error ? error.message : String(error);
   }
 
@@ -2080,6 +2174,8 @@ export class EcsExpressAdapter implements IProviderAdapter {
 }
 
 providerRegistry.register({
+  transientAuthentication: { provider: 'aws', hostingProvider: 'ecs', parseScope: value => awsDeploymentScopeSchema.parse(value),
+    createAdapter: async input => { const adapter = new EcsExpressAdapter(); await adapter.connectTransient(input); return adapter; } },
   metadata: {
     name: 'ecs',
     displayName: 'AWS ECS Express Mode',
@@ -2104,6 +2200,7 @@ providerRegistry.register({
       diff: { workloadKindObservation: 'exact' },
       ci: {
         displayName: 'AWS ECS Express Mode',
+        transientDeployment: 'github-oidc-broker-v1',
         requiredSecrets: ECS_EXPRESS_CI_REQUIRED_SECRETS,
         secretCredentialKeys: {
           AWS_ACCESS_KEY_ID: 'accessKeyId',

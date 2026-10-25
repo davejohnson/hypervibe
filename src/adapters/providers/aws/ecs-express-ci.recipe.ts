@@ -150,6 +150,7 @@ writeFileSync('.hypervibe-release.json', JSON.stringify({ version: 1, provider: 
 }
 
 export function buildEcsExpressPortableRecipe(target: BranchDeployTarget): PortableCiDeployRecipe {
+  if (target.deploymentAccess) throw new Error('Hosted deployment federation currently requires reviewed GitHub Actions identity; GitLab federation is not implemented.');
   const clusterArn = target.providerProjectId?.trim();
   const serviceArns = [...new Set(target.providerServiceIds.map((value) => value.trim()).filter(Boolean))].sort();
   if (!clusterArn || serviceArns.length === 0) throw new Error(`ECS Express bindings for ${target.environmentName} are incomplete; apply hosting first`);

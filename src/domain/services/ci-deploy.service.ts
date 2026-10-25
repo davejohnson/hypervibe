@@ -518,10 +518,10 @@ async function resolveManagedWorkflowSecrets(params: {
   const requiredDatabaseSecrets = params.workflow.requiredSecrets.includes('DATABASE_URL')
     ? ['DATABASE_URL']
     : [];
-  const availableSecrets = providerSecretsForGitHubActions(
+  const availableSecrets = requiredProviderSecrets.length ? providerSecretsForGitHubActions(
     params.environmentSpec.hosting.provider,
     { githubRepo: params.repository }
-  ).filter((secret) => params.workflow.requiredSecrets.includes(secret.name));
+  ).filter((secret) => params.workflow.requiredSecrets.includes(secret.name)) : [];
   if (requiredDatabaseSecrets.length > 0 && !availableSecrets.some((secret) => secret.name === 'DATABASE_URL')) {
     const databaseUrlSecret = await databaseUrlSecretForGitHubActions(
       params.project,

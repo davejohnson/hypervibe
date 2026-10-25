@@ -1,6 +1,10 @@
 import { AzureRuntimeIdentities } from './azure-runtime-identities.js';
+import type { CloudDeploymentAdapterInputV1, CloudDeploymentConnectionV1 } from '../../../domain/ports/cloud-deployment.port.js';
+import { validateCloudDeploymentAdapterInputV1 } from '../../../domain/services/cloud-deployment-authentication.js';
+import { azureDeploymentContract } from './azure-cloud-deployment.js';
 import { runtimeAccessBindings } from '../../../domain/services/runtime-access.service.js';
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { validateRuntimeSecretReferences, runtimeSecretReferenceIdentity } from '../../../domain/services/runtime-secret-references.js';
 import type { RuntimeSecretReference } from '../../../domain/ports/secret-destination.port.js';
 import { resolve4, resolveCname, resolveTxt } from 'node:dns/promises';
@@ -69,9 +73,9 @@ const INTERNAL_ENV_KEYS = new Set([
 ]);
 
 const AzureContainerAppsAuthenticationSchema = z.object({
-  tenantId: z.string().uuid('Azure tenant ID must be a UUID'),
-  subscriptionId: z.string().uuid('Azure subscription ID must be a UUID'),
-  clientId: z.string().uuid('Azure service principal client ID must be a UUID'),
+  tenantId: z.string().guid('Azure tenant ID must be a UUID'),
+  subscriptionId: z.string().guid('Azure subscription ID must be a UUID'),
+  clientId: z.string().guid('Azure service principal client ID must be a UUID'),
   clientSecret: z.string().min(8, 'Azure service principal client secret is required'),
 }).strict();
 
@@ -84,7 +88,7 @@ export const AzureContainerAppsCredentialsSchema = z.preprocess((input) => {
 export type AzureContainerAppsCredentials = z.infer<typeof AzureContainerAppsCredentialsSchema>;
 const DEFAULT_AZURE_CONTAINER_APPS_LOCATION = 'canadacentral';
 const AzureLocationSchema = z.string().trim().regex(/^[a-z0-9]+$/, 'Azure location must be a region slug');
-type ConnectedAzureContainerAppsCredentials = AzureContainerAppsCredentials & { location: string };
+type ConnectedAzureContainerAppsCredentials = (AzureContainerAppsCredentials | Extract<import('./azure-resource-manager.client.js').AzureResourceManagerCredentials, { authMode: 'federated' }>) & { location: string };
 
 type AzureResource = {
   id: string;
@@ -107,7 +111,7 @@ type AzureProject = {
 
 export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMaintenanceAdapter {
   readonly name = 'azure-container-apps';
-  readonly runtimeIdentities = new AzureRuntimeIdentities(() => { const { client, credentials } = this.connected(); return { client, ...credentials, deployClientId: credentials.clientId }; });
+  readonly runtimeIdentities = new AzureRuntimeIdentities(() => { const { client, credentials } = this.connected(); return { client, ...credentials, deployClientId: credentials.clientId, deployment: this.deploymentConnection }; });
   readonly serviceVolumes = new AzureServiceVolumes(() => this.connected().client);
 
   readonly capabilities: ProviderCapabilities = {
@@ -127,8 +131,30 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
 
   private credentials: ConnectedAzureContainerAppsCredentials | null = null;
   private client: AzureResourceManagerClient | null = null;
+  private deploymentConnection?: CloudDeploymentConnectionV1;
+
+  /** Internal authenticated broker input; never accepted by connect(credentials). */
+  async connectTransient(input: CloudDeploymentAdapterInputV1): Promise<void> {
+    const validated = validateCloudDeploymentAdapterInputV1(input, azureDeploymentContract);
+    const { authentication, connection } = validated;
+    if (authentication.kind !== 'azure-federation') throw new Error('Azure transient authorization is unavailable.');
+    const { principal } = authentication;
+    const credentials = { authMode: 'federated' as const, ...principal, resourceGroup: connection.nativeScope.resourceGroup,
+      location: connection.nativeScope.location, getAccessToken: authentication.getAccessToken,
+      readerVaultIds: [...new Set(connection.deployment.workloads.flatMap(workload => workload.runtimeSecrets.map(({ reference }) => {
+        const d = reference.destination;
+        if (d.provider !== 'azure-key-vault' || d.tenantId !== principal.tenantId || d.subscriptionId !== principal.subscriptionId) throw new Error('Azure reader scope does not match its deployment approval.');
+        return `/subscriptions/${d.subscriptionId}/resourceGroups/${d.resourceGroup}/providers/Microsoft.KeyVault/vaults/${d.vaultName}`;
+      })))] };
+    const client = new AzureResourceManagerClient(credentials);
+    await client.servicePrincipalId();
+    this.credentials = credentials;
+    this.client = client;
+    this.deploymentConnection = connection;
+  }
 
   async connect(credentials: unknown): Promise<void> {
+    this.deploymentConnection = undefined;
     const parsed = AzureContainerAppsCredentialsSchema.parse(credentials);
     const legacyLocation = credentials && typeof credentials === 'object' && typeof (credentials as Record<string, unknown>).location === 'string'
       ? (credentials as Record<string, string>).location
@@ -139,6 +165,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
 
   configureTarget(target: { region?: string }): void {
     if (!target.region) return;
+    if (this.deploymentConnection && target.region !== this.deploymentConnection.nativeScope.location) throw new Error('Azure placement requires a new deployment approval.');
     const { credentials } = this.connected();
     this.credentials = { ...credentials, location: AzureLocationSchema.parse(target.region) };
   }
@@ -159,9 +186,11 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
   async disconnect(): Promise<void> {
     this.client = null;
     this.credentials = null;
+    this.deploymentConnection = undefined;
   }
 
   async ensureProject(projectName: string, environment: Environment): Promise<Receipt> {
+    if (this.deploymentConnection) return { success: false, message: 'Azure namespace creation and setup grants remain blocked until native creation ownership is verified.', data: { mutationAttempted: false, reason: 'create_ownership_unverified' } };
     try {
       const bindings = parseHostingBindings(environment);
       const desired = bindings.projectId
@@ -273,6 +302,8 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     envVars: Record<string, string>,
     options: DeploymentMutationOptions = {}
   ): Promise<DeployResult> {
+    if (this.deploymentConnection && !parseHostingBindings(environment).services?.[service.name]?.serviceId) return this.failedDeploy(service,
+      'Azure first workload creation remains blocked until native conditional creation ownership is verified.');
     if (options.requireNewWorkload) return this.failedDeploy(service, 'Azure Container Apps does not expose a verified conditional-create API. This reviewed create-only request is blocked before provider access.');
     let secretVersionRefs: Record<string, RuntimeSecretReference>;
     try {
@@ -281,6 +312,13 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
         && destination.tenantId.toLowerCase() === this.connected().credentials.tenantId.toLowerCase()
         && destination.subscriptionId.toLowerCase() === this.connected().credentials.subscriptionId.toLowerCase());
     } catch { return this.failedDeploy(service, 'Invalid or conflicting runtime secret reference.'); }
+    if (this.deploymentConnection) {
+      const reviewed = this.deploymentConnection.deployment.workloads.find(workload => workload.name === service.name);
+      const expected = reviewed?.runtimeSecrets.map(({ key, reference }) => [key, reference] as const).sort(([left], [right]) => left.localeCompare(right));
+      const supplied = Object.entries(secretVersionRefs).sort(([left], [right]) => left.localeCompare(right));
+      if (environment.name !== this.deploymentConnection.environment || !reviewed || reviewed.kind !== serviceWorkloadKind(service)
+        || !isDeepStrictEqual(supplied, expected)) return this.failedDeploy(service, 'Runtime secret references differ from the separately approved deployment. Review new deployment access before changing them.');
+    }
     if (serviceWorkloadKind(service) !== 'web') {
       return this.failedDeploy(service, 'Azure Container Apps Jobs and workers require distinct lifecycle resources and are not yet supported.');
     }
@@ -402,6 +440,11 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
   }
 
   async deleteEnvVars(environment: Environment, service: Service, keys: string[]): Promise<Receipt> {
+    if (this.deploymentConnection) {
+      const reviewed = this.deploymentConnection.deployment.workloads.find(workload => workload.name === service.name);
+      if (environment.name !== this.deploymentConnection.environment || !reviewed || reviewed.runtimeSecrets.some(reference => keys.includes(reference.key)))
+        return { success: false, message: 'Reviewed runtime secret references cannot be removed through the existing deployment approval.' };
+    }
     const appId = parseHostingBindings(environment).services?.[service.name]?.serviceId;
     if (!appId) return { success: true, message: 'Azure Container App has no retired environment variables to delete.' };
     try {
@@ -724,7 +767,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       const definitions = app.properties?.configuration?.secrets ?? [];
       const hasExternalReferences = definitions.some((item: any) => typeof item.keyVaultUrl === 'string');
       const secretValues = Object.fromEntries(
-        (hasExternalReferences ? [] : await this.listAppSecrets(app.id)).filter((item: any) => typeof item.name === 'string' && typeof item.value === 'string')
+        (hasExternalReferences || this.deploymentConnection ? [] : await this.listAppSecrets(app.id)).filter((item: any) => typeof item.name === 'string' && typeof item.value === 'string')
           .map((item: any) => [item.name, item.value])
       );
       const envValues = Object.fromEntries(
@@ -900,6 +943,11 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
   }
 
   private desiredProject(projectName: string, environment: Environment, legacy = false): AzureProject {
+    if (this.deploymentConnection) {
+      if (environment.name !== this.deploymentConnection.environment) throw new Error('Azure deployment environment does not match its approval.');
+      const group = `/subscriptions/${this.deploymentConnection.nativeScope.subscriptionId}/resourceGroups/${this.deploymentConnection.nativeScope.resourceGroup}`;
+      return this.projectFromResourceGroup(group, `${group}/providers/Microsoft.App/managedEnvironments/runtime`);
+    }
     const scope = (legacy ? legacyAzureEnvironmentResourceGroupScope : azureEnvironmentResourceGroupScope)({
       subscriptionId: this.connected().credentials.subscriptionId,
       projectName,
@@ -911,6 +959,9 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
   }
 
   private projectFromResourceGroup(resourceGroupId: string, boundEnvironmentId?: string): AzureProject {
+    if (this.deploymentConnection && resourceGroupId.toLowerCase() !== `/subscriptions/${this.deploymentConnection.nativeScope.subscriptionId}/resourceGroups/${this.deploymentConnection.nativeScope.resourceGroup}`.toLowerCase()) {
+      throw new Error('Azure bound namespace is outside its deployment approval.');
+    }
     const scope = parseAzureResourceGroupScope(
       resourceGroupId,
       this.connected().credentials.subscriptionId
@@ -1438,6 +1489,9 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
 }
 
 providerRegistry.register({
+  transientAuthentication: { ...azureDeploymentContract, createAdapter: async input => {
+    const adapter = new AzureContainerAppsAdapter(); await adapter.connectTransient(input); return adapter;
+  } },
   metadata: {
     name: 'azure-container-apps',
     displayName: 'Azure Container Apps',
@@ -1462,6 +1516,7 @@ providerRegistry.register({
       project: { shareAcrossEnvironments: false },
       diff: { workloadKindObservation: 'exact' },
       ci: {
+        transientDeployment: 'github-oidc-broker-v1',
         displayName: 'Azure Container Apps',
         requiredSecrets: AZURE_CONTAINER_APPS_CI_REQUIRED_SECRETS,
         secretCredentialKeys: {

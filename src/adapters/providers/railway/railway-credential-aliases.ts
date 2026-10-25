@@ -10,7 +10,7 @@ import { prepareRailwayDatabaseCredentialAliases, verifyRailwayDatabaseCredentia
 
 const identity = z.string().min(1);
 const scopeSchema = z.object({ projectId: identity, environmentId: identity }).strict();
-const variableMap = z.record(z.string());
+const variableMap = z.record(z.string(), z.string());
 const privateSchema = z.object({ instanceId: identity, definitions: variableMap, rendered: variableMap }).strict();
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const relevant = (values: Record<string, string>) => Object.fromEntries(Object.entries(values).filter(([key]) =>

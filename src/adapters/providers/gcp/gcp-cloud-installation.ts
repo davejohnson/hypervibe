@@ -30,12 +30,12 @@ const operations = ['enable-api', 'create-role', 'create-account', 'create-secre
 const identitySchema = z.object({
   uniqueId: z.string().regex(/^[1-9]\d{5,29}$/).optional(), createTime: z.string().datetime().optional(),
   adoption: z.literal('reviewed-existing').optional(),
-  owner: z.string().regex(/^[a-f0-9]{64}$/).optional(), attemptId: z.string().uuid().optional(),
+  owner: z.string().regex(/^[a-f0-9]{64}$/).optional(), attemptId: z.string().guid().optional(),
 }).strict();
 const evidenceSchema = z.object({
   resources: z.array(z.object({ kind: z.enum(['project', 'service', 'role', 'serviceAccount', 'secret', 'iamBinding']),
     id: z.string().max(1024).regex(/^projects\/[a-z0-9-]+(?:\/[A-Za-z0-9_.@\/-]+)?$/), identity: identitySchema }).strict()).max(5),
-  native: z.object({ operation: z.enum(operations), attemptId: z.string().uuid().optional(), installationId: z.string().uuid(),
+  native: z.object({ operation: z.enum(operations), attemptId: z.string().guid().optional(), installationId: z.string().guid(),
     owner: z.string().regex(/^[a-f0-9]{64}$/), key: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).optional(),
     role: z.string().regex(/^projects\/[a-z0-9-]+\/roles\/[a-zA-Z0-9_.]+$/).optional(),
     member: z.string().regex(/^serviceAccount:[a-z][a-z0-9-]+@[a-z][a-z0-9-]+\.iam\.gserviceaccount\.com$/).optional(),
@@ -240,7 +240,7 @@ export function createGcpCloudInstallationDriver(options: { fetch?: typeof fetch
         try { result = await client.json(`https://secretmanager.googleapis.com/v1/${context.action.resource.name}`); }
         catch (error) { if (error instanceof DestinationBoundaryError && error.status === 404) result = null; else throw error; }
         if (result) {
-          const labels = z.record(z.string()).parse(result.labels ?? {});
+          const labels = z.record(z.string(), z.string()).parse(result.labels ?? {});
           if (result.name !== context.action.resource.name || !z.string().datetime().safeParse(result.createTime).success
             || labels['hv-installation'] !== n.owner.slice(0, 63) || context.attempt && labels['hv-attempt'] !== context.attempt.id) return { state: 'conflict', reason: 'ownership_mismatch' };
           found = { kind: 'secret', id: String(result.name), identity: { createTime: String(result.createTime), owner: n.owner, attemptId: labels['hv-attempt'] } };

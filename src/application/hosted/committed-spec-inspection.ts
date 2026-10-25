@@ -300,7 +300,7 @@ function secretShapedPaths(document: unknown): string[] {
   return Array.from(found).sort();
 }
 
-function safeDocumentPath(path: Array<string | number>): string {
+function safeDocumentPath(path: PropertyKey[]): string {
   return path
     .map((segment) => String(segment).replace(/[^A-Za-z0-9_.-]/g, '?').slice(0, 80))
     .join('.')

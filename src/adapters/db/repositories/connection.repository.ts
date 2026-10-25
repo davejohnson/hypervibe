@@ -264,6 +264,18 @@ export class ConnectionRepository {
     return this.create(input);
   }
 
+  /** Exact local grant/reference revision; a stale asynchronous response cannot overwrite newer authority. */
+  compareAndSwap(input: CreateConnectionInput, expectedCipher: string | null, status: ConnectionStatus, expectedStatus?: ConnectionStatus | null): Connection | null {
+    return getDb().transaction(() => {
+      const current = this.findByProviderAndScope(input.provider, normalizeConnectionScope(input.scope));
+      if ((current?.credentialsEncrypted ?? null) !== expectedCipher) return null;
+      if (expectedStatus !== undefined && (current?.status ?? null) !== expectedStatus) return null;
+      const saved = this.upsert(input);
+      this.updateStatus(saved.id, status);
+      return this.findById(saved.id);
+    }).immediate();
+  }
+
   /**
    * Atomically stores a batch whose credentials have already been verified
    * against every provider. This intentionally bypasses the ordinary pending

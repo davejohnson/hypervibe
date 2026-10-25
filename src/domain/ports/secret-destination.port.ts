@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-const uuid = z.string().uuid();
+const uuid = z.string().guid();
 const accountNumber = z.string().regex(/^\d{12}$/);
 const region = z.string().regex(/^[a-z]{2}(?:-[a-z]+)+-\d$/);
 export const awsSecretDestinationSchema = z.object({

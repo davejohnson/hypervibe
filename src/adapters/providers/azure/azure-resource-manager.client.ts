@@ -1,4 +1,6 @@
 import { DefaultAzureCredential } from '@azure/identity';
+import { DestinationBudget } from '../secret-destination-http.js';
+import { redactExactValues } from '../../../utils/redact-exact-values.js';
 
 const AZURE_MANAGEMENT_URL = 'https://management.azure.com';
 const AZURE_RESOURCE_API_VERSION = '2024-11-01';
@@ -16,6 +18,18 @@ export type AzureResourceManagerCredentials = {
   authMode: 'default';
   subscriptionId: string;
   resourceGroup?: string;
+} | {
+  /** Trusted broker callbacks only; this shape is not a user credential schema. */
+  authMode: 'federated';
+  tenantId: string;
+  subscriptionId: string;
+  clientId: string;
+  principalId: string;
+  identityResourceId: string;
+  resourceGroup: string;
+  /** Exact reviewed vault metadata/RBAC reads; never arbitrary cross-group access. */
+  readerVaultIds?: string[];
+  getAccessToken(target: 'resource-manager' | 'container-registry', signal: AbortSignal): Promise<{ token: string; expiresAt: string }>;
 };
 
 type AzureDefaultTokenProvider = () => Promise<string>;
@@ -77,7 +91,7 @@ export class AzureResourceManagerClient {
   private accessTokenPromise: Promise<string> | null = null;
   private readonly defaultCredential: DefaultAzureCredential | null;
 
-  constructor(readonly credentials: AzureResourceManagerCredentials) {
+  constructor(readonly credentials: AzureResourceManagerCredentials, private readonly options: { deadlineMs?: number } = {}) {
     this.defaultCredential = credentials.authMode === 'default'
       ? new DefaultAzureCredential()
       : null;
@@ -102,6 +116,20 @@ export class AzureResourceManagerClient {
   }
 
   async servicePrincipalId(): Promise<string> {
+    if (this.credentials.authMode === 'federated') {
+      // The authenticated broker's provider-owned OAuth exchange establishes the
+      // caller. ARM independently checks continuing native identity/authority.
+      // Microsoft-owned access tokens are opaque, never an unverified oid JWT.
+      const expected = this.credentials;
+      const native = await this.request<{ id?: unknown; properties?: { tenantId?: unknown; clientId?: unknown; principalId?: unknown } }>(
+        'GET', expected.identityResourceId, '2024-11-30');
+      const same = (actual: unknown, value: string) => typeof actual === 'string' && actual.toLowerCase() === value.toLowerCase();
+      if (!same(native.id, expected.identityResourceId) || !same(native.properties?.tenantId, expected.tenantId)
+        || !same(native.properties?.clientId, expected.clientId) || !same(native.properties?.principalId, expected.principalId)) {
+        throw new Error('Azure transient identity could not be verified.');
+      }
+      return expected.principalId;
+    }
     const token = await this.getAccessToken();
     try {
       const payload = JSON.parse(
@@ -265,12 +293,21 @@ export class AzureResourceManagerClient {
     apiVersion: string,
     body?: unknown
   ): Promise<T> {
-    const token = await this.getAccessToken();
     const versioned = this.withApiVersion(pathOrUrl, apiVersion);
     const url = versioned.startsWith('https://')
       ? versioned
       : `${AZURE_MANAGEMENT_URL}${versioned}`;
     this.assertManagementUrl(url);
+    if (this.credentials.authMode === 'federated') {
+      this.assertTransientScope(url, method);
+      const result = await this.transientRequest<T>(url, method, body);
+      if (result.operation) {
+        await this.waitForOperation(result.operation, apiVersion);
+        if (method === 'PUT' || method === 'PATCH') return this.request<T>('GET', pathOrUrl, apiVersion);
+      }
+      return result.value;
+    }
+    const token = await this.getAccessToken();
     const response = await fetch(url, {
       method,
       headers: {
@@ -315,6 +352,7 @@ export class AzureResourceManagerClient {
   }
 
   private async requestAccessToken(): Promise<string> {
+    if (this.credentials.authMode === 'federated') throw new Error('Azure transient authorization must use its bounded request.');
     if (this.credentials.authMode === 'default') {
       const access = await this.defaultCredential!.getToken('https://management.azure.com/.default');
       if (!access?.token) throw new Error('Azure default credential chain did not return an ARM access token.');
@@ -369,6 +407,15 @@ export class AzureResourceManagerClient {
     const url = this.withApiVersion(operationUrl, apiVersion);
     this.assertManagementUrl(url);
     for (let attempt = 1; attempt <= 180; attempt += 1) {
+      if (this.credentials.authMode === 'federated') {
+        this.assertTransientScope(url, 'GET');
+        const { value } = await this.transientRequest<{ status?: unknown; properties?: { provisioningState?: unknown } }>(url, 'GET');
+        const status = String(value?.status ?? value?.properties?.provisioningState ?? '').toLowerCase();
+        if (['succeeded', 'completed'].includes(status)) return;
+        if (['failed', 'canceled', 'cancelled'].includes(status)) throw new Error('Azure Resource Manager operation failed.');
+        if (attempt < 180) await this.delay();
+        continue;
+      }
       const response = await fetch(url, {
         headers: {
           Accept: 'application/json',
@@ -414,12 +461,67 @@ export class AzureResourceManagerClient {
     const url = new URL(value);
     if (
       url.protocol !== 'https:'
-      || url.hostname.toLowerCase() !== 'management.azure.com'
+      || url.host.toLowerCase() !== 'management.azure.com' || url.username || url.password || url.hash
     ) {
       throw new Error(
         'Azure Resource Manager request URL left management.azure.com.'
       );
     }
+  }
+
+  private assertTransientScope(value: string, method: string): void {
+    if (this.credentials.authMode !== 'federated') return;
+    const path = new URL(value).pathname.toLowerCase();
+    const subscription = `/subscriptions/${this.credentials.subscriptionId}`.toLowerCase();
+    const group = `${subscription}/resourceGroups/${this.credentials.resourceGroup}`.toLowerCase();
+    const reviewedReader = method === 'GET' && (this.credentials.readerVaultIds ?? []).some(id => path === id.toLowerCase()
+      || path.startsWith(`${id}/providers/Microsoft.Authorization/roleAssignments/`.toLowerCase()));
+    if (/%|\\/.test(path) || path !== group && !path.startsWith(`${group}/`)
+      && !reviewedReader
+      && !(method === 'GET' && (path === subscription || path.startsWith(`${subscription}/providers/microsoft.app/locations/`)))) {
+      throw new Error('Azure transient request is outside its reviewed scope.');
+    }
+    if (method !== 'GET' && (/\/providers\/microsoft\.(authorization|managedidentity)\//.test(path) || /\/(register|listsecrets|listcredentials)$/.test(path))) {
+      throw new Error('Azure deployment cannot change setup trust or retrieve secret values.');
+    }
+  }
+
+  private async transientRequest<T>(url: string, method: string, body?: unknown): Promise<{ value: T; operation?: string }> {
+    if (this.credentials.authMode !== 'federated') throw new Error('Azure transient authorization is unavailable.');
+    const budget = new DestinationBudget({ deadlineMs: this.options.deadlineMs });
+    try {
+      let access: { token: string; expiresAt: string };
+      try {
+        access = await budget.wait(this.credentials.getAccessToken('resource-manager', budget.signal));
+        if (!access || typeof access.token !== 'string' || !access.token || access.token.length > 65_536 || /[\r\n]/.test(access.token)
+          || typeof access.expiresAt !== 'string' || !Number.isFinite(Date.parse(access.expiresAt)) || Date.parse(access.expiresAt) <= Date.now()) throw new Error();
+      } catch { throw new Error('Azure transient authorization is unavailable.'); }
+      if (budget.signal.aborted) throw new Error('Azure transient authorization is unavailable.');
+      const response = await budget.wait(fetch(url, { method, redirect: 'error', signal: budget.signal,
+        headers: { Accept: 'application/json', Authorization: `Bearer ${access.token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }) }));
+      if (!response.ok || response.redirected) {
+        void response.body?.cancel().catch(() => {});
+        throw new AzureResourceManagerError(response.status);
+      }
+      const operation = response.headers.get('azure-asyncoperation') ?? response.headers.get('operation-location') ?? undefined;
+      if (operation) { this.assertManagementUrl(operation); this.assertTransientScope(operation, 'GET'); }
+      if (response.status === 204) { void response.body?.cancel().catch(() => {}); return { value: undefined as T, operation }; }
+      const reader = response.body?.getReader();
+      if (!reader) return { value: undefined as T, operation };
+      let bytes = 0; const chunks: Uint8Array[] = [];
+      try {
+        for (;;) {
+          const chunk = await budget.wait(reader.read()); if (chunk.done) break;
+          bytes += chunk.value.byteLength; if (bytes > 1_048_576) throw new Error(); chunks.push(chunk.value);
+        }
+        return { value: bytes ? redactExactValues(JSON.parse(Buffer.concat(chunks).toString('utf8')) as T, [access.token]) : undefined as T, operation };
+      } catch { void reader.cancel().catch(() => {}); throw new Error('Azure transient response could not be verified.'); }
+      finally { reader.releaseLock(); }
+    } catch (error) {
+      if (error instanceof AzureResourceManagerError || error instanceof Error && /^Azure transient (authorization is unavailable|response could not be verified)\.$/.test(error.message)) throw error;
+      throw new Error('Azure transient request could not be verified.');
+    } finally { budget.close(); }
   }
 
   private assertContinuationUrl(value: string, initialPath: string): void {

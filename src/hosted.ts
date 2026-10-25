@@ -32,9 +32,14 @@ export * from './hosted-secret-destinations.js';
 export { generateHostedSecretValueV1 } from './application/hosted/secret-generation.js';
 export { cloudSecretSetupSchema, cloudSecretSetupReceiptSchema, type CloudSecretSetup } from './application/cloud-secret-setup-contract.js';
 export * from './domain/ports/cloud-installation.port.js';
+export * from './domain/ports/cloud-deployment.port.js';
+export { createAwsCloudDeploymentTemplateV1 } from './adapters/providers/aws/aws-cloud-deployment.js';
+export { CloudDeploymentAccessError, parseCloudDeploymentTopologyV1, parseCloudDeploymentConnectionV1, parseCloudDeploymentSessionV1, validateCloudDeploymentAdapterInputV1 } from './domain/services/cloud-deployment-authentication.js';
+export { issueCloudDeploymentSessionV1, prepareCloudDeploymentIntentV1, assertCloudDeploymentSourcePlacementV1, verifyCloudDeploymentReleaseTargetsV1 } from './application/hosted/cloud-deployment-session.js';
 export {
   CloudInstallationError, parseCloudInstallationIntentV1, parseCloudInstallationRecordV1,
   planCloudInstallationV1, applyCloudInstallationV1, reconcileCloudInstallationV1, cloudInstallationConnectionsV1,
+  cloudInstallationDeploymentConnectionV1,
   cloudInstallationResolvedScopeV1, cloudInstallationNextStageV1, cloudInstallationDisconnectionIntentV1, planCloudInstallationContinuationV1,
 } from './application/hosted/cloud-installation.js';
 export { createAwsCloudInstallationDriver, createAwsCloudInstallationTemplateV1 } from './adapters/providers/aws/aws-cloud-installation.js';
@@ -43,3 +48,6 @@ export { createAzureCloudInstallationDriver } from './adapters/providers/azure/a
 export { createAzureFederatedTokenProvider } from './adapters/providers/azure/azure-federated-auth.js';
 export { createGcpCloudInstallationDriver } from './adapters/providers/gcp/gcp-cloud-installation.js';
 export { cloudInstallationDriverFactories } from './application/hosted/cloud-installation-providers.js';
+
+/** Canonical reviewed program hash, including all managed companion files. */
+export { workflowFilesContentHash as workflowFilesContentHashV1 } from './domain/services/ci-deploy.service.js';

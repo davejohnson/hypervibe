@@ -59,7 +59,7 @@ function makeRegistry(): CommandRegistry {
     'Store a provider connection.',
     {
       provider: z.string(),
-      credentials: z.record(z.unknown()).optional(),
+      credentials: z.record(z.string(), z.unknown()).optional(),
       credentialsRef: z.string().optional(),
     },
     async (input) => commandSuccess(input)
@@ -76,7 +76,7 @@ function makeRegistry(): CommandRegistry {
   registry.register(
     'hv_plan',
     'Plan with encrypted environment overrides.',
-    { envVars: z.record(z.string()).optional() },
+    { envVars: z.record(z.string(), z.string()).optional() },
     async (input) => commandSuccess(input)
   );
   registry.register(

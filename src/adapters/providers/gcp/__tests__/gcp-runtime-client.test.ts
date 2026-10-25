@@ -20,6 +20,11 @@ describe('Google runtime HTTP boundary', () => {
     await expect(gcpRuntimeRequest('https://iam.googleapis.com/v1/projects/example', 'synthetic-token', { signal: controller.signal }, request)).rejects.toThrow('did not return verifiable evidence');
     expect(request).not.toHaveBeenCalled();
   });
+  it('rejects successful metadata that echoes the bearer in ordinary fields', async () => {
+    const request = vi.fn<typeof fetch>(async () => Response.json({ name: 'projects/example', description: 'prefix synthetic-private-token suffix' }));
+    await expect(gcpRuntimeRequest('https://iam.googleapis.com/v1/projects/example', 'synthetic-private-token', {}, request))
+      .rejects.toThrow('did not return verifiable evidence');
+  });
   it('classifies definite native absence while excluding echoed credential bodies', async () => {
     const request = vi.fn<typeof fetch>(async () => new Response('synthetic-token', { status: 404 }));
     expect(await gcpRuntimeRequest('https://iam.googleapis.com/v1/projects/example', 'synthetic-token', {}, request)).toBeNull();

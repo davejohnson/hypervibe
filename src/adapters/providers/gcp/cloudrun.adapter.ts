@@ -1,4 +1,9 @@
 import { z } from 'zod';
+import { isDeepStrictEqual } from 'node:util';
+import type { CloudDeploymentAdapterInputV1, CloudDeploymentConnectionV1 } from '../../../domain/ports/cloud-deployment.port.js';
+import { validateCloudDeploymentAdapterInputV1 } from '../../../domain/services/cloud-deployment-authentication.js';
+import { GcpDeploymentAuthentication, gcpDeploymentScopeSchema } from './gcp-deployment-authentication.js';
+import { getGcpNativeAdminToken } from './gcp-runtime-client.js';
 import { validateRuntimeSecretReferences, runtimeSecretReferenceIdentity } from '../../../domain/services/runtime-secret-references.js';
 import type { RuntimeSecretReference } from '../../../domain/ports/secret-destination.port.js';
 import { DestinationBudget } from '../secret-destination-http.js';
@@ -24,6 +29,7 @@ import { createHostingServiceCreateRecovery, parseHostingBindings, pendingSchedu
 import * as pubsub from './pubsub.api.js';
 import { CloudRunServiceVolumes } from './cloudrun-service-volume.js';
 import { CloudRunRuntimeIdentities } from './cloudrun-runtime-identities.js';
+import { CloudRunInstalledRuntimeIdentities } from './cloudrun-installed-runtime.js';
 import type { RuntimeIdentityBinding } from '../../../domain/ports/runtime-identity.port.js';
 import { cloudRunFilesystemIdentity } from './cloudrun-volume-runtime.js';
 import { cloudRunJobUpdateBody } from './cloudrun-job-request.js';
@@ -90,7 +96,7 @@ export const CloudRunCredentialsSchema = z.preprocess((input) => {
 export type CloudRunCredentials = z.infer<typeof CloudRunCredentialsSchema>;
 const DEFAULT_CLOUD_RUN_REGION = 'us-central1';
 const CloudRunRegionSchema = z.string().trim().min(1, 'GCP region is required');
-type ConnectedCloudRunCredentials = CloudRunCredentials & { region: string };
+type ConnectedCloudRunCredentials = Omit<CloudRunCredentials, 'credentials'> & { credentials?: string; region: string };
 
 const MANAGED_DATABASE_ENV_KEYS = new Set([
   'DATABASE_URL',
@@ -130,6 +136,7 @@ const MANAGED_DATABASE_SYNC_KEYS = new Set([
 interface CloudRunService {
   name: string;
   uid: string;
+  etag?: string;
   generation: number | string;
   observedGeneration?: number | string;
   reconciling?: boolean;
@@ -502,24 +509,53 @@ export class CloudRunAdapter implements
   private serviceAccountCreds: ServiceAccountCredentials | null = null;
   private accessToken: string | null = null;
   private tokenExpiry: Date | null = null;
+  private transientAuthentication: GcpDeploymentAuthentication | null = null;
+  private deploymentConnection: CloudDeploymentConnectionV1 | null = null;
+  private get deploymentEmail(): string | undefined {
+    return this.transientAuthentication?.authentication.principal.serviceAccountEmail ?? this.serviceAccountCreds?.client_email;
+  }
+  private request(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+    return this.transientAuthentication ? this.transientAuthentication.request(input, init) : fetch(input, init);
+  }
   readonly serviceVolumes = new CloudRunServiceVolumes(() => {
     if (!this.credentials) throw new Error('Cloud Run filesystem requires a verified connection.');
     return { projectId: this.credentials.projectId, region: this.credentials.region };
   }, () => this.getAccessToken());
 
-  readonly runtimeIdentities = new CloudRunRuntimeIdentities(() => {
-    if (!this.credentials || !this.serviceAccountCreds) throw new Error('Cloud Run runtime identity requires a verified connection.');
-    return { projectId: this.credentials.projectId, region: this.credentials.region, deployEmail: this.serviceAccountCreds.client_email };
-  }, () => this.getAccessToken(), (environment, serviceName, boundId) => this.workloadResourceName(environment, serviceName, boundId));
+  private readonly legacyRuntimeIdentities = new CloudRunRuntimeIdentities(() => {
+    if (!this.credentials || !this.deploymentEmail) throw new Error('Cloud Run runtime identity requires a verified connection.');
+    return { projectId: this.credentials.projectId, region: this.credentials.region, deployEmail: this.deploymentEmail! };
+  }, () => this.getAccessToken(), (environment, serviceName, boundId) => this.workloadResourceName(environment, serviceName, boundId), async () => {
+    if (this.transientAuthentication) throw new Error('Runtime permissions require their separately reviewed cloud installation.');
+    return getGcpNativeAdminToken();
+  });
+
+  private readonly installedRuntimeIdentities = new CloudRunInstalledRuntimeIdentities(() => {
+    if (!this.deploymentConnection) throw new Error('Reviewed Google deployment installation is unavailable.');
+    return this.deploymentConnection;
+  }, () => this.getAccessToken());
+  get runtimeIdentities() { return this.deploymentConnection ? this.installedRuntimeIdentities : this.legacyRuntimeIdentities; }
+
+  async connectDeployment(input: CloudDeploymentAdapterInputV1): Promise<void> {
+    const checked = validateCloudDeploymentAdapterInputV1(input, { provider: 'gcp', hostingProvider: 'cloudrun', parseScope: value => gcpDeploymentScopeSchema.parse(value) });
+    if (checked.authentication.kind !== 'gcp-impersonation') throw new Error('Cloud Run requires Google deployment access.');
+    await this.disconnect();
+    this.credentials = { projectId: checked.connection.nativeScope.projectId, region: checked.connection.deployment.region };
+    this.transientAuthentication = new GcpDeploymentAuthentication(checked.authentication);
+    this.deploymentConnection = checked.connection;
+    try { await this.getAccessToken(); }
+    catch (error) { await this.disconnect(); throw error; }
+  }
 
   async connect(credentials: unknown): Promise<void> {
     const parsed = CloudRunCredentialsSchema.parse(credentials);
+    await this.disconnect();
     const legacyRegion = credentials && typeof credentials === 'object' && typeof (credentials as Record<string, unknown>).region === 'string'
       ? (credentials as Record<string, string>).region
       : DEFAULT_CLOUD_RUN_REGION;
     this.credentials = { ...parsed, region: CloudRunRegionSchema.parse(legacyRegion) };
     try {
-      this.serviceAccountCreds = JSON.parse(this.credentials.credentials);
+      this.serviceAccountCreds = JSON.parse(parsed.credentials);
     } catch {
       throw new Error('Invalid service account JSON');
     }
@@ -562,7 +598,7 @@ export class CloudRunAdapter implements
     const observedPrincipal = isJob
       ? this.jobRuntimeIdentity(current as CloudRunJob)
       : this.serviceRuntimeIdentity(current as CloudRunService);
-    if (current.name !== resourceName || !observedPrincipal || observedPrincipal === this.serviceAccountCreds?.client_email
+    if (current.name !== resourceName || !observedPrincipal || observedPrincipal === this.deploymentEmail
       || !observedPrincipal.endsWith(`@${projectId}.iam.gserviceaccount.com`)) {
       throw new Error('Observed Cloud Run workload resource or runtime identity does not match the selected destination.');
     }
@@ -573,6 +609,8 @@ export class CloudRunAdapter implements
   configureTarget(target: { region?: string }): void {
     if (!target.region) return;
     if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    if (this.transientAuthentication && target.region !== this.credentials.region)
+      throw new Error('The requested region differs from the reviewed deployment installation.');
     this.credentials = {
       ...this.credentials,
       region: CloudRunRegionSchema.parse(target.region),
@@ -580,7 +618,7 @@ export class CloudRunAdapter implements
   }
 
   async verify(): Promise<{ success: boolean; error?: string; email?: string; warning?: string }> {
-    if (!this.credentials || !this.serviceAccountCreds) {
+    if (!this.credentials || !this.deploymentEmail) {
       return { success: false, error: 'Not connected. Call connect() first.' };
     }
 
@@ -590,7 +628,7 @@ export class CloudRunAdapter implements
       // A token exchange succeeds even for a service account with zero roles;
       // probe the Cloud Run Admin API since deploys are impossible without it.
       const { projectId, region } = this.credentials;
-      const runResponse = await fetch(
+      const runResponse = await this.request(
         `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services?pageSize=1`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -601,7 +639,7 @@ export class CloudRunAdapter implements
             success: false,
             error: [
               'Cloud Run Admin API probe failed with 403.',
-              `Grant roles/run.admin to serviceAccount:${this.serviceAccountCreds.client_email} on project ${projectId} — deploys are impossible without it.`,
+              `Grant roles/run.admin to serviceAccount:${this.deploymentEmail!} on project ${projectId} — deploys are impossible without it.`,
               `Original error: ${text}`,
             ].join(' '),
           };
@@ -616,13 +654,13 @@ export class CloudRunAdapter implements
       if (!loggingAccess.success) {
         return {
           success: true,
-          email: this.serviceAccountCreds.client_email,
+          email: this.deploymentEmail!,
           warning: loggingAccess.error,
         };
       }
       return {
         success: true,
-        email: this.serviceAccountCreds.client_email,
+        email: this.deploymentEmail!,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -635,15 +673,18 @@ export class CloudRunAdapter implements
     this.serviceAccountCreds = null;
     this.accessToken = null;
     this.tokenExpiry = null;
+    this.transientAuthentication = null;
+    this.deploymentConnection = null;
   }
 
   async repairLoggingAccess(): Promise<Receipt> {
-    if (!this.credentials || !this.serviceAccountCreds) {
+    if (this.transientAuthentication) return { success: false, message: 'Logging access belongs to the separately reviewed cloud installation.' };
+    if (!this.credentials || !this.deploymentEmail) {
       return { success: false, message: 'Not connected', error: 'Call connect() first.' };
     }
 
     const roles = ['roles/logging.viewer', 'roles/logging.viewAccessor'];
-    const member = `serviceAccount:${this.serviceAccountCreds.client_email}`;
+    const member = `serviceAccount:${this.deploymentEmail!}`;
     try {
       const token = await this.getAccessToken();
       const updatedRoles = await this.ensureProjectIamBindings({
@@ -701,6 +742,10 @@ export class CloudRunAdapter implements
         },
       },
     };
+    if (this.transientAuthentication) {
+      if (projectId !== this.credentials.projectId) throw new Error('The bound Google project differs from the reviewed deployment installation.');
+      return { success: true, message: 'Using the reviewed Google deployment project.', data };
+    }
     const loggingRepair = await this.repairLoggingAccess();
     data.loggingIamRepair = {
       success: loggingRepair.success,
@@ -750,7 +795,7 @@ export class CloudRunAdapter implements
       throw new Error('Not connected. Call connect() first.');
     }
     let secretVersionRefs: Record<string, RuntimeSecretReference>;
-    try { secretVersionRefs = this.validateSecretReferences(options, envVars); }
+    try { secretVersionRefs = this.validateSecretReferences(options, envVars, environment, service); }
     catch { return { serviceId: service.id, status: 'failed', receipt: { success: false, message: 'Invalid or conflicting runtime secret reference.' } }; }
     const creationBinding = parseHostingBindings(environment).services?.[service.name];
     if (options.requireNewWorkload && (options.deferDeployment !== true || creationBinding?.serviceId || creationBinding?.jobName)) {
@@ -848,16 +893,7 @@ export class CloudRunAdapter implements
         },
       };
     }
-    const bindings = environment.platformBindings as {
-      projectId?: string;
-      services?: Record<string, {
-        serviceId?: string;
-        jobName?: string;
-        schedulerJobName?: string;
-        releaseJobName?: string;
-        resourceType?: string;
-      }>;
-    };
+    const bindings = parseHostingBindings(environment);
 
     const isCron = workloadKind === 'cron';
     const serviceBinding = bindings.services?.[service.name];
@@ -892,6 +928,7 @@ export class CloudRunAdapter implements
       // Only a provider-confirmed 404 means the service does not exist.
       // Permission, transport, and server failures must not authorize a create.
       const cloudRunService = await this.getService(serviceName);
+      const deploymentEtag = this.assertDeploymentServiceIdentity(environment, service, cloudRunService);
       if (options.deferDeployment) {
         const freshDeferredProblem = this.deferredWorkloadProblem({
           expectedExisting: Boolean(serviceBinding?.serviceId),
@@ -1016,6 +1053,7 @@ export class CloudRunAdapter implements
         );
       }
       const serviceSpec = {
+        ...(deploymentEtag ? { etag: deploymentEtag } : {}),
         labels,
         annotations,
         ingress: isWorker ? 'INGRESS_TRAFFIC_INTERNAL_ONLY' : 'INGRESS_TRAFFIC_ALL',
@@ -1092,7 +1130,7 @@ export class CloudRunAdapter implements
 
       if (cloudRunService) {
         // Update existing service
-        const response = await fetch(`${baseUrl}/${serviceName}?updateMask=labels,annotations,ingress,template`, {
+        const response = await this.request(`${baseUrl}/${serviceName}?updateMask=labels,annotations,ingress,template`, {
           method: 'PATCH',
           headers: {
             Authorization: `Bearer ${token}`,
@@ -1109,7 +1147,7 @@ export class CloudRunAdapter implements
         serviceOperation = await response.json() as CloudRunOperation;
       } else {
         // Create new service
-        const response = await fetch(`${baseUrl}?serviceId=${encodeURIComponent(serviceName)}`, {
+        const response = await this.request(`${baseUrl}?serviceId=${encodeURIComponent(serviceName)}`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${token}`,
@@ -1153,6 +1191,10 @@ export class CloudRunAdapter implements
       );
       this.assertVpcAccess(serviceInfo, vpcAccess, `Cloud Run service ${serviceName}`);
       this.assertPreservedFilesystem(cloudRunService, serviceInfo);
+      if (this.deploymentConnection && (!serviceInfo?.uid
+        || serviceBinding?.resourceUid && serviceInfo.uid !== serviceBinding.resourceUid)) {
+        throw new Error('Cloud Run service lifetime identity could not be verified.');
+      }
       if (this.unappliedRuntimeEnvKeys(this.primaryContainer(serviceInfo), {}, secretVersionRefs).length) {
         throw new Error('Cloud Run did not verify the requested runtime secret references.');
       }
@@ -1176,6 +1218,7 @@ export class CloudRunAdapter implements
               : `Deployed ${serviceName} to Cloud Run`,
           data: {
             serviceName,
+            ...(serviceInfo?.uid ? { resourceUid: serviceInfo.uid } : {}),
             url,
             imageUri,
             createdService: creatingService,
@@ -1538,7 +1581,7 @@ export class CloudRunAdapter implements
         throw new Error('The released Job changed before schedule activation.');
       }
       if (!existing) {
-        const response = await fetch(`https://cloudscheduler.googleapis.com/v1/projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs`, {
+        const response = await this.request(`https://cloudscheduler.googleapis.com/v1/projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs`, {
           method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(schedulerSpec),
         });
@@ -1727,9 +1770,31 @@ export class CloudRunAdapter implements
     return createGcpSecretContainerSetup({ projectId: this.credentials?.projectId ?? '', getAccessToken: () => this.getAccessToken() });
   }
 
-  private validateSecretReferences(options: DeploymentMutationOptions, vars: Record<string, string>) {
-    return validateRuntimeSecretReferences(options.secretVersionRefs, vars, (destination) =>
+  private validateSecretReferences(options: DeploymentMutationOptions, vars: Record<string, string>, environment: Environment, service: Service) {
+    const references = validateRuntimeSecretReferences(options.secretVersionRefs, vars, (destination) =>
       destination.provider === 'gcp-secret-manager' && destination.projectId === this.credentials?.projectId);
+    if (this.deploymentConnection) {
+      const workload = this.deploymentConnection.deployment.workloads.find(item => item.name === service.name);
+      if (environment.name !== this.deploymentConnection.environment || !workload
+        || serviceWorkloadKind(service) !== workload.kind
+        || !isDeepStrictEqual(Object.fromEntries(workload.runtimeSecrets.map(item => [item.key, item.reference])), { ...references })) {
+        throw new Error('Deployment topology and secret references require their exact reviewed authority.');
+      }
+    }
+    return references;
+  }
+
+  private assertDeploymentServiceIdentity(environment: Environment, service: Service, current: CloudRunService | null): string | undefined {
+    if (!this.deploymentConnection) return;
+    const bound = parseHostingBindings(environment).services?.[service.name];
+    if (!current && !bound) return;
+    const runtime = this.deploymentConnection.runtimeIdentities.find(item => item.workload === service.name)?.principal;
+    if (!current || !bound?.serviceId || !bound.resourceUid || current.uid !== bound.resourceUid || !current.etag?.trim()
+      || current.name !== `projects/${this.credentials!.projectId}/locations/${this.credentials!.region}/services/${bound.serviceId}`
+      || runtime?.kind !== 'gcp-service-account' || this.serviceRuntimeIdentity(current) !== runtime.serviceAccountEmail) {
+      throw new Error('The approved Cloud Run service lifetime or runtime identity changed.');
+    }
+    return current.etag;
   }
 
   private async verifySecretReferenceProjects(references: Record<string, RuntimeSecretReference>): Promise<void> {
@@ -1775,7 +1840,7 @@ export class CloudRunAdapter implements
       throw new Error('Not connected. Call connect() first.');
     }
     let secretVersionRefs: Record<string, RuntimeSecretReference>;
-    try { secretVersionRefs = this.validateSecretReferences(options, vars); }
+    try { secretVersionRefs = this.validateSecretReferences(options, vars, environment, service); }
     catch { return { success: false, message: 'Invalid or conflicting runtime secret reference.' }; }
     try { await this.verifySecretReferenceProjects(secretVersionRefs); }
     catch { return { success: false, message: 'The native secret reference project identity could not be verified.' }; }
@@ -1884,6 +1949,7 @@ export class CloudRunAdapter implements
 
       // Get current service
       const currentService = await this.getService(serviceName);
+      const deploymentEtag = this.assertDeploymentServiceIdentity(environment, service, currentService);
       if (options.deferDeployment) {
         const deferredProblem = this.deferredWorkloadProblem({
           expectedExisting: Boolean(bindings.services?.[service.name]?.serviceId),
@@ -1964,7 +2030,7 @@ export class CloudRunAdapter implements
         updateMask.push('template.vpcAccess');
       }
 
-      const response = await fetch(
+      const response = await this.request(
         `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services/${serviceName}?updateMask=${updateMask.join(',')}`,
         {
           method: 'PATCH',
@@ -1973,6 +2039,7 @@ export class CloudRunAdapter implements
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
+            ...(deploymentEtag ? { etag: deploymentEtag } : {}),
             template: templateUpdate,
           }),
         }
@@ -2026,6 +2093,13 @@ export class CloudRunAdapter implements
   ): Promise<Receipt> {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
+    }
+    if (this.deploymentConnection) {
+      const workload = this.deploymentConnection.deployment.workloads.find(item => item.name === service.name);
+      if (!workload || environment.name !== this.deploymentConnection.environment || serviceWorkloadKind(service) !== workload.kind
+        || workload.runtimeSecrets.some(item => keys.includes(item.key))) {
+        return { success: false, message: 'Removing reviewed runtime secret references requires a new deployment approval.' };
+      }
     }
 
     const uniqueKeys = [...new Set(keys)].sort();
@@ -2132,6 +2206,7 @@ export class CloudRunAdapter implements
       }
 
       const currentService = await this.getService(serviceName);
+      const deploymentEtag = this.assertDeploymentServiceIdentity(environment, service, currentService);
       const currentContainer = this.primaryContainer(currentService);
       if (!currentService || !currentContainer?.image) {
         return {
@@ -2178,7 +2253,7 @@ export class CloudRunAdapter implements
         template.vpcAccess = vpcAccess.apiValue ?? {};
         updateMask.push('template.vpcAccess');
       }
-      const response = await fetch(
+      const response = await this.request(
         `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services/${serviceName}?updateMask=${updateMask.join(',')}`,
         {
           method: 'PATCH',
@@ -2187,6 +2262,7 @@ export class CloudRunAdapter implements
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
+            ...(deploymentEtag ? { etag: deploymentEtag } : {}),
             template,
           }),
         }
@@ -3266,7 +3342,7 @@ export class CloudRunAdapter implements
           const query = new URLSearchParams({ pageSize: String(Math.min(request.limit, 100)) });
           if (pageToken) query.set('pageToken', pageToken);
           const parent = `projects/${projectId}/locations/${location}`;
-          const response = await fetch(
+          const response = await this.request(
             `https://artifactregistry.googleapis.com/v1/${parent}/repositories?${query.toString()}`,
             { headers: { Authorization: `Bearer ${token}` } }
           );
@@ -3366,7 +3442,7 @@ export class CloudRunAdapter implements
         return { success: false, message: 'Artifact Registry returned a different repository identity', error: 'No deletion was attempted.' };
       }
       const token = await this.getAccessToken();
-      const response = await fetch(`https://artifactregistry.googleapis.com/v1/${target.id}`, {
+      const response = await this.request(`https://artifactregistry.googleapis.com/v1/${target.id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -3521,7 +3597,7 @@ export class CloudRunAdapter implements
     const updateMask = automatic
       ? 'launchStage,scaling.scalingMode,scaling.manualInstanceCount,scaling.minInstanceCount,scaling.maxInstanceCount'
       : 'scaling.scalingMode,scaling.manualInstanceCount,scaling.minInstanceCount,scaling.maxInstanceCount';
-    const response = await fetch(
+    const response = await this.request(
       `https://run.googleapis.com/v2/projects/${this.credentials.projectId}/locations/${this.credentials.region}/services/${encodeURIComponent(serviceName)}?updateMask=${encodeURIComponent(updateMask)}`,
       {
         method: 'PATCH',
@@ -3538,7 +3614,7 @@ export class CloudRunAdapter implements
     token: string
   ): Promise<void> {
     if (!this.credentials || !schedulerJobName) throw new Error('Cloud Scheduler identity is missing.');
-    const response = await fetch(
+    const response = await this.request(
       `https://cloudscheduler.googleapis.com/v1/projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs/${encodeURIComponent(schedulerJobName)}:${operation}`,
       { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: '{}' }
     );
@@ -3555,7 +3631,7 @@ export class CloudRunAdapter implements
     for (let page = 1; page <= 20; page += 1) {
       const query = new URLSearchParams({ pageSize: '1000' });
       if (pageToken) query.set('pageToken', pageToken);
-      const response = await fetch(
+      const response = await this.request(
         `https://run.googleapis.com/v2/projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs/${encodeURIComponent(jobName)}/executions?${query.toString()}`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -3583,7 +3659,7 @@ export class CloudRunAdapter implements
       for (const execution of running) {
         const executionName = this.lastPathSegment(execution.name);
         if (!executionName || cancelled.has(executionName)) continue;
-        const response = await fetch(
+        const response = await this.request(
           `https://run.googleapis.com/v2/projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs/${encodeURIComponent(jobName)}/executions/${encodeURIComponent(executionName)}:cancel`,
           {
             method: 'POST',
@@ -3649,7 +3725,7 @@ export class CloudRunAdapter implements
     token: string
   ): Promise<CloudRunService | null> {
     const { projectId, region } = this.credentials!;
-    const response = await fetch(
+    const response = await this.request(
       `https://run.googleapis.com/v2/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(region)}/services/${encodeURIComponent(serviceName)}`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
@@ -3664,7 +3740,7 @@ export class CloudRunAdapter implements
     domain: string,
     token: string
   ): Promise<CloudRunDomainMapping | null> {
-    const response = await fetch(
+    const response = await this.request(
       `${this.domainMappingBaseUrl()}/${encodeURIComponent(domain)}`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
@@ -3682,7 +3758,7 @@ export class CloudRunAdapter implements
     const seenNames = new Set<string>();
     let continuation: string | undefined;
     do {
-      const response = await fetch(
+      const response = await this.request(
         `${this.domainMappingBaseUrl()}?limit=100${continuation ? `&continue=${encodeURIComponent(continuation)}` : ''}`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -3719,7 +3795,7 @@ export class CloudRunAdapter implements
     serviceId: string,
     token: string
   ): Promise<CloudRunDomainMapping> {
-    const response = await fetch(this.domainMappingBaseUrl(), {
+    const response = await this.request(this.domainMappingBaseUrl(), {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -3748,7 +3824,7 @@ export class CloudRunAdapter implements
     domain: string,
     token: string
   ): Promise<void> {
-    const response = await fetch(
+    const response = await this.request(
       `${this.domainMappingBaseUrl()}/${encodeURIComponent(domain)}`,
       { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
     );
@@ -3834,7 +3910,7 @@ export class CloudRunAdapter implements
       params.errorsOnly ? 'severity>=WARNING' : undefined,
     ].filter((entry): entry is string => Boolean(entry));
 
-    const response = await fetch('https://logging.googleapis.com/v2/entries:list', {
+    const response = await this.request('https://logging.googleapis.com/v2/entries:list', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${params.token}`,
@@ -3863,7 +3939,7 @@ export class CloudRunAdapter implements
     }
 
     const { projectId } = this.credentials;
-    const response = await fetch('https://logging.googleapis.com/v2/entries:list', {
+    const response = await this.request('https://logging.googleapis.com/v2/entries:list', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -3890,7 +3966,7 @@ export class CloudRunAdapter implements
       return `Cloud Logging API error: ${status} ${text}`;
     }
 
-    const email = this.serviceAccountCreds?.client_email;
+    const email = this.deploymentEmail;
     const member = email ? `serviceAccount:${email}` : '<cloudrun-service-account>';
     const projectId = this.credentials?.projectId ?? '<gcp-project-id>';
     return [
@@ -3908,7 +3984,7 @@ export class CloudRunAdapter implements
     }
 
     const { projectId, region } = this.credentials;
-    const response = await fetch(
+    const response = await this.request(
       `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services/${serviceName}/revisions?pageSize=${Math.max(1, limit)}`,
       {
         headers: { Authorization: `Bearer ${token}` },
@@ -3931,7 +4007,7 @@ export class CloudRunAdapter implements
     }
 
     const { projectId, region } = this.credentials;
-    const response = await fetch(
+    const response = await this.request(
       `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/jobs/${jobName}/executions?pageSize=${Math.max(1, limit)}`,
       {
         headers: { Authorization: `Bearer ${token}` },
@@ -3981,7 +4057,7 @@ export class CloudRunAdapter implements
     let pageToken: string | undefined;
     do {
       const url = `${baseUrl}?pageSize=100${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
-      const response = await fetch(url, {
+      const response = await this.request(url, {
         headers: { Authorization: `Bearer ${token}` },
       });
 
@@ -4164,7 +4240,7 @@ export class CloudRunAdapter implements
   ): Promise<{ operation: CloudRunOperation; execution: CloudRunExecution | null }> {
     if (!this.credentials) throw new Error('Not connected. Call connect() first.');
     const { projectId, region } = this.credentials;
-    const response = await fetch(
+    const response = await this.request(
       `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/jobs/${jobName}:run`,
       {
         method: 'POST',
@@ -4228,7 +4304,7 @@ export class CloudRunAdapter implements
             throw new Error('Cloud Run job execution response did not include an execution name.');
           }
           await new Promise((resolve) => setTimeout(resolve, 2000));
-          const response = await fetch(`https://run.googleapis.com/v2/${execution.name}`, {
+          const response = await this.request(`https://run.googleapis.com/v2/${execution.name}`, {
             headers: { Authorization: `Bearer ${token}` },
           });
           if (!response.ok) {
@@ -4244,7 +4320,7 @@ export class CloudRunAdapter implements
       }
 
       await new Promise((resolve) => setTimeout(resolve, 2000));
-      const response = await fetch(`https://run.googleapis.com/v2/${operationName}`, {
+      const response = await this.request(`https://run.googleapis.com/v2/${operationName}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) {
@@ -4354,7 +4430,7 @@ export class CloudRunAdapter implements
     for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
       const query = new URLSearchParams({ pageSize: '100' });
       if (pageToken) query.set('pageToken', pageToken);
-      const response = await fetch(
+      const response = await this.request(
         `https://artifactregistry.googleapis.com/v1/projects/${projectId}/locations?${query.toString()}`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -4398,7 +4474,7 @@ export class CloudRunAdapter implements
       throw new Error(`Artifact Registry repository id must match projects/${this.credentials.projectId}/locations/${this.credentials.region}/repositories/{repository}.`);
     }
     const token = accessToken ?? await this.getAccessToken();
-    const response = await fetch(`https://artifactregistry.googleapis.com/v1/${name}`, {
+    const response = await this.request(`https://artifactregistry.googleapis.com/v1/${name}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (response.status === 404) return null;
@@ -4479,7 +4555,7 @@ export class CloudRunAdapter implements
         return;
       }
       await this.delay(Number(process.env.HYPERVIBE_GCP_WAIT_DELAY_MS ?? 1000));
-      const response = await fetch(`https://artifactregistry.googleapis.com/v1/${operationName}`, {
+      const response = await this.request(`https://artifactregistry.googleapis.com/v1/${operationName}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) {
@@ -4590,7 +4666,7 @@ export class CloudRunAdapter implements
       throw new Error('Not connected. Call connect() first.');
     }
 
-    const response = await fetch(`https://cloudresourcemanager.googleapis.com/v1/projects/${this.credentials.projectId}:getIamPolicy`, {
+    const response = await this.request(`https://cloudresourcemanager.googleapis.com/v1/projects/${this.credentials.projectId}:getIamPolicy`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -4612,7 +4688,7 @@ export class CloudRunAdapter implements
       throw new Error('Not connected. Call connect() first.');
     }
 
-    const response = await fetch(
+    const response = await this.request(
       `https://serviceusage.googleapis.com/v1/projects/${this.credentials.projectId}/services/${serviceName}:enable`,
       {
         method: 'POST',
@@ -4659,7 +4735,7 @@ export class CloudRunAdapter implements
       }
 
       await new Promise((resolve) => setTimeout(resolve, 2000));
-      const response = await fetch(`https://serviceusage.googleapis.com/v1/${operation.name}`, {
+      const response = await this.request(`https://serviceusage.googleapis.com/v1/${operation.name}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) {
@@ -4686,7 +4762,7 @@ export class CloudRunAdapter implements
       throw new Error('Not connected. Call connect() first.');
     }
 
-    const response = await fetch(`https://cloudresourcemanager.googleapis.com/v1/projects/${this.credentials.projectId}:setIamPolicy`, {
+    const response = await this.request(`https://cloudresourcemanager.googleapis.com/v1/projects/${this.credentials.projectId}:setIamPolicy`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -4733,7 +4809,7 @@ export class CloudRunAdapter implements
 
   private async getServiceIamPolicy(resource: string, token: string, policyVersion?: number): Promise<IamPolicy> {
     const query = policyVersion ? `?options.requestedPolicyVersion=${policyVersion}` : '';
-    const response = await fetch(`https://run.googleapis.com/v2/${resource}:getIamPolicy${query}`, {
+    const response = await this.request(`https://run.googleapis.com/v2/${resource}:getIamPolicy${query}`, {
       headers: {
         Authorization: `Bearer ${token}`,
       },
@@ -4748,7 +4824,7 @@ export class CloudRunAdapter implements
   }
 
   private async setServiceIamPolicy(resource: string, policy: IamPolicy, token: string, updateMask?: string): Promise<void> {
-    const response = await fetch(`https://run.googleapis.com/v2/${resource}:setIamPolicy`, {
+    const response = await this.request(`https://run.googleapis.com/v2/${resource}:setIamPolicy`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -4812,7 +4888,7 @@ export class CloudRunAdapter implements
         images: [imageUri],
         timeout: '1200s',
       };
-      const response = await fetch(`https://cloudbuild.googleapis.com/v1/projects/${projectId}/builds`, {
+      const response = await this.request(`https://cloudbuild.googleapis.com/v1/projects/${projectId}/builds`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -4903,7 +4979,7 @@ export class CloudRunAdapter implements
     const { projectId, region } = this.credentials;
     const baseUrl = `https://artifactregistry.googleapis.com/v1/projects/${projectId}/locations/${region}/repositories`;
     const repositoryName = `projects/${projectId}/locations/${region}/repositories/${repository}`;
-    const existing = await fetch(`${baseUrl}/${repository}`, {
+    const existing = await this.request(`${baseUrl}/${repository}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
 
@@ -4920,7 +4996,7 @@ export class CloudRunAdapter implements
       throw new Error(`Artifact Registry lookup failed: ${existing.status} ${text}`);
     }
 
-    const created = await fetch(`${baseUrl}?repositoryId=${encodeURIComponent(repository)}`, {
+    const created = await this.request(`${baseUrl}?repositoryId=${encodeURIComponent(repository)}`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -4976,7 +5052,7 @@ export class CloudRunAdapter implements
     }
 
     const { projectId } = this.credentials;
-    const response = await fetch(`https://cloudbuild.googleapis.com/v1/projects/${projectId}/builds`, {
+    const response = await this.request(`https://cloudbuild.googleapis.com/v1/projects/${projectId}/builds`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${params.token}`,
@@ -5030,7 +5106,7 @@ export class CloudRunAdapter implements
     for (let attempt = 0; attempt < 120; attempt++) {
       if (!buildId && operation?.name) {
         await new Promise((resolve) => setTimeout(resolve, 5000));
-        const operationResponse = await fetch(`https://cloudbuild.googleapis.com/v1/${operation.name}`, {
+        const operationResponse = await this.request(`https://cloudbuild.googleapis.com/v1/${operation.name}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!operationResponse.ok) {
@@ -5053,7 +5129,7 @@ export class CloudRunAdapter implements
       }
 
       if (!current || current.id !== buildId) {
-        const response = await fetch(`https://cloudbuild.googleapis.com/v1/projects/${projectId}/builds/${buildId}`, {
+        const response = await this.request(`https://cloudbuild.googleapis.com/v1/projects/${projectId}/builds/${buildId}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!response.ok) {
@@ -5081,7 +5157,7 @@ export class CloudRunAdapter implements
       }
 
       await new Promise((resolve) => setTimeout(resolve, 5000));
-      const response = await fetch(`https://cloudbuild.googleapis.com/v1/projects/${projectId}/builds/${buildId}`, {
+      const response = await this.request(`https://cloudbuild.googleapis.com/v1/projects/${projectId}/builds/${buildId}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) {
@@ -5176,6 +5252,7 @@ export class CloudRunAdapter implements
   }
 
   private async getAccessToken(): Promise<string> {
+    if (this.transientAuthentication) return this.transientAuthentication.token();
     if (this.accessToken && this.tokenExpiry && new Date() < this.tokenExpiry) {
       return this.accessToken;
     }
@@ -5188,8 +5265,8 @@ export class CloudRunAdapter implements
     const now = Math.floor(Date.now() / 1000);
     const header = { alg: 'RS256', typ: 'JWT' };
     const payload = {
-      iss: this.serviceAccountCreds.client_email,
-      sub: this.serviceAccountCreds.client_email,
+      iss: this.deploymentEmail!,
+      sub: this.deploymentEmail!,
       aud: 'https://oauth2.googleapis.com/token',
       iat: now,
       exp: now + 3600,
@@ -5199,7 +5276,7 @@ export class CloudRunAdapter implements
     const jwt = await this.createJwt(header, payload, this.serviceAccountCreds.private_key);
 
     // Exchange JWT for access token
-    const response = await fetch('https://oauth2.googleapis.com/token', {
+    const response = await this.request('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -5276,7 +5353,7 @@ export class CloudRunAdapter implements
 
     const token = await this.getAccessToken();
     const { projectId, region } = this.credentials;
-    const response = await fetch(
+    const response = await this.request(
       `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services/${serviceName}`,
       {
         headers: { Authorization: `Bearer ${token}` },
@@ -5370,7 +5447,7 @@ export class CloudRunAdapter implements
       };
     }
     const expectedRuntimeIdentity = evidence.runtimeServiceAccountEmail;
-    if (!expectedRuntimeIdentity || expectedRuntimeIdentity === this.serviceAccountCreds?.client_email
+    if (!expectedRuntimeIdentity || expectedRuntimeIdentity === this.deploymentEmail
       || !expectedRuntimeIdentity.endsWith(`@${this.credentials?.projectId}.iam.gserviceaccount.com`)) {
       return {
         phase: 'runtime_identity_evidence',
@@ -5436,7 +5513,7 @@ export class CloudRunAdapter implements
         `Cloud Run runtimeServiceAccountEmail is required to create ${resource}; refusing to run application code as the deploy credential.`
       );
     }
-    if (email === this.serviceAccountCreds?.client_email || !email.endsWith(`@${this.credentials?.projectId}.iam.gserviceaccount.com`)) throw new Error('Cloud Run runtime identity must be distinct from the deployer and belong to the exact project.');
+    if (email === this.deploymentEmail || !email.endsWith(`@${this.credentials?.projectId}.iam.gserviceaccount.com`)) throw new Error('Cloud Run runtime identity must be distinct from the deployer and belong to the exact project.');
     return email;
   }
 
@@ -5586,10 +5663,10 @@ export class CloudRunAdapter implements
     const subnetworkName = desired.subnetwork.split('/').at(-1)!;
     const base = `https://compute.googleapis.com/compute/v1/projects/${this.credentials!.projectId}`;
     const [networkResponse, subnetworkResponse] = await Promise.all([
-      fetch(`${base}/global/networks/${encodeURIComponent(networkName)}`, {
+      this.request(`${base}/global/networks/${encodeURIComponent(networkName)}`, {
         headers: { Authorization: `Bearer ${token}` },
       }),
-      fetch(`${base}/regions/${encodeURIComponent(this.credentials!.region)}/subnetworks/${encodeURIComponent(subnetworkName)}`, {
+      this.request(`${base}/regions/${encodeURIComponent(this.credentials!.region)}/subnetworks/${encodeURIComponent(subnetworkName)}`, {
         headers: { Authorization: `Bearer ${token}` },
       }),
     ]);
@@ -5696,7 +5773,7 @@ export class CloudRunAdapter implements
       'Content-Type': 'application/json',
     };
     const jobsBaseUrl = `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/jobs`;
-    const existingJob = await fetch(`${jobsBaseUrl}/${params.jobName}`, {
+    const existingJob = await this.request(`${jobsBaseUrl}/${params.jobName}`, {
       headers: { Authorization: `Bearer ${params.token}` },
     });
     const creatingJob = existingJob.status === 404;
@@ -5734,12 +5811,12 @@ export class CloudRunAdapter implements
     if (params.expectedUid) params.jobSpec.etag = liveJob!.etag;
     if (creatingJob) params.onCreateAttempt?.();
     const upsertResponse = !creatingJob
-      ? await fetch(`${jobsBaseUrl}/${params.jobName}`, {
+      ? await this.request(`${jobsBaseUrl}/${params.jobName}`, {
           method: 'PATCH',
           headers,
           body: JSON.stringify(cloudRunJobUpdateBody(liveJob, params.jobSpec)),
         })
-      : await fetch(`${jobsBaseUrl}?jobId=${encodeURIComponent(params.jobName)}`, {
+      : await this.request(`${jobsBaseUrl}?jobId=${encodeURIComponent(params.jobName)}`, {
           method: 'POST',
           headers,
           body: JSON.stringify(params.jobSpec),
@@ -5786,7 +5863,7 @@ export class CloudRunAdapter implements
     }
 
     const { projectId, region } = this.credentials;
-    const response = await fetch(
+    const response = await this.request(
       `https://cloudscheduler.googleapis.com/v1/projects/${projectId}/locations/${region}/jobs/${schedulerJobName}`,
       {
         headers: { Authorization: `Bearer ${token}` },
@@ -5878,12 +5955,12 @@ export class CloudRunAdapter implements
       'Content-Type': 'application/json',
     };
     const response = existing
-      ? await fetch(`${params.baseUrl}/${params.schedulerJobName}?updateMask=description,schedule,timeZone,httpTarget`, {
+      ? await this.request(`${params.baseUrl}/${params.schedulerJobName}?updateMask=description,schedule,timeZone,httpTarget`, {
           method: 'PATCH',
           headers,
           body: JSON.stringify(params.schedulerSpec),
         })
-      : await fetch(params.baseUrl, {
+      : await this.request(params.baseUrl, {
           method: 'POST',
           headers,
           body: JSON.stringify(params.schedulerSpec),
@@ -5915,7 +5992,7 @@ export class CloudRunAdapter implements
     const { projectId, region } = this.credentials;
     const headers = { Authorization: `Bearer ${token}` };
     const serviceUrl = `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services/${serviceName}`;
-    const existing = await fetch(serviceUrl, { headers });
+    const existing = await this.request(serviceUrl, { headers });
     if (existing.status === 404) {
       return undefined;
     }
@@ -5924,7 +6001,7 @@ export class CloudRunAdapter implements
       return `Could not verify whether Cloud Run service ${serviceName} exists: ${existing.status} ${text}`;
     }
 
-    const deleted = await fetch(serviceUrl, { method: 'DELETE', headers });
+    const deleted = await this.request(serviceUrl, { method: 'DELETE', headers });
     if (deleted.status === 404) {
       return undefined;
     }
@@ -5955,7 +6032,7 @@ export class CloudRunAdapter implements
     const { projectId, region } = this.credentials;
     const headers = { Authorization: `Bearer ${token}` };
     const jobUrl = `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/jobs/${jobName}`;
-    const existing = await fetch(jobUrl, { headers });
+    const existing = await this.request(jobUrl, { headers });
     if (existing.status === 404) {
       return undefined;
     }
@@ -5980,7 +6057,7 @@ export class CloudRunAdapter implements
       deleteUrl = `${jobUrl}?etag=${encodeURIComponent(expectedCreatedIdentity.etag)}`;
     }
 
-    const deleted = await fetch(deleteUrl, { method: 'DELETE', headers });
+    const deleted = await this.request(deleteUrl, { method: 'DELETE', headers });
     if (deleted.status === 404) {
       return undefined;
     }
@@ -6007,7 +6084,7 @@ export class CloudRunAdapter implements
     const attempts = Number(process.env.HYPERVIBE_CLOUDRUN_DELETE_ATTEMPTS ?? 20);
     const delayMs = Number(process.env.HYPERVIBE_CLOUDRUN_DELETE_DELAY_MS ?? 500);
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const response = await fetch(url, { headers });
+      const response = await this.request(url, { headers });
       if (response.status === 404) return undefined;
       if (!response.ok) {
         const text = await response.text();
@@ -6028,7 +6105,7 @@ export class CloudRunAdapter implements
     const { projectId, region } = this.credentials;
     const headers = { Authorization: `Bearer ${token}` };
     const schedulerUrl = `https://cloudscheduler.googleapis.com/v1/projects/${projectId}/locations/${region}/jobs/${schedulerJobName}`;
-    const deleted = await fetch(schedulerUrl, { method: 'DELETE', headers });
+    const deleted = await this.request(schedulerUrl, { method: 'DELETE', headers });
     if (deleted.status === 404) {
       return undefined;
     }
@@ -6153,7 +6230,7 @@ export class CloudRunAdapter implements
     }
 
     const { projectId, region } = this.credentials;
-    const response = await fetch(
+    const response = await this.request(
       `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services/${serviceName}`,
       {
         headers: { Authorization: `Bearer ${token}` },
@@ -6232,7 +6309,7 @@ export class CloudRunAdapter implements
       }
 
       await new Promise((resolve) => setTimeout(resolve, 1000));
-      const response = await fetch(`https://run.googleapis.com/v2/${operationName}`, {
+      const response = await this.request(`https://run.googleapis.com/v2/${operationName}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) {
@@ -6271,7 +6348,7 @@ export class CloudRunAdapter implements
     }
 
     const { projectId, region } = this.credentials;
-    const response = await fetch(
+    const response = await this.request(
       `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/jobs/${jobName}`,
       {
         headers: { Authorization: `Bearer ${token}` },
@@ -6625,6 +6702,10 @@ export class CloudRunAdapter implements
 
 // Self-register with provider registry
 providerRegistry.register({
+  transientAuthentication: {
+    provider: 'gcp', hostingProvider: 'cloudrun', parseScope: value => gcpDeploymentScopeSchema.parse(value),
+    createAdapter: async input => { const adapter = new CloudRunAdapter(); await adapter.connectDeployment(input); return adapter; },
+  },
   metadata: {
     name: 'cloudrun',
     displayName: 'GCP Cloud Run',
@@ -6668,6 +6749,7 @@ providerRegistry.register({
       },
       ci: {
         displayName: 'Cloud Run',
+        transientDeployment: 'github-oidc-broker-v1',
         rendererRevision: 2,
         requiredSecrets: CLOUDRUN_CI_REQUIRED_SECRETS,
         secretCredentialKeys: {

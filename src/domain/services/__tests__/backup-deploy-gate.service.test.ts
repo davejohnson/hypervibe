@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { parse } from 'yaml';
 import { describe, expect, it, vi } from 'vitest';
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
+import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
 import '../../../adapters/providers/railway/railway.adapter.js';
 import { projectSpecSchema } from '../../spec/spec.schema.js';
 import type { Project } from '../../entities/project.entity.js';
@@ -26,6 +27,7 @@ function target(): BranchDeployTarget {
 describe('deployment backup health gate', () => {
   it('derives implicit daily protection for persistent specs and explicit exclusion for opted-out specs', () => {
     const find = vi.spyOn(EnvironmentRepository.prototype, 'findByProjectAndName').mockReturnValue(null);
+    const connections = vi.spyOn(ConnectionRepository.prototype, 'findAllByProvider').mockReturnValue([]);
     const project: Project = { id: 'project', name: 'test', defaultPlatform: 'railway', policies: {}, createdAt: new Date(), updatedAt: new Date() };
     try {
       const spec = projectSpecSchema.parse({ version: 1, project: 'test', environments: { staging: {
@@ -37,7 +39,7 @@ describe('deployment backup health gate', () => {
       delete spec.environments.staging.database;
       delete spec.environments.staging.backups;
       expect(resolveReviewedBranchDeployTargets(project, spec).targets[0].backupPolicy).toBeUndefined();
-    } finally { find.mockRestore(); }
+    } finally { find.mockRestore(); connections.mockRestore(); }
   });
 
   it('places the generated GitHub health gate before migrations and provider deployment and exempts immutable rollback', () => {

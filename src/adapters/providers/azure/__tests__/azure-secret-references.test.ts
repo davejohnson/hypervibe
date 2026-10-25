@@ -30,7 +30,7 @@ const url = 'https://credential-vault.vault.azure.net/secrets/api-token/' + refe
 const now = new Date();
 const service: Service = { id: 'service', projectId: 'project', name: 'web', buildConfig: { workloadKind: 'web' }, envVarSpec: {}, createdAt: now, updatedAt: now };
 const environment: Environment = { id: 'environment', projectId: 'project', name: 'staging', createdAt: now, updatedAt: now, platformBindings: { provider: 'azure-container-apps', projectId: group, environmentId: managedEnvironment, services: { web: { serviceId: appId } } } };
-async function fixture(options: { opaque?: boolean; corrupt?: boolean; environmentId?: string; preparedReader?: boolean } = {}) {
+async function fixture(options: { opaque?: boolean; corrupt?: boolean; environmentId?: string; preparedReader?: boolean; deployment?: boolean } = {}) {
   const adapter = new AzureContainerAppsAdapter();
   await adapter.connect({ tenantId, subscriptionId, clientId: '33333333-3333-4333-8333-333333333333', clientSecret: 'synthetic' });
   let revision = 1;
@@ -51,6 +51,8 @@ async function fixture(options: { opaque?: boolean; corrupt?: boolean; environme
     const target = String(input), method = init?.method ?? 'GET';
     if (target.startsWith('https://login.microsoftonline.com/')) return Response.json({ access_token: 'header.' + Buffer.from(JSON.stringify({ oid: principal })).toString('base64url') + '.signature', expires_in: 3600 });
     const path = new URL(target).pathname;
+    if (options.deployment && path.endsWith('/userAssignedIdentities/provision')) return Response.json({ id: path,
+      properties: { tenantId, clientId: '33333333-3333-4333-8333-333333333333', principalId: '55555555-5555-4555-8555-555555555555' } });
     if (options.preparedReader && path.includes('/userAssignedIdentities/')) {
       expect(path).toBe(readerId);
       return Response.json({ id: readerId, properties: { tenantId, clientId: readerClient, principalId: readerPrincipal },
@@ -79,10 +81,33 @@ async function fixture(options: { opaque?: boolean; corrupt?: boolean; environme
     throw new Error('Unexpected request: ' + method + ' ' + target);
   });
   vi.stubGlobal('fetch', request);
+  if (options.deployment) {
+    // Synthetic retained broker receipt. New Azure installation remains blocked.
+    const native = (name: string, digit: string) => ({ kind: 'azure-managed-identity' as const, tenantId, subscriptionId,
+      clientId: `${digit.repeat(8)}-${digit.repeat(4)}-4${digit.repeat(3)}-8${digit.repeat(3)}-${digit.repeat(12)}`,
+      principalId: '55555555-5555-4555-8555-555555555555', identityResourceId: `${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${name}` });
+    const provision = native('provision', '3'), release = { ...native('release', '6'), principalId: '66666666-6666-4666-8666-666666666666' };
+    const runtime = { ...native('runtime', '7'), principalId: '77777777-7777-4777-8777-777777777777' };
+    await adapter.connectTransient({ capability: 'provision', connection: { schemaVersion: 1, purpose: 'deployment', installationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      planDigest: 'a'.repeat(64), customerId: 'customer', appId: 'app', environment: 'staging', provider: 'azure', hostingProvider: 'azure-container-apps',
+      source: { repository: 'github.com/example/app', branch: 'main', revision: 'a'.repeat(40), specDigest: 'b'.repeat(64) },
+      nativeScope: { tenantId, subscriptionId, resourceGroup: 'staging', location: 'canadacentral' },
+      deployment: { hostingProvider: 'azure-container-apps', region: 'canadacentral', workloads: [{ name: 'web', kind: 'web', runtimeSecrets: [{ key: 'API_TOKEN', reference: reference as any }] }] },
+      hostIdentity: { kind: 'gcp-service-account', projectId: 'host-project', projectNumber: '123456789', serviceAccountEmail: 'delivery@host-project.iam.gserviceaccount.com', subject: '123456789012345678901', issuer: 'https://accounts.google.com' },
+      principals: { provision, release }, runtimeIdentities: [{ workload: 'web', installationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', owner: 'b'.repeat(64), principal: runtime }] },
+      authentication: { kind: 'azure-federation', principal: provision, getAccessToken: async () => ({ token: 'opaque-synthetic-deployment', expiresAt: new Date(Date.now() + 300000).toISOString() }) } });
+    request.mockClear();
+  }
   return { adapter, writes, request, existingSecret, attachReader: (id: string) => { live.identity = { ...live.identity, type: 'SystemAssigned, UserAssigned', userAssignedIdentities: { [id]: { principalId: readerPrincipal, clientId: readerClient } } }; }, owner, readerPrincipal, readerClient, readerId, readerVault, readerGrant };
 }
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 describe('Azure immutable secret references', () => {
+  it.each(['deploy-changed', 'sync-omitted', 'delete-approved'])('rejects %s under deployment access before any native mutation', async mode => {
+    const f = await fixture({ deployment: true });
+    const receipt = mode === 'deploy-changed' ? (await f.adapter.deploy(service, environment, {}, { secretVersionRefs: { API_TOKEN: { ...reference, version: 'f'.repeat(32) } } } as any)).receipt
+      : mode === 'sync-omitted' ? await f.adapter.setEnvVars(environment, service, {}) : await f.adapter.deleteEnvVars(environment, service, ['API_TOKEN']);
+    expect(receipt.success).toBe(false); expect(f.writes).toEqual([]); expect(f.request).not.toHaveBeenCalled();
+  });
   it('writes a versioned Key Vault reference without reading values and retains existing references on later deploy', async () => {
     const f = await fixture();
     expect(await f.adapter.setEnvVars(environment, service, {}, { secretVersionRefs: { API_TOKEN: reference } } as any)).toMatchObject({ success: true });

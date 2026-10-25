@@ -38,9 +38,9 @@ const PROJECT_TAG = 'hypervibe-project';
 
 const AzureBlobStorageAuthenticationSchema = z.object({
   authMode: z.enum(['default', 'servicePrincipal']).default('servicePrincipal'),
-  tenantId: z.string().uuid('Azure tenant ID must be a UUID').optional(),
-  subscriptionId: z.string().uuid('Azure subscription ID must be a UUID').optional(),
-  clientId: z.string().uuid('Azure service principal client ID must be a UUID').optional(),
+  tenantId: z.string().guid('Azure tenant ID must be a UUID').optional(),
+  subscriptionId: z.string().guid('Azure subscription ID must be a UUID').optional(),
+  clientId: z.string().guid('Azure service principal client ID must be a UUID').optional(),
   clientSecret: z.string().min(8, 'Azure service principal client secret is required').optional(),
 }).strict().superRefine((value, ctx) => {
   if (value.authMode === 'default') return;

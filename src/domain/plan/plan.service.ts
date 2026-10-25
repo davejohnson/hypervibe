@@ -14,6 +14,8 @@ import { ComponentRepository } from '../../adapters/db/repositories/component.re
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import { adapterFactory } from '../services/adapter.factory.js';
+import { selectedDeploymentAccess } from '../../adapters/cloud/deployment-access.client.js';
+import { getProjectScopeHints } from '../services/project-scope.js';
 import { planDatabaseScopeBinding } from '../services/database-scope-binding.service.js';
 import { observeBackupPolicy } from '../services/backup-policy.service.js';
 import { planBackupPolicy } from '../services/backup-policy-plan.service.js';
@@ -350,7 +352,7 @@ export class PlanService {
         warnings: [message],
       };
     };
-    const adapterResult = await adapterFactory.getProviderAdapter(provider, project);
+    const adapterResult = await adapterFactory.getProviderAdapter(provider, project, undefined, environment.name);
     if (!adapterResult.success || !adapterResult.adapter) {
       return unknownObservation(
         `Cannot observe ${provider}: ${adapterResult.error ?? 'no adapter'}. Mutations that require live state are blocked.`
@@ -859,7 +861,7 @@ export class PlanService {
   }
 
   /** Connections that must exist+verify before apply can run. */
-  preflight(environmentSpec: EnvironmentSpec, environmentName?: string, projectSpec?: ProjectSpec): Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions'; requiredCredentialKeys?: string[] }> {
+  preflight(environmentSpec: EnvironmentSpec, environmentName?: string, projectSpec?: ProjectSpec, project?: Project): Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions'; requiredCredentialKeys?: string[] }> {
     const blocked: Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions'; requiredCredentialKeys?: string[] }> = [];
     const required: Array<{ provider: string; scopeHints?: string[] }> = [
       { provider: environmentSpec.hosting.provider },
@@ -907,6 +909,12 @@ export class PlanService {
       const key = `${requirement.provider}:${requirement.scopeHints?.join('|') ?? '*'}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      const deployment = this.deploymentPreflight(requirement.provider, project, environmentName);
+      if (deployment === true) continue;
+      if (deployment === false) {
+        blocked.push({ provider: requirement.provider, policy: 'hard', reason: 'The exact environment deployment approval is unavailable or changed. Reconnect deployment access; saved cloud credentials cannot replace this approval.' });
+        continue;
+      }
       const connectionProviders = providerRegistry.connectionProviders(requirement.provider);
       const scoped = requirement.scopeHints?.length
         ? connectionProviders
@@ -947,9 +955,24 @@ export class PlanService {
 
   /** Provider connections needed by an isolated cross-environment data copy.
    * Unrelated hosting, email, DNS, and CI connections cannot block this stage. */
-  providerPreflight(providers: string[]): Array<{ provider: string; reason: string; policy: 'hard'; requiredCredentialKeys?: string[] }> {
+  private deploymentPreflight(provider: string, project?: Project, environmentName?: string): boolean | undefined {
+    if (!project || providerRegistry.getMetadata(provider)?.category !== 'deployment') return undefined;
+    try {
+      const selected = selectedDeploymentAccess({ providerName: provider, scopeHints: getProjectScopeHints(project), environment: environmentName,
+        store: { connections: this.connectionRepo, get secretStore() { return getSecretStore(); } } });
+      return selected ? true : undefined;
+    } catch { return false; }
+  }
+
+  providerPreflight(providers: string[], project?: Project, environmentName?: string): Array<{ provider: string; reason: string; policy: 'hard'; requiredCredentialKeys?: string[] }> {
     const blocked: Array<{ provider: string; reason: string; policy: 'hard'; requiredCredentialKeys?: string[] }> = [];
     for (const provider of [...new Set(providers)].sort()) {
+      const deployment = this.deploymentPreflight(provider, project, environmentName);
+      if (deployment === true) continue;
+      if (deployment === false) {
+        blocked.push({ provider, policy: 'hard', reason: 'The exact environment deployment approval is unavailable or changed. Reconnect deployment access; saved cloud credentials cannot replace this approval.' });
+        continue;
+      }
       const verified = providerRegistry.connectionProviders(provider).some((connectionProvider) =>
         this.connectionRepo.findAllByProvider(connectionProvider).some((connection) => connection.status === 'verified')
       );
@@ -1000,7 +1023,8 @@ export class PlanService {
    */
   async checkBranchDeploySource(
     project: Project,
-    environmentSpec: EnvironmentSpec
+    environmentSpec: EnvironmentSpec,
+    environmentName?: string
   ): Promise<string[]> {
     const provider = environmentSpec.hosting.provider;
     const providerMetadata = providerRegistry.getMetadata(provider);
@@ -1020,7 +1044,7 @@ export class PlanService {
       ];
     }
 
-    const adapterResult = await adapterFactory.getProviderAdapter(provider, project);
+    const adapterResult = await adapterFactory.getProviderAdapter(provider, project, undefined, environmentName);
     const adapter = adapterResult.adapter as {
       isGitHubRepoAccessible?: (repo: string) => Promise<boolean | null>;
     } | undefined;
@@ -1444,7 +1468,7 @@ export class PlanService {
         };
       }
       let blockedReason: string | undefined;
-      const adapterResult = await adapterFactory.getProviderAdapter(previousResourceProvider, projectForPlan);
+      const adapterResult = await adapterFactory.getProviderAdapter(previousResourceProvider, projectForPlan, undefined, environmentName);
       if (!adapterResult.success || !adapterResult.adapter) {
         retainedResourceVerified = false;
         blockedReason = 'retained_resource_connection_unavailable';
@@ -1586,7 +1610,7 @@ export class PlanService {
         ...(previousDatabaseProvider ? [previousDatabaseProvider] : []),
         ...(previousCacheProvider ? [previousCacheProvider] : []),
         ...(previousResourceProvider ? [previousResourceProvider] : []),
-      ]),
+      ], project, environmentName),
     };
   }
 
@@ -1609,9 +1633,9 @@ export class PlanService {
     if (invalid.length) return { error: `These keys are not delegated runtime secrets for ${environmentName}: ${invalid.join(', ')}.` };
     const environment = this.envRepo.findByProjectAndName(project.id, environmentName);
     if (!environment) return { error: `Environment ${environmentName} has no existing hosting bindings. Review initial setup with a full plan.` };
-    const blocked = this.providerPreflight([environmentSpec.hosting.provider]);
+    const blocked = this.providerPreflight([environmentSpec.hosting.provider], project, environmentName);
     if (blocked.length) return { error: blocked.map(block => block.reason).join(' ') };
-    const adapter = await adapterFactory.getProviderAdapter(environmentSpec.hosting.provider, project);
+    const adapter = await adapterFactory.getProviderAdapter(environmentSpec.hosting.provider, project, undefined, environmentName);
     if (!adapter.success || adapter.adapter?.capabilities.supportsDeferredSecretUpdates !== true) {
       return { error: `${environmentSpec.hosting.provider} does not yet support verified secret-only updates without restarting workloads.` };
     }
@@ -1653,7 +1677,7 @@ export class PlanService {
     const environment = this.envRepo.findByProjectAndName(project.id, environmentName)
       ?? this.envRepo.create({ projectId: project.id, name: environmentName, platformBindings: { provider: desired.hosting.provider } });
     const missing = Object.values(desired.secretDestinations ?? {}).some(value => value.version === undefined);
-    const blocked = missing ? this.providerPreflight([desired.hosting.provider]) : [];
+    const blocked = missing ? this.providerPreflight([desired.hosting.provider], project, environmentName) : [];
     if (blocked.length) return { error: blocked.map(block => block.reason).join(' ') };
     try {
       const actions = await planSecretContainers({ project, spec: specResult.spec, environment });
@@ -2320,14 +2344,14 @@ export class PlanService {
       return { error: 'A service-filtered plan cannot skip pending daily backup policy configuration. Run hv_plan without services to review the isolated backup policy stage.' };
     }
     const blocked: EnvironmentPlan['blocked'] = maintenance.pending
-      ? this.providerPreflight(maintenance.providers)
+      ? this.providerPreflight(maintenance.providers, project, environmentName)
       : dataMigration.pending
-      ? this.providerPreflight(dataMigration.providers)
+      ? this.providerPreflight(dataMigration.providers, project, environmentName)
       : [
-          ...this.preflight(environmentSpec, environmentName, specResult.spec),
+          ...this.preflight(environmentSpec, environmentName, specResult.spec, project),
           ...this.projectPreflight(projectForPlan, specResult.spec, environmentName),
         ];
-    const sourceWarnings = await this.checkBranchDeploySource(projectForPlan, environmentSpec);
+    const sourceWarnings = await this.checkBranchDeploySource(projectForPlan, environmentSpec, environmentName);
     const domainRegistration = await planCloudflareDomainRegistration({ environmentSpec, environment });
 
     let actions: PlanAction[] = [
@@ -3163,7 +3187,7 @@ export class PlanService {
         )
       )
       .map((action) => action.resource.provider);
-    for (const block of this.providerPreflight(plannedCleanupProviders)) {
+    for (const block of this.providerPreflight(plannedCleanupProviders, project, environmentName)) {
       if (!blocked.some((existing) => existing.provider === block.provider && existing.reason === block.reason)) {
         blocked.push(block);
       }
@@ -3245,7 +3269,7 @@ export class PlanService {
       ? [ciConnectionProvider]
       : actions.map((action) => action.resource.provider);
     const planBlocked = isolatedCiStage
-      ? this.providerPreflight(isolatedProviders)
+      ? this.providerPreflight(isolatedProviders, project, environmentName)
       : blocked;
     if (backupReadinessStageActive) planBlocked.push({ category: 'prerequisite', provider: 'hypervibe', policy: 'hard', reason: `Backup readiness is incomplete. ${backupReadiness.gaps.join(' ')}` });
     const planInputRequired = runtimeAccessStageActive || checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive || volumeStageActive

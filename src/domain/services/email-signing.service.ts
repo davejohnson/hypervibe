@@ -89,7 +89,7 @@ export function planEventSigning(params: { spec: EnvironmentSpec; environment: E
 }
 
 export async function observeHosting(project: Project, environment: Environment, spec: EnvironmentSpec): Promise<ObservedState | null> {
-  const resolved = await adapterFactory.getProviderAdapter(spec.hosting.provider, project);
+  const resolved = await adapterFactory.getProviderAdapter(spec.hosting.provider, project, undefined, environment.name);
   const adapter = resolved.adapter as unknown as Partial<IObservableHosting> & { configureTarget?: (target: { region?: string }) => Promise<void> };
   if (!resolved.success || !adapter || typeof adapter.observe !== 'function') return null;
   await adapter.configureTarget?.({ region: spec.hosting.region });

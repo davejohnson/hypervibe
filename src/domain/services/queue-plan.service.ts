@@ -158,7 +158,7 @@ export async function planQueues(params: {
   }
 
   const provider = params.environmentSpec.hosting.provider;
-  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project, undefined, params.environment?.name);
   if (!adapterResult.success || !adapterResult.adapter) {
     const reason = `Cannot plan queues: ${adapterResult.error ?? `no ${provider} adapter`}`;
     return {
@@ -507,7 +507,7 @@ export async function applyQueueAction(params: {
     return { success: false, message: 'Environment not found locally', error: `No local environment "${params.envName}"` };
   }
 
-  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project, undefined, params.envName);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: 'Hosting adapter unavailable', error: adapterResult.error };
   }

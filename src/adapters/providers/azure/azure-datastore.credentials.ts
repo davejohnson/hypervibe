@@ -1,9 +1,9 @@
 import { z } from 'zod';
 
 const AzureDatastoreAuthenticationSchema = z.object({
-  tenantId: z.string().uuid('Azure tenant ID must be a UUID'),
-  subscriptionId: z.string().uuid('Azure subscription ID must be a UUID'),
-  clientId: z.string().uuid('Azure service principal client ID must be a UUID'),
+  tenantId: z.string().guid('Azure tenant ID must be a UUID'),
+  subscriptionId: z.string().guid('Azure subscription ID must be a UUID'),
+  clientId: z.string().guid('Azure service principal client ID must be a UUID'),
   clientSecret: z.string().min(8, 'Azure service principal client secret is required'),
 }).strict();
 

@@ -143,7 +143,7 @@ export async function applyScheduleActivation(params: {
   } catch {
     return blocked('The latest managed release does not prove the exact current application, environment and workload identities. No schedule was activated.');
   }
-  const resolvedHosting = await adapterFactory.getProviderAdapter(environmentSpec.hosting.provider, params.project);
+  const resolvedHosting = await adapterFactory.getProviderAdapter(environmentSpec.hosting.provider, params.project, undefined, params.environmentName);
   const adapter = resolvedHosting.adapter;
   if (!resolvedHosting.success || !adapter?.capabilities.supportsDeferredCronActivation || !adapter.activateSchedule) {
     return blocked('The hosting provider cannot activate prepared schedules through the shared release contract.');

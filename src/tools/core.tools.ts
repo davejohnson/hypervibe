@@ -525,7 +525,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
     'Read or update the desired-state ProjectSpec used by hv_plan. Omit spec to read. In a fresh git repository, that read returns a successful uninitialized contract with native runtime, lockfile/package-manager, build-script, and start-script evidence; one unambiguous concrete Node or Python selection plus reviewed install/build commands is persisted on initial write. Missing/conflicting commands, custom languages, and ambiguous projects require an explicit decision or repository Dockerfile. Later native drift is suggested for review, never applied silently. When spec is supplied, it merges by default; use replace=true for full replacement and null to delete a field. In a git worktree Hypervibe syncs .hypervibe/spec.json. Secret declarations contain ownership and targets, never values.',
     {
       project: projectField,
-      spec: z.record(z.unknown()).optional().describe('Full ProjectSpec or partial patch. Omit to read the current spec. Main fields are project, runtime, github, secrets, and environments; environment resources include hosting, services, databases, caches, storage, queues, domains, email, deploy, migrations, and iOS.'),
+      spec: z.record(z.string(), z.unknown()).optional().describe('Full ProjectSpec or partial patch. Omit to read the current spec. Main fields are project, runtime, github, secrets, and environments; environment resources include hosting, services, databases, caches, storage, queues, domains, email, deploy, migrations, and iOS.'),
       replace: z.boolean().optional().describe('Replace the entire spec instead of merging'),
       confirmNativeDeploy: z.boolean().optional().describe('Required when introducing deploy.trigger="native"; acknowledges provider-native deploys are provider-specific and may require external repository-app access.'),
     },
@@ -764,10 +764,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       env: envField,
       scope: z.enum(['full', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'secret-destinations']).optional().describe('Default full. secret-destinations prepares reviewed missing empty native secret containers without values, IAM or workload deployment. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
-      envVars: z.record(z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
+      envVars: z.record(z.string(), z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
       includeEnvFile: z.boolean().optional().describe('Set false to skip default repo .env deploy input and base-value syncing; the private .env.<env> scaffold is still prepared. Ignored for repository-only plans, which never load deploy env files.'),
-      secretRefs: z.record(z.string()).optional().describe('Chat-safe local/secret-manager references only for legacy delegated slots without secretDestinations. Values are resolved locally and encrypted into this plan. Destination-backed slots use committed immutable version pins instead; never pass raw secrets here.'),
+      secretRefs: z.record(z.string(), z.string()).optional().describe('Chat-safe local/secret-manager references only for legacy delegated slots without secretDestinations. Values are resolved locally and encrypted into this plan. Destination-backed slots use committed immutable version pins instead; never pass raw secrets here.'),
     },
     wrapCommandHandler(async ({ project: projectRef, env, scope, services, envVars, envFile, includeEnvFile, secretRefs }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
@@ -1142,7 +1142,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       );
       // Catches provider-native source links whose external repository app can
       // no longer see the repository, where pushes silently do not deploy.
-      const sourceWarnings = await planService.checkBranchDeploySource(projectForStatus, envSpec);
+      const sourceWarnings = await planService.checkBranchDeploySource(projectForStatus, envSpec, envName);
       const observedServicesByName = new Map((observed?.services ?? []).map((service) => [service.name, service]));
       const expectedServiceNames = Object.keys(envSpec.services);
       const expectedRepo = normalizeGitSourceRepo(expectedSource?.repo);
@@ -1277,7 +1277,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         || stripeDrift.length > 0
         || emailDrift.length > 0
         || messagingDrift.length > 0;
-      const blocked = planService.preflight(envSpec, envName, specResult.spec);
+      const blocked = planService.preflight(envSpec, envName, specResult.spec, project);
       for (const stripeBlock of stripeSync.blocked) {
         if (!blocked.some((entry) => entry.provider === 'stripe' && entry.scope === stripeBlock.scope)) {
           blocked.push(stripeBlock);

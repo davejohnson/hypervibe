@@ -8,13 +8,15 @@ import type { CloudInstallationAction, CloudInstallationAttempt, CloudInstallati
   CloudInstallationObservation, CloudInstallationProviderContext, CloudInstallationReason } from '../../../domain/ports/cloud-installation.port.js';
 import { CloudInstallationBoundaryError } from '../../../domain/ports/cloud-installation.port.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
-import { DestinationBoundaryError, DestinationBudget } from '../secret-destination-http.js';
+import { DestinationBoundaryError } from '../secret-destination-http.js';
+import { verifyAwsCloudFormationPublication } from './aws-cloudformation-publication.js';
 import { boundAwsSdkResponses } from './aws-secret-destination.js';
 import { createAwsFederatedCredentialProvider, type AwsFederatedCredentials } from './aws-federated-auth.js';
+import { createAwsCloudDeploymentDriver } from './aws-cloud-deployment.js';
 
 const MAX_SECRETS = 50; // Keeps aggregate inline IAM policy below its native 10,240-character limit.
 const policyName = 'hypervibe-scoped-access';
-const uuid = z.string().uuid();
+const uuid = z.string().guid();
 const scopeSchema = z.object({ accountId: z.string().regex(/^\d{12}$/), region: z.string().regex(/^[a-z]{2}(?:-[a-z]+)+-\d$/) }).strict();
 const roleArnSchema = z.string().regex(/^arn:aws:iam::\d{12}:role\/[A-Za-z0-9+=,.@_-]+$/);
 const nativeSchema = z.object({ operation: z.enum(['install', 'revoke-writer', 'revoke-disconnector']), installationId: uuid,
@@ -138,36 +140,12 @@ function failure(error: unknown): CloudInstallationReason {
     : error.code === 'scope_mismatch' ? 'identity_mismatch' : error.code === 'deadline_exceeded' ? 'timeout' : 'provider_error';
   return 'provider_error';
 }
-export function createAwsCloudInstallationDriver(options: { templateUrl?: string; requestHandler?: STSClientConfig['requestHandler']; fetch?: typeof fetch } = {}): CloudInstallationDriver {
+export function createAwsCloudInstallationDriver(options: { templateUrl?: string; deploymentTemplateUrl?: string; requestHandler?: STSClientConfig['requestHandler']; fetch?: typeof fetch } = {}): CloudInstallationDriver {
+  const deployment = createAwsCloudDeploymentDriver({ ...options, templateUrl: options.deploymentTemplateUrl });
   const retainedSessions = new Map<string, AwsFederatedCredentials>(); // Process-local only; never serialized for recovery.
-  const publication = () => {
-    try {
-      const url = new URL(options.templateUrl ?? '');
-      if (url.protocol !== 'https:' || !/^[a-z0-9.-]+\.s3\.[a-z0-9-]+\.amazonaws\.com$/.test(url.hostname)
-        || url.username || url.password || url.port || url.hash || !url.searchParams.get('versionId')
-        || [...url.searchParams.keys()].some(key => key !== 'versionId') || !url.pathname.endsWith(`/${createAwsCloudInstallationTemplateV1().sha256}.json`)) throw new Error();
-      return url.toString();
-    } catch { throw new InstallationError('not_installed'); }
-  };
-  const verifyPublication = async (signal: AbortSignal) => {
-    const url = publication(), budget = new DestinationBudget({ signal });
-    try {
-      const response = await budget.wait((options.fetch ?? fetch)(url, { redirect: 'error', signal: budget.signal }));
-      if (!response.ok || response.redirected || !response.body) { void response.body?.cancel().catch(() => {}); throw new InstallationError('not_installed'); }
-      const reader = response.body.getReader(), chunks: Uint8Array[] = []; let bytes = 0;
-      try {
-        for (;;) {
-          const item = await budget.wait(reader.read()); if (item.done) break;
-          bytes += item.value.byteLength; if (bytes > 1_048_576) throw new InstallationError('identity_mismatch');
-          chunks.push(item.value);
-        }
-        if (createHash('sha256').update(Buffer.concat(chunks)).digest('hex') !== createAwsCloudInstallationTemplateV1().sha256)
-          throw new InstallationError('identity_mismatch');
-      } catch (error) { void reader.cancel().catch(() => {}); throw error; }
-      finally { reader.releaseLock(); }
-      return url;
-    } finally { budget.close(); }
-  };
+  const verifyPublication = (signal: AbortSignal) => verifyAwsCloudFormationPublication({
+    templateUrl: options.templateUrl, sha256: createAwsCloudInstallationTemplateV1().sha256, signal, fetch: options.fetch,
+  });
   const parseEvidence = (value: unknown, intent: CloudInstallationIntent): CloudInstallationEvidence => {
     const parsed = evidenceSchema.parse(value), s = settings(intent);
     const { attemptId: _attemptId, stackId: _stackId, ...base } = parsed.native;
@@ -305,7 +283,7 @@ export function createAwsCloudInstallationDriver(options: { templateUrl?: string
       return { observation, policy, client, roleName };
     } catch (error) { client.destroy(); throw error; }
   };
-  return {
+  const collection: CloudInstallationDriver = {
     provider: 'aws', parseScope: value => scopeSchema.parse(value), parseEvidence,
     discoverScopes: async () => ({ state: 'unknown', scopes: [], authority: 'not-verified' }),
     parseAction(value, intent) {
@@ -393,4 +371,11 @@ export function createAwsCloudInstallationDriver(options: { templateUrl?: string
       });
     },
   };
+  const select = (intent: CloudInstallationIntent) => intent.purpose === 'deployment' ? deployment : collection;
+  return { ...collection, deployment: deployment.deployment,
+    parseAction: (value, intent) => select(intent).parseAction(value, intent),
+    parseEvidence: (value, intent) => select(intent).parseEvidence(value, intent),
+    plan: context => select(context.intent).plan(context), inspect: context => select(context.intent).inspect(context),
+    mutate: context => select(context.intent).mutate(context), recover: context => select(context.intent).recover(context),
+    connections: record => select(record.intent).connections(record) };
 }

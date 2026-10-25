@@ -64,7 +64,7 @@ export const serviceSpecSchema = z.object({
     mountPath: z.string().regex(/^\/(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*)(?:\/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$/, 'Use a canonical absolute mount path, for example /data'),
   }).strict().optional(),
   workloadKind: z.enum(['web', 'worker', 'cron'], {
-    errorMap: () => ({ message: "workloadKind 'job' was removed; use 'worker' (always-on) or 'cron' (scheduled, requires cronSchedule). See README migration notes." }),
+    error: () => ({ message: "workloadKind 'job' was removed; use 'worker' (always-on) or 'cron' (scheduled, requires cronSchedule). See README migration notes." }),
   }).default('web'),
   startCommand: z.string().min(1).optional(),
   releaseCommand: z.string().min(1).optional(),
@@ -304,7 +304,7 @@ export const collaborationSpecSchema = z.object({
     enabled: z.boolean().default(true),
     labels: z.array(collaborationLabelSpecSchema).default([]),
     templates: z.boolean().default(true),
-  }).strict().default({}),
+  }).strict().prefault({}),
   pullRequests: z.object({
     targetBranch: z.string().min(1).default('main'),
     requirePr: z.boolean().default(true),
@@ -316,12 +316,12 @@ export const collaborationSpecSchema = z.object({
     statusChecks: z.array(z.string().min(1)).default([]),
     strictStatusChecks: z.boolean().default(true),
     enforceAdmins: z.boolean().default(false),
-  }).strict().default({}),
+  }).strict().prefault({}),
   collaborators: z.array(z.object({
     username: z.string().min(1),
     permission: z.enum(['pull', 'triage', 'push', 'maintain', 'admin']).default('push'),
   }).strict()).default([]),
-}).strict().default({});
+}).strict().prefault({});
 
 const automationIdSchema = z.string().regex(
   /^[a-z][a-z0-9-]{0,62}$/,
@@ -333,7 +333,7 @@ const githubAutomationTriggersSchema = z.object({
   push: z.array(z.string().min(1)).default([]),
   schedule: githubScheduleSpecSchema.optional(),
   manual: z.boolean().default(true),
-}).strict().default({});
+}).strict().prefault({});
 
 const githubAutomationRuntimeSchema = z.discriminatedUnion('kind', [
   z.object({
@@ -387,7 +387,7 @@ const githubAiAgentSchema = z.object({
   provider: z.literal('openai').default('openai'),
   model: z.literal('gpt-5.6-sol').default('gpt-5.6-sol'),
   effort: z.enum(['low', 'medium', 'high', 'xhigh']).default('high'),
-}).strict().default({});
+}).strict().prefault({});
 
 const githubAuditInstructionsSchema = z.string().min(1).max(12_000).superRefine((value, ctx) => {
   if (value.includes('${{') || /[\0]/.test(value)) {
@@ -509,7 +509,7 @@ export const githubCodeAuditAutomationSpecSchema = z.object({
   findings: z.object({
     createIssues: z.literal(true).default(true),
     closeAfterCleanRuns: z.literal(1).default(1),
-  }).strict().default({}),
+  }).strict().prefault({}),
 }).strict();
 
 const githubTaskTextSchema = z.string().max(2_048).refine(
@@ -568,7 +568,7 @@ const githubCollaborationSpecSchema = z.object({
     enabled: z.boolean().default(true),
     labels: z.array(collaborationLabelSpecSchema).default([]),
     templates: z.boolean().default(true),
-  }).strict().default({}),
+  }).strict().prefault({}),
   pullRequests: z.object({
     targetBranch: z.string().min(1).default('main'),
     requirePr: z.boolean().default(true),
@@ -580,12 +580,12 @@ const githubCollaborationSpecSchema = z.object({
     statusChecks: z.array(z.string().min(1)).default([]),
     strictStatusChecks: z.boolean().default(true),
     enforceAdmins: z.boolean().default(false),
-  }).strict().default({}),
+  }).strict().prefault({}),
   collaborators: z.array(z.object({
     username: z.string().min(1),
     permission: z.enum(['pull', 'triage', 'push', 'maintain', 'admin']).default('push'),
   }).strict()).default([]),
-}).strict().default({});
+}).strict().prefault({});
 
 const githubPagesSourcePathSchema = z.string().min(1).superRefine((value, ctx) => {
   if (
@@ -658,12 +658,12 @@ export const githubSpecSchema = z.object({
       interval: z.enum(['daily', 'weekly', 'monthly']).default('weekly'),
       targetBranch: z.string().min(1).optional(),
     }).strict()).default([]),
-  }).strict().default({}),
+  }).strict().prefault({}),
   security: z.object({
     codeScanning: z.boolean().default(false),
     secretScanning: z.boolean().default(false),
     pushProtection: z.boolean().default(false),
-  }).strict().default({}),
+  }).strict().prefault({}),
 }).strict().superRefine((github, ctx) => {
   for (const [id, automation] of Object.entries(github.actions)) {
     if (automation.kind === 'environment-task') {
@@ -801,7 +801,7 @@ export const devopsSpecSchema = z.object({
         }
       })
         .default('main'),
-    }).strict().default({}),
+    }).strict().prefault({}),
   }).strict(),
   ci: z.object({
     provider: providerIdSchema,
@@ -838,7 +838,7 @@ export const envFileSpecSchema = z.object({
   include: z.array(z.string().min(1)).default([]),
   /** Exact .env keys to omit even if the mode or include list would select them. */
   exclude: z.array(z.string().min(1)).default([]),
-}).strict().default({});
+}).strict().prefault({});
 
 export const delegatedSecretSpecSchema = z.object({
   /** Delegated values are supplied explicitly at plan time and never stored in the spec. */
@@ -1642,7 +1642,7 @@ export const environmentSpecSchema = z.object({
   removeEnvVars: z.array(
     z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'retired keys must be valid environment variable names')
   ).optional(),
-  envFile: envFileSpecSchema.optional(),
+  envFile: envFileSpecSchema.unwrap().optional(),
   deploy: deploySpecSchema.optional(),
   migrations: migrationsSpecSchema.optional(),
   ios: iosSpecSchema.optional(),
@@ -2228,7 +2228,7 @@ export const projectSpecSchema = z.object({
   devops: devopsSpecSchema.optional(),
   github: githubSpecSchema.optional(),
   /** @deprecated Use github.collaboration. Accepted for one compatibility period. */
-  collaboration: collaborationSpecSchema.optional(),
+  collaboration: collaborationSpecSchema.unwrap().optional(),
   secrets: z.record(
     z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'secret names must be valid environment variable names'),
     projectSecretSpecSchema

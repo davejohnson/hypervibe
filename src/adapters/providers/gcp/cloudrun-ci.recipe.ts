@@ -227,6 +227,7 @@ await writeFile('.hypervibe-release.json', JSON.stringify({ version: 1, provider
 }
 
 export function buildCloudRunPortableRecipe(target: BranchDeployTarget): PortableCiDeployRecipe {
+  if (target.deploymentAccess) throw new Error('Hosted deployment federation currently requires reviewed GitHub Actions identity; GitLab federation is not implemented.');
   const projectId = target.providerScope?.projectId?.trim();
   const region = target.providerRegion?.trim();
   const artifactRepository = target.providerScope?.artifactRepository?.trim() || 'hypervibe';

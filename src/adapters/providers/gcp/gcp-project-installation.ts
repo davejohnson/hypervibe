@@ -19,9 +19,9 @@ export const gcpProjectPreparationScopeSchema = z.object({ scopeKind: z.literal(
   parent: PARENT.optional(), billingAccountName: BILLING }).strict();
 const proofSchema = z.object({ resources: z.array(z.object({ kind: z.literal('project'), id: z.string().regex(/^projects\/[1-9]\d{5,29}$/),
   identity: z.object({ projectId: PROJECT, projectNumber: NUMBER, createTime: z.string().datetime(), parent: z.union([PARENT, z.literal('none')]),
-    owner: z.string().regex(/^[a-f0-9]{64}$/), attemptId: z.string().uuid() }).strict() }).strict()).max(1),
-  native: z.object({ operation: z.enum(['create-project', 'verify-billing']), installationId: z.string().uuid(), owner: z.string().regex(/^[a-f0-9]{64}$/),
-    attemptId: z.string().uuid().optional(), operationName: z.string().regex(/^operations\/[A-Za-z0-9._~-]{1,255}$/).optional(),
+    owner: z.string().regex(/^[a-f0-9]{64}$/), attemptId: z.string().guid() }).strict() }).strict()).max(1),
+  native: z.object({ operation: z.enum(['create-project', 'verify-billing']), installationId: z.string().guid(), owner: z.string().regex(/^[a-f0-9]{64}$/),
+    attemptId: z.string().guid().optional(), operationName: z.string().regex(/^operations\/[A-Za-z0-9._~-]{1,255}$/).optional(),
     billingAccountName: BILLING.optional() }).strict() }).strict();
 type Context = CloudInstallationProviderContext;
 type ActionContext = Context & { action: CloudInstallationAction; attempt?: CloudInstallationAttempt };
@@ -62,7 +62,7 @@ function parseEvidence(value: unknown, intent: CloudInstallationIntent): CloudIn
 function proof(context: ActionContext, project?: GcpBootstrapProject, operationName?: string): CloudInstallationEvidence {
   const expectedOwner = owner(context.intent); const target = scope(context.intent);
   if (project && (project.projectId !== target.projectId || project.state !== 'ACTIVE' || !project.createTime
-    || project.labels?.['hv-installation'] !== expectedOwner.slice(0, 63) || !z.string().uuid().safeParse(project.labels?.['hv-attempt']).success
+    || project.labels?.['hv-installation'] !== expectedOwner.slice(0, 63) || !z.string().guid().safeParse(project.labels?.['hv-attempt']).success
     || context.attempt && project.labels?.['hv-attempt'] !== context.attempt.id || target.parent && project.parent !== target.parent)) throw new ScopeError('ownership_mismatch');
   return parseEvidence({ resources: project ? [{ kind: 'project', id: project.name, identity: {
     projectId: project.projectId, projectNumber: project.name.slice(9), createTime: project.createTime,

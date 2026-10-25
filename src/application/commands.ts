@@ -1,4 +1,4 @@
-import { z, type ZodRawShape } from 'zod';
+import { z } from 'zod';
 import './providers.js';
 import type { CommandContext } from './context.js';
 import {
@@ -22,6 +22,8 @@ import { registerHvCloudConnectionsTools } from '../tools/hv-cloud-connections.t
 import { registerHvCloudSecretsTools } from '../tools/hv-cloud-secrets.tools.js';
 import { registerCloudRequestCommands } from './cloud-requests.js';
 
+export type CommandInputShape = Record<string, z.ZodType>;
+
 export type CommandAccess = 'read' | 'write';
 
 export interface CommandDefinition {
@@ -30,15 +32,15 @@ export interface CommandDefinition {
   /** Human-oriented CLI path, for example ["spec"]. */
   cliPath: string[];
   description: string;
-  inputShape: ZodRawShape;
-  inputSchema: z.ZodObject<ZodRawShape>;
+  inputShape: CommandInputShape;
+  inputSchema: z.ZodObject<CommandInputShape>;
   access: CommandAccess;
   execute(input: Record<string, unknown>): Promise<CommandEnvelope>;
 }
 
 function confirmationFieldForCommand(
   id: string,
-  inputShape: ZodRawShape
+  inputShape: CommandInputShape
 ): string | undefined {
   if (id === 'hv_spec' && inputShape.confirmNativeDeploy) {
     return 'confirmNativeDeploy';
@@ -54,7 +56,7 @@ function confirmationFieldForCommand(
 
 function addConfirmationMetadata(
   id: string,
-  inputShape: ZodRawShape,
+  inputShape: CommandInputShape,
   result: CommandEnvelope
 ): CommandEnvelope {
   if (result.ok || result.error?.code !== 'CONFIRM_REQUIRED' || result.confirmation) {
@@ -74,7 +76,7 @@ function addConfirmationMetadata(
 }
 
 export interface CommandRegistrar {
-  register<Args extends ZodRawShape>(
+  register<Args extends CommandInputShape>(
     name: string,
     description: string,
     inputShape: Args,
@@ -119,7 +121,7 @@ export function cliPathForCommand(id: string): string[] {
 export class CommandRegistry implements CommandRegistrar {
   private readonly definitions = new Map<string, CommandDefinition>();
 
-  register<Args extends ZodRawShape>(
+  register<Args extends CommandInputShape>(
     name: string,
     description: string,
     inputShape: Args,

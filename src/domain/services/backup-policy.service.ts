@@ -167,7 +167,7 @@ export async function resolveBackupTarget(context: BackupPolicyContext, resource
     if (resource.kind === 'volume') {
       const binding = parseServiceVolumeBindings(environment)?.[resource.name];
       if (!binding || binding.provider !== resource.provider) return unknown;
-      const result = await context.adapterFactory.getProviderAdapter(resource.provider, context.project);
+      const result = await context.adapterFactory.getProviderAdapter(resource.provider, context.project, undefined, environment.name);
       if (!result.success || !result.adapter || result.adapter.name !== resource.provider) return unknown;
       const volumes = result.adapter.serviceVolumes;
       if (!volumes?.dailyBackups) return bind(undefined, undefined);

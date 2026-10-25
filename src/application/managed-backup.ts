@@ -22,7 +22,7 @@ import { recoverySourceIdentityMatches, recoverySourceIdentitySchema } from '../
 import { RecoveryDiagnosticError, recoveryDiagnosticSchema, recoveryFailure, type RecoveryDiagnostic } from '../domain/ports/recovery-diagnostics.port.js';
 import type { BackupOperationReceipt } from '../domain/services/backup-operation-receipt.js';
 
-export const backupReceiptSchema = z.object({ setId: z.string().uuid(), manifestKey: z.string().min(1), manifestSha256: z.string().regex(/^[a-f0-9]{64}$/),
+export const backupReceiptSchema = z.object({ setId: z.string().guid(), manifestKey: z.string().min(1), manifestSha256: z.string().regex(/^[a-f0-9]{64}$/),
   completedAt: z.string().datetime(), applied: z.literal(1), skipped: z.literal(0), databaseCount: z.number().int().min(0).max(1),
   objectCount: z.number().int().nonnegative(), restoreVerified: z.literal(true), cleanupVerified: z.literal(true) }).strict();
 

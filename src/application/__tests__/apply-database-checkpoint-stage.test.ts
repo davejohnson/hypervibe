@@ -30,7 +30,7 @@ describe('checkpoint-only apply stage', () => {
     const mutate = vi.spyOn(checkpoint, 'applyDatabaseResilienceAction').mockResolvedValue({ success: true, message: 'Snapshot confirmed; no restore tested' });
     const result = await executePlanApply(ctx, { project, spec, specRevision: 1, planId: run.id, confirmActions: [action.id], alwaysRunBootstrap: true });
     expect(result).toMatchObject({ kind: 'executed', result: { success: true } });
-    expect(providerPreflight).toHaveBeenCalledWith(['railway']);
+    expect(providerPreflight).toHaveBeenCalledWith(['railway'], project, 'production');
     expect(mutate).toHaveBeenCalledWith(expect.objectContaining({ confirmedActionIds: new Set([action.id]) }));
     expect(broaderPreflight).not.toHaveBeenCalled(); expect(observe).not.toHaveBeenCalled();
     expect(ctx.repos.environments.findById(environment.id)?.platformBindings).toEqual(environment.platformBindings);

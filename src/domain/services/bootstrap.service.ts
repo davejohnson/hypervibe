@@ -253,7 +253,7 @@ export async function executeBootstrap(params: {
   const hostingProject = project.defaultPlatform?.toLowerCase() === targetPlatform
     ? project
     : { ...project, defaultPlatform: targetPlatform };
-  const hostingResult = await adapterFactory.getHostingAdapter(hostingProject);
+  const hostingResult = await adapterFactory.getHostingAdapter(hostingProject, environment.name);
   if (!hostingResult.success || !hostingResult.adapter) {
     const cleanup = await tx.rollback();
     return {

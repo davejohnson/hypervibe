@@ -26,18 +26,18 @@ const browserMode = z.enum(['connect', 'migrate']);
 const browserKeys = z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/)).min(1).max(16).refine(keys => new Set(keys).size === keys.length);
 // Deliberately project only value-free device fields. Browser review also has
 // installation details and administrator invitations; those are not agent data.
-const browserConnection = z.object({ id: z.string().uuid(), mode: browserMode.default('connect'),
+const browserConnection = z.object({ id: z.string().guid(), mode: browserMode.default('connect'),
   status: z.enum(['choose-provider', 'authorization-required', 'review-required', 'pending', 'blocked', 'scope-ready', 'source-required', 'ready', 'cancelled', 'disconnecting', 'disconnected']),
   provider: z.enum(['aws', 'azure', 'gcp']).nullable(), keys: browserKeys, environment: z.string(), source: browserSource,
   expiresAt: z.string().datetime(), connectUrl: z.string().url(), deployment: z.literal('not-authorized'),
   destinations: z.array(z.object({ key: z.string(), destination: secretDestinationSchema }).strict()).max(16).optional(),
   acceptedSource: browserSource.omit({ branch: true }).optional(),
   reason: z.enum(CLOUD_INSTALLATION_REASONS).optional(),
-  scopePreparation: z.object({ installationId: z.string().uuid(),
+  scopePreparation: z.object({ installationId: z.string().guid(),
     status: z.enum(['review-required', 'pending', 'blocked', 'scope-ready']),
     reason: z.enum(CLOUD_INSTALLATION_REASONS).optional() }).optional(),
 });
-const browserInstallation = z.object({ id: z.string().uuid(), mode: browserMode.default('connect'), keys: browserKeys, source: browserSource, pending: z.boolean(),
+const browserInstallation = z.object({ id: z.string().guid(), mode: browserMode.default('connect'), keys: browserKeys, source: browserSource, pending: z.boolean(),
   acceptance: z.object({ revision: z.string().regex(/^[a-f0-9]{40}$/), digest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
 }).strict();
 const archivedInstallation = browserInstallation.extend({ terminalStatus: z.enum(['cancelled', 'disconnected']), archivedAt: z.string().datetime() }).strict();
@@ -47,7 +47,7 @@ const stateSchema = z.object({
   deviceCode: z.string().optional(), userCode: z.string().optional(), verificationUrl: z.string().url().optional(), token: z.string().optional(),
   project: z.object({ id: z.string(), name: z.string() }).strict().optional(),
   environment: z.object({ id: z.string(), key: z.string(), name: z.string() }).strict().optional(),
-  preview: z.object({ id: z.string().uuid(), fingerprint: z.string(), expiresAt: z.string().datetime(),
+  preview: z.object({ id: z.string().guid(), fingerprint: z.string(), expiresAt: z.string().datetime(),
     planDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(), writerIdentity: writerSchema.optional(),
   }).strict().optional(),
   installation: browserInstallation.optional(),
@@ -159,14 +159,14 @@ export function createCloudSecretSetups({ context, fetchImpl = fetch, directory 
       if (!keys.length) return { status: 'declared', env: local.env, destinationTargets: local.targets, nextSteps: [] };
       if (keys.length + local.targets.length > 100) throw new HvError('VALIDATION', 'Prepare at most 100 secret destinations per environment.');
       const project = context.resolveProjectOrThrow({ project: local.spec.project });
-      const result = await context.adapterFactory.getProviderAdapter(desired.hosting.provider, project);
+      const result = await context.adapterFactory.getProviderAdapter(desired.hosting.provider, project, undefined, local.env);
       const driver = result.success ? result.adapter?.secretDestinationSetup : undefined;
       if (!driver) throw new HvError('VALIDATION', 'Connect this project’s hosting provider before discovering secret destinations.');
       const environment = context.repos.environments.findByProjectAndName(project.id, local.env)
         ?? { platformBindings: { provider: desired.hosting.provider } };
       const discovered = await driver.discover(environment, { repository: `github.com/${local.repository.toLowerCase()}`, environment: local.env, keys });
       if (discovered.state !== 'known') throw new HvError('PROVIDER_ERROR', 'The connected cloud project could not be verified for destination discovery.');
-      const destinations = z.record(secretDestinationSchema).safeParse(discovered.destinations);
+      const destinations = z.record(z.string(), secretDestinationSchema).safeParse(discovered.destinations);
       if (!destinations.success || canonical(Object.keys(destinations.data).sort()) !== canonical(keys)
         || Object.values(destinations.data).some(destination => !supported.includes(destination.provider)))
         throw new HvError('PROVIDER_ERROR', 'The provider returned an invalid destination proposal.');

@@ -49,7 +49,7 @@ const projection = z.object({
   provider: z.string().regex(/^[a-z][a-z0-9-]*$/).max(128).optional(),
   projectId: identity.optional(),
   environmentId: identity.optional(),
-  services: z.record(z.object({ serviceId: identity.optional(), url: z.unknown().optional(), customDomains: z.unknown().optional() })).optional(),
+  services: z.record(z.string(), z.object({ serviceId: identity.optional(), url: z.unknown().optional(), customDomains: z.unknown().optional() })).optional(),
   databaseTopology: z.object({ primary: z.object({
     provider: z.string().regex(/^[a-z][a-z0-9-]*$/).max(128), externalId: identity,
   }).optional() }).optional(),

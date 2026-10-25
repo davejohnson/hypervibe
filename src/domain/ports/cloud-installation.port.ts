@@ -1,10 +1,13 @@
 import type { PlanAction } from '../plan/plan.types.js';
 import type { SecretDestination } from './secret-destination.port.js';
+import type { CloudDeploymentConnectionV1, CloudDeploymentSessionRequestV1, CloudDeploymentSessionV1, CloudDeploymentTopologyV1,
+  CloudDeploymentReleaseTargetV1, CloudDeploymentReleaseTargetRequestV1 } from './cloud-deployment.port.js';
+import type { ProjectSpec } from '../spec/spec.schema.js';
 
 /** Reviewed roster, not a claim of live compatibility. */
 export const CLOUD_INSTALLATION_PROVIDERS = ['aws', 'azure', 'gcp'] as const;
 export type CloudInstallationProvider = typeof CLOUD_INSTALLATION_PROVIDERS[number];
-export type CloudInstallationStage = 'scope-preparation' | 'collection';
+export type CloudInstallationStage = 'scope-preparation' | 'collection' | 'deployment';
 export const CLOUD_INSTALLATION_SECRET_PROVIDERS = { aws: 'aws-secrets', azure: 'azure-key-vault', gcp: 'gcp-secret-manager' } as const;
 
 export interface CloudInstallationHostIdentity {
@@ -23,6 +26,10 @@ export interface CloudInstallationIntent {
   environment: string;
   source: { repository: string; branch: string; revision: string; specDigest: string };
   provider: CloudInstallationProvider;
+  /** Omitted historical records retain collection purpose and their original digest. */
+  purpose?: 'collection' | 'deployment';
+  /** Exact committed hosting topology and immutable runtime references, separately reviewed. */
+  deployment?: CloudDeploymentTopologyV1;
   mode: 'connect' | 'migrate' | 'disconnect';
   /** Omitted on historical collection records; scope preparation never authorizes writers. */
   stage?: CloudInstallationStage;
@@ -31,6 +38,7 @@ export interface CloudInstallationIntent {
   /** Provider's strict schema; only nonsecret native scope identifiers. */
   nativeScope: Record<string, string>;
   hostIdentity: CloudInstallationHostIdentity;
+  /** Collection keys; deployment installation requires the explicit empty list. */
   keys: string[];
   /** Reviewed existing destinations; migration replaces writer authorization, never native values or references. */
   migrationTargets?: Array<{ key: string; destination: SecretDestination }>;
@@ -50,7 +58,7 @@ export interface CloudInstallationAction extends PlanAction {
 export interface CloudInstallationReview {
   /** Native children of an atomic installation (for example a CloudFormation stack). */
   resources?: Array<{ kind: string; name: string; scope: string }>;
-  permissions: Array<{ principal: string; scope: string; actions: string[]; purpose: 'writer' | 'installation-verification' | 'hosted-trust-removal' }>;
+  permissions: Array<{ principal: string; scope: string; actions: string[]; purpose: 'writer' | 'installation-verification' | 'hosted-trust-removal' | 'deployment-provision' | 'deployment-release' | 'runtime-reader' }>;
   costs: Array<{ resource: string; description: string; pricingUrl: string }>;
   warnings: string[];
 }
@@ -116,6 +124,21 @@ export interface CloudInstallationScopeDiscovery {
 }
 export interface CloudInstallationDriver {
   readonly provider: CloudInstallationProvider;
+  /** Explicit separate installation capability; collection support never implies deployment authority. */
+  deployment?: {
+    hostingProvider: string;
+    connection(record: CloudInstallationRecord): CloudDeploymentConnectionV1;
+    /** Derives the reviewed subset from the exact source; cannot change customer/app/source/scope. */
+    prepareIntent?(spec: ProjectSpec, intent: CloudInstallationIntent): CloudDeploymentTopologyV1;
+    /** Provider must verify immutable native principal and reviewed trust before every issuance. */
+    issueSession?(input: CloudDeploymentSessionRequestV1): Promise<CloudDeploymentSessionV1>;
+    /** Read-only source comparison; throws when current placement requires a new administrator review. */
+    assertSourcePlacement?(spec: ProjectSpec, connection: CloudDeploymentConnectionV1): void;
+    /** Native read-only lifetime/ownership checks; names in committed bindings never authorize adoption. */
+    verifyReleaseTargets?(input: CloudDeploymentReleaseTargetRequestV1): Promise<CloudDeploymentReleaseTargetV1[]>;
+    /** Closed provider-native identifier, scope and lifetime grammar. */
+    parseReleaseTargets?(value: unknown, connection: CloudDeploymentConnectionV1): CloudDeploymentReleaseTargetV1[];
+  };
   /** Optional provider-owned scope preparation; absence is explicitly unsupported. */
   readonly scopePreparation?: {
     resolvedScope(record: CloudInstallationRecord): Record<string, string>;

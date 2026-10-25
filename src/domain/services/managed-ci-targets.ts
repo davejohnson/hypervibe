@@ -16,6 +16,11 @@ import { environmentDeploymentContractHashForApply } from './deployment-contract
 import { resolveBackupPolicies } from './backup-policy.service.js';
 import { resolveBackupStrategy, withBackupStorageDefaults } from './backup-strategy.service.js';
 import { providerRegistry } from '../registry/provider.registry.js';
+import { selectedDeploymentAccess } from '../../adapters/cloud/deployment-access.client.js';
+import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
+import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import { getProjectScopeHints } from './project-scope.js';
+import { reviewedCloudDeploymentCiAccess } from './cloud-deployment-ci.js';
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -350,6 +355,16 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
       containerStartCommand,
       runtime,
     };
+    const deployment = selectedDeploymentAccess({ providerName: environment.hosting.provider, environment: environmentName,
+      scopeHints: getProjectScopeHints(project), store: { connections: new ConnectionRepository(), get secretStore() { return getSecretStore(); } } });
+    if (deployment) {
+      target.deploymentAccess = { origin: deployment.binding.baseUrl, projectId: deployment.binding.projectId,
+        connectionId: deployment.binding.connectionId, environment: environmentName, sourceBranch: deployment.binding.source.branch,
+        connection: deployment.receipt };
+      // Separate browser approval still controls release. Rendering carries no
+      // device/native token or mutable policy digest into the managed program.
+      target.deploymentAccess = reviewedCloudDeploymentCiAccess(target);
+    }
     const boundEnvironment = new EnvironmentRepository().findByProjectAndName(project.id, environmentName);
     const components = boundEnvironment ? new ComponentRepository().findByEnvironmentId(boundEnvironment.id) : [];
     const backupPolicy = resolveBackupPolicies(spec, boundEnvironment ? [boundEnvironment] : [], components)[environmentName];

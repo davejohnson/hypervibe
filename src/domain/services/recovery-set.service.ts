@@ -15,7 +15,7 @@ const timestamp = z.string().datetime();
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
 const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,100}$/);
 export const RECOVERY_SET_FORMAT_VERSION = 2;
-export const recoverySetManifestSchema = z.object({ version: z.literal(RECOVERY_SET_FORMAT_VERSION), setId: z.string().uuid(),
+export const recoverySetManifestSchema = z.object({ version: z.literal(RECOVERY_SET_FORMAT_VERSION), setId: z.string().guid(),
   project: name, environment: name, contractHash: sha256,
   destination: objectRecoveryIdentitySchema, startedAt: timestamp, dataTime: timestamp, completedAt: timestamp,
   database: z.object({ source: recoverySourceIdentitySchema, archiveKey: z.string().min(1), manifestKey: z.string().min(1),
@@ -64,7 +64,7 @@ export async function createRecoverySet(input: RecoverySetInput, dependencies: {
 } = {}) {
   let stage: RecoveryDiagnostic['stage'] = 'worker-input';
   try {
-    z.string().uuid().parse(input.runId); sha256.parse(input.contractHash);
+    z.string().guid().parse(input.runId); sha256.parse(input.contractHash);
     const destination = objectRecoveryIdentitySchema.parse(input.destination);
     if (!input.database && !input.objects.length) throw recoveryFailure(stage, 'invalid-input', undefined, undefined, 'Recovery set has no persistent sources.');
     const names = new Set(input.objects.map(item => name.parse(item.name)));

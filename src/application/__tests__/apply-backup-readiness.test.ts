@@ -160,7 +160,7 @@ describe('fresh backup readiness at the real apply boundary', () => {
       confirmActions: confirmed ? [action.id] : [], alwaysRunBootstrap: true });
     expect(result).toMatchObject({ kind: 'executed', result: { success: confirmed } });
     expect(publication).toHaveBeenCalledTimes(confirmed ? 1 : 0);
-    expect(providers).toHaveBeenCalledWith(['github']);
+    expect(providers).toHaveBeenCalledWith(['github'], project, 'production');
     expect(deploy).not.toHaveBeenCalled();
     expect(ctx.repos.environments.findById(environment.id)?.platformBindings).toEqual(environment.platformBindings);
   });

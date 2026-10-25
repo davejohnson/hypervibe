@@ -31,10 +31,10 @@ function environmentScope(value: Environment) {
   const { secretDestinationContainers: _containers, ...scope } = value.platformBindings;
   return scope;
 }
-async function driverFor(project: Project, provider: string, destinations: Array<SecretContainerIntent['destination']>) {
+async function driverFor(project: Project, provider: string, destinations: Array<SecretContainerIntent['destination']>, environmentName: string) {
   const supported = providerRegistry.getMetadata(provider)?.secretDestinationSetupProviders ?? [];
   if (destinations.some(destination => !supported.includes(destination.provider))) throw new Error(`${provider} does not support empty container setup for these secret destinations. Existing resources are preserved.`);
-  const result = await adapterFactory.getProviderAdapter(provider, project);
+  const result = await adapterFactory.getProviderAdapter(provider, project, undefined, environmentName);
   const driver = result.success ? result.adapter?.secretDestinationSetup : undefined;
   if (!driver || destinations.some(destination => !driver.providers.includes(destination.provider))) throw new Error('The connected provider cannot prepare these secret containers.');
   return driver;
@@ -73,7 +73,7 @@ export async function assertReadySecretContainers(input: { project: Project; spe
     }
   };
   assertCurrent();
-  const driver = await driverFor(project, desired.hosting.provider, Object.values(selected).map(binding => binding.destination));
+  const driver = await driverFor(project, desired.hosting.provider, Object.values(selected).map(binding => binding.destination), environment.name);
   for (const binding of Object.values(selected)) {
     if (!matches(await driver.observe(environment, binding.destination), binding))
       throw new Error('Secret container ownership or lifetime could not be verified. No writer grant is authorized.');
@@ -88,7 +88,7 @@ export async function planSecretContainers(input: { project: Project; spec: Proj
   if (!entries.length) return [];
   if (entries.length > 100) throw new Error('Prepare at most 100 secret destinations per environment.');
   const bindings = secretContainerBindings(environment.platformBindings.secretDestinationContainers);
-  const driver = await driverFor(project, desired.hosting.provider, entries.map(([, value]) => value.destination));
+  const driver = await driverFor(project, desired.hosting.provider, entries.map(([, value]) => value.destination), environment.name);
   const actions: PlanAction[] = [];
   for (const [key, value] of entries) {
     const owner = ownerFor(project, spec, environment.name, key);
@@ -146,7 +146,7 @@ export async function applySecretContainer(input: { ctx: CommandContext; project
       return latest;
     };
     assertCurrent();
-    const driver = await driverFor(project, desired.hosting.provider, [declaration.destination]);
+    const driver = await driverFor(project, desired.hosting.provider, [declaration.destination], environment.name);
     let observed: SecretContainerObservation;
     if (metadata.mode === 'create') {
       const intent = { destination: declaration.destination, owner: metadata.owner, attemptId: randomUUID() };

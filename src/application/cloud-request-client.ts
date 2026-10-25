@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { HvError } from './results.js';
 import { secretDestinationSchema, runtimeSecretReferenceSchema, type SecretDestination } from '../domain/ports/secret-destination.port.js';
 
-const uuid = z.string().uuid();
+const uuid = z.string().guid();
 const shortText = z.string().trim().min(1).max(120).regex(/^[^\u0000-\u001f\u007f]+$/);
 const key = z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/);
 export const fieldSchema = z.object({ key, label: shortText, inputType: z.enum(['password', 'text', 'textarea']) });

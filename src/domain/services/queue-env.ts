@@ -93,7 +93,7 @@ export async function resolveQueueEnvVars(
   if (!environmentSpec.queues || Object.keys(environmentSpec.queues).length === 0) {
     return undefined;
   }
-  const adapterResult = await adapterFactory.getProviderAdapter(environmentSpec.hosting.provider, project);
+  const adapterResult = await adapterFactory.getProviderAdapter(environmentSpec.hosting.provider, project, undefined, environment?.name);
   const adapter = adapterResult.success ? adapterResult.adapter as IProviderAdapter : null;
   const backend = adapter?.capabilities.queues?.backend;
   const gcpProjectId = backend === 'pubsub'

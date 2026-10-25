@@ -104,7 +104,7 @@ async function verifyMigrationMaintenance(params: {
     [params.sourceEnvironment, params.sourceSpec] as const,
     [params.targetEnvironment, params.targetSpec] as const,
   ].map(async ([environment, spec]) => {
-    const adapterResult = await adapterFactory.getProviderAdapter(spec.hosting.provider, params.project);
+    const adapterResult = await adapterFactory.getProviderAdapter(spec.hosting.provider, params.project, undefined, environment.name);
     if (!adapterResult.success || !adapterResult.adapter) return null;
     const adapter = adapterResult.adapter as IProviderAdapter;
     await adapter.configureTarget?.({ region: spec.hosting.region });

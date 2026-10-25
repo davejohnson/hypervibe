@@ -21,19 +21,19 @@ const email = z.string().trim().toLowerCase().email().max(320);
 const inputShape = {
   action: z.enum(['environments', 'create', 'list', 'resume', 'reconcile', 'replace', 'revoke', 'authorize']).optional().describe('Start with environments for a read-only inventory of every environment and separate approval steps. Default: prepare one invitation; confirm sends it. Resume returns direct secret version receipts or legacy private import calls. Reconcile checks uncertain direct delivery metadata without sending values again. Authorize grants access to one environment.'),
   env: z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/).optional().describe('Defaults to staging, or the only declared environment.'),
-  planId: z.string().uuid().optional().describe('For create/replace, select only unsupplied required runtime inputs from this fresh persisted plan. Resume treats this as a continuity hint, never deployment approval; a fresh plan is required after import.'),
+  planId: z.string().guid().optional().describe('For create/replace, select only unsupplied required runtime inputs from this fresh persisted plan. Resume treats this as a continuity hint, never deployment approval; a fresh plan is required after import.'),
   ownerEmail: email.optional().describe('Usually inferred from secret principal="email:owner@example.com". Supply only when the spec does not name an email owner, or to select one of several declared owners.'),
   fields: z.array(fieldSchema.partial({ label: true, inputType: true }).strict()).min(1).max(16).optional().describe('Optional subset of delegated keys with label/inputType overrides. By default request required keys from the spec with readable labels and hidden inputs. Never include values.'),
   sourceBranch: branch.optional().describe('Defaults to the checked-out branch. Authorize uses it only to prefill app setup; invitations and resume still require matching committed source.'),
   title: z.string().trim().min(1).max(120).regex(/^[^\u0000-\u001f\u007f]+$/).optional(),
-  requestId: z.string().uuid().optional().describe('Required only when replacing or revoking a request returned by list/resume.'),
+  requestId: z.string().guid().optional().describe('Required only when replacing or revoking a request returned by list/resume.'),
   page: z.number().int().min(1).max(1000).optional(),
   sort: z.enum(['newest', 'oldest']).optional(),
   baseUrl: z.string().optional(),
   confirm: z.boolean().optional().describe('Approve the previously reviewed invitation or revocation; changes require a new review.'),
 };
 type Input = z.infer<z.ZodObject<typeof inputShape>>;
-const environment = z.object({ id: z.string().uuid(), key: z.string(), name: z.string() });
+const environment = z.object({ id: z.string().guid(), key: z.string(), name: z.string() });
 const proposalSchema = z.object({
   recipientEmail: email, title: inputShape.title.unwrap(), fields: z.array(fieldSchema).min(1).max(16),
   sourceBranch: branch, expectedSourceRevision: z.string().regex(/^[a-f0-9]{40}$/), expectedSourceDigest: z.string().regex(/^[a-f0-9]{64}$/),
@@ -42,14 +42,14 @@ const proposalSchema = z.object({
 type Proposal = z.infer<typeof proposalSchema>;
 const reviewSchema = z.object({
   fingerprint: z.string(), message: z.string(), pendingWrite: z.boolean(), action: z.enum(['create', 'replace', 'revoke']),
-  requestId: z.string().uuid().optional(), proposal: proposalSchema.optional(), priorRequestIds: z.array(z.string().uuid()).max(20000).optional(),
+  requestId: z.string().guid().optional(), proposal: proposalSchema.optional(), priorRequestIds: z.array(z.string().guid()).max(20000).optional(),
 });
 const commonState = {
   version: z.literal(1), baseUrl: z.string(), repository: z.string(), env: z.string(),
   expiresAt: z.string().datetime(), review: reviewSchema.optional(),
 };
 const pendingSchema = z.object({ ...commonState, status: z.literal('pending'), sourceBranch: branch.optional(), deviceCode: z.string().regex(/^[A-Za-z0-9_-]{43}$/), userCode: z.string(), verificationUrl: z.string().url(), exchangeAttempted: z.boolean().optional() });
-const verifiedSchema = z.object({ ...commonState, status: z.literal('verified'), project: z.object({ id: z.string().uuid(), name: z.string() }), environment, token: z.string().regex(/^hvc_[0-9a-f-]{36}_[A-Za-z0-9_-]{43}$/) });
+const verifiedSchema = z.object({ ...commonState, status: z.literal('verified'), project: z.object({ id: z.string().guid(), name: z.string() }), environment, token: z.string().regex(/^hvc_[0-9a-f-]{36}_[A-Za-z0-9_-]{43}$/) });
 const stateSchema = z.discriminatedUnion('status', [pendingSchema, verifiedSchema]);
 type State = z.infer<typeof stateSchema>;
 

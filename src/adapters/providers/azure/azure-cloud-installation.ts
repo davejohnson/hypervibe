@@ -10,6 +10,7 @@ import { resourceName } from '../../../domain/services/resource-names.js';
 import { DestinationBoundaryError, DestinationBudget, destinationJson } from '../secret-destination-http.js';
 import { createAzureSecretDestinationDriver } from './azure-secret-destination.js';
 import { AZURE_HOST_FEDERATION_AUDIENCE, createAzureFederatedTokenProvider } from './azure-federated-auth.js';
+import { createAzureDeploymentInstallationDriver } from './azure-cloud-deployment.js';
 
 const ARM = 'https://management.azure.com';
 const ARM_SCOPE = `${ARM}/.default`;
@@ -17,7 +18,7 @@ const MI_API = '2024-11-30';
 const VAULT_API = '2024-11-01';
 const RBAC_API = '2022-04-01';
 const RESOURCE_API = '2022-09-01';
-const uuid = z.string().uuid();
+const uuid = z.string().guid();
 const scopeSchema = z.object({ tenantId: uuid, subscriptionId: uuid,
   resourceGroup: z.string().regex(/^[A-Za-z0-9_().-]{1,90}$/).refine(value => !value.endsWith('.')),
   location: z.string().regex(/^[a-z][a-z0-9]{1,39}$/),
@@ -33,7 +34,7 @@ const actionSchema = z.object({ id: z.string(), type: z.enum(['create', 'update'
     execution: z.literal('api'), native: nativeSchema }).strict(),
 }).strict();
 const evidenceSchema = z.object({ resources: z.array(z.object({ kind: z.enum(kinds), id: z.string().max(2048),
-  identity: z.record(z.string().max(2048)) }).strict()).min(1).max(9), native: z.object({ scopeDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  identity: z.record(z.string(), z.string().max(2048)) }).strict()).min(1).max(9), native: z.object({ scopeDigest: z.string().regex(/^[a-f0-9]{64}$/),
     installationId: uuid, attemptId: uuid.optional(), writerClientId: uuid.optional(), destinations: z.array(azureSecretDestinationSchema).max(100).optional(),
   }).strict() }).strict();
 type Resource = Record<string, any>;
@@ -118,6 +119,7 @@ function matches(pattern: string, permission: string) {
 
 /** Hosted ARM installer. Every mutation corresponds to one persisted action. */
 export function createAzureCloudInstallationDriver(options: { fetch?: typeof fetch; deadlineMs?: number } = {}): CloudInstallationDriver {
+  const deployment = createAzureDeploymentInstallationDriver(options);
   const request = options.fetch ?? fetch;
   const call = async <T>(context: Context, run: (budget: DestinationBudget, token: string) => Promise<T>): Promise<T> => {
     const budget = new DestinationBudget({ signal: context.signal, deadlineMs: options.deadlineMs });
@@ -227,6 +229,7 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
     }));
   };
   const driver: CloudInstallationDriver = {
+    deployment: deployment.deployment,
     provider: 'azure',
     parseScope(value) { return validated(() => scopeSchema.parse(value)); },
     async discoverScopes(context) {
@@ -277,6 +280,7 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
     },
 
     parseAction(value, intent) {
+      if (intent.purpose === 'deployment') return deployment.parseAction(value, intent);
       const parsed = validated(() => actionSchema.parse(value));
       if (parsed.metadata.native.kind === 'vault' && settings(intent).migration && !parsed.metadata.native.existingVaultCreatedAt) throw new InstallationError('identity_mismatch');
       const expected = buildActions(intent, parsed.metadata.native.kind === 'group' && parsed.type === 'noop', parsed.metadata.native.existingVaultCreatedAt).find(action => action.id === parsed.id);
@@ -284,6 +288,7 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
       return parsed;
     },
     parseEvidence(value, intent) {
+      if (intent.purpose === 'deployment') return deployment.parseEvidence(value, intent);
       const parsed = validated(() => evidenceSchema.parse(value)); const config = settings(intent);
       if (parsed.native.scopeDigest !== config.scopeDigest || parsed.native.installationId !== config.installationId
         || new Set(parsed.resources.map(item => item.kind)).size !== parsed.resources.length) throw new InstallationError('identity_mismatch');
@@ -304,6 +309,7 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
       return parsed;
     },
     async plan(context) {
+      if (context.intent.purpose === 'deployment') return deployment.plan(context);
       const config = settings(context.intent);
       return call(context, async (budget, token) => {
         const subscription = await read(budget, token, config.subscription, '2022-12-01');
@@ -355,9 +361,10 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
         } };
       });
     },
-    async inspect(input) { return observe(input, false); },
-    async recover(input) { return observe(input, true); },
+    async inspect(input) { return input.intent.purpose === 'deployment' ? deployment.inspect(input) : observe(input, false); },
+    async recover(input) { return input.intent.purpose === 'deployment' ? deployment.recover(input) : observe(input, true); },
     async mutate(input) {
+      if (input.intent.purpose === 'deployment') return deployment.mutate(input);
       let started = false;
       try {
         const context = withInstalled(input); const action = driver.parseAction(input.action, input.intent);

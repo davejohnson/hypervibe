@@ -206,28 +206,35 @@ command regressions passed 29/29. The writer/access/provider-matrix suites passe
 packed development candidate, with no source override. These counts overlap
 other focused evidence and must not be added together.
 
-The audit fell from nine affected packages (five high,
-four moderate) to three high packages: `zod`, `@azure/msal-node`, and its parent
-`@azure/identity`. No audit suppression, dependency override or downgrade was
-applied.
+The earlier audit fell from nine affected packages (five high, four moderate)
+to three high packages. The subsequent real Zod 4.6.7 migration leaves two high
+packages: `@azure/msal-node` and its parent `@azure/identity`. No audit
+suppression, new dependency override or downgrade was applied. Release remains
+blocked while those findings are unresolved.
 
-- **Zod requires a real v4 migration.** The collection-size fix is in 4.6.6's
+- **Zod now uses the fixed v4 implementation.** The collection-size fix is in 4.6.6's
   v4 implementation. Testing the published 4.6.6 and 4.6.7 packages with an array bounded to
   two elements and four invalid inputs showed `zod/v3` still parsed all four
   elements and produced five issues; `zod/v4` parsed no elements and produced
   one issue. Merely changing the package version while retaining `/v3` would
-  hide the audit finding without fixing that behavior. A temporary compiler
-  feasibility check against v4 produced 301 errors across 65 files, including
-  44 one-argument record constructors and cascading type errors. The provider
-  schema introspection, CLI/MCP schema handling, default/record semantics and
-  validation-error contracts need deliberate migration and regression checks.
+  hide the audit finding without fixing that behavior. The migration uses
+  explicit record key schemas and v4's public schema-unwrapping APIs, preserving
+  the existing GUID grammar with `guid()` and nested input defaults with
+  `prefault()`. Optional collaboration and env-file sections remain absent until
+  declared; v4 otherwise inserts their defaults and changes desired state.
+  Two bounded-array regressions failed before the upgrade and passed afterward.
+  Separate retained-GUID and absent-section regressions failed against the
+  initial v4 migration and now pass. These checks remain in ordinary `npm test`.
+  Real MCP SDK, CLI and credential-form checks pass; the earlier full-suite
+  counts above describe the pre-migration checkpoint, not this dependency change.
   [Advisory](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5),
   [maintainer fix](https://github.com/colinhacks/zod/commit/a0ebf97),
   [migration guide](https://zod.dev/v4/changelog).
 - **Azure lacks a supported dependency-only repair identified in this review.**
   MSAL's authorization-code issue affects versions from 5.0.0-beta.0 through
   versions below 7.1.0. Identity 4.13.2 uses MSAL 5; current stable Identity
-  4.14.0 still requires MSAL 6. Hypervibe uses `DefaultAzureCredential`, not
+  4.14.0 and beta 4.15.0-beta.1 still require MSAL 6, confirmed independently
+  against npm package metadata and Microsoft's release history. Hypervibe uses `DefaultAzureCredential`, not
   `AuthorizationCodeCredential` or caller-supplied authorization-code options;
   this limits the demonstrated exposure but does not clear the release audit.
   The audit-suggested Identity 4.13.0 downgrade would remove 4.13.2's safer
