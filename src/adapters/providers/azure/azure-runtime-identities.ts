@@ -8,6 +8,8 @@ import { runtimeSecretReferenceSchema } from '../../../domain/ports/secret-desti
 import { resourceName } from '../../../domain/services/resource-names.js';
 import { AzureResourceManagerClient } from './azure-resource-manager.client.js';
 import { parseAzureResourceGroupScope } from './azure-environment-scope.js';
+import { azurePreparedGrantId, azurePreparedGrantDescription } from './azure-prepared-hosting.js';
+import { azurePreparedHoldingTransition } from './azure-prepared-release.js';
 const MI_API='2024-11-30', APP_API='2026-01-01', VAULT_API='2024-11-01', RBAC_API='2022-04-01';
 const READER_ROLE='4633458b-17de-408a-b874-0445c86b69e6';
 const uuid=(value:unknown):value is string=>typeof value==='string'&&/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value);
@@ -45,7 +47,11 @@ export class AzureRuntimeIdentities implements IRuntimeIdentities {
  private async read(request:RuntimeIdentityRequest){
   const scope=this.coordinates(request), retained=request.binding?.evidence;
   const app=await scope.client.getNullable<Native>(scope.workloadId,APP_API);
-  if(app&&(!scope.bound||!same(app.id,scope.workloadId)||app.tags?.['managed-by']!=='hypervibe'||app.tags?.['hypervibe-environment-id']!==request.environment.id||!same(app.properties?.managedEnvironmentId,scope.managed)||app.properties?.provisioningState!=='Succeeded'))throw failure();
+  const installedApp=scope.deployment?.preparedResources?.workloads.find(item=>item.workload===request.service.name);
+  if(app&&(!scope.bound||!same(app.id,scope.workloadId)||!same(app.properties?.managedEnvironmentId,scope.managed)||app.properties?.provisioningState!=='Succeeded'))throw failure();
+  if(app&&(installedApp?(app.systemData?.createdAt!==installedApp.lifetimeId||app.tags?.hypervibeInstallation!==scope.deployment!.installationId||app.tags?.hypervibeDeployment!==scope.owner)
+   :app.tags?.['managed-by']!=='hypervibe'||app.tags?.['hypervibe-environment-id']!==request.environment.id))throw failure();
+  const holding=app&&installedApp?azurePreparedHoldingTransition(scope.deployment!,request.environment,request.service.name,app):null;
   if(scope.bound&&!app&&request.mode==='ensure')throw failure();
   if(!app){
    for(const [id,version] of [[scope.group,'2024-11-01'],[scope.managed,APP_API]]){
@@ -73,7 +79,7 @@ export class AzureRuntimeIdentities implements IRuntimeIdentities {
      if(!creationAttempt||native.tags?.hypervibeRuntime!==scope.owner||native.tags?.hypervibeAttempt!==creationAttempt)throw failure();
     }
     principalId=properties.principalId;clientId=properties.clientId;
-    if(app&&!Object.keys(app.identity?.userAssignedIdentities??{}).some(id=>same(id,scope.identityId)))throw failure();
+    if(app&&!holding&&!Object.keys(app.identity?.userAssignedIdentities??{}).some(id=>same(id,scope.identityId)))throw failure();
    } else if(retained?.principalId||scope.prepared)throw failure();
   }
   if(retained?.principalId&&!same(principalId,retained.principalId)||retained?.clientId&&!same(clientId,retained.clientId)||retained?.createdAt&&native?.systemData?.createdAt!==retained.createdAt)throw failure();
@@ -95,14 +101,22 @@ export class AzureRuntimeIdentities implements IRuntimeIdentities {
    const vault=await scope.client.getNullable<Native>(vaultId,VAULT_API);
    if(!vault||!same(vault.id,vaultId)||!same(vault.properties?.tenantId,scope.tenantId)||vault.properties?.enableRbacAuthorization!==true||vault.properties?.provisioningState!=='Succeeded'||typeof vault.systemData?.createdAt!=='string')throw failure();
    const previous=grants.find(g=>same(g.vaultId,vaultId));if(previous&&previous.createdAt!==vault.systemData.createdAt)throw failure();
-   const assignmentId=`${vaultId}/providers/Microsoft.Authorization/roleAssignments/${guid([scope.owner,vaultId.toLowerCase(),principalId.toLowerCase()])}`;
+   const assignmentId=scope.deployment?.preparedResources?azurePreparedGrantId(scope.owner,`runtime-${request.service.name}:vault:${vaultId.toLowerCase()}`,vaultId)
+    :`${vaultId}/providers/Microsoft.Authorization/roleAssignments/${guid([scope.owner,vaultId.toLowerCase(),principalId.toLowerCase()])}`;
    if(previous&&!same(previous.assignmentId,assignmentId))throw failure();
    vaults.push({vaultId,createdAt:vault.systemData.createdAt,assignmentId,principalId});
   }
-  const state={scope,app,native,kind,principalId,clientId,grants,vaults};
+  const state={scope,app,native,kind,principalId,clientId,grants,vaults,holding};
   if(scope.prepared){
    // Administrator installation owns these grants. Local plan/apply may bind
    // exact observed proof, never repair them using deployment authority.
+   if(scope.deployment?.preparedResources){
+    const registry=scope.deployment.preparedResources.registry,key=`runtime-${request.service.name}:pull`,id=azurePreparedGrantId(scope.owner,key,registry.id);
+    const pull=await scope.client.getNullable<Native>(id,RBAC_API),p=pull?.properties;
+    if(!pull||!same(pull.id,id)||!same(p?.principalId,principalId)||!same(p?.scope,registry.id)
+      ||!same(p?.roleDefinitionId,`/subscriptions/${scope.subscriptionId}/providers/Microsoft.Authorization/roleDefinitions/7f951dda-4ed3-4680-a7ca-43fe172d538d`)
+      ||p?.principalType!=='ServicePrincipal'||p?.condition!=null||p?.description!==azurePreparedGrantDescription(scope.owner,key))throw failure();
+   }
    for(const grant of vaults)if(!await this.assignment(state,grant))throw failure();
    state.grants=vaults;
   }
@@ -114,14 +128,15 @@ export class AzureRuntimeIdentities implements IRuntimeIdentities {
    ...(state.kind==='user'?{identityId:scope.identityId,clientId:state.clientId!,...(state.native!.systemData?.createdAt?{createdAt:state.native!.systemData.createdAt}:{}),...(scope.prepared?{installationId:scope.prepared.installationId}:{creationAttempt:state.native!.tags.hypervibeAttempt})}:{}),readerGrants:JSON.stringify(grants)}};
  }
  private identity(request:RuntimeIdentityRequest,state:Awaited<ReturnType<AzureRuntimeIdentities['read']>>):ProviderRuntimeIdentity{
-  if(!state.principalId)throw failure();const {scope}=state;return{provider:'azure',principal:state.principalId,source:state.app?'observed':'configured',scope:{tenantId:scope.tenantId,subscriptionId:scope.subscriptionId,environmentId:request.environment.id,serviceName:request.service.name,workloadResource:scope.workloadId,...(state.kind==='user'?{identityResourceId:scope.identityId,clientId:state.clientId!}:{} )}};
+  if(!state.principalId)throw failure();const {scope}=state;return{provider:'azure',principal:state.principalId,source:state.app&&!state.holding?'observed':'configured',scope:{tenantId:scope.tenantId,subscriptionId:scope.subscriptionId,environmentId:request.environment.id,serviceName:request.service.name,workloadResource:scope.workloadId,...(state.kind==='user'?{identityResourceId:scope.identityId,clientId:state.clientId!}:{} )}};
  }
  private step(state:Awaited<ReturnType<AzureRuntimeIdentities['read']>>,phase:string,grant?:ReaderGrant):RuntimeIdentityStep{
   return{operation:phase==='create'?'create':'attach',requiresConfirm:true,target:{phase,identityId:state.scope.identityId,owner:state.scope.owner,workloadId:state.scope.workloadId,...(state.principalId?{principalId:state.principalId}:{}),...(grant??{})},description:phase==='create'?'Prepare an isolated Azure user-assigned runtime identity before creating this workload.':phase==='bind-existing'?'Record the existing Azure runtime principal without replacing it.':`Grant this runtime principal read access to every secret in the selected app and environment vault ${grant?.vaultId}.`};
  }
  private async assignment(state:{scope:ReturnType<AzureRuntimeIdentities['coordinates']>;principalId?:string},grant:ReaderGrant){
   const native=await state.scope.client.getNullable<Native>(grant.assignmentId,RBAC_API);if(!native)return null;
-  const p=native.properties;if(!same(native.id,grant.assignmentId)||!same(p?.principalId,state.principalId)||!same(p?.roleDefinitionId,`/subscriptions/${state.scope.subscriptionId}/providers/Microsoft.Authorization/roleDefinitions/${READER_ROLE}`)||!same(p?.scope,grant.vaultId)||p?.principalType!=='ServicePrincipal'||p?.description!==`Hypervibe runtime ${state.scope.owner}`||p?.condition!=null)throw failure();return native;
+  const description=state.scope.deployment?.preparedResources?azurePreparedGrantDescription(state.scope.owner,`runtime-${state.scope.prepared!.workload}:vault:${grant.vaultId.toLowerCase()}`):`Hypervibe runtime ${state.scope.owner}`;
+  const p=native.properties;if(!same(native.id,grant.assignmentId)||!same(p?.principalId,state.principalId)||!same(p?.roleDefinitionId,`/subscriptions/${state.scope.subscriptionId}/providers/Microsoft.Authorization/roleDefinitions/${READER_ROLE}`)||!same(p?.scope,grant.vaultId)||p?.principalType!=='ServicePrincipal'||p?.description!==description||p?.condition!=null)throw failure();return native;
  }
  async inspect(request:RuntimeIdentityRequest):Promise<RuntimeIdentityObservation>{try{
   const state=await this.read(request),pending=request.binding?.pending;

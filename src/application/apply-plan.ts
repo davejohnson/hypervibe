@@ -6,6 +6,8 @@ import { applyScheduleActivation } from '../domain/services/schedule-activation.
 import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js';
 import { applyApiPolicy, planApiPolicy } from '../domain/services/api-policy.js';
 import { applyDatabaseScopeBinding } from './apply-database-scope-binding.js';
+import { applyPreparedHosting } from './apply-prepared-hosting.js';
+import { SpecStore } from '../domain/spec/spec.store.js';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { isScopedSecretAction, scopedSecretObservation } from '../domain/plan/scoped-secrets.js';
 import { actionRequiresBackupReadiness, deploymentPrerequisitePhase, isManagedCiCredentialAction } from '../domain/plan/plan-stage.js';
@@ -959,6 +961,17 @@ export async function executePlanApply(ctx: CommandContext, params: {
           action, confirmedActionIds: new Set(params.confirmActions) });
       } });
     return { kind: 'executed', envName, result, actionScopedWarnings: [] };
+  }
+  if (planScope === 'hosting-prepared-bindings') {
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap)
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'Prepared hosting requires its exact existing environment and isolated metadata plan.' }] };
+    const blocked = planService.providerPreflight([envSpec.hosting.provider], projectForPreflight, envName);
+    if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
+      handler: (action, execution) => applyPreparedHosting({ ctx, project: projectForPreflight, environmentName: envName, environmentSpec: envSpec, spec,
+        action, confirmedActionIds: new Set(params.confirmActions), authorize: () => ctx.repos.runs.findById(execution.applyRunId)?.status === 'running'
+          && new SpecStore().get(project)?.revision === params.specRevision }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Prepared bindings are metadata only; pending first releases are not application convergence.'] };
   }
   const freshBackupReadiness = async () => {
     const currentEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);

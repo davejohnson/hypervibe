@@ -38,10 +38,13 @@ of those. Collection disconnect preserves runtime readers; runtime grant removal
 is a separate desired-state action and can remain waiting on retained consumers.
 
 The [scope-preparation stage](connect-cloud-scope-preparation.md) now covers
-project-only creation, a separate actual-parent/billing review, existing-billing
-verification and explicit historical temporary-grant cleanup in reconstructed
-transport tests. Missing billing stays blocked before any temporary writes.
+project-only creation, a separate actual-parent/billing review, versioned initial
+assignment, existing-billing verification and explicit historical temporary-grant
+cleanup in reconstructed transport tests. Old unversioned billing plans stay blocked.
 Selected-account negative permission checks do not prove absence of inherited
 unlink authority on another account; the concrete race was observed failing
-before the blocker. This remains an incomplete fresh-customer path, not a claim
-that Google cannot attach billing or that manual dashboard work meets acceptance.
+before the blocker. New [initial assignment reviews](connect-cloud-gcp-billing-assignment.md)
+authorize the native non-atomic PUT for the exact newly created project, explicitly
+requiring coordination of external changes. They use transient administrator
+authority and no temporary IAM grants. The new path has offline acceptance only;
+it does not claim conditional-empty semantics or a successful live onboarding.

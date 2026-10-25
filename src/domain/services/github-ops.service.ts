@@ -9,6 +9,7 @@ import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import type { GitHubCredentials } from '../../adapters/providers/github/github.adapter.js';
 import type { Project } from '../entities/project.entity.js';
+import type { Environment } from '../entities/environment.entity.js';
 import { projectSpecSchema, type IosSpec } from '../spec/spec.schema.js';
 import { effectiveRuntimeInstallCommand, type ProjectRuntime } from '../spec/project-runtime.js';
 import { providerRegistry } from '../registry/provider.registry.js';
@@ -136,7 +137,7 @@ export function githubActionsServerProgramFingerprint(params: {
   });
 }
 
-export function resolveBranchDeployTargets(project: Project): {
+export function resolveBranchDeployTargets(project: Project, bindingOverride?: Environment): {
   targets: BranchDeployTarget[];
   desiredBranches: Record<string, string | undefined>;
   migration: { includeStep: boolean; command?: string; note?: string };
@@ -145,7 +146,7 @@ export function resolveBranchDeployTargets(project: Project): {
   const specRow = projectSpecRepo.findLatest(project.id);
   const parsedSpec = specRow ? projectSpecSchema.safeParse(specRow.document) : null;
   if (parsedSpec?.success) {
-    const resolved = resolveReviewedBranchDeployTargets(project, parsedSpec.data);
+    const resolved = resolveReviewedBranchDeployTargets(project, parsedSpec.data, bindingOverride);
     const byEnvironment = new Map(resolved.targets.map((target) => [target.environmentName, target]));
     const resolving = new Set<string>();
     const resolveProgram = (target: BranchDeployTarget): string => {

@@ -8,12 +8,20 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+`hosting-prepared-provider-roster.test.ts` pins the seven hosting providers against
+the [prepared hosting handoff](../../docs/connect-cloud-prepared-hosting.md).
+Shared receipt, repository replay and real SQLite plan/apply regressions run in normal
+Vitest discovery. Their synthetic native observations establish metadata authority and
+recovery boundaries, not cloud installation or first-release compatibility.
+
 `cloud-deployment-provider-roster.test.ts` pins every hosting provider against the
 [keyless deployment contract](../../docs/connect-cloud-deployment-contract.md).
 The shared deployment/install/session suites distinguish provision, release and runtime
 authority; emitted CI tests execute broker exchanges and native registry transports.
-All run through ordinary Vitest discovery in `npm test`. GCP native scoped deployment
-installation, fresh Azure creation, GitLab broker authentication, AWS template publication
+All run through ordinary Vitest discovery in `npm test`. GCP native scoped installation
+and prepared first release now have [offline native evidence](../../docs/connect-cloud-gcp-deployment-evidence.md).
+Azure's reviewed namespace and prepared runtime handoff have separate offline native suites.
+GitLab broker authentication, AWS template publication
 and all three new-customer live walkthroughs remain explicit gates. Callback, renderer
 or registry presence does not establish a complete first deployment.
 
@@ -26,10 +34,11 @@ regressions and unresolved live gates](../../docs/connect-cloud-azure-evidence.m
 review; shared runtime-access tests exercise saved plans and SQLite recovery.
 The create-only probe tests are synthetic acceptance criteria, not evidence
 that Azure honors the proposed header. All run in the ordinary `npm test` gate.
-New Azure connect/migration plans are blocked before registration/group writes;
-native first group/vault/UAMI writes and first ACA workload creation remain blocked. Azure new
-customer onboarding is not ready for live. Positive historical fixtures do not
-establish successful installation of a new customer.
+Azure's new reviewed namespace path retains native deployment acknowledgment and
+correlated creation operations; it does not claim atomic create-if-absent semantics.
+Prepared ACA first rollout keeps managed identities inaccessible to container code,
+and release enrollment verifies exact native resource lifetimes, scoped grants and
+configuration. These reconstructed contracts do not establish successful live onboarding.
 
 
 `secret-container-setup.test.ts` and the application/service suites with the same
@@ -369,9 +378,12 @@ Connect Cloud scope preparation additionally runs
 `gcp-project-installation.test.ts` and `gcp-billing-installation.test.ts` in the
 ordinary Vitest gate. These use reconstructed Resource Manager/Billing REST
 responses, not captured live acceptance. Project creation has an independently
-reviewed continuation; existing billing verification is mutation-free. New
-billing attachment remains hard blocked: inherited unlink permission on another
-account invalidates a selected-account-only preservation argument. Cleanup tests
+reviewed continuation; existing billing verification is mutation-free. Versioned
+initial billing assignment requires a separately reviewed reserved-project scope:
+one exact transient-administrator write, no automatic replay after uncertainty, and
+an explicit warning that concurrent independently authorized association can be replaced.
+Unversioned plans retain the earlier blocker; inherited unlink permission on another
+account still invalidates a claim of atomic preservation. Cleanup tests
 reconstruct historical native resources and exact durable attempts, then exercise
 read-only recovery and explicit removal through the actual shared engine. The
 fixture's synthetic historical plan is not a runtime feature flag or a production

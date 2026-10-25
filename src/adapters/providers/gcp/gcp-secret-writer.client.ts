@@ -6,7 +6,13 @@ export interface WriterIamBinding { role: string; members: string[]; condition?:
 export interface WriterIamPolicy extends Record<string, unknown> { etag: string; version?: number; bindings: WriterIamBinding[] }
 export interface WriterCustomRole { name: string; description: string; includedPermissions: string[]; stage: 'GA' }
 export interface WriterMutationContext { secretId?: string }
-const ROOTS = new Set(['iam.googleapis.com', 'cloudresourcemanager.googleapis.com', 'serviceusage.googleapis.com', 'secretmanager.googleapis.com', 'cloudbilling.googleapis.com']);
+const ROOTS = new Set(['iam.googleapis.com', 'cloudresourcemanager.googleapis.com', 'serviceusage.googleapis.com', 'secretmanager.googleapis.com', 'cloudbilling.googleapis.com',
+  'run.googleapis.com', 'artifactregistry.googleapis.com', 'iamcredentials.googleapis.com']);
+export type WriterPolicyKind = 'project' | 'account' | 'secret' | 'service' | 'registry';
+function policyRoot(kind: WriterPolicyKind): string {
+  return kind === 'secret' ? 'secretmanager.googleapis.com/v1' : kind === 'account' ? 'iam.googleapis.com/v1'
+    : kind === 'service' ? 'run.googleapis.com/v2' : kind === 'registry' ? 'artifactregistry.googleapis.com/v1' : 'cloudresourcemanager.googleapis.com/v3';
+}
 
 /** Fixed GCP REST endpoints; one shared deadline includes provider body reads. */
 export class GcpSecretWriterClient {
@@ -66,26 +72,26 @@ export class GcpSecretWriterClient {
       return { name, description: result.description, stage: 'GA', includedPermissions: result.includedPermissions as string[] };
     } catch (error) { if (error instanceof DestinationBoundaryError && error.status === 404) return null; throw error; }
   }
-  async createRole(projectId: string, roleId: string, description: string, permissions: string[]): Promise<void> {
+  async createRole(projectId: string, roleId: string, description: string, permissions: string[], title = 'Hypervibe secret writer'): Promise<void> {
     const name = `projects/${projectId}/roles/${roleId}`;
     const result = await this.json(`https://iam.googleapis.com/v1/projects/${projectId}/roles`, {
-      method: 'POST', body: JSON.stringify({ roleId, role: { title: 'Hypervibe secret writer', description, stage: 'GA', includedPermissions: permissions } }),
+      method: 'POST', body: JSON.stringify({ roleId, role: { title, description, stage: 'GA', includedPermissions: permissions } }),
     }, true);
     if (result.name !== name) throw new DestinationBoundaryError('invalid_response');
   }
-  async createAccount(projectId: string, accountId: string, description: string): Promise<{ uniqueId: string }> {
+  async createAccount(projectId: string, accountId: string, description: string, displayName = 'Hypervibe secret writer'): Promise<{ uniqueId: string }> {
     const email = `${accountId}@${projectId}.iam.gserviceaccount.com`;
     const result = await this.json(`https://iam.googleapis.com/v1/projects/${projectId}/serviceAccounts`, {
-      method: 'POST', body: JSON.stringify({ accountId, serviceAccount: { displayName: 'Hypervibe secret writer', description } }),
+      method: 'POST', body: JSON.stringify({ accountId, serviceAccount: { displayName, description } }),
     }, true);
     if (result.name !== `projects/${projectId}/serviceAccounts/${email}` || result.email !== email || result.projectId !== projectId
       || result.description !== description || typeof result.uniqueId !== 'string' || !/^[1-9]\d*$/.test(result.uniqueId)
       || (result.disabled !== undefined && result.disabled !== false)) throw new DestinationBoundaryError('invalid_response');
     return { uniqueId: result.uniqueId };
   }
-  async policy(kind: 'project' | 'account' | 'secret', resource: string): Promise<WriterIamPolicy> {
-    const root = kind === 'secret' ? 'secretmanager.googleapis.com/v1' : kind === 'account' ? 'iam.googleapis.com/v1' : 'cloudresourcemanager.googleapis.com/v3';
-    const result = kind === 'secret'
+  async policy(kind: WriterPolicyKind, resource: string): Promise<WriterIamPolicy> {
+    const root = policyRoot(kind);
+    const result = ['secret', 'service', 'registry'].includes(kind)
       ? await this.json(`https://${root}/${resource}:getIamPolicy?options.requestedPolicyVersion=3`)
       : await this.json(`https://${root}/${resource}:getIamPolicy`, { method: 'POST', body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }) });
     const bindings = result.bindings ?? [];
@@ -100,8 +106,8 @@ export class GcpSecretWriterClient {
     }
     return { ...result, etag: result.etag, bindings } as WriterIamPolicy;
   }
-  async setPolicy(kind: 'project' | 'account' | 'secret', resource: string, policy: WriterIamPolicy): Promise<void> {
-    const root = kind === 'secret' ? 'secretmanager.googleapis.com/v1' : kind === 'account' ? 'iam.googleapis.com/v1' : 'cloudresourcemanager.googleapis.com/v3';
+  async setPolicy(kind: WriterPolicyKind, resource: string, policy: WriterIamPolicy): Promise<void> {
+    const root = policyRoot(kind);
     await this.json(`https://${root}/${resource}:setIamPolicy`, { method: 'POST', body: JSON.stringify({ policy }) }, true,
       kind === 'secret' ? { secretId: resource.split('/secrets/')[1] } : undefined);
   }

@@ -115,30 +115,32 @@ function hostedContext(f: ReturnType<typeof fixture>): CloudInstallationContext 
 }
 
 describe('Azure hosted installation contract', () => {
-  it.each([false, true])('blocks the whole new-customer plan before any registration or resource-group mutation (group exists: %s)', async groupExists => {
+  it('blocks a pre-existing namespace before any registration or resource-group mutation', async () => {
     const f = fixture();
-    if (!groupExists) f.responses.delete(group);
     for (const namespace of ['Microsoft.ManagedIdentity', 'Microsoft.KeyVault']) {
       const id = `/subscriptions/${subscriptionId}/providers/${namespace}`;
       f.responses.set(id, { id, namespace, registrationState: 'NotRegistered' });
     }
     const context = hostedContext(f);
     const planned = await planCloudInstallationV1({ ...context, intent });
-    expect(planned).toMatchObject({ status: 'blocked', reason: 'create_ownership_unverified' });
+    expect(planned).toMatchObject({ status: 'blocked', reason: 'ownership_mismatch' });
     expect(planned.plan.actions.map(action => action.id)).toContain('azure:group');
     const applied = await applyCloudInstallationV1({ ...context, installationId: planned.installationId,
       planDigest: planned.plan.digest, confirmActions: planned.plan.actions.map(action => action.id) });
-    expect(applied).toMatchObject({ status: 'blocked', reason: 'create_ownership_unverified', attempts: [] });
+    expect(applied).toMatchObject({ status: 'blocked', reason: 'ownership_mismatch', attempts: [] });
     expect(f.events.every(event => event.method === 'GET')).toBe(true);
   });
 
-  it.each(['group', 'managed-identity-provider', 'vault-provider'])('rejects an isolated %s mutation before impossible fresh prerequisites create partial resources', async kind => {
+  it.each(['group', 'managed-identity-provider', 'vault-provider'])('does not silently authorize an old blocked %s action under the new namespace contract', async kind => {
     const f = fixture(); f.responses.delete(group);
     for (const namespace of ['Microsoft.ManagedIdentity', 'Microsoft.KeyVault']) {
       const id = `/subscriptions/${subscriptionId}/providers/${namespace}`;
       f.responses.set(id, { id, namespace, registrationState: 'NotRegistered' });
     }
     const { actions } = await f.driver.plan(f.context), action = actions.find(item => item.metadata.native.kind === kind)!;
+    // Exact historical action shape remains blocked; new authority must be
+    // reviewed in a new digest, not inferred during an old plan's replay.
+    delete action.metadata.native.lifecycle; action.verified = false;
     expect(await f.driver.mutate({ ...f.context, action, attempt: attempt(action) }))
       .toEqual({ state: 'rejected', reason: 'create_ownership_unverified' });
     expect(f.events.every(event => event.method === 'GET')).toBe(true);
@@ -413,10 +415,10 @@ describe('Azure legacy writer migration', () => {
     expect(f.events.every(event => event.method === 'GET')).toBe(true);
     const hosted = hostedContext(f); f.responses.set(legacyVault, existing);
     const planned = await planCloudInstallationV1({ ...hosted, intent: migration });
-    expect(planned).toMatchObject({ status: 'blocked', reason: 'create_ownership_unverified' });
+    expect(planned).toMatchObject({ status: 'review-required' });
     const applied = await applyCloudInstallationV1({ ...hosted, installationId: planned.installationId,
-      planDigest: planned.plan.digest, confirmActions: planned.plan.actions.map(action => action.id) });
-    expect(applied.attempts).toEqual([]); expect(applied.reason).toBe('create_ownership_unverified');
+      planDigest: planned.plan.digest, confirmActions: [] });
+    expect(applied.attempts).toEqual([]); expect(applied.reason).toBe('confirmation_required');
     expect(f.events.every(event => event.method === 'GET')).toBe(true);
   });
 });
@@ -431,8 +433,12 @@ it('recovers a historical migrated writer and verifies its remaining trust witho
   // Migration needs no permission to update the retained vault.
   f.responses.set(`${group}/providers/Microsoft.Authorization/permissions`, { value: [{ actions: [
     'Microsoft.ManagedIdentity/userAssignedIdentities/write', 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/write',
+    'Microsoft.Resources/deployments/write', 'Microsoft.Resources/deployments/read', 'Microsoft.Resources/deployments/operations/read',
     'Microsoft.Authorization/roleDefinitions/write', 'Microsoft.Authorization/roleAssignments/write'], notActions: [] }] });
   const context = { ...f.context, intent: migration }, plan = await f.driver.plan(context);
+  // Historical records predate the new reviewed namespace/deployment contract.
+  // Preserve their read-only recovery and exact trust handling.
+  for (const action of plan.actions) { delete action.metadata.native.lifecycle; action.verified = action.type === 'noop' && action.id !== 'azure:verify'; }
   for (const action of plan.actions) {
     let observed = await f.driver.inspect({ ...context, action });
     if (observed.state === 'action-required') {

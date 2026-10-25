@@ -3,7 +3,14 @@
 This is offline contract evidence, not a completed live rollout. Keep both feature
 PRs in draft. No provider account was changed while implementing these checks.
 
-## Installation preparation, recovery and blocked first creation
+## Installation preparation and native operation recovery
+
+The current reviewed-exclusive namespace contract and native ARM deployment path
+are documented in [Azure ARM evidence](connect-cloud-azure-arm.md). This supersedes
+the earlier universal atomic-create blocker for new collection setup and writer
+migration. It does not claim to prevent an independently authorized concurrent
+same-ID upsert. [Prepared ACA first deployment](connect-cloud-azure-prepared.md) now
+has separate native installation, shared handoff and emitted workflow evidence.
 
 A transient browser administrator token discovers enabled subscriptions and their
 native tenant IDs, chooses an available region, and derives the app/environment
@@ -12,10 +19,11 @@ native effective ARM permissions separately, including subscription-scoped provi
 registration when required. Explicit actions register only Microsoft.ManagedIdentity
 and Microsoft.KeyVault, create the isolated writer UAMI and vault, and add the exact
 custom role, assignment and Google federated identity credential. New connect and migration
-plans retain this resource review but are blocked as a whole before any registration or
-resource-group mutation. The blocker is part of the immutable plan digest; confirmations
-cannot bypass it. First group, vault and UAMI writes are also rejected at the native
-mutation boundary. These planned actions do not establish completed onboarding. Registration is
+plans review exclusive namespace management and dispatch one target per native ARM
+deployment. Existing/unknown targets, missing native provenance and uncertain attempts
+remain blocked. Historical blocked actions retain their original guard; confirmations
+cannot silently opt an old plan into the new contract. Offline tests do not establish
+completed live onboarding. Registration is
 subscription-wide and remains on disconnect; Azure may register regions gradually.
 
 The writer's native vault scope permits ARM vault metadata, secret metadata and SET.
@@ -30,8 +38,8 @@ usable until expiry and native authorization changes can take time to propagate.
 An explicit migration targets one existing RBAC vault in the selected tenant,
 subscription and resource group. Native vault tags must identify the same customer,
 app and environment; a legacy destination reference alone does not establish dedicated
-vault ownership. A future verified vault creation contract must apply these nonsecret
-markers; no new-vault PUT is currently dispatched. An unmarked, shared
+vault ownership. New vaults carry these nonsecret correlation markers alongside
+independently retained native deployment evidence. An unmarked, shared
 or differently owned legacy vault is blocked without changing its tags or old connection.
 Narrow existing-secret migration would require a separate reviewed permission contract.
 The reviewed plan pins the vault's native creation timestamp.
@@ -40,8 +48,8 @@ protection and unrelated grants are preserved. Migration needs no vault write
 permission. It prepares new writer authorization, verifies an exact recovered writer, and leaves the old
 connection active until Hypercloud's explicit verified switch. Existing access-policy
 vaults need a separate preservation-safe RBAC transition; that conversion is not
-implemented and cannot be represented as completed migration. Creating a new writer
-UAMI also remains blocked, so a fresh keyless migration is not currently complete.
+implemented and cannot be represented as completed migration. New writer UAMI creation
+now uses the reviewed native deployment path; its live walkthrough remains outstanding.
 
 Official contracts:
 
@@ -66,7 +74,7 @@ foundation explicitly; the original working tree remains untouched.
 | --- | --- | --- |
 | cloudrun | Before workload: dedicated service account, immutable UID/etag observation; deployed reader grants remain separately reviewed. | [Cloud Run service identity](https://docs.cloud.google.com/run/docs/configuring/services/service-identity) |
 | ecs | Before workload: prepare the exact environment-owned execution-role secret reader policy. The separate application task role and S3 grants still follow the holding workload. Existing workloads preserve their observed execution role. | [ECS secret injection](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/secrets-envvar-secrets-manager.html) |
-| azure-container-apps | **New installation/first deployment blocked, not ready for live.** Historical UAMI recovery and explicit vault-wide Secrets User reader grants work offline; existing system identity is preserved. First UAMI/workload creation stays disabled. | [Container Apps identities](https://learn.microsoft.com/en-us/azure/container-apps/managed-identity), [secret references](https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets) |
+| azure-container-apps | Before workload: bind administrator-installed UAMIs and exact reader grants. New prepared web installation and emitted first rollout have [offline evidence](connect-cloud-azure-prepared.md); live acceptance remains outstanding. Ordinary local first-create remains disabled. | [Container Apps identities](https://learn.microsoft.com/en-us/azure/container-apps/managed-identity), [secret references](https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets) |
 | railway | This new native cloud identity frontier is not implemented; existing Railway connection/secret behavior is preserved. | [Railway variables](https://docs.railway.com/integrations/api/manage-variables) |
 | fly | This new native cloud identity frontier is not implemented. | [Fly secrets](https://docs.fly.io/apps/secrets) |
 | digitalocean | This new native cloud identity frontier is not implemented. | [App Platform environment](https://docs.digitalocean.com/products/app-platform/how-to/use-environment-variables/) |
@@ -84,18 +92,26 @@ ACA revisions may still use it. Tests retain the native assignment and historica
 evidence both on ordinary re-entry and attempted identity retirement. No Azure runtime
 reader DELETE is implemented. Creating a new runtime UAMI is hard-blocked below.
 
-The legacy Azure deployment adapter still uses its existing service-principal connection;
-keyless hosted collection authorization does not establish hosted deployment authority.
-An injected transient deployment authorization path remains a release prerequisite.
+Legacy Azure connections retain their explicit authentication path. New deployment
+connections use separately approved native Entra federation and broker-issued transient
+ARM/ACR access; collection authorization never establishes deployment authority.
 
-## First-deployment ownership gate
+## Historical atomic-create gate
+
+This section records the earlier rejected universal atomic-create assumption and its
+tests. Those historical plans keep their original restrictions. The new reviewed
+exclusive-namespace installer uses the provider's actual upsert semantics and native
+provenance; the separate prepared first-deployment path is documented above. A native
+conditional-header probe is optional research, not a prerequisite invented for Azure.
 
 The official resource-group PUT, [UAMI PUT](https://learn.microsoft.com/en-us/rest/api/managedidentity/user-assigned-identities/create-or-update?view=rest-managedidentity-2024-11-30)
 and [vault PUT](https://learn.microsoft.com/en-us/rest/api/keyvault/keyvault/vaults/create-or-update?view=rest-keyvault-keyvault-2024-11-01)
 are also create-or-update operations without a published conditional-create contract.
 A concurrent creator can occupy an absent name before our PUT. Re-reading our submitted
-tags afterward cannot prove we did not overwrite it. The actual hosted installer rejects
-first group/vault/writer creation with `create_ownership_unverified`; the runtime identity driver
+tags afterward cannot prove we did not overwrite it. The earlier hosted installer rejected
+first group/vault/writer creation with `create_ownership_unverified`; historical actions
+retain that guard. The new [collection contract](connect-cloud-azure-arm.md) expressly
+reviews the real upsert semantics and requires native operation provenance. The runtime identity driver
 rejects first UAMI creation without a write. There is no configuration bypass. Three native
 transport regressions observed the previous PUTs before the fix and now prove zero writes.
 Observation, exact historical recovery, existing-reader grants and disconnect remain.
@@ -107,8 +123,8 @@ though the writer could not be safely created. Three isolated-action regressions
 those requests before the fix. Two real Azure driver → shared plan/apply regressions also
 exposed incompatible action-verification semantics. The shared contract now preserves
 unverified actions only inside an explicit blocked review, and blocks all mutation dispatch.
-The new-customer cases, migration and exact historical disconnect pass through that shared
-boundary; the focused Azure/shared/AWS/GCP roster run passed 85 tests. The native fixtures
+Those historical blocked-plan cases and exact historical disconnect passed through that shared
+boundary. New collection/migration now have separate positive shared-engine tests. The native fixtures
 are reconstructed, not live evidence. Historical registration recovery remains read-only.
 
 The official [ACA PUT contract](https://learn.microsoft.com/en-us/rest/api/resource-manager/containerapps/container-apps/create-or-update?view=rest-resource-manager-containerapps-2026-01-01)

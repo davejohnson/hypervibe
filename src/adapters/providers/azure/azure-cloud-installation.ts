@@ -11,6 +11,8 @@ import { DestinationBoundaryError, DestinationBudget, destinationJson } from '..
 import { createAzureSecretDestinationDriver } from './azure-secret-destination.js';
 import { AZURE_HOST_FEDERATION_AUDIENCE, createAzureFederatedTokenProvider } from './azure-federated-auth.js';
 import { createAzureDeploymentInstallationDriver } from './azure-cloud-deployment.js';
+import { azureDeploymentProvenanceSchema, createAzureInstallationDeployment, verifyAzureInstallationDeployment,
+  rejectAzureCredentialEcho, type AzureInstallationTarget } from './azure-arm-installation.js';
 
 const ARM = 'https://management.azure.com';
 const ARM_SCOPE = `${ARM}/.default`;
@@ -25,7 +27,8 @@ const scopeSchema = z.object({ tenantId: uuid, subscriptionId: uuid,
 }).strict();
 const kinds = ['managed-identity-provider', 'vault-provider', 'group', 'writer', 'vault', 'role', 'federation', 'grant', 'verify'] as const;
 type Kind = typeof kinds[number];
-const nativeSchema = z.object({ kind: z.enum(kinds), resourceId: z.string().min(1).max(2048), scopeDigest: z.string().regex(/^[a-f0-9]{64}$/), existingVaultCreatedAt: z.string().datetime({ offset: true }).optional() }).strict();
+const nativeSchema = z.object({ kind: z.enum(kinds), resourceId: z.string().min(1).max(2048), scopeDigest: z.string().regex(/^[a-f0-9]{64}$/), existingVaultCreatedAt: z.string().datetime({ offset: true }).optional(),
+  lifecycle: z.literal('exclusive-arm-deployment-v1').optional() }).strict();
 const actionSchema = z.object({ id: z.string(), type: z.enum(['create', 'update', 'destroy', 'noop']),
   resource: z.object({ kind: z.enum(['project', 'secret']), name: z.string(), provider: z.literal('azure') }).strict(),
   verified: z.boolean(), reason: z.string().max(1000), billable: z.boolean().optional(), dataBearing: z.boolean().optional(),
@@ -34,8 +37,9 @@ const actionSchema = z.object({ id: z.string(), type: z.enum(['create', 'update'
     execution: z.literal('api'), native: nativeSchema }).strict(),
 }).strict();
 const evidenceSchema = z.object({ resources: z.array(z.object({ kind: z.enum(kinds), id: z.string().max(2048),
-  identity: z.record(z.string(), z.string().max(2048)) }).strict()).min(1).max(9), native: z.object({ scopeDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  identity: z.record(z.string(), z.string().max(2048)) }).strict()).max(9), native: z.object({ scopeDigest: z.string().regex(/^[a-f0-9]{64}$/),
     installationId: uuid, attemptId: uuid.optional(), writerClientId: uuid.optional(), destinations: z.array(azureSecretDestinationSchema).max(100).optional(),
+    deployment: azureDeploymentProvenanceSchema.optional(),
   }).strict() }).strict();
 type Resource = Record<string, any>;
 type Context = CloudInstallationProviderContext & { completed?: Record<string, CloudInstallationEvidence> };
@@ -48,7 +52,7 @@ function validated<T>(parse: () => T): T {
   catch { throw new InstallationError('identity_mismatch'); }
 }
 function reason(error: unknown): CloudInstallationReason {
-  if (error instanceof InstallationError) return error.reason;
+  if (error instanceof CloudInstallationBoundaryError) return error.reason;
   if (error instanceof Error && ['authorization_revoked', 'authorization_expired', 'cancelled', 'timeout'].includes(error.message)) {
     return error.message as CloudInstallationReason;
   }
@@ -118,7 +122,7 @@ function matches(pattern: string, permission: string) {
 }
 
 /** Hosted ARM installer. Every mutation corresponds to one persisted action. */
-export function createAzureCloudInstallationDriver(options: { fetch?: typeof fetch; deadlineMs?: number } = {}): CloudInstallationDriver {
+export function createAzureCloudInstallationDriver(options: { fetch?: typeof fetch; deadlineMs?: number; holdingImage?: string } = {}): CloudInstallationDriver {
   const deployment = createAzureDeploymentInstallationDriver(options);
   const request = options.fetch ?? fetch;
   const call = async <T>(context: Context, run: (budget: DestinationBudget, token: string) => Promise<T>): Promise<T> => {
@@ -131,7 +135,7 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
     finally { budget.close(); }
   };
   const read = async (budget: DestinationBudget, token: string, id: string, version: string): Promise<Resource | null> => {
-    try { return await destinationJson(request, budget, `${ARM}${id}?api-version=${version}`, token); }
+    try { const value = await destinationJson(request, budget, `${ARM}${id}?api-version=${version}`, token); rejectAzureCredentialEcho(value, token); return value; }
     catch (error) { if (error instanceof DestinationBoundaryError && error.status === 404) return null; throw error; }
   };
   const nativeIdentity = (intent: CloudInstallationIntent, kind: Kind, resource: Resource, attempt?: CloudInstallationAttempt,
@@ -145,7 +149,9 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
     }
     const properties = resource.properties;
     if (!properties || typeof properties !== 'object') throw new InstallationError('not_converged');
-    if (['group', 'writer', ...(config.migration ? [] : ['vault'])].includes(kind) && (resource.tags?.hypervibeInstallation !== config.installationId
+    if ((kind === 'writer' || !config.migration && (kind === 'group' || kind === 'vault'))
+      && resource.location !== config.scope.location) throw new InstallationError('identity_mismatch');
+    if (['writer', ...(config.migration ? [] : ['group', 'vault'])].includes(kind) && (resource.tags?.hypervibeInstallation !== config.installationId
       || resource.tags?.hypervibeScope !== config.scopeDigest || attempt && resource.tags?.hypervibeAttempt !== attempt.id)) {
       throw new InstallationError('ownership_mismatch');
     }
@@ -211,21 +217,22 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
     if (!isDeepStrictEqual(retained.identity, identity)) throw new InstallationError('identity_mismatch');
     return identity;
   };
-  const buildActions = (intent: CloudInstallationIntent, groupExists: boolean, existingVaultCreatedAt?: string): CloudInstallationAction[] => {
+  const buildActions = (intent: CloudInstallationIntent, groupExists: boolean, existingVaultCreatedAt?: string, nativeLifecycle = false): CloudInstallationAction[] => {
     const config = settings(intent);
-    const selected: Kind[] = intent.mode === 'disconnect' ? ['grant', 'federation'] : [...kinds];
+    const selected: Kind[] = intent.mode === 'disconnect' ? (['grant', 'federation'] as Kind[]).filter(kind =>
+      intent.installed?.some(item => evidenceSchema.parse(item).resources.some(resource => resource.kind === kind))) : [...kinds];
     return selected.map(kind => ({ id: `azure:${kind}`, type: intent.mode === 'disconnect' ? 'destroy'
       : kind === 'verify' || kind === 'group' && groupExists || kind === 'vault' && config.migration ? 'noop' : registrationKind(kind) ? 'update' : 'create',
       resource: { kind: kind === 'group' || registrationKind(kind) ? 'project' : 'secret', name: kind, provider: 'azure' },
-      verified: intent.mode === 'disconnect' || kind === 'group' && groupExists || kind === 'vault' && config.migration, reason: intent.mode === 'disconnect' ? `Remove the exact owned Azure ${kind}; preserve stored secrets and runtime readers`
+      verified: nativeLifecycle || intent.mode === 'disconnect' || kind === 'group' && groupExists || kind === 'vault' && config.migration, reason: intent.mode === 'disconnect' ? `Remove the exact owned Azure ${kind}; preserve stored secrets and runtime readers`
         : kind === 'verify' ? 'Verify hosted federation and value-free destination access' : `Prepare the isolated Azure ${kind}`,
       ...(kind === 'vault' && !config.migration ? { billable: true, dataBearing: true } : {}), requiresConfirm: kind !== 'verify' && !(kind === 'group' && groupExists) && !(kind === 'vault' && config.migration),
-      dependsOn: intent.mode === 'disconnect' ? kind === 'federation' ? ['azure:grant'] : []
+      dependsOn: intent.mode === 'disconnect' ? kind === 'federation' && selected.includes('grant') ? ['azure:grant'] : []
         : kind === 'group' || registrationKind(kind) ? [] : kind === 'writer' ? ['azure:group', 'azure:managed-identity-provider'] : kind === 'vault' ? ['azure:group', 'azure:vault-provider'] : kind === 'grant' ? ['azure:writer', 'azure:vault', 'azure:role']
           : kind === 'federation' ? ['azure:writer'] : kind === 'verify' ? ['azure:federation', 'azure:grant'] : ['azure:group'],
       metadata: { operation: 'azureCloudInstallation', category: kind === 'group' || registrationKind(kind) ? 'scope' : kind === 'writer' ? 'identity'
         : kind === 'vault' ? 'secret-container' : kind === 'verify' ? 'verification' : 'trust', execution: 'api',
-        native: { kind, resourceId: config.ids[kind], scopeDigest: config.scopeDigest, ...(kind === 'vault' && config.migration && existingVaultCreatedAt ? { existingVaultCreatedAt } : {}) } },
+        native: { kind, resourceId: config.ids[kind], scopeDigest: config.scopeDigest, ...(nativeLifecycle ? { lifecycle: 'exclusive-arm-deployment-v1' as const } : {}), ...(kind === 'vault' && config.migration && existingVaultCreatedAt ? { existingVaultCreatedAt } : {}) } },
     }));
   };
   const driver: CloudInstallationDriver = {
@@ -283,7 +290,8 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
       if (intent.purpose === 'deployment') return deployment.parseAction(value, intent);
       const parsed = validated(() => actionSchema.parse(value));
       if (parsed.metadata.native.kind === 'vault' && settings(intent).migration && !parsed.metadata.native.existingVaultCreatedAt) throw new InstallationError('identity_mismatch');
-      const expected = buildActions(intent, parsed.metadata.native.kind === 'group' && parsed.type === 'noop', parsed.metadata.native.existingVaultCreatedAt).find(action => action.id === parsed.id);
+      const expected = buildActions(intent, parsed.metadata.native.kind === 'group' && parsed.type === 'noop', parsed.metadata.native.existingVaultCreatedAt,
+        parsed.metadata.native.lifecycle === 'exclusive-arm-deployment-v1').find(action => action.id === parsed.id);
       if (!expected || !isDeepStrictEqual(expected, parsed)) throw new InstallationError('identity_mismatch');
       return parsed;
     },
@@ -291,7 +299,14 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
       if (intent.purpose === 'deployment') return deployment.parseEvidence(value, intent);
       const parsed = validated(() => evidenceSchema.parse(value)); const config = settings(intent);
       if (parsed.native.scopeDigest !== config.scopeDigest || parsed.native.installationId !== config.installationId
-        || new Set(parsed.resources.map(item => item.kind)).size !== parsed.resources.length) throw new InstallationError('identity_mismatch');
+        || new Set(parsed.resources.map(item => item.kind)).size !== parsed.resources.length
+        || !parsed.resources.length && (!parsed.native.deployment || !parsed.native.attemptId)) throw new InstallationError('identity_mismatch');
+      if (parsed.native.deployment) {
+        const operation = parsed.native.deployment.operation;
+        const allowed = [config.subscription, config.ids.group].map(id => `${id}/providers/Microsoft.Resources/deployments/hv-${parsed.native.attemptId}`);
+        if (!parsed.native.attemptId || !allowed.some(id => sameId(id, parsed.native.deployment!.id)) || parsed.resources.length > 1
+          || operation && !operation.id.toLowerCase().startsWith(`${parsed.native.deployment.id.toLowerCase()}/operations/`)) throw new InstallationError('identity_mismatch');
+      }
       for (const resource of parsed.resources) {
         if (!sameId(resource.id, config.ids[resource.kind])) throw new InstallationError('identity_mismatch');
         const shapes: Record<Kind, z.ZodTypeAny> = {
@@ -319,13 +334,23 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
         if (group && !sameId(group.id, config.ids.group)) throw new InstallationError('identity_mismatch');
         const permissions = await read(budget, token, `${group ? config.ids.group : config.subscription}/providers/Microsoft.Authorization/permissions`, RBAC_API);
         if (!permissions || !Array.isArray(permissions.value) || permissions.nextLink) throw new InstallationError('insufficient_permissions');
-        const needed = context.intent.mode === 'disconnect' ? ['Microsoft.Authorization/roleAssignments/delete',
-          'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/delete']
-          : [...requiredActions.filter(permission => context.intent.mode !== 'migrate' || permission !== 'Microsoft.KeyVault/vaults/write'), ...(!group ? ['Microsoft.Resources/subscriptions/resourceGroups/write'] : [])];
+        const needed = context.intent.mode === 'disconnect' ? buildActions(context.intent, Boolean(group)).map(action => action.id === 'azure:grant'
+          ? 'Microsoft.Authorization/roleAssignments/delete' : 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/delete')
+          : [...requiredActions.filter(permission => context.intent.mode !== 'migrate' || permission !== 'Microsoft.KeyVault/vaults/write'),
+            'Microsoft.Resources/deployments/write', 'Microsoft.Resources/deployments/read', 'Microsoft.Resources/deployments/operations/read',
+            ...(!group ? ['Microsoft.Resources/subscriptions/resourceGroups/write'] : [])];
         if (!needed.every(permission => permissions.value.some((entry: any) => Array.isArray(entry.actions) && Array.isArray(entry.notActions)
           && entry.actions.every((action: unknown) => typeof action === 'string') && entry.notActions.every((action: unknown) => typeof action === 'string')
           && entry.actions.some((pattern: string) => matches(pattern, permission)) && !entry.notActions.some((pattern: string) => matches(pattern, permission))))) {
           throw new InstallationError('insufficient_permissions');
+        }
+        if (context.intent.mode !== 'disconnect' && group) {
+          const authority = await read(budget, token, `${config.subscription}/providers/Microsoft.Authorization/permissions`, RBAC_API);
+          if (!Array.isArray(authority?.value) || authority?.nextLink || !['Microsoft.Resources/deployments/write', 'Microsoft.Resources/deployments/read',
+            'Microsoft.Resources/deployments/operations/read', 'Microsoft.Authorization/roleDefinitions/write']
+            .every(permission => authority!.value.some((entry: any) => Array.isArray(entry.actions) && Array.isArray(entry.notActions)
+              && entry.actions.some((pattern: unknown) => typeof pattern === 'string' && matches(pattern, permission))
+              && !entry.notActions.some((pattern: unknown) => typeof pattern !== 'string' || matches(pattern, permission))))) throw new InstallationError('insufficient_permissions');
         }
         const registrations: string[] = [];
         if (context.intent.mode !== 'disconnect') for (const kind of ['managed-identity-provider', 'vault-provider'] as const) {
@@ -340,9 +365,11 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
             Array.isArray(entry.actions) && Array.isArray(entry.notActions) && entry.actions.some((pattern: unknown) => typeof pattern === 'string' && matches(pattern, permission))
             && !entry.notActions.some((pattern: unknown) => typeof pattern !== 'string' || matches(pattern, permission))))) throw new InstallationError('insufficient_permissions');
         }
-        if (context.intent.mode === 'disconnect' && (!context.intent.installed?.length
-          || !['writer', 'vault', 'role', 'federation', 'grant'].every(kind => context.intent.installed!.some(item =>
-            driver.parseEvidence(item, context.intent).resources.some(resource => resource.kind === kind))))) throw new InstallationError('ownership_mismatch');
+        if (context.intent.mode === 'disconnect') {
+          const owned = new Set((context.intent.installed ?? []).flatMap(item => driver.parseEvidence(item, context.intent).resources.map(resource => resource.kind)));
+          if (!owned.size || (owned.has('grant') || owned.has('federation')) && !owned.has('writer')
+            || owned.has('grant') && (!owned.has('vault') || !owned.has('role'))) throw new InstallationError('ownership_mismatch');
+        }
         let existingVaultCreatedAt: string | undefined;
         if (context.intent.mode === 'migrate') {
           if (!group) throw new InstallationError('not_installed');
@@ -350,12 +377,24 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
           if (!vault) throw new InstallationError('not_installed');
           existingVaultCreatedAt = nativeIdentity(context.intent, 'vault', vault).createdAt;
         }
-        return { actions: buildActions(context.intent, Boolean(group), existingVaultCreatedAt),
-          ...(context.intent.mode !== 'disconnect' ? { blockedReason: 'create_ownership_unverified' as const } : {}), review: {
+        const nativeLifecycle = context.intent.mode !== 'disconnect' && (!group || config.migration);
+        let blockedReason: CloudInstallationReason | undefined = context.intent.mode !== 'disconnect' && !nativeLifecycle ? 'ownership_mismatch' : undefined;
+        if (nativeLifecycle) for (const kind of ['writer', ...(config.migration ? [] : ['vault']), 'role', 'federation', 'grant'] as Kind[]) {
+          if (await read(budget, token, config.ids[kind], api(kind))) blockedReason = 'ownership_mismatch';
+        }
+        return { actions: buildActions(context.intent, Boolean(group), existingVaultCreatedAt, nativeLifecycle),
+          ...(blockedReason ? { blockedReason } : {}), review: {
+          resources: ['group', 'writer', 'vault', 'role', 'federation', 'grant'].map(kind => ({ kind, name: config.ids[kind as Kind], scope: config.ids.group })),
           permissions: [{ principal: config.ids.writer, scope: config.ids.vault, actions: [...writerActions], purpose: 'writer' as const },
+            ...(nativeLifecycle ? [{ principal: 'Transient administrator', scope: config.subscription, actions: [...needed], purpose: 'installation-verification' as const }] : []),
             ...(registrations.length ? [{ principal: 'Transient administrator', scope: config.subscription, actions: registrations, purpose: 'installation-verification' as const }] : [])],
           costs: [{ resource: config.ids.vault, description: config.migration ? 'Key Vault operations use the existing vault pricing. Existing retention and purge protection settings are preserved on migration and disconnect.' : 'Standard Key Vault charges for operations; secrets and 90-day purge protection are retained on disconnect.', pricingUrl: 'https://azure.microsoft.com/en-us/pricing/details/key-vault/' }],
-          warnings: [...(context.intent.mode !== 'disconnect' ? ['The whole new installation is blocked before any resource-group creation or namespace registration: Azure ARM publishes create-or-update without a verified atomic creation-ownership guard. Existing exact attempts can be observed or recovered, but this installation cannot yet complete for a new customer.'] : []), ...(config.migration ? ['Migration prepares new writer trust on the exact dedicated RBAC vault without changing its secrets, retention settings or unrelated grants. First writer creation remains blocked. The previous writer stays active until Hypercloud verifies and explicitly switches delivery. The reviewed writer role can set every secret in this vault; target names are an additional host restriction.'] : []), 'Required resource providers are registered at subscription scope and remain registered on disconnect; registration may continue region by region while each resource is independently verified.', 'The isolated vault is the native writer scope; reviewed target names are an additional Hypervibe restriction.',
+          warnings: [...(context.intent.mode !== 'disconnect' ? [
+            'Approve exclusive management of this app/environment namespace and the exact listed resource IDs. Existing or unknown targets block installation; names and tags do not establish ownership.',
+            'ARM uses create-or-update: an independently authorized concurrent writer can cause an overwrite between the absence check and native dispatch. Native deployment receipts detect conflicting outcomes after the write; they are not an atomic no-overwrite fence. Hypervibe serializes its own installation actions.',
+            'Each new target uses a unique native deployment name. Missing native acknowledgment or incomplete operation evidence stays unknown without automatic resubmission. Uncertain resources are retained for review, never deleted by name.',
+            ...(blockedReason ? ['A selected resource already exists outside this reviewed new installation. No installation writes are authorized by this blocked plan.'] : []),
+          ] : []), ...(config.migration ? ['Migration prepares new writer trust on the exact dedicated RBAC vault without changing its secrets, retention settings or unrelated grants. The previous writer stays active until Hypercloud verifies and explicitly switches delivery. The reviewed writer role can set every secret in this vault; target names are an additional host restriction.'] : []), 'Required resource providers are registered at subscription scope and remain registered on disconnect; registration may continue region by region while each resource is independently verified.', 'The isolated vault is the native writer scope; reviewed target names are an additional Hypervibe restriction.',
             'Permission discovery is a readiness check; Azure enforces current authority on every installation operation.',
             'Removing federation does not instantly expire already issued tokens. Secrets and separately authorized runtime access are preserved.'],
         } };
@@ -393,12 +432,36 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
             if (!previous || !sameId(previous.id, config.ids[kind]) || previous.namespace !== registrationNamespace(kind)) throw new InstallationError('identity_mismatch');
             if (['Registered', 'Registering'].includes(previous.registrationState)) return { state: 'acknowledged' };
             if (!['NotRegistered', 'Unregistered'].includes(previous.registrationState)) throw new InstallationError('not_converged');
-            await retainedPrimitives(context, budget, token);
+            if (!action.metadata.native.lifecycle) await retainedPrimitives(context, budget, token);
             await budget.wait(context.beforeMutation()); started = true;
             await destinationJson(request, budget, `${ARM}${config.ids[kind]}/register?api-version=${api(kind)}`, token, { method: 'POST' });
             return { state: 'acknowledged' };
           }
           if (previous) throw new InstallationError('ownership_mismatch');
+          if (action.metadata.native.lifecycle === 'exclusive-arm-deployment-v1') {
+            if (kind !== 'group') await prerequisite(context, budget, token, 'group');
+            if (kind === 'federation' || kind === 'grant') await prerequisite(context, budget, token, 'writer');
+            if (kind === 'grant') { await prerequisite(context, budget, token, 'vault'); await prerequisite(context, budget, token, 'role'); }
+            const target = installationTarget(context.intent, kind);
+            const tags = { hypervibeInstallation: config.installationId, hypervibeScope: config.scopeDigest, hypervibeAttempt: input.attempt.id,
+              hypervibeCustomerId: input.intent.customerId, hypervibeAppId: input.intent.appId, hypervibeEnvironment: input.intent.environment };
+            let resource: Record<string, unknown>;
+            if (kind === 'group' || kind === 'writer') resource = { location: config.scope.location, tags };
+            else if (kind === 'vault') resource = { location: config.scope.location, tags, properties: { tenantId: config.scope.tenantId,
+              sku: { family: 'A', name: 'standard' }, accessPolicies: [], enableRbacAuthorization: true,
+              enableSoftDelete: true, enablePurgeProtection: true, softDeleteRetentionInDays: 90 } };
+            else if (kind === 'role') resource = { properties: { roleName: resourceName('Hypervibe writer', { scope: [config.scopeDigest], maxLength: 128 }),
+              type: 'CustomRole', description: config.owner, assignableScopes: [config.ids.group], permissions: writerPermissions } };
+            else if (kind === 'federation') resource = { properties: { issuer: input.intent.hostIdentity.issuer,
+              subject: input.intent.hostIdentity.subject, audiences: [AZURE_HOST_FEDERATION_AUDIENCE] } };
+            else if (kind === 'grant') resource = { scope: config.ids.vault, properties: { principalId: context.completed['azure:writer'].resources[0].identity.principalId,
+              roleDefinitionId: config.ids.role, principalType: 'ServicePrincipal', description: config.owner } };
+            else throw new InstallationError('identity_mismatch');
+            const deployment = await createAzureInstallationDeployment({ request, budget, token, target, attempt: input.attempt, resource,
+              beforeMutation: context.beforeMutation, dispatched() { started = true; } });
+            return { state: 'acknowledged', evidence: { resources: [], native: { scopeDigest: config.scopeDigest,
+              installationId: config.installationId, attemptId: input.attempt.id, deployment } } };
+          }
           // These native PUTs are upserts. An absence read and our own tags do
           // not prove another actor did not create this name before the write.
           // No configuration switch may enable an unverified admission rule.
@@ -437,6 +500,16 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
       } }));
     },
   };
+  function installationTarget(intent: CloudInstallationIntent, kind: Kind): AzureInstallationTarget {
+    const config = settings(intent);
+    const types: Partial<Record<Kind, string>> = { group: 'Microsoft.Resources/resourceGroups', writer: 'Microsoft.ManagedIdentity/userAssignedIdentities',
+      vault: 'Microsoft.KeyVault/vaults', role: 'Microsoft.Authorization/roleDefinitions',
+      federation: 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials', grant: 'Microsoft.Authorization/roleAssignments' };
+    const type = types[kind]; if (!type) throw new InstallationError('identity_mismatch');
+    const name = kind === 'group' ? config.scope.resourceGroup : kind === 'federation' ? `${config.ids.writer.split('/').at(-1)!}/hypervibe` : config.ids[kind].split('/').at(-1)!;
+    return { id: config.ids[kind], apiVersion: api(kind), type, name, location: config.scope.location,
+      deploymentScope: kind === 'group' || kind === 'role' ? config.subscription : config.ids.group, subscriptionScope: kind === 'group' || kind === 'role' };
+  }
   async function retainedPrimitives(context: Context, budget: DestinationBudget, token: string) {
     for (const kind of ['writer', 'vault'] as const) {
       if (!context.completed?.[`azure:${kind}`]) throw new InstallationError('create_ownership_unverified');
@@ -493,6 +566,20 @@ export function createAzureCloudInstallationDriver(options: { fetch?: typeof fet
           if (['Registered', 'Registering'].includes(value.registrationState)) return { state: 'satisfied', evidence: evidence(input.intent, kind, nativeIdentity(input.intent, kind, value)) };
           if (!['NotRegistered', 'Unregistered'].includes(value.registrationState)) return { state: 'unknown', reason: 'not_converged' };
           return recovering ? { state: 'unknown', reason: 'not_converged' } : { state: 'action-required' };
+        }
+        if (action.metadata.native.lifecycle === 'exclusive-arm-deployment-v1' && action.type === 'create' && recovering) {
+          if (!input.attempt?.evidence) return { state: 'unknown', reason: 'not_converged' };
+          const retained = driver.parseEvidence(input.attempt.evidence, input.intent);
+          if (!retained.native.deployment || retained.native.attemptId !== input.attempt.id) return { state: 'unknown', reason: 'not_converged' };
+          const deployment = await verifyAzureInstallationDeployment({ request, budget, token, target: installationTarget(input.intent, kind),
+            attempt: input.attempt, retained: azureDeploymentProvenanceSchema.parse(retained.native.deployment) });
+          if (!value) return { state: 'unknown', reason: 'not_installed' };
+          if (kind !== 'group') await prerequisite(context, budget, token, 'group');
+          if (kind === 'federation' || kind === 'grant') await prerequisite(context, budget, token, 'writer');
+          if (kind === 'grant') { await prerequisite(context, budget, token, 'vault'); await prerequisite(context, budget, token, 'role'); }
+          const identity = nativeIdentity(input.intent, kind, value, input.attempt, context.completed);
+          const result = evidence(input.intent, kind, identity, input.attempt);
+          return { state: 'satisfied', evidence: { ...result, native: { ...result.native, deployment } } };
         }
         if (!value) return recovering ? { state: 'unknown', reason: 'not_installed' } : { state: 'action-required' };
         if (kind === 'vault' && config.migration && action.type === 'noop') {

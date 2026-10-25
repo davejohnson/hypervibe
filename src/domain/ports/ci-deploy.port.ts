@@ -43,6 +43,12 @@ export interface BranchDeployReleaseTarget {
 
 export interface BranchDeployTarget {
   deploymentAccess?: CloudDeploymentCiAccessV1;
+  /** First rollout uses committed nonsecret settings and the reviewed local
+   * preparation journal. Collected values remain immutable provider references. */
+  preparedRuntime?: {
+    envVars: Record<string, string>;
+    preparation: import('./hosting-prepared.port.js').PreparedHostingMarker;
+  };
   environmentName: string;
   api?: ApiReleaseSpec;
   kind: BranchDeployEnvironmentKind;

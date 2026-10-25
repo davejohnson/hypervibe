@@ -9,6 +9,9 @@ import { runtimeSecretReferenceSchema } from '../../../domain/ports/secret-desti
 import { resourceName } from '../../../domain/services/resource-names.js';
 import { DestinationBudget, destinationJson } from '../secret-destination-http.js';
 import { AZURE_HOST_FEDERATION_AUDIENCE, createAzureDeploymentTokenProvider } from './azure-federated-auth.js';
+import { createAzurePreparedInstallationDriver } from './azure-prepared-installation.js';
+import { azureHoldingImageSchema, parseAzurePreparedResources } from './azure-prepared-hosting.js';
+import { parseAzurePreparedReleaseTargets, verifyAzurePreparedReleaseTargets } from './azure-prepared-targets.js';
 
 const ARM = 'https://management.azure.com';
 const MI_API = '2024-11-30';
@@ -18,7 +21,8 @@ const scope = z.object({ tenantId: z.string().guid(), subscriptionId: z.string()
 const fail = () => new CloudDeploymentAccessError('scope_mismatch');
 const same = (a: unknown, b: string) => typeof a === 'string' && a.toLowerCase() === b.toLowerCase();
 export const azureDeploymentContract = { provider: 'azure' as const, hostingProvider: 'azure-container-apps',
-  parseScope(value: unknown): Record<string, string> { try { return scope.parse(value); } catch { throw fail(); } } };
+  parseScope(value: unknown): Record<string, string> { try { return scope.parse(value); } catch { throw fail(); } },
+  parsePreparedResources: parseAzurePreparedResources };
 
 export function azureDeploymentCoordinates(value: Pick<CloudInstallationIntent, 'customerId' | 'appId' | 'environment' | 'installationId' | 'nativeScope'>) {
   const nativeScope = scope.parse(value.nativeScope);
@@ -37,7 +41,7 @@ function topology(value: unknown, nativeScope: Record<string, string>) {
     }))) throw fail();
   return result;
 }
-function prepareIntent(spec: ProjectSpec, intent: CloudInstallationIntent): CloudDeploymentTopologyV1 {
+function prepareIntent(spec: ProjectSpec, intent: CloudInstallationIntent, holdingImage?: string): CloudDeploymentTopologyV1 {
   const environment = spec.environments[intent.environment];
   if (!environment || environment.hosting.provider !== azureDeploymentContract.hostingProvider
     || environment.database || environment.cache || Object.keys(environment.storage ?? {}).length || Object.keys(environment.queues ?? {}).length
@@ -47,7 +51,9 @@ function prepareIntent(spec: ProjectSpec, intent: CloudInstallationIntent): Clou
       || Object.keys(service.databaseEnvAliases ?? {}).length)) throw new CloudDeploymentAccessError('unsupported');
   const runtimeSecrets = Object.entries(environment.secretDestinations ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([key, reference]) => ({ key, reference: runtimeSecretReferenceSchema.parse(reference) }));
   return topology({ hostingProvider: environment.hosting.provider, region: environment.hosting.region ?? intent.nativeScope.location,
-    workloads: Object.entries(environment.services).sort(([a], [b]) => a.localeCompare(b)).map(([name, service]) => ({ name, kind: service.workloadKind, runtimeSecrets })) }, intent.nativeScope);
+    ...(holdingImage ? { preparation: { kind: 'holding-workloads', image: azureHoldingImageSchema.parse(holdingImage) } } : {}),
+    workloads: Object.entries(environment.services).sort(([a], [b]) => a.localeCompare(b)).map(([name, service]) => ({ name, kind: service.workloadKind,
+      ...(holdingImage ? { public: service.public ?? true } : {}), runtimeSecrets })) }, intent.nativeScope);
 }
 function parseConnection(value: unknown) {
   const connection = parseCloudDeploymentConnectionV1(value, azureDeploymentContract);
@@ -62,8 +68,9 @@ function parseConnection(value: unknown) {
 }
 
 /** Separate deployment authority. Fresh native creates stay blocked until atomic ownership is proven. */
-export function createAzureDeploymentInstallationDriver(options: { fetch?: typeof fetch; deadlineMs?: number } = {}): CloudInstallationDriver {
+export function createAzureDeploymentInstallationDriver(options: { fetch?: typeof fetch; deadlineMs?: number; holdingImage?: string } = {}): CloudInstallationDriver {
   const request = options.fetch ?? fetch;
+  const prepared = createAzurePreparedInstallationDriver(options);
   const action = (intent: CloudInstallationIntent): CloudInstallationAction => {
     const c = azureDeploymentCoordinates(intent); topology(intent.deployment, c.nativeScope);
     if (intent.purpose !== 'deployment' || intent.stage !== 'deployment' || intent.mode !== 'connect' || intent.keys.length) throw fail();
@@ -73,16 +80,23 @@ export function createAzureDeploymentInstallationDriver(options: { fetch?: typeo
   };
   const driver: CloudInstallationDriver = {
     provider: 'azure', parseScope: azureDeploymentContract.parseScope,
-    parseAction(value, intent) { const expected = action(intent); if (!isDeepStrictEqual(value, expected)) throw fail(); return expected; },
+    parseAction(value, intent) { if (intent.deployment?.preparation) return prepared.parseAction(value, intent);
+      const expected = action(intent); if (!isDeepStrictEqual(value, expected)) throw fail(); return expected; },
     // No release of this installer has completed an Azure deployment installation.
     // Do not fabricate historical ownership or accept copied native identities.
-    parseEvidence() { throw new CloudInstallationBoundaryError('create_ownership_unverified'); },
+    parseEvidence(value, intent) { if (intent.deployment?.preparation) return prepared.parseEvidence(value, intent); throw new CloudInstallationBoundaryError('create_ownership_unverified'); },
     connections() { return []; },
-    deployment: { hostingProvider: azureDeploymentContract.hostingProvider, prepareIntent,
-      connection() { throw new CloudInstallationBoundaryError('create_ownership_unverified'); },
+    deployment: { hostingProvider: azureDeploymentContract.hostingProvider, prepareIntent: (spec, intent) => prepareIntent(spec, intent, options.holdingImage), parsePreparedResources: parseAzurePreparedResources,
+      parseReleaseTargets: parseAzurePreparedReleaseTargets,
+      async verifyReleaseTargets(input) {
+        driver.deployment!.assertSourcePlacement!(input.spec, input.connection);
+        return verifyAzurePreparedReleaseTargets(input, { request, deadlineMs: options.deadlineMs,
+          issueSession: request => driver.deployment!.issueSession!(request) });
+      },
+      connection(record) { if (record.intent.deployment?.preparation) return prepared.deployment!.connection(record); throw new CloudInstallationBoundaryError('create_ownership_unverified'); },
       assertSourcePlacement(spec, connection) {
         const checked = parseConnection(connection);
-        const proposed = prepareIntent(spec, { ...checked, stage: 'deployment', mode: 'connect', keys: [] });
+        const proposed = prepareIntent(spec, { ...checked, stage: 'deployment', mode: 'connect', keys: [] }, checked.deployment.preparation?.image);
         if (!isDeepStrictEqual(proposed, checked.deployment)) throw fail();
       },
       async issueSession(input) {
@@ -122,6 +136,7 @@ export function createAzureDeploymentInstallationDriver(options: { fetch?: typeo
       },
     },
     async plan(context) {
+      if (context.intent.deployment?.preparation) return prepared.plan(context);
       const proposed = action(context.intent), c = azureDeploymentCoordinates(context.intent);
       const budget = new DestinationBudget({ signal: context.signal, deadlineMs: options.deadlineMs });
       try {
@@ -149,9 +164,9 @@ export function createAzureDeploymentInstallationDriver(options: { fetch?: typeo
         } };
       } finally { budget.close(); }
     },
-    async inspect() { return { state: 'unknown', reason: 'create_ownership_unverified' }; },
-    async recover() { return { state: 'unknown', reason: 'create_ownership_unverified' }; },
-    async mutate() { return { state: 'rejected', reason: 'create_ownership_unverified' }; },
+    async inspect(input) { return input.intent.deployment?.preparation ? prepared.inspect(input) : { state: 'unknown', reason: 'create_ownership_unverified' }; },
+    async recover(input) { return input.intent.deployment?.preparation ? prepared.recover(input) : { state: 'unknown', reason: 'create_ownership_unverified' }; },
+    async mutate(input) { return input.intent.deployment?.preparation ? prepared.mutate(input) : { state: 'rejected', reason: 'create_ownership_unverified' }; },
   };
   return driver;
 }

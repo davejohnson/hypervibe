@@ -13,19 +13,21 @@ export const gcpBillingPreparationScopeSchema = z.object({ scopeKind: z.literal(
   projectId: z.string().regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/), projectNumber: z.string().regex(/^[1-9]\d{5,29}$/),
   projectCreateTime: z.string().datetime(), projectParent: z.string().regex(/^(?:none|(?:organizations|folders)\/[1-9]\d*)$/),
   projectInstallationId: z.string().guid(), projectAttemptId: z.string().guid(),
-  billingAccountName: z.string().regex(/^billingAccounts\/[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}$/) }).strict();
+  billingAccountName: z.string().regex(/^billingAccounts\/[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}$/),
+  assignmentMode: z.literal('initial-reviewed-v1').optional() }).strict();
 const rolePermissions = {
   link: ['resourcemanager.projects.get', 'resourcemanager.projects.createBillingAssignment', 'serviceusage.services.list', 'serviceusage.effectivepolicy.get'],
   impersonator: ['iam.serviceAccounts.get', 'iam.serviceAccounts.getAccessToken'],
 };
 const apiNames = ['iam.googleapis.com', 'iamcredentials.googleapis.com', 'cloudbilling.googleapis.com'];
-const operations = ['enable-api', 'create-account', 'create-role', 'grant', 'attach-billing', 'revoke', 'verify-existing-billing'] as const;
+const operations = ['enable-api', 'create-account', 'create-role', 'grant', 'attach-billing', 'revoke', 'verify-existing-billing', 'assign-initial-billing'] as const;
 const proofSchema = z.object({ resources: z.array(z.object({ kind: z.enum(['project', 'service', 'serviceAccount', 'role']), id: z.string().max(1024),
   identity: z.object({ uniqueId: z.string().regex(/^[1-9]\d{5,29}$/).optional(), owner: z.string().regex(/^[a-f0-9]{64}$/).optional(),
     attemptId: z.string().guid().optional(), createTime: z.string().datetime().optional(), parent: z.string().max(256).optional() }).strict() }).strict()).max(3),
   native: z.object({ operation: z.enum(operations), actionId: z.string().max(256), installationId: z.string().guid(), owner: z.string().regex(/^[a-f0-9]{64}$/),
     attemptId: z.string().guid().optional(), operationName: z.string().regex(/^operations\/[A-Za-z0-9._~-]{1,255}$/).optional(),
-    billingAccountName: z.string().max(100).optional(), policyResource: z.string().max(1024).optional(), role: z.string().max(1024).optional(), member: z.string().max(1024).optional(),
+    billingAccountName: z.string().max(100).optional(), assignmentMode: z.literal('initial-reviewed-v1').optional(),
+    policyResource: z.string().max(1024).optional(), role: z.string().max(1024).optional(), member: z.string().max(1024).optional(),
   }).strict() }).strict();
 type Context = CloudInstallationProviderContext;
 type ActionContext = Context & { action: CloudInstallationAction; attempt?: CloudInstallationAttempt };
@@ -55,6 +57,7 @@ function names(intent: CloudInstallationIntent) {
 }
 function allActions(intent: CloudInstallationIntent): CloudInstallationAction[] {
   const n = names(intent);
+  if (n.assignmentMode === 'initial-reviewed-v1' && intent.mode === 'connect') return [initialAssignmentAction(intent)];
   const action = (id: string, operation: typeof operations[number], name: string, category: CloudInstallationAction['metadata']['category'], native: Record<string, unknown>, dependsOn: string[] = []): CloudInstallationAction => ({
     id: `gcp:billing:${id}`, type: ['grant', 'attach-billing', 'revoke'].includes(operation) ? 'update' : 'create',
     resource: { kind: 'project', name, provider: 'gcp' }, verified: true, requiresConfirm: true,
@@ -75,6 +78,14 @@ function allActions(intent: CloudInstallationIntent): CloudInstallationAction[] 
   result.push(action('revoke:account', 'revoke', n.account, 'trust', { target: 'account' }, ['revoke:billing']));
   return result;
 }
+function initialAssignmentAction(intent: CloudInstallationIntent): CloudInstallationAction {
+  const n = names(intent);
+  if (n.assignmentMode !== 'initial-reviewed-v1') throw new BillingError('billing_assignment_unverified');
+  return { id: 'gcp:billing:initial-assignment-v1', type: 'update', resource: { kind: 'project', name: `projects/${n.projectNumber}`, provider: 'gcp' },
+    verified: true, requiresConfirm: true, billable: true,
+    reason: 'Assign the reviewed billing account to this exact newly created project using transient browser authorization.',
+    metadata: { operation: 'assign-initial-billing', category: 'scope', execution: 'api', native: { assignmentMode: n.assignmentMode } } };
+}
 function actions(intent: CloudInstallationIntent): CloudInstallationAction[] {
   if (intent.mode !== 'disconnect') return allActions(intent);
   const grants = new Set(intent.installed?.map(item => item.native.actionId));
@@ -91,7 +102,7 @@ function parseEvidence(value: unknown, intent: CloudInstallationIntent): CloudIn
   const p = proofSchema.parse(value); const n = names(intent); const action = [...allActions(intent), verificationAction(intent)].find(item => item.id === p.native.actionId);
   if (!action || action.metadata.operation !== p.native.operation || p.native.owner !== n.owner || p.native.installationId !== n.connectionId) throw new BillingError('ownership_mismatch');
   const kinds = p.resources.map(resource => resource.kind).sort();
-  const expectedKinds = p.native.operation === 'verify-existing-billing' ? ['project'] : p.native.operation === 'attach-billing' ? ['project', 'serviceAccount']
+  const expectedKinds = ['verify-existing-billing', 'assign-initial-billing'].includes(p.native.operation) ? ['project'] : p.native.operation === 'attach-billing' ? ['project', 'serviceAccount']
     : p.native.operation === 'create-role' ? ['role'] : p.native.operation === 'enable-api' ? ['service'] : ['serviceAccount'];
   if (!isDeepStrictEqual(kinds, expectedKinds) && !(p.native.operation === 'enable-api' && !kinds.length && p.native.operationName)) throw new BillingError('identity_mismatch');
   if (['create-account', 'create-role'].includes(p.native.operation) && p.resources[0]?.identity.attemptId !== p.native.attemptId) throw new BillingError('ownership_mismatch');
@@ -104,7 +115,8 @@ function parseEvidence(value: unknown, intent: CloudInstallationIntent): CloudIn
     if (resource.kind === 'serviceAccount' && !resource.identity.uniqueId) throw new BillingError('identity_mismatch');
   }
   if (p.native.billingAccountName !== undefined && p.native.billingAccountName !== n.billingAccountName) throw new BillingError('identity_mismatch');
-  if (['attach-billing', 'verify-existing-billing'].includes(p.native.operation) && p.native.billingAccountName !== n.billingAccountName) throw new BillingError('identity_mismatch');
+  if (['attach-billing', 'verify-existing-billing', 'assign-initial-billing'].includes(p.native.operation) && p.native.billingAccountName !== n.billingAccountName) throw new BillingError('identity_mismatch');
+  if (p.native.operation === 'assign-initial-billing' && (n.assignmentMode !== 'initial-reviewed-v1' || p.native.assignmentMode !== n.assignmentMode)) throw new BillingError('identity_mismatch');
   if (['grant', 'revoke'].includes(p.native.operation)) {
     const account = p.resources.find(item => item.kind === 'serviceAccount');
     const target = action.metadata.native.target as Target;
@@ -127,9 +139,17 @@ function completed(context: Context, id: string, kind: string) {
 
 export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetch } = {}): CloudInstallationDriver {
   const request = options.fetch ?? fetch;
+  async function knownProjectBilling(client: GcpSecretWriterClient, projectId: string) {
+    const billing = await client.bootstrap.getProjectBillingInfo(projectId);
+    // CRM already proved this exact project exists. Billing's successful empty
+    // association is ProjectBillingInfo with empty/default scalar fields; 404
+    // is incomplete evidence and cannot authorize assigning a billing account.
+    if (!billing) throw new BillingError('provider_error');
+    return billing;
+  }
   async function verifyBilling(client: GcpSecretWriterClient, intent: CloudInstallationIntent) {
     if (intent.mode === 'disconnect') return;
-    const n = names(intent); const billing = await client.bootstrap.getProjectBillingInfo(n.projectId);
+    const n = names(intent); const billing = await knownProjectBilling(client, n.projectId);
     if (billing?.billingAccountName && billing.billingAccountName !== n.billingAccountName) throw new BillingError('ownership_mismatch');
   }
   async function withClient<T>(context: Context, run: (client: GcpSecretWriterClient, budget: DestinationBudget) => Promise<T>, recovery = false): Promise<T> {
@@ -138,7 +158,7 @@ export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetc
     try {
       const token = await budget.wait(context.authentication.administrator.getAccessToken(SCOPE, budget.signal));
       const client: GcpSecretWriterClient = new GcpSecretWriterClient({ token, budget, request, beforeWrite: async () => {
-        await context.beforeMutation(); await verifyBilling(client, context.intent);
+        await verifyBilling(client, context.intent); await context.beforeMutation();
       }, sleep: async () => {} });
       const project = await client.bootstrap.getProject(n.projectId);
       if (!project || project.name !== `projects/${n.projectNumber}` || project.state !== 'ACTIVE' || project.createTime !== n.projectCreateTime
@@ -208,11 +228,12 @@ export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetc
       if (retained && parseEvidence(retained, context.intent).resources.length && !isDeepStrictEqual(parseEvidence(retained, context.intent).resources, [resource])) throw new BillingError('identity_mismatch');
       return { state: 'satisfied', evidence: proof(context, [resource]) };
     }
-    if (op === 'attach-billing' || op === 'verify-existing-billing') {
-      const writer = op === 'attach-billing' ? await verifiedAccount(client, context) : null; const info = await client.bootstrap.getProjectBillingInfo(n.projectId);
+    if (op === 'attach-billing' || op === 'verify-existing-billing' || op === 'assign-initial-billing') {
+      const writer = op === 'attach-billing' ? await verifiedAccount(client, context) : null; const info = await knownProjectBilling(client, n.projectId);
       if (info?.billingAccountName && info.billingAccountName !== n.billingAccountName) return { state: 'conflict', reason: 'ownership_mismatch' };
       if (info?.billingEnabled && info.billingAccountName === n.billingAccountName) return { state: 'satisfied', evidence: proof(context, [...(writer ? [writer] : []),
-        { kind: 'project', id: `projects/${n.projectNumber}`, identity: { createTime: n.projectCreateTime, parent: n.projectParent } }], { billingAccountName: n.billingAccountName }) };
+        { kind: 'project', id: `projects/${n.projectNumber}`, identity: { createTime: n.projectCreateTime, parent: n.projectParent } }],
+        { billingAccountName: n.billingAccountName, ...(op === 'assign-initial-billing' ? { assignmentMode: n.assignmentMode } : {}) }) };
       if (op === 'verify-existing-billing') return { state: 'rejected', reason: 'billing_assignment_unverified' };
       return context.attempt ? { state: 'pending', reason: 'not_converged' } : { state: 'action-required' };
     }
@@ -269,6 +290,10 @@ export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetc
       return { ...original, installationId, mode: 'disconnect', installed: Object.values(record.completed) };
     }, continuationStage: () => 'collection', resolvedScope(record) {
       const n = names(record.intent);
+      if (record.status === 'scope-ready' && n.assignmentMode === 'initial-reviewed-v1' && record.completed['gcp:billing:initial-assignment-v1']) {
+        parseEvidence(record.completed['gcp:billing:initial-assignment-v1'], record.intent);
+        return { projectId: n.projectId, projectNumber: n.projectNumber };
+      }
       if (record.status === 'scope-ready' && record.completed['gcp:billing:existing']) {
         parseEvidence(record.completed['gcp:billing:existing'], record.intent);
         return { projectId: n.projectId, projectNumber: n.projectNumber };
@@ -302,15 +327,19 @@ export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetc
         await withClient(context, async client => {
           const account = await client.json(`https://cloudbilling.googleapis.com/v1/${n.billingAccountName}`);
           if (account.name !== n.billingAccountName || account.open !== true) throw new BillingError('insufficient_permissions');
-          const billing = await client.bootstrap.getProjectBillingInfo(n.projectId);
+          const billing = await knownProjectBilling(client, n.projectId);
           if (billing?.billingAccountName && billing.billingAccountName !== n.billingAccountName) throw new BillingError('ownership_mismatch');
           alreadyLinked = billing?.billingAccountName === n.billingAccountName && billing.billingEnabled === true;
           if (alreadyLinked) return;
-          for (const [url, permissions] of [
+          const required = n.assignmentMode === 'initial-reviewed-v1' ? [
+            [`https://cloudbilling.googleapis.com/v1/${n.billingAccountName}:testIamPermissions`, ['billing.accounts.get', 'billing.resourceAssociations.create']],
+            [`https://cloudresourcemanager.googleapis.com/v3/projects/${n.projectNumber}:testIamPermissions`, rolePermissions.link],
+          ] : [
             [`https://cloudbilling.googleapis.com/v1/${n.billingAccountName}:testIamPermissions`, ['billing.accounts.get', 'billing.accounts.getIamPolicy', 'billing.accounts.setIamPolicy']],
             [`https://cloudresourcemanager.googleapis.com/v3/projects/${n.projectNumber}:testIamPermissions`, ['resourcemanager.projects.get', 'resourcemanager.projects.getIamPolicy', 'resourcemanager.projects.setIamPolicy',
               'iam.roles.create', 'iam.roles.get', 'iam.serviceAccounts.create', 'iam.serviceAccounts.get', 'iam.serviceAccounts.getIamPolicy', 'iam.serviceAccounts.setIamPolicy', 'serviceusage.services.get', 'serviceusage.services.enable']],
-          ] as Array<[string, string[]]>) {
+          ];
+          for (const [url, permissions] of required as Array<[string, string[]]>) {
             const result = await client.json(url, { method: 'POST', body: JSON.stringify({ permissions }) }); const granted = result.permissions;
             if (!Array.isArray(granted) || !permissions.every(permission => granted.includes(permission))) throw new BillingError('insufficient_permissions');
           }
@@ -319,6 +348,16 @@ export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetc
           { kind: 'project', name: n.projectId, scope: n.projectParent === 'none' ? 'No organization (observed)' : n.projectParent },
           { kind: 'billing-account', name: n.billingAccountName, scope: `projects/${n.projectNumber}` }],
           permissions: [], costs: [], warnings: ['The selected billing association already exists. This stage verifies it without any billing or IAM changes.'] } };
+        if (n.assignmentMode === 'initial-reviewed-v1') return { actions: [initialAssignmentAction(context.intent)], review: {
+          resources: [{ kind: 'project', name: n.projectId, scope: `${n.projectParent}; projects/${n.projectNumber}; created ${n.projectCreateTime}` },
+            { kind: 'billing-account', name: n.billingAccountName, scope: `projects/${n.projectNumber}` }],
+          permissions: [{ principal: 'Browser-authorized administrator', scope: `projects/${n.projectNumber}`, actions: rolePermissions.link, purpose: 'installation-verification' },
+            { principal: 'Browser-authorized administrator', scope: n.billingAccountName, actions: ['billing.accounts.get', 'billing.resourceAssociations.create'], purpose: 'installation-verification' }],
+          costs: [{ resource: n.billingAccountName, description: 'This account will pay for resource usage in the exact newly created project. This step creates no application workloads.', pricingUrl: 'https://cloud.google.com/pricing' }],
+          warnings: ['Reserve this newly created project for this setup and coordinate billing changes with other administrators until it finishes.',
+            'Google’s billing API can replace a concurrent external billing selection after our final check. This review authorizes the selected account for this initial assignment; it is not an atomic link-only operation.',
+            'A different account observed before the write is preserved and blocks setup. An uncertain response is recovered by reading, never by automatically repeating the assignment.',
+            'Only transient browser authorization is used. This step creates no temporary identities or IAM grants, and stores no administrator credential.'] } };
         return { actions: actions(context.intent), blockedReason: 'billing_assignment_unverified' as const, review: {
           resources: [{ kind: 'temporary-service-account', name: n.email, scope: `projects/${n.projectNumber}` }, ...Object.values(n.roles).map(name => ({ kind: 'temporary-custom-role', name, scope: `projects/${n.projectNumber}` }))],
           permissions: [{ principal: n.email, scope: `projects/${n.projectNumber}`, actions: rolePermissions.link, purpose: 'installation-verification' },
@@ -342,13 +381,29 @@ export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetc
       let canRetry = () => true;
       try {
         driver.parseAction(context.action, context.intent);
-        if (context.intent.mode === 'connect' && context.action.metadata.operation !== 'revoke')
+        if (context.intent.mode === 'connect' && context.action.metadata.operation !== 'revoke'
+          && !(names(context.intent).assignmentMode === 'initial-reviewed-v1' && context.action.metadata.operation === 'assign-initial-billing'))
           throw new BillingError('billing_assignment_unverified');
         return await withClient(context, async (client, budget) => {
           canRetry = () => client.canRetryRejectedMutation();
           const n = names(context.intent); const op = context.action.metadata.operation;
           const current = await observe(client, { ...context, attempt: undefined });
           if (current.state !== 'action-required') throw new BillingError('ownership_mismatch');
+          if (op === 'assign-initial-billing') {
+            // The separately reviewed versioned action deliberately uses the
+            // transient administrator, never an implicit credential fallback.
+            // Native PUT has no conditional-empty guard; the review states its
+            // concurrent-change semantics. The shared attempt is already durable.
+            client.beginMutation();
+            const result = await client.json(`https://cloudbilling.googleapis.com/v1/projects/${n.projectId}/billingInfo`, {
+              method: 'PUT', body: JSON.stringify({ billingAccountName: n.billingAccountName }),
+            }, true);
+            if (result.projectId !== n.projectId || result.name !== `projects/${n.projectId}/billingInfo`
+              || result.billingAccountName !== n.billingAccountName || result.billingEnabled !== true) throw new BillingError('not_converged');
+            const observed = await observe(client, context);
+            return observed.state === 'satisfied' ? { state: 'acknowledged' as const, evidence: observed.evidence }
+              : { state: 'uncertain' as const, reason: 'not_converged' as const };
+          }
           if (op === 'enable-api') {
             const result = await client.json(`https://serviceusage.googleapis.com/v1/${context.action.resource.name}:enable`, { method: 'POST', body: '{}' }, true);
             if (typeof result.name !== 'string') throw new BillingError('provider_error');

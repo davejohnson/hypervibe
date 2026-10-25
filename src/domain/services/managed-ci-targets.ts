@@ -2,6 +2,7 @@ import { EnvironmentRepository } from '../../adapters/db/repositories/environmen
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import type { Project } from '../entities/project.entity.js';
+import type { Environment } from '../entities/environment.entity.js';
 import type {
   BranchDeployEnvironmentKind,
   BranchDeployReleaseResource,
@@ -17,6 +18,7 @@ import { resolveBackupPolicies } from './backup-policy.service.js';
 import { resolveBackupStrategy, withBackupStorageDefaults } from './backup-strategy.service.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { selectedDeploymentAccess } from '../../adapters/cloud/deployment-access.client.js';
+import { preparedHostingMarkerSchema } from '../ports/hosting-prepared.port.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { getProjectScopeHints } from './project-scope.js';
@@ -134,7 +136,8 @@ export function managedCiEnvironmentBindings(
   projectId: string,
   environmentName: string,
   desiredWorkloadKinds?: Record<string, 'web' | 'worker' | 'cron'>,
-  desiredProvider?: string
+  desiredProvider?: string,
+  bindingOverride?: Environment
 ): {
   providerProjectId?: string;
   providerEnvironmentId?: string;
@@ -148,7 +151,9 @@ export function managedCiEnvironmentBindings(
   releaseJobNamesByName: Record<string, string>;
   releaseResources: BranchDeployReleaseResource[];
 } {
-  const environment = new EnvironmentRepository().findByProjectAndName(projectId, environmentName);
+  if (bindingOverride && (bindingOverride.projectId !== projectId || bindingOverride.name !== environmentName))
+    throw new Error('Reviewed workflow bindings do not match the selected environment.');
+  const environment = bindingOverride ?? new EnvironmentRepository().findByProjectAndName(projectId, environmentName);
   const bindings = parseHostingBindings(environment);
   const bindingsMatchProvider = !desiredProvider || bindings.provider === desiredProvider;
   const services = bindingsMatchProvider ? bindings.services ?? {} : {};
@@ -228,12 +233,14 @@ export function managedCiEnvironmentBindings(
   };
 }
 
-export function resolveReviewedBranchDeployTargets(project: Project, spec: ProjectSpec): {
+export function resolveReviewedBranchDeployTargets(project: Project, spec: ProjectSpec, bindingOverride?: Environment): {
   targets: BranchDeployTarget[];
   desiredBranches: Record<string, string | undefined>;
   migration: { includeStep: boolean; command?: string; note?: string };
   skippedEnvironments: string[];
 } {
+  if (bindingOverride && (bindingOverride.projectId !== project.id || !spec.environments[bindingOverride.name]))
+    throw new Error('Reviewed workflow bindings do not match the selected project.');
   const targetsByEnvironment = new Map<string, BranchDeployTarget>();
   const skippedEnvironments: string[] = [];
   const desiredBranches: Record<string, string | undefined> = {};
@@ -274,7 +281,8 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
       project.id,
       environmentName,
       desiredWorkloadKinds,
-      environment.hosting.provider
+      environment.hosting.provider,
+      bindingOverride?.name === environmentName ? bindingOverride : undefined
     );
     const runtimeServiceNames = Object.entries(effectiveEnvironment.services)
       .filter(([, service]) => service.workloadKind !== 'cron')
@@ -365,7 +373,15 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
       // device/native token or mutable policy digest into the managed program.
       target.deploymentAccess = reviewedCloudDeploymentCiAccess(target);
     }
-    const boundEnvironment = new EnvironmentRepository().findByProjectAndName(project.id, environmentName);
+    const boundEnvironment = bindingOverride?.name === environmentName ? bindingOverride
+      : new EnvironmentRepository().findByProjectAndName(project.id, environmentName);
+    if (deployment?.receipt.preparedResources) {
+      const preparation = preparedHostingMarkerSchema.parse(boundEnvironment?.platformBindings.preparedHosting);
+      if (preparation.installationId !== deployment.receipt.installationId || preparation.planDigest !== deployment.receipt.planDigest) {
+        throw new Error('CI preparation does not match the installed cloud connection.');
+      }
+      target.preparedRuntime = { envVars: { ...environment.envVars }, preparation };
+    }
     const components = boundEnvironment ? new ComponentRepository().findByEnvironmentId(boundEnvironment.id) : [];
     const backupPolicy = resolveBackupPolicies(spec, boundEnvironment ? [boundEnvironment] : [], components)[environmentName];
     if (backupPolicy.resources.length > 0) {

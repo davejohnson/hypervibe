@@ -42,8 +42,8 @@ and exact receipt. Receipt possession alone does not authorize a session.
 | Cloud | Administrator installation | Ongoing access and native identity proof | Runtime and initial blockers |
 | --- | --- | --- | --- |
 | AWS / ECS | Reviewed, immutable CloudFormation template creates separate provision/release roles, exact PassRole targets and runtime reader roles. Console-edited parameters are untrusted until native stack/template/role verification. | Google host ID token uses purpose-specific audience; STS web-identity returns a 900-second session. Signed GetCallerIdentity independently checks account, assumed-role ARN and immutable role ID. Native roles/trust/policies are re-observed before broker issuance. | ECS execution role reads exact Secrets Manager containers; application task role remains separate. Runtime roles must exist before Express creation. Provision must not create or attach arbitrary IAM roles. Template publication and live verification remain release gates. |
-| GCP / Cloud Run | The contract requires transient browser installation of separate provision/release service accounts, precreated runtime accounts, narrow actAs and reviewed secret-reader grants. Native scoped deployment installation remains blocked: parent-authorized creates and Cloud Run update permissions cannot be described as verified exact-name grants. | Dedicated Hypercloud host impersonates the exact customer account UID. Fixed OAuth scope does not downscope IAM. Provider checks service-account/project lifetime and official token-info identity where applicable. | Runtime accounts read exact containers, while workload references pin immutable versions. Fresh project creation has a separate review; automatic fresh billing remains explicitly blocked pending preservation-safe native semantics. Auth callbacks and emitted CI do not establish a complete new-customer installation. |
-| Azure / Container Apps | Reviewed resource/UAMI/federated-credential/custom-role installation. Existing create-ownership gaps block fresh installation before any writes. | Google assertion is exchanged at the exact Entra tenant/client for a closed ARM or ACR target. Opaque resource tokens are not decoded as caller proof; verified native UAMI/FIC identity, OAuth issuance and authenticated broker response bind the principal. | Precreated runtime UAMI avoids the first-container system-identity cycle. Its Key Vault and ACR access is installed separately. Ongoing provision/release identities cannot write arbitrary RBAC or fetch Key Vault values. Native atomic first-create ownership remains a blocker. |
+| GCP / Cloud Run | Transient administrator installs exact registry and inactive holding web/worker services, distinct provision/release/holding/runtime accounts, and separately reviewed resource IAM. Initial native path requires a project without an organization parent and an operator-configured public digest image. | Dedicated Hypercloud host re-observes native lifetimes and installed permissions, then impersonates the exact provision/release account UID for 900 seconds. Fixed cloud-platform OAuth scope does not downscope IAM. | Shared prepared-binding frontier and first-rollout transition have offline transport/lifecycle evidence; they are not live acceptance. Runtime readers retain exact containers and immutable versions. Cron/release commands, broader storage topology, ancestor/group authority and the approved live walkthrough remain explicit limits. Initial billing has a separate versioned review with documented native non-atomic semantics. |
+| Azure / Container Apps | Reviewed exclusive app/environment namespace, native ARM deployment provenance, distinct UAMIs/custom roles and no-secret holding apps. Native upsert concurrency limits are explicit; existing/unknown targets and uncertain provenance block. | Google assertion is exchanged at the exact Entra tenant/client for a closed ARM or ACR target. Opaque resource tokens are not decoded as caller proof; verified native UAMI/FIC identity, OAuth issuance and authenticated broker response bind the principal. | Installed reader UAMIs and separate Key Vault/ACR grants feed the shared prepared-binding frontier and one candidate-image/reference rollout. Identity lifecycle None keeps the platform reader unavailable to holding container code. [Offline native/emitted evidence](connect-cloud-azure-prepared.md) is implemented; operator image publication, live runtime consumption and the approved walkthrough remain gates. |
 
 Official evidence: [STS web identity](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html),
 [STS caller identity](https://docs.aws.amazon.com/STS/latest/APIReference/API_GetCallerIdentity.html),
@@ -62,41 +62,28 @@ by native IAM and expiry, not cryptographically by local plan/action IDs. Local 
 still enforces exact actions. Removing hosted trust prevents future minting; already
 issued credentials may remain usable until expiry.
 
-## Proposed GCP resource preparation — not implemented
+## GCP prepared deployment
 
-Prefer preparing the exact hosting resources inside the initial reviewed installation
-graph. This avoids giving ongoing deployment principals project-wide creation rights
-or requiring the administrator to return solely to grant access after first apply.
-The administrator's transient authority performs the approved dependency graph;
-Hypercloud still does not become an application build/deployment reconciler.
+The native installer prepares exact hosting resources inside the reviewed installation
+graph using transient administrator authority. Ongoing deployment principals receive
+resource-scoped updates and registry access, plus narrowly enumerated project reads;
+they receive no project-wide create or IAM-write grant. Hypercloud brokers credentials
+and installation; ordinary application reconciliation remains Hypervibe plan/apply and
+managed CI.
 
-| Boundary | Proposed contract | Current evidence or remaining prerequisite |
+| Boundary | Implemented behavior | Remaining limit |
 | --- | --- | --- |
-| Project scope | Explicit app/environment mapping, native project number/createTime and original ownership evidence. A dedicated project is an isolation choice, not the definition of a Hypervibe environment. | Existing project-preparation journal can supply exact scope. Fresh automatic billing remains blocked; pending-deletion projects are unusable. |
-| Hosting preparation | Create the reviewed registry and private, digest-pinned holding services/jobs; observe operation completion, resource UID/createTime, ownership and configuration before dependent IAM writes. | Cloud Run service/job creation authorizes on the parent. Hosting preparation in the installer and its shared prepared-resource receipt are not implemented. |
-| Holding runtime | Use a separately identified holding service account with no application secret permissions or values. Jobs have no executions/triggers; holding workers remain inactive until the reviewed rollout enables their normal CPU/floor. | Requires an operator-published, reviewed immutable image and verified pull access. No hidden customer Cloud Build, mutable public sample tag, or claim of zero startup cost. |
-| Ongoing grants | Grant provision/release access on exact prepared services/jobs and registry; actAs only on reviewed runtime identities. Install desired public access as an explicit dependent setup action. | Cloud Run and Artifact Registry support resource IAM. Preserve unrelated policy entries with native etags. Public access requires run.services.setIamPolicy; the ongoing deployment role must not acquire it implicitly. |
-| Hypervibe handoff | Receipt pins installation/plan/source/scope, workload and registry lifetimes, holding image/configuration/identity, and final runtime identity. Plan an explicit metadata binding before first application rollout. | Requires a shared frontier and provider conformance tests. Receipt possession is not adoption authority; fresh native proof and exact source authorization remain required. |
-| First rollout | Update only the verified prepared resource. The one approved identity transition is holding SA → recorded application SA. Preserve existing workloads' observed identities and immutable secret references otherwise. | Requires first-deployment, restart, stale receipt, changed image/SA, missing binding and mutation-free noop coverage. CI cannot create a missing replacement. |
+| Project scope | Pin native project number and createTime; inspect project IAM and effective permissions of directly matching custom roles. | Initial path supports projects without an organization parent. Unknown group/principal-set authority blocks. Newly created projects use separately reviewed initial billing assignment; old unversioned billing plans remain blocked. |
+| Native preparation | Separate reviewed POST actions create custom roles, provision/release/holding/runtime accounts, registry and inactive web/worker services; observe native ownership and lifetime before dependent grants. | Operator must publish and configure a reviewed public digest image; no image is supplied by default. Cron, release commands, databases, storage and queues are explicitly unsupported in this initial deployment topology. |
+| Secret authority | Review pins existing secret-container createTime and immutable versions before any writes; exact runtime reader grants preserve values and unrelated policy entries. | No secret values are fetched; secret collection remains separately authorized. |
+| Hosted proof | Independently read installed resources and policies with the actual hosted identity before publishing the connection. Provision and release mint by immutable native SA UID, validate token identity and expiration, and recheck caller authority. | Native permissions, propagation and token acceptance still need the approved disposable-account walkthrough. |
+| Hypervibe handoff | Optional prepared receipt pins project/registry/workload lifetimes, original holding generation/revision/configuration and final runtime identity. An explicit local metadata action records verified bindings. | Receipt possession does not authorize adoption; current native proof, exact source and existing recovery vetoes still apply. |
+| First rollout | Exact holding image and identity transition together to the candidate image and final runtime account. Original generation/revision prevents replay after rollout. Pending markers retire only with independent managed-CI release provenance and matching native image/configuration against the prior reviewed digest. | Missing release evidence keeps pending; holding readiness is never application convergence. |
+| Disconnect | Remove only exact recorded hosted grants with native identity and IAM etag proof. | Secrets, registry/workloads, public access and separately authorized runtime readers are preserved; existing issued credentials have native expiry limits. |
 
-Official contracts: [service creation](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services/create),
-[job creation](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs/create),
-[resource IAM and public access](https://docs.cloud.google.com/run/docs/securing/managing-access),
-[service policy replacement/etag](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services/setIamPolicy),
-[repository policy](https://docs.cloud.google.com/artifact-registry/docs/reference/rest/v1/projects.locations.repositories/setIamPolicy),
-and [runtime identity permissions](https://docs.cloud.google.com/run/docs/configuring/services/service-identity).
-Google documents [digest-pinned images and per-service deployment roles](https://docs.cloud.google.com/run/docs/deploying).
-Inherited allow policies can broaden effective authority; installed bindings alone do
-not prove its absence. Inspection must account for readable parent policies and report
-unknown scope, following [Google's inheritance contract](https://docs.cloud.google.com/iam/docs/resource-hierarchy-access-control).
-
-The alternative is a reviewed dedicated project with explicitly project-scoped provision
-authority, followed by a separately reviewed exact-resource release/public-access grant
-after first apply. It is feasible in principle but requires an explicit provision-ready
-versus release-ready lifecycle. Neither alternative is implemented by the current GCP
-authentication callback or CI emitter. AWS's existing CloudFormation path is unchanged;
-Azure remains blocked on native create ownership. A shared preparation capability must
-declare all three providers implemented/unsupported explicitly before any promotion.
+See [GCP evidence and remaining gates](connect-cloud-gcp-deployment-evidence.md).
+The shared [prepared-hosting contract](connect-cloud-prepared-hosting.md) records the
+named provider matrix. AWS's existing absent-preparation path remains unchanged.
 
 ## Managed CI
 
@@ -198,7 +185,7 @@ and do not replay a conflict. The independent contract is the Cloud Run v2
 [Service UID and etag definition](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services).
 The affected adapter, installed-runtime and legacy-runtime suites pass together (141
 tests). These fixtures use reconstructed metadata and synthetic retained installation
-receipts; they do not establish a working native GCP deployment installer.
+receipts. The later native installer evidence is recorded separately; neither suite establishes live compatibility.
 
 No offline result proves live trust, available billing, RBAC propagation, first deployment,
 or CI release compatibility. Each provider still needs the approved no-local-credentials

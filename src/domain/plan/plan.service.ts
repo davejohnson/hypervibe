@@ -17,6 +17,7 @@ import { adapterFactory } from '../services/adapter.factory.js';
 import { selectedDeploymentAccess } from '../../adapters/cloud/deployment-access.client.js';
 import { getProjectScopeHints } from '../services/project-scope.js';
 import { planDatabaseScopeBinding } from '../services/database-scope-binding.service.js';
+import { planPreparedHosting } from '../services/hosting-prepared.service.js';
 import { observeBackupPolicy } from '../services/backup-policy.service.js';
 import { planBackupPolicy } from '../services/backup-policy-plan.service.js';
 import { observeBackupHealth } from '../services/backup-health.service.js';
@@ -165,7 +166,7 @@ export interface EnvironmentPlan {
   webhookReadiness?: WebhookReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
-  scope: 'full' | 'secrets' | 'database-credential-aliases' | 'secret-destinations' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'runtime-access' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
+  scope: 'full' | 'secrets' | 'database-credential-aliases' | 'secret-destinations' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'hosting-prepared-bindings' | 'service-volumes' | 'runtime-access' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
   backupReadiness?: BackupReadiness;
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
@@ -2342,6 +2343,37 @@ export class PlanService {
     }
     if (backupPolicyStageActive && serviceFilter) {
       return { error: 'A service-filtered plan cannot skip pending daily backup policy configuration. Run hv_plan without services to review the isolated backup policy stage.' };
+    }
+    if (!providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive && environment?.platformBindings.projectId
+      && (hostingMetadata?.lifecycle?.hosting?.preparedResources === 'installer-receipt-v1' || environment.platformBindings.preparedHosting !== undefined)) {
+      try {
+        if (hostingMetadata?.lifecycle?.hosting?.preparedResources !== 'installer-receipt-v1') throw new Error('Prepared hosting capability is unavailable.');
+        // Prepared identity discovery is observation, including legacy adapters
+        // without an installed receipt. Resolve the exact environment without
+        // requiring hosting mutation access merely to inspect this capability.
+        const hosting = await adapterFactory.getProviderAdapter(environmentSpec.hosting.provider, projectForPlan, undefined, environmentName);
+        if ((!hosting.success || !hosting.adapter) && (environment.platformBindings.preparedHosting !== undefined
+          || this.deploymentPreflight(environmentSpec.hosting.provider, projectForPlan, environmentName) !== undefined))
+          throw new Error('Prepared hosting authorization is unavailable.');
+        // An independently absent hosted binding retains the ordinary legacy
+        // connection/unknown-observation blockers. A present or unreadable
+        // hosted binding above must never bypass initial receipt discovery.
+        const prepared = hosting.success && hosting.adapter ? await planPreparedHosting({ environment, environmentSpec,
+          hosting: hosting.adapter, project: projectForPlan, spec: specResult.spec }) : null;
+        if (prepared) {
+          if (serviceFilter || envVarOverrides || envFileVars && Object.keys(envFileVars).length || options?.secretRefs)
+            return { error: 'Prepared hosting binding is an isolated metadata stage; remove runtime inputs and service filters before reviewing it.' };
+          const warnings = ['This step records verified hosting identities only. Pending first releases, runtime configuration and application rollout remain separate.'];
+          const document: PlanRunDocument = { kind: 'hv_plan', scope: 'hosting-prepared-bindings', environmentName, specRevision: specResult.revision,
+            observedFingerprint: null, actions: [prepared], warnings, ...(sourceCommitSha ? { sourceCommitSha } : {}) };
+          planRunDocumentSchema.parse(document);
+          const run = this.runRepo.create({ projectId: project.id, environmentId: environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
+          this.runRepo.updateStatus(run.id, 'succeeded');
+          return { planRunId: run.id, scope: 'hosting-prepared-bindings', specRevision: specResult.revision, specSource: specResult.source ?? { kind: 'local' },
+            environmentName, observed, verified: true, actions: [prepared], unmanaged: [], warnings, inputRequired: [],
+            blocked: this.providerPreflight([environmentSpec.hosting.provider], projectForPlan, environmentName), backupCoverage, backupReadiness };
+        }
+      } catch { return { error: 'Installer-prepared hosting identity or pending recovery is unverified. No binding or workload change is authorized.' }; }
     }
     const blocked: EnvironmentPlan['blocked'] = maintenance.pending
       ? this.providerPreflight(maintenance.providers, project, environmentName)

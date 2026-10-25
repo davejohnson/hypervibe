@@ -377,10 +377,14 @@ export function resolveManagedWorkflowContract(params: {
   environmentName: string;
   environmentSpec: EnvironmentSpec;
   environment?: Environment | null;
+  /** Internal read-only recovery of a persisted metadata action's original producer inputs. */
+  reviewedTargetEnvironment?: Environment;
 }):
   | { ok: false; reason: 'target-missing' | 'bindings-incomplete'; error: string }
   | ({ ok: true } & ManagedWorkflowContract) {
-  const { targets, migration } = resolveBranchDeployTargets(params.project);
+  if (params.reviewedTargetEnvironment && (params.reviewedTargetEnvironment.projectId !== params.project.id
+    || params.reviewedTargetEnvironment.name !== params.environmentName)) throw new Error('Reviewed workflow bindings do not match the selected environment.');
+  const { targets, migration } = resolveBranchDeployTargets(params.project, params.reviewedTargetEnvironment);
   const target = targets.find((candidate) => candidate.environmentName === params.environmentName);
   if (!target) {
     return {

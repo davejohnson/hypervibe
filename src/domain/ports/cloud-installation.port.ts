@@ -1,6 +1,6 @@
 import type { PlanAction } from '../plan/plan.types.js';
 import type { SecretDestination } from './secret-destination.port.js';
-import type { CloudDeploymentConnectionV1, CloudDeploymentSessionRequestV1, CloudDeploymentSessionV1, CloudDeploymentTopologyV1,
+import type { CloudDeploymentConnectionV1, CloudDeploymentPreparedResourcesV1, CloudDeploymentSessionRequestV1, CloudDeploymentSessionV1, CloudDeploymentTopologyV1,
   CloudDeploymentReleaseTargetV1, CloudDeploymentReleaseTargetRequestV1 } from './cloud-deployment.port.js';
 import type { ProjectSpec } from '../spec/spec.schema.js';
 
@@ -128,6 +128,7 @@ export interface CloudInstallationDriver {
   deployment?: {
     hostingProvider: string;
     connection(record: CloudInstallationRecord): CloudDeploymentConnectionV1;
+    parsePreparedResources?(value: unknown, connection: CloudDeploymentConnectionV1): CloudDeploymentPreparedResourcesV1;
     /** Derives the reviewed subset from the exact source; cannot change customer/app/source/scope. */
     prepareIntent?(spec: ProjectSpec, intent: CloudInstallationIntent): CloudDeploymentTopologyV1;
     /** Provider must verify immutable native principal and reviewed trust before every issuance. */

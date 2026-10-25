@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { azureVolumeFingerprint } from './azure-volume-runtime.js';
 import { azureDeploymentCiBinding, azureBrokerRuntime, azureBrokerRegistryLogin } from './azure-deployment-ci-broker.js';
+import { buildAzurePreparedReleaseRuntime } from './azure-prepared-release.js';
 import { GITHUB_EPHEMERAL_DOCKER_CLEANUP_STEP } from '../../../domain/services/cloud-deployment-ci.js';
 import type {
   BranchDeployStepResult,
@@ -27,6 +28,7 @@ export function buildAzureContainerAppsGitHubActionsSteps(
   target: BranchDeployTarget
 ): BranchDeployStepResult {
   const broker = target.deploymentAccess ? azureDeploymentCiBinding(target) : null;
+  const preparedRuntime = target.deploymentAccess?.connection.preparedResources ? buildAzurePreparedReleaseRuntime(target) : '';
   const script = (value: string) => value.trimEnd().replace(/\n/g, '\n            ');
   const buildCondition = target.promoteFromEnvironment
     ? "steps.deploy.outputs.operation != 'rollback' && !steps.promotion_release.outputs.image_uri"
@@ -143,7 +145,7 @@ ${broker ? `          AZURE_SUBSCRIPTION_ID: ${yamlSingleQuoted(broker.principal
             const volumeFingerprint = ${azureVolumeFingerprint.toString().replace(/\n/g, '\n            ')};
             const apiVersion = '2026-01-01';
 ${broker ? `            ${script(azureBrokerRuntime(target))}
-            const expectedLifetimes = ${JSON.stringify(broker.apps)};
+${preparedRuntime ? `            ${script(preparedRuntime)}\n` : ''}            const expectedLifetimes = ${JSON.stringify(broker.apps)};
             const verifyWorkload = (app, id) => {
               const expected = expectedLifetimes.find(item => item.id === id);
               const assigned = Object.entries(app?.identity?.userAssignedIdentities || {});
@@ -219,7 +221,9 @@ ${broker ? `              const token = (await hvDeploymentSession('resource-man
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
             for (const appId of appIds) {
               const app = await request('GET', appId);
-${broker ? `              verifyWorkload(app, appId);
+${preparedRuntime ? `              await hvPreparedRelease(app, appId, exactImage, sha);
+              continue;
+` : ''}${broker ? `              verifyWorkload(app, appId);
 ` : ''}              if (app?.id?.toLowerCase() !== appId.toLowerCase()) {
                 throw new Error('Azure returned the wrong Container App identity for ' + appId);
               }

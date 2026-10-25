@@ -18,7 +18,8 @@ export function prepareCloudDeploymentIntentV1(spec: ProjectSpec, intent: CloudI
 
 function parseConnection(value: unknown, driver: CloudInstallationDriver) {
   if (!driver.deployment) throw new CloudDeploymentAccessError('unsupported');
-  return parseCloudDeploymentConnectionV1(value, { provider: driver.provider, hostingProvider: driver.deployment.hostingProvider, parseScope: value => driver.parseScope(value) });
+  return parseCloudDeploymentConnectionV1(value, { provider: driver.provider, hostingProvider: driver.deployment.hostingProvider,
+    parseScope: value => driver.parseScope(value), parsePreparedResources: driver.deployment.parsePreparedResources });
 }
 /** Provider-owned current-source validation, not authority inferred from receipt possession. */
 export function assertCloudDeploymentSourcePlacementV1(spec: ProjectSpec, connection: CloudDeploymentConnectionV1, driver: CloudInstallationDriver): void {

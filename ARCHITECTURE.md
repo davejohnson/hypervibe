@@ -46,6 +46,15 @@ Desired infrastructure state is repo-backed when Hypervibe runs inside a git wor
 
 Do not treat cached local state as proof of convergence when live observation is available.
 
+Administrator-prepared hosting resources use an explicit metadata handoff before
+runtime convergence. A provider-declared `preparedHosting` capability verifies the
+installation receipt and native lifetimes; the isolated `hosting-prepared-bindings`
+plan records only those exact identities. Its durable per-workload first-release
+journal never authorizes application secrets for the holding image. Expected runtime
+configuration hashes and completed first releases change only through reviewed metadata
+actions backed by fresh native proof; stale repository replay cannot reinstate them.
+See [the prepared hosting contract](docs/connect-cloud-prepared-hosting.md).
+
 Unreadable local state is not empty state. Non-empty corrupt or schema-invalid
 JSON in bindings, plans, receipts, service configuration, or policies blocks
 the operation; repositories must never replace it with `{}`/`[]` and continue

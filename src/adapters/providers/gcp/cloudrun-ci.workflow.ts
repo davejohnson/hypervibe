@@ -14,11 +14,15 @@ import {
   CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION,
   cloudRunReleaseCommandHash,
 } from './cloudrun-release-command.js';
+import { buildGcpPreparedReleaseRuntime } from './gcp-prepared-release.js';
 
 export const CLOUDRUN_CI_REQUIRED_SECRETS = ['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID'];
 
 export function buildCloudRunGitHubActionsSteps(target: BranchDeployTarget): BranchDeployStepResult {
   const broker = Boolean(target.deploymentAccess);
+  const prepared = Boolean(target.deploymentAccess?.connection.preparedResources);
+  const preparedRuntime = buildGcpPreparedReleaseRuntime(target).split('\n').filter((line, index, lines) => line || index < lines.length - 1)
+    .map(line => `            ${line}\n`).join('');
   const buildCondition = target.promoteFromEnvironment
     ? "steps.deploy.outputs.operation != 'rollback' && !steps.promotion_release.outputs.image_uri"
     : "steps.deploy.outputs.operation != 'rollback'";
@@ -375,7 +379,7 @@ ${broker ? '              return hvGoogleJson(url, options);' : `              c
                   const expectedName = 'projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/' + (kind === 'service' ? 'services/' : 'jobs/') + name;
                   if (last.name !== expectedName) throw new Error('Cloud Run ' + kind + ' ' + name + ' returned a different resource identity');
                   cloudRunVerifyFilesystem(last, kind, filesystem);
-                  const mismatch = cloudRunRuntimeMismatch(container, runtimeResource);
+${prepared ? `                  if (filesystem.preparedConfigurationDigest && hvPreparedDigest(gcpObservedPreparedApplicationConfiguration(last)) !== filesystem.preparedConfigurationDigest) throw new Error('The first Google application configuration did not converge.');\n` : ''}                  const mismatch = cloudRunRuntimeMismatch(container, runtimeResource);
                   if (mismatch) throw new Error('Cloud Run ' + kind + ' ' + name + ' did not converge to the exact reviewed ' + mismatch);
                   return last;
                 }
@@ -399,7 +403,7 @@ ${broker ? '              return hvGoogleJson(url, options);' : `              c
               return next;
             }
 
-${releaseRuntime}
+${preparedRuntime}${releaseRuntime}
             const runtimeResources = cloudRunRuntimeResourcesFromBase64(
               process.env.CLOUDRUN_RUNTIME_RESOURCES_B64,
               serviceNames,
@@ -425,8 +429,9 @@ ${releaseRuntime}
               const expectedName = 'projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/services/' + serviceName;
               if (current.name !== expectedName) throw new Error('Cloud Run service lookup returned a different resource identity');
               const runtimeResource = cloudRunRuntimeResource(runtimeResources, 'service', serviceName);
-              const filesystem = cloudRunFilesystemGuard(current, 'service', runtimeResource.providerResourceUid);
-              const template = current.template || {};
+${prepared ? `              const firstRelease = hvPreparedService(current, runtimeResource);\n` : ''}              const filesystem = cloudRunFilesystemGuard(current, 'service', runtimeResource.providerResourceUid);
+${prepared ? `              if (firstRelease) { filesystem.runtimePrincipal = firstRelease.runtimeEmail; filesystem.preparedConfigurationDigest = firstRelease.configurationDigest; }
+              const template = firstRelease ? { ...firstRelease.configuration.template, ...(current.template?.labels ? { labels: current.template.labels } : {}) } : current.template || {};` : '              const template = current.template || {};'}
               const containers = Array.isArray(template.containers) && template.containers.length > 0 ? [...template.containers] : [primaryServiceContainer(current)];
               containers[0] = cloudRunContainerWithRuntime(containers[0], process.env.IMAGE_URI, runtimeResource);
               template.containers = containers;
@@ -434,11 +439,11 @@ ${releaseRuntime}
               const annotations = releaseHash
                 ? { ...(current.annotations || {}), [${releaseCommandAnnotation}]: releaseHash }
                 : current.annotations;
-              const updateMask = releaseHash ? 'annotations,template.containers' : 'template.containers';
+              const updateMask = ${prepared ? "firstRelease ? 'ingress,template' : " : ''}releaseHash ? 'annotations,template.containers' : 'template.containers';
               const operation = await googleJson(url + '?updateMask=' + updateMask, {
                 method: 'PATCH',
                 headers,
-                body: JSON.stringify({ ...(annotations ? { annotations } : {}), ...(filesystem.etag ? { etag: filesystem.etag } : {}), template }),
+                body: JSON.stringify({ ${prepared ? '...(firstRelease ? { ingress: firstRelease.configuration.ingress } : {}), ' : ''}...(annotations ? { annotations } : {}), ...(filesystem.etag ? { etag: filesystem.etag } : {}), template }),
               }, 'Cloud Run service deployment for ' + serviceName);
               await waitOperation(operation, 'service ' + serviceName + ' deployment');
               await waitReady(url, serviceName, 'service', process.env.IMAGE_URI, runtimeResource, filesystem);

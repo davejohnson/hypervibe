@@ -22,11 +22,12 @@ const intent: CloudInstallationIntent = {
 const billingId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const collectionId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 function fixture(options: { raceAssociation?: boolean; extraUnlink?: boolean; otherAccountUnlink?: boolean; loseBillingAck?: boolean;
-  deniedAccountPolicy?: boolean; policyConflict?: boolean; loseCleanupAck?: boolean; expireCleanup?: boolean; historical?: boolean } = {}) {
+  deniedAccountPolicy?: boolean; policyConflict?: boolean; loseCleanupAck?: boolean; expireCleanup?: boolean; historical?: boolean; initialAssignment?: boolean;
+  loseBeforeBillingAck?: boolean; revokeAtFinalBillingCheck?: boolean } = {}) {
   const records = new Map<string, CloudInstallationRecord>(); const objects = new Map<string, any>();
   const policies = new Map<string, any>(); const apis = new Set<string>();
   const calls: Array<{ method: string; url: string; body: any; token: string | null }> = [];
-  let project: any = null; let billing = ''; let etag = 1;
+  let project: any = null; let billing = ''; let etag = 1, attemptedBillingReads = 0; let authorized = true;
   const targetAccount = intent.nativeScope.billingAccountName;
   const request: typeof fetch = async (input, init = {}) => {
     const url = new URL(String(input)); const path = url.pathname; const method = init.method ?? 'GET';
@@ -47,13 +48,16 @@ function fixture(options: { raceAssociation?: boolean; extraUnlink?: boolean; ot
     if (path === '/v3/projects/sequence-new-project' || path === '/v3/projects/987654321012') return project ? Response.json(project) : Response.json({}, { status: 404 });
     if (path === '/v1/projects/sequence-new-project') return Response.json({ projectId: 'sequence-new-project', projectNumber: '987654321012', lifecycleState: 'ACTIVE' });
     if (path === '/v1/projects/sequence-new-project/billingInfo') {
+      if (method === 'GET' && records.get(billingId)?.attempts.at(-1)?.status === 'attempted'
+        && ++attemptedBillingReads === 3 && options.revokeAtFinalBillingCheck) authorized = false;
       if (method === 'PUT') {
-        expect(token).toBe('Bearer synthetic-billing-token');
+        expect(token).toBe(options.initialAssignment ? 'Bearer synthetic-admin-token' : 'Bearer synthetic-billing-token');
         expect(records.get(billingId)?.attempts.at(-1)?.status).toBe('attempted');
         expect(body).toEqual({ billingAccountName: targetAccount });
+        if (options.loseBeforeBillingAck) throw new Error('synthetic uncertain billing dispatch');
         if (options.raceAssociation) billing = 'billingAccounts/OTHER1-123456-789ABC';
         // Native permission contract, modeled independently of adapter decisions.
-        if (billing && billing !== targetAccount && !options.otherAccountUnlink) return Response.json({ error: { code: 403 } }, { status: 403 });
+        if (billing && billing !== targetAccount && !options.otherAccountUnlink && !options.initialAssignment) return Response.json({ error: { code: 403 } }, { status: 403 });
         billing = targetAccount;
         if (options.loseBillingAck) throw new Error('synthetic lost billing acknowledgement');
       }
@@ -104,7 +108,7 @@ function fixture(options: { raceAssociation?: boolean; extraUnlink?: boolean; ot
   const driver = options.historical ? { ...nativeDriver, plan: async (input: Parameters<typeof nativeDriver.plan>[0]) => {
     const plan = await nativeDriver.plan(input); return { ...plan, blockedReason: undefined };
   } } : nativeDriver;
-  const context = { driver, authorize: async () => true, timeoutMs: 60_000,
+  const context = { driver, authorize: async () => authorized, timeoutMs: 60_000,
     store: { read: async (id: string) => structuredClone(records.get(id) ?? null), compareAndSwap: async (id: string, revision: number | null, record: CloudInstallationRecord) => {
       if ((records.get(id)?.revision ?? null) !== revision) return false; records.set(id, structuredClone(record)); return true;
     } }, authentication: { administrator: { getAccessToken: async () => {
@@ -114,7 +118,8 @@ function fixture(options: { raceAssociation?: boolean; extraUnlink?: boolean; ot
       host: { verifyIdentity: async () => intent.hostIdentity, getAccessToken: async () => 'synthetic-host-token', getIdToken: async () => 'unused' } } };
   const apply = (record: CloudInstallationRecord) => applyCloudInstallationV1({ ...context, installationId: record.installationId, planDigest: record.plan.digest, confirmActions: record.plan.actions.map(action => action.id) });
   const prepare = async () => {
-    const projectPlan = await planCloudInstallationV1({ ...context, intent });
+    const projectPlan = await planCloudInstallationV1({ ...context, intent: options.initialAssignment
+      ? { ...intent, nativeScope: { ...intent.nativeScope, assignmentMode: 'initial-reviewed-v1' } } : intent });
     const projectReady = await apply(projectPlan);
     expect(projectReady.status).toBe('scope-ready');
     expect(cloudInstallationNextStageV1(projectReady, driver)).toBe('scope-preparation');
@@ -167,6 +172,53 @@ function fixture(options: { raceAssociation?: boolean; extraUnlink?: boolean; ot
 }
 
 describe('GCP billing safety boundary and reconstructed historical cleanup', () => {
+  it('reviews and applies the versioned initial assignment through transient browser authority without temporary IAM', async () => {
+    const f = fixture({ initialAssignment: true, deniedAccountPolicy: true }); const plan = await f.prepare();
+    expect(plan.status).toBe('review-required');
+    expect(plan.intent.nativeScope.assignmentMode).toBe('initial-reviewed-v1');
+    expect(plan.plan.actions).toHaveLength(1); expect(plan.plan.actions[0]).toMatchObject({ billable: true, requiresConfirm: true });
+    expect(plan.plan.review.warnings.join(' ')).toMatch(/concurrent/i);
+    const ready = await f.apply(plan); expect(ready.status).toBe('scope-ready');
+    expect(f.billing()).toBe(intent.nativeScope.billingAccountName);
+    expect(f.calls.filter(call => call.method === 'PUT')).toHaveLength(1);
+    expect(f.calls.some(call => call.url.includes('iam.googleapis.com') || call.url.includes('iamcredentials.googleapis.com') || call.url.endsWith(':setIamPolicy'))).toBe(false);
+    expect(lifecycle.cloudInstallationDisconnectionIntentV1(ready, f.context.driver, collectionId)).toBeNull();
+    expect(JSON.stringify([...f.records.values()])).not.toContain('synthetic-admin-token');
+  });
+  it('requires exact initial-assignment confirmation and preserves an account observed before dispatch', async () => {
+    const f = fixture({ initialAssignment: true }); const plan = await f.prepare();
+    await applyCloudInstallationV1({ ...f.context, installationId: plan.installationId, planDigest: plan.plan.digest, confirmActions: [] });
+    expect(f.calls.filter(call => call.method === 'PUT')).toHaveLength(0);
+    f.setBilling('billingAccounts/OTHER1-123456-789ABC');
+    expect((await f.apply(plan)).status).toBe('blocked');
+    expect(f.billing()).toBe('billingAccounts/OTHER1-123456-789ABC');
+    expect(f.calls.filter(call => call.method === 'PUT')).toHaveLength(0);
+  });
+  it('recovers a lost initial-assignment response by reading without repeating PUT', async () => {
+    const f = fixture({ initialAssignment: true, loseBillingAck: true }); const plan = await f.prepare();
+    expect((await f.apply(plan)).status).not.toBe('scope-ready');
+    const recovered = await reconcileCloudInstallationV1({ ...f.context, installationId: plan.installationId, planDigest: plan.plan.digest });
+    expect(recovered.status).toBe('scope-ready'); expect((await f.apply(plan)).status).toBe('scope-ready');
+    expect(f.calls.filter(call => call.method === 'PUT')).toHaveLength(1);
+  });
+  it('makes the reviewed native non-atomic assignment behavior explicit for a concurrent external change', async () => {
+    const f = fixture({ initialAssignment: true, raceAssociation: true }); const plan = await f.prepare();
+    expect(plan.plan.review.warnings.join(' ')).toMatch(/replace.*concurrent/i);
+    expect((await f.apply(plan)).status).toBe('scope-ready');
+    expect(f.calls.filter(call => call.method === 'PUT')).toHaveLength(1);
+  });
+  it('never repeats an uncertain initial assignment when readback still shows no association', async () => {
+    const f = fixture({ initialAssignment: true, loseBeforeBillingAck: true }); const plan = await f.prepare();
+    expect((await f.apply(plan)).status).not.toBe('scope-ready');
+    expect((await reconcileCloudInstallationV1({ ...f.context, installationId: plan.installationId, planDigest: plan.plan.digest })).status).not.toBe('scope-ready');
+    expect((await f.apply(plan)).status).not.toBe('scope-ready');
+    expect(f.calls.filter(call => call.method === 'PUT')).toHaveLength(1);
+  });
+  it('rechecks app authority after the final native billing read and before PUT', async () => {
+    const f = fixture({ initialAssignment: true, revokeAtFinalBillingCheck: true }); const plan = await f.prepare();
+    expect((await f.apply(plan)).status).not.toBe('scope-ready');
+    expect(f.calls.filter(call => call.method === 'PUT')).toHaveLength(0);
+  });
   it('blocks fresh attachment before all temporary writes even with every action confirmed', async () => {
     const f = fixture(); const plan = await f.prepare(); const before = f.calls.length;
     expect(plan).toMatchObject({ status: 'blocked', reason: 'billing_assignment_unverified', plan: { blockedReason: 'billing_assignment_unverified' } });

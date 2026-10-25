@@ -5,7 +5,8 @@ import type { ProjectSpec } from '../spec/spec.schema.js';
 export interface CloudDeploymentTopologyV1 {
   hostingProvider: string;
   region: string;
-  workloads: Array<{ name: string; kind: 'web' | 'worker' | 'cron'; runtimeSecrets: Array<{ key: string; reference: RuntimeSecretReference }> }>;
+  preparation?: { kind: 'holding-workloads'; image: string };
+  workloads: Array<{ name: string; kind: 'web' | 'worker' | 'cron'; public?: boolean; runtimeSecrets: Array<{ key: string; reference: RuntimeSecretReference }> }>;
 }
 
 export type CloudDeploymentCapability = 'provision' | 'release';
@@ -20,6 +21,16 @@ export interface CloudDeploymentRuntimeIdentityV1 {
   owner: string;
   principal: Exclude<CloudDeploymentPrincipalV1, { kind: 'aws-role' }>
     | { kind: 'aws-role'; purpose: 'task' | 'execution' | 'infrastructure'; accountId: string; roleArn: string; roleId: string };
+}
+export interface CloudDeploymentPreparedResourcesV1 {
+  schemaVersion: 1;
+  project: { id: string; lifetimeId: string; parentId?: string };
+  registry: { id: string; lifetimeId: string; owner: string };
+  /** Provider verifies exact referenced container coverage and immutable lifetime. Never secret values. */
+  secretTargets?: Array<{ id: string; lifetimeId: string }>;
+  workloads: Array<{ workload: string; kind: 'service' | 'job'; id: string; lifetimeId: string; owner: string;
+    holding: { image: string; configurationDigest: string; revision?: string; generation?: string; principal: Exclude<CloudDeploymentPrincipalV1, { kind: 'aws-role' }>
+      | Omit<Extract<CloudDeploymentPrincipalV1, { kind: 'aws-role' }>, 'audience'> } }>;
 }
 export interface CloudDeploymentConnectionV1 {
   schemaVersion: 1;
@@ -37,12 +48,16 @@ export interface CloudDeploymentConnectionV1 {
   hostIdentity: CloudInstallationHostIdentity;
   principals: Record<CloudDeploymentCapability, CloudDeploymentPrincipalV1>;
   runtimeIdentities: CloudDeploymentRuntimeIdentityV1[];
+  /** Native preparation is identity evidence, never application/runtime convergence. */
+  preparedResources?: CloudDeploymentPreparedResourcesV1;
 }
 export interface CloudDeploymentConnectionContractV1 {
   provider: CloudInstallationProvider;
   hostingProvider: string;
   /** Provider-owned closed native identifier schema; never accepts value-bearing arbitrary fields. */
   parseScope(value: unknown): Record<string, string>;
+  /** Required for prepared receipts; verifies provider-native paths, placement and lifetime grammar. */
+  parsePreparedResources?(value: unknown, connection: CloudDeploymentConnectionV1): CloudDeploymentPreparedResourcesV1;
 }
 export type CloudDeploymentAuthenticationV1 =
   | { kind: 'aws-sts'; principal: Extract<CloudDeploymentPrincipalV1, { kind: 'aws-role' }>;

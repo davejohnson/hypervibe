@@ -11,6 +11,7 @@ import { DestinationBoundaryError, DestinationBudget, destinationJson } from '..
 import { GcpSecretWriterClient, type WriterIamPolicy } from './gcp-secret-writer.client.js';
 import { createGcpProjectPreparationDriver, discoverGcpProjectPreparationScopes, gcpProjectPreparationScopeSchema } from './gcp-project-installation.js';
 import { createGcpBillingPreparationDriver, gcpBillingPreparationScopeSchema } from './gcp-billing-installation.js';
+import { createGcpCloudDeploymentDriver } from './gcp-cloud-deployment.js';
 
 const SCOPE = 'https://www.googleapis.com/auth/cloud-platform';
 const scopeSchema = z.object({ projectId: z.string().regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/), projectNumber: z.string().regex(/^[1-9]\d{5,29}$/) }).strict();
@@ -175,7 +176,7 @@ function sameIdentity(actual: CloudInstallationEvidence['resources'][number], ex
 /** Hosted GCP installation; only injected, short-lived browser/host credentials.
  * The caller supplies a durable CAS store through the shared lifecycle engine.
  * No ADC, SQLite, cloud CLI, refresh token, service-account key, or secret value. */
-export function createGcpCloudInstallationDriver(options: { fetch?: typeof fetch } = {}): CloudInstallationDriver {
+export function createGcpCloudInstallationDriver(options: { fetch?: typeof fetch; holdingImage?: string } = {}): CloudInstallationDriver {
   const request = options.fetch ?? fetch;
   async function withClient<T>(context: Context, run: (client: GcpSecretWriterClient, budget: DestinationBudget, token: string) => Promise<T>): Promise<T> {
     scope(context.intent);
@@ -465,10 +466,11 @@ export function createGcpCloudInstallationDriver(options: { fetch?: typeof fetch
   };
   const preparation = createGcpProjectPreparationDriver(options);
   const billing = createGcpBillingPreparationDriver(options);
+  const deployment = createGcpCloudDeploymentDriver(options);
   const selected = (intent: CloudInstallationIntent) => intent.stage === 'scope-preparation'
-    ? intent.nativeScope.scopeKind === 'project-billing' ? billing : preparation : driver;
+    ? intent.nativeScope.scopeKind === 'project-billing' ? billing : preparation : intent.purpose === 'deployment' ? deployment : driver;
   return {
-    ...driver, scopePreparation: {
+    ...driver, deployment: deployment.deployment, scopePreparation: {
       continuationStage: record => selected(record.intent).scopePreparation!.continuationStage?.(record) ?? 'collection',
       resolvedScope: record => selected(record.intent).scopePreparation!.resolvedScope(record),
       reviewResources: record => selected(record.intent).scopePreparation!.reviewResources(record),

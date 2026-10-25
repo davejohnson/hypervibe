@@ -15,6 +15,7 @@ import type { Component } from '../entities/component.entity.js';
 import { secretContainerBindings } from '../ports/secret-destination-lifecycle.port.js';
 import { isDeepStrictEqual } from 'node:util';
 import { mergeRuntimeAccessBindings, runtimeAccessBindings } from '../services/runtime-access.service.js';
+import { preparedHostingMarkerSchema } from '../ports/hosting-prepared.port.js';
 
 // Bindings are the inverse of the spec's source-of-truth contract: the DB
 // column `environments.platform_bindings` is authoritative (it holds data the
@@ -99,6 +100,20 @@ export function mergeRepoPlatformBindings(
     throw new Error('Malformed retained service-volume bindings; refusing to overwrite recovery state.');
   }
   const merged: Record<string, unknown> = { ...existing, ...repoBindings, ...mergeRuntimeAccessBindings(existing, repoBindings) };
+  if (existing.preparedHosting !== undefined || repoBindings.preparedHosting !== undefined) {
+    const local = existing.preparedHosting === undefined ? undefined : preparedHostingMarkerSchema.parse(existing.preparedHosting);
+    const incoming = repoBindings.preparedHosting === undefined ? undefined : preparedHostingMarkerSchema.parse(repoBindings.preparedHosting);
+    if (local && incoming) {
+      if ((['installationId', 'planDigest', 'receiptDigest'] as const).some(key => local[key] !== incoming[key])
+        || local.pendingFirstRelease.some(name => incoming.firstReleaseConfigurationDigests?.[name] !== undefined
+          && local.firstReleaseConfigurationDigests?.[name] !== undefined
+          && incoming.firstReleaseConfigurationDigests[name] !== local.firstReleaseConfigurationDigests[name]))
+        throw new Error('Repository prepared hosting evidence conflicts with retained local authority. Reconcile the reviewed metadata plan.');
+    }
+    // Repository replay cannot complete or reinstate a release. A fresh native
+    // observation and an explicit local metadata action advance this journal.
+    merged.preparedHosting = local ?? incoming;
+  }
   if (existing.backupPolicyAttempts !== undefined || repoBindings.backupPolicyAttempts !== undefined) {
     merged.backupPolicyAttempts = mergeBackupPolicyAttempts(existing.backupPolicyAttempts, repoBindings.backupPolicyAttempts);
   }
@@ -122,7 +137,7 @@ export function mergeRepoPlatformBindings(
       merged[key] = retained;
       continue;
     }
-    if (key === 'databaseCheckpoints' || key === 'backupPolicyAttempts' || key === 'runtimeIdentities' || key === 'storageRuntimeAccess') continue;
+    if (key === 'databaseCheckpoints' || key === 'backupPolicyAttempts' || key === 'runtimeIdentities' || key === 'storageRuntimeAccess' || key === 'preparedHosting') continue;
     if (key === 'serviceVolumes' && existing[key] !== undefined) {
       const retained = { ...incomingVolumes, ...localVolumes };
       for (const [name, next] of Object.entries(incomingVolumes)) {
@@ -199,6 +214,8 @@ function presentStorageInstanceScopes(platformBindings: Record<string, unknown>)
 
 function sanitizePlatformBindings(raw: Record<string, unknown>): Record<string, unknown> {
   const sanitized = sanitize(raw) as Record<string, unknown>;
+  // Only the closed value-free schema bypasses redaction for workload names.
+  if (raw.preparedHosting !== undefined) sanitized.preparedHosting = preparedHostingMarkerSchema.parse(raw.preparedHosting);
   const access = runtimeAccessBindings({ platformBindings: raw });
   if (!access) throw new Error('Malformed runtime permission bindings cannot be exported safely.');
   for (const key of ['runtimeIdentities', 'storageRuntimeAccess'] as const) {

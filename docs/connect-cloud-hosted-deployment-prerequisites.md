@@ -15,8 +15,9 @@ required by that phrase. The existing Hypervibe/CI deployment path can remain th
 path if it receives separately authorized transient/keyless deployment access and proves
 first deployment, native-reference consumption and recovery for all three providers.
 The extraction below is needed only if full hosted application reconciliation is selected.
-Keyless deployment authority and the native first-deployment gaps still need resolution
-regardless of where application deployment executes.
+The selected path now has offline contracts for keyless deployment authority and
+native first deployment. Operator configuration and an approved live walkthrough for
+each cloud remain prerequisites regardless of where application deployment executes.
 
 ### Azure transient authentication checkpoint
 
@@ -39,14 +40,14 @@ project UUID naming. Explicit shared plan/apply binding independently verifies n
 IDs and existing reader grants, including a separate collection resource group. Missing
 or replaced identities and revoked grants remain unknown; binding performs no cloud writes.
 
-This is not complete Azure onboarding. New Azure deployment installation is a
-digest-bound, zero-write `create_ownership_unverified` plan; it cannot project a ready
-receipt. First namespace and workload creation remain blocked. Positive session and
-prepared-reader tests use synthetic retained receipts and reconstructed official HTTP
-contracts, not a completed installer or live Azure evidence. Initial regressions were
-observed failing for missing federation/adapter support, reader scope, token echo and
-deadline handling before implementation. Managed CI's broker/registry exchange and
-native installation grants require separate acceptance evidence.
+Azure now has a separately reviewed exclusive namespace installation with exact ARM
+deployment provenance and an installer-prepared first-workload path. Native upsert races
+are explicit; existing/unknown targets and uncertain operation evidence block progress.
+Historical unversioned/atomic-create-blocked plans keep their restrictions. The actual
+shared engine, serialized provider transport, read-only local binding and emitted first
+release have [offline acceptance evidence](connect-cloud-azure-prepared.md). These tests
+do not establish live Azure onboarding; operator image publication, native reference
+consumption and the approved disposable walkthrough remain release gates.
 
 ### Local deployment and managed CI checkpoint
 
@@ -83,9 +84,10 @@ Executed-script regressions covered copied-key selection, replaced registry and 
 identity, echoed exchange errors, and exact-image updates preserving references. Adapter
 regressions reproduced changed, omitted and deleted approved reference maps mutating an
 existing app, then verified all three reject before provider access. These are synthetic
-retained receipts with reconstructed official ARM/ACR transport contracts. Azure native
-installation, release-target verification/approved policy, first deployment, and the live
-walkthrough remain incomplete; passing these tests does not establish live support.
+retained receipts with reconstructed official ARM/ACR transport contracts. New native
+installation, release-target verification and first deployment additionally exercise the
+actual shared installation engine and executed holding-to-candidate workflow. The live
+walkthrough remains incomplete; passing these tests does not establish live support.
 
 ## Observed execution gap
 
@@ -171,9 +173,11 @@ These are purpose-specific extensions of the agreed host-identity strategy. They
 not evidence that current writer trust already supplies deployment authorization.
 GCP Connect Cloud discovery can select an existing accessible project or propose a
 separate project-preparation review. New project creation and exact recovery are
-implemented; automatic billing attachment remains blocked. Neither project readiness
+implemented; new versioned setup separately reviews native initial billing
+assignment, while old unversioned billing plans remain blocked. Neither project readiness
 nor collection trust grants deployment authority.
-Azure's independently documented first-create ownership gate also remains unresolved.
+Azure's reviewed exclusive namespace/native-provenance contract implements first
+installation with actual upsert semantics; it makes no atomic-create guarantee.
 
 ## Acceptance sequence
 
@@ -240,5 +244,7 @@ This narrows the implementation to a shared execution-port extraction, one restr
 hosted planner/application entry, one shared workload action extraction, the artifact
 contract, three transient adapter integrations, and Hypercloud's durable store plus
 approval protocol/browser composition. It still requires separately reviewed deployment
-trust. The Azure first-create proof and new GCP project/billing lifecycle cannot be removed
-from the acceptance criteria by restricting the engine's input schema.
+trust. The native Azure installation and GCP project/billing lifecycle require their
+own acceptance evidence; restricting an engine's input schema cannot establish it.
+The current local-plan/managed-CI route has since implemented the scoped prepared
+first-release path without adding this separate hosted application reconciler.

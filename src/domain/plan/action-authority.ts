@@ -7,6 +7,7 @@ import { INBOUND_SIGNING_KEY_OPERATION } from '../services/email-inbound-signing
 import { databaseCheckpointIdentitySchema } from '../services/database-checkpoint.js';
 import { backupPolicyActionId, backupPolicyActionMetadataSchema, DAILY_BACKUP_OPERATION } from '../services/backup-policy-plan.service.js';
 import { DATABASE_SCOPE_BIND_OPERATION, isDatabaseScopeBindingAction } from '../services/database-scope-binding.service.js';
+import { HOSTING_PREPARED_OPERATION, isPreparedHostingAction } from '../services/hosting-prepared.service.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { API_POLICY_OPERATION } from '../services/api-policy.js';
 import { EMAIL_SIGNING_OPERATIONS } from '../services/email-signing.service.js';
@@ -97,6 +98,7 @@ import {
 export type PlanMutationCapability =
   | 'database.credential-aliases.repair'
   | 'database.scope.bind'
+  | 'hosting.prepared.bind'
   | 'backup-policy.configure'
   | 'api.policy.accept'
   | 'hosting.volume.mutate'
@@ -510,6 +512,9 @@ export function resolvePlanActionAuthority(
 
   if (action.metadata?.operation === DATABASE_SCOPE_BIND_OPERATION) {
     return isDatabaseScopeBindingAction(action) ? authority(action, 'database.scope.bind') : null;
+  }
+  if (action.metadata?.operation === HOSTING_PREPARED_OPERATION) {
+    return isPreparedHostingAction(action) ? authority(action, 'hosting.prepared.bind') : null;
   }
 
   if (action.metadata?.operation === DAILY_BACKUP_OPERATION) {

@@ -8,6 +8,7 @@ import { runtimeSecretReferenceSchema } from '../../../domain/ports/secret-desti
 import { resourceName } from '../../../domain/services/resource-names.js';
 import { gcpRuntimeRequest, hasGcpRuntimeRole, parseGcpRuntimePolicy } from './gcp-runtime-client.js';
 import { desiredRuntimeSecrets, readRuntimeSecretPolicies, serializeRuntimeSecrets } from './gcp-runtime-secrets.js';
+import { gcpPreparedHoldingTransition } from './gcp-prepared-release.js';
 
 const phase = 'installed-runtime-binding';
 /** Read-only binding of the exact reviewed native account. No IAM repair, adoption or deletion. */
@@ -41,7 +42,12 @@ export class CloudRunInstalledRuntimeIdentities implements IRuntimeIdentities {
     for (const deployer of Object.values(connection.principals)) if (deployer.kind !== 'gcp-service-account'
       || !hasGcpRuntimeRole(policy, 'roles/iam.serviceAccountUser', `serviceAccount:${deployer.serviceAccountEmail}`)) throw new Error();
     const secretRequest = { ...request, environmentSpec: request.environmentSpec ?? { secretDestinations: Object.fromEntries(workload.runtimeSecrets.map(item => [item.key, item.reference])) } as RuntimeIdentityRequest['environmentSpec'] };
-    const desired = desiredRuntimeSecrets(secretRequest, projectId);
+    const desired = desiredRuntimeSecrets(secretRequest, projectId).map(target => {
+      if (!connection.preparedResources) return target;
+      const prepared = connection.preparedResources.secretTargets?.find(item => item.id === target.resource);
+      if (!prepared) throw new Error();
+      return { ...target, createTime: prepared.lifetimeId };
+    });
     const readers = await readRuntimeSecretPolicies(projectId, desired, token, desired);
     if (readers.some(reader => !reader.policy || !hasGcpRuntimeRole(reader.policy, 'roles/secretmanager.secretAccessor', `serviceAccount:${email}`))) throw new Error();
     const bound = bindings.services?.[workload.name];
@@ -50,14 +56,15 @@ export class CloudRunInstalledRuntimeIdentities implements IRuntimeIdentities {
     if (!/^[a-z][a-z0-9-]{0,48}$/.test(nativeName)) throw new Error();
     const resource = `projects/${projectId}/locations/${region}/${kind}/${nativeName}`;
     const native = await gcpRuntimeRequest(`https://run.googleapis.com/v2/${resource}`, token) as Record<string, any> | null;
+    const prepared = native && kind === 'services' ? gcpPreparedHoldingTransition(connection, request.environment, workload.name, native) : null;
     if (native ? !bound || native.name !== resource || !bound.resourceUid || native.uid !== bound.resourceUid
-      || (kind === 'jobs' ? native.template?.template?.serviceAccount : native.template?.serviceAccount) !== email : !!bound) throw new Error();
+      || !prepared && (kind === 'jobs' ? native.template?.template?.serviceAccount : native.template?.serviceAccount) !== email : !!bound) throw new Error();
     const target = { phase, runtimeInstallationId: connection.installationId, runtimePlanDigest: connection.planDigest, runtimeOwner: installed.owner,
       projectId, region, email, name, uniqueId: principal.serviceAccountUniqueId, accountId: email.split('@')[0]!,
       environmentId: request.environment.id, serviceName: workload.name, workloadResource: resource,
       readerGrants: serializeRuntimeSecrets(readers.map(reader => reader.target)),
       readerFingerprint: createHash('sha256').update(JSON.stringify(workload.runtimeSecrets)).digest('hex') };
-    const identity: ProviderRuntimeIdentity = { provider: 'gcp', principal: email, source: native ? 'observed' : 'configured', scope: {
+    const identity: ProviderRuntimeIdentity = { provider: 'gcp', principal: email, source: native && !prepared ? 'observed' : 'configured', scope: {
       projectId, region, environmentId: request.environment.id, serviceName: workload.name, workloadResource: resource,
       serviceAccountUniqueId: principal.serviceAccountUniqueId, ...(native ? { workloadUid: native.uid as string } : {}) } };
     return { target, identity };

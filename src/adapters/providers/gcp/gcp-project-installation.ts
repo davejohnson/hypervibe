@@ -16,7 +16,8 @@ const PARENT = z.string().regex(/^(organizations|folders)\/[1-9]\d*$/);
 const BILLING = z.string().regex(/^billingAccounts\/[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}$/);
 export const gcpProjectPreparationScopeSchema = z.object({ scopeKind: z.literal('new-project'), projectId: PROJECT,
   displayName: z.string().min(4).max(30).regex(/^[A-Za-z0-9][A-Za-z0-9 '!\-]*[A-Za-z0-9]$/),
-  parent: PARENT.optional(), billingAccountName: BILLING }).strict();
+  parent: PARENT.optional(), billingAccountName: BILLING,
+  assignmentMode: z.literal('initial-reviewed-v1').optional() }).strict();
 const proofSchema = z.object({ resources: z.array(z.object({ kind: z.literal('project'), id: z.string().regex(/^projects\/[1-9]\d{5,29}$/),
   identity: z.object({ projectId: PROJECT, projectNumber: NUMBER, createTime: z.string().datetime(), parent: z.union([PARENT, z.literal('none')]),
     owner: z.string().regex(/^[a-f0-9]{64}$/), attemptId: z.string().guid() }).strict() }).strict()).max(1),
@@ -101,7 +102,8 @@ export function createGcpProjectPreparationDriver(options: { fetch?: typeof fetc
     const account = await json(`https://cloudbilling.googleapis.com/v1/${target.billingAccountName}`);
     if (account.name !== target.billingAccountName || account.open !== true) throw new ScopeError('insufficient_permissions');
     for (const [url, permissions] of [
-      [`https://cloudbilling.googleapis.com/v1/${target.billingAccountName}:testIamPermissions`, ['billing.resourceAssociations.create', 'billing.accounts.getIamPolicy', 'billing.accounts.setIamPolicy']],
+      [`https://cloudbilling.googleapis.com/v1/${target.billingAccountName}:testIamPermissions`, target.assignmentMode
+        ? ['billing.resourceAssociations.create', 'billing.accounts.get'] : ['billing.resourceAssociations.create', 'billing.accounts.getIamPolicy', 'billing.accounts.setIamPolicy']],
       ...(target.parent ? [[`https://cloudresourcemanager.googleapis.com/v3/${target.parent}:testIamPermissions`, ['resourcemanager.projects.create']]] : []),
     ] as Array<[string, string[]]>) {
       const result = await json(url, { method: 'POST', body: JSON.stringify({ permissions }) });
@@ -150,7 +152,8 @@ export function createGcpProjectPreparationDriver(options: { fetch?: typeof fetc
       if (!project) throw new ScopeError('identity_mismatch');
       return { scopeKind: 'project-billing', projectId: project.identity.projectId, projectNumber: project.identity.projectNumber,
         projectCreateTime: project.identity.createTime, projectParent: project.identity.parent, projectInstallationId: record.intent.installationId,
-        projectAttemptId: project.identity.attemptId, billingAccountName: scope(record.intent).billingAccountName };
+        projectAttemptId: project.identity.attemptId, billingAccountName: scope(record.intent).billingAccountName,
+        ...(scope(record.intent).assignmentMode ? { assignmentMode: scope(record.intent).assignmentMode! } : {}) };
     }, reviewResources(record) {
       const resolved = driver.scopePreparation!.resolvedScope(record);
       const project = parseEvidence(record.completed['gcp:project'], record.intent).resources[0];
@@ -172,10 +175,12 @@ export function createGcpProjectPreparationDriver(options: { fetch?: typeof fetc
         return { actions: actions(context.intent), review: {
           resources: [{ kind: 'project', name: target.projectId, scope: target.parent ?? 'Google-selected parent, verified after creation' }],
           permissions: [{ principal: 'Browser-authorized administrator', scope: target.parent ?? 'Google-selected parent', actions: ['resourcemanager.projects.create'], purpose: 'installation-verification' },
-            { principal: 'Browser-authorized administrator', scope: target.billingAccountName, actions: ['billing.resourceAssociations.create', 'billing.accounts.getIamPolicy', 'billing.accounts.setIamPolicy'], purpose: 'installation-verification' }],
+            { principal: 'Browser-authorized administrator', scope: target.billingAccountName, actions: target.assignmentMode
+              ? ['billing.resourceAssociations.create', 'billing.accounts.get'] : ['billing.resourceAssociations.create', 'billing.accounts.getIamPolicy', 'billing.accounts.setIamPolicy'], purpose: 'installation-verification' }],
           costs: [{ resource: target.projectId, description: 'Creating an empty project does not provision paid workloads. Enabling billing authorizes future resource usage charges; workloads need a separate review.', pricingUrl: 'https://cloud.google.com/pricing' }],
           warnings: ['This stage creates only the reviewed project and retains it on partial setup; it does not create secret containers, writer identities or workloads.',
-            'A separate review will show the actual project parent, temporary billing identity, permissions and billing attachment before those operations can begin.',
+            target.assignmentMode ? 'A separate review will show the actual project parent, selected billing account, costs and native initial-assignment behavior before billing is enabled.'
+              : 'A separate review will show the actual project parent, temporary billing identity, permissions and billing attachment before those operations can begin.',
             ...(target.parent ? [] : ['Google may automatically select an organization from the administrator’s domain. The actual parent is retained and verified before continuation.'])],
         } };
       } catch (error) { throw new ScopeError(errorReason(error)); }
@@ -223,7 +228,7 @@ export async function discoverGcpProjectPreparationScopes(context: Parameters<No
     if (accounts.nextPageToken !== undefined && typeof accounts.nextPageToken !== 'string') throw new ScopeError('provider_error');
     const projectId = resourceName('app', { maxLength: 30, scope: [context.sourceScope.customerId, context.sourceScope.appId, context.sourceScope.installationId] });
     return { complete: !accounts.nextPageToken, scopes: open.map(account => ({ stage: 'scope-preparation' as const,
-      nativeScope: { scopeKind: 'new-project', projectId, displayName: 'Hypervibe application', billingAccountName: account.name },
+      nativeScope: { scopeKind: 'new-project', projectId, displayName: 'Hypervibe application', billingAccountName: account.name, assignmentMode: 'initial-reviewed-v1' },
       label: `Create ${projectId} · ${account.displayName ?? account.name} · Google-selected parent` })) };
   } finally { budget.close(); }
 }

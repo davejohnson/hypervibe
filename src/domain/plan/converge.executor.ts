@@ -4,6 +4,7 @@ import { databaseCredentialAliasesActionSchema, databaseCredentialAliasesMetadat
 import { isDeepStrictEqual } from 'node:util';
 import { API_POLICY_OPERATION } from '../services/api-policy.js';
 import { DATABASE_SCOPE_BIND_OPERATION, isDatabaseScopeBindingAction } from '../services/database-scope-binding.service.js';
+import { HOSTING_PREPARED_OPERATION, isPreparedHostingAction } from '../services/hosting-prepared.service.js';
 import { createHash } from 'crypto';
 import { z } from 'zod';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
@@ -226,6 +227,7 @@ export const planRunDocumentSchema = z.object({
     'retained-cleanup',
     'managed-ci-bindings',
     'hosting-bindings',
+    'hosting-prepared-bindings',
     'service-volumes',
     'runtime-access',
     'database-checkpoint',
@@ -310,6 +312,16 @@ export const planRunDocumentSchema = z.object({
   }
   if (document.scope !== 'database-bindings' && document.actions.some(action => action.metadata?.operation === DATABASE_SCOPE_BIND_OPERATION)) {
     ctx.addIssue({ code: 'custom', message: 'Database scope binding requires its isolated database-bindings stage.' });
+  }
+  if (document.scope !== 'hosting-prepared-bindings' && document.actions.some(action => action.metadata?.operation === HOSTING_PREPARED_OPERATION)) {
+    ctx.addIssue({ code: 'custom', message: 'Prepared hosting binding requires its isolated metadata stage.' });
+  }
+  if (document.scope === 'hosting-prepared-bindings') {
+    if (document.actions.length !== 1 || !document.actions.every(isPreparedHostingAction) || document.observedFingerprint !== null
+      || document.overrides || document.integrationFingerprints || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
+      ctx.addIssue({ code: 'custom', message: 'Prepared hosting binding contains only one exact confirmed metadata action and no rollout inputs.' });
+    }
+    return;
   }
   if (document.scope === 'database-bindings') {
     if (document.actions.length !== 1 || document.actions.some(action => !isDatabaseScopeBindingAction(action))

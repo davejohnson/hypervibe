@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { observeManagedReleaseEvidence } from '../managed-release-observation.js';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -113,6 +114,28 @@ function setup() {
 }
 
 describe('post-release schedule activation contract', () => {
+  it('projects the actual emitted artifact and independently verified run into strict provider-neutral release evidence', async () => {
+    const state = setup();
+    const evidence = await observeManagedReleaseEvidence({ project: state.project, spec: new SpecStore().get(state.project)!.spec,
+      environment: state.environment });
+    expect(evidence).toMatchObject({ schemaVersion: 1, sourceCommitSha: SHA, workflowSourceCommitSha: SHA, runId: 101, runAttempt: 1, artifactId: 201,
+      imageUri: IMAGE, targets: [{ workload: 'cron', kind: 'job', resourceId: pending.jobName, resourceUid: pending.jobUid }] });
+  });
+  it('uses fresh run detail for retry evidence when the list summary omits run_attempt', async () => {
+    const state = setup();
+    const { run_attempt: _attempt, ...summary } = state.run;
+    vi.mocked(GitHubAdapter.prototype.listWorkflowRuns).mockResolvedValue({ total_count: 1, workflow_runs: [summary] });
+    const evidence = await observeManagedReleaseEvidence({ project: state.project, spec: state.spec, environment: state.environment });
+    expect(evidence).toMatchObject({ runId: state.run.id, runAttempt: 1 });
+    expect(GitHubAdapter.prototype.getWorkflowRun).toHaveBeenCalledTimes(2);
+  });
+  it('rejects a native run rerun after artifact observation even when the list summary remains successful', async () => {
+    const state = setup();
+    vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockResolvedValueOnce(state.run)
+      .mockResolvedValue({ ...state.run, run_attempt: 2 });
+    expect(await observeManagedReleaseEvidence({ project: state.project, spec: state.spec, environment: state.environment })).toBeUndefined();
+    expect(state.activateSchedule).not.toHaveBeenCalled();
+  });
   it('admits actual emitted release evidence, calls the narrow capability, and preserves the other environment', async () => {
     const state = setup();
     expect(resolvePlanActionAuthority(state.action)?.capability).toBe('hosting.schedule.activate');

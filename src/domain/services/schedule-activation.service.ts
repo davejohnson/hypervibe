@@ -1,6 +1,4 @@
-import { environmentDeploymentContractHashForApply } from './deployment-contract.service.js';
 import { z } from 'zod';
-import { createRequire } from 'node:module';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { ProjectSpec, EnvironmentSpec } from '../spec/spec.schema.js';
@@ -11,11 +9,9 @@ import type { ActionResult } from '../plan/converge.executor.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { adapterFactory } from './adapter.factory.js';
-import { getGitHubAdapter, releaseEvidenceValidationRuntime } from './github-ops.service.js';
-import { observeManagedWorkflowFiles, resolveManagedWorkflowContract, workflowFilesContentHash } from './ci-deploy.service.js';
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
-import { MANAGED_CI_RELEASE_EVIDENCE_FILE, managedCiReleaseArtifactName } from './managed-ci-evidence.js';
 import { resolveDevOpsSelection } from '../spec/devops-selection.js';
+import { observeManagedReleaseEvidence } from './managed-release-observation.js';
 
 export const SCHEDULE_ACTIVATION_OPERATION = 'hostingScheduleActivate';
 export const scheduleActivationActionMetadataSchema = z.object({
@@ -83,66 +79,13 @@ export async function applyScheduleActivation(params: {
       || JSON.stringify(bound.scheduleActivation) !== JSON.stringify(metadata.pending)) {
     return blocked('Prepared schedule identity changed or is no longer pending. Re-run hv_plan.');
   }
-  const contract = resolveManagedWorkflowContract({ project: params.project, environmentName: params.environmentName, environmentSpec, environment });
-  if (!contract.ok || contract.workflow.path !== metadata.release.workflow || contract.workflow.branch !== metadata.release.ref
-      || contract.inputHash !== metadata.release.workflowInputHash) return blocked('The reviewed release contract has changed. Re-run hv_plan.');
-  const resolved = getGitHubAdapter(repository!);
-  if ('error' in resolved) return blocked('A verified repository-scoped GitHub connection is required for schedule activation.');
-  const [owner, repo] = repository!.split('/');
-  let imageUri: string;
-  let runId: number;
-  try {
-    const github = resolved.adapter;
-    const [observation, ref, runs] = await Promise.all([
-      observeManagedWorkflowFiles({ adapter: github, owner, repo, contract }),
-      github.getRef(owner, repo, `heads/${metadata.release.ref}`),
-      github.listWorkflowRuns(owner, repo, contract.workflow.path, { per_page: 1 }),
-    ]);
-    if (observation.acceptance === 'drift' || observation.liveContentHash !== metadata.release.workflowContentHash
-        || ref?.object.sha !== metadata.release.targetSha || runs.workflow_runs.length !== 1) throw new Error('Release observation changed');
-    const run = await github.getWorkflowRun(owner, repo, runs.workflow_runs[0].id);
-    if (run.id !== runs.workflow_runs[0].id || run.path !== contract.workflow.path || run.run_attempt !== 1
-        || run.status !== 'completed' || run.conclusion !== 'success' || !/^[a-f0-9]{40}$/.test(run.head_sha)
-        || run.repository?.full_name !== repository || run.head_repository?.full_name !== repository) throw new Error('Unverified workflow run');
-    const artifacts = await github.listWorkflowRunArtifacts(owner, repo, run.id);
-    const matches = artifacts.artifacts.filter(artifact => artifact.name === managedCiReleaseArtifactName(params.environmentName, metadata.release.targetSha));
-    if (artifacts.total_count !== artifacts.artifacts.length || matches.length !== 1) throw new Error('Incomplete release artifact observation');
-    const artifact = matches[0];
-    if (artifact.expired || artifact.workflow_run?.id !== run.id || artifact.workflow_run.head_sha !== run.head_sha
-        || !Number.isSafeInteger(artifact.workflow_run.repository_id) || artifact.workflow_run.repository_id <= 0
-        || artifact.workflow_run.repository_id !== artifact.workflow_run.head_repository_id) throw new Error('Unverified artifact provenance');
-    const [files, producerFiles] = await Promise.all([
-      github.readArtifactFiles(owner, repo, artifact.id),
-      Promise.all(observation.desiredFiles.map(async file => ({ path: file.path, content: await github.getFileContent(owner, repo, file.path, run.head_sha) }))),
-    ]);
-    if (Object.keys(files).length !== 1 || !Object.hasOwn(files, MANAGED_CI_RELEASE_EVIDENCE_FILE)
-        || producerFiles.some(file => file.content === null)
-        || workflowFilesContentHash(producerFiles as Array<{ path: string; content: string }>) !== observation.liveContentHash) throw new Error('Unverified release producer');
-    // Execute only our trusted shared v4 consumer, never downloaded workflow code.
-    const module = { exports: {} as {
-      validateReleaseEvidence(evidence: unknown, expected: Record<string, unknown>): { imageUri: string };
-    } };
-    new Function('require', 'module', 'exports', releaseEvidenceValidationRuntime())(createRequire(import.meta.url), module, module.exports);
-    const validated = module.exports.validateReleaseEvidence(JSON.parse(files[MANAGED_CI_RELEASE_EVIDENCE_FILE]), {
-      label: 'Schedule activation', provider: environmentSpec.hosting.provider, environment: params.environmentName,
-      repository, sha: metadata.release.targetSha, target: contract.target.releaseTarget,
-      programFingerprint: contract.target.programFingerprint,
-      deploymentContractFingerprint: environmentDeploymentContractHashForApply(params.spec, params.environmentName),
-      requireImmutableImage: true,
-    });
-    imageUri = validated.imageUri;
-    if (imageUri === metadata.pending.holdingImage) throw new Error('Holding image cannot activate a schedule');
-    const [latest, currentRef] = await Promise.all([
-      github.listWorkflowRuns(owner, repo, contract.workflow.path, { per_page: 1 }),
-      github.getRef(owner, repo, `heads/${metadata.release.ref}`),
-    ]);
-    if (latest.workflow_runs.length !== 1 || latest.workflow_runs[0].id !== run.id
-        || latest.workflow_runs[0].status !== 'completed' || latest.workflow_runs[0].conclusion !== 'success'
-        || currentRef?.object.sha !== metadata.release.targetSha) throw new Error('Release changed during evidence verification');
-    runId = run.id;
-  } catch {
+  const release = await observeManagedReleaseEvidence({ project: params.project, spec: params.spec, environment,
+    expected: { workflow: metadata.release.workflow, branch: metadata.release.ref, sourceCommitSha: metadata.release.targetSha,
+      workflowInputHash: metadata.release.workflowInputHash, workflowContentHash: metadata.release.workflowContentHash } });
+  if (!release || release.imageUri === metadata.pending.holdingImage) {
     return blocked('The latest managed release does not prove the exact current application, environment and workload identities. No schedule was activated.');
   }
+  const { imageUri, runId } = release;
   const resolvedHosting = await adapterFactory.getProviderAdapter(environmentSpec.hosting.provider, params.project, undefined, params.environmentName);
   const adapter = resolvedHosting.adapter;
   if (!resolvedHosting.success || !adapter?.capabilities.supportsDeferredCronActivation || !adapter.activateSchedule) {

@@ -150,9 +150,11 @@ for the conditional extraction if hosted application reconciliation is selected.
 
 Google scope discovery supports an existing active project or a separately reviewed
 project-preparation stage. The latter creates and recovers the exact project, then
-requires verified billing before a new collection review. Automatic billing attachment
-remains blocked; a customer with only a billing account cannot yet finish onboarding.
-Asking that customer to attach billing manually does not satisfy this feature's criterion.
+requires verified billing before a new collection review. New setup uses a versioned,
+explicitly reviewed [initial billing assignment](connect-cloud-gcp-billing-assignment.md)
+to the exact newly created project. The native PUT is not conditional: a pre-observed
+different account blocks, but administrators must coordinate changes during setup.
+Old unversioned plans remain blocked. Offline tests do not establish live onboarding.
 
 Device revocation, request cancellation and hosted-trust removal are different
 operations. Disconnect locally stops new submissions first, then uses a reviewed
@@ -200,6 +202,18 @@ host identity, OAuth registrations/redirects, AWS template publication and three
 approved disposable-account walkthroughs remain explicit release gates. Both
 PRs remain drafts until all agreed criteria are met. No merge, publication or
 deployment is authorized by this design document.
+
+Dependency review on 2026-10-25 found an unresolved Azure Identity/MSAL release
+gate. The lock selects Identity 4.13.2 and MSAL Node 5.5.0; Microsoft's
+[advisory](https://github.com/AzureAD/microsoft-authentication-library-for-js/security/advisories/GHSA-xcx6-jx8p-x3h5)
+identifies MSAL 7.1.0 as the patched floor. Published Identity 4.14.0 and
+4.15.0-beta.1 still require MSAL 6, and no published compatible Identity range
+accepts the patch. A major override crosses documented breaking changes and is
+not a supported repair. A compatible upstream release or separately reviewed,
+maintained backport is required. Hypervibe currently uses DefaultAzureCredential;
+the absence of a direct authorization-code call limits demonstrated reachability
+but does not clear the audit finding. See the [Identity changelog](https://github.com/Azure/azure-sdk-for-js/blob/main/sdk/identity/identity/CHANGELOG.md)
+and [MSAL changelog](https://github.com/AzureAD/microsoft-authentication-library-for-js/blob/dev/lib/msal-node/CHANGELOG.md).
 
 Hosted operator configuration pins the native service account email,
 `SECRET_DELIVERY_GCP_HOST_SUBJECT` and
@@ -287,10 +301,11 @@ requires the server's separately reviewed writer-migration path.
 
 GCP fresh-project creation now has a separate [scope preparation stage](connect-cloud-scope-preparation.md).
 Its first `scope-ready` result proves project creation only. A second linked
-scope review shows the observed parent and verifies existing billing before a
-fresh collection review. Automatic billing assignment remains blocked before
-temporary writes: even a dedicated principal may inherit unlink authority on
-an unselected account, and the update API has no preserve-existing precondition.
-Exact historical temporary grants have a separately reviewed cleanup path.
+scope review shows the observed parent and selected billing account before a
+fresh collection review. New versioned plans separately authorize the native
+initial assignment with its explicit concurrent-change limitation; old plans
+remain blocked because their link-only contract cannot be established. No
+temporary IAM grants are created by the new path. Exact historical temporary
+grants retain a separately reviewed cleanup path.
 AWS and Azure do not advertise scope preparation. No live support
 claim or release gate is changed by this offline implementation.

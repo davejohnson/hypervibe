@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { preparedHostingMarkerSchema } from './hosting-prepared.port.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Service } from '../entities/service.entity.js';
 import type {
@@ -111,6 +112,7 @@ export interface HostingBindings {
 
   /** Provider-native non-secret scope when projectId is a logical resource prefix. */
   providerScope?: Record<string, string>;
+  preparedHosting?: import('./hosting-prepared.port.js').PreparedHostingMarker;
 
   /** Map of service names to their external IDs */
   services: Record<string, {
@@ -314,6 +316,7 @@ export const hostingBindingsSchema = z.object({
   projectId: nonEmptyHostingBindingString.optional(),
   environmentId: nonEmptyHostingBindingString.optional(),
   providerScope: retainedProviderScopeSchema.optional(),
+  preparedHosting: preparedHostingMarkerSchema.optional(),
   services: hostingServicesSchema.optional(),
   serviceCreateRecovery: serviceCreateRecoveryMapSchema.optional(),
   previousDatabase: previousDatabaseSchema.optional(),
@@ -355,6 +358,7 @@ export function parseHostingBindings(
  * Hosting adapters handle deploying services to cloud platforms.
  */
 export interface IHostingAdapter {
+  readonly preparedHosting?: import('./hosting-prepared.port.js').IPreparedHosting;
   readonly runtimeIdentities?: import('./runtime-identity.port.js').IRuntimeIdentities;
   readonly serviceVolumes?: import('./service-volume.port.js').IServiceVolumes;
   readonly name: string;

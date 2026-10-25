@@ -11,8 +11,11 @@ export class CloudDeploymentAccessError extends Error {
 const projectId = z.string().regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/);
 const number = z.string().regex(/^[1-9]\d{5,29}$/);
 const text = z.string().min(1).max(2048);
+const immutableImage = z.string().max(2048).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[a-f0-9]{64}$/);
 export const cloudDeploymentTopologySchema = z.object({ hostingProvider: z.string().regex(/^[a-z][a-z0-9-]{0,95}$/), region: z.string().regex(/^[a-z][a-z0-9-]{1,63}$/),
+  preparation: z.object({ kind: z.literal('holding-workloads'), image: immutableImage }).strict().optional(),
   workloads: z.array(z.object({ name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/), kind: z.enum(['web', 'worker', 'cron']),
+    public: z.boolean().optional(),
     runtimeSecrets: z.array(z.object({ key: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/), reference: runtimeSecretReferenceSchema }).strict()).max(100)
       .refine(items => new Set(items.map(item => item.key)).size === items.length),
   }).strict()).min(1).max(50).refine(items => new Set(items.map(item => item.name)).size === items.length),
@@ -29,6 +32,16 @@ const azure = z.object({ kind: z.literal('azure-managed-identity'), tenantId: z.
   identityResourceId: z.string().regex(/^\/subscriptions\/[a-fA-F0-9-]{36}\/resourceGroups\/[A-Za-z0-9_.()-]{1,90}\/providers\/Microsoft\.ManagedIdentity\/userAssignedIdentities\/[A-Za-z0-9_-]{3,128}$/) }).strict();
 const principal = z.discriminatedUnion('kind', [aws, gcp, azure]);
 const runtimePrincipal = z.discriminatedUnion('kind', [aws.omit({ audience: true }).extend({ purpose: z.enum(['task', 'execution', 'infrastructure']) }).strict(), gcp, azure]);
+const holdingPrincipal = z.discriminatedUnion('kind', [aws.omit({ audience: true }), gcp, azure]);
+export const cloudDeploymentPreparedResourcesSchema = z.object({ schemaVersion: z.literal(1),
+  project: z.object({ id: text, lifetimeId: text, parentId: text.optional() }).strict(),
+  registry: z.object({ id: text, lifetimeId: text, owner: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  secretTargets: z.array(z.object({ id: text, lifetimeId: text }).strict()).max(100)
+    .refine(items => new Set(items.map(item => item.id)).size === items.length).optional(),
+  workloads: z.array(z.object({ workload: text, kind: z.enum(['service', 'job']), id: text, lifetimeId: text,
+    owner: z.string().regex(/^[a-f0-9]{64}$/), holding: z.object({ image: immutableImage, revision: text.optional(), generation: z.string().regex(/^[1-9]\d{0,29}$/).optional(),
+      principal: holdingPrincipal, configurationDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict() }).strict()).min(1).max(50),
+}).strict();
 const receipt = z.object({ schemaVersion: z.literal(1), purpose: z.literal('deployment'), installationId: z.string().guid(), planDigest: z.string().regex(/^[a-f0-9]{64}$/),
   customerId: text, appId: text, environment: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),
   source: z.object({ repository: z.string().max(500).regex(/^[a-z0-9.-]+(?::\d+)?\/[a-z0-9_.-]+(?:\/[a-z0-9_.-]+)+$/), branch: text,
@@ -39,6 +52,7 @@ const receipt = z.object({ schemaVersion: z.literal(1), purpose: z.literal('depl
     serviceAccountEmail: gcp.shape.serviceAccountEmail, subject: number, issuer: z.literal('https://accounts.google.com') }).strict(),
   principals: z.object({ provision: principal, release: principal }).strict(),
   runtimeIdentities: z.array(z.object({ workload: text, installationId: z.string().guid(), owner: z.string().regex(/^[a-f0-9]{64}$/), principal: runtimePrincipal }).strict()).min(1).max(150),
+  preparedResources: cloudDeploymentPreparedResourcesSchema.optional(),
 }).strict();
 
 /** Public nonsecret boundary; provider scope parsing is required, never optional. */
@@ -84,6 +98,35 @@ export function parseCloudDeploymentConnectionV1(value: unknown, contract: Cloud
       } else throw new Error();
     }
     if (expected.size) throw new Error();
+    if (Boolean(result.deployment.preparation) !== Boolean(result.preparedResources)) throw new Error();
+    if (result.preparedResources) {
+      if (!contract.parsePreparedResources) throw new Error();
+      const prepared = cloudDeploymentPreparedResourcesSchema.parse(contract.parsePreparedResources(result.preparedResources, result));
+      if (!isDeepStrictEqual(prepared, result.preparedResources)) throw new Error();
+      const names = new Set(result.deployment.workloads.map(item => item.name)), ids = new Set<string>();
+      const identities = [a, b, ...result.runtimeIdentities.map(item => item.principal)];
+      for (const item of prepared.workloads) {
+        const declared = result.deployment.workloads.find(workload => workload.name === item.workload);
+        if (!names.delete(item.workload) || ids.has(item.id) || !declared || declared.kind !== 'cron' && item.kind !== 'service'
+          || item.holding.image !== result.deployment.preparation!.image) throw new Error();
+        ids.add(item.id); const holding = item.holding.principal;
+        if (holding.kind !== a.kind) throw new Error();
+        if (holding.kind === 'gcp-service-account' && a.kind === 'gcp-service-account') {
+          if (holding.projectId !== a.projectId || holding.projectNumber !== a.projectNumber
+            || !holding.serviceAccountEmail.endsWith(`@${a.projectId}.iam.gserviceaccount.com`)
+            || holding.serviceAccountUniqueId === result.hostIdentity.subject
+            || identities.some(id => id.kind === holding.kind && (id.serviceAccountUniqueId === holding.serviceAccountUniqueId || id.serviceAccountEmail === holding.serviceAccountEmail))) throw new Error();
+        } else if (holding.kind === 'aws-role' && a.kind === 'aws-role') {
+          if (holding.accountId !== a.accountId || holding.roleArn.split(':')[4] !== a.accountId
+            || identities.some(id => id.kind === holding.kind && (id.roleId === holding.roleId || id.roleArn === holding.roleArn))) throw new Error();
+        } else if (holding.kind === 'azure-managed-identity' && a.kind === 'azure-managed-identity') {
+          if (holding.tenantId !== a.tenantId || holding.subscriptionId !== a.subscriptionId
+            || !holding.identityResourceId.toLowerCase().startsWith(`/subscriptions/${a.subscriptionId}/resourcegroups/${result.nativeScope.resourceGroup}/`.toLowerCase())
+            || identities.some(id => id.kind === holding.kind && (id.clientId === holding.clientId || id.principalId === holding.principalId || id.identityResourceId.toLowerCase() === holding.identityResourceId.toLowerCase()))) throw new Error();
+        } else throw new Error();
+      }
+      if (names.size) throw new Error();
+    }
     return result;
   } catch { throw new CloudDeploymentAccessError('invalid_contract'); }
 }

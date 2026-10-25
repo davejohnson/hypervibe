@@ -168,6 +168,7 @@ export function cloudInstallationDeploymentConnectionV1(value: unknown, driver: 
   return contract(() => {
     const connection = parseCloudDeploymentConnectionV1(driver.deployment!.connection(record), {
       provider: driver.provider, hostingProvider: driver.deployment!.hostingProvider, parseScope: scope => driver.parseScope(scope),
+      parsePreparedResources: driver.deployment!.parsePreparedResources,
     });
     for (const key of ['installationId', 'customerId', 'appId', 'environment', 'source', 'provider', 'nativeScope', 'hostIdentity', 'deployment'] as const)
       if (canonical(connection[key]) !== canonical(record.intent[key])) throw new Error();

@@ -9,8 +9,8 @@ deployment. Existing collection records omit `stage` and retain their digest.
 | Provider | Native scope mechanism | Current preparation capability |
 | --- | --- | --- |
 | AWS | Customer selects an existing account in the reviewed CloudFormation console installation. Creating an organization member account has different authority and lifecycle. | Unsupported; no account-creation stage is inferred from CloudFormation support. |
-| Azure | Customer selects an existing tenant/subscription. Subscription creation and billing ownership are separate Azure APIs and agreements. | Unsupported; existing reviewed resource installation remains separately blocked where atomic create ownership is unverified. |
-| GCP | Resource Manager POST creates a project and returns an operation; a second reviewed scope operation handles billing. | Project creation/recovery, existing-billing verification and historical temporary-grant cleanup have offline acceptance. Automatic attachment is blocked before temporary writes. No live walkthrough completed. |
+| Azure | Customer selects an existing tenant/subscription. Subscription creation and billing ownership are separate Azure APIs and agreements. | Subscription/billing preparation is unsupported. Within an existing scope, the reviewed exclusive app/environment namespace uses actual ARM deployment provenance and upsert semantics for collection and [prepared hosting](connect-cloud-azure-prepared.md); historical atomic-create-blocked plans retain their restrictions. Live walkthrough remains outstanding. |
+| GCP | Resource Manager POST creates a project and returns an operation; a second reviewed scope operation handles billing. | Project creation/recovery, versioned initial billing assignment, existing-billing verification and historical temporary-grant cleanup have offline acceptance. Initial assignment has explicitly reviewed native non-atomic semantics. Old unversioned plans remain blocked. No live walkthrough completed. |
 
 The ordinary provider-roster test requires all three providers to declare this
 boundary. [AWS account creation](https://docs.aws.amazon.com/organizations/latest/APIReference/API_CreateAccount.html),
@@ -44,29 +44,36 @@ this stage has no deletion or compensation authority.
 
 Project-only completion returns `scope-ready`, which is not billing readiness.
 `cloudInstallationNextStageV1` selects another `scope-preparation` review. That
-review shows the observed actual parent, selected billing account and candidate
-temporary identity permissions. Each scope operation has its own UUID, plan
+review shows the observed actual parent, selected billing account and exact
+administrator permissions. Each scope operation has its own UUID, plan
 digest and durable history; the original plan is never rewritten. After billing
 is independently verified, the same continuation route selects `collection`.
 Neither scope-ready result can project writer connections or accept values.
 
 If the selected billing account is already associated and enabled, the billing
 stage contains one verification noop. It changes no billing or IAM resources.
-A different account blocks and is preserved. If no association exists, the plan
-has the immutable blocker `billing_assignment_unverified` before **any** temporary
-API, identity or IAM write. Confirming every action cannot override it, and
-direct provider mutation also rejects new setup/attachment. No owner-token PUT
-fallback or configuration escape exists. A missing association therefore remains
-an explicit fresh-customer onboarding gap; manual attachment does not satisfy
-the requested automated experience.
+A different account blocks and is preserved. New discovery records
+`assignmentMode: initial-reviewed-v1` in the original project intent and carries
+it into billing continuation. Its separately confirmed billable action uses the
+transient browser administrator to assign the selected account to the exact newly
+created project. The review explicitly reserves the project during this operation:
+Google's PUT has no conditional-empty guard and can replace an external association
+made after the final read. This is an authoritative initial assignment, not a
+link-only claim. It creates no temporary IAM identities or grants. See the
+[assignment evidence and counterexamples](connect-cloud-gcp-billing-assignment.md).
 
-The native candidate uses a dedicated service-account UID, an exact-project
+Existing unversioned plans retain the immutable `billing_assignment_unverified`
+blocker before any temporary writes. Confirmation cannot upgrade their authorization,
+and there is no credential fallback or flag that changes an existing plan. An
+uncertain new-mode PUT is recovered only through exact native observation; it is
+never automatically repeated, detached or restored.
+
+The older native candidate used a dedicated service-account UID, an exact-project
 custom link role (without `deleteBillingAssignment`), selected-account
 `roles/billing.user`, narrow host impersonation and 15-minute tokens. Its review
 shows the additional `billing.accounts.setIamPolicy` administrator prerequisite,
 temporary grants, retained inert account/roles and potential usage charges.
-These candidate writes are deliberately unreachable until preservation is
-established. The counterexample is a principal with pre-existing inherited
+These candidate writes remain deliberately unreachable. The counterexample is a principal with pre-existing inherited
 `billing.resourceAssociations.delete` on another account B, where another actor
 associates B after the last read. Negative permission tests on target A do not
 prevent a subsequent PUT from switching B to A. A delete-only custom grant need
@@ -113,8 +120,9 @@ The billing candidate's four initial native/shared tests failed before the stage
 implementation, then passed against reconstructed transports. Adversarial review
 added the account-B counterexample: it failed with one PUT before the immutable
 blocker and passed with zero afterward. Those earlier candidate passes are not
-evidence of a safe complete billing flow. Current tests exercise the production
-blocker and existing-association noop; cleanup tests explicitly reconstruct
+evidence of a safe complete billing flow. Current tests exercise the old-mode
+blocker, new explicitly reviewed initial assignment and existing-association noop;
+cleanup tests explicitly reconstruct
 historical attempts/native state without enabling a production bypass. Lost
 cleanup acknowledgement initially failed recovery; durable attempt correlation
 fixed it. Incomplete native completion evidence also failed before strict
@@ -128,6 +136,6 @@ cross-environment predecessor rejection. `npm test` runs the suite and provider
 roster normally. Actual Google permissions, organization policy, quotas,
 parent selection and a disposable-account walkthrough remain unverified.
 
-Billing automation, approved host/OAuth configuration, actual packaged consumer
+Live initial billing acceptance, approved host/OAuth configuration, actual packaged consumer
 acceptance and all three approved provider walkthroughs remain release gates.
 Both PRs remain drafts; this change grants no merge, publish or deployment approval.

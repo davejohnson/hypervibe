@@ -189,6 +189,8 @@ export interface ProviderMetadata {
   lifecycle?: {
     /** Hosting lifecycle exists only when the provider is valid in environments.*.hosting. */
     hosting?: {
+      /** Optional read-only binding of exact administrator-installed resources. No create/deploy authority. */
+      preparedResources?: 'installer-receipt-v1';
       /** Workload kinds this adapter can reconcile through the complete hosting lifecycle. */
       workloadKinds: readonly WorkloadKind[];
       runtimeIdentityTiming?: 'before-workload' | 'after-workload';
