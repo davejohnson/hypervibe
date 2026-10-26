@@ -21,6 +21,10 @@ connection gains those fields without replacing an existing account/profile/tena
 selection. Invalid, undeclared, credential-shaped or schema-stripped fields fail
 before persistence. Failed verification never reads the descriptor. Current exact
 value redaction, hosted federation, and runtime credential separation remain intact.
+GitLab portable CI variable selection also honors the provider's automation
+admission decision at both plan and apply, before any variable write. The restored
+transport regression first failed because a revoked admission decision still
+produced a plan; it then passed with both stages blocked and zero variable writes.
 
 Repository selection also retains the complete nested namespace. For
 `gitlab.example.com/studio/team/app`, `team/app` is a different repository and
