@@ -4,6 +4,7 @@ import type { Environment } from '../../../../domain/entities/environment.entity
 import type { IStorageAdapter } from '../../../../domain/ports/storage.port.js';
 import type { StorageRuntimeAccessTarget } from '../../../../domain/ports/storage-runtime-access.port.js';
 import { AzureBlobStorageAdapter } from '../azure-blob.adapter.js';
+import { AzureBlobRuntimeAccess } from '../azure-blob-runtime-access.js';
 
 // Reconstructed Azure REST responses, real ARM transport serialization. No live
 // RBAC propagation or application SDK acceptance is claimed by these fixtures.
@@ -79,6 +80,13 @@ async function connected(): Promise<IStorageAdapter> {
 const writes = () => calls.filter(call => call.method !== 'GET');
 
 describe('Azure container-scoped workload Blob access', () => {
+  it('requires a verified connection tenant before any native access read or grant', async () => {
+    const access = new AzureBlobRuntimeAccess(async () => ({ authMode: 'default', subscriptionId }));
+    expect(await access.observe(target)).toMatchObject({ state: 'unknown' });
+    expect((await access.grant(target, attemptId)).receipt.success).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
   it.each(['ready', 'unavailable', 'replaced'] as const)('checks the current user-assigned identity and container availability: %s', async state => {
     const adapter = await connected();
     target.identity.scope.identityResourceId = identityResourceId;

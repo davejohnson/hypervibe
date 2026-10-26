@@ -83,7 +83,8 @@ export class AzureBlobRuntimeAccess implements IStorageRuntimeAccess {
       || !/^[a-z0-9]{3,24}\/blobServices\/default\/containers\/[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?$/.test(suffix)
       || identity.provider !== 'azure' || identity.source !== 'observed' || !UUID.test(identity.principal)
       || !UUID.test(scope.tenantId ?? '')
-      || ('tenantId' in credentials && !equal(scope.tenantId, credentials.tenantId))
+      || typeof credentials.tenantId !== 'string' || !UUID.test(credentials.tenantId)
+      || !equal(scope.tenantId, credentials.tenantId)
       || !equal(scope.subscriptionId, credentials.subscriptionId)
       || scope.environmentId !== target.environment.id
       || typeof resourceGroupId !== 'string' || typeof managedEnvironmentId !== 'string' || !appId

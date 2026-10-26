@@ -104,6 +104,28 @@ describe('reviewed recurring backup authority', () => {
     expect(create).not.toHaveBeenCalled();
   });
 
+  it.each(['backup', 'health'] as const)('rejects temporary AWS credentials before recurring %s provider access', async operation => {
+    const { target } = fixture();
+    target.destination.identity = { provider: 's3', externalId: 'owned-vault', instanceScope: { accountId: '123456789012', region: 'us-east-1' } };
+    target.objects = [];
+    const create = vi.spyOn(providerRegistry, 'createAdapter').mockRejectedValue(new Error('Provider access must not start.'));
+    await expect(executeManagedBackup({ target, environment: {} as Environment, operation,
+      repository: 'owner/hls', runId: '123', credentials: { AWS_ACCESS_KEY_ID: 'ASIAIOSFODNN7EXAMPLE',
+        AWS_SECRET_ACCESS_KEY: 'temporary-secret-must-not-leak', AWS_SESSION_TOKEN: 'temporary-token-must-not-leak' } })).rejects.toThrow();
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('retains explicit durable credentials for recurring object recovery', async () => {
+    const { target } = fixture();
+    target.destination.identity = { provider: 's3', externalId: 'owned-vault', instanceScope: { accountId: '123456789012', region: 'us-east-1' } };
+    target.objects = [];
+    const create = vi.spyOn(providerRegistry, 'createAdapter').mockRejectedValue(new Error('Stop after credential admission.'));
+    await expect(executeManagedBackup({ target, environment: {} as Environment, operation: 'health',
+      repository: 'owner/hls', runId: '123', credentials: { AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE',
+        AWS_SECRET_ACCESS_KEY: 'explicit-automation-secret' } })).rejects.toThrow();
+    expect(create).toHaveBeenCalledWith('s3', { accessKeyId: 'AKIAIOSFODNN7EXAMPLE', secretAccessKey: 'explicit-automation-secret' });
+  });
+
   it.each(['hash', 'image', 'branch', 'head', 'scope', 'source', 'workflow', 'disabled-workflow', 'incomplete-inventory', 'excluded', 'foreign-repository'])(
     'rejects changed %s before a recurring task may run', async change => {
       const { input, github, files, bindings, spec } = fixture();
@@ -151,7 +173,7 @@ describe('reviewed recurring backup authority', () => {
       createdAt: new Date(), updatedAt: new Date() };
     await expect(executeManagedBackup({ target, environment,
       operation: 'backup', repository: 'owner/hls', runId: '123', credentials: {
-        RAILWAY_API_TOKEN: 'controller-token', AWS_ACCESS_KEY_ID: 'controller-access', AWS_SECRET_ACCESS_KEY: 'controller-secret',
+        RAILWAY_API_TOKEN: 'controller-token', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'controller-secret',
       } })).rejects.toThrow(/handoff is unsupported/);
     expect(runJob).not.toHaveBeenCalled(); expect(broadCredentials).not.toHaveBeenCalled();
     expect(archive.destroy).toHaveBeenCalled();
