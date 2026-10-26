@@ -20,7 +20,7 @@ import type { ActionResult } from '../plan/converge.executor.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { SpecStore, type SpecResult } from '../spec/spec.store.js';
 import type { ProjectSpec } from '../spec/spec.schema.js';
-import { applyCloudInstallationV1, planCloudInstallationV1, reconcileCloudInstallationV1 } from './cloud-installation-runtime.js';
+import { applyCloudInstallationV1, planCloudInstallationV1, reconcileCloudInstallationV1, reviewCloudInstallationRetryV1 } from './cloud-installation-runtime.js';
 
 type Record = CloudInstallationRecord<LocalCloudScopePreparationIntent>;
 const routingSchema = z.object({ intent: z.object({ hostingProvider: z.string().min(1).max(100) }).passthrough() }).passthrough();
@@ -100,15 +100,31 @@ async function context(project: Project, environment: Environment, intent: Local
     return true;
   } };
 }
-function projection(record: Record, mode: LocalCloudScopePlan['mode']): { cloudScope: LocalCloudScopePlan; actions: PlanAction[] } {
+function projection(record: Record, mode: LocalCloudScopePlan['mode'], retryActions?: LocalCloudScopePlan['retryActions']): { cloudScope: LocalCloudScopePlan; actions: PlanAction[] } {
   const cloudScope: LocalCloudScopePlan = { schemaVersion: 1, installationId: record.installationId,
-    installationPlanDigest: record.plan.digest, hostingProvider: record.intent.hostingProvider, mode };
-  const originals: PlanAction[] = mode === 'bind' ? [{ id: 'cloud-scope:bind', type: 'update',
+    installationPlanDigest: record.plan.digest, hostingProvider: record.intent.hostingProvider, mode, ...(retryActions ? { retryActions } : {}) };
+  let originals: PlanAction[] = mode === 'bind' ? [{ id: 'cloud-scope:bind', type: 'update',
     resource: { kind: 'project', name: record.intent.nativeScope.projectId, provider: record.intent.provider },
     verified: true, requiresConfirm: true,
     reason: 'Record nonsecret local-default connections for this exact application/environment and bind its verified cloud project; grant no cloud permissions.' }] : mode === 'recover' && record.intent.predecessor
       ? record.plan.actions.filter(action => record.attempts.some(attempt => attempt.actionId === action.id)) : record.plan.actions;
+  if (retryActions) {
+    // Retry only the reviewed rejected action. Its completed dependency closure
+    // remains explicit noop evidence; later work belongs to the next plan.
+    const included = new Set(retryActions.map(retry => retry.actionId));
+    for (const id of included) {
+      const action = record.plan.actions.find(action => action.id === id);
+      if (!action) throw unavailable();
+      for (const dependency of action.dependsOn ?? []) {
+        if (!record.completed[dependency]) throw unavailable();
+        included.add(dependency);
+      }
+    }
+    originals = originals.filter(action => included.has(action.id));
+  }
   const actions: PlanAction[] = mode === 'verified' ? [] : originals.map(original => ({ ...original,
+    ...(retryActions?.some(retry => retry.actionId === original.id)
+      ? { reason: `Retry the rejected attempt ${retryActions.find(retry => retry.actionId === original.id)!.attemptId}. ${original.reason}` } : {}),
     ...(mode === 'recover' ? { type: 'update' as const, requiresConfirm: false, billable: false, dataBearing: false,
       reason: 'Read only the exact retained preparation and native operation; never repeat an uncertain mutation or adopt a replacement.' }
       : mode === 'allocate' && record.completed[original.id] ? { type: 'noop' as const, requiresConfirm: false, billable: false, dataBearing: false } : {}),
@@ -246,22 +262,27 @@ export async function planLocalCloudScope(input: { project: Project; environment
     }
   }
   if (record.plan.blockedReason && !record.attempts.length) throw unavailable();
-  const mode = record.status === 'scope-ready' ? 'verified' : record.intent.predecessor
+  const incompleteAttempts = record.plan.actions.filter(action => !record!.completed[action.id]).map(action =>
+    record!.attempts.filter(attempt => attempt.actionId === action.id).at(-1)).filter(attempt => !!attempt);
+  const retry = record.intent.predecessor && incompleteAttempts.length && incompleteAttempts.every(attempt => attempt.status === 'rejected')
+    ? await reviewCloudInstallationRetryV1({ ...await context(project, environment, record.intent, 'allocate'),
+      installationId: record.installationId, planDigest: record.plan.digest }) : undefined;
+  const mode = record.status === 'scope-ready' ? 'verified' : retry ? 'allocate' : record.intent.predecessor
     ? record.attempts.some(attempt => !record!.completed[attempt.actionId]) ? 'recover'
       : record.plan.actions.some(action => !record!.completed[action.id]) ? 'allocate' : 'recover'
     : record.attempts.length ? 'recover' : 'allocate';
   // Preserve the approved plan while distinguishing its observations from the
   // current reconciliation result on both public warning surfaces.
-  const review = mode === 'allocate' ? record.plan.review : { ...record.plan.review,
-    warnings: record.plan.review.warnings.map(warning => `Historical approval review: ${warning}`) };
-  return { ...projection(record, mode), environment, review, warnings: [
+  const review = retry?.review ?? (mode === 'allocate' ? record.plan.review : { ...record.plan.review,
+    warnings: record.plan.review.warnings.map(warning => `Historical approval review: ${warning}`) });
+  return { ...projection(record, mode, retry?.retryActions), environment, review, warnings: [
     ...review.warnings,
-    ...record.plan.review.costs.map(item => item.description),
+    ...review.costs.map(item => item.description),
     record.intent.predecessor ? 'Only this retained preparation stage is authorized; later API, identity, binding or hosting stages need their own current plan.'
       : 'This stage allocates an empty cloud project only. Billing, API enablement, cloud connections and hosting are separate reviewed work.',
     'An allocated but unbound project remains in this isolated stage until a separate reviewed lifecycle handoff records its connection and binding; removing this declaration does not adopt it.',
     ...(record.reason ? [record.intent.predecessor
-      ? `The retained preparation stage reports ${record.reason}; recovery never repeats a mutation.`
+      ? `The retained preparation stage reports ${record.reason}; ${retry ? 'this new plan requires separate confirmation of its exact rejected-attempt retries' : 'recovery never repeats a mutation'}.`
       : `The retained allocation reports ${record.reason}; recovery never repeats a creation request.`] : []),
   ] };
 }
@@ -332,17 +353,23 @@ export async function applyLocalCloudScope(input: { project: Project; environmen
     const proof = localCloudScopePlanSchema.parse(input.cloudScope);
     const record = await journal(input.project, input.environment).read(proof.installationId);
     if (!record || record.plan.digest !== proof.installationPlanDigest || record.intent.hostingProvider !== proof.hostingProvider) throw unavailable();
-    const expected = projection(record, proof.mode);
+    if (proof.retryActions && (proof.mode !== 'allocate' || !record.intent.predecessor)) throw unavailable();
+    const expected = projection(record, proof.mode, proof.retryActions);
     if (input.action ? !isLocalCloudScopeAction(input.action) || !expected.actions.some(action => isDeepStrictEqual(input.action, action)) : proof.mode !== 'verified') throw unavailable();
     if (input.action) localCloudScopeActionMetadataSchema.parse(input.action.metadata);
-    const readOnly = proof.mode !== 'allocate' || (record.intent.predecessor
-      ? record.attempts.some(attempt => attempt.actionId === input.action?.id) : record.attempts.length > 0);
+    const attempt = record.attempts.filter(attempt => attempt.actionId === input.action?.id).at(-1);
+    const retryAction = proof.retryActions?.find(retry => retry.actionId === input.action?.id && retry.attemptId === attempt?.id && attempt.status === 'rejected');
+    const readOnly = proof.mode !== 'allocate' || (record.intent.predecessor ? !!attempt && !retryAction : record.attempts.length > 0);
     const execution = await context(input.project, input.environment, record.intent, readOnly ? 'recover' : 'allocate', input.authorize);
+    if (proof.retryActions) {
+      const current = await reviewCloudInstallationRetryV1({ ...execution, installationId: record.installationId, planDigest: record.plan.digest });
+      if (!isDeepStrictEqual(current.retryActions, proof.retryActions)) throw unavailable();
+    }
     const updated = readOnly
       ? await reconcileCloudInstallationV1({ ...execution, installationId: record.installationId, planDigest: record.plan.digest,
         ...(record.intent.predecessor && input.action && proof.mode !== 'bind' ? { onlyActionId: input.action.id } : {}) })
       : await applyCloudInstallationV1({ ...execution, installationId: record.installationId, planDigest: record.plan.digest, confirmActions: [input.action!.id],
-        ...(record.intent.predecessor ? { onlyActionId: input.action!.id } : {}) });
+        ...(record.intent.predecessor ? { onlyActionId: input.action!.id } : {}), ...(retryAction ? { retryActions: [retryAction] } : {}) });
     if (proof.mode === 'bind' && updated.status === 'scope-ready') bindLocalScope(input.project, input.environment, updated, input.authorize);
     const complete = updated.status === 'scope-ready' || ['allocate', 'recover'].includes(proof.mode) && updated.status === 'pending' && !updated.reason && Boolean(updated.completed[input.action!.id]);
     return { success: complete, ...(complete ? {} : { status: updated.status === 'pending' ? 'pending' as const : 'blocked' as const }),

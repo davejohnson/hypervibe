@@ -121,12 +121,58 @@ one billing PUT in the reconstructed transport. These checks run in ordinary
 check configuration execute. Repository configuration alone does not establish
 live branch-protection enforcement.
 
-The previous candidate remains source
-`ceb81302028e476c0f14dc85ea071205d9a4205c`, package version `0.1.44`, tarball SHA-256
+The previous candidate was built from
+`049182c32be0f9b1238570c885a602d40fbdb8bd`, package version `0.1.44`, tarball SHA-256
 `290997bcffa41c628fbfdb2e48abd39814b7e92f73d5b60fb2492abc35011b6a`.
-Its [acceptance run](https://github.com/davejohnson/hypervibe/actions/runs/40247019631/job/121330626037)
+Its acceptance revision `ceb81302028e476c0f14dc85ea071205d9a4205c` changed only two
+provider test files; production build inputs were unchanged. The
+[acceptance run](https://github.com/davejohnson/hypervibe/actions/runs/40247019631/job/121330626037)
 passed 7,845 tests (six skipped, one todo). Those gates remain historical baseline
 evidence for those exact bytes. This source correction requires a newly built
 package and renewed consumer acceptance;
 it has not been repacked, published or exercised against live cloud state. Offline
 regressions do not establish live billing success or full Connect Cloud readiness.
+
+### Separately reviewed rejected-attempt retries (2026-10-26)
+
+The next counterexample challenged the assumption that local continuation
+recovery exposed the shared kernel's rejected-attempt retry contract. A definite
+HTTP 400 rejection was retained correctly, but every subsequent local plan
+remained a nonbillable, unconfirmed read-only recovery. The installation returned
+`retry_confirmation_required` without a reachable public way to review that retry.
+Independent requirements are the architecture's exact-action confirmation and
+retry safety invariants, together with the observed rejected request; the native
+400 cause remains unknown.
+
+A new plan may now carry one exact rejected action/attempt pair for a continuation.
+Planning and apply both rerun the provider's authorized plan validation, including
+current native identity, billing selection and permissions. The fresh actions and
+confirmation flags must match the immutable installation contract; changed
+actions fail closed. The outer saved plan identifies each rejected attempt and
+retains its billable confirmation requirement. Only that retry and its completed
+dependency noops are projected; later actions require a fresh plan. Apply passes
+only the current action's exact retry proof to the existing shared kernel. Historical allocation
+and recovery plans retain their authority, uncertain writes remain read-only,
+and `create-exclusive-v1` project allocation still cannot be replayed.
+
+Before runtime edits, nine of ten new public-command/SQLite/native-transport
+regressions failed; the uncertain-write case passed. The correction passed all
+ten, then added current-permission and repeated-rejection/stale-plan checks.
+Independent review added first/middle GitHub identity rejection and public-reader
+grant rejection cases. All three failed before correcting the retry projection
+and fresh-review assumptions. GitHub and public-registry planning now verifies
+already-completed prerequisites through their existing exact ownership helpers;
+unowned resources still conflict.
+Coverage includes missing confirmation, changed billing before and after review,
+denied project reads, replaced lifetimes, wrong/stale attempts, and old saved
+allocate/recovery plans. Fixtures reconstruct responses and unspecified HTTP 400
+rejection; they do not diagnose the live billing error or establish live retry
+success. No cloud operation or package cutover is authorized by these tests.
+
+Final focused evidence covers all 15 new application scenarios and 29 tests in
+the changed provider suites; type checking and diff whitespace validation passed.
+Two timed-out existing continuation scenarios passed their focused rerun. The
+broader six-suite run's 111 passes and two timeouts are retained as an incomplete
+run, rather than reported as an uninterrupted green gate. These regressions remain
+in the ordinary acceptance test path; the corrected source needs its own CI and
+package/consumer acceptance before replacing the historical candidate.

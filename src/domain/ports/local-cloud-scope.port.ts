@@ -8,6 +8,7 @@ export const localCloudScopePlanSchema = z.object({
   installationPlanDigest: z.string().regex(/^[a-f0-9]{64}$/),
   hostingProvider: z.string().min(1).max(100),
   mode: z.enum(['allocate', 'recover', 'verified', 'bind']),
+  retryActions: z.array(z.object({ actionId: z.string().min(1).max(200), attemptId: z.string().guid() }).strict()).length(1).optional(),
 }).strict();
 export type LocalCloudScopePlan = z.infer<typeof localCloudScopePlanSchema>;
 export const localCloudScopeActionMetadataSchema = localCloudScopePlanSchema.extend({
@@ -16,7 +17,8 @@ export const localCloudScopeActionMetadataSchema = localCloudScopePlanSchema.ext
 }).strict();
 export function isLocalCloudScopeAction(action: PlanAction): boolean {
   const parsed = localCloudScopeActionMetadataSchema.safeParse(action.metadata);
-  return parsed.success && action.id === parsed.data.nativeActionId && action.verified
+  return parsed.success && (!parsed.data.retryActions || parsed.data.mode === 'allocate')
+    && action.id === parsed.data.nativeActionId && action.verified
     && (parsed.data.mode === 'allocate' ? ['create', 'update', 'noop'].includes(action.type) && (action.type === 'noop' || action.requiresConfirm === true)
       : parsed.data.mode === 'bind' ? action.id === 'cloud-scope:bind' && action.type === 'update' && action.requiresConfirm === true
       : parsed.data.mode === 'recover' && action.type === 'update' && action.requiresConfirm !== true && action.billable !== true);

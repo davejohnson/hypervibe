@@ -285,7 +285,10 @@ export function createGcpGithubCiPreparationDriver(options: { fetch?: typeof fet
         if (n.scopeKind === 'github-ci-disconnection') {
           for (const operation of ['create-pool', 'create-account', 'create-provider', 'create-role'] as const) await owned(client, context, operation);
           for (const action of actions(context.intent)) await grant(client, { ...context, action });
-        } else for (const operation of ['create-pool', 'create-account', 'create-role'] as const) if (await resource(client, context, operation)) fail();
+        } else for (const operation of ['create-pool', 'create-account', 'create-role'] as const) {
+          if (context.completed[`gcp:github-ci:${operation}`]) await owned(client, context, operation);
+          else if (await resource(client, context, operation)) fail();
+        }
       });
       return { actions: actions(context.intent), review: { resources: actions(context.intent).filter(action => action.type === 'create' || isRevocation(action.metadata.operation))
         .map(action => ({ kind: action.metadata.operation, name: action.resource.name, scope: `projects/${n.projectNumber}` })),

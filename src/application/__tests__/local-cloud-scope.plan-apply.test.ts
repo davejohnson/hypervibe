@@ -371,7 +371,108 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
     expect(JSON.stringify({ applied, status })).not.toContain(token);
   });
 
-  it.each(['normal', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-lost-ack', 'public-registry', 'public-grant-lost-ack', 'github-ci-public-registry'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
+  it.each(['rejected', 'uncertain', 'unconfirmed', 'changed-billing-before-review', 'changed-billing-after-review',
+    'denied-project', 'replaced-project', 'denied-permission', 'wrong-attempt', 'stale-attempt', 'original-plan', 'legacy-recovery'] as const)(
+    'reviews an exact rejected continuation retry without replaying uncertain work: %s', async scenario => {
+      // Product contract: a new reviewed plan may retry a definitely rejected
+      // continuation; uncertain writes and the one-shot project allocation keep
+      // their existing recovery boundary. The HTTP 400 cause is unspecified.
+      const f = fixture(); const allocation = await f.plan(); if ('error' in allocation) throw new Error(allocation.error);
+      expect(await f.apply(allocation.planRunId)).toMatchObject({ kind: 'executed', result: { success: true } });
+      const desired = structuredClone(f.desired) as any;
+      desired.environments.staging.hosting.scopePreparation.continuation = { nativeScope: {
+        scopeKind: 'operator-hosting-v1', billingAccountName: 'billingAccounts/ABCDEF-123456-789ABC',
+      } };
+      f.store.replace(f.project, desired);
+      const base = f.request.getMockImplementation()!;
+      let billing = ''; let writes = 0; let changed = false;
+      f.request.mockImplementation(async (input, init) => {
+        const url = new URL(String(input)); const method = init?.method ?? 'GET';
+        if (url.pathname.endsWith(':testIamPermissions')) return Response.json({ permissions: changed && scenario === 'denied-permission' ? [] : [
+          'billing.accounts.get', 'billing.resourceAssociations.create', 'resourcemanager.projects.get',
+          'resourcemanager.projects.createBillingAssignment', 'serviceusage.services.list', 'serviceusage.effectivepolicy.get',
+        ] });
+        if (url.host === 'cloudbilling.googleapis.com') {
+          if (url.pathname === '/v1/billingAccounts/ABCDEF-123456-789ABC') return Response.json({ name: 'billingAccounts/ABCDEF-123456-789ABC', open: true });
+          expect(url.pathname).toBe(`/v1/projects/${nativeId}/billingInfo`);
+          if (method === 'PUT') {
+            expect(JSON.parse(String(init?.body))).toEqual({ billingAccountName: 'billingAccounts/ABCDEF-123456-789ABC' });
+            writes++;
+            if (writes === 1 || scenario === 'stale-attempt' && writes === 2) {
+              if (scenario === 'uncertain') throw new Error('synthetic lost billing response');
+              return new Response(null, { status: 400 });
+            }
+            billing = 'billingAccounts/ABCDEF-123456-789ABC';
+          }
+          return Response.json({ name: `projects/${nativeId}/billingInfo`, projectId: nativeId, billingAccountName: billing, billingEnabled: !!billing });
+        }
+        const response = await base(input, init);
+        if (changed && url.pathname === `/v3/projects/${nativeId}`) {
+          if (scenario === 'denied-project') return Response.json({}, { status: 403 });
+          if (scenario === 'replaced-project') return Response.json({ ...await response.json() as Record<string, unknown>, createTime: '2026-10-25T09:00:00Z' });
+        }
+        return response;
+      });
+      const registry = new CommandRegistry(); registerCoreTools(registry, f.ctx);
+      const plan = () => registry.execute('hv_plan', { project: f.project.name, env: 'staging' });
+      const apply = (id: string, confirmActions = ['gcp:billing:initial-assignment-v1']) => registry.execute('hv_apply', { project: f.project.name, planId: id, confirmActions });
+      const first = await plan(); expect(first.ok).toBe(true);
+      const firstPlanId = (first.data as any).planId;
+      const installationId = (f.ctx.repos.runs.findById(firstPlanId)!.plan as any).cloudScope.installationId;
+      expect(await apply(firstPlanId)).toMatchObject({ ok: true, data: { applied: false } });
+      const attempt = (f.ctx.repos.runs.findById(installationId)!.plan as any).attempts[0];
+      expect(attempt.status).toBe(scenario === 'uncertain' ? 'uncertain' : 'rejected');
+      if (scenario === 'changed-billing-before-review') billing = 'billingAccounts/111111-222222-333333';
+      const reviewed = await plan();
+      if (scenario === 'changed-billing-before-review') {
+        expect.soft(reviewed.ok).toBe(false); expect(writes).toBe(1); return;
+      }
+      expect(reviewed.ok).toBe(true);
+      const retryPlanId = (reviewed.data as any).planId;
+      const document = structuredClone(f.ctx.repos.runs.findById(retryPlanId)!.plan) as any;
+      if (scenario === 'uncertain') {
+        expect(document.cloudScope.mode).toBe('recover');
+        expect(document.cloudScope).not.toHaveProperty('retryActions');
+      } else {
+        expect.soft((reviewed.data as any).actions).toMatchObject([{ billable: true, requiresConfirm: true, reason: expect.stringContaining(attempt.id) }]);
+        expect.soft(document.cloudScope).toMatchObject({ mode: 'allocate', retryActions: [{ actionId: attempt.actionId, attemptId: attempt.id }] });
+      }
+      if (scenario === 'wrong-attempt') {
+        document.cloudScope.retryActions = [{ actionId: attempt.actionId, attemptId: '00000000-0000-4000-8000-000000000001' }];
+        for (const action of document.actions) {
+          action.metadata.retryActions = document.cloudScope.retryActions;
+          action.reason = action.reason.replace(attempt.id, document.cloudScope.retryActions[0].attemptId);
+        }
+        f.ctx.repos.runs.updatePlan(retryPlanId, document);
+      }
+      if (scenario === 'legacy-recovery') {
+        document.cloudScope.mode = 'recover'; delete document.cloudScope.retryActions;
+        for (const action of document.actions) {
+          action.type = 'update'; action.requiresConfirm = false; action.billable = false; action.dataBearing = false;
+          action.reason = 'Read only the exact retained preparation and native operation; never repeat an uncertain mutation or adopt a replacement.';
+          action.metadata.mode = 'recover'; delete action.metadata.retryActions;
+        }
+        f.ctx.repos.runs.updatePlan(retryPlanId, document);
+      }
+      if (scenario === 'changed-billing-after-review') billing = 'billingAccounts/111111-222222-333333';
+      if (scenario === 'stale-attempt') {
+        expect(await apply(retryPlanId)).toMatchObject({ ok: true, data: { applied: false } });
+        expect(writes).toBe(2);
+        const newest = (f.ctx.repos.runs.findById(installationId)!.plan as any).attempts.at(-1);
+        expect(newest.status).toBe('rejected'); expect(newest.id).not.toBe(attempt.id);
+        const next = await plan(); expect(next.ok).toBe(true);
+        const nextDocument = f.ctx.repos.runs.findById((next.data as any).planId)!.plan as any;
+        expect(nextDocument.cloudScope.retryActions).toEqual([{ actionId: attempt.actionId, attemptId: newest.id }]);
+      }
+      changed = true;
+      const applied = await apply(scenario === 'original-plan' ? firstPlanId : retryPlanId, scenario === 'unconfirmed' ? [] : undefined);
+      expect.soft((applied.data as any)?.applied === true).toBe(scenario === 'rejected');
+      expect(writes).toBe(['rejected', 'stale-attempt'].includes(scenario) ? 2 : 1); expect(f.writes).toHaveLength(1);
+      if (scenario.startsWith('changed-billing')) expect(billing).toBe('billingAccounts/111111-222222-333333');
+      expect(JSON.stringify({ reviewed, applied })).not.toContain(token);
+    });
+
+  it.each(['normal', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-lost-ack', 'github-ci-rejected-first', 'github-ci-rejected-middle', 'public-registry', 'public-grant-lost-ack', 'public-grant-rejected', 'github-ci-public-registry'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
     const f = fixture(); const allocated = await f.plan(); if ('error' in allocated) throw new Error(allocated.error);
     expect(await f.apply(allocated.planRunId)).toMatchObject({ kind: 'executed', result: { success: true } });
     const desired = structuredClone(f.desired) as any;
@@ -386,13 +487,13 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
         githubWorkflow: '.github/workflows/deploy-cloudrun-staging.yml', githubBackupWorkflow: '.github/workflows/hypervibe-backup-staging.yml' });
       f.store.replace(f.project, desired);
     }
-    const native = new Map<string, any>(), operations = new Map<string, any>(); let lostCiAck = false;
+    const native = new Map<string, any>(), operations = new Map<string, any>(); let lostCiAck = false; let rejectedCi = false;
     const unrelated = { role: 'roles/viewer', members: ['user:unrelated@example.invalid'], condition: { title: 'retained', expression: 'true' } };
     const projectPolicy = { version: 3, etag: 'project-etag', bindings: [unrelated] } as any;
     const accountPolicy = { version: 3, etag: 'account-etag', bindings: [] } as any;
     const registryPolicy = { version: 3, etag: 'registry-etag', bindings: [unrelated] } as any;
     const publicPolicy = { version: 3, etag: 'public-etag', bindings: [unrelated] } as any;
-    const registries = new Map<string, Record<string, unknown>>(); let lostPublicAck = false;
+    const registries = new Map<string, Record<string, unknown>>(); let lostPublicAck = false; let rejectedPublic = false;
     const base = f.request.getMockImplementation()!; let billing = false; let apis = false; const writes: string[] = [];
     f.request.mockImplementation(async (input, init) => {
       const url = new URL(String(input)); const method = init?.method ?? 'GET';
@@ -407,6 +508,9 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       if (url.pathname.endsWith(':setIamPolicy')) {
         const target = url.host === 'iam.googleapis.com' ? accountPolicy : url.host === 'artifactregistry.googleapis.com' ? (url.pathname.includes('/operator-public:') ? publicPolicy : registryPolicy) : projectPolicy;
         const body = JSON.parse(String(init?.body)); expect(body.policy.etag).toBe(target.etag);
+        if (target === publicPolicy && scenario === 'public-grant-rejected' && !rejectedPublic) {
+          rejectedPublic = true; writes.push('public-iam-rejected'); return new Response(null, { status: 400 });
+        }
         Object.assign(target, body.policy, { etag: target.etag + '-next' }); writes.push(target === publicPolicy ? 'public-iam-policy' : 'iam-policy');
         if (target === publicPolicy && scenario === 'public-grant-lost-ack' && !lostPublicAck) { lostPublicAck = true; throw new Error('synthetic lost public policy acknowledgment'); }
         return Response.json(target);
@@ -414,6 +518,10 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       if (url.host === 'iam.googleapis.com') {
         const name = url.pathname.replace('/v1/', '');
         if (method !== 'POST') return Response.json(operations.get(name) ?? native.get(name) ?? {}, { status: operations.has(name) || native.has(name) ? 200 : 404 });
+        if (!rejectedCi && (scenario === 'github-ci-rejected-first' && name.endsWith('/workloadIdentityPools')
+          || scenario === 'github-ci-rejected-middle' && name.endsWith('/roles'))) {
+          rejectedCi = true; writes.push('ci-rejected'); return new Response(null, { status: 400 });
+        }
         const body = JSON.parse(String(init?.body)); writes.push('ci-identity');
         if (name.endsWith('/workloadIdentityPools') || name.endsWith('/providers')) {
           const id = url.searchParams.get('workloadIdentityPoolId') ?? url.searchParams.get('workloadIdentityPoolProviderId');
@@ -484,10 +592,14 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       for (let step = 0; step < 6; step++) {
         const planned = await f.plan(); if ('error' in planned) throw new Error(JSON.stringify(planned));
         if (planned.actions.some(action => action.id === 'cloud-scope:bind' || action.id.startsWith('gcp:github-ci:'))) break;
-        await f.apply(planned.planRunId, planned.actions.filter(action => action.type !== 'noop' && action.requiresConfirm).map(action => action.id));
+        const retryActions = (f.ctx.repos.runs.findById(planned.planRunId)!.plan as any).cloudScope.retryActions as Array<{ actionId: string }> | undefined;
+        if (retryActions) expect(planned.actions.filter(action => action.type !== 'noop').map(action => action.id)).toEqual(retryActions.map(retry => retry.actionId));
+        const applied = await f.apply(planned.planRunId, planned.actions.filter(action => action.type !== 'noop' && action.requiresConfirm).map(action => action.id));
+        if (retryActions) expect(applied).toMatchObject({ kind: 'executed', result: { success: true } });
       }
       expect(writes.filter(write => write === 'registry')).toHaveLength(2);
       expect(writes.filter(write => write === 'public-iam-policy')).toHaveLength(1);
+      if (scenario === 'public-grant-rejected') expect(writes.filter(write => write === 'public-iam-rejected')).toHaveLength(1);
       expect(publicPolicy.bindings).toEqual([unrelated, { role: 'roles/artifactregistry.reader', members: ['allUsers'] }]);
       expect(registryPolicy.bindings).toEqual([unrelated]);
     }
@@ -501,12 +613,22 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
         // Reconstruct the application context every time: all authoritative
         // ownership, attempts and partial completion come from durable SQLite.
         const confirmations = planned.actions.filter(action => action.type !== 'noop' && action.requiresConfirm).map(action => action.id);
+        const retryActions = (f.ctx.repos.runs.findById(planned.planRunId)!.plan as any).cloudScope.retryActions as Array<{ actionId: string }> | undefined;
+        if (retryActions) {
+          // A retry plan must be executable as reviewed. Unattempted later work
+          // cannot inherit this exact rejected-attempt authorization.
+          expect(planned.actions.filter(action => action.type !== 'noop').map(action => action.id)).toEqual(retryActions.map(retry => retry.actionId));
+          for (const action of planned.actions) for (const dependency of action.dependsOn ?? [])
+            expect(planned.actions.find(candidate => candidate.id === dependency)?.type).toBe('noop');
+        }
         const result = await executePlanApply(createCommandContext(), { project: f.project, spec: current.spec, specRevision: current.revision,
           planId: planned.planRunId, confirmActions: step === 0 ? confirmations.slice(0, 1) : confirmations });
+        if (retryActions) expect(result).toMatchObject({ kind: 'executed', result: { success: true } });
         if (step === 0) { expect(writes).toHaveLength(before); expect(result).toMatchObject({ kind: 'executed', result: { success: false } }); }
         else expect(writes.length - before).toBeLessThanOrEqual(confirmations.length);
       }
       expect(writes.filter(write => write === 'ci-identity')).toHaveLength(4);
+      if (scenario.includes('rejected-')) expect(writes.filter(write => write === 'ci-rejected')).toHaveLength(1);
       expect(writes.filter(write => write === 'iam-policy')).toHaveLength(3);
       expect(projectPolicy.bindings).toEqual(expect.arrayContaining([unrelated]));
       expect(projectPolicy.bindings.some((binding: any) => binding.role === 'roles/artifactregistry.writer')).toBe(false);
@@ -558,7 +680,8 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       if (publicImages) expect(publicPolicy.bindings).toEqual([unrelated, { role: 'roles/artifactregistry.reader', members: ['allUsers'] }]); expect(JSON.stringify({ bind, after })).not.toMatch(/synthetic-local-allocation-token|synthetic-refresh/);
       return;
     }
-    expect(writes).toEqual(['billing', 'apis', 'registry', ...(publicImages ? ['registry', 'public-iam-policy'] : [])]);
+    expect(writes).toEqual(['billing', 'apis', 'registry', ...(publicImages
+      ? ['registry', ...(scenario === 'public-grant-rejected' ? ['public-iam-rejected'] : []), 'public-iam-policy'] : [])]);
     const instantiate = vi.spyOn(providerRegistry, 'createAdapter').mockResolvedValue({} as any);
     expect(await adapterFactory.getProviderAdapter('cloudrun', f.project, undefined, 'staging')).toMatchObject({ success: true });
     expect(await adapterFactory.getProviderAdapter('cloudrun', f.project, undefined, 'production')).toMatchObject({ success: false });

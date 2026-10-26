@@ -201,7 +201,9 @@ export function createGcpLocalArtifactRegistryDriver(options: { fetch?: typeof f
     async plan(context) {
       const requestedPermissions = ['artifactregistry.repositories.get', 'artifactregistry.repositories.create', ...(options.public ? ['artifactregistry.repositories.getIamPolicy', 'artifactregistry.repositories.setIamPolicy'] : [])];
       await withClient(context, async client => {
-        if (await read(client, context)) fail();
+        if (names(context.intent).publicRepository && context.completed[PUBLIC_CREATE])
+          await createdPublic(client, { ...context, action: publicGrantAction(context.intent) });
+        else if (await read(client, context)) fail();
         const permissions = (await client.json(`https://cloudresourcemanager.googleapis.com/v3/projects/${names(context.intent).projectNumber}:testIamPermissions`,
           { method: 'POST', body: JSON.stringify({ permissions: requestedPermissions }) })).permissions;
         if (!Array.isArray(permissions) || !requestedPermissions.every(permission => permissions.includes(permission))) fail('insufficient_permissions');

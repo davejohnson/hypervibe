@@ -506,6 +506,32 @@ export function reconcileCloudInstallationV1<I extends CloudInstallationExecutab
   return execute({ ...input, confirmActions: [] }, true);
 }
 
+/** Fresh authority review for exact rejected local continuation attempts; never mutates or rewrites their history. */
+export async function reviewCloudInstallationRetryV1(input: CloudInstallationContext<LocalCloudScopePreparationIntent> & {
+  installationId: string; planDigest: string;
+}): Promise<{ retryActions: Array<{ actionId: string; attemptId: string }>; review: CloudInstallationRecord['plan']['review'] }> {
+  const record = await read(input, input.installationId);
+  if (!record || record.plan.digest !== input.planDigest || !record.intent.predecessor
+    || !input.driver.localScopePreparation?.continuation || record.plan.blockedReason) throw new CloudInstallationError('scope_mismatch');
+  const pending = record.plan.actions.filter(action => !record.completed[action.id]).map(action =>
+    record.attempts.filter(attempt => attempt.actionId === action.id).at(-1)).filter(attempt => !!attempt);
+  if (!pending.length || pending.some(attempt => attempt.status !== 'rejected')) throw new CloudInstallationError('retry_confirmation_required');
+  let proposal;
+  try { proposal = await authorized(input, record.intent, 'plan', record.plan.digest, undefined,
+    context => input.driver.plan(context), record.completed, [], record.attempts); }
+  catch (error) { throw new CloudInstallationError(reason(error)); }
+  const blockedReason = proposal.blockedReason === undefined ? undefined : contract(() => reasonSchema.parse(proposal.blockedReason));
+  const actions = parseActions(proposal.actions, record.intent, input.driver, blockedReason);
+  const review = contract(() => reviewSchema.parse(proposal.review));
+  // Recompute confirmation/cost flags through the provider contract. A changed
+  // action requires a new installation review, never reuse of historical authority.
+  if (blockedReason || canonical(actions) !== canonical(record.plan.actions)) throw new CloudInstallationError(blockedReason ?? 'not_converged');
+  const retry = pending.find(attempt => record.plan.actions.find(action => action.id === attempt.actionId)!
+    .dependsOn?.every(dependency => !!record.completed[dependency]) !== false);
+  if (!retry) throw new CloudInstallationError('not_converged');
+  return { retryActions: [{ actionId: retry.actionId, attemptId: retry.id }], review };
+}
+
 /** Re-observe the prepared scope, then persist separately reviewed collection or deployment access. */
 export async function planCloudInstallationContinuationV1(input: CloudInstallationContext & {
   scopePreparationId: string; scopePreparationDigest: string; installationId: string;
