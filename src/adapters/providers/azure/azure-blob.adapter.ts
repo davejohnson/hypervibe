@@ -1,3 +1,4 @@
+import { AzureAuthenticationSchema, azureConnectionIdentity, canUseAzureCredentialsForAutomation } from './azure-datastore.credentials.js';
 import { azureEnvironmentResourceGroupScope, legacyAzureEnvironmentResourceGroupScope } from './azure-environment-scope.js';
 import { Readable } from 'node:stream';
 import { resourceName } from '../../../domain/services/resource-names.js';
@@ -36,19 +37,6 @@ const ENVIRONMENT_TAG = 'hypervibe-environment-id';
 const STORAGE_NAME_TAG = 'hypervibe-storage-name';
 const PROJECT_TAG = 'hypervibe-project';
 
-const AzureBlobStorageAuthenticationSchema = z.object({
-  authMode: z.enum(['default', 'servicePrincipal']).default('servicePrincipal'),
-  tenantId: z.string().guid('Azure tenant ID must be a UUID').optional(),
-  subscriptionId: z.string().guid('Azure subscription ID must be a UUID').optional(),
-  clientId: z.string().guid('Azure service principal client ID must be a UUID').optional(),
-  clientSecret: z.string().min(8, 'Azure service principal client secret is required').optional(),
-}).strict().superRefine((value, ctx) => {
-  if (value.authMode === 'default') return;
-  for (const field of ['tenantId', 'subscriptionId', 'clientId', 'clientSecret'] as const) {
-    if (!value[field]) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `Azure ${field} is required` });
-  }
-});
-
 export const AzureBlobStorageCredentialsSchema = z.preprocess((input) => {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
   const { resourceGroup: _legacyResourceGroup, location: _legacyLocation, ...authentication } = input as Record<string, unknown>;
@@ -56,7 +44,7 @@ export const AzureBlobStorageCredentialsSchema = z.preprocess((input) => {
     authentication.authMode = 'servicePrincipal';
   }
   return authentication;
-}, AzureBlobStorageAuthenticationSchema);
+}, AzureAuthenticationSchema);
 
 export type AzureBlobStorageCredentials = z.infer<typeof AzureBlobStorageCredentialsSchema>;
 export type ConnectedAzureBlobStorageCredentials = AzureResourceManagerCredentials;
@@ -94,7 +82,7 @@ export interface AzureBlobStorageAdapterOptions {
   controlPlaneFactory?: (credentials: ConnectedAzureBlobStorageCredentials, resourceGroup?: string) => AzureStorageControlPlane;
   dataPlaneFactory?: (account: string, key: string, container: string) => AzureBlobDataPlane;
   storageHttpClient?: StoragePipelineOptions['httpClient'];
-  defaultCredentialProvider?: (preferredSubscriptionId?: string) => Promise<{ authMode: 'default'; subscriptionId: string }>;
+  defaultCredentialProvider?: (preferredSubscriptionId?: string, options?: { tenantId?: string }) => Promise<{ authMode: 'default'; subscriptionId: string; tenantId?: string }>;
 }
 
 interface AzureStorageKeys {
@@ -388,7 +376,7 @@ export class AzureBlobStorageAdapter implements IStorageAdapter {
   private control: AzureStorageControlPlane | null = null;
   private readonly controlPlaneFactory: (credentials: ConnectedAzureBlobStorageCredentials, resourceGroup?: string) => AzureStorageControlPlane;
   private readonly dataPlaneFactory: (account: string, key: string, container: string) => AzureBlobDataPlane;
-  private readonly defaultCredentialProvider: (preferredSubscriptionId?: string) => Promise<{ authMode: 'default'; subscriptionId: string }>;
+  private readonly defaultCredentialProvider: (preferredSubscriptionId?: string, options?: { tenantId?: string }) => Promise<{ authMode: 'default'; subscriptionId: string; tenantId?: string }>;
 
   constructor(options: AzureBlobStorageAdapterOptions = {}) {
     this.controlPlaneFactory = options.controlPlaneFactory ?? ((credentials, resourceGroup) => new ArmStorageControlPlane(credentials, resourceGroup));
@@ -414,6 +402,8 @@ export class AzureBlobStorageAdapter implements IStorageAdapter {
     this.credentials = null;
     this.resolvedCredentials = null;
   }
+
+  getConnectionIdentity(): Record<string, string> { return azureConnectionIdentity(this.resolvedCredentials); }
 
   async verify(): Promise<VerifyResult> {
     try {
@@ -694,7 +684,7 @@ export class AzureBlobStorageAdapter implements IStorageAdapter {
     if (!this.credentials) throw new Error('Not connected. Call connect() first.');
     if (this.resolvedCredentials) return this.resolvedCredentials;
     if (this.credentials.authMode === 'default') {
-      this.resolvedCredentials = await this.defaultCredentialProvider(this.credentials.subscriptionId);
+      this.resolvedCredentials = await this.defaultCredentialProvider(this.credentials.subscriptionId, { tenantId: this.credentials.tenantId });
       return this.resolvedCredentials;
     }
     this.resolvedCredentials = {
@@ -770,9 +760,11 @@ providerRegistry.register({
     credentialsSchema: AzureBlobStorageCredentialsSchema,
     setupHelpUrl: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
     credentials: {
+      canUseForAutomation: canUseAzureCredentialsForAutomation,
+      supportsNativeCliAuth: true,
+      verifiedIdentityKeys: ['authMode', 'subscriptionId', 'tenantId'],
       automationSecretKeys: { AZURE_TENANT_ID: 'tenantId', AZURE_SUBSCRIPTION_ID: 'subscriptionId',
         AZURE_CLIENT_ID: 'clientId', AZURE_CLIENT_SECRET: 'clientSecret' },
-      supportsNativeCliAuth: true,
       environmentVariableAliases: [
         ['AZURE_TENANT_ID', 'HYPERVIBE_AZURE_TENANT_ID'],
         ['AZURE_SUBSCRIPTION_ID', 'HYPERVIBE_AZURE_SUBSCRIPTION_ID'],

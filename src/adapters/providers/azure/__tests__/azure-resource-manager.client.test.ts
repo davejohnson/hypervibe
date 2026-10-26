@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Buffer } from 'node:buffer';
-import { AzureDatastoreCredentialsSchema } from '../azure-datastore.credentials.js';
+import { AzureDatastoreCredentialsSchema, resolveAzureAuthentication } from '../azure-datastore.credentials.js';
 import {
   AzureResourceManagerClient,
   AzureResourceManagerError,
@@ -13,14 +13,16 @@ const COLLECTION =
   `/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}`
   + '/providers/Microsoft.Example/resources';
 
-const credentials = AzureDatastoreCredentialsSchema.parse({
+const resolvedCredentials = await resolveAzureAuthentication(AzureDatastoreCredentialsSchema.parse({
   tenantId: '11111111-1111-4111-8111-111111111111',
   subscriptionId: SUBSCRIPTION_ID,
   clientId: '33333333-3333-4333-8333-333333333333',
   clientSecret: 'azure-client-secret',
   resourceGroup: RESOURCE_GROUP,
   location: 'canadacentral',
-});
+}));
+if (resolvedCredentials.authMode === 'default') throw new Error('Expected service-principal fixture.');
+const credentials = resolvedCredentials;
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -49,16 +51,16 @@ afterEach(() => {
 describe('AzureResourceManagerClient', () => {
   it('derives an unambiguous subscription from the Azure default credential chain', async () => {
     const request = vi.fn(async () => jsonResponse({
-      value: [{ subscriptionId: SUBSCRIPTION_ID, state: 'Enabled' }],
+      value: [{ subscriptionId: SUBSCRIPTION_ID, tenantId: credentials.tenantId, state: 'Enabled' }],
     }));
 
     await expect(resolveAzureDefaultSubscription(undefined, {
       tokenProvider: async () => 'default-chain-token',
       fetch: request as typeof fetch,
-    })).resolves.toEqual({ authMode: 'default', subscriptionId: SUBSCRIPTION_ID });
+    })).resolves.toEqual({ authMode: 'default', subscriptionId: SUBSCRIPTION_ID, tenantId: credentials.tenantId });
     expect(request).toHaveBeenCalledWith(
       'https://management.azure.com/subscriptions?api-version=2022-12-01',
-      { headers: { Accept: 'application/json', Authorization: 'Bearer default-chain-token' } }
+      expect.objectContaining({ headers: { Accept: 'application/json', Authorization: 'Bearer default-chain-token' }, redirect: 'error', signal: expect.any(AbortSignal) })
     );
   });
 
@@ -66,8 +68,8 @@ describe('AzureResourceManagerClient', () => {
     await expect(resolveAzureDefaultSubscription(undefined, {
       tokenProvider: async () => 'default-chain-token',
       fetch: (async () => jsonResponse({ value: [
-        { subscriptionId: SUBSCRIPTION_ID, state: 'Enabled' },
-        { subscriptionId: '55555555-5555-4555-8555-555555555555', state: 'Enabled' },
+        { subscriptionId: SUBSCRIPTION_ID, tenantId: credentials.tenantId, state: 'Enabled' },
+        { subscriptionId: '55555555-5555-4555-8555-555555555555', tenantId: credentials.tenantId, state: 'Enabled' },
       ] })) as typeof fetch,
     })).rejects.toThrow(/multiple subscriptions/);
   });

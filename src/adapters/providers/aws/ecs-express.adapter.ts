@@ -1,3 +1,4 @@
+import { AwsConnectionAuthentication, awsAuthenticationFields, awsConnectionRegion, checkedAwsAccountId, validateAwsAuthentication, canUseAwsCredentialsForAutomation } from './aws-authentication.js';
 import type { ProviderRuntimeIdentity } from '../../../domain/ports/provider.port.js';
 import type { ProviderEnvironmentVariablesRequest, ProviderEnvironmentVariablesResult } from '../../../domain/ports/provider-env-vars.port.js';
 import { createEcsRegistryCredentialLifecycle } from './ecs-registry-credential.js';
@@ -150,10 +151,7 @@ const INTERNAL_ENV_KEYS = new Set([
   IMAGE_DIGEST_KEY,
 ]);
 
-const EcsExpressAuthenticationSchema = z.object({
-  accessKeyId: z.string().trim().min(16, 'AWS access key ID is required'),
-  secretAccessKey: z.string().min(32, 'AWS secret access key is required'),
-}).strict();
+const EcsExpressAuthenticationSchema = z.object(awsAuthenticationFields).strict().superRefine(validateAwsAuthentication);
 
 export const EcsExpressCredentialsSchema = z.preprocess((input) => {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
@@ -233,7 +231,9 @@ export class EcsExpressAdapter implements IProviderAdapter {
     if (this.transient) throw new CloudDeploymentAccessError('scope_mismatch');
     const { credentials } = this.connected();
     const secrets = new AwsSecretsAdapter();
-    await secrets.connect({ accessKeyId: credentials.accessKeyId, secretAccessKey: credentials.secretAccessKey, region: credentials.region });
+    const source = await this.authentication!.credentials();
+    await secrets.connect({ accessKeyId: source.accessKeyId, secretAccessKey: source.secretAccessKey,
+      ...(source.sessionToken ? { sessionToken: source.sessionToken } : {}), region: credentials.region });
     return secrets;
   });
   readonly serviceVolumes = new EcsServiceVolumes(() => ({ clients: this.connected().clients, region: this.connected().credentials.region }), () => this.resolveAccountId());
@@ -258,6 +258,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
   private credentials: ConnectedEcsExpressCredentials | null = null;
   private clients: AwsClients | null = null;
   private accountId: string | null = null;
+  private authentication: AwsConnectionAuthentication | null = null;
   private transient: { input: CloudDeploymentAdapterInputV1; credentials: ReturnType<typeof createAwsDeploymentCredentialProvider>; requestHandler?: STSClientConfig['requestHandler'] } | null = null;
 
   async resolveRuntimeIdentity(environment: Environment, service: Pick<Service, 'name' | 'buildConfig'>): Promise<ProviderRuntimeIdentity> {
@@ -314,7 +315,9 @@ export class EcsExpressAdapter implements IProviderAdapter {
     const parsed = EcsExpressCredentialsSchema.parse(credentials);
     const legacyRegion = credentials && typeof credentials === 'object' && typeof (credentials as Record<string, unknown>).region === 'string'
       ? (credentials as Record<string, string>).region
-      : DEFAULT_ECS_REGION;
+      : await awsConnectionRegion(parsed, DEFAULT_ECS_REGION);
+    this.authentication = null;
+    this.accountId = null;
     this.credentials = { ...parsed, region: EcsRegionSchema.parse(legacyRegion) };
     this.transient = null;
     this.replaceClients();
@@ -323,6 +326,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
   async connectTransient(input: CloudDeploymentAdapterInputV1, options: { requestHandler?: STSClientConfig['requestHandler'] } = {}): Promise<void> {
     const validated = validateCloudDeploymentAdapterInputV1(input, { provider: 'aws', hostingProvider: 'ecs', parseScope: value => awsDeploymentScopeSchema.parse(value) });
     const credentials = createAwsDeploymentCredentialProvider(validated, options);
+    this.authentication = null;
     this.transient = { input: validated, credentials, requestHandler: options.requestHandler };
     this.credentials = { region: validated.connection.deployment.region };
     this.accountId = null;
@@ -343,11 +347,13 @@ export class EcsExpressAdapter implements IProviderAdapter {
   private replaceClients(): void {
     if (!this.credentials) throw new Error('Not connected. Call connect() first.');
     for (const client of Object.values(this.clients ?? {})) client.destroy();
+    if (!this.transient) {
+      this.credentials = { ...this.credentials, ...this.authentication?.identity() };
+      this.authentication = new AwsConnectionAuthentication(this.credentials, this.credentials.region);
+    }
     const config = {
       region: this.credentials.region,
-      credentials: this.transient ? () => this.transient!.credentials(AbortSignal.timeout(30_000)) : {
-        accessKeyId: this.credentials.accessKeyId!, secretAccessKey: this.credentials.secretAccessKey!,
-      },
+      credentials: this.transient ? () => this.transient!.credentials(AbortSignal.timeout(30_000)) : this.authentication!.credentials,
       ...(this.transient ? { maxAttempts: 1, requestHandler: this.transient.requestHandler } : {}),
     };
     this.clients = {
@@ -363,6 +369,8 @@ export class EcsExpressAdapter implements IProviderAdapter {
     if (this.transient) for (const client of Object.values(this.clients)) boundAwsSdkResponses(client);
   }
 
+  getConnectionIdentity(): Record<string, string> { return this.authentication?.identity() ?? {}; }
+
   async verify(): Promise<VerifyResult> {
     try {
       const { clients, credentials } = this.connected();
@@ -374,7 +382,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
       if (!identity.Account || !/^\d{12}$/.test(identity.Account)) {
         return { success: false, error: 'AWS did not return a valid account identity.' };
       }
-      this.accountId = identity.Account;
+      this.accountId = checkedAwsAccountId(identity.Account, this.credentials?.accountId);
       return {
         success: true,
         email: `AWS account ${identity.Account} (${credentials.region})`,
@@ -388,6 +396,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
     for (const client of Object.values(this.clients ?? {})) client.destroy();
     this.clients = null;
     this.credentials = null;
+    this.authentication = null;
     this.accountId = null;
     this.transient = null;
   }
@@ -1179,7 +1188,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
     if (!identity.Account || !/^\d{12}$/.test(identity.Account)) {
       throw new Error('AWS did not return a valid account identity.');
     }
-    this.accountId = identity.Account;
+    this.accountId = checkedAwsAccountId(identity.Account, this.credentials?.accountId);
     return identity.Account;
   }
 
@@ -2229,7 +2238,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
 
   private formatError(error: unknown): string {
     if (this.transient) return error instanceof CloudDeploymentAccessError ? error.message : 'AWS deployment operation could not be verified.';
-    return error instanceof Error ? error.message : String(error);
+    return this.authentication?.redact(error) ?? (error instanceof Error ? error.message : String(error));
   }
 
   private async observeDomains(params: {
@@ -2284,6 +2293,9 @@ providerRegistry.register({
     credentialsSchema: EcsExpressCredentialsSchema,
     setupHelpUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
     credentials: {
+      supportsNativeCliAuth: true,
+      canUseForAutomation: canUseAwsCredentialsForAutomation,
+      verifiedIdentityKeys: ['accountId', 'profile'],
       environmentVariableAliases: [
         ['HYPERVIBE_AWS_ACCESS_KEY_ID', 'AWS_ACCESS_KEY_ID'],
         ['HYPERVIBE_AWS_SECRET_ACCESS_KEY', 'AWS_SECRET_ACCESS_KEY'],

@@ -1,3 +1,4 @@
+import { AwsConnectionAuthentication, awsAuthenticationFields, awsConnectionRegion, checkedAwsAccountId, validateAwsAuthentication, canUseAwsCredentialsForAutomation } from './aws-authentication.js';
 import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { z } from 'zod';
 import {
@@ -51,10 +52,7 @@ import {
   workloadSecurityGroupName,
 } from './aws-workload-network.js';
 
-export const ElastiCacheCredentialsSchema = z.object({
-  accessKeyId: z.string().trim().min(16, 'AWS access key ID is required'),
-  secretAccessKey: z.string().min(32, 'AWS secret access key is required'),
-}).strict();
+export const ElastiCacheCredentialsSchema = z.object(awsAuthenticationFields).strict().superRefine(validateAwsAuthentication);
 
 export type ElastiCacheCredentials = z.infer<typeof ElastiCacheCredentialsSchema>;
 type ConnectedElastiCacheCredentials = ElastiCacheCredentials & { region: string };
@@ -96,12 +94,12 @@ export class ElastiCacheAdapter implements ICacheAdapter {
   private ec2: EC2Client | null = null;
   private sts: STSClient | null = null;
   private accountId: string | null = null;
+  private authentication: AwsConnectionAuthentication | null = null;
 
   async connect(credentials: unknown): Promise<void> {
-    this.credentials = {
-      ...ElastiCacheCredentialsSchema.parse(credentials),
-      region: DEFAULT_REGION,
-    };
+    const parsed = ElastiCacheCredentialsSchema.parse(credentials);
+    this.authentication = null;
+    this.credentials = { ...parsed, region: await awsConnectionRegion(parsed, DEFAULT_REGION) };
     this.replaceClients();
   }
 
@@ -125,10 +123,9 @@ export class ElastiCacheAdapter implements ICacheAdapter {
     this.elasticache?.destroy();
     this.ec2?.destroy();
     this.sts?.destroy();
-    const awsCredentials = {
-      accessKeyId: this.credentials.accessKeyId,
-      secretAccessKey: this.credentials.secretAccessKey,
-    };
+    this.credentials = { ...this.credentials, ...this.authentication?.identity() };
+    this.authentication = new AwsConnectionAuthentication(this.credentials, this.credentials.region);
+    const awsCredentials = this.authentication.credentials;
     this.elasticache = new ElastiCacheClient({
       region: this.credentials.region,
       credentials: awsCredentials,
@@ -143,6 +140,8 @@ export class ElastiCacheAdapter implements ICacheAdapter {
     });
     this.accountId = null;
   }
+
+  getConnectionIdentity(): Record<string, string> { return this.authentication?.identity() ?? {}; }
 
   async verify(): Promise<VerifyResult> {
     if (!this.credentials || !this.elasticache || !this.ec2 || !this.sts) {
@@ -188,6 +187,7 @@ export class ElastiCacheAdapter implements ICacheAdapter {
     this.ec2 = null;
     this.sts = null;
     this.credentials = null;
+    this.authentication = null;
     this.accountId = null;
   }
 
@@ -1643,7 +1643,7 @@ export class ElastiCacheAdapter implements ICacheAdapter {
         'AWS did not return a valid account identity for the ElastiCache connection.'
       );
     }
-    this.accountId = identity.Account;
+    this.accountId = checkedAwsAccountId(identity.Account, this.credentials?.accountId);
     return this.accountId;
   }
 
@@ -1690,7 +1690,7 @@ export class ElastiCacheAdapter implements ICacheAdapter {
   }
 
   private formatError(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
+    return this.authentication?.redact(error) ?? (error instanceof Error ? error.message : String(error));
   }
 
   private positiveIntegerEnv(name: string, fallback: number): number {
@@ -1716,6 +1716,11 @@ providerRegistry.register({
     displayName: 'Amazon ElastiCache',
     category: 'cache',
     credentialsSchema: ElastiCacheCredentialsSchema,
+    credentials: {
+      supportsNativeCliAuth: true,
+      canUseForAutomation: canUseAwsCredentialsForAutomation,
+      verifiedIdentityKeys: ['accountId', 'profile'],
+    },
     setupHelpUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
     connectionAliases: ['ecs'],
     maturity: {

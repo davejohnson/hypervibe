@@ -26,10 +26,9 @@ export function getProjectScopeHints(project: Project, environment?: string): st
 
   const pathParts = parsed.path.split('/').filter(Boolean);
   if (pathParts.length >= 2) {
-    const ownerRepo = `${pathParts[pathParts.length - 2]}/${pathParts[pathParts.length - 1]}`;
-    if (ownerRepo !== fullScope) {
-      hints.push(ownerRepo);
-    }
+    // The hostless legacy scope still names the complete repository. Dropping
+    // a parent namespace could authorize credentials for another repository.
+    hints.push(pathParts.join('/'));
   }
 
   return hints;

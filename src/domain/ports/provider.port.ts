@@ -218,6 +218,8 @@ export interface IProviderAdapter {
 
   connect(credentials: unknown): Promise<void>;
   verify(): Promise<VerifyResult>;
+  /** Non-secret authenticated selectors, read only after successful verification. */
+  getConnectionIdentity?(): Record<string, string>;
   disconnect?(): Promise<void>;
 
   /** Configure non-secret desired placement before observation or mutation. */

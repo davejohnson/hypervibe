@@ -21,7 +21,7 @@ import {
 } from '../../../domain/registry/provider.registry.js';
 import {
   AzurePostgresCredentialsSchema,
-  type AzurePostgresCredentials,
+  azureConnectionIdentity, canUseAzureCredentialsForAutomation, resolveAzureAuthentication, type ResolvedAzureAuthentication,
 } from './azure-datastore.credentials.js';
 import {
   AzurePostgresClient,
@@ -75,14 +75,14 @@ export class AzurePostgresAdapter implements IDatabaseAdapter {
     prefersTemporaryDatabaseAccess: true,
   };
 
-  private credentials: AzurePostgresCredentials | null = null;
+  private credentials: ResolvedAzureAuthentication | null = null;
   private arm: AzureResourceManagerClient | null = null;
   private client: AzurePostgresClient | null = null;
   private target: DatabaseTargetOptions | null = null;
   private temporaryFirewallRules = new Map<string, { resourceId: string; ruleName: string }>();
 
   async connect(credentials: unknown): Promise<void> {
-    this.credentials = AzurePostgresCredentialsSchema.parse(credentials);
+    this.credentials = await resolveAzureAuthentication(AzurePostgresCredentialsSchema.parse(credentials));
     this.arm = new AzureResourceManagerClient(this.credentials);
     this.client = new AzurePostgresClient(this.arm);
   }
@@ -99,6 +99,8 @@ export class AzurePostgresAdapter implements IDatabaseAdapter {
       ...(target.region ? { region: target.region } : {}),
     };
   }
+
+  getConnectionIdentity(): Record<string, string> { return azureConnectionIdentity(this.credentials); }
 
   async verify(): Promise<VerifyResult> {
     if (!this.client) {
@@ -957,6 +959,9 @@ providerRegistry.register({
     setupHelpUrl:
       'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
     credentials: {
+      canUseForAutomation: canUseAzureCredentialsForAutomation,
+      supportsNativeCliAuth: true,
+      verifiedIdentityKeys: ['authMode', 'subscriptionId', 'tenantId'],
       environmentVariableAliases: [
         ['AZURE_TENANT_ID', 'HYPERVIBE_AZURE_TENANT_ID'],
         ['AZURE_SUBSCRIPTION_ID', 'HYPERVIBE_AZURE_SUBSCRIPTION_ID'],

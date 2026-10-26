@@ -42,4 +42,17 @@ describe('getProjectScopeHints', () => {
 
     expect(hints).toEqual([]);
   });
+
+  it('preserves the complete nested namespace and exact environment scope', () => {
+    const project = {
+      id: 'p1', name: 'demo', defaultPlatform: 'cloudrun',
+      gitRemoteUrl: 'git@gitlab.example.com:studio/team/demo.git', policies: {},
+      createdAt: new Date(), updatedAt: new Date(),
+    };
+    expect(getProjectScopeHints(project, 'staging')).toEqual([
+      'gitlab.example.com/studio/team/demo#environment=staging',
+      'gitlab.example.com/studio/team/demo',
+      'studio/team/demo',
+    ]);
+  });
 });
