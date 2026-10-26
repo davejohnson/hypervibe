@@ -452,9 +452,9 @@ describe('ci-deploy.service', () => {
         credentialsEncrypted: getSecretStore().encryptObject({ authMode: 'default', projectId: 'cloud-project' }) });
       connectionRepo.updateStatus(connection.id, 'verified');
       const projected = providerSecretsForGitHubActions('cloudrun', { githubRepo: 'davejohnson/billforge' });
-      expect(projected).toEqual([{ name: 'GCP_PROJECT_ID', value: 'cloud-project' }]);
+      expect(projected).toEqual([]);
       const missing = requiredProviderSecretNamesForGitHubActions('cloudrun').filter(name => !projected.some(item => item.name === name));
-      expect(missing).toEqual(['GCP_SERVICE_ACCOUNT_JSON']);
+      expect(missing.sort()).toEqual(['GCP_PROJECT_ID', 'GCP_SERVICE_ACCOUNT_JSON']);
       expect(missingProviderSecretsMessage('cloudrun', missing)).toContain('separately reviewed deployment federation');
     });
 

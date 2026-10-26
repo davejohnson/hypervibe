@@ -12,7 +12,7 @@ generate keys, or authorize infrastructure changes outside spec → plan → app
 | --- | --- | --- |
 | AWS `ecs`, `rds`, `elasticache`, `s3` | The [Node.js credential chain](https://docs.aws.amazon.com/sdk-for-javascript/v3/developer-guide/setting-credentials-node.html) resolves the explicitly selected profile or default chain. [GetCallerIdentity](https://docs.aws.amazon.com/STS/latest/APIReference/API_GetCallerIdentity.html) independently supplies account and ARN. Refreshed credentials must match the pinned account before provider requests; target-region changes retain that identity. | Local profile, SSO and session values remain in memory. Default/session credentials are rejected for unattended credential projection. Account identity does not prove permissions or pin one IAM principal within that account. |
 | Azure `azure-container-apps`, `azure-postgres`, `azure-managed-redis`, `azureblob` | [DefaultAzureCredential](https://learn.microsoft.com/en-us/javascript/api/@azure/identity/defaultazurecredential) acquires local tokens. Subscription [List](https://learn.microsoft.com/en-us/rest/api/resources/subscriptions/list?view=rest-resources-2022-12-01) and [Get](https://learn.microsoft.com/en-us/rest/api/resources/subscriptions/get?view=rest-resources-2022-12-01) establish an enabled subscription and tenant. Complete bounded pagination must expose one unambiguous subscription unless explicitly selected. Subsequent reads retain that scope; expiring tokens refresh. | Missing or contradictory identity evidence blocks. Native tokens are not persisted. Local mode cannot establish the distinct deploy client needed by Container Apps runtime-identity reconciliation and returns an explicit Connect Cloud/service-principal prerequisite. Existing hosted UAMI verification is unchanged. |
-| GCP `cloudrun`, `cloudsql`, `gcs` | Existing [local ADC work](gcp-local-default-auth.md) and storage authentication remain separate provider-owned paths. | This reconciliation adds no GCP authentication, permission, bootstrap or automation behavior. Existing local-user ADC restrictions remain. |
+| GCP `cloudrun`, `cloudsql`, `gcs` | Existing [local ADC work](gcp-local-default-auth.md) and storage authentication remain separate provider-owned paths. | Existing ADC authentication and federation remain. GCS and Cloud Run now reject local/default credentials before unattended CI/backup projection, preserving valid explicit automation and federation paths. |
 | Other registered hosting, database, cache and storage providers | Existing provider-specific credentials and capabilities remain in effect. | No AWS/Azure default-chain fallback is introduced for another provider or account. |
 
 The shared optional `verifiedIdentityKeys` contract permits only provider-declared,
@@ -79,7 +79,7 @@ Installer/CLI integration and provider credential validation already present in
 the frozen base were preserved. Newer Zod 4 contracts, exact secret redaction,
 Connect Cloud onboarding, and native installation/recovery protections take
 precedence over obsolete versions in the archive. Storage grants, queues and
-managed recovery are reconciled separately.
+managed recovery are covered by the complementary [storage evidence](storage-runtime-access-evidence.md).
 
 ## Retained lifecycle safeguards
 
@@ -97,3 +97,10 @@ The focused planner, hosting transition and runtime lifecycle group passed all
 113 checks. These tests establish local authority and recovery behavior, not live
 provider compatibility. The preserved S3 test also covers sessions whose provider
 omits expiration metadata: local credentials still cannot become runtime keys.
+
+Runtime permission observations also participate in saved-plan drift detection
+when no filesystem volume exists. Six cases (changed principal, grant or invalid
+state with absent/empty volumes) previously allowed a stale plan to execute.
+The corrected fingerprint rejects all six at the executor boundary; all 57
+executor checks pass. This restores the preserved behavior while retaining newer
+cloud and secret-destination authority stages.
