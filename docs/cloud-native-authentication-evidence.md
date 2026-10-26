@@ -80,3 +80,20 @@ the frozen base were preserved. Newer Zod 4 contracts, exact secret redaction,
 Connect Cloud onboarding, and native installation/recovery protections take
 precedence over obsolete versions in the archive. Storage grants, queues and
 managed recovery are reconciled separately.
+
+## Retained lifecycle safeguards
+
+The reconciliation also preserves the local scope-change and stage-isolation
+regressions. The independent contract is the architecture requirement that
+accepted runtime identities and recovery state cannot be silently rebound, and
+that each saved stage authorizes only its own actions and dependencies.
+
+Seven hosting-transition cases failed before restoring reserved runtime binding
+keys and the guard covering provider, project, environment and recreated scopes.
+The queue prerequisite test failed when a later CI credential update became a
+prerequisite of an isolated runtime-access stage. The composed planner persists
+through SQLite and now preserves the queue-only stage without secret inputs.
+The focused planner, hosting transition and runtime lifecycle group passed all
+113 checks. These tests establish local authority and recovery behavior, not live
+provider compatibility. The preserved S3 test also covers sessions whose provider
+omits expiration metadata: local credentials still cannot become runtime keys.
