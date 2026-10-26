@@ -602,8 +602,8 @@ const DEFAULT_MAX_PLAN_AGE_MS = 24 * 60 * 60 * 1000;
  */
 export function fingerprintObservedState(observed: ObservedState): string {
   const essence = {
-    ...(observed.serviceVolumes && Object.keys(observed.serviceVolumes).length > 0 ? {
     ...(observed.runtimeAccess && (observed.runtimeAccess.invalid || observed.runtimeAccess.identities.length || observed.runtimeAccess.grants.length) ? { runtimeAccess: observed.runtimeAccess } : {}),
+    ...(observed.serviceVolumes && Object.keys(observed.serviceVolumes).length > 0 ? {
       serviceVolumes: Object.fromEntries(Object.entries(observed.serviceVolumes).sort(([a], [b]) => a.localeCompare(b))),
     } : {}),
     provider: observed.provider,
