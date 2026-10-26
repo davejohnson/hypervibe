@@ -83,3 +83,14 @@ Final isolated branch validation: 19 focused test files, 377 tests passed;
 `npm run typecheck` and `git diff --check` passed. The tests cover real serialized
 provider clients and SQLite application flows with synthetic transports. No live
 provider operation, deployment, credential rotation or public access change occurred.
+
+Follow-up reconciliation restores the preserved repository-binding recovery tests
+without changing the newer prepared-hosting or secret-container merge rules: all
+48 binding tests pass. The preserved automation-export suite also exposed native
+GCS and Cloud Run connections exporting retained legacy key fields. Four focused
+checks failed before their registered admission gates, then all 12 selected Google
+export checks passed. Exact GitHub federation remains admitted; local default
+credentials and federation mixed with a private key remain rejected. This tests
+credential selection with real encrypted connection storage, not live cloud login.
+The full cross-provider suite also requires the separately reconciled AWS and
+Azure authentication gates and is verified after those branches are combined.

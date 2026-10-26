@@ -741,6 +741,8 @@ providerRegistry.register({
       agentManagedKeys: ['runtimeServiceAccountEmail', 'projectId', 'workloadIdentity'],
       agentManagedChoices: { authMode: ['github-workload-identity'] },
       automationSecretKeys: { GCP_SERVICE_ACCOUNT_JSON: 'credentials' },
+      canUseForAutomation: credentials => credentials.authMode !== 'default'
+        && GcsStorageCredentialsSchema.safeParse(credentials).success,
       defaultScalarKey: 'credentials',
       supportsNativeCliAuth: true,
       environmentVariableAliases: [
