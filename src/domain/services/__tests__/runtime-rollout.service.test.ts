@@ -9,6 +9,9 @@ import type { Environment } from '../../entities/environment.entity.js';
 import type { ActionReceipt } from '../../plan/converge.executor.js';
 import type { PlanAction } from '../../plan/plan.types.js';
 import type { ObservedState } from '../../ports/observe.port.js';
+import { PlanService } from '../../plan/plan.service.js';
+import { adapterFactory } from '../adapter.factory.js';
+import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { hashEnvValue } from '../../ports/observe.port.js';
 import {
   parseRuntimeRolloutBindings,
@@ -130,6 +133,41 @@ describe('runtime rollout state', () => {
       expectedConfiguration: { worker: { operationId: 'native-change', envVarHashes: intendedHashes } },
     });
   }
+
+  it('passes retained encrypted credential expectation names to normal provider observation', async () => {
+    const expected = { ...intendedHashes, CUSTOM_DATABASE_URL: hashEnvValue('additional-credential-reference') };
+    const updated = recordRuntimeRolloutRequirements({ environment, provider: 'railway', observed: deployed('old'),
+      actions: [action], receipts: [{ actionId: action.id, status: 'succeeded', data: { runtimeRolloutRequired: true } }], applyRunId: 'custom-credential',
+      expectedConfiguration: { worker: { operationId: 'custom-credential', envVarHashes: expected } },
+    });
+    const observe = vi.fn(async (_environment: Environment, _context?: unknown) => deployed('new', expected));
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter: { name: 'railway', capabilities: { supportsObserve: true }, observe } } as any);
+    await new PlanService().observeEnvironment(new ProjectRepository().findById(environment.projectId)!, updated,
+      { hosting: { provider: 'railway' }, services: { worker: {} } } as any, { hostingOnly: true });
+    expect(observe).toHaveBeenCalledWith(updated, expect.objectContaining({ runtimeConfigurationKeys: { worker: Object.keys(expected).sort() } }));
+    const context = observe.mock.calls[0]?.[1];
+    expect(JSON.stringify(context)).not.toContain(expected.CUSTOM_DATABASE_URL);
+    expect(JSON.stringify(context)).not.toContain('additional-credential-reference');
+  });
+
+  it.each(['unreadable', 'empty', 'bad-key', 'bad-hash', 'changed-consumer', 'changed-scope'])('preserves unknown observation for %s retained runtime expectations', async kind => {
+    const updated = strictRequirement(environment);
+    const retained = (updated.platformBindings.runtimeRollouts as Array<Record<string, unknown>>)[0];
+    if (kind === 'unreadable') retained.configurationExpectationEncrypted = 'invalid-encrypted-state';
+    if (kind === 'empty') retained.configurationExpectationEncrypted = getSecretStore().encryptObject({});
+    if (kind === 'bad-key') retained.configurationExpectationEncrypted = getSecretStore().encryptObject({ 'INVALID NAME': hashEnvValue('private-value') });
+    if (kind === 'bad-hash') retained.configurationExpectationEncrypted = getSecretStore().encryptObject({ DATABASE_URL: 'private-value' });
+    if (kind === 'changed-consumer') retained.serviceExternalId = 'different-worker';
+    if (kind === 'changed-scope') retained.providerEnvironmentId = 'different-environment';
+    const observe = vi.fn(async () => deployed('new'));
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter: { name: 'railway', capabilities: { supportsObserve: true }, observe } } as any);
+    const result = await new PlanService().observeEnvironment(new ProjectRepository().findById(environment.projectId)!, updated,
+      { hosting: { provider: 'railway' }, services: { worker: {} } } as any, { hostingOnly: true });
+    expect(result.observed).toMatchObject({ partial: true, completeness: { services: 'unknown' } });
+    expect(observe).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain('private-value');
+    expect(JSON.stringify(result)).not.toContain('invalid-encrypted-state');
+  });
 
   it('binds native activation to the exact acknowledged deployment, even if another deployment has equal values', () => {
     const updated = nativeRequirement();

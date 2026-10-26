@@ -54,6 +54,28 @@ function fixture() {
 }
 
 describe('upstream database credential consumer readiness', () => {
+  it('does not equate an idle cron schedule with known selected deployment activation', async () => {
+    const f = fixture();
+    f.observed.services.forEach(service => { service.deployment = { id: `new-${service.name}`, activeDeploymentIds: [`new-${service.name}`], configurationState: 'resolved', envVarHashes: f.hashes }; });
+    const cron = f.observed.services.find(service => service.name === 'cron')!;
+    cron.config.cronSchedule = '0 * * * *';
+    cron.deployment!.activeDeploymentIds = [];
+    const result = await f.read();
+    expect(result.data.databaseConsumers.find((entry: any) => entry.service === 'cron')).toMatchObject({
+      deployedConfiguration: 'match', oldDeployments: 'unknown', authentication: 'unchecked', applicationOperation: 'unchecked',
+    });
+    expect(result.data.inSync).toBe(false);
+    expect(result.data.runtimeConfiguration.status).toBe('unknown');
+  });
+
+  it.each(['deployment-snapshot', 'runtime-instances'] as const)('reports %s provenance without implying authentication', async evidence => {
+    const f = fixture();
+    f.observed.services.forEach(service => { service.deployment = { id: `new-${service.name}`, activeDeploymentIds: [`new-${service.name}`],
+      configurationState: 'resolved', configurationEvidence: evidence, envVarHashes: f.hashes }; });
+    const result = await f.read();
+    expect(result.data.databaseConsumers.every((entry: any) => entry.deployedConfigurationEvidence === evidence && entry.authentication === 'unchecked')).toBe(true);
+  });
+
   it('requires activation for unchanged references whose current resolved values differ from every deployed consumer', async () => {
     const f = fixture(); const before = f.ctx.repos.environments.findById(f.environment.id);
     const result = await f.read();

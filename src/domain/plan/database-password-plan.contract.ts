@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { databaseCredentialTargetSchema } from '../ports/database-credential.port.js';
 import type { PlanAction } from './plan.types.js';
 
-export const DATABASE_PASSWORD_OPERATIONS = ['databasePasswordRotate', 'databasePasswordSynchronize'] as const;
+export const DATABASE_PASSWORD_OPERATIONS = ['databasePasswordRotate', 'databasePasswordSynchronize', 'databasePasswordVerify'] as const;
 export const databasePasswordMetadataSchema = z.object({
   operation: z.enum(DATABASE_PASSWORD_OPERATIONS), role: z.string().min(1), target: databaseCredentialTargetSchema,
   issuerNames: z.array(z.string().regex(/^[A-Z][A-Z0-9_]*$/)).min(1),
@@ -17,15 +17,16 @@ export function isDatabasePasswordAction(action: PlanAction): boolean {
   const m = parsed.data;
   return action.id === databasePasswordActionId(m.target.componentId, m.operation)
     && action.type === 'update' && action.resource.kind === 'database' && action.resource.name === 'postgres'
-    && action.resource.provider === m.target.provider && action.verified && action.requiresConfirm === true
-    && action.dataBearing === true && !action.billable
+    && action.resource.provider === m.target.provider && action.verified && action.requiresConfirm === (m.operation !== 'databasePasswordVerify')
+    && action.dataBearing === (m.operation !== 'databasePasswordVerify') && !action.billable
     && (m.operation === 'databasePasswordRotate' ? !action.dependsOn?.length
-      : action.dependsOn?.length === 1 && action.dependsOn[0] === databasePasswordActionId(m.target.componentId, 'databasePasswordRotate'));
+      : action.dependsOn?.length === 1 && action.dependsOn[0] === databasePasswordActionId(m.target.componentId, m.operation === 'databasePasswordSynchronize' ? 'databasePasswordRotate' : 'databasePasswordSynchronize'));
 }
 export function isDatabasePasswordPlan(actions: PlanAction[]): boolean {
-  if (actions.length !== 2 || !actions.every(isDatabasePasswordAction)) return false;
+  if (![2, 3].includes(actions.length) || !actions.every(isDatabasePasswordAction)) return false;
   const first = databasePasswordMetadataSchema.parse(actions[0].metadata);
   const second = databasePasswordMetadataSchema.parse(actions[1].metadata);
   return first.operation === 'databasePasswordRotate' && second.operation === 'databasePasswordSynchronize'
-    && JSON.stringify({ ...first, operation: undefined }) === JSON.stringify({ ...second, operation: undefined });
+    && actions.every((action, index) => action.metadata?.operation === DATABASE_PASSWORD_OPERATIONS[index]
+      && JSON.stringify({ ...first, operation: undefined }) === JSON.stringify({ ...databasePasswordMetadataSchema.parse(action.metadata), operation: undefined }));
 }

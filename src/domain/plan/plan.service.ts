@@ -1,3 +1,4 @@
+import { runtimeRolloutConfigurationKeys } from '../services/runtime-rollout.service.js';
 import { credentialSourceInputKeys } from '../services/accepted-credential-inputs.js';
 import { databaseConsumerReadiness, type DatabaseConsumerReadiness } from '../services/database-consumer-readiness.service.js';
 import { planCredentialLifecycle, pendingCredentialUpdate } from '../services/credential-lifecycle.service.js';
@@ -376,9 +377,10 @@ export class PlanService {
     }
 
     try {
+      const runtimeConfigurationKeys = runtimeRolloutConfigurationKeys(environment, provider);
       const observed = await adapter.observe(environment, { databaseEnvAliases: Object.fromEntries(
         Object.entries(environmentSpec.services).map(([name, service]) => [name, service.databaseEnvAliases ?? {}])
-      ) });
+      ), ...(Object.keys(runtimeConfigurationKeys).length ? { runtimeConfigurationKeys } : {}) });
       const reportedCompleteness = observed.completeness;
       const providerHasSeparateEnvironment = providerRegistry
         .getMetadata(provider)

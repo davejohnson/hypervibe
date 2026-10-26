@@ -10,6 +10,7 @@ export interface DatabaseConsumerReadiness {
   checkedNames: string[];
   resolvedConfiguration: 'known' | 'unknown';
   deployedConfiguration: 'match' | 'mismatch' | 'unknown';
+  deployedConfigurationEvidence: 'deployment-snapshot' | 'runtime-instances' | 'unknown';
   oldDeployments: 'drained' | 'pending' | 'unknown';
   activation: 'running' | 'not-running' | 'unknown';
   authentication: 'unchecked';
@@ -69,7 +70,8 @@ export function databaseConsumerReadiness(params: {
     const activation = !identityKnown || !service || service.status === 'unknown' ? 'unknown'
       : service.status === 'running' ? 'running' : 'not-running';
     return { service: name, provider: params.spec.hosting.provider, checkedNames: names,
-      resolvedConfiguration: configured ? 'known' : 'unknown', deployedConfiguration, oldDeployments, activation,
+      resolvedConfiguration: configured ? 'known' : 'unknown', deployedConfiguration,
+      deployedConfigurationEvidence: deployedKnown ? snapshot?.configurationEvidence ?? 'unknown' : 'unknown', oldDeployments, activation,
       authentication: 'unchecked', applicationOperation: 'unchecked',
       ...(!ready ? { reason: !identityKnown ? 'Exact consumer identity and provider scope could not be verified.'
         : !configured ? 'Resolved database configuration is unsupported or unknown for this consumer.'

@@ -893,6 +893,16 @@ remain distinct. See
 [credential lifecycle](docs/credential-lifecycle.md) for schemas, provider limits,
 review, recovery, validation evidence and regression coverage.
 
+A native database rotation can explicitly request deployed `node-postgres`
+authentication through an optional provider capability. This adds a read-only
+third action to the exact encrypted plan; it never rewrites older two-action
+recovery plans. Railway can use already registered SSH identity and independently
+trusted hosts to inspect every exact running replica. No key registration, host
+trust change, CLI fallback, public access creation or workload deployment is implied.
+Native SQL proof still requires its own existing route. Runtime password challenges,
+configuration activation, instance retirement and application operations remain
+separate evidence. See [database password rotation](docs/database-password-rotation.md).
+
 
 `hv_secrets view="inventory"` is a read-only application-layer projection of
 declared roles/references, local candidates, accepted bindings, action receipts,
