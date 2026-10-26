@@ -1,3 +1,8 @@
+import type { PlanAction } from '../../domain/plan/plan.types.js';
+import { planRunDocumentSchema } from '../../domain/plan/converge.executor.js';
+import { planQueues } from '../../domain/services/queue-plan.service.js';
+import { CLOUD_PREPARE_PROFILES, QUEUE_PREPARE_ADDON } from '../../domain/services/cloud-prepare.js';
+import { CloudRunAdapter } from '../../adapters/providers/gcp/cloudrun.adapter.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -125,5 +130,95 @@ describe('runtime access through saved plans and SQLite', () => {
     expect(f.writes).toEqual(['project:staging', 'holding:staging']);
     expect(f.access.grant).not.toHaveBeenCalled(); expect(f.access.revoke).not.toHaveBeenCalled();
     expect(f.ctx.repos.environments.findByProjectAndName(f.project.id, 'staging')!.platformBindings).not.toHaveProperty('appliedSpecHash');
+  });
+});
+
+async function queueFixture() {
+  const ctx = createCommandContext(); const profile = CLOUD_PREPARE_PROFILES.cloudrun;
+  const project = ctx.repos.projects.create({ name: 'queue-runtime-app', defaultPlatform: 'cloudrun', policies: { cloudPreparation: { cloudrun: {
+    provider: 'cloudrun', version: profile.version, gcpProjectId: 'gcp-project', preparedAt: '2026-10-24T00:00:00Z',
+    requiredApis: [...profile.requiredApis, ...QUEUE_PREPARE_ADDON.requiredApis],
+    requiredRoles: [...profile.requiredRoles, 'projects/gcp-project/roles/hypervibeRuntimeIdentityV1', ...QUEUE_PREPARE_ADDON.requiredRoles],
+  } } } });
+  new SpecStore().replace(project, { version: 1, project: project.name, environments: Object.fromEntries(['staging', 'production'].map(name => [name, {
+    hosting: { provider: 'cloudrun', region: 'us-central1' }, services: { web: {}, worker: { workloadKind: 'worker' } },
+    deploy: { strategy: 'manual' }, queues: { 'email-jobs': { ackDeadlineSeconds: 120 } },
+    backups: { mode: 'disabled', reason: 'Disposable transport contract fixture.' },
+  }])) });
+  const createEnvironment = (name: string) => ctx.repos.environments.create({ projectId: project.id, name,
+    platformBindings: { provider: 'cloudrun', projectId: 'gcp-project', environmentId: name, appliedSpecHash: `accepted-${name}`,
+      services: { web: { serviceId: `projects/gcp-project/locations/us-central1/services/web-${name}` } } } });
+  const staging = createEnvironment('staging'); const production = createEnvironment('production');
+  const adapter = new CloudRunAdapter(); await adapter.connect({ projectId: 'gcp-project', credentials: '{}' });
+  Object.assign(adapter, { accessToken: 'synthetic-contract-token', tokenExpiry: new Date(Date.now() + 3_600_000) });
+  vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter });
+  const hosting = vi.spyOn(adapterFactory, 'getHostingAdapter').mockRejectedValue(new Error('Queue prerequisite may not change workloads'));
+  vi.spyOn(PlanService.prototype, 'providerPreflight').mockReturnValue([]);
+  vi.spyOn(PlanService.prototype, 'preflight').mockReturnValue([]);
+  vi.spyOn(PlanService.prototype, 'projectPreflight').mockReturnValue([]);
+  // The shared read-only deployment preflight is outside this fixture; all queue
+  // observations and writes still pass through the real native transport.
+  vi.spyOn(PlanService.prototype, 'observeEnvironment').mockResolvedValue({ observed: null, warnings: [] });
+  const { topicId, subscriptionId } = adapter.queueResourceNames(staging, 'email-jobs');
+  const topicName = `projects/gcp-project/topics/${topicId}`;
+  const subscriptionName = `projects/gcp-project/subscriptions/${subscriptionId}`;
+  // Reconstructed Pub/Sub v1 REST responses, using published Topic and Subscription
+  // fields. Only transport is replaced; the real adapter serializes and verifies.
+  // https://docs.cloud.google.com/pubsub/docs/reference/rest/v1/projects.topics/create
+  // https://docs.cloud.google.com/pubsub/docs/reference/rest/v1/projects.subscriptions/create
+  const labels = { 'infraprint-environment': 'staging', 'infraprint-queue': 'email-jobs' };
+  const resources = new Map<string, Record<string, unknown>>(); const writes: string[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input)); expect(url.origin).toBe('https://pubsub.googleapis.com');
+    const name = url.pathname.replace(/^\/v1\//, ''); const method = init?.method ?? 'GET';
+    if (method === 'GET') return resources.has(name) ? Response.json(resources.get(name)) : new Response(null, { status: 404 });
+    expect(method).toBe('PUT'); expect([topicName, subscriptionName]).toContain(name);
+    const body = JSON.parse(String(init?.body)); expect(body.labels).toEqual(labels);
+    const resource = name === topicName ? { name: topicName, labels } : { name: subscriptionName, topic: topicName, ackDeadlineSeconds: 120, labels };
+    if (name === subscriptionName) expect(body).toMatchObject({ topic: topicName, ackDeadlineSeconds: 120 });
+    expect(resources.has(name)).toBe(false); resources.set(name, resource); writes.push(`${method} ${name}`);
+    return Response.json(resource);
+  }));
+  const stored = new SpecStore().get(project)!;
+  const planned = await planQueues({ project, environmentSpec: stored.spec.environments.staging, environment: staging });
+  expect(planned.actions).toHaveLength(1); const action = planned.actions[0];
+  const document = (actions: PlanAction[]) => ({ kind: 'hv_plan', scope: 'runtime-access', environmentName: 'staging', specRevision: stored.revision, observedFingerprint: null, actions });
+  const apply = async (actions: PlanAction[], confirmActions: string[] = []) => {
+    const run = ctx.repos.runs.create({ projectId: project.id, environmentId: staging.id, type: 'plan', plan: document(actions) });
+    return executePlanApply(ctx, { project, spec: stored.spec, specRevision: stored.revision, planId: run.id, confirmActions });
+  };
+  return { ctx, staging, production, action, document, apply, writes, topicName, subscriptionName, hosting };
+}
+
+describe('queue prerequisite through saved runtime-access plans and native transport', () => {
+  it('requires exact approval, creates only the selected queue, and preserves application acceptance and production', async () => {
+    const f = await queueFixture(); const untouched = structuredClone(f.production.platformBindings);
+    expect(f.action).toMatchObject({ type: 'create', billable: true, requiresConfirm: true });
+    expect(await f.apply([f.action], ['queue:wrong'])).not.toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(f.writes).toEqual([]);
+    expect(await f.apply([f.action], [f.action.id])).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(f.writes).toEqual([`PUT ${f.topicName}`, `PUT ${f.subscriptionName}`]);
+    const bound = f.ctx.repos.environments.findById(f.staging.id)!;
+    expect(bound.platformBindings).toMatchObject({ appliedSpecHash: 'accepted-staging', services: f.staging.platformBindings.services,
+      queues: { 'email-jobs': { topicName: f.topicName, subscriptionName: f.subscriptionName, providerScope: { projectId: 'gcp-project' } } } });
+    expect(f.ctx.repos.environments.findById(f.production.id)!.platformBindings).toEqual(untouched);
+    expect(f.hosting).not.toHaveBeenCalled();
+  });
+
+  it.each(['billable', 'requiresConfirm'] as const)('rejects a persisted create stripped of %s before any native write', async field => {
+    const f = await queueFixture(); const action = { ...f.action, billable: true, requiresConfirm: true }; delete action[field];
+    expect(await f.apply([action], [action.id])).not.toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(f.writes).toEqual([]); expect(f.ctx.repos.environments.findById(f.staging.id)!.platformBindings).toEqual(f.staging.platformBindings);
+  });
+
+  it.each(['unwire', 'destroy', 'mixed'])('rejects a %s action in the persisted queue prerequisite envelope', async scenario => {
+    const f = await queueFixture();
+    const actions: PlanAction[] = scenario === 'mixed'
+      ? [f.action, { id: 'identity:web', type: 'update', resource: { kind: 'service', provider: 'cloudrun', name: 'web' }, verified: true,
+        reason: 'Unrelated identity mutation', metadata: { operation: 'runtimeIdentityApply' } }]
+      : [{ ...f.action, type: scenario === 'destroy' ? 'destroy' : 'update', metadata: { ...f.action.metadata, operation: scenario === 'destroy' ? 'queueDestroy' : 'queueUnwire' } }];
+    expect(planRunDocumentSchema.safeParse(f.document(actions)).success).toBe(false);
+    expect(await f.apply(actions, actions.map(action => action.id))).not.toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(f.writes).toEqual([]); expect(f.hosting).not.toHaveBeenCalled();
   });
 });

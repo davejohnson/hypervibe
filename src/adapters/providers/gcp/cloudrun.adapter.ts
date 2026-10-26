@@ -2833,18 +2833,14 @@ export class CloudRunAdapter implements
     ]);
     if (topic) this.assertManagedQueueTopic(environment, queueName, topic);
     if (subscription) this.assertManagedQueueSubscription(environment, queueName, subscription);
-    if (subscription && !topic) {
-      throw new Error(
-        `Pub/Sub subscription ${subscription.name} exists but its exact managed topic is absent; queue observation is incomplete.`
-      );
-    }
+    this.assertCompleteQueuePair(topic, subscription);
     return subscription;
   }
 
   async ensureQueue(
     environment: Environment,
     queueName: string,
-    options: { ackDeadlineSeconds?: number } = {}
+    options: { ackDeadlineSeconds?: number; expectedState?: 'absent' | 'present' } = {}
   ): Promise<{ topicName: string; subscriptionName: string; createdTopic: boolean; createdSubscription: boolean }> {
     if (!this.credentials) throw new Error('Not connected. Call connect() first.');
     this.assertQueueBindingScope(environment, queueName, false);
@@ -2859,22 +2855,29 @@ export class CloudRunAdapter implements
 
     let existingTopic = await pubsub.getTopic(token, gcpProjectId, topicId, this.request.bind(this));
     if (existingTopic) this.assertManagedQueueTopic(environment, queueName, existingTopic);
+    let existing = await pubsub.getSubscription(token, gcpProjectId, subscriptionId, this.request.bind(this));
+    if (existing) this.assertManagedQueueSubscription(environment, queueName, existing);
+    this.assertCompleteQueuePair(existingTopic, existing);
+    if ((options.expectedState === 'present' && !existingTopic)
+      || (options.expectedState === 'absent' && existingTopic)) {
+      throw new Error('The reviewed Pub/Sub queue state changed before mutation; re-plan without creating replacements or adopting existing resources.');
+    }
     let createdTopic = false;
     if (!existingTopic) {
       const result = await pubsub.ensureTopic(token, gcpProjectId, topicId, labels, this.request.bind(this));
+      if (options.expectedState === 'absent' && !result.created) throw new Error('Pub/Sub topic creation ownership is unverified after a concurrent create; preserve the exact resource for explicit reconciliation.');
       createdTopic = result.created;
       existingTopic = await this.waitForQueueTopic(token, topicId);
       this.assertManagedQueueTopic(environment, queueName, existingTopic);
     }
 
-    let existing = await pubsub.getSubscription(token, gcpProjectId, subscriptionId, this.request.bind(this));
-    if (existing) this.assertManagedQueueSubscription(environment, queueName, existing);
     let createdSubscription = false;
     if (!existing) {
       const result = await pubsub.ensureSubscription(token, gcpProjectId, subscriptionId, topicId, {
         ackDeadlineSeconds: options.ackDeadlineSeconds,
         labels,
       }, this.request.bind(this));
+      if (options.expectedState === 'absent' && !result.created) throw new Error('Pub/Sub subscription creation ownership is unverified after a concurrent create; preserve the exact resource for explicit reconciliation.');
       createdSubscription = result.created;
       existing = await this.waitForQueueSubscription(token, subscriptionId);
       this.assertManagedQueueSubscription(environment, queueName, existing);
@@ -2935,6 +2938,12 @@ export class CloudRunAdapter implements
       pubsub.getSubscription(token, projectId, `${legacy}-sub`, this.request.bind(this)),
     ]);
     if (topic || subscription) throw new Error(`Legacy Pub/Sub queue "${queueName}" exists without a durable binding; explicitly import or clean up that scoped identity before creating another queue.`);
+  }
+
+  private assertCompleteQueuePair(topic: pubsub.PubSubTopic | null, subscription: pubsub.PubSubSubscription | null): void {
+    if (Boolean(topic) !== Boolean(subscription)) {
+      throw new Error('Pub/Sub topic and subscription have partial state; queue observation is incomplete. Preserve the existing resource and explicitly reconcile its exact ownership before retrying creation.');
+    }
   }
 
   private assertQueueBindingScope(

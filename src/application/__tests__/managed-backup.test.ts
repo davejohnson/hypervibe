@@ -163,3 +163,48 @@ describe('reviewed recurring backup authority', () => {
     expect(() => managedRecoveryExecutionId('owner/hls', 'bad')).toThrow();
   });
 });
+
+it('hands only a reviewed native execution target to the database/files worker, without storage keys', async () => {
+  await import('../../adapters/providers/gcp/cloudrun.adapter.js');
+  await import('../../adapters/providers/gcp/cloudsql.adapter.js');
+  await import('../../adapters/providers/gcp/gcs.adapter.js');
+  const { canonicalJsonSha256 } = await import('../../lib/canonical-json.js');
+  const { target } = fixture();
+  const scope = { projectId: 'test-project', region: 'us-central1' };
+  target.hosting = { provider: 'cloudrun', providerScope: scope, region: 'us-central1' };
+  target.environmentId = 'env';
+  target.database = { componentId: 'db', source: { provider: 'cloudsql', primaryExternalId: 'database', providerScope: { projectId: 'test-project' }, resourceIdentity: { instanceId: 'database' } } };
+  for (const item of [target.destination, ...target.objects]) item.identity = { provider: 'gcs', externalId: item.identity.externalId, instanceScope: { projectId: 'test-project' } };
+  target.executionTarget = { provider: 'cloudrun', environmentId: 'env', region: 'us-central1', providerScope: scope, identity: { provider: 'gcp', principal: 'backup@test-project.iam.gserviceaccount.com', source: 'observed', scope: { uniqueId: '123' } },
+    configuration: { secretVersion: 'projects/test-project/secrets/backup/versions/1' },
+    worker: { provider: 'cloudrun', configuration: { projectId: 'test-project', instanceConnectionName: 'test-project:us-central1:database', ipType: 'PUBLIC', runtimeServiceAccountEmail: 'backup@test-project.iam.gserviceaccount.com' } } };
+  const runtime = { provider: 'cloudrun', evidence: { uniqueId: '123' } };
+  Object.assign(target, { runtimeBindingHash: canonicalJsonSha256(runtime) });
+  const metadata = providerRegistry.getMetadata.bind(providerRegistry);
+  vi.spyOn(providerRegistry, 'getMetadata').mockImplementation(provider => {
+    const original = metadata(provider);
+    if (provider === 'cloudrun') return { ...original!, lifecycle: { ...original!.lifecycle, hosting: { ...original!.lifecycle!.hosting!,
+      recoveryTasks: { databaseProviders: ['cloudsql'] }, recoveryRuntime: { databaseProviders: ['cloudsql'], storageProviders: ['gcs'], status: 'ready-for-live' } } } } as never;
+    if (provider === 'cloudsql') return { ...original!, credentials: { ...original!.credentials, automationSecretKeys: { GCP_SERVICE_ACCOUNT_JSON: 'credentials', GCP_PROJECT_ID: 'projectId' } } };
+    return original;
+  });
+  const runJob = vi.fn(async (..._args: unknown[]) => { throw new Error('Stop after native handoff'); });
+  const getCredentials = vi.fn();
+  const archive = { destroy: vi.fn() };
+  const objects = [target.destination, ...target.objects];
+  vi.spyOn(providerRegistry, 'createAdapter').mockImplementation(async provider => provider === 'cloudrun' ? { runJob }
+    : provider === 'cloudsql' ? { name: 'cloudsql', dailyBackups: { observe: async () => ({ state: 'known', source: target.database!.source }) } }
+    : { name: 'gcs', capabilities: {}, getCredentials,
+      observe: async () => objects.map(item => ({ ...item.identity, status: 'ready' })), openObjectTransfer: async () => archive });
+  const environment = { id: 'env', name: 'production', projectId: 'project', platformBindings: { recoveryRuntime: runtime,
+    recoveryDatabases: [{ componentId: 'db', provider: 'cloudsql', engine: 'postgres', externalId: 'database' }] } } as unknown as Environment;
+  await expect(executeManagedBackup({ target, environment, operation: 'backup', repository: 'owner/hls', runId: '123',
+    credentials: { GCP_PROJECT_ID: 'test-project', GCP_SERVICE_ACCOUNT_JSON: JSON.stringify({ type: 'service_account', project_id: 'test-project', client_email: 'deploy@test-project.iam.gserviceaccount.com', private_key: 'synthetic-key' }) } })).rejects.toThrow();
+  expect(runJob).toHaveBeenCalledTimes(1);
+  const options = runJob.mock.calls[0][3] as any;
+  expect(options.managedRecoveryTask).toMatchObject({ executionTarget: target.executionTarget, selectedSecretValues: {}, variableReferences: [] });
+  expect(JSON.parse(options.managedRecoveryTask.variables.HYPERVIBE_BACKUP_CONFIG)).toMatchObject({ nativeAccess: target.executionTarget.worker });
+  expect(getCredentials).not.toHaveBeenCalled();
+  expect(JSON.stringify(options)).not.toContain('synthetic-key');
+  vi.restoreAllMocks();
+});

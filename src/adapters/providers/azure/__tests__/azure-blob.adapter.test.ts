@@ -288,7 +288,7 @@ describe('AzureBlobStorageAdapter', () => {
 
     expect(adapter.runtimeEnvKeys('documents')).toEqual([
       'OBJECT_STORAGE_PROVIDER', 'OBJECT_STORAGE_BUCKET', 'AZURE_STORAGE_ACCOUNT_NAME',
-      'AZURE_STORAGE_CONTAINER_NAME', 'AZURE_STORAGE_CONNECTION_STRING',
+      'AZURE_STORAGE_CONTAINER_NAME', 'AZURE_STORAGE_CONNECTION_STRING', 'AZURE_STORAGE_BLOB_ENDPOINT', 'AZURE_CLIENT_ID',
     ]);
     await expect(adapter.getRuntimeEnv(environment(), context, externalId, 'documents')).resolves.toMatchObject({
       OBJECT_STORAGE_PROVIDER: 'azureblob', AZURE_STORAGE_CONTAINER_NAME: 'documents',

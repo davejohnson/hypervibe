@@ -1,5 +1,7 @@
 import { AwsConnectionAuthentication, awsAuthenticationFields, awsConnectionRegion, checkedAwsAccountId, validateAwsAuthentication, canUseAwsCredentialsForAutomation } from './aws-authentication.js';
 import { z } from 'zod';
+import { IAMClient } from '@aws-sdk/client-iam';
+import { S3RuntimeAccess } from './s3-runtime-access.js';
 import { createAwsOperatorArtifactCapability } from './aws-operator-artifacts.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
 import {
@@ -28,6 +30,7 @@ import type {
   StorageCredentials,
   StorageEnsureResult,
   StorageObservationTarget,
+  StorageRuntimeTarget,
 } from '../../../domain/ports/storage.port.js';
 import {
   providerRegistry,
@@ -64,6 +67,7 @@ interface AwsCommandClient {
 export type S3StorageClientFactory = (credentials: S3StorageCredentials, region: string, provider?: AwsCredentialProvider) => {
   s3: AwsCommandClient;
   sts: AwsCommandClient;
+  iam?: AwsCommandClient;
 };
 type AwsCredentialProvider = ReturnType<typeof defaultProvider>;
 
@@ -72,7 +76,7 @@ function defaultClientFactory(credentials: S3StorageCredentials, region: string,
     region,
     credentials: provider ?? new AwsConnectionAuthentication(credentials, region).credentials,
   };
-  return { s3: new S3Client(config), sts: new STSClient(config) };
+  return { s3: new S3Client(config), sts: new STSClient(config), iam: new IAMClient({ ...config, maxAttempts: 1 }) };
 }
 
 function deterministicBucketName(context: StorageContext, environment: Environment, name: string): string {
@@ -99,17 +103,24 @@ function errorMessage(error: unknown): string {
 
 export class S3StorageAdapter implements IStorageAdapter {
   readonly name = 's3';
+  readonly runtimeAccess = new S3RuntimeAccess(target => {
+    this.assertContext(target.context);
+    if (!this.iam) throw new Error('AWS runtime IAM access is unavailable.');
+    return { iam: this.iam, s3: this.s3Client(), sts: this.stsClient() };
+  });
   readonly capabilities = {
     kind: 'object' as const,
     regions: [],
     privateOnly: true,
     supportsUsageObservation: true,
     supportsObjectTransfer: true,
+    usesWorkloadIdentity: true,
   };
 
   private credentials: S3StorageCredentials | null = null;
   private s3: AwsCommandClient | null = null;
   private sts: AwsCommandClient | null = null;
+  private iam: AwsCommandClient | null = null;
   private region: string | null = null;
   private authentication: AwsConnectionAuthentication | null = null;
 
@@ -132,8 +143,10 @@ export class S3StorageAdapter implements IStorageAdapter {
   async disconnect(): Promise<void> {
     this.s3?.destroy();
     this.sts?.destroy();
+    this.iam?.destroy();
     this.s3 = null;
     this.sts = null;
+    this.iam = null;
     this.credentials = null;
     this.authentication = null;
     this.region = null;
@@ -434,8 +447,18 @@ export class S3StorageAdapter implements IStorageAdapter {
     environment: Environment,
     context: StorageContext,
     externalId: string,
-    _name: string
+    name: string,
+    runtimeTarget?: StorageRuntimeTarget
   ): Promise<Record<string, string>> {
+    if (runtimeTarget?.hostingProvider === 'ecs') {
+      if (!runtimeTarget.identity || !runtimeTarget.serviceName || !runtimeTarget.runtimeAccessBinding) throw new Error('ECS S3 access requires its verified application role and reviewed bucket grant.');
+      const observed = await this.runtimeAccess.observe({ environment, context, externalId, storageName: name, serviceName: runtimeTarget.serviceName, identity: runtimeTarget.identity }, runtimeTarget.runtimeAccessBinding);
+      if (observed.state !== 'present') throw new Error('ECS S3 application bucket access could not be verified.');
+      return { AWS_ENDPOINT_URL: `https://s3.${context.region}.amazonaws.com`, AWS_ACCESS_KEY_ID: '', AWS_SECRET_ACCESS_KEY: '', AWS_SESSION_TOKEN: '', AWS_S3_BUCKET_NAME: externalId, AWS_DEFAULT_REGION: context.region!, AWS_S3_URL_STYLE: 'virtual' };
+    }
+    if (runtimeTarget?.connectionProvider && runtimeTarget.connectionProvider !== this.name) {
+      throw new Error('Hypervibe will not copy a deployment credential into application storage settings. Use the ECS application role and reviewed bucket grant, or an explicitly scoped runtime storage connection for other hosts.');
+    }
     if (this.connectedCredentials().authMode === 'default' || this.connectedCredentials().sessionToken) {
       throw new Error('Hypervibe will not copy an expiring CLI/SSO session or local AWS credential chain into a deployed service. Use workload identity.');
     }
@@ -501,11 +524,13 @@ export class S3StorageAdapter implements IStorageAdapter {
     const credentials = this.connectedCredentials();
     this.s3?.destroy();
     this.sts?.destroy();
+    this.iam?.destroy();
     this.credentials = { ...credentials, ...this.authentication?.identity() };
     this.authentication = new AwsConnectionAuthentication(this.credentials, region, undefined, this.defaultCredentialsProvider);
     const clients = this.clientFactory(this.credentials, region, this.authentication.credentials);
     this.s3 = clients.s3;
     this.sts = clients.sts;
+    this.iam = clients.iam ?? null;
     this.region = region;
   }
 
@@ -615,6 +640,8 @@ providerRegistry.register({
     name: 's3',
     displayName: 'Amazon S3',
     category: 'storage',
+    storageRuntimeContract: 's3-ecs-task-role-v1',
+    storageRuntimeAccess: { hostingProviders: ['ecs'] },
     credentialsSchema: S3StorageCredentialsSchema,
     setupHelpUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
     credentials: {

@@ -1,5 +1,6 @@
 import { AzureAuthenticationSchema, azureConnectionIdentity, canUseAzureCredentialsForAutomation } from './azure-datastore.credentials.js';
 import { azureEnvironmentResourceGroupScope, legacyAzureEnvironmentResourceGroupScope } from './azure-environment-scope.js';
+import { AzureBlobRuntimeAccess } from './azure-blob-runtime-access.js';
 import { Readable } from 'node:stream';
 import { resourceName } from '../../../domain/services/resource-names.js';
 import {
@@ -20,6 +21,7 @@ import type {
   StorageObjectRecord,
   StorageObjectRevision,
   StorageObservationTarget,
+  StorageRuntimeTarget,
 } from '../../../domain/ports/storage.port.js';
 import {
   providerRegistry,
@@ -363,12 +365,14 @@ function errorMessage(error: unknown): string {
 
 export class AzureBlobStorageAdapter implements IStorageAdapter {
   readonly name = 'azureblob';
+  readonly runtimeAccess = new AzureBlobRuntimeAccess(() => this.connectedCredentials());
   readonly capabilities = {
     kind: 'object' as const,
     regions: [],
     privateOnly: true,
     supportsUsageObservation: true,
     supportsObjectTransfer: true,
+    usesWorkloadIdentity: true,
   };
 
   private credentials: AzureBlobStorageCredentials | null = null;
@@ -387,7 +391,7 @@ export class AzureBlobStorageAdapter implements IStorageAdapter {
   runtimeEnvKeys(_name: string): string[] {
     return [
       'OBJECT_STORAGE_PROVIDER', 'OBJECT_STORAGE_BUCKET', 'AZURE_STORAGE_ACCOUNT_NAME',
-      'AZURE_STORAGE_CONTAINER_NAME', 'AZURE_STORAGE_CONNECTION_STRING',
+      'AZURE_STORAGE_CONTAINER_NAME', 'AZURE_STORAGE_CONNECTION_STRING', 'AZURE_STORAGE_BLOB_ENDPOINT', 'AZURE_CLIENT_ID',
     ];
   }
 
@@ -627,14 +631,27 @@ export class AzureBlobStorageAdapter implements IStorageAdapter {
   }
 
   async getRuntimeEnv(
-    _environment: Environment,
+    environment: Environment,
     context: StorageContext,
     externalId: string,
-    _name: string
+    name: string,
+    target?: StorageRuntimeTarget
   ): Promise<Record<string, string>> {
     await this.assertContext(context);
     const identity = parseExternalId(externalId, context);
     const account = await this.requiredAccount(identity.account);
+    if (target?.hostingProvider === 'azure-container-apps') {
+      if (account.name !== identity.account || account.id.toLowerCase() !== externalId.slice(0, externalId.toLowerCase().indexOf('/blobservices/default/containers/')).toLowerCase()) throw new Error('Azure Blob runtime account identity could not be verified.');
+      if (!target.identity || !target.serviceName || !target.runtimeAccessBinding) throw new Error('Azure Blob runtime access requires the observed workload identity and approved access binding.');
+      const access = await this.runtimeAccess.observe({ environment, context, externalId, storageName: name, serviceName: target.serviceName, identity: target.identity }, target.runtimeAccessBinding);
+      if (access.state !== 'present') throw new Error('Azure Blob workload access must be granted and verified by its reviewed access action before runtime wiring.');
+      return {
+        OBJECT_STORAGE_PROVIDER: 'azureblob', OBJECT_STORAGE_BUCKET: identity.container,
+        AZURE_STORAGE_ACCOUNT_NAME: account.name, AZURE_STORAGE_CONTAINER_NAME: identity.container,
+        AZURE_STORAGE_BLOB_ENDPOINT: `https://${account.name}.blob.core.windows.net`, AZURE_STORAGE_CONNECTION_STRING: '',
+        AZURE_CLIENT_ID: target.identity.scope.identityResourceId ? target.identity.scope.clientId! : '',
+      };
+    }
     const key = await this.controlPlane().listKeys(account);
     return {
       OBJECT_STORAGE_PROVIDER: 'azureblob',
@@ -773,6 +790,8 @@ providerRegistry.register({
       ],
     },
     connectionAliases: ['azure-container-apps'],
+    storageRuntimeContract: 'azure-blob-managed-identity-v1',
+    storageRuntimeAccess: { hostingProviders: ['azure-container-apps'] },
     maturity: {
       lifecycle: {
         storage: { status: 'ready-for-live' },

@@ -23,6 +23,7 @@ function cloudrunPolicies(options: { queueAddon: boolean }): Record<string, unkn
       cloudrun: {
         provider: 'cloudrun',
         version: profile.version,
+        gcpProjectId: 'gcp-project',
         preparedAt: new Date().toISOString(),
         requiredApis: [
           ...profile.requiredApis,
@@ -30,6 +31,7 @@ function cloudrunPolicies(options: { queueAddon: boolean }): Record<string, unkn
         ],
         requiredRoles: [
           ...profile.requiredRoles,
+          'projects/gcp-project/roles/hypervibeRuntimeIdentityV1',
           ...(options.queueAddon ? QUEUE_PREPARE_ADDON.requiredRoles : []),
         ],
       },
@@ -104,6 +106,7 @@ function ensureAction(
     resource: { kind: 'queue', name, provider },
     verified: true,
     reason: 'test',
+    ...(provider === 'cloudrun' ? { billable: true, requiresConfirm: true } : {}),
     metadata: {
       operation: QUEUE_OPERATIONS.ensure,
       queueName: name,
@@ -182,6 +185,21 @@ describe('queue-plan.service', () => {
   }
 
   describe('pubsub backend', () => {
+    it('declares fresh managed queue creation as an exact confirmed billable action', async () => {
+      const { project, environment } = seedProject(); stubAdapter({ queues: { backend: 'pubsub' } });
+      const { actions } = await planQueues({ project, environmentSpec: pubsubSpec(), environment });
+      expect(actions[0]).toMatchObject({ type: 'create', billable: true, requiresConfirm: true });
+    });
+    it.each(['missing-confirmation', 'wrong-id', 'missing-billable', 'missing-confirmation-flag', 'update-now-absent'])('blocks %s at the queue mutation boundary', async scenario => {
+      const { project, environment } = seedProject(); const adapter = stubAdapter({ queues: { backend: 'pubsub' } });
+      const action: PlanAction = { ...ensureAction('email-jobs', { providerScope: { projectId: 'gcp-project' } }), billable: true, requiresConfirm: true };
+      if (scenario === 'missing-billable') delete action.billable;
+      if (scenario === 'missing-confirmation-flag') delete action.requiresConfirm;
+      if (scenario === 'update-now-absent') action.type = 'update';
+      const result = await applyQueueAction({ project, envName: environment.name, environmentSpec: pubsubSpec(), action,
+        confirmedActionIds: new Set(scenario === 'missing-confirmation' ? [] : scenario === 'wrong-id' ? ['queue:another'] : [action.id]) });
+      expect(result.success).toBe(false); expect(adapter.ensureQueue).not.toHaveBeenCalled();
+    });
     it('isolates same-name queues through real adapter plan/apply, runtime wiring, noop and teardown', async () => {
       const { project, environment: production } = seedProject();
       const staging = envRepo().create({ projectId: project.id, name: 'staging',
@@ -214,7 +232,7 @@ describe('queue-plan.service', () => {
         const planned = await planQueues({ project, environmentSpec: spec, environment: target });
         expect(planned.actions).toHaveLength(1);
         expect(planned.actions[0]).toMatchObject({ type: 'create', verified: true });
-        expect(await applyQueueAction({ project, envName: target.name, environmentSpec: spec, action: planned.actions[0]! }))
+        expect(await applyQueueAction({ project, envName: target.name, environmentSpec: spec, action: planned.actions[0]!, confirmedActionIds: new Set([planned.actions[0]!.id]) }))
           .toMatchObject({ success: true });
         const bound = envRepo().findById(target.id)!;
         const vars = buildQueueEnvVars({ environmentSpec: spec, environment: bound, backend: 'pubsub', gcpProjectId: 'gcp-project' });
@@ -449,13 +467,14 @@ describe('queue-plan.service', () => {
         envName: 'production',
         environmentSpec: pubsubSpec(),
         action: ensureAction('email-jobs', { ackDeadlineSeconds: 120 }),
+        confirmedActionIds: new Set(['queue:email-jobs']),
       });
 
       expect(result.success).toBe(true);
       expect(adapter.ensureQueue).toHaveBeenCalledWith(
         expect.objectContaining({ id: environment.id }),
         'email-jobs',
-        { ackDeadlineSeconds: 120 }
+        { ackDeadlineSeconds: 120, expectedState: 'absent' }
       );
       const bindings = parseQueueBindings(envRepo().findById(environment.id));
       expect(bindings['email-jobs']).toMatchObject({
@@ -464,6 +483,19 @@ describe('queue-plan.service', () => {
         subscriptionName: 'projects/gcp-project/subscriptions/gcp-project-email-jobs-sub',
         providerScope: { projectId: 'gcp-project' },
       });
+    });
+
+    it('carries update-only existence authority to the native queue mutation boundary', async () => {
+      const { project, environment } = seedProject(); bindPubsubQueue(environment);
+      const adapter = stubAdapter({ queues: { backend: 'pubsub' } });
+      adapter.getQueueSubscription.mockResolvedValue({ name: 'projects/gcp-project/subscriptions/gcp-project-email-jobs-sub',
+        topic: 'projects/gcp-project/topics/gcp-project-email-jobs', ackDeadlineSeconds: 10 });
+      adapter.ensureQueue.mockResolvedValue({ topicName: 'projects/gcp-project/topics/gcp-project-email-jobs',
+        subscriptionName: 'projects/gcp-project/subscriptions/gcp-project-email-jobs-sub', createdTopic: false, createdSubscription: false });
+      const planned = await planQueues({ project, environmentSpec: pubsubSpec(), environment: envRepo().findById(environment.id) });
+      expect(planned.actions[0].type).toBe('update');
+      expect(await applyQueueAction({ project, envName: environment.name, environmentSpec: pubsubSpec(), action: planned.actions[0] })).toMatchObject({ success: true });
+      expect(adapter.ensureQueue).toHaveBeenCalledWith(expect.objectContaining({ id: environment.id }), 'email-jobs', { ackDeadlineSeconds: 120, expectedState: 'present' });
     });
 
     it('does not persist an ensure result from an unexpected Pub/Sub project', async () => {
@@ -481,6 +513,7 @@ describe('queue-plan.service', () => {
         envName: 'production',
         environmentSpec: pubsubSpec(),
         action: ensureAction('email-jobs', { ackDeadlineSeconds: 120 }),
+        confirmedActionIds: new Set(['queue:email-jobs']),
       });
 
       expect(result.success).toBe(false);

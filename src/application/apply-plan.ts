@@ -1797,7 +1797,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
       return applyIosAction({ project: applyProject, envName, environmentSpec: envSpec, action });
     }
     if (capability === 'queue.mutate') {
-      return applyQueueAction({ project: applyProject, envName, environmentSpec: envSpec, action });
+      return applyQueueAction({ project: applyProject, envName, environmentSpec: envSpec, action, confirmedActionIds });
     }
     if (capability === 'storage.mutate') {
       return applyStorageAction({ project: applyProject, envName, environmentSpec: envSpec, action });

@@ -432,6 +432,20 @@ describe('ci-deploy.service', () => {
   });
 
   describe('providerSecretsForGitHubActions', () => {
+    it('honors the provider automation boundary before exporting a verified connection', () => {
+      const repo = new ConnectionRepository();
+      const connection = repo.create({ provider: 'cloudrun', scope: 'davejohnson/billforge',
+        credentialsEncrypted: getSecretStore().encryptObject({ credentials: 'temporary-credential', projectId: 'cloud-project' }) });
+      repo.updateStatus(connection.id, 'verified');
+      const original = providerRegistry.getMetadata.bind(providerRegistry);
+      vi.spyOn(providerRegistry, 'getMetadata').mockImplementation(name => {
+        const metadata = original(name);
+        return name === 'cloudrun' && metadata ? { ...metadata, credentials: { ...metadata.credentials,
+          canUseForAutomation: () => false } } : metadata;
+      });
+      expect(providerSecretsForGitHubActions('cloudrun', { githubRepo: 'davejohnson/billforge' })).toEqual([]);
+    });
+
     it('does not export local Google ADC or invent an automation key', () => {
       const connectionRepo = new ConnectionRepository();
       const connection = connectionRepo.create({ provider: 'cloudrun', scope: 'davejohnson/billforge',
