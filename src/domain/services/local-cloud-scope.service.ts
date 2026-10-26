@@ -260,7 +260,9 @@ export async function planLocalCloudScope(input: { project: Project; environment
     record.intent.predecessor ? 'Only this retained preparation stage is authorized; later API, identity, binding or hosting stages need their own current plan.'
       : 'This stage allocates an empty cloud project only. Billing, API enablement, cloud connections and hosting are separate reviewed work.',
     'An allocated but unbound project remains in this isolated stage until a separate reviewed lifecycle handoff records its connection and binding; removing this declaration does not adopt it.',
-    ...(record.reason ? [`The retained allocation reports ${record.reason}; recovery never repeats a creation request.`] : []),
+    ...(record.reason ? [record.intent.predecessor
+      ? `The retained preparation stage reports ${record.reason}; recovery never repeats a mutation.`
+      : `The retained allocation reports ${record.reason}; recovery never repeats a creation request.`] : []),
   ] };
 }
 
@@ -285,13 +287,43 @@ export async function inspectLocalCloudScope(project: Project, environmentName: 
   let record = acceptedLeaf(history) ?? history.at(-1);
   if (!record) return undefined;
   if (record.status === 'scope-ready' && !emptyLocalScope(environment)) return undefined;
+  // A continuation's outcome does not describe allocation. Follow only its
+  // accepted immutable ancestry and freshly verify the exact allocated lifetime.
+  let allocation = record;
+  const visited = new Set<string>();
+  while (allocation.intent.predecessor) {
+    if (visited.has(allocation.installationId) || visited.size >= 20) throw unavailable();
+    visited.add(allocation.installationId);
+    const predecessor = allocation.intent.predecessor;
+    const previous = history.find(item => item.installationId === predecessor.installationId);
+    if (!previous || previous.plan.digest !== predecessor.planDigest) throw unavailable();
+    allocation = previous;
+  }
+  if (allocation.installationId !== record.installationId) {
+    const execution = await context(project, environment, allocation.intent, 'recover');
+    allocation = await reconcileCloudInstallationV1({ ...execution, installationId: allocation.installationId, planDigest: allocation.plan.digest });
+  }
   if (record.attempts.length) {
     const execution = await context(project, environment, record.intent, 'recover');
     record = await reconcileCloudInstallationV1({ ...execution, installationId: record.installationId, planDigest: record.plan.digest });
   }
+  // Continuation authorization also refreshes predecessors. Use that latest
+  // observation, including a denied read or a replaced native project lifetime.
+  if (allocation.installationId === record.installationId) allocation = record;
+  else {
+    const current = await journal(project, environment).read(allocation.installationId);
+    if (!current || current.plan.digest !== allocation.plan.digest) throw unavailable();
+    allocation = current;
+  }
+  const allocationComplete = allocation.status === 'scope-ready';
+  const resources = [
+    ...(allocationComplete ? Object.values(allocation.completed).flatMap(value => value.resources) : []),
+    ...Object.values(record.completed).flatMap(value => value.resources),
+  ].filter((resource, index, all) => all.findIndex(other => isDeepStrictEqual(other, resource)) === index);
   return { scope: 'cloud-scope' as const, environment: environmentName, installationId: record.installationId,
-    status: record.status, verified: record.status === 'scope-ready', allocationComplete: record.status === 'scope-ready', hostingReady: false,
-    resources: Object.values(record.completed).flatMap(value => value.resources), ...(record.reason ? { reason: record.reason } : {}) };
+    stage: record.intent.predecessor ? 'continuation' as const : 'allocation' as const, actionIds: record.plan.actions.map(action => action.id),
+    status: record.status, verified: record.status === 'scope-ready' && allocationComplete, allocationComplete, hostingReady: false,
+    resources, ...(record.reason ? { reason: record.reason } : {}) };
 }
 
 export async function applyLocalCloudScope(input: { project: Project; environment: Environment; cloudScope: unknown;
@@ -317,7 +349,9 @@ export async function applyLocalCloudScope(input: { project: Project; environmen
       message: complete ? proof.mode === 'bind' ? 'Bound the exact verified cloud project and nonsecret local connections to this application environment.'
         : updated.intent.predecessor ? 'Verified this exact preparation action. Later stages require a separate current plan.'
         : 'Verified the exact empty project allocation. Billing and hosting have not been configured.'
-        : 'The project allocation is unresolved. Retain its exact native operation for read-only recovery; no replacement was authorized.',
+        : updated.intent.predecessor
+          ? `The cloud preparation action ${input.action?.id ?? updated.plan.actions.map(action => action.id).join(', ')} is unresolved. Retain its exact attempt for read-only recovery; no later stage was authorized.`
+          : 'The project allocation is unresolved. Retain its exact native operation for read-only recovery; no replacement was authorized.',
       data: { installationId: updated.installationId, status: updated.status, ...(updated.reason ? { reason: updated.reason } : {}),
         resources: Object.values(updated.completed).flatMap(value => value.resources) } };
   } catch { return { success: false, status: 'blocked', message: unavailable().message }; }

@@ -84,3 +84,49 @@ when no scope was supplied. The new environment record was returned without an
 environment (one failing test). That no-context fallback now excludes only the new
 reserved environment scope; explicit exact-environment lookups and legacy scopes
 remain available. The connection repository suite then passed all eight tests.
+
+### Stage reporting after rejected billing (2026-10-25)
+
+The challenged assumption was that the current continuation's readiness also
+describes project allocation. Independent live evidence showed one exactly
+reviewed initial billing PUT returning HTTP 400, followed by a guarded read of
+the same project with `billingEnabled: false` and no billing account. The project
+had already been allocated. Apply nevertheless called its allocation unresolved,
+and status reported `allocationComplete: false`. Successful billing also inherited
+plan/apply/status hints saying billing still needed configuration.
+
+Google's [updateBillingInfo contract](https://docs.cloud.google.com/billing/docs/reference/rest/v1/projects/updateBillingInfo)
+and [ProjectBillingInfo fields](https://docs.cloud.google.com/billing/docs/reference/rest/v1/ProjectBillingInfo)
+match the retained method, project path and single `billingAccountName` input;
+the other fields are output-only. The native 400 body was discarded by the bounded
+transport, so its cause remains unknown. This finding establishes a reporting
+defect, not the cause of the rejected billing request.
+
+Four reconstructed public-command/SQLite/real-client transport regressions first
+failed against the unchanged runtime: rejected billing, verified billing, a denied
+project reread, and a replaced project lifetime. The successful case additionally
+failed two assertions for the successful apply and no-action plan hints before
+those hints changed. Status now follows the immutable predecessor chain and
+freshly verifies the exact allocation independently of continuation readiness.
+It retains the verified project resource and identifies the current preparation
+actions. Denied reads and replaced lifetimes remain unverified. Plan warnings and
+apply receipts identify the retained preparation stage. Transport behavior,
+failure categories and retry authority are unchanged.
+
+The focused application, local continuation, billing assignment and project
+allocation suites passed 48 tests; `npm run typecheck` and `git diff --check`
+passed. Rejected-billing recovery still performed exactly one project create and
+one billing PUT in the reconstructed transport. These checks run in ordinary
+`npm test`, which both the committed acceptance workflow and desired required
+check configuration execute. Repository configuration alone does not establish
+live branch-protection enforcement.
+
+The previous candidate remains source
+`ceb81302028e476c0f14dc85ea071205d9a4205c`, package version `0.1.44`, tarball SHA-256
+`290997bcffa41c628fbfdb2e48abd39814b7e92f73d5b60fb2492abc35011b6a`.
+Its [acceptance run](https://github.com/davejohnson/hypervibe/actions/runs/40247019631/job/121330626037)
+passed 7,845 tests (six skipped, one todo). Those gates remain historical baseline
+evidence for those exact bytes. This source correction requires a newly built
+package and renewed consumer acceptance;
+it has not been repacked, published or exercised against live cloud state. Offline
+regressions do not establish live billing success or full Connect Cloud readiness.

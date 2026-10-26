@@ -167,9 +167,10 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
     expect(result.data).not.toHaveProperty('localEnv');
     const applied = await registry.execute('hv_apply', { project: f.project.name, planId: (result.data as any).planId, confirmActions: ['gcp:project'] });
     expect(applied).toMatchObject({ ok: true, data: { applied: true } });
-    expect(applied.hint).toMatch(/empty.*project/i);
+    expect(applied.hint).toMatch(/preparation stage is verified/);
+    expect(applied.data).toMatchObject({ receipts: [expect.objectContaining({ message: expect.stringMatching(/empty project allocation/) })] });
     const next = await registry.execute('hv_plan', { project: f.project.name, env: 'staging' });
-    expect(next.hint).toMatch(/empty.*project/i);
+    expect(next.hint).toMatch(/preparation stage is verified/);
     expect(next.hint).not.toContain('Everything is in sync');
     const status = await registry.execute('hv_status', { project: f.project.name, env: 'staging' });
     expect(status).toMatchObject({ ok: true, data: { scope: 'cloud-scope', allocationComplete: true, hostingReady: false } });
@@ -290,6 +291,86 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       const full = await registry.execute('hv_plan', { project: f.project.name, env: 'staging', scope: 'full' });
       expect(full).toMatchObject({ ok: true, data: { scope: 'cloud-scope', actions: [expect.objectContaining({ id: 'gcp:project' })] } });
     });
+  it.each(['rejected', 'ready', 'project-read-denied', 'project-lifetime-replaced'] as const)('reports the allocated project separately from billing preparation: %s', async scenario => {
+    // Independent evidence: Plan Honesty requires stage-specific partial progress;
+    // the observed live initial-assignment PUT returned HTTP 400 while a later
+    // exact ProjectBillingInfo read reported no association. Its error body was
+    // not retained, so this reconstruction deliberately supplies no native cause.
+    // https://docs.cloud.google.com/billing/docs/reference/rest/v1/projects/updateBillingInfo
+    // https://docs.cloud.google.com/billing/docs/reference/rest/v1/ProjectBillingInfo
+    const f = fixture(); const allocated = await f.plan(); if ('error' in allocated) throw new Error(allocated.error);
+    expect(await f.apply(allocated.planRunId)).toMatchObject({ kind: 'executed', result: { success: true } });
+    const desired = structuredClone(f.desired) as any;
+    desired.environments.staging.hosting.scopePreparation.continuation = { nativeScope: {
+      scopeKind: 'operator-hosting-v1', billingAccountName: 'billingAccounts/ABCDEF-123456-789ABC',
+    } };
+    f.store.replace(f.project, desired);
+    const base = f.request.getMockImplementation()!;
+    let billing = false; let billingWrites = 0; let invalidateProject = false;
+    f.request.mockImplementation(async (input, init) => {
+      const url = new URL(String(input)); const method = init?.method ?? 'GET';
+      if (url.pathname.endsWith(':testIamPermissions')) return Response.json({ permissions: [
+        'billing.accounts.get', 'billing.resourceAssociations.create', 'resourcemanager.projects.get',
+        'resourcemanager.projects.createBillingAssignment', 'serviceusage.services.list', 'serviceusage.effectivepolicy.get',
+      ] });
+      if (url.host === 'cloudbilling.googleapis.com') {
+        if (url.pathname === '/v1/billingAccounts/ABCDEF-123456-789ABC') return Response.json({ name: 'billingAccounts/ABCDEF-123456-789ABC', open: true });
+        expect(url.pathname).toBe(`/v1/projects/${nativeId}/billingInfo`);
+        if (method === 'PUT') {
+          expect(JSON.parse(String(init?.body))).toEqual({ billingAccountName: 'billingAccounts/ABCDEF-123456-789ABC' });
+          billingWrites++;
+          if (scenario !== 'ready') return new Response(null, { status: 400 });
+          billing = true;
+        }
+        return Response.json({ name: `projects/${nativeId}/billingInfo`, projectId: nativeId,
+          billingAccountName: billing ? 'billingAccounts/ABCDEF-123456-789ABC' : '', billingEnabled: billing });
+      }
+      const response = await base(input, init);
+      if (invalidateProject && url.pathname === `/v3/projects/${nativeId}`) {
+        if (scenario === 'project-read-denied') return Response.json({}, { status: 403 });
+        if (scenario === 'project-lifetime-replaced') return Response.json({ ...await response.json() as Record<string, unknown>, createTime: '2026-10-25T09:00:00Z' });
+      }
+      return response;
+    });
+    const registry = new CommandRegistry(); registerCoreTools(registry, f.ctx);
+    const planned = await registry.execute('hv_plan', { project: f.project.name, env: 'staging' });
+    expect(planned).toMatchObject({ ok: true, data: { actions: [{ id: 'gcp:billing:initial-assignment-v1' }] } });
+    const applied = await registry.execute('hv_apply', { project: f.project.name, planId: (planned.data as any).planId,
+      confirmActions: ['gcp:billing:initial-assignment-v1'] });
+    expect(applied).toMatchObject({ ok: true, data: { applied: scenario === 'ready' } });
+    if (scenario === 'ready') expect.soft(applied.hint).not.toMatch(/Billing, API enablement and hosting still require/);
+    if (scenario !== 'ready') {
+      const receipt = (applied.data as any).receipts[0];
+      expect(receipt).toMatchObject({ status: 'blocked', data: { reason: 'provider_error' } });
+      expect.soft(receipt.message).toMatch(/preparation action.*gcp:billing:initial-assignment-v1/);
+      expect.soft(receipt.message).not.toMatch(/project allocation is unresolved/);
+    }
+    invalidateProject = true;
+    const status = await registry.execute('hv_status', { project: f.project.name, env: 'staging' });
+    const allocationComplete = !scenario.startsWith('project-');
+    expect.soft(status).toMatchObject({ ok: true, data: { allocationComplete, verified: scenario === 'ready', hostingReady: false } });
+    expect.soft(status.hint).toContain('gcp:billing:initial-assignment-v1');
+    expect.soft(status.hint).not.toMatch(/Billing and hosting have not been configured|saved cloud project allocation still needs review/);
+    if (scenario === 'rejected') {
+      expect.soft((status.data as any).resources).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'project', id: `projects/${number}` })]));
+      const recovery = await registry.execute('hv_plan', { project: f.project.name, env: 'staging' });
+      expect(recovery.ok).toBe(true);
+      expect.soft(recovery.warnings).toEqual(expect.arrayContaining([expect.stringMatching(/^The retained preparation stage reports /)]));
+      expect.soft(recovery.warnings?.join(' ')).not.toMatch(/The retained allocation reports /);
+      await registry.execute('hv_apply', { project: f.project.name, planId: (recovery.data as any).planId });
+    }
+    if (scenario === 'ready') {
+      // Removing the next-stage selection does not erase verified billing.
+      delete desired.environments.staging.hosting.scopePreparation.continuation;
+      f.store.replace(f.project, desired);
+      const complete = await registry.execute('hv_plan', { project: f.project.name, env: 'staging' });
+      expect(complete).toMatchObject({ ok: true, data: { actions: [] } });
+      expect.soft(complete.hint).not.toMatch(/Billing, API enablement and hosting still require/);
+    }
+    expect(billingWrites).toBe(1); expect(f.writes).toHaveLength(1);
+    expect(JSON.stringify({ applied, status })).not.toContain(token);
+  });
+
   it.each(['normal', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-lost-ack', 'public-registry', 'public-grant-lost-ack', 'github-ci-public-registry'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
     const f = fixture(); const allocated = await f.plan(); if ('error' in allocated) throw new Error(allocated.error);
     expect(await f.apply(allocated.planRunId)).toMatchObject({ kind: 'executed', result: { success: true } });

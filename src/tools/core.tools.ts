@@ -932,7 +932,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         hint = result.scope === 'credentials'
           ? 'The reviewed credential configuration matches or has recorded synchronization. Write-only values, deployment, application operation and revocation still need their own evidence.'
           : result.scope === 'cloud-scope'
-          ? 'The exact empty cloud project is allocated. Billing, API enablement and hosting still require separate reviewed plans.'
+          ? 'The reviewed cloud preparation stage is verified. Further setup requires a separate current plan; hosting readiness is not verified.'
           : result.scope === 'secrets'
           ? 'The selected secrets already match. This does not verify deployment or other environment settings.'
           : result.backupCoverage && !result.backupCoverage.complete
@@ -1035,7 +1035,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const inspectionEnvironment = inspectionSpec ? commandEnvironment(inspectionSpec.spec, env) : env?.trim() || 'staging';
       const cloudScope = await inspectLocalCloudScope(project, inspectionEnvironment);
       if (cloudScope) return commandSuccess(cloudScope, {
-        hint: cloudScope.allocationComplete ? 'The exact empty cloud project is allocated. Billing and hosting have not been configured by this stage.'
+        hint: cloudScope.stage === 'continuation'
+          ? `${cloudScope.allocationComplete ? 'The exact cloud project allocation is verified.' : 'The exact cloud project allocation could not be verified.'} The retained preparation stage (${cloudScope.actionIds.join(', ')}) ${cloudScope.verified ? 'is verified' : 'still needs review or read-only recovery'}. Run hv_plan to review its next step; hosting readiness is not verified.`
+          : cloudScope.allocationComplete ? 'The exact empty cloud project is allocated. Billing and hosting have not been configured by this stage.'
           : 'The saved cloud project allocation still needs review or exact operation recovery. Run hv_plan; no replacement project is authorized.',
         next: ['hv_plan'],
       });
@@ -1574,7 +1576,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
                 ? `Apply has pending provider workflows: ${pending.map((r) => r.actionId).join(', ')}. Re-run hv_plan and hv_apply after they progress.`
             : result.success
               ? cloudScopeOnly
-                ? 'The exact empty cloud project is allocated. Billing, API enablement and hosting still require separate reviewed plans.'
+                ? 'The reviewed cloud preparation stage is verified. Further setup requires a separate current plan; hosting readiness is not verified.'
                 : secretOnly
                 ? 'The selected secrets are saved. They take effect after the managed CI deployment; select its workflow with hv_ci_status, then use hv_ci_trigger.'
                 : 'Apply complete. Check hv_status to verify convergence.'
