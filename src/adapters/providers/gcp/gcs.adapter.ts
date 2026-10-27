@@ -17,6 +17,7 @@ import type {
   StorageObservationTarget,
   StorageRuntimeTarget,
 } from '../../../domain/ports/storage.port.js';
+import { GcsRuntimeAccess } from './gcs-runtime-access.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
 import {
   providerRegistry,
@@ -317,12 +318,16 @@ export class GcsStorageAdapter implements IStorageAdapter {
   private readonly mediaRequest: typeof fetch;
   private readonly tokenProvider: TokenProvider;
   private readonly defaultProjectProvider: () => Promise<string>;
+  readonly runtimeAccess: GcsRuntimeAccess;
 
   constructor(options: GcsStorageAdapterOptions = {}) {
     this.request = options.fetch ?? fetch;
     this.mediaRequest = options.mediaFetch ?? options.fetch ?? rawGcsMediaFetch;
     this.tokenProvider = options.tokenProvider ?? defaultTokenProvider;
     this.defaultProjectProvider = options.defaultProjectProvider ?? (() => new GoogleAuth().getProjectId());
+    this.runtimeAccess = new GcsRuntimeAccess(async () => ({ projectId: await this.connectedProjectId(),
+      managementEmail: this.credentials?.workloadIdentity?.serviceAccountEmail ?? this.serviceAccount?.client_email,
+      token: await this.accessToken() }), this.request);
   }
 
   runtimeEnvKeys(_name: string): string[] {
@@ -584,10 +589,10 @@ export class GcsStorageAdapter implements IStorageAdapter {
   }
 
   async getRuntimeEnv(
-    _environment: Environment,
+    environment: Environment,
     context: StorageContext,
     externalId: string,
-    _name: string,
+    name: string,
     target?: StorageRuntimeTarget
   ): Promise<Record<string, string>> {
     await this.assertContext(context);
@@ -604,6 +609,9 @@ export class GcsStorageAdapter implements IStorageAdapter {
         || (configuredPrincipal && configuredPrincipal !== identity.principal)) {
         throw new Error('GCS runtime access requires the exact distinct Cloud Run workload identity and GCP project scope.');
       }
+      if (!target.serviceName || !target.runtimeAccessBinding) throw new Error('GCS workload access preparation requires its exact reviewed bucket grant before runtime wiring.');
+      const grant = await this.runtimeAccess.observe({ environment, context, externalId, storageName: name, serviceName: target.serviceName, identity }, target.runtimeAccessBinding);
+      if (grant.state !== 'present') throw new Error('GCS workload access grant is missing or unverified; apply its exact permission action before runtime wiring.');
       // Empty the legacy slot on reviewed runtime synchronization. Leaving an
       // old key installed would override workload ADC in existing consumers.
       return { ...runtimeEnv, GOOGLE_CLOUD_CREDENTIALS_JSON: '' };
@@ -733,6 +741,8 @@ providerRegistry.register({
       agentManagedKeys: ['runtimeServiceAccountEmail', 'projectId', 'workloadIdentity'],
       agentManagedChoices: { authMode: ['github-workload-identity'] },
       automationSecretKeys: { GCP_SERVICE_ACCOUNT_JSON: 'credentials' },
+      canUseForAutomation: credentials => credentials.authMode !== 'default'
+        && GcsStorageCredentialsSchema.safeParse(credentials).success,
       defaultScalarKey: 'credentials',
       supportsNativeCliAuth: true,
       environmentVariableAliases: [
@@ -740,7 +750,8 @@ providerRegistry.register({
       ],
     },
     connectionAliases: ['cloudrun'],
-    storageRuntimeContract: 'gcs-native-adc-v1',
+    storageRuntimeContract: 'gcs-native-adc-v2',
+    storageRuntimeAccess: { hostingProviders: ['cloudrun'] },
     maturity: {
       lifecycle: {
         storage: { status: 'ready-for-live' },

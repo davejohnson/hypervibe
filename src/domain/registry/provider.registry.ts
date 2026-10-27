@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isNonSecretConnectionField } from '../../lib/value-free-coordinates.js';
 import { unwrapCredentialSchema } from '../services/connection-guidance.js';
 import type { ProviderCiDeployMetadata } from '../ports/ci-deploy.port.js';
 import type { ProviderDatabaseRestoreDrillMetadata } from '../ports/database-restore-drill.port.js';
@@ -135,6 +136,10 @@ export const standardDatabaseRuntimeProjection: ProviderDatabaseRuntimeProjectio
 
 function credentialSchemaKeys(schema: z.ZodTypeAny): Set<string> | null {
   const current = unwrapCredentialSchema(schema);
+  if (current instanceof z.ZodUnion) {
+    const alternatives = current.options.map(option => credentialSchemaKeys(option as z.ZodTypeAny));
+    return alternatives.every(keys => keys !== null) ? new Set(alternatives.flatMap(keys => [...keys!])) : null;
+  }
   return current instanceof z.ZodObject
     ? new Set(Object.keys(current.shape))
     : null;
@@ -163,6 +168,8 @@ export interface ProviderMetadata {
     agentManagedChoices?: Record<string, string[]>;
     /** The adapter can authenticate through the provider's native local CLI/default chain. */
     supportsNativeCliAuth?: boolean;
+    /** Non-secret authenticated selectors verification may pin, never silently replace. */
+    verifiedIdentityKeys?: string[];
     /** Reject local or expiring sessions before unattended CI/backup automation. */
     canUseForAutomation?: (credentials: Record<string, unknown>) => boolean;
     /** Reconstruct public federation configuration from the exact reviewed environment. */
@@ -411,9 +418,14 @@ export class ProviderRegistry {
     const inputs = provider.metadata.credentials?.localEnvInputs ?? [];
     const agentManagedKeys = provider.metadata.credentials?.agentManagedKeys ?? [];
     const managedChoices = provider.metadata.credentials?.agentManagedChoices ?? {};
-    const schemaKeys = inputs.length > 0 || agentManagedKeys.length > 0
+    const identityKeys = provider.metadata.credentials?.verifiedIdentityKeys ?? [];
+    const schemaKeys = inputs.length > 0 || agentManagedKeys.length > 0 || identityKeys.length > 0
       ? credentialSchemaKeys(provider.metadata.credentialsSchema)
       : null;
+    if (!Array.isArray(identityKeys) || new Set(identityKeys).size !== identityKeys.length
+      || identityKeys.some(key => !isNonSecretConnectionField(key) || !schemaKeys?.has(key))) {
+      throw new Error(`Provider "${provider.metadata.name}" has invalid verified connection identity keys.`);
+    }
     const keys = inputs.map((input) => input.envKey);
     if (new Set(keys).size !== keys.length) {
       throw new Error(`Provider "${provider.metadata.name}" local env input keys must be unique.`);

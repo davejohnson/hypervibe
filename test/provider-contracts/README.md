@@ -438,3 +438,9 @@ reconstruct historical native resources and exact durable attempts, then exercis
 read-only recovery and explicit removal through the actual shared engine. The
 fixture's synthetic historical plan is not a runtime feature flag or a production
 bypass. See [scope evidence and remaining gaps](../../docs/connect-cloud-scope-preparation.md).
+
+`storage-runtime-access.contract.test.ts` covers all four storage and seven hosting
+providers. The native AWS/GCP/Azure transport suites and shared SQLite storage/queue
+lifecycle suites run in ordinary `npm test`; see [storage access evidence](../../docs/storage-runtime-access-evidence.md).
+These checks establish exact configured grant and recovery boundaries, not live
+application authorization or atomic exclusion of external IAM writers.

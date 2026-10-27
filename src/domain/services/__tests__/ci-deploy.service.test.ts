@@ -432,15 +432,29 @@ describe('ci-deploy.service', () => {
   });
 
   describe('providerSecretsForGitHubActions', () => {
+    it('honors the provider automation boundary before exporting a verified connection', () => {
+      const repo = new ConnectionRepository();
+      const connection = repo.create({ provider: 'cloudrun', scope: 'davejohnson/billforge',
+        credentialsEncrypted: getSecretStore().encryptObject({ credentials: 'temporary-credential', projectId: 'cloud-project' }) });
+      repo.updateStatus(connection.id, 'verified');
+      const original = providerRegistry.getMetadata.bind(providerRegistry);
+      vi.spyOn(providerRegistry, 'getMetadata').mockImplementation(name => {
+        const metadata = original(name);
+        return name === 'cloudrun' && metadata ? { ...metadata, credentials: { ...metadata.credentials,
+          canUseForAutomation: () => false } } : metadata;
+      });
+      expect(providerSecretsForGitHubActions('cloudrun', { githubRepo: 'davejohnson/billforge' })).toEqual([]);
+    });
+
     it('does not export local Google ADC or invent an automation key', () => {
       const connectionRepo = new ConnectionRepository();
       const connection = connectionRepo.create({ provider: 'cloudrun', scope: 'davejohnson/billforge',
         credentialsEncrypted: getSecretStore().encryptObject({ authMode: 'default', projectId: 'cloud-project' }) });
       connectionRepo.updateStatus(connection.id, 'verified');
       const projected = providerSecretsForGitHubActions('cloudrun', { githubRepo: 'davejohnson/billforge' });
-      expect(projected).toEqual([{ name: 'GCP_PROJECT_ID', value: 'cloud-project' }]);
+      expect(projected).toEqual([]);
       const missing = requiredProviderSecretNamesForGitHubActions('cloudrun').filter(name => !projected.some(item => item.name === name));
-      expect(missing).toEqual(['GCP_SERVICE_ACCOUNT_JSON']);
+      expect(missing.sort()).toEqual(['GCP_PROJECT_ID', 'GCP_SERVICE_ACCOUNT_JSON']);
       expect(missingProviderSecretsMessage('cloudrun', missing)).toContain('separately reviewed deployment federation');
     });
 

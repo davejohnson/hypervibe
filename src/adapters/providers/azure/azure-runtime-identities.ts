@@ -17,7 +17,7 @@ const same=(a:unknown,b:unknown)=>typeof a==='string'&&typeof b==='string'&&a.to
 const hash=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const guid=(value:unknown)=>{const h=hash(value);return `${h.slice(0,8)}-${h.slice(8,12)}-5${h.slice(13,16)}-8${h.slice(17,20)}-${h.slice(20,32)}`;};
 type Native=Record<string,any>;
-interface Connection {client:AzureResourceManagerClient;tenantId:string;subscriptionId:string;deployClientId:string;location:string;deployment?:CloudDeploymentConnectionV1}
+interface Connection {client:AzureResourceManagerClient;tenantId:string;subscriptionId:string;deployClientId?:string;location:string;deployment?:CloudDeploymentConnectionV1}
 interface ReaderGrant {vaultId:string;createdAt:string;assignmentId:string;principalId:string}
 const readerGrantSchema=z.object({vaultId:z.string().regex(/^\/subscriptions\/[a-f0-9-]+\/resourceGroups\/[A-Za-z0-9_().-]+\/providers\/Microsoft\.KeyVault\/vaults\/[A-Za-z0-9-]+$/i),
  createdAt:z.string().datetime({offset:true}),assignmentId:z.string().min(1),principalId:z.string().guid()}).strict().refine(value=>value.assignmentId.toLowerCase().startsWith(`${value.vaultId}/providers/Microsoft.Authorization/roleAssignments/`.toLowerCase())&&uuid(value.assignmentId.split('/').at(-1)));
@@ -139,6 +139,7 @@ export class AzureRuntimeIdentities implements IRuntimeIdentities {
   const p=native.properties;if(!same(native.id,grant.assignmentId)||!same(p?.principalId,state.principalId)||!same(p?.roleDefinitionId,`/subscriptions/${state.scope.subscriptionId}/providers/Microsoft.Authorization/roleDefinitions/${READER_ROLE}`)||!same(p?.scope,grant.vaultId)||p?.principalType!=='ServicePrincipal'||p?.description!==description||p?.condition!=null)throw failure();return native;
  }
  async inspect(request:RuntimeIdentityRequest):Promise<RuntimeIdentityObservation>{try{
+  if(!this.connected().deployClientId)return{state:'unknown',reason:'Local Azure authentication cannot establish a distinct workload identity. Use the reviewed Connect Cloud deployment or an explicit service-principal connection.'};
   const state=await this.read(request),pending=request.binding?.pending;
   if(request.mode==='destroy')return{state:'waiting',reason:'Retained runtime identities and reader grants require a separately reviewed retirement after all workloads are removed.'};
   if(pending){

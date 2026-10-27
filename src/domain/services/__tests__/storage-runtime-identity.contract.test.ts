@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import '../../../application/providers.js';
 import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
@@ -14,9 +15,9 @@ import { adapterFactory } from '../adapter.factory.js';
 import { applyStorageAction, planStorage, resolveStorageServiceEnvVars } from '../storage-plan.service.js';
 import type { Environment } from '../../entities/environment.entity.js';
 import type { EnvironmentSpec } from '../../spec/spec.schema.js';
+import { gcpRuntimeAccount, gcpRuntimeOwner } from '../../../adapters/providers/gcp/cloudrun-runtime-identities.js';
 
 const projectId = 'cloud-project';
-const principal = `runtime@${projectId}.iam.gserviceaccount.com`;
 const spec = environmentSpecSchema.parse({ hosting: { provider: 'cloudrun', region: 'us-central1' },
   services: { web: {} }, storage: { documents: { provider: 'gcs', type: 'bucket', region: 'us-central1', injectInto: ['web'] } } });
 const cronSpec = environmentSpecSchema.parse({ ...spec,
@@ -33,13 +34,13 @@ afterEach(() => {
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
-function fixture(options: { cron?: boolean; missingImage?: boolean; retainLegacyKey?: boolean } = {}) {
+function fixture(options: { cron?: boolean; missingImage?: boolean; retainLegacyKey?: boolean; replaceRuntimePrincipal?: boolean; lifecycleIdentityOnly?: boolean } = {}) {
   const name = options.cron ? 'cron' : 'web';
   const resource = `projects/${projectId}/locations/us-central1/${options.cron ? 'jobs' : 'services'}/bound-${name}`;
   const project = new ProjectRepository().create({ name: 'runtime-identity', defaultPlatform: 'cloudrun' });
   const connectionRepo = new ConnectionRepository();
   const connection = connectionRepo.create({ provider: 'cloudrun', credentialsEncrypted: getSecretStore().encryptObject({
-    projectId, runtimeServiceAccountEmail: principal, credentials: JSON.stringify({
+    projectId, credentials: JSON.stringify({
       type: 'service_account', project_id: projectId, private_key: 'synthetic-management-key',
       client_email: `deploy@${projectId}.iam.gserviceaccount.com`,
     }),
@@ -54,15 +55,35 @@ function fixture(options: { cron?: boolean; missingImage?: boolean; retainLegacy
     storage: { documents: { provider: 'gcs', externalId: 'documents-bucket', region: 'us-central1',
       instanceScope: { projectId }, services: [], envKeys: [] } },
   } });
+  const runtimePrincipal = `${gcpRuntimeAccount(projectId, environment, name)}@${projectId}.iam.gserviceaccount.com`;
+  const uniqueId = '123456789012345678901';
+  const identity = { provider: 'gcp', principal: runtimePrincipal, source: 'observed', scope: { projectId, region: 'us-central1',
+    environmentId: environment.id, serviceName: name, workloadResource: resource, serviceAccountUniqueId: uniqueId, workloadUid: 'cron-resource-uid' } };
+  const evidence = { projectId, bucket: 'documents-bucket', principal: runtimePrincipal, serviceAccountUniqueId: uniqueId,
+    environmentId: environment.id, serviceName: name, storageName: 'documents', workloadResource: resource, workloadUid: 'cron-resource-uid' };
+  const id = 'hypervibe-storage-' + createHash('sha256').update(JSON.stringify(Object.fromEntries(Object.entries(evidence).sort(([a], [b]) => a.localeCompare(b))))).digest('hex');
+  const grant = { id, attemptId: 'grant-1', evidence };
+  environment.platformBindings.runtimeIdentities = { [name]: { provider: 'cloudrun', evidence: { projectId, region: 'us-central1',
+    accountId: gcpRuntimeAccount(projectId, environment, name), email: runtimePrincipal,
+    name: `projects/${projectId}/serviceAccounts/${runtimePrincipal}`, uniqueId, attemptId: 'create-1', environmentId: environment.id, serviceName: name } } };
+  environment.platformBindings.storageRuntimeAccess = { documents: { [name]: { provider: 'gcs', externalId: 'documents-bucket', context: { projectId }, identity, binding: grant } } };
+  new EnvironmentRepository().updatePlatformBindings(environment.id, environment.platformBindings);
   // Supply a cached synthetic access token; all resource calls still traverse
   // the real hosting/storage adapters and the serialized provider transport.
   const original = adapterFactory.getProviderAdapter.bind(adapterFactory);
   vi.spyOn(adapterFactory, 'getProviderAdapter').mockImplementation(async (...args) => {
     const result = await original(...args);
-    Object.assign(result.adapter!, { accessToken: 'synthetic-token', tokenExpiry: new Date(Date.now() + 60_000) });
+    Object.assign(result.adapter!, { accessToken: 'synthetic-token', tokenExpiry: new Date(Date.now() + 60_000),
+      ...(options.lifecycleIdentityOnly ? { resolveRuntimeIdentity: undefined } : {}) });
     return result;
   });
-  const task = { serviceAccount: principal, containers: [{
+  const originalStorage = adapterFactory.getStorageAdapter.bind(adapterFactory);
+  vi.spyOn(adapterFactory, 'getStorageAdapter').mockImplementation(async (...args) => {
+    const result = await originalStorage(...args);
+    Object.assign(result.adapter!, { token: 'synthetic-token', tokenExpiresAt: Date.now() + 3_600_000 });
+    return result;
+  });
+  const task = { serviceAccount: runtimePrincipal, containers: [{
     ...(options.missingImage ? {} : { image: `registry.example/app@sha256:${'a'.repeat(64)}` }),
     env: [{ name: 'GOOGLE_CLOUD_CREDENTIALS_JSON', value: 'legacy-management-key' }],
   }] };
@@ -72,11 +93,28 @@ function fixture(options: { cron?: boolean; missingImage?: boolean; retainLegacy
   const writes: Record<string, any>[] = [];
   const request = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
+    if (url.hostname === 'iam.googleapis.com') {
+      if (url.pathname.endsWith(':getIamPolicy')) return Response.json({ etag: 'sa-etag', bindings: [
+        { role: 'roles/iam.serviceAccountUser', members: [`serviceAccount:deploy@${projectId}.iam.gserviceaccount.com`] },
+      ] });
+      return Response.json({ name: `projects/${projectId}/serviceAccounts/${runtimePrincipal}`, email: runtimePrincipal,
+        uniqueId, projectId, description: gcpRuntimeOwner(projectId, environment, name) + 'create-1' });
+    }
+    if (url.hostname === 'cloudresourcemanager.googleapis.com') return Response.json({ etag: 'project-etag', bindings: [] });
+    if (url.hostname === 'storage.googleapis.com') {
+      if (url.pathname.endsWith('/iam')) return Response.json({ resourceId: 'projects/_/buckets/documents-bucket', etag: 'bucket-etag', version: 3, bindings: [
+        { role: 'roles/storage.objectUser', members: [`serviceAccount:${runtimePrincipal}`], condition: { title: id, description: 'hypervibe:storage:v1:grant-1',
+          expression: "resource.name == 'projects/_/buckets/documents-bucket' || resource.name.startsWith('projects/_/buckets/documents-bucket/objects/')" } },
+      ] });
+      return Response.json({ name: 'documents-bucket', labels: { hypervibe_environment_id: environment.id, hypervibe_storage_name: 'documents' },
+        iamConfiguration: { uniformBucketLevelAccess: { enabled: true } } });
+    }
     expect(`${url.origin}${url.pathname}`).toBe(`https://run.googleapis.com/v2/${resource}`);
     if ((init?.method ?? 'GET') === 'GET') return Response.json(current);
     expect(init?.method).toBe('PATCH');
     const body = JSON.parse(String(init?.body)); writes.push(structuredClone(body));
     current = { ...current, template: { ...current.template, ...body.template } };
+    if (options.replaceRuntimePrincipal) current.template.serviceAccount = `different@${projectId}.iam.gserviceaccount.com`;
     if (options.retainLegacyKey) {
       const updatedTask = options.cron ? current.template.template : current.template;
       updatedTask.containers[0].env = updatedTask.containers[0].env.map((entry: { name: string; value: string }) =>
@@ -95,6 +133,9 @@ function wiringPlan(environment: Environment, environmentSpec: EnvironmentSpec =
   return planStorage({ environment, environmentSpec, observed: {
     provider: 'cloudrun', observedAt: new Date().toISOString(), projectExists: true,
     databases: [], partial: false, warnings: [],
+    runtimeAccess: { identities: [], grants: Object.entries(environment.platformBindings.storageRuntimeAccess as Record<string, Record<string, any>> ?? {}).flatMap(([storageName, values]) => Object.entries(values).map(([serviceName, retained]) => ({
+      provider: retained.provider, storageName, serviceName, desired: true, retained, observation: { state: 'present' as const, binding: retained.binding },
+    }))) },
     services: Object.keys(environmentSpec.services).map((name) => ({ name, externalId: `bound-${name}`,
       status: 'running' as const, workloadKind: environmentSpec.services[name].workloadKind,
       customDomains: [], config: {}, envVarKeys: runtimeKeys, envVarHashes: {} })),
@@ -104,12 +145,38 @@ function wiringPlan(environment: Environment, environmentSpec: EnvironmentSpec =
 }
 
 describe('shared storage runtime credential boundary', () => {
+  it('resolves the current runtime identity lifecycle without a legacy identity resolver', async () => {
+    const f = fixture({ lifecycleIdentityOnly: true });
+    const vars = await resolveStorageServiceEnvVars(f.project, spec, f.environment);
+    expect(vars?.web.GOOGLE_CLOUD_CREDENTIALS_JSON).toBe('');
+    expect(f.writes).toEqual([]);
+  });
+  it('blocks unwiring while the exact workload bucket grant remains retained', async () => {
+    const f = fixture();
+    const binding = (f.environment.platformBindings.storage as Record<string, any>).documents;
+    binding.services = ['web']; binding.envKeys = runtimeKeys;
+    new EnvironmentRepository().updatePlatformBindings(f.environment.id, f.environment.platformBindings);
+    const desired = environmentSpecSchema.parse({ ...spec, storage: { documents: { ...spec.storage!.documents, injectInto: [] } } });
+    const result = await applyStorageAction({ project: f.project, envName: 'test', environmentSpec: desired,
+      action: wiringPlan(f.environment, desired)[0] });
+    expect(result).toMatchObject({ success: false, status: 'blocked' });
+    expect(f.writes).toEqual([]);
+  });
+
+  it('rejects runtime identity replacement during a direct volume-free environment update', async () => {
+    const f = fixture({ replaceRuntimePrincipal: true });
+    const result = await applyStorageAction({ project: f.project, envName: 'test', environmentSpec: spec,
+      action: wiringPlan(f.environment)[0] });
+    expect(result.success).toBe(false); expect(f.writes).toHaveLength(1);
+    const refreshed = new EnvironmentRepository().findById(f.environment.id)!;
+    expect((refreshed.platformBindings.storage as Record<string, any>).documents.runtimeContracts).toBeUndefined();
+  });
   it('resolves each consumer through the actual hosting identity and keeps alias keys out of desired env', async () => {
     const f = fixture();
     const vars = await resolveStorageServiceEnvVars(f.project, spec, f.environment);
     expect(vars?.web.GOOGLE_CLOUD_CREDENTIALS_JSON).toBe('');
     expect(JSON.stringify(vars)).not.toContain('synthetic-management-key');
-    expect(f.request).toHaveBeenCalledTimes(1);
+    expect(f.request.mock.calls.some(([url]) => String(url).includes('/iam?optionsRequestedPolicyVersion=3'))).toBe(true);
     expect(f.writes).toEqual([]);
   });
 
@@ -125,13 +192,13 @@ describe('shared storage runtime credential boundary', () => {
     expect(wiringPlan(refreshed)[0].type).toBe('noop');
   });
 
-  it('blocks a confirmed-absent new consumer until its per-service identity is prepared', async () => {
+  it('blocks bucket wiring for a confirmed-absent consumer until its workload and grant can be observed', async () => {
     const f = fixture();
     const services = new ServiceRepository();
     services.delete(services.findByProjectAndName(f.project.id, 'web')!.id);
     f.environment.platformBindings.services = {};
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({}, { status: 404 })));
-    await expect(resolveStorageServiceEnvVars(f.project, spec, f.environment)).rejects.toThrow(/identity|preparation/i);
+    await expect(resolveStorageServiceEnvVars(f.project, spec, f.environment)).rejects.toThrow(/identity|access|grant/i);
     expect(services.findByProjectAndName(f.project.id, 'web')).toBeNull();
   });
 
@@ -185,6 +252,7 @@ describe('shared storage runtime credential boundary', () => {
     const f = fixture({ cron: true, missingImage: true });
     const binding = (f.environment.platformBindings.storage as Record<string, any>).documents;
     binding.services = ['cron']; binding.envKeys = runtimeKeys;
+    f.environment.platformBindings.storageRuntimeAccess = {};
     new EnvironmentRepository().updatePlatformBindings(f.environment.id, f.environment.platformBindings);
     const desired = environmentSpecSchema.parse({ ...cronSpec,
       storage: { documents: { ...cronSpec.storage!.documents, injectInto: [] } } });
@@ -196,7 +264,7 @@ describe('shared storage runtime credential boundary', () => {
     expect((refreshed.platformBindings.storage as Record<string, any>).documents.services).toEqual(['cron']);
   });
 
-  it('rewires legacy key-complete consumers independently and reaches noop only after both converge', () => {
+  it('rewires consumers independently and keeps missing owned access non-noop even after env keys converge', () => {
     const f = fixture();
     const twoConsumers = environmentSpecSchema.parse({ ...spec, services: { web: {}, worker: { workloadKind: 'worker' } },
       storage: { documents: { ...spec.storage!.documents, injectInto: ['web', 'worker'] } } });
@@ -205,11 +273,11 @@ describe('shared storage runtime credential boundary', () => {
     binding.services = ['web', 'worker']; binding.envKeys = runtimeKeys;
     const first = wiringPlan(f.environment, twoConsumers);
     expect(first.map((action) => action.type)).toEqual(['update', 'update']);
-    expect(first[0].metadata?.runtimeContract).toBe('gcs-native-adc-v1:cloudrun');
+    expect(first[0].metadata?.runtimeContract).toBe('gcs-native-adc-v2:cloudrun');
     binding.runtimeContracts = { web: first[0].metadata!.runtimeContract };
     expect(wiringPlan(f.environment, twoConsumers).map((action) => action.type)).toEqual(['noop', 'update']);
     binding.runtimeContracts.worker = first[1].metadata!.runtimeContract;
-    expect(wiringPlan(f.environment, twoConsumers).map((action) => action.type)).toEqual(['noop', 'noop']);
+    expect(wiringPlan(f.environment, twoConsumers).map((action) => action.type)).toEqual(['noop', 'update']);
   });
 
   it('rejects stale runtime contract authority before any provider access', async () => {

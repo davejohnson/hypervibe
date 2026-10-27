@@ -1,3 +1,4 @@
+import { isNonSecretConnectionField } from '../../lib/value-free-coordinates.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
@@ -215,6 +216,26 @@ export async function verifyConnection(provider: string, scope?: string): Promis
     }).verify(scope || undefined);
 
     if (result.success) {
+      const identityReader = adapter as { getConnectionIdentity?: () => Record<string, string> };
+      if (identityReader.getConnectionIdentity) {
+        let identity: Record<string, string>;
+        try { identity = identityReader.getConnectionIdentity(); }
+        catch { throw new Error('The provider could not return its verified connection identity.'); }
+        const allowed = new Set(registeredProvider.metadata.credentials?.verifiedIdentityKeys ?? []);
+        if (!identity || typeof identity !== 'object' || Array.isArray(identity)
+          || Object.entries(identity).some(([key, value]) => !allowed.has(key)
+            || !isNonSecretConnectionField(key) || typeof value !== 'string' || !value.trim())) {
+          throw new Error('The provider returned an invalid or undeclared connection identity.');
+        }
+        const original = decryptedCreds as Record<string, unknown>;
+        if (Object.entries(identity).some(([key, value]) => original[key] !== undefined && original[key] !== value)) {
+          throw new Error('The verified cloud identity differs from the saved connection scope. Reconnect the intended account explicitly.');
+        }
+        const normalized = registeredProvider.metadata.credentialsSchema.safeParse({ ...original, ...identity });
+        if (!normalized.success || !normalized.data || typeof normalized.data !== 'object' || Array.isArray(normalized.data)
+          || Object.entries(identity).some(([key, value]) => (normalized.data as Record<string, unknown>)[key] !== value)) throw new Error('The verified connection identity does not match the provider contract.');
+        connectionRepo.updateCredentials(connection.id, secretStore.encryptObject(normalized.data));
+      }
       // Persist discovered Railway workspaceId so future deploy/apply flows can create projects
       // without requiring manual workspace lookup.
       if (provider === 'railway' && result.workspaceId) {

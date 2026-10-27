@@ -3037,10 +3037,10 @@ export class PlanService {
         if (
           action.type === 'noop'
           || prerequisiteIds.has(action.id)
-          // Durable namespace/data identities do not consume CI credentials.
-          // Preserve their own prerequisites without making backup bootstrap
-          // depend on a later CI sync that its isolated stage cannot execute.
+          // Namespace/data identities and queue prerequisites have isolated
+          // stages that cannot depend on a later CI credential synchronization.
           || isBackupProvisioningAction(action)
+          || isRuntimeQueuePrerequisite(action)
         ) {
           return action;
         }

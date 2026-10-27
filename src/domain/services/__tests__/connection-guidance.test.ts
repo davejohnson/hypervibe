@@ -530,9 +530,9 @@ describe('credentialFieldsFromSchema', () => {
   it('keeps hosting geography out of connection forms', () => {
     const expected = {
       cloudrun: ['projectId', 'authMode', 'credentials'],
-      ecs: ['accessKeyId', 'secretAccessKey'],
-      'azure-container-apps': ['tenantId', 'subscriptionId', 'clientId', 'clientSecret'],
-      s3: ['authMode', 'accessKeyId', 'secretAccessKey'],
+      ecs: ['authMode', 'accessKeyId', 'secretAccessKey', 'sessionToken', 'profile', 'accountId'],
+      'azure-container-apps': ['authMode', 'tenantId', 'subscriptionId', 'clientId', 'clientSecret'],
+      s3: ['authMode', 'accessKeyId', 'secretAccessKey', 'sessionToken', 'profile', 'accountId'],
       gcs: ['authMode', 'credentials'],
       azureblob: ['authMode', 'tenantId', 'subscriptionId', 'clientId', 'clientSecret'],
       digitalocean: ['apiToken'],

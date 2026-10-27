@@ -15,7 +15,8 @@ import { withMigrationReleaseCommand } from '../spec/spec-bootstrap.js';
 import { effectiveBranchCiAutoDeploy, type ProjectSpec } from '../spec/spec.schema.js';
 import { environmentDeploymentContractHashForApply } from './deployment-contract.service.js';
 import { resolveBackupPolicies } from './backup-policy.service.js';
-import { resolveBackupStrategy, withBackupStorageDefaults } from './backup-strategy.service.js';
+import { managedBackupCredentialKeys, managedBackupProvidersForSpec } from './managed-backup-target.service.js';
+import { resolveBackupStrategy } from './backup-strategy.service.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { selectedDeploymentAccess } from '../../adapters/cloud/deployment-access.client.js';
 import { preparedHostingMarkerSchema } from '../ports/hosting-prepared.port.js';
@@ -396,9 +397,8 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
     const backupPolicy = resolveBackupPolicies(spec, boundEnvironment ? [boundEnvironment] : [], components)[environmentName];
     if (backupPolicy.resources.length > 0) {
       const strategy = resolveBackupStrategy(environment);
-      const storageProviders = Object.values(withBackupStorageDefaults(environment).storage ?? {}).map(storage => storage.provider);
-      const providers = [...new Set([environment.hosting.provider, ...storageProviders, ...backupPolicy.resources.map(resource => resource.provider)])];
-      const credentials = [...new Set(providers.flatMap(provider => Object.keys(providerRegistry.getMetadata(provider)?.orchestration?.ci?.secretCredentialKeys ?? {})))].sort();
+      const credentials = [...new Set(managedBackupProvidersForSpec(environment)
+        .flatMap(provider => Object.keys(managedBackupCredentialKeys(provider) ?? {})))].sort();
       target.backupPolicy = { mode: backupPolicy.mode,
         ...(strategy.runnerImage ? { runnerImage: strategy.runnerImage } : {}), credentialNames: credentials,
         ...(backupPolicy.resources.some(resource => resource.retained)

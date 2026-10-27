@@ -1,3 +1,4 @@
+import { managedBackupCredentialKeys, managedBackupProvidersForSpec } from './managed-backup-target.service.js';
 import { SpecStore } from '../spec/spec.store.js';
 import { pendingCredentialOperations } from './runtime-rollout.service.js';
 import { prepareGitHubCredentialRollout, observeGitHubCredentialRollout } from '../../adapters/providers/github/github-credential-activation.js';
@@ -148,21 +149,31 @@ interface ManagedCiCredentialSource {
 
 export function providerSecretsForGitHubActions(
   provider: string,
-  options: { githubLogin?: string; githubRepo?: string; onSource?: (source: ManagedCiCredentialSource) => void } = {}
+  options: { githubLogin?: string; githubRepo?: string; backupProviders?: string[];
+    onSource?: (source: ManagedCiCredentialSource) => void } = {}
 ): ProviderSecret[] {
   const secrets: ProviderSecret[] = [];
-  const connection = connectionRepo.findBestVerifiedMatch(provider, options.githubRepo);
-  const ci = providerRegistry.getMetadata(provider)?.orchestration?.ci;
-
-  if (connection) {
+  const metadata = providerRegistry.getMetadata(provider);
+  const ci = metadata?.orchestration?.ci;
+  const selections = [{ provider, keys: Object.fromEntries((ci?.requiredSecrets ?? [])
+    .flatMap(name => ci?.secretCredentialKeys?.[name] ? [[name, ci.secretCredentialKeys[name]]] : [])) },
+  ...[...new Set(options.backupProviders ?? [])].map(provider => ({ provider, keys: managedBackupCredentialKeys(provider) ?? {} }))];
+  for (const selection of selections) {
+    const selectedMetadata = providerRegistry.getMetadata(selection.provider);
+    const connection = [selection.provider, ...(selectedMetadata?.connectionAliases ?? [])]
+      .map(candidate => connectionRepo.findBestVerifiedMatch(candidate, options.githubRepo)).find(Boolean);
+    if (!connection) continue;
     const credentials = getSecretStore().decryptObject<Record<string, unknown>>(connection.credentialsEncrypted);
-    for (const name of ci?.requiredSecrets ?? []) {
-      const credentialKey = ci?.secretCredentialKeys?.[name];
-      if (!credentialKey) continue;
-      const value = credentials[credentialKey];
-      if (typeof value === 'string' && value.length > 0) {
-        secrets.push({ name, value });
-        options.onSource?.({ connectionId: connection.id, credentialKey, name });
+    if (selectedMetadata?.credentials?.canUseForAutomation?.(credentials) !== false) {
+      for (const [name, credentialKey] of Object.entries(selection.keys)) {
+        const value = credentials[credentialKey];
+        if (typeof value === 'string' && value.length > 0) {
+          const prior = secrets.find(secret => secret.name === name);
+          if (prior && prior.value !== value) throw new Error(`Managed CI credential ${name} has conflicting provider connections. Reconcile the selected deployment and backup connections before publishing one environment secret.`);
+          if (prior) continue;
+          secrets.push({ name, value });
+          options.onSource?.({ connectionId: connection.id, credentialKey, name });
+        }
       }
     }
   }
@@ -539,17 +550,22 @@ async function resolveManagedWorkflowSecrets(params: {
   providerError?: string;
   appStoreError?: string;
 }> {
-  const requiredProviderSecrets = requiredProviderSecretNamesForGitHubActions(
+  const backupProviders = managedBackupProvidersForSpec(params.environmentSpec);
+  const requiredProviderSecrets = [...new Set([...requiredProviderSecretNamesForGitHubActions(
     params.environmentSpec.hosting.provider
-  ).filter((name) => params.workflow.requiredSecrets.includes(name));
+  ), ...backupProviders.flatMap(provider => Object.keys(managedBackupCredentialKeys(provider) ?? {}))])]
+    .filter((name) => params.workflow.requiredSecrets.includes(name));
   const requiredDatabaseSecrets = params.workflow.requiredSecrets.includes('DATABASE_URL')
     ? ['DATABASE_URL']
     : [];
+  let availableSecrets: ProviderSecret[] = [];
   let providerError: string | undefined;
-  let availableSecrets = requiredProviderSecrets.length ? providerSecretsForGitHubActions(
-    params.environmentSpec.hosting.provider,
-    { githubRepo: params.repository }
-  ).filter((secret) => params.workflow.requiredSecrets.includes(secret.name)) : [];
+  try {
+    availableSecrets = providerSecretsForGitHubActions(params.environmentSpec.hosting.provider,
+      { githubRepo: params.repository, backupProviders }).filter(secret => params.workflow.requiredSecrets.includes(secret.name));
+  } catch {
+    providerError = 'The selected deployment and backup connections cannot share their required GitHub environment secret names. Reconcile the exact scoped connections before synchronizing credentials.';
+  }
   if (requiredDatabaseSecrets.length > 0 && !availableSecrets.some((secret) => secret.name === 'DATABASE_URL')) {
     const databaseUrlSecret = await databaseUrlSecretForGitHubActions(
       params.project,

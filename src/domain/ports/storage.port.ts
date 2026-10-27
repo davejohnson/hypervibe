@@ -22,6 +22,8 @@ export interface StorageRuntimeTarget {
   /** Actual selected connection provider, including an explicit alias. */
   connectionProvider?: string;
   identity?: import('./provider.port.js').ProviderRuntimeIdentity;
+  serviceName?: string;
+  runtimeAccessBinding?: import('./storage-runtime-access.port.js').StorageRuntimeAccessBinding;
 }
 
 export interface StorageObjectRecord {

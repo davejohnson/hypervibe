@@ -1,4 +1,7 @@
+import { AwsConnectionAuthentication, awsAuthenticationFields, awsConnectionRegion, checkedAwsAccountId, validateAwsAuthentication, canUseAwsCredentialsForAutomation } from './aws-authentication.js';
 import { z } from 'zod';
+import { IAMClient } from '@aws-sdk/client-iam';
+import { S3RuntimeAccess } from './s3-runtime-access.js';
 import { createAwsOperatorArtifactCapability } from './aws-operator-artifacts.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
 import {
@@ -27,6 +30,7 @@ import type {
   StorageCredentials,
   StorageEnsureResult,
   StorageObservationTarget,
+  StorageRuntimeTarget,
 } from '../../../domain/ports/storage.port.js';
 import {
   providerRegistry,
@@ -42,15 +46,7 @@ const ENVIRONMENT_TAG = 'hypervibe-environment-id';
 const STORAGE_NAME_TAG = 'hypervibe-storage-name';
 const PROJECT_TAG = 'hypervibe-project';
 
-const S3StorageAuthenticationSchema = z.object({
-  authMode: z.enum(['default', 'static']).default('static'),
-  accessKeyId: z.string().trim().min(16, 'AWS access key ID is required').optional(),
-  secretAccessKey: z.string().min(32, 'AWS secret access key is required').optional(),
-}).strict().superRefine((value, ctx) => {
-  if (value.authMode === 'default') return;
-  if (!value.accessKeyId) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['accessKeyId'], message: 'AWS access key ID is required' });
-  if (!value.secretAccessKey) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['secretAccessKey'], message: 'AWS secret access key is required' });
-});
+const S3StorageAuthenticationSchema = z.object({ ...awsAuthenticationFields, authMode: awsAuthenticationFields.authMode.default('static') }).strict().superRefine(validateAwsAuthentication);
 
 export const S3StorageCredentialsSchema = z.preprocess((input) => {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
@@ -68,20 +64,19 @@ interface AwsCommandClient {
   destroy(): void;
 }
 
-export type S3StorageClientFactory = (credentials: S3StorageCredentials, region: string) => {
+export type S3StorageClientFactory = (credentials: S3StorageCredentials, region: string, provider?: AwsCredentialProvider) => {
   s3: AwsCommandClient;
   sts: AwsCommandClient;
+  iam?: AwsCommandClient;
 };
 type AwsCredentialProvider = ReturnType<typeof defaultProvider>;
 
-function defaultClientFactory(credentials: S3StorageCredentials, region: string): ReturnType<S3StorageClientFactory> {
+function defaultClientFactory(credentials: S3StorageCredentials, region: string, provider?: AwsCredentialProvider): ReturnType<S3StorageClientFactory> {
   const config = {
     region,
-    ...(credentials.authMode === 'static'
-      ? { credentials: { accessKeyId: credentials.accessKeyId!, secretAccessKey: credentials.secretAccessKey! } }
-      : {}),
+    credentials: provider ?? new AwsConnectionAuthentication(credentials, region).credentials,
   };
-  return { s3: new S3Client(config), sts: new STSClient(config) };
+  return { s3: new S3Client(config), sts: new STSClient(config), iam: new IAMClient({ ...config, maxAttempts: 1 }) };
 }
 
 function deterministicBucketName(context: StorageContext, environment: Environment, name: string): string {
@@ -108,22 +103,30 @@ function errorMessage(error: unknown): string {
 
 export class S3StorageAdapter implements IStorageAdapter {
   readonly name = 's3';
+  readonly runtimeAccess = new S3RuntimeAccess(target => {
+    this.assertContext(target.context);
+    if (!this.iam) throw new Error('AWS runtime IAM access is unavailable.');
+    return { iam: this.iam, s3: this.s3Client(), sts: this.stsClient() };
+  });
   readonly capabilities = {
     kind: 'object' as const,
     regions: [],
     privateOnly: true,
     supportsUsageObservation: true,
     supportsObjectTransfer: true,
+    usesWorkloadIdentity: true,
   };
 
   private credentials: S3StorageCredentials | null = null;
   private s3: AwsCommandClient | null = null;
   private sts: AwsCommandClient | null = null;
+  private iam: AwsCommandClient | null = null;
   private region: string | null = null;
+  private authentication: AwsConnectionAuthentication | null = null;
 
   constructor(
     private readonly clientFactory: S3StorageClientFactory = defaultClientFactory,
-    private readonly defaultCredentialsProvider: AwsCredentialProvider = defaultProvider()
+    private readonly defaultCredentialsProvider?: AwsCredentialProvider
   ) {}
 
   runtimeEnvKeys(_name: string): string[] {
@@ -132,26 +135,32 @@ export class S3StorageAdapter implements IStorageAdapter {
 
   async connect(credentials: unknown): Promise<void> {
     this.credentials = S3StorageCredentialsSchema.parse(credentials);
-    this.configureRegion('us-east-1');
+    this.authentication = null;
+    this.region = null;
+    this.configureRegion(await awsConnectionRegion(this.credentials, 'us-east-1'));
   }
 
   async disconnect(): Promise<void> {
     this.s3?.destroy();
     this.sts?.destroy();
+    this.iam?.destroy();
     this.s3 = null;
     this.sts = null;
+    this.iam = null;
     this.credentials = null;
+    this.authentication = null;
     this.region = null;
   }
+
+  getConnectionIdentity(): Record<string, string> { return this.authentication?.identity() ?? {}; }
 
   async verify(): Promise<VerifyResult> {
     try {
       const identity = await this.stsClient().send(new GetCallerIdentityCommand({}));
-      return typeof identity.Account === 'string'
-        ? { success: true, email: `AWS account ${identity.Account}` }
-        : { success: false, error: 'AWS STS did not return an account identity.' };
+      checkedAwsAccountId(identity.Account, this.credentials?.accountId);
+      return { success: true, email: `AWS account ${identity.Account}` };
     } catch (error) {
-      return { success: false, error: errorMessage(error) };
+      return { success: false, error: this.safeError(error) };
     }
   }
 
@@ -185,9 +194,7 @@ export class S3StorageAdapter implements IStorageAdapter {
       }
       this.configureRegion(region);
       const identity = await this.stsClient().send(new GetCallerIdentityCommand({}));
-      if (typeof identity.Account !== 'string') {
-        throw new Error('AWS STS did not return an account identity.');
-      }
+      checkedAwsAccountId(identity.Account, this.credentials?.accountId);
       if (context.accountId && context.accountId !== identity.Account) {
         throw new Error(`Bound AWS account ${context.accountId} does not match connected account ${identity.Account}.`);
       }
@@ -203,7 +210,7 @@ export class S3StorageAdapter implements IStorageAdapter {
         context: resolved,
       };
     } catch (error) {
-      return { receipt: { success: false, message: 'Failed to resolve AWS S3 context', error: errorMessage(error) } };
+      return { receipt: { success: false, message: 'Failed to resolve AWS S3 context', error: this.safeError(error) } };
     }
   }
 
@@ -312,7 +319,7 @@ export class S3StorageAdapter implements IStorageAdapter {
             receipt: {
               success: false,
               message: `Failed to repair AWS S3 bucket "${bucket}" configuration`,
-              error: errorMessage(error),
+              error: this.safeError(error),
               data: {
                 externalId: bucket,
                 created: false,
@@ -351,7 +358,7 @@ export class S3StorageAdapter implements IStorageAdapter {
             receipt: {
               success: false,
               message: `Failed to configure newly created AWS S3 bucket "${bucket}" and rollback failed`,
-              error: `${errorMessage(configurationError)}; rollback failed: ${errorMessage(rollbackError)}`,
+              error: `${this.safeError(configurationError)}; rollback failed: ${this.safeError(rollbackError)}`,
               data: {
                 externalId: bucket,
                 created: true,
@@ -369,7 +376,7 @@ export class S3StorageAdapter implements IStorageAdapter {
               receipt: {
                 success: false,
                 message: `Failed to configure newly created AWS S3 bucket "${bucket}"; rollback is not yet confirmed`,
-                error: `${errorMessage(configurationError)}; the exact bucket still exists after rollback acknowledgement`,
+                error: `${this.safeError(configurationError)}; the exact bucket still exists after rollback acknowledgement`,
                 data: {
                   externalId: bucket,
                   created: true,
@@ -386,7 +393,7 @@ export class S3StorageAdapter implements IStorageAdapter {
             receipt: {
               success: false,
               message: `Failed to configure newly created AWS S3 bucket "${bucket}"; rollback state is unknown`,
-              error: `${errorMessage(configurationError)}; rollback observation failed: ${errorMessage(rollbackObservationError)}`,
+              error: `${this.safeError(configurationError)}; rollback observation failed: ${this.safeError(rollbackObservationError)}`,
               data: {
                 externalId: bucket,
                 created: true,
@@ -402,7 +409,7 @@ export class S3StorageAdapter implements IStorageAdapter {
           receipt: {
             success: false,
             message: `Failed to configure newly created AWS S3 bucket "${bucket}"; rollback was confirmed`,
-            error: errorMessage(configurationError),
+            error: this.safeError(configurationError),
             data: { created: true, rollback: 'confirmed', recoveryRequired: false },
           },
         };
@@ -413,7 +420,7 @@ export class S3StorageAdapter implements IStorageAdapter {
         context,
       };
     } catch (error) {
-      return { receipt: { success: false, message: `Failed to ensure AWS S3 bucket "${name}"`, error: errorMessage(error) } };
+      return { receipt: { success: false, message: `Failed to ensure AWS S3 bucket "${name}"`, error: this.safeError(error) } };
     }
   }
 
@@ -423,13 +430,7 @@ export class S3StorageAdapter implements IStorageAdapter {
     externalId: string
   ): Promise<StorageCredentials> {
     this.assertContext(context);
-    const authentication = this.connectedCredentials();
-    const credentials = authentication.authMode === 'static'
-      ? {
-        accessKeyId: authentication.accessKeyId!,
-        secretAccessKey: authentication.secretAccessKey!,
-      }
-      : await this.defaultCredentialsProvider();
+    const credentials = await this.authentication!.credentials();
     return {
       bucket: externalId,
       endpoint: `https://s3.${context.region}.amazonaws.com`,
@@ -446,8 +447,21 @@ export class S3StorageAdapter implements IStorageAdapter {
     environment: Environment,
     context: StorageContext,
     externalId: string,
-    _name: string
+    name: string,
+    runtimeTarget?: StorageRuntimeTarget
   ): Promise<Record<string, string>> {
+    if (runtimeTarget?.hostingProvider === 'ecs') {
+      if (!runtimeTarget.identity || !runtimeTarget.serviceName || !runtimeTarget.runtimeAccessBinding) throw new Error('ECS S3 access requires its verified application role and reviewed bucket grant.');
+      const observed = await this.runtimeAccess.observe({ environment, context, externalId, storageName: name, serviceName: runtimeTarget.serviceName, identity: runtimeTarget.identity }, runtimeTarget.runtimeAccessBinding);
+      if (observed.state !== 'present') throw new Error('ECS S3 application bucket access could not be verified.');
+      return { AWS_ENDPOINT_URL: `https://s3.${context.region}.amazonaws.com`, AWS_ACCESS_KEY_ID: '', AWS_SECRET_ACCESS_KEY: '', AWS_SESSION_TOKEN: '', AWS_S3_BUCKET_NAME: externalId, AWS_DEFAULT_REGION: context.region!, AWS_S3_URL_STYLE: 'virtual' };
+    }
+    if (runtimeTarget?.connectionProvider && runtimeTarget.connectionProvider !== this.name) {
+      throw new Error('Hypervibe will not copy a deployment credential into application storage settings. Use the ECS application role and reviewed bucket grant, or an explicitly scoped runtime storage connection for other hosts.');
+    }
+    if (this.connectedCredentials().authMode === 'default' || this.connectedCredentials().sessionToken) {
+      throw new Error('Hypervibe will not copy an expiring CLI/SSO session or local AWS credential chain into a deployed service. Use workload identity.');
+    }
     const credentials = await this.getCredentials(environment, context, externalId);
     if (credentials.expiration) {
       throw new Error(
@@ -478,9 +492,11 @@ export class S3StorageAdapter implements IStorageAdapter {
       }
       return { success: true, message: `Deleted AWS S3 bucket "${externalId}" and all objects` };
     } catch (error) {
-      return { success: false, message: `Failed to delete AWS S3 bucket "${externalId}"`, error: errorMessage(error) };
+      return { success: false, message: `Failed to delete AWS S3 bucket "${externalId}"`, error: this.safeError(error) };
     }
   }
+
+  private safeError(error: unknown): string { return this.authentication?.redact(error) ?? errorMessage(error); }
 
   private connectedCredentials(): S3StorageCredentials {
     if (!this.credentials) throw new Error('Not connected. Call connect() first.');
@@ -508,9 +524,13 @@ export class S3StorageAdapter implements IStorageAdapter {
     const credentials = this.connectedCredentials();
     this.s3?.destroy();
     this.sts?.destroy();
-    const clients = this.clientFactory(credentials, region);
+    this.iam?.destroy();
+    this.credentials = { ...credentials, ...this.authentication?.identity() };
+    this.authentication = new AwsConnectionAuthentication(this.credentials, region, undefined, this.defaultCredentialsProvider);
+    const clients = this.clientFactory(this.credentials, region, this.authentication.credentials);
     this.s3 = clients.s3;
     this.sts = clients.sts;
+    this.iam = clients.iam ?? null;
     this.region = region;
   }
 
@@ -620,9 +640,13 @@ providerRegistry.register({
     name: 's3',
     displayName: 'Amazon S3',
     category: 'storage',
+    storageRuntimeContract: 's3-ecs-task-role-v1',
+    storageRuntimeAccess: { hostingProviders: ['ecs'] },
     credentialsSchema: S3StorageCredentialsSchema,
     setupHelpUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
     credentials: {
+      canUseForAutomation: canUseAwsCredentialsForAutomation,
+      verifiedIdentityKeys: ['accountId', 'profile'],
       automationSecretKeys: { AWS_ACCESS_KEY_ID: 'accessKeyId', AWS_SECRET_ACCESS_KEY: 'secretAccessKey' },
       supportsNativeCliAuth: true,
       environmentVariableAliases: [

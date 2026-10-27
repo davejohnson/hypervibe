@@ -1,3 +1,4 @@
+import { AzureAuthenticationSchema, azureConnectionIdentity, canUseAzureCredentialsForAutomation, resolveAzureAuthentication, type ResolvedAzureAuthentication } from './azure-datastore.credentials.js';
 import { AzureRuntimeIdentities } from './azure-runtime-identities.js';
 import { azurePreparedHostingBinding } from './azure-prepared-binding.js';
 import { azurePreparedHoldingTransition, azurePreparedApplicationConfiguration, azurePreparedApplicationDigest, azureObservedPreparedApplicationConfiguration } from './azure-prepared-release.js';
@@ -78,23 +79,16 @@ const INTERNAL_ENV_KEYS = new Set([
   IMAGE_DIGEST_KEY,
 ]);
 
-const AzureContainerAppsAuthenticationSchema = z.object({
-  tenantId: z.string().guid('Azure tenant ID must be a UUID'),
-  subscriptionId: z.string().guid('Azure subscription ID must be a UUID'),
-  clientId: z.string().guid('Azure service principal client ID must be a UUID'),
-  clientSecret: z.string().min(8, 'Azure service principal client secret is required'),
-}).strict();
-
 export const AzureContainerAppsCredentialsSchema = z.preprocess((input) => {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
   const { location: _legacyLocation, ...authentication } = input as Record<string, unknown>;
   return authentication;
-}, AzureContainerAppsAuthenticationSchema);
+}, AzureAuthenticationSchema);
 
 export type AzureContainerAppsCredentials = z.infer<typeof AzureContainerAppsCredentialsSchema>;
 const DEFAULT_AZURE_CONTAINER_APPS_LOCATION = 'canadacentral';
 const AzureLocationSchema = z.string().trim().regex(/^[a-z0-9]+$/, 'Azure location must be a region slug');
-type ConnectedAzureContainerAppsCredentials = (AzureContainerAppsCredentials | Extract<import('./azure-resource-manager.client.js').AzureResourceManagerCredentials, { authMode: 'federated' }>) & { location: string };
+type ConnectedAzureContainerAppsCredentials = (ResolvedAzureAuthentication | Extract<import('./azure-resource-manager.client.js').AzureResourceManagerCredentials, { authMode: 'federated' }>) & { location: string };
 
 type AzureResource = {
   id: string;
@@ -120,7 +114,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
   readonly name = 'azure-container-apps';
   private readonly installedPreparedHosting = azurePreparedHostingBinding(() => this.deploymentConnection, () => this.connected().client);
   get preparedHosting() { return this.deploymentConnection?.preparedResources ? this.installedPreparedHosting : undefined; }
-  readonly runtimeIdentities = new AzureRuntimeIdentities(() => { const { client, credentials } = this.connected(); return { client, ...credentials, deployClientId: credentials.clientId, deployment: this.deploymentConnection }; });
+  readonly runtimeIdentities = new AzureRuntimeIdentities(() => { const { client, credentials } = this.connected(); return { client, ...credentials, deployClientId: 'clientId' in credentials ? credentials.clientId : undefined, deployment: this.deploymentConnection }; });
   readonly registryCredentialLifecycle = createAzureRegistryCredentialLifecycle(() => this.connected().client);
   readonly serviceVolumes = new AzureServiceVolumes(() => this.connected().client);
 
@@ -171,7 +165,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     const legacyLocation = credentials && typeof credentials === 'object' && typeof (credentials as Record<string, unknown>).location === 'string'
       ? (credentials as Record<string, string>).location
       : DEFAULT_AZURE_CONTAINER_APPS_LOCATION;
-    this.credentials = { ...parsed, location: AzureLocationSchema.parse(legacyLocation) };
+    this.credentials = { ...await resolveAzureAuthentication(parsed), location: AzureLocationSchema.parse(legacyLocation) };
     this.client = new AzureResourceManagerClient(this.credentials);
   }
 
@@ -181,6 +175,8 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     const { credentials } = this.connected();
     this.credentials = { ...credentials, location: AzureLocationSchema.parse(target.region) };
   }
+
+  getConnectionIdentity(): Record<string, string> { return azureConnectionIdentity(this.credentials); }
 
   async verify(): Promise<VerifyResult> {
     try {
@@ -1714,6 +1710,9 @@ providerRegistry.register({
     credentialsSchema: AzureContainerAppsCredentialsSchema,
     setupHelpUrl: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
     credentials: {
+      canUseForAutomation: canUseAzureCredentialsForAutomation,
+      supportsNativeCliAuth: true,
+      verifiedIdentityKeys: ['authMode', 'subscriptionId', 'tenantId'],
       environmentVariableAliases: [
         ['HYPERVIBE_AZURE_TENANT_ID', 'AZURE_TENANT_ID'],
         ['HYPERVIBE_AZURE_SUBSCRIPTION_ID', 'AZURE_SUBSCRIPTION_ID'],

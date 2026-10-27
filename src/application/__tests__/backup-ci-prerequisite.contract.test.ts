@@ -35,7 +35,9 @@ describe('backup activation through CI credentials and canonical repository publ
     SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true });
   });
 
-  async function fixture() {
+  async function fixture(objectOnlyGcs = false) {
+    const storageProvider = objectOnlyGcs ? 'gcs' : 'railway';
+    const storageRegion = objectOnlyGcs ? 'us-central1' : 'iad';
     const project = ctx.repos.projects.create({ name: 'backup-ci', defaultPlatform: 'railway',
       gitRemoteUrl: 'https://github.com/acme/backup-ci' });
     const stored = new SpecStore().replace(project, { version: 1, project: project.name,
@@ -46,21 +48,23 @@ describe('backup activation through CI credentials and canonical repository publ
         security: { codeScanning: false, secretScanning: false, pushProtection: false } },
       environments: { production: {
         hosting: { provider: 'railway' }, services: { web: { startCommand: 'npm start', public: true } },
-        database: { provider: 'railway', engine: 'postgres' },
-        storage: { documents: { provider: 'railway', type: 'bucket', region: 'iad', injectInto: ['web'] } },
+        ...(!objectOnlyGcs ? { database: { provider: 'railway', engine: 'postgres' } } : {}),
+        storage: { documents: { provider: storageProvider, type: 'bucket', region: storageRegion, injectInto: objectOnlyGcs ? [] : ['web'] } },
         backups: { mode: 'daily', runnerImage: `ghcr.io/acme/backup@sha256:${'a'.repeat(64)}`,
-          fileReferenceQueries: [{ storageName: 'documents', query: 'SELECT key FROM files' }] },
+          ...(!objectOnlyGcs ? { fileReferenceQueries: [{ storageName: 'documents', query: 'SELECT key FROM files' }] } : {}) },
         email: { enabled: false }, envVars: { CHANGE_PENDING: 'new-value' },
         deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
       } } });
     for (const [provider, credentials] of Object.entries({ railway: { apiToken: 'synthetic-railway-token' },
+      ...(objectOnlyGcs ? { gcs: { projectId: 'gcp-project', credentials: JSON.stringify({ project_id: 'gcp-project', client_email: 'backup@gcp-project.iam.gserviceaccount.com', private_key: 'synthetic-private-key' }) } } : {}),
       github: { apiToken: 'synthetic-github-token', login: 'acme', packageReadToken: 'synthetic-package-token' } })) {
       const connection = ctx.repos.connections.create({ provider, credentialsEncrypted: ctx.secretStore.encryptObject(credentials) });
       ctx.repos.connections.updateStatus(connection.id, 'verified');
     }
     const scope = { projectId: 'project-1', environmentId: 'production-1' };
-    const bucket = (externalId: string, purpose?: 'backup') => ({ provider: 'railway', externalId,
-      region: 'iad', instanceScope: scope, services: purpose ? [] : ['web'], envKeys: [], ...(purpose ? { purpose } : {}) });
+    const storageScope = objectOnlyGcs ? { projectId: 'gcp-project' } : scope;
+    const bucket = (externalId: string, purpose?: 'backup') => ({ provider: storageProvider, externalId,
+      region: storageRegion, instanceScope: storageScope, services: purpose || objectOnlyGcs ? [] : ['web'], envKeys: [], ...(purpose ? { purpose } : {}) });
     const environment = ctx.repos.environments.create({ projectId: project.id, name: 'production', platformBindings: {
       provider: 'railway', ...scope, services: { web: { serviceId: 'web-1', workloadKind: 'web' } },
       appliedSpecHash: 'unchanged-application-contract',
@@ -68,22 +72,22 @@ describe('backup activation through CI credentials and canonical repository publ
     } });
     const source = { provider: 'railway', primaryExternalId: 'db-1', providerScope: scope,
       resourceIdentity: { volumeId: 'volume-1', volumeInstanceId: 'volume-instance-1' } };
-    ctx.repos.components.create({ environmentId: environment.id, type: 'postgres', externalId: 'db-1',
+    if (!objectOnlyGcs) ctx.repos.components.create({ environmentId: environment.id, type: 'postgres', externalId: 'db-1',
       bindings: { provider: 'railway', resourceKind: 'service', providerScope: scope } });
     const observe = vi.fn(async () => ({ state: 'known', source, daily: true,
       policyFingerprint: 'a'.repeat(64), preservationFingerprint: 'b'.repeat(64), mechanism: 'snapshot' }));
     vi.spyOn(AdapterFactory.prototype, 'getDatabaseAdapter').mockResolvedValue({ success: true,
       adapter: { name: 'railway', dailyBackups: { observe } } as unknown as IDatabaseAdapter });
     vi.spyOn(AdapterFactory.prototype, 'getStorageAdapter').mockResolvedValue({ success: true,
-      adapter: { name: 'railway', capabilities: { recoveryCredentialScope: 'bucket' },
+      adapter: { name: storageProvider, capabilities: { recoveryCredentialScope: 'bucket' },
         getCredentials: vi.fn(() => { throw new Error('No storage data-plane access is authorized'); }) } as unknown as IStorageAdapter });
     vi.spyOn(PlanService.prototype, 'observeEnvironment').mockResolvedValue({ warnings: [], observed: {
       provider: 'railway', observedAt: new Date().toISOString(), projectExists: true, ...scope,
       partial: false, warnings: [], services: [{ name: 'web', externalId: 'web-1', workloadKind: 'web',
         sourceState: 'disconnected', config: { startCommand: 'npm start', public: true }, envVarKeys: [], envVarHashes: {}, customDomains: [], status: 'running' }],
-      databases: [{ provider: 'railway', engine: 'postgres', externalId: 'db-1', status: 'running', providerScope: scope }],
-      storage: ['documents', 'hypervibe-backups'].map(name => ({ name, provider: 'railway', kind: 'object' as const,
-        status: 'running' as const, externalId: name === 'documents' ? 'documents-1' : 'archive-1', region: 'iad', instanceScope: scope })),
+      databases: objectOnlyGcs ? [] : [{ provider: 'railway', engine: 'postgres', externalId: 'db-1', status: 'running', providerScope: scope }],
+      storage: ['documents', 'hypervibe-backups'].map(name => ({ name, provider: storageProvider, kind: 'object' as const,
+        status: 'running' as const, externalId: name === 'documents' ? 'documents-1' : 'archive-1', region: storageRegion, instanceScope: storageScope })),
     } });
     const files = new Map<string, string>();
     const refreshWorkflow = () => {
@@ -130,6 +134,26 @@ describe('backup activation through CI credentials and canonical repository publ
     return { project, stored, environment, files, secretNames, writes, unexpected, plan, refreshWorkflow,
       setUnknown: (value: boolean) => { secretsUnknown = value; } };
   }
+
+  it('synchronizes the exact GCS backup credential before publishing an object-only recovery program on another host', async () => {
+    const f = await fixture(true);
+    expect(f.refreshWorkflow().requiredSecrets).toContain('GCP_SERVICE_ACCOUNT_JSON');
+    const planned = await f.plan();
+    if ('error' in planned) throw new Error(planned.error);
+    expect(planned.scope).toBe('managed-ci-credentials');
+    const result = await executePlanApply(ctx, { project: f.project, spec: f.stored.spec, specRevision: f.stored.revision,
+      planId: planned.planRunId, confirmActions: [], alwaysRunBootstrap: true });
+    expect(result).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(f.writes.map(write => write.pathname.split('/').at(-1)).sort())
+      .toEqual(['GCP_SERVICE_ACCOUNT_JSON', 'IMAGE_REGISTRY_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'RAILWAY_API_TOKEN']);
+    expect(f.writes.every(write => write.pathname.includes('/environments/production/secrets/'))).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('synthetic-private-key');
+    const publication = await f.plan('repository');
+    if ('error' in publication) throw new Error(publication.error);
+    const action = publication.actions.find(action => action.metadata?.backupWorkflowPublicationRequired === true)!;
+    expect(action.metadata?.blockedReason).toBeUndefined();
+    expect(f.unexpected).toEqual([]);
+  });
 
   it('sets only environment CI credentials before publishing the exact production backup contract', async () => {
     const f = await fixture();

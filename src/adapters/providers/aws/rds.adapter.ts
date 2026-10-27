@@ -1,3 +1,4 @@
+import { AwsConnectionAuthentication, awsAuthenticationFields, awsConnectionRegion, checkedAwsAccountId, validateAwsAuthentication, canUseAwsCredentialsForAutomation } from './aws-authentication.js';
 import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
 import { AwsSecretsAdapter } from '../secretmanagers/aws-secrets.adapter.js';
 import { environmentResourceName } from '../../../domain/services/resource-names.js';
@@ -56,13 +57,13 @@ import {
 } from './aws-workload-network.js';
 
 export const RdsCredentialsSchema = z.object({
-  accessKeyId: z.string().min(1, 'Access key ID is required').describe('AWS IAM access key ID'),
-  secretAccessKey: z.string().min(1, 'Secret access key is required').describe('AWS IAM secret access key'),
-  sessionToken: z.string().optional().describe('Required when using temporary AWS STS credentials'),
+  ...awsAuthenticationFields,
+  accessKeyId: z.string().min(1).optional(),
+  secretAccessKey: z.string().min(1).optional(),
   region: z.string().default('us-east-1').describe('AWS region containing the RDS instance'),
   vpcId: z.string().optional().describe('VPC for new RDS instances; defaults to the region default VPC'),
   dbSubnetGroupName: z.string().optional().describe('Existing DB subnet group for new RDS instances'),
-});
+}).superRefine(validateAwsAuthentication);
 
 export type RdsCredentials = z.infer<typeof RdsCredentialsSchema>;
 
@@ -167,7 +168,9 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
       if (target.inputMode !== 'provider-generated') return null;
       if (!this.credentials || !target.providerScope.masterUserSecretArn) throw new Error('The bound RDS master secret is unavailable.');
       const secrets = new AwsSecretsAdapter();
-      await secrets.connect({ accessKeyId: this.credentials.accessKeyId, secretAccessKey: this.credentials.secretAccessKey, sessionToken: this.credentials.sessionToken, region: this.credentials.region });
+      const source = await this.authentication!.credentials();
+      await secrets.connect({ accessKeyId: source.accessKeyId, secretAccessKey: source.secretAccessKey,
+        ...(source.sessionToken ? { sessionToken: source.sessionToken } : {}), region: this.credentials.region });
       const value = await secrets.readCredentialJson(target.providerScope.masterUserSecretArn);
       if (value.username !== target.username || typeof value.password !== 'string' || !value.password) throw new Error('RDS master secret returned a different database user.');
       return value.password;
@@ -184,7 +187,7 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
         if (!this.credentials || instance.MasterUserSecret?.SecretArn !== target.providerScope.masterUserSecretArn) return { state: 'blocked' };
         // A generated reset is not idempotent. Disable SDK transport retries;
         // the encrypted plan recovers from the exact existing secret instead.
-        const resetClient = new RDSClient({ region: this.credentials.region, credentials: { accessKeyId: this.credentials.accessKeyId, secretAccessKey: this.credentials.secretAccessKey, ...(this.credentials.sessionToken ? { sessionToken: this.credentials.sessionToken } : {}) }, maxAttempts: 1 });
+        const resetClient = new RDSClient({ region: this.credentials.region, credentials: this.authentication!.credentials, maxAttempts: 1 });
         try {
           const response = await resetClient.send(new ModifyDBInstanceCommand({ DBInstanceIdentifier: target.externalId, RotateMasterUserPassword: true, ApplyImmediately: true }));
           return { state: response.DBInstance?.DBInstanceIdentifier === target.externalId ? 'acknowledged' : 'unknown' };
@@ -213,10 +216,14 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
   private ec2: EC2Client | null = null;
   private sts: STSClient | null = null;
   private accountId: string | null = null;
+  private authentication: AwsConnectionAuthentication | null = null;
   private temporaryIngress = new Map<string, TemporaryIngress>();
 
   async connect(credentials: unknown): Promise<void> {
-    this.credentials = RdsCredentialsSchema.parse(credentials);
+    const parsed = RdsCredentialsSchema.parse(credentials);
+    const explicitRegion = credentials && typeof credentials === 'object' && typeof (credentials as Record<string, unknown>).region === 'string';
+    this.authentication = null;
+    this.credentials = { ...parsed, region: explicitRegion ? parsed.region : await awsConnectionRegion(parsed, parsed.region) };
     this.replaceClients();
   }
 
@@ -237,16 +244,16 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
     this.rds?.destroy();
     this.ec2?.destroy();
     this.sts?.destroy();
-    const awsCredentials = {
-      accessKeyId: this.credentials.accessKeyId,
-      secretAccessKey: this.credentials.secretAccessKey,
-      ...(this.credentials.sessionToken ? { sessionToken: this.credentials.sessionToken } : {}),
-    };
+    this.credentials = { ...this.credentials, ...this.authentication?.identity() };
+    this.authentication = new AwsConnectionAuthentication(this.credentials, this.credentials.region);
+    const awsCredentials = this.authentication.credentials;
     this.rds = new RDSClient({ region: this.credentials.region, credentials: awsCredentials });
     this.ec2 = new EC2Client({ region: this.credentials.region, credentials: awsCredentials });
     this.sts = new STSClient({ region: this.credentials.region, credentials: awsCredentials });
     this.accountId = null;
   }
+
+  getConnectionIdentity(): Record<string, string> { return this.authentication?.identity() ?? {}; }
 
   async verify(): Promise<VerifyResult> {
     if (!this.rds || !this.ec2 || !this.sts || !this.credentials) {
@@ -260,7 +267,7 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
       ]);
       return { success: true, email: `AWS account ${accountId} RDS (${this.credentials.region})` };
     } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) };
+      return { success: false, error: this.authentication?.redact(error) ?? (error instanceof Error ? error.message : String(error)) };
     }
   }
 
@@ -276,6 +283,7 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
     this.ec2 = null;
     this.sts = null;
     this.credentials = null;
+    this.authentication = null;
     this.accountId = null;
   }
 
@@ -301,7 +309,7 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
       return this.failedProvision(
         environment,
         type,
-        `Amazon RDS requires the exact applied ECS workload network: ${error instanceof Error ? error.message : String(error)}`,
+        `Amazon RDS requires the exact applied ECS workload network: ${this.authentication?.redact(error) ?? (error instanceof Error ? error.message : String(error))}`,
         { instanceId: identifier, resourceCreated: false }
       );
     }
@@ -319,11 +327,11 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
       return this.failedProvision(
         environment,
         type,
-        `Could not observe Amazon RDS instance ${identifier}, so Hypervibe refused to create a database whose absence is unknown: ${error instanceof Error ? error.message : String(error)}`,
+        `Could not observe Amazon RDS instance ${identifier}, so Hypervibe refused to create a database whose absence is unknown: ${this.authentication?.redact(error) ?? (error instanceof Error ? error.message : String(error))}`,
         {
           instanceId: identifier,
           resourceCreated: 'unknown',
-          liveObservationError: error instanceof Error ? error.message : String(error),
+          liveObservationError: this.authentication?.redact(error) ?? (error instanceof Error ? error.message : String(error)),
         }
       );
     }
@@ -345,7 +353,7 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
       return this.failedProvision(
         environment,
         type,
-        `Amazon RDS requires the exact applied ECS workload network: ${error instanceof Error ? error.message : String(error)}`,
+        `Amazon RDS requires the exact applied ECS workload network: ${this.authentication?.redact(error) ?? (error instanceof Error ? error.message : String(error))}`,
         { instanceId: identifier, resourceCreated: false }
       );
     }
@@ -509,7 +517,7 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
       return this.failedProvision(
         environment,
         type,
-        `Failed to provision Amazon RDS PostgreSQL: ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to provision Amazon RDS PostgreSQL: ${this.authentication?.redact(error) ?? (error instanceof Error ? error.message : String(error))}`,
         {
           instanceId: identifier,
           providerScope,
@@ -661,14 +669,14 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
           return {
             success: false,
             message: `Amazon RDS instance is absent but managed network cleanup failed`,
-            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+            error: this.authentication?.redact(cleanupError) ?? (cleanupError instanceof Error ? cleanupError.message : String(cleanupError)),
           };
         }
       }
       return {
         success: false,
         message: `Failed to delete Amazon RDS instance ${component.externalId}`,
-        error: error instanceof Error ? error.message : String(error),
+        error: this.authentication?.redact(error) ?? (error instanceof Error ? error.message : String(error)),
       };
     }
   }
@@ -685,7 +693,7 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
     } catch (error) {
       return {
         status: 'unknown',
-        message: `Failed to observe instance: ${error instanceof Error ? error.message : String(error)}`,
+        message: `Failed to observe instance: ${this.authentication?.redact(error) ?? (error instanceof Error ? error.message : String(error))}`,
       };
     }
     if (!instance) return { status: 'unknown', message: 'Instance not found' };
@@ -807,7 +815,7 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
     if (!identity.Account || !/^\d{12}$/.test(identity.Account)) {
       throw new Error('AWS did not return a valid account identity for the RDS connection.');
     }
-    this.accountId = identity.Account;
+    this.accountId = checkedAwsAccountId(identity.Account, this.credentials?.accountId);
     return this.accountId;
   }
 
@@ -996,8 +1004,8 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
         const recovered = await this.recoverSecurityGroupAfterCreateAttempt(identifier, groupName, vpcId);
         groupId = recovered?.GroupId;
       } catch (recoveryError) {
-        const createMessage = createError instanceof Error ? createError.message : String(createError);
-        const recoveryMessage = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
+        const createMessage = this.authentication?.redact(createError) ?? (createError instanceof Error ? createError.message : String(createError));
+        const recoveryMessage = this.authentication?.redact(recoveryError) ?? (recoveryError instanceof Error ? recoveryError.message : String(recoveryError));
         throw new RdsSecurityGroupProvisionError(
           `Could not recover the exact RDS security group after its create response was ambiguous: ${createMessage}; recovery failed: ${recoveryMessage}`,
           undefined,
@@ -1006,7 +1014,7 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
         );
       }
       if (!groupId) {
-        const createMessage = createError instanceof Error ? createError.message : String(createError);
+        const createMessage = this.authentication?.redact(createError) ?? (createError instanceof Error ? createError.message : String(createError));
         throw new RdsSecurityGroupProvisionError(
           `Could not recover the exact RDS security group after its create response was ambiguous: ${createMessage}`,
           undefined,
@@ -1023,7 +1031,7 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
       await this.ensureRuntimeIngress(observed, identifier, network);
     } catch (error) {
       throw new RdsSecurityGroupProvisionError(
-        `Could not verify newly created RDS security group ${groupId}: ${error instanceof Error ? error.message : String(error)}`,
+        `Could not verify newly created RDS security group ${groupId}: ${this.authentication?.redact(error) ?? (error instanceof Error ? error.message : String(error))}`,
         groupId,
         vpcId,
         groupName
@@ -1138,7 +1146,7 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
     }
     throw new Error(
       authorizeError
-        ? `RDS workload ingress could not be proven after an ambiguous authorize response: ${authorizeError instanceof Error ? authorizeError.message : String(authorizeError)}`
+        ? `RDS workload ingress could not be proven after an ambiguous authorize response: ${this.authentication?.redact(authorizeError) ?? (authorizeError instanceof Error ? authorizeError.message : String(authorizeError))}`
         : `RDS workload ingress was not observable after authorization for security group ${group.GroupId}.`
     );
   }
@@ -1526,6 +1534,11 @@ providerRegistry.register({
     displayName: 'Amazon RDS',
     category: 'database',
     credentialsSchema: RdsCredentialsSchema,
+    credentials: {
+      supportsNativeCliAuth: true,
+      canUseForAutomation: canUseAwsCredentialsForAutomation,
+      verifiedIdentityKeys: ['accountId', 'profile'],
+    },
     setupHelpUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
     connectionAliases: ['ecs'],
     maturity: {
