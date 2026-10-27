@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { createSendGridOperatorCapability } from './sendgrid-operator.js';
 import { verifySendGridRuntimeMail } from './sendgrid-runtime-mail.js';
 import type { RuntimeMailProbe } from '../../../domain/ports/runtime-mail-authentication.port.js';
 import { createPublicKey } from 'node:crypto';
@@ -251,6 +252,7 @@ function missingSetupScopeSummary(permissions: SendGridPermissionAudit): string 
 export class SendGridAdapter {
   readonly name = 'sendgrid';
   private credentials: SendGridCredentials | null = null;
+  constructor(private readonly transport?: typeof fetch) {}
 
   connect(credentials: unknown): void {
     this.credentials = credentials as SendGridCredentials;
@@ -286,7 +288,7 @@ export class SendGridAdapter {
       options.body = JSON.stringify(body);
     }
 
-    const response = await fetch(`${SENDGRID_API_URL}${endpoint}`, options);
+    const response = await (this.transport ?? fetch)(`${SENDGRID_API_URL}${endpoint}`, options);
 
     // Handle accepted and no-content responses.
     if (response.status === 202 || response.status === 204) {
@@ -656,6 +658,7 @@ providerRegistry.register({
       defaultScalarKey: 'apiKey',
     },
   },
+  operatorApplication: createSendGridOperatorCapability(),
   factory: (credentials) => {
     const adapter = new SendGridAdapter();
     adapter.connect(credentials);

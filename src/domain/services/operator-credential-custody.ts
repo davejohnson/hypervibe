@@ -6,7 +6,7 @@ import { EnvironmentRepository } from '../../adapters/db/repositories/environmen
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { runtimeSecretReferenceSchema } from '../ports/secret-destination.port.js';
 const contextSchema = z.object({ projectId: z.string().guid(), environmentId: z.string().guid(), installationId: z.string().guid(),
-  intentDigest: z.string().regex(/^[a-f0-9]{64}$/), provider: z.enum(['github-app', 'google-oauth', 'google-recaptcha']) }).strict();
+  intentDigest: z.string().regex(/^[a-f0-9]{64}$/), provider: z.enum(['github-app', 'google-oauth', 'google-recaptcha', 'sendgrid']) }).strict();
 export type OperatorCustodyContext = z.infer<typeof contextSchema>;
 const privateText = z.string().min(1).max(65_536), nonce = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 const browserSchema = z.object({ attemptId: z.string().guid(), expiresAt: z.string().datetime(), state: nonce, launch: nonce,

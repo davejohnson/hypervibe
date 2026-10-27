@@ -73,8 +73,8 @@ export function withOperatorOutputDelivery(native: CloudInstallationDriver<Inten
   dependencies: (intent: Intent) => string[] = () => []): CloudInstallationDriver<Intent> {
   function custody(intent: Intent) {
     if (!local || local.projectId !== intent.appId || local.installationId !== intent.installationId || local.intentDigest !== canonicalJsonSha256(intent)
-      || !['github-app', 'google-oauth', 'google-recaptcha'].includes(intent.applicationProvider)) fail();
-    return new OperatorCredentialCustody({ ...local, provider: intent.applicationProvider as 'github-app' | 'google-oauth' | 'google-recaptcha' });
+      || !['github-app', 'google-oauth', 'google-recaptcha', 'sendgrid'].includes(intent.applicationProvider)) fail();
+    return new OperatorCredentialCustody({ ...local, provider: intent.applicationProvider as 'github-app' | 'google-oauth' | 'google-recaptcha' | 'sendgrid' });
   }
   async function selection(intent: Intent) {
     if (!local) fail();

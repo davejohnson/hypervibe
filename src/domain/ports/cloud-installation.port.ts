@@ -8,7 +8,7 @@ import type { ProjectSpec } from '../spec/spec.schema.js';
 export const CLOUD_INSTALLATION_PROVIDERS = ['aws', 'azure', 'gcp'] as const;
 export type CloudInstallationProvider = typeof CLOUD_INSTALLATION_PROVIDERS[number];
 /** Registration identities do not expand the hosted cloud roster. */
-export const OPERATOR_APPLICATION_PROVIDERS = ['microsoft-entra', 'github-app', 'google-oauth', 'google-recaptcha'] as const;
+export const OPERATOR_APPLICATION_PROVIDERS = ['microsoft-entra', 'github-app', 'google-oauth', 'google-recaptcha', 'sendgrid'] as const;
 export type OperatorApplicationProvider = typeof OPERATOR_APPLICATION_PROVIDERS[number];
 export type CloudInstallationExecutableProvider = CloudInstallationProvider | OperatorApplicationProvider;
 export type CloudInstallationStage = 'scope-preparation' | 'collection' | 'deployment';

@@ -138,8 +138,25 @@
       "coverage": "Reconstructed serialized REST responses with real installation kernel and actual SQLite private custody; not a full pinned schema validator.",
       "limits": [
         "No blind create retry after uncertain outcome; labels correlate only a durable original attempt and cannot establish adoption alone.",
-        "No live allocation, browser scoring, native secret delivery or cleanup is established by these offline tests.",
-        "Named operator matrix remains Entra/Graph, GitHub manifest, Google OAuth owner import and Google CAPTCHA allocation; hosted AWS/Azure/GCP roster is unchanged."
+        "No live allocation, browser scoring, native secret delivery or cleanup is established by these offline tests."
+      ]
+    },
+    {
+      "provider": "sendgrid",
+      "reviewedAt": "2026-10-27",
+      "documentation": [
+        "https://www.twilio.com/docs/sendgrid/api-reference/api-keys/create-api-keys",
+        "https://www.twilio.com/docs/sendgrid/api-reference/api-keys/retrieve-an-existing-api-key",
+        "https://www.twilio.com/docs/sendgrid/api-reference/api-keys/delete-api-keys",
+        "https://www.twilio.com/docs/sendgrid/api-reference/users-api/retrieve-your-username",
+        "https://www.twilio.com/docs/sendgrid/for-developers/sending-email/sandbox-mode"
+      ],
+      "contract": "Reviewed runtime API-key creation on the existing SendGrid provider: explicit mail.send only, native account user_id, immutable generated API-key ID, nonunique names, one-time value, no idempotency key or native value retrieval. Fixed sandbox POST cannot deliver mail. Failed private capture cleans up only the exact acknowledged new ID, with retained evidence on incomplete cleanup.",
+      "coverage": "Pinned exact API-key OpenAPI requests plus independent redacted native GET-by-ID direct-object projection; actual installation kernel and SQLite private custody/delivery use reconstructed responses.",
+      "limits": [
+        "No create replay or name adoption after uncertain outcome.",
+        "mail.send is account-wide; sender verification does not restrict native API-key permission to that sender.",
+        "Offline tests do not establish native issuance, real invitation delivery or production email readiness."
       ]
     },
     {
