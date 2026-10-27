@@ -10,6 +10,8 @@ import { PlanService, type EnvironmentPlan, type PlanOptions } from '../plan/pla
 import { registryCredentialLifecycle } from '../ports/registry-credential.port.js';
 import { ConvergeExecutor, type PlanRunDocument, type ActionResult } from '../plan/converge.executor.js';
 import { credentialActionId, credentialActionMetadataSchema, CREDENTIAL_OPERATION, type CredentialTarget } from '../plan/credential-plan.contract.js';
+import { hasPendingDatabaseBootstrap } from '../plan/database-bootstrap.contract.js';
+import { hasPendingDatabaseInitialization } from '../plan/database-initialization.contract.js';
 import { scopedSecretObservation } from '../plan/scoped-secrets.js';
 import { hashEnvValue, type ObservedState } from '../ports/observe.port.js';
 import { parseHostingBindings } from '../ports/hosting.port.js';
@@ -58,7 +60,9 @@ export function credentialRecoveryDeletionOwners(projectId: string, selection: {
     if (selection.environment && environment.name !== selection.environment) return false;
     const bindings = environment.platformBindings;
     if (Object.values(obj(bindings.credentialUpdates)).some(value => obj(value).state === 'pending')) return true;
-    if (new ComponentRepository().findByEnvironmentId(environment.id).some(component => component.bindings.credentialRotation !== undefined || component.bindings.credentialAliasRepair !== undefined)) return true;
+    if (new ComponentRepository().findByEnvironmentId(environment.id).some(component => component.bindings.credentialRotation !== undefined
+      || component.bindings.credentialAliasRepair !== undefined || hasPendingDatabaseBootstrap(component.bindings)
+      || hasPendingDatabaseInitialization(component.bindings))) return true;
     if (bindings.runtimeRollouts === undefined) return false;
     if (!Array.isArray(bindings.runtimeRollouts)) return true;
     return bindings.runtimeRollouts.some(value => {

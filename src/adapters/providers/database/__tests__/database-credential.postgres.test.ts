@@ -156,6 +156,13 @@ describe('native credential lifecycle (real PostgreSQL)', () => {
       const result = await run(request(current, hung), current);
       expect(result.code).not.toBe(0); expect(result.receipt).toMatchObject({ authentication: 'authenticated', migration: 'unknown' });
     });
+    it('retains a finite nonzero migration exit after successful real authentication', async () => {
+      const values = { DATABASE_URL: url };
+      const migration = { command: 'exit 7', timeoutMs: 1_000 };
+      const result = await run(request(values, migration), values);
+      expect(result.code).not.toBe(0);
+      expect(result.receipt).toMatchObject({ authentication: 'authenticated', migration: 'failed', exitCode: 7 });
+    });
   });
 
 });
