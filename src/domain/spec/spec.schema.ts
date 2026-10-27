@@ -1,4 +1,5 @@
 import { credentialTrackingSchema } from './credential.schema.js';
+import { databaseFreshInitializationIntentSchema } from '../ports/database-fresh-initialization.port.js';
 import { z } from 'zod';
 import { parse as parseDomain } from 'tldts';
 import { isReservedRuntimeEnvKey, RESERVED_RUNTIME_ENV_ERROR } from '../services/runtime-env-policy.js';
@@ -225,6 +226,8 @@ export const databaseSpecSchema = z.object({
   resilience: databaseResilienceSchema.optional(),
   /** Keep provider-managed connection aliases tied to its existing issuer password. */
   credentialAliases: z.object({ mode: z.literal('issuer-references') }).strict().optional(),
+  /** One-use destructive initialization of empty persistence on an exact existing database. */
+  freshInitialization: databaseFreshInitializationIntentSchema.optional(),
 }).strict();
 
 export const cacheSpecSchema = z.object({

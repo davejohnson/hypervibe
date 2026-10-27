@@ -25,6 +25,17 @@ template configuration and volume requirements; RDS retains its existing
 SDK-command lifecycle coverage. These checks do not certify live persistence,
 backup points or restore success.
 
+The same named matrix reviews explicit fresh initialization of an exact existing
+database before adapter implementation. Railway implements the reviewed operation
+with offline contracts; all seven managed-database adapters are unsupported. This is not
+a generic database reset contract. Completion must distinguish attached storage,
+exact deployment, SQL/application readiness and future backup evidence. Registry
+conformance checks actual adapter admission against the reviewed matrix and
+executes shared planning/apply with each unsupported concrete adapter, requiring
+zero provider mutations and unchanged local bindings. Pinned source contracts are
+under `railway/database-initialization`; synthetic transport outcomes and local
+lifecycle checks do not establish a successful live initialization.
+
 `src/application/__tests__/seed-registry-scope.api-contract.test.ts` exercises
 database seed dispatch through real encrypted connection selection and Railway
 HTTP serialization. Its synthetic responses execute against the pinned official

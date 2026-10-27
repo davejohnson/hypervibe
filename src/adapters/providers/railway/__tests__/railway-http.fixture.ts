@@ -15,6 +15,7 @@ type Instance = {
   numReplicas: number | null;
   activeDeployments?: Array<{ id: string }>;
   latestDeployment?: { id: string; status: string };
+  startCommand?: string | null; preDeployCommand?: unknown;
   source: { image?: string }; domains: { serviceDomains: Array<{ domain: string }>; customDomains: [] };
 };
 type ProviderService = { id: string; name: string; instances: Map<string, Instance>; templateId?: string; templateServiceId?: string };
@@ -46,6 +47,9 @@ export async function railwayHttpFixture(options: {
   dropBackupCreateResponse?: boolean; backupWorkflowId?: string | null;
   dropScheduleUpdateResponse?: boolean; ignoreScheduleUpdate?: boolean;
   dropVariableResponse?: boolean;
+  dropDeploymentResponse?: boolean;
+  deploymentStatus?: string;
+  mutationEnvironments?: string[];
   variableMutationEnvironments?: string[];
   dropTemplateDeployResponse?: boolean;
   templateWithoutVolume?: boolean;
@@ -325,6 +329,22 @@ export async function railwayHttpFixture(options: {
       expect(services.get(serviceId)?.instances.has(environmentId)).toBe(true);
       return true;
     },
+    // Official manage-services.md: serviceInstanceDeployV2 returns the new
+    // deployment ID. Deployment state is independently observed, not inferred
+    // from that acknowledgement. This synthetic model is not a live recording.
+    serviceInstanceDeployV2: ({ serviceId, environmentId }) => {
+      const instance = services.get(serviceId)?.instances.get(environmentId);
+      expect(instance).toBeDefined();
+      const id = `deployment-${deployments.size + 1}`;
+      const snapshotId = `snapshot-${id}`;
+      const deployment = { id, projectId, environmentId, serviceId, snapshotId,
+        status: options.deploymentStatus ?? 'SUCCESS', deploymentStopped: false };
+      deployments.set(id, deployment);
+      deploymentSnapshots.set(id, { id: snapshotId, variables: resolvedVariables(serviceId, environmentId) });
+      instance!.latestDeployment = deployment;
+      instance!.activeDeployments = [deployment];
+      return id;
+    },
     serviceDelete: ({ id, environmentId }) => {
       services.get(id)!.instances.get(environmentId)!.deletedAt = '2026-09-12T00:00:00Z';
       return true;
@@ -362,12 +382,12 @@ export async function railwayHttpFixture(options: {
       return 'bucket-deployment';
     },
   };
-  for (const field of ['projectCreate', 'environmentCreate', 'templateDeployV2', 'serviceCreate', 'variableCollectionUpsert', 'serviceInstanceUpdate', 'volumeCreate', 'volumeDelete', 'serviceInstanceRedeploy', 'serviceDelete', 'serviceDomainCreate', 'bucketCreate', 'environmentPatchCommit']) {
+  for (const field of ['projectCreate', 'environmentCreate', 'templateDeployV2', 'serviceCreate', 'variableCollectionUpsert', 'serviceInstanceUpdate', 'volumeCreate', 'volumeDelete', 'serviceInstanceRedeploy', 'serviceInstanceDeployV2', 'serviceDelete', 'serviceDomainCreate', 'bucketCreate', 'environmentPatchCommit']) {
     const resolve = root[field];
     root[field] = (args) => {
       if (!['projectCreate', 'environmentCreate', 'bucketCreate', 'volumeDelete'].includes(field)) {
         if (field === 'variableCollectionUpsert' && options.variableMutationEnvironments) expect(options.variableMutationEnvironments).toContain(args.input?.environmentId);
-        else expect(args.input?.environmentId ?? args.environmentId).toBe(stagingId);
+        else expect(options.mutationEnvironments ?? [stagingId]).toContain(args.input?.environmentId ?? args.environmentId);
       }
       mutations.push({ field, args });
       return resolve(args);
@@ -406,7 +426,7 @@ export async function railwayHttpFixture(options: {
     if (options.dropTemplateDeployResponse && request.query.includes('templateDeployV2')) {
       throw new TypeError('Synthetic connection reset after templateDeployV2 committed');
     }
-    if (options.dropVolumeCreateResponse && request.query.includes('mutation VolumeCreate')) {
+    if (options.dropVolumeCreateResponse && /mutation\s+\w*[Vv]olumeCreate/.test(request.query)) {
       throw new TypeError('Synthetic connection reset after volumeCreate committed');
     }
     if (options.dropBackupCreateResponse && request.query.includes('mutation DatabaseCheckpointCreate')) {
@@ -415,8 +435,11 @@ export async function railwayHttpFixture(options: {
     if (options.dropScheduleUpdateResponse && request.query.includes('mutation DailyBackupScheduleUpdate')) {
       throw new TypeError('Synthetic connection reset after schedule update committed');
     }
-    if (options.dropVariableResponse && (request.query.includes('mutation UpsertVariables') || request.query.includes('mutation SynchronizeDatabaseRotationIssuer'))) {
+    if (options.dropVariableResponse && (request.query.includes('mutation UpsertVariables') || request.query.includes('mutation SynchronizeDatabaseRotationIssuer') || request.query.includes('mutation InitializeDatabaseVariables'))) {
       throw new TypeError('Synthetic connection reset after variable update committed');
+    }
+    if (options.dropDeploymentResponse && /mutation[\s\S]*serviceInstanceDeployV2/.test(request.query)) {
+      throw new TypeError('Synthetic connection reset after database deployment committed');
     }
     return Response.json(result);
   }));
