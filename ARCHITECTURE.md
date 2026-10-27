@@ -2040,6 +2040,25 @@ a replacement disk. This verifies provider configuration, not database contents,
 restart durability or a successful restore. Existing databases are never replaced,
 restarted or given a new empty volume as an implicit repair.
 
+Explicit fresh initialization is a separate optional capability, never ordinary
+persistence reconciliation. Reviewed desired state
+`database.freshInitialization = { id, discardExistingData: true, target: {
+externalId, providerScope } }` names one exact existing database and isolates its
+data-bearing work in `database-initialization`. The optional database adapter
+capability `freshInitialization` owns native eligibility, completion and durable
+uncertain-write recovery; generic lifecycle code does not branch on providers.
+Railway's implementation admits only a supported existing PostgreSQL 16 service
+with no volume, preserves its identity/private credentials and references, stages
+an additive deferred `PGDATA` change, then verifies the newly attached volume and
+exact deployment. Existing storage and unknown evidence block. Supabase, Neon,
+Cloud SQL, RDS, Azure PostgreSQL, Fly MPG and DigitalOcean are unsupported for
+this operation; their managed reset/restore APIs must not be used as fallbacks.
+Discard permission covers only the reviewed old data. Future backups, SQL
+authentication, migrations, seed work and application readiness remain separate.
+The provider matrix records implemented versus unsupported admission. Ordinary
+CI checks the complete registry and mutation-free rejection by all seven other
+providers; offline contracts do not establish a successful live initialization.
+
 Railway runtime wiring preserves provider variable references. New template-backed
 bindings record which existing issuer URL key supplies `DIRECT_URL`, since native
 templates need not define `DATABASE_PRIVATE_URL`. Provisioning and subsequent
@@ -2344,8 +2363,10 @@ Fresh-environment seed/bootstrap data belongs in desired state as `database.seed
 Provider-to-provider data moves are lifecycle operations modeled as explicit
 `dataMigration` spec/plan/apply actions with dependency edges, data-bearing
 confirmation, isolated copy and cutover stages, and verification receipts.
-Database resets likewise belong to desired-state destruction, not an
-imperative shortcut. Re-running or repairing seed or migrated data requires a
+Database resets likewise require reviewed desired state, never an imperative
+shortcut. The narrow `database.freshInitialization` capability above initializes
+empty storage only on its explicitly named eligible existing database; it is not
+a generic reset or replacement path. Re-running or repairing seed or migrated data requires a
 new reviewable desired-state id; Hypervibe does not expose a generic seed or
 copy command runner.
 

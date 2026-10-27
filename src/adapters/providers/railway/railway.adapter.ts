@@ -23,6 +23,7 @@ import type { IServiceVolumes, ServiceVolumeTarget, ServiceVolumeObservation } f
 import { railwayDeployedConfiguration } from './railway-runtime-configuration.js';
 import { createRailwayRuntimeEvidence } from './railway-runtime-evidence.js';
 import { createRailwayDatabaseRotationConfiguration } from './railway-database-rotation.js';
+import { createRailwayDatabaseInitialization } from './railway-database-initialization.js';
 import {
   createHostingServiceCreateRecovery,
   parseHostingBindings,
@@ -142,7 +143,7 @@ export interface RailwayVolumeTarget {
 
 export type RailwayVolumeResolution =
   | { success: true; state: 'absent' }
-  | { success: true; state: 'present'; volumeId: string; pendingDeletion: boolean }
+  | { success: true; state: 'present'; volumeId: string; instanceId?: string; pendingDeletion: boolean }
   | { success: false; error: string; volumeId?: string };
 
 export type RailwayServiceInstanceInspection =
@@ -260,6 +261,14 @@ export class RailwayAdapter implements
   readonly railwayCredentialAliases = createRailwayCredentialAliases(() => this.client);
   readonly railwayRuntimeEvidence = createRailwayRuntimeEvidence(() => this.client, () => this.credentials);
   readonly railwayDatabaseRotationConfiguration = createRailwayDatabaseRotationConfiguration(() => this.client, this.railwayRuntimeEvidence);
+  readonly railwayDatabaseInitialization = createRailwayDatabaseInitialization(() => this.client,
+    async (target, expectedVolumeId, options) => {
+      // Reuse the existing exact target and multi-region replica checks for
+      // every volume admission; scalar numReplicas alone is insufficient.
+      const eligible = await this.observeWebServiceVolume(target, expectedVolumeId);
+      if (eligible.state === 'unknown') return { success: false, error: eligible.reason };
+      return this.resolveServiceVolume(target, expectedVolumeId, options);
+    });
 
   readonly capabilities: ProviderCapabilities = {
     supportedBuilders: ['nixpacks', 'dockerfile'],
@@ -1877,6 +1886,7 @@ export class RailwayAdapter implements
         success: true,
         state: 'present',
         volumeId: match.volumeId,
+        instanceId: match.instanceId,
         pendingDeletion: match.isPendingDeletion,
       };
     } catch (error) {

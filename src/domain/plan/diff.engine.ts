@@ -1,4 +1,5 @@
 import type { EnvironmentSpec, ProjectRuntimeSpec, ServiceSpec } from '../spec/spec.schema.js';
+import { hasPendingDatabaseInitialization } from './database-initialization.contract.js';
 import { createHash } from 'crypto';
 import { migrationReleaseCommandWarning, withMigrationReleaseCommand } from '../spec/spec-bootstrap.js';
 import type { ObservedState, ObservedService } from '../ports/observe.port.js';
@@ -954,7 +955,15 @@ export function diffEnvironment(input: {
     }
   }
 
-  if (databaseProvisioningIncomplete) {
+  if (localDbBindings && hasPendingDatabaseInitialization(localDbBindings)) {
+    const provider = localDbProvider ?? spec.database?.provider ?? 'unknown';
+    activeDatabaseActionId = spec.database ? `database:${provider}` : undefined;
+    actions.push({ id: `database:${provider}`, type: 'update', resource: {
+      kind: 'database', name: localDb?.type ?? spec.database?.engine ?? 'postgres', provider }, verified: false,
+      reason: 'The exact database initialization attempt has not completed verification',
+      metadata: { blockedReason: 'database_initialization_pending' } });
+    warnings.push('Recover the isolated database initialization before dependent changes; previous deployment success does not prove the new storage is active.');
+  } else if (databaseProvisioningIncomplete) {
     const retainedProvider = localDbProvider ?? spec.database?.provider ?? 'unknown';
     const retainedId = `database:${retainedProvider}`;
     activeDatabaseActionId = spec.database ? retainedId : undefined;

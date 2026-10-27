@@ -1,5 +1,7 @@
 import { applyCredentialLifecycle, pendingCredentialUpdate } from '../domain/services/credential-lifecycle.service.js';
 import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from '../domain/services/database-credential-aliases.service.js';
+import { applyDatabaseFreshInitialization } from '../domain/services/database-fresh-initialization.service.js';
+import { hasPendingDatabaseInitialization } from '../domain/plan/database-initialization.contract.js';
 import { applyScheduleActivation } from '../domain/services/schedule-activation.service.js';
 import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js';
 import { applyApiPolicy, planApiPolicy } from '../domain/services/api-policy.js';
@@ -854,6 +856,13 @@ export async function executePlanApply(ctx: CommandContext, params: {
     return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
       reason: 'A database reference repair needs readback verification. Recover its isolated plan before other mutations.' }] };
   }
+  const initializationEnvironments = planScope === 'credentials'
+    ? ctx.repos.environments.findByProjectId(project.id) : environment ? [environment] : [];
+  if (planScope !== 'database-initialization' && initializationEnvironments.some(candidate =>
+    ctx.repos.components.findByEnvironmentId(candidate.id).some(component => hasPendingDatabaseInitialization(component.bindings)))) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'Database initialization needs exact readback verification. Recover its isolated stage before other mutations.' }] };
+  }
   if (planScope === 'credentials') {
     if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'Credential plans require the exact existing environment and cannot bootstrap.' }] };
     const result = await applyCredentialLifecycle(ctx, { project: projectForPreflight, spec, specRevision: params.specRevision, planId, confirmActions: params.confirmActions });
@@ -893,6 +902,23 @@ export async function executePlanApply(ctx: CommandContext, params: {
       : { kind: 'env_missing', envName };
   }
 
+  if (planScope === 'database-initialization') {
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
+      || loaded.document.actions.length !== 1 || params.alwaysRunBootstrap) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'Initialization requires its exact ready plan and existing environment; it cannot bootstrap applications.' }] };
+    }
+    const blocked = planService.providerPreflight([envSpec.database?.provider ?? 'unconfigured']);
+    if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision,
+      confirmActions: params.confirmActions, handler: action =>
+        resolvePlanActionAuthority(action)?.capability === 'database.fresh-initialization'
+          ? applyDatabaseFreshInitialization({ project: projectForPreflight, spec: envSpec, environmentName: envName,
+            action, confirmed: new Set(params.confirmActions), encrypted: loaded.document.overrides?.databaseInitializationEncrypted })
+          : Promise.resolve({ success: false, status: 'blocked' as const, message: 'Only the exact reviewed database initialization is authorized.' }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [
+      'This stage authorizes only database storage initialization. Application rollout, schema migrations, SQL access, backups and restore remain separate.' ] };
+  }
   if (planScope === 'database-credential-aliases') {
     if (loaded.document.databaseCredentialAliasesReady !== true || !environment || loaded.run.projectId !== project.id
       || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap) {

@@ -1,4 +1,5 @@
 import { isDatabasePasswordAction, DATABASE_PASSWORD_OPERATIONS } from './database-password-plan.contract.js';
+import { DATABASE_FRESH_INITIALIZATION_OPERATION, isDatabaseInitializationAction } from './database-initialization.contract.js';
 import { isCredentialAction, CREDENTIAL_OPERATION } from './credential-plan.contract.js';
 import { databaseCredentialAliasesActionSchema, DATABASE_CREDENTIAL_ALIASES_OPERATION } from '../services/database-credential-aliases.service.js';
 import { scheduleActivationActionMetadataSchema } from '../services/schedule-activation.service.js';
@@ -93,6 +94,7 @@ import {
 } from '../services/managed-code-repository.contract.js';
 
 export type PlanMutationCapability =
+  | 'database.fresh-initialization'
   | 'credential.lifecycle.update'
   | 'database.credential-aliases.repair'
   | 'database.scope.bind'
@@ -500,6 +502,9 @@ export function resolvePlanActionAuthority(
 
   if (action.metadata?.operation === DATABASE_SCOPE_BIND_OPERATION) {
     return isDatabaseScopeBindingAction(action) ? authority(action, 'database.scope.bind') : null;
+  }
+  if (action.metadata?.operation === DATABASE_FRESH_INITIALIZATION_OPERATION) {
+    return isDatabaseInitializationAction(action) ? authority(action, 'database.fresh-initialization') : null;
   }
 
   if (action.metadata?.operation === DAILY_BACKUP_OPERATION) {
