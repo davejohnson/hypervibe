@@ -1684,6 +1684,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
         workflowInputHash,
         workflowContentHash,
         forceRelease,
+        ...(typeof action.metadata?.retryAttemptId === 'string' ? { retryAttemptId: action.metadata.retryAttemptId } : {}),
+        ...(typeof action.metadata?.previousAttemptId === 'string' ? { previousAttemptId: action.metadata.previousAttemptId } : {}),
+        ...(typeof action.metadata?.credentialOperationsHash === 'string' ? { credentialOperationsHash: action.metadata.credentialOperationsHash } : {}),
       });
     }
     if (capability === 'github.collaboration.sync') {

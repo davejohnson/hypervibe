@@ -1,6 +1,7 @@
 import * as githubCredentialActivation from '../../../adapters/providers/github/github-credential-activation.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'crypto';
+import { createRequire } from 'node:module';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -19,7 +20,7 @@ import { GitHubAdapter } from '../../../adapters/providers/github/github.adapter
 import { SpecStore } from '../../spec/spec.store.js';
 import { providerRegistry } from '../../registry/provider.registry.js';
 import { environmentSpecSchema } from '../../spec/spec.schema.js';
-import { buildBranchDeployWorkflow, resolveBranchDeployTargets } from '../github-ops.service.js';
+import { buildBranchDeployWorkflow, resolveBranchDeployTargets, releaseEvidenceValidationRuntime } from '../github-ops.service.js';
 import type { Project } from '../../entities/project.entity.js';
 import {
   applyGitHubActionsAppliedSpecHash,
@@ -306,6 +307,8 @@ function seedAcceptedRelease(options: {
       environments: { production: options.environmentSpec },
     });
   }
+  const current = new SpecStore().get(seeded.project)!.spec;
+  new SpecStore().replace(seeded.project, { ...current, devops: { code: { provider: 'github', scope: 'davejohnson/billforge' }, ci: { provider: 'github-actions' } } });
   const spec = new SpecStore().get(seeded.project)!.spec;
   const workflow = expectedWorkflow(seeded.project);
   acceptWorkflow(seeded.project, seeded.envRepo, seeded.environmentId, workflow, {
@@ -318,6 +321,60 @@ function seedAcceptedRelease(options: {
     workflowInputHash: expectedWorkflowInputHash(seeded.project),
     workflowContentHash: workflowFilesContentHash(workflowFiles(workflow)),
   };
+}
+
+function mockNativeReleaseProof(release: ReturnType<typeof seedAcceptedRelease>, run: { id: number; head_sha: string; head_branch: string; status: string; conclusion: string | null; event: string }) {
+  const files = workflowFiles(release.workflow);
+  vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockImplementation(async (_owner, _repo, file) => files.find(entry => entry.path === file)?.content ?? null);
+  vi.spyOn(GitHubAdapter.prototype, 'getWorkflowRun').mockImplementation(async () => ({ ...run, path: release.workflow.path, run_attempt: 1,
+    repository: { full_name: 'davejohnson/billforge' }, head_repository: { full_name: 'davejohnson/billforge' } }));
+  const producer = parse(release.workflow.content).jobs.deploy.steps.find((step: any) => step.name === 'Write server release evidence');
+  let text = '';
+  const nativeRequire = createRequire(import.meta.url), fixtureRequire = (name: string) => name === 'fs' ? {
+    readFileSync: () => `${releaseEvidenceValidationRuntime().trim()}\n`, writeFileSync: (_file: string, value: string) => { text = value; },
+  } : nativeRequire(name);
+  new Function('require', 'process', producer.with.script)(fixtureRequire, { env: { ...producer.env,
+    HYPERVIBE_CREDENTIAL_OPERATIONS: '{}', HYPERVIBE_CREDENTIAL_DEPLOYMENTS: '[]', GITHUB_REPOSITORY: 'davejohnson/billforge',
+    HYPERVIBE_RELEASE_SHA: run.head_sha, HYPERVIBE_RELEASE_IMAGE_URI: `ghcr.io/davejohnson/billforge@sha256:${'d'.repeat(64)}`,
+    HYPERVIBE_RELEASE_DEPLOYMENT_CONTRACT_FINGERPRINT: environmentDeploymentContractHash(release.spec, 'production'),
+  } });
+  const artifact = JSON.parse(text);
+  vi.spyOn(GitHubAdapter.prototype, 'readArtifactFiles').mockImplementation(async () => ({ 'hypervibe-server-release.json': JSON.stringify(artifact) }));
+  return artifact;
+}
+
+function recoveringReleaseFixture() {
+  const release = seedAcceptedRelease(), sha = 'b'.repeat(40);
+  const state = { visible: false, loseAcknowledgment: false, duplicate: false, runAttempt: 1 };
+  const run = { id: 42, name: 'Deploy Railway (production)', display_title: '', status: 'completed', conclusion: 'success' as string | null,
+    created_at: new Date().toISOString(), updated_at: new Date().toISOString(), head_sha: sha, head_branch: 'main',
+    event: 'workflow_dispatch', html_url: 'https://github.com/davejohnson/billforge/actions/runs/42' };
+  const artifact = mockNativeReleaseProof(release, run);
+  const observe = vi.spyOn(githubCredentialActivation, 'observeGitHubCredentialRollout').mockResolvedValue([]);
+  const prepare = vi.spyOn(githubCredentialActivation, 'prepareGitHubCredentialRollout').mockResolvedValue({ commit_sha: sha });
+  vi.spyOn(GitHubAdapter.prototype, 'getRef').mockResolvedValue({ ref: 'refs/heads/main', object: { sha } });
+  vi.spyOn(GitHubAdapter.prototype, 'getWorkflowRun').mockImplementation(async () => ({ ...run, path: release.workflow.path, run_attempt: state.runAttempt,
+    repository: { full_name: 'davejohnson/billforge' }, head_repository: { full_name: 'davejohnson/billforge' } }));
+  const listed = vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockImplementation(async () => ({
+    total_count: state.visible ? state.duplicate ? 2 : 1 : 0,
+    workflow_runs: state.visible ? state.duplicate ? [run, { ...run, id: 43 }] : [run] : [],
+  }));
+  vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunArtifacts').mockResolvedValue({ total_count: 1, artifacts: [{
+    id: 99, name: `hypervibe-server-release-v4-production-${sha}`, expired: false,
+    created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    workflow_run: { id: run.id, repository_id: 1, head_repository_id: 1, head_branch: 'main', head_sha: sha },
+  }] });
+  const retained = () => new EnvironmentRepository().findByProjectAndName(release.project.id, 'production')!.platformBindings.managedReleaseDispatch as { id: string; status: string; runId?: number };
+  const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockImplementation(async (_owner, _repo, _workflow, _ref, inputs) => {
+    // This assertion observes the durable SQLite write at the transport boundary.
+    expect(retained()).toMatchObject({ id: inputs!.hypervibe_release_id, status: 'attempted' });
+    run.display_title = `Deploy production ${sha}  [hv:${inputs!.hypervibe_release_id}]`;
+    if (state.loseAcknowledgment) throw new Error('Synthetic lost native response');
+    state.visible = true;
+    return { runId: run.id, url: run.html_url };
+  });
+  const params = reviewedReleaseParams(release, { forceRelease: true, timeoutMs: 1, pollIntervalMs: 0 });
+  return { release, state, run, artifact, retained, trigger, params, listed, prepare, observe };
 }
 
 function reviewedReleaseParams(
@@ -868,6 +925,30 @@ describe('ci-deploy.service', () => {
       if (scenario === 'stale-binding') expect(binding.contentHash).not.toBe(sha256(acceptedContent));
       if (scenario === 'legacy') expect(result.action?.metadata?.workflowPublicationRequired).toBe(true);
       if (scenario === 'live-drift') expect(liveContent).not.toBe(acceptedContent);
+    });
+
+
+    it('requires reviewed publication of revision-7 workflows before nonce dispatch is available', async () => {
+      const { project, envRepo, environmentId } = seedProjectWithSpec(); seedVerifiedConnections();
+      const { targets, migration } = resolveBranchDeployTargets(project), target = { ...targets[0] };
+      delete target.providerImageUris; delete target.programFingerprint; delete target.deploymentContractFingerprint;
+      const oldInputHash = canonicalJsonSha256({ version: 1, rendererRevision: 7, provider: 'railway', target,
+        migration: { includeStep: migration.includeStep, ...(migration.includeStep && migration.command ? { command: migration.command } : {}) } });
+      const workflow = expectedWorkflow(project), accepted = parse(workflow.content);
+      // Reconstructed historical contract: revision 7 had no operation identity.
+      delete accepted.on.workflow_dispatch.inputs.hypervibe_release_id;
+      accepted['run-name'] = "Deploy production ${{ inputs.commit_sha || github.sha }} ${{ inputs.rollback && '(rollback)' || '' }}";
+      const bytes = stringify(accepted);
+      acceptWorkflow(project, envRepo, environmentId, workflow, { acceptedContent: bytes, binding: { ...syncedBinding(project, bytes), inputHash: oldInputHash } });
+      const nativeWrite = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow');
+      const deployPlan = await planGitHubActionsDeploy({ project, environmentName: 'production', environmentSpec, environment: envRepo.findById(environmentId) });
+      expect(deployPlan.action?.metadata?.workflowPublicationRequired).toBe(true);
+      const releasePlan = await planGitHubActionsRelease({ project, environmentName: 'production', environmentSpec });
+      expect(releasePlan.action?.metadata?.blockedReason).toBe('github_release_workflow_drift');
+      expect(nativeWrite).not.toHaveBeenCalled();
+      const reviewed = parse(workflow.content);
+      expect(reviewed.on.workflow_dispatch.inputs.hypervibe_release_id).toMatchObject({ type: 'string', required: false });
+      expect(reviewed['run-name']).toContain("format('[hv:{0}]', inputs.hypervibe_release_id)");
     });
 
     it('requires publication when a reviewed revision-5 workflow still gates on v1 backup receipts', async () => {
@@ -2376,6 +2457,197 @@ describe('ci-deploy.service', () => {
       });
     });
 
+    it('persists dispatch intent before transport and never blindly repeats a lost acknowledgment', async () => {
+      const release = seedAcceptedRelease();
+      vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockResolvedValue({ total_count: 0, workflow_runs: [] });
+      vi.spyOn(GitHubAdapter.prototype, 'getRef').mockResolvedValue({ ref: 'refs/heads/main', object: { sha: 'b'.repeat(40) } });
+      const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockRejectedValue(new Error('Synthetic lost dispatch acknowledgment'));
+      const params = reviewedReleaseParams(release, { forceRelease: true, timeoutMs: 1, pollIntervalMs: 0 });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try { await applyGitHubActionsRelease(params); } catch { /* old boundary throws */ }
+      }
+      expect(trigger).toHaveBeenCalledTimes(1);
+      const environment = new EnvironmentRepository().findByProjectAndName(release.project.id, 'production')!;
+      expect(environment.platformBindings.managedReleaseDispatch).toMatchObject({ status: 'attempted' });
+    });
+
+
+    it('recovers the exact nonce after a SQLite restart without repeating a lost dispatch', async () => {
+      const fixture = recoveringReleaseFixture(); fixture.state.loseAcknowledgment = true;
+      expect(await applyGitHubActionsRelease(fixture.params)).toMatchObject({ success: false, status: 'pending' });
+      const id = fixture.retained().id;
+      SqliteAdapter.resetInstance(); initializeDatabase(path.join(tempDir, 'hypervibe.db'));
+      fixture.state.visible = true;
+      expect(await applyGitHubActionsRelease(fixture.params)).toMatchObject({ success: true, data: { attemptId: id, runId: 42, artifactId: 99 } });
+      expect(fixture.trigger).toHaveBeenCalledTimes(1);
+      expect(fixture.retained()).toMatchObject({ id, status: 'succeeded', runId: 42 });
+    });
+
+    it('refuses ambiguous nonce correlation and foreign native attempts without redispatch', async () => {
+      const fixture = recoveringReleaseFixture(); fixture.state.loseAcknowledgment = true;
+      await applyGitHubActionsRelease(fixture.params);
+      fixture.state.visible = true; fixture.state.duplicate = true;
+      expect(await applyGitHubActionsRelease(fixture.params)).toMatchObject({ success: false, status: 'blocked', message: expect.stringContaining('ambiguous') });
+      fixture.state.duplicate = false; fixture.state.runAttempt = 2;
+      expect(await applyGitHubActionsRelease(fixture.params)).toMatchObject({ success: false, status: 'blocked', message: expect.stringContaining('identity or attempt') });
+      expect(fixture.trigger).toHaveBeenCalledTimes(1);
+      expect(fixture.retained().status).toBe('acknowledged');
+    });
+
+    it.each(['missing', 'source', 'program', 'target'])('does not complete from artifact metadata with %s release proof', async fault => {
+      const fixture = recoveringReleaseFixture();
+      if (fault === 'missing') vi.mocked(GitHubAdapter.prototype.readArtifactFiles).mockResolvedValue({});
+      else if (fault === 'source') fixture.artifact.source.sha = 'c'.repeat(40);
+      else if (fault === 'program') fixture.artifact.programFingerprint = 'c'.repeat(64);
+      else fixture.artifact.target.resources[0].providerResourceId = 'foreign-service';
+      expect(await applyGitHubActionsRelease(fixture.params)).toMatchObject({ success: false, status: 'pending', message: expect.stringContaining('artifact evidence') });
+      expect(await applyGitHubActionsRelease(fixture.params)).toMatchObject({ success: false, status: 'pending' });
+      expect(fixture.trigger).toHaveBeenCalledTimes(1);
+      expect(fixture.observe).not.toHaveBeenCalled();
+      expect(fixture.retained().status).toBe('acknowledged');
+    });
+
+    it('requires a fresh planned failed-run identity before retrying a terminal native failure', async () => {
+      const fixture = recoveringReleaseFixture(); fixture.run.conclusion = 'failure';
+      expect(await applyGitHubActionsRelease(fixture.params)).toMatchObject({ success: false, message: expect.stringContaining('failed') });
+      const failedId = fixture.retained().id;
+      expect(await applyGitHubActionsRelease(fixture.params)).toMatchObject({ success: false, status: 'blocked' });
+      expect(await applyGitHubActionsRelease({ ...fixture.params, retryAttemptId: '00000000-0000-4000-8000-000000000000' })).toMatchObject({ success: false, status: 'blocked' });
+      const planned = await planGitHubActionsRelease({ project: fixture.release.project, environmentName: 'production', environmentSpec: fixture.release.spec.environments.production });
+      expect(planned.action?.metadata?.retryAttemptId).toBe(failedId);
+      fixture.run.id = 43; fixture.run.status = 'in_progress'; fixture.run.conclusion = null; fixture.state.visible = false;
+      expect(await applyGitHubActionsRelease({ ...fixture.params, retryAttemptId: String(planned.action!.metadata!.retryAttemptId) })).toMatchObject({ success: false, status: 'pending' });
+      expect(fixture.trigger).toHaveBeenCalledTimes(2);
+      expect(fixture.retained()).toMatchObject({ status: 'acknowledged', runId: 43 });
+      expect(fixture.retained().id).not.toBe(failedId);
+    });
+
+    it('serializes concurrent apply calls before the native dispatch boundary', async () => {
+      const fixture = recoveringReleaseFixture(); fixture.state.loseAcknowledgment = true;
+      await Promise.all([applyGitHubActionsRelease(fixture.params), applyGitHubActionsRelease(fixture.params)]);
+      expect(fixture.trigger).toHaveBeenCalledTimes(1);
+      expect(fixture.retained().status).toBe('attempted');
+    });
+
+    it('stops when source authority changes during asynchronous credential preparation', async () => {
+      const fixture = recoveringReleaseFixture();
+      fixture.prepare.mockImplementation(async () => {
+        const current = new SpecStore().get(fixture.release.project)!.spec;
+        new SpecStore().replace(fixture.release.project, { ...current, environments: { production: { ...current.environments.production, envVars: { CHANGED: 'yes' } } } });
+        return { commit_sha: fixture.params.targetSha };
+      });
+      expect(await applyGitHubActionsRelease(fixture.params)).toMatchObject({ success: false, status: 'blocked' });
+      expect(fixture.trigger).not.toHaveBeenCalled();
+    });
+
+    it('stops when the GitHub branch advances during asynchronous credential preparation', async () => {
+      const fixture = recoveringReleaseFixture();
+      fixture.prepare.mockImplementation(async () => {
+        vi.mocked(GitHubAdapter.prototype.getRef).mockResolvedValue({ ref: 'refs/heads/main', object: { sha: 'c'.repeat(40) } });
+        return { commit_sha: fixture.params.targetSha };
+      });
+      expect(await applyGitHubActionsRelease(fixture.params)).toMatchObject({ success: false, status: 'blocked' });
+      expect(fixture.trigger).not.toHaveBeenCalled();
+    });
+
+
+    it('observes an obsolete pending source read-only before a newly planned release', async () => {
+      const fixture = recoveringReleaseFixture(); fixture.state.loseAcknowledgment = true;
+      await applyGitHubActionsRelease(fixture.params);
+      const oldAttemptId = fixture.retained().id;
+      fixture.state.visible = true;
+      const nextSha = 'c'.repeat(40);
+      vi.mocked(GitHubAdapter.prototype.getRef).mockResolvedValue({ ref: 'refs/heads/main', object: { sha: nextSha } });
+      const params = { ...fixture.params, targetSha: nextSha };
+      expect(await applyGitHubActionsRelease(params)).toMatchObject({ success: false, status: 'blocked', message: expect.stringContaining('Re-plan') });
+      expect(fixture.retained()).toMatchObject({ id: oldAttemptId, status: 'completed', runId: 42 });
+      expect(fixture.observe).not.toHaveBeenCalled();
+      expect(fixture.trigger).toHaveBeenCalledTimes(1);
+      const plan = await planGitHubActionsRelease({ project: fixture.release.project, environmentName: 'production', environmentSpec: fixture.release.spec.environments.production });
+      expect(plan.action?.metadata).toMatchObject({ targetSha: nextSha, previousAttemptId: oldAttemptId });
+      // A pre-completion plan cannot authorize the next dispatch.
+      expect(await applyGitHubActionsRelease(params)).toMatchObject({ success: false, status: 'blocked' });
+      expect(fixture.trigger).toHaveBeenCalledTimes(1);
+      fixture.state.visible = false; fixture.run.status = 'in_progress'; fixture.run.conclusion = null;
+      expect(await applyGitHubActionsRelease({ ...params, previousAttemptId: String(plan.action!.metadata!.previousAttemptId) })).toMatchObject({ success: false, status: 'pending' });
+      expect(fixture.trigger).toHaveBeenCalledTimes(2);
+      expect(fixture.retained().id).not.toBe(oldAttemptId);
+    });
+
+    it('stops when the selected GitHub connection is revoked during credential preparation', async () => {
+      const fixture = recoveringReleaseFixture();
+      fixture.prepare.mockImplementation(async () => {
+        const repository = new ConnectionRepository();
+        repository.updateStatus(repository.findBestVerifiedMatch('github', 'davejohnson/billforge')!.id, 'failed');
+        return { commit_sha: fixture.params.targetSha };
+      });
+      expect(await applyGitHubActionsRelease(fixture.params)).toMatchObject({ success: false, status: 'blocked' });
+      expect(fixture.trigger).not.toHaveBeenCalled();
+    });
+
+
+    it.each(['source', 'native binding'])('does not accept a completed release when %s changes during artifact observation', async kind => {
+      const fixture = recoveringReleaseFixture();
+      const artifactRead = vi.mocked(GitHubAdapter.prototype.readArtifactFiles).getMockImplementation()!;
+      vi.mocked(GitHubAdapter.prototype.readArtifactFiles).mockImplementation(async (...args) => {
+        const value = await artifactRead(...args);
+        if (kind === 'source') {
+          const current = new SpecStore().get(fixture.release.project)!.spec;
+          new SpecStore().replace(fixture.release.project, { ...current, environments: { production: { ...current.environments.production, envVars: { CHANGED: 'yes' } } } });
+        } else fixture.release.envRepo.updatePlatformBindings(fixture.release.environmentId, { services: { web: { serviceId: 'replaced-native-service' } } });
+        return value;
+      });
+      expect(await applyGitHubActionsRelease(fixture.params)).toMatchObject({ success: false, status: 'blocked' });
+      expect(fixture.retained().status).toBe('acknowledged');
+      expect(fixture.observe).not.toHaveBeenCalled();
+    });
+
+
+    it('requires a new reviewed release for a later credential operation at the same source SHA', async () => {
+      const fixture = recoveringReleaseFixture();
+      expect(await applyGitHubActionsRelease(fixture.params)).toMatchObject({ success: true });
+      const previousId = fixture.retained().id;
+      fixture.release.envRepo.updatePlatformBindings(fixture.release.environmentId, { runtimeRollouts: [{
+        provider: 'railway', service: 'web', serviceExternalId: 'rail-web', requiredAt: new Date().toISOString(),
+        applyRunId: 'next-credential-apply', actionIds: ['credential:replacement'], baselineDeployment: { state: 'present', id: 'previous' },
+        operationId: 'replacement-operation', configurationExpectationEncrypted: getSecretStore().encryptObject({ API_KEY: 'digest-only' }),
+        configurationAccepted: 'acknowledgement', configurationAcceptedKeys: ['API_KEY'],
+      }] });
+      expect(await applyGitHubActionsRelease(fixture.params)).toMatchObject({ success: false, status: 'blocked' });
+      const planned = await planGitHubActionsRelease({ project: fixture.release.project, environmentName: 'production', environmentSpec: fixture.release.spec.environments.production });
+      expect(planned.action).toMatchObject({ type: 'update', metadata: { previousAttemptId: previousId } });
+      fixture.run.id = 43; fixture.run.status = 'in_progress'; fixture.run.conclusion = null; fixture.state.visible = false;
+      expect(await applyGitHubActionsRelease({ ...fixture.params, previousAttemptId: String(planned.action!.metadata!.previousAttemptId), credentialOperationsHash: String(planned.action!.metadata!.credentialOperationsHash) })).toMatchObject({ success: false, status: 'pending' });
+      expect(fixture.trigger).toHaveBeenCalledTimes(2);
+    });
+
+
+    it('records an explicit native permission rejection and retries only after a fresh reviewed action', async () => {
+      const fixture = recoveringReleaseFixture(); fixture.trigger.mockRestore();
+      const nativeTrigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow');
+      const transport = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ message: 'Resource not accessible by integration' }, { status: 403 }));
+      expect(await applyGitHubActionsRelease(fixture.params)).toMatchObject({ success: false, status: 'blocked', message: expect.stringContaining('rejected') });
+      expect(fixture.retained().status).toBe('rejected');
+      expect(await applyGitHubActionsRelease(fixture.params)).toMatchObject({ success: false, status: 'blocked' });
+      expect(transport).toHaveBeenCalledTimes(1);
+      const planned = await planGitHubActionsRelease({ project: fixture.release.project, environmentName: 'production', environmentSpec: fixture.release.spec.environments.production });
+      expect(planned.action?.metadata?.retryAttemptId).toBe(fixture.retained().id);
+      fixture.run.status = 'in_progress'; fixture.run.conclusion = null;
+      transport.mockResolvedValue(Response.json({ workflow_run_id: 42, run_url: 'https://api.github.com/repos/davejohnson/billforge/actions/runs/42', html_url: fixture.run.html_url }));
+      expect(await applyGitHubActionsRelease({ ...fixture.params, retryAttemptId: String(planned.action!.metadata!.retryAttemptId) })).toMatchObject({ success: false, status: 'pending' });
+      expect(nativeTrigger).toHaveBeenCalledTimes(2); expect(transport).toHaveBeenCalledTimes(2);
+      expect(fixture.retained().status).toBe('acknowledged');
+    });
+
+
+    it.each([null, 'unknown-native-conclusion'])('does not authorize another dispatch from incomplete native terminal evidence: %s', async conclusion => {
+      const fixture = recoveringReleaseFixture(); fixture.run.conclusion = conclusion;
+      expect(await applyGitHubActionsRelease(fixture.params)).toMatchObject({ success: false, status: 'blocked' });
+      expect(await applyGitHubActionsRelease(fixture.params)).toMatchObject({ success: false, status: 'blocked' });
+      expect(fixture.trigger).toHaveBeenCalledTimes(1);
+      expect(fixture.retained().status).toBe('acknowledged');
+    });
+
     it('dispatches the exact commit and waits for verified release evidence', async () => {
       const release = seedAcceptedRelease();
       const credentialInputs = { commit_sha: 'b'.repeat(40), credential_operations: JSON.stringify({ web: { serviceId: 's', operationId: 'op' } }) };
@@ -2395,14 +2667,14 @@ describe('ci-deploy.service', () => {
         event: 'workflow_dispatch',
         html_url: 'https://github.com/davejohnson/billforge/actions/runs/42',
       };
-      vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns')
-        .mockResolvedValueOnce({ total_count: 0, workflow_runs: [] })
-        .mockResolvedValueOnce({ total_count: 1, workflow_runs: [run] });
+      let dispatched = false;
+      vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockImplementation(async () => ({ total_count: dispatched ? 1 : 0, workflow_runs: dispatched ? [run] : [] }));
       vi.spyOn(GitHubAdapter.prototype, 'getRef').mockResolvedValue({
         ref: 'refs/heads/main',
         object: { sha },
       });
-      const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockResolvedValue();
+      const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockImplementation(async () => { dispatched = true; return { runId: run.id, url: run.html_url }; });
+      mockNativeReleaseProof(release, run);
       vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunArtifacts').mockResolvedValue({
         total_count: 1,
         artifacts: [{
@@ -2436,7 +2708,8 @@ describe('ci-deploy.service', () => {
         'billforge',
         '.github/workflows/deploy-railway-production.yml',
         'main',
-        credentialInputs
+        { ...credentialInputs, hypervibe_release_id: expect.any(String) },
+        { returnRunDetails: true }
       );
     });
 

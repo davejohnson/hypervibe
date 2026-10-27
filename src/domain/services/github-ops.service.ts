@@ -61,7 +61,7 @@ export type {
   BranchDeployWorkflow,
 };
 
-export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 7;
+export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 8;
 const GITHUB_ACTIONS_PROMOTION_RENDERER_REVISION = 2;
 export const GITHUB_ACTIONS_SERVER_PROGRAM_REVISION = 1;
 
@@ -223,6 +223,10 @@ function buildWorkflowTrigger(target: BranchDeployTarget): string {
     inputs:
       commit_sha:
         description: 'Commit SHA to deploy. Defaults to the selected ref when omitted.'
+        required: false
+        type: string
+      hypervibe_release_id:
+        description: 'Nonsecret release attempt identity supplied by Hypervibe.'
         required: false
         type: string
       credential_operations:
@@ -1105,7 +1109,7 @@ export function buildBranchDeployWorkflow(
 
   const content = `name: Deploy ${providerName} (${target.environmentName})
 
-run-name: Deploy ${target.environmentName} \${{ inputs.commit_sha || github.sha }} \${{ inputs.rollback && '(rollback)' || '' }}
+run-name: Deploy ${target.environmentName} \${{ inputs.commit_sha || github.sha }} \${{ inputs.rollback && '(rollback)' || '' }} \${{ inputs.hypervibe_release_id && format('[hv:{0}]', inputs.hypervibe_release_id) || '' }}
 
 on:
 ${buildWorkflowTrigger(target)}

@@ -80,6 +80,31 @@ describe('staged service-volume binding merge', () => {
 });
 
 describe('repo bindings delegated metadata', () => {
+
+  it('keeps dispatch recovery local across repository export and rejects imported authority', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-dispatch-bindings-'));
+    execFileSync('git', ['init', '-q', root]);
+    execFileSync('git', ['-C', root, 'remote', 'add', 'origin', 'https://github.com/owner/app.git']);
+    const now = new Date();
+    const project: Project = { id: 'project', name: 'app', gitRemoteUrl: 'https://github.com/owner/app.git', defaultPlatform: 'railway', policies: {}, createdAt: now, updatedAt: now };
+    const journal = { id: 'nonsecret-local-attempt', status: 'attempted' };
+    const environment: Environment = { id: 'env', projectId: project.id, name: 'staging', platformBindings: { provider: 'railway', managedReleaseDispatch: journal }, createdAt: now, updatedAt: now };
+    const disabled = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      const file = writeRepoBindingsForEnvironment(project, environment, root)!;
+      expect(readFileSync(file, 'utf8')).not.toContain('nonsecret-local-attempt');
+      const imported = readRepoBindingsFile(project.name, root)!.document.environments.staging.platformBindings;
+      expect(imported).not.toHaveProperty('managedReleaseDispatch');
+      expect(mergeRepoPlatformBindings(environment.platformBindings, imported).managedReleaseDispatch).toEqual(journal);
+      expect(() => mergeRepoPlatformBindings(environment.platformBindings, { ...imported, managedReleaseDispatch: journal })).toThrow(/local authority/);
+    } finally {
+      if (disabled === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = disabled;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('roundtrips the exact pending schedule and permanent provider UID through export and import', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-cron-bindings-'));
     execFileSync('git', ['init', '-q', root]);

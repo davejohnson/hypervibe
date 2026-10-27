@@ -79,7 +79,8 @@ function reviewedTarget(
 it('requires a reviewed workflow migration for the shared backup receipt consumer', () => {
   // Revision 5 workflows reject current v2 backup health receipts. Their v1-only
   // success gate must not remain locked as current after installing this fix.
-  expect(GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION).toBe(7);
+  // Revision 8 additionally introduces the reviewed release-attempt input.
+  expect(GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION).toBe(8);
 });
 
 function executeDockerfileStep(workflowContent: string, directory: string): string {

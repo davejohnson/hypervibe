@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
 import { isDeepStrictEqual } from 'node:util';
+import type { BranchDeployTarget } from '../ports/ci-deploy.port.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { ProjectSpec } from '../spec/spec.schema.js';
@@ -12,14 +13,15 @@ import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
 import { MANAGED_CI_RELEASE_EVIDENCE_FILE, managedCiReleaseArtifactName } from './managed-ci-evidence.js';
 import { resolveDevOpsSelection } from '../spec/devops-selection.js';
 
-export type ManagedReleaseExpectation = Pick<PreparedHostingReleaseEvidence, 'workflow' | 'branch' | 'sourceCommitSha' | 'workflowInputHash' | 'workflowContentHash'>;
+export type ManagedReleaseExpectation = Pick<PreparedHostingReleaseEvidence, 'workflow' | 'branch' | 'sourceCommitSha' | 'workflowInputHash' | 'workflowContentHash'> & { runId?: number };
+type ReleaseInput = { project: Project; spec: ProjectSpec; environment: Environment; expected?: ManagedReleaseExpectation; reviewed?: PreparedHostingReleaseEvidence };
+export type ManagedReleaseArtifactEvidence = Omit<PreparedHostingReleaseEvidence, 'targets'> & { resources: NonNullable<BranchDeployTarget['releaseTarget']>['resources'] };
 
 /** Read only. Reuses the schedule-activation proof: native run/artifact provenance,
  * exact committed producer files and our trusted v4 consumer. Missing authority
  * or uncertain evidence means unavailable, never a guessed successful release.
  */
-export async function observeManagedReleaseEvidence(input: { project: Project; spec: ProjectSpec; environment: Environment;
-  expected?: ManagedReleaseExpectation; reviewed?: PreparedHostingReleaseEvidence }): Promise<PreparedHostingReleaseEvidence | undefined> {
+export async function observeManagedReleaseArtifact(input: ReleaseInput): Promise<ManagedReleaseArtifactEvidence | undefined> {
   try {
     const { project, spec, environment } = input, environmentSpec = spec.environments[environment.name];
     const repository = parseGitHubRepoFromRemote(project.gitRemoteUrl);
@@ -43,7 +45,7 @@ export async function observeManagedReleaseEvidence(input: { project: Project; s
       || observation.acceptance === 'drift' || !observation.liveContentHash
       || expected && observation.liveContentHash !== expected.workflowContentHash || runs.workflow_runs.length !== 1) return;
     const run = await github.getWorkflowRun(owner, repo, runs.workflow_runs[0].id);
-    if (run.id !== runs.workflow_runs[0].id || run.path !== contract.workflow.path || run.run_attempt !== 1
+    if (expected?.runId !== undefined && run.id !== expected.runId || run.id !== runs.workflow_runs[0].id || run.path !== contract.workflow.path || run.run_attempt !== 1
       || run.status !== 'completed' || run.conclusion !== 'success' || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(run.head_sha)
       || run.head_branch !== contract.workflow.branch || run.repository?.full_name !== repository || run.head_repository?.full_name !== repository) return;
     const artifacts = await github.listWorkflowRunArtifacts(owner, repo, run.id);
@@ -68,13 +70,6 @@ export async function observeManagedReleaseEvidence(input: { project: Project; s
       repository, sha, target: contract.target.releaseTarget, programFingerprint: contract.target.programFingerprint,
       deploymentContractFingerprint, requireImmutableImage: true,
     });
-    const bindings = parseHostingBindings(environment);
-    const targets = contract.target.releaseTarget.resources.map(resource => {
-      const bound = bindings.services?.[resource.logicalName];
-      const id = resource.providerResourceType === 'job' ? bound?.jobName ?? bound?.serviceId : bound?.serviceId;
-      if (!bound?.resourceUid || id !== resource.providerResourceId) throw new Error();
-      return { workload: resource.logicalName, kind: resource.providerResourceType, resourceId: resource.providerResourceId, resourceUid: bound.resourceUid };
-    });
     const [latest, currentRef, currentRun] = await Promise.all([
       github.listWorkflowRuns(owner, repo, contract.workflow.path, { per_page: 1 }),
       github.getRef(owner, repo, `heads/${contract.workflow.branch}`),
@@ -86,10 +81,26 @@ export async function observeManagedReleaseEvidence(input: { project: Project; s
       || currentRun.id !== run.id || currentRun.run_attempt !== 1 || currentRun.status !== 'completed' || currentRun.conclusion !== 'success'
       || currentRun.path !== run.path || currentRun.head_sha !== run.head_sha || currentRun.head_branch !== run.head_branch
       || currentRun.repository?.full_name !== repository || currentRun.head_repository?.full_name !== repository) return;
-    const result = preparedHostingReleaseEvidenceSchema.parse({ schemaVersion: 1, repository, workflow: contract.workflow.path, branch: contract.workflow.branch,
+    const result: ManagedReleaseArtifactEvidence = { schemaVersion: 1, repository, workflow: contract.workflow.path, branch: contract.workflow.branch,
       sourceCommitSha: sha, workflowSourceCommitSha: run.head_sha, runId: run.id, runAttempt: run.run_attempt, artifactId: artifact.id,
       workflowInputHash: contract.inputHash, workflowContentHash: observation.liveContentHash, programFingerprint: contract.target.programFingerprint,
-      deploymentContractFingerprint, imageUri: validated.imageUri, targets });
+      deploymentContractFingerprint, imageUri: validated.imageUri, resources: contract.target.releaseTarget.resources };
+    return result;
+  } catch { return; }
+}
+
+/** Prepared handoff additionally requires the original native resource lifetimes. */
+export async function observeManagedReleaseEvidence(input: ReleaseInput): Promise<PreparedHostingReleaseEvidence | undefined> {
+  try {
+    const artifact = await observeManagedReleaseArtifact(input); if (!artifact) return;
+    const { resources, ...proof } = artifact, bindings = parseHostingBindings(input.environment);
+    const targets = resources.map(resource => {
+      const bound = bindings.services?.[resource.logicalName];
+      const id = resource.providerResourceType === 'job' ? bound?.jobName ?? bound?.serviceId : bound?.serviceId;
+      if (!bound?.resourceUid || id !== resource.providerResourceId) throw new Error();
+      return { workload: resource.logicalName, kind: resource.providerResourceType, resourceId: resource.providerResourceId, resourceUid: bound.resourceUid };
+    });
+    const result = preparedHostingReleaseEvidenceSchema.parse({ ...proof, targets });
     if (input.reviewed && !isDeepStrictEqual(result, input.reviewed)) return;
     return result;
   } catch { return; }

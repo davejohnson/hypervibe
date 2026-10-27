@@ -297,12 +297,12 @@ committed acceptance workflow runs `npm test`, and desired repository policy
 requires `Hypervibe / acceptance`. Live branch protection was not inspected by
 this change. No live ECS deployment was performed.
 
-**Remaining shared CI recovery prerequisite:** the existing GitHub release
-dispatch path has no durable pre-dispatch intent. Losing its acknowledgment can
-therefore lead to another dispatch after restart, particularly with
-`forceRelease`. The new ECS tests establish no acceptance or writes during
-replanning, not replay-safe later dispatch. This shared CI gap must be repaired
-and tested before claiming the full first-release lifecycle complete.
+**Shared CI recovery:** the original GitHub dispatch path could repeat a release
+after losing its acknowledgment, especially with `forceRelease`. The separate
+[managed dispatch recovery change](managed-release-dispatch.md) now retains
+intent before the request, recovers an exact run without dispatching again, and
+requires actual v4 release proof before dependent acceptance. These are offline
+regressions; live first-release walkthrough evidence remains a separate gate.
 
 Independent review found that task `entryPoint` and `healthCheck` overrides could
 survive the bootstrap image replacement and execute with final application
@@ -316,8 +316,7 @@ Initial bootstrap validation now rejects those unreviewed inherited overrides;
 empty lists and false native boolean defaults remain allowed. This does not
 remove reviewed settings from ordinary existing local-key workloads. Final
 installed release verification independently rejects executable entry-point or
-health-command drift. The remaining shared CI recovery prerequisite above is
-unchanged.
+health-command drift. Shared CI recovery is documented separately above.
 
 
 The legacy emitter compatibility check caught an additional regression: installed
