@@ -108,12 +108,23 @@ function projection(record: RecordV1, mode: LocalHoldingPlan['mode'], retryActio
     metadata: { ...holdingPreparation, operation: LOCAL_HOLDING_OPERATION, nativeActionId: action.id },
   })) };
 }
+function matchesRetainedReceipt(value: unknown, receipt: LocalPreparedHostingReceiptV1): boolean {
+  if (isDeepStrictEqual(value, receipt)) return true;
+  // Older repository export/replay removed secret-shaped keys inside arrays.
+  // Restore only an omitted empty declaration proved by the immutable journal;
+  // no IDs, nonempty references, ownership or release evidence are inferred.
+  const parsed = z.object({ deployment: z.object({ workloads: z.array(z.record(z.string(), z.unknown())) }).passthrough() }).passthrough().safeParse(value);
+  if (!parsed.success || parsed.data.deployment.workloads.length !== receipt.deployment.workloads.length) return false;
+  const workloads = parsed.data.deployment.workloads.map((item, index) => !Object.hasOwn(item, 'runtimeSecrets')
+    && receipt.deployment.workloads[index].runtimeSecrets.length === 0 ? { ...item, runtimeSecrets: [] } : item);
+  return isDeepStrictEqual({ ...parsed.data, deployment: { ...parsed.data.deployment, workloads } }, receipt);
+}
 function matchesBinding(environment: Environment, receipt: LocalPreparedHostingReceiptV1) {
   const bindings = environment.platformBindings, services = bindings.services as Record<string, Record<string, unknown>> | undefined;
   return bindings.provider === receipt.hostingProvider && bindings.projectId === receipt.nativeScope.projectId
     && bindings.environmentId === receipt.deployment.region && !!services && receipt.preparedResources.workloads.every(item =>
       services[item.workload]?.serviceId === item.id.split('/').at(-1) && services[item.workload]?.resourceUid === item.lifetimeId)
-    && isDeepStrictEqual(bindings.localPreparedHosting, receipt)
+    && matchesRetainedReceipt(bindings.localPreparedHosting, receipt)
     && (environment.platformBindings.preparedHosting as any)?.receiptDigest === canonicalJsonSha256(receipt);
 }
 export async function localHoldingWorkRequired(project: Project, environmentName: string, spec?: ProjectSpec): Promise<boolean> {

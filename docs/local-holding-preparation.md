@@ -107,6 +107,38 @@ Holding recovery points to `hv_plan`, which reconciles its retained journal befo
 ordinary application bindings exist. All 64 focused guidance checks and typecheck
 pass. This adds no write authority and never permits replay of an uncertain write.
 
+### Repository export and restart
+
+The 2026-10-27 disposable walkthrough also disproved the assumption that a
+sanitized repository receipt could replace its authoritative local copy. The
+completed six-action journal still reproduced the original receipt digest and
+native identities, but both retained workload declarations lacked
+`runtimeSecrets: []`. The repository sanitizer removes secret-shaped keys, and
+array replay replaced those declarations wholesale. Adding only secret
+destinations therefore encountered the holding prerequisite again. The observed
+bindings were already stripped before that spec update; the update itself did
+not change their identities.
+
+An actual command/SQLite regression reproduced export, restart, repository
+hydration and the blocked narrow plan before the fix. Separate failing cases
+showed rejection of the observed older shape and acceptance of replacement or
+newly imported local receipts. The local receipt now stays out of repository
+exports; an older sanitized copy can only match and preserve retained local
+authority. New-environment hydration uses the same merge guard. Verification
+can reconstruct omitted empty runtime declarations only when the completed
+journal proves them and the original receipt digest, native IDs, lifetimes and
+ownership still match. It never infers nonempty secret references, rewrites
+stored state, or accepts a different receipt.
+
+The normal acceptance cases exercise both narrow destination planning and full
+operator-output prerequisite planning after restart, as well as changed IDs,
+ownership, digest and nonempty-reference rejection. These are reconstructed
+local lifecycle regressions with serialized synthetic cloud transport; they do
+not establish another live installation or successful application deployment.
+They run through ordinary `npm test`, which both committed acceptance CI and
+desired required-check configuration select; this alone does not verify live
+branch-protection enforcement.
+
 ### Cloud SQL first release
 
 The local operator path reuses Cloud Run's existing `cloudsql` volume and

@@ -45,6 +45,7 @@ const LOCAL_ONLY_BINDING_KEYS = new Set([
   'preparedDirectReleaseAttempts',
   'preparedDirectReleaseEvidence',
   'managedReleaseDispatch',
+  'localPreparedHosting',
 ]);
 
 function bindingsPath(root: string): string {
@@ -99,6 +100,14 @@ export function mergeRepoPlatformBindings(
   existing: Record<string, unknown>,
   repoBindings: Record<string, unknown>
 ): Record<string, unknown> {
+  if (Object.hasOwn(repoBindings, 'localPreparedHosting')) {
+    // Older exports included a sanitized receipt. It may identify the same
+    // retained receipt, but must never replace its immutable local authority.
+    if (existing.localPreparedHosting === undefined
+      || !isDeepStrictEqual(repoBindings.localPreparedHosting, existing.localPreparedHosting)
+        && !isDeepStrictEqual(repoBindings.localPreparedHosting, sanitize(existing.localPreparedHosting)))
+      throw new Error('Local holding preparation receipts require matching retained local authority and cannot be imported or replaced.');
+  }
   if (Object.hasOwn(repoBindings, 'managedReleaseDispatch')) throw new Error('Managed release dispatch recovery is local authority and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'recoveryRuntimeSecretInputs')) throw new Error('Private recovery inputs are local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'credentialUpdates')) throw new Error('Credential acceptance and recovery state are local only and cannot be imported.');
@@ -140,6 +149,10 @@ export function mergeRepoPlatformBindings(
     );
   }
   for (const [key, repoValue] of Object.entries(repoBindings)) {
+    if (key === 'localPreparedHosting') {
+      merged[key] = existing[key];
+      continue;
+    }
     if (key === 'secretDestinationContainers') {
       const retained = secretContainerBindings(existing[key]);
       for (const [name, incoming] of Object.entries(secretContainerBindings(repoValue))) {
@@ -285,8 +298,13 @@ function parseDocument(raw: unknown, file: string, projectName?: string): RepoBi
 
   const normalized: RepoBindingsFile['environments'] = {};
   for (const [envName, value] of Object.entries(parsed.data.environments)) {
+    const platformBindings = sanitizePlatformBindings(value.platformBindings);
+    // Read older exports only so the merge boundary can compare them with
+    // retained local authority. New exports omit this receipt entirely.
+    if (value.platformBindings.localPreparedHosting !== undefined)
+      platformBindings.localPreparedHosting = sanitize(value.platformBindings.localPreparedHosting);
     normalized[envName] = {
-      platformBindings: sanitizePlatformBindings(value.platformBindings),
+      platformBindings,
     };
   }
   return {

@@ -1,6 +1,7 @@
 import { localHoldingApplicationFixture as fixture } from './local-holding-preparation.fixture.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import '../providers.js';
@@ -12,9 +13,12 @@ import { providerRegistry } from '../../domain/registry/provider.registry.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { environmentConnectionScope } from '../../domain/services/project-scope.js';
 import { readGcpLocalPreparedResources } from '../../adapters/providers/gcp/gcp-local-holding-preparation.js';
-import { verifiedLocalHoldingReceipt } from '../../domain/services/local-holding-preparation.service.js';
+import { localHoldingWorkRequired, verifiedLocalHoldingReceipt } from '../../domain/services/local-holding-preparation.service.js';
 import { planCloudInstallationV1 } from '../../domain/services/cloud-installation-runtime.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
+import { runWithWorkspaceDirectories } from '../../lib/workspace-context.js';
+import { createGcpSecretContainerSetup } from '../../adapters/providers/gcp/gcp-secret-container.js';
+import { mergeRepoPlatformBindings } from '../../domain/spec/repo-bindings-file.js';
 
 // User requirement: obtaining the exact HTTPS origin must not run application
 // code or require its still-unregistered OAuth secrets. This exercises actual
@@ -99,6 +103,101 @@ describe('local inert holding preparation', () => {
     f.native.options.corrupt = true;
     await expect(verify.call(capability, receipt, { service: 'web', runtimeService: 'web' })).rejects.toThrow();
     expect(f.native.writes).toHaveLength(writes);
+  });
+
+  it('preserves completed multi-service holding authority across repository export, restart and a later secret-destination plan', async () => {
+    const f = await fixture({ serviceScaling: { maxInstanceCount: 20 } });
+    for (let step = 0; step < 2; step++) {
+      const plan = await f.plan(); if ('error' in plan) throw new Error(plan.error);
+      expect(await f.apply(plan.planRunId, plan.actions.filter(action => action.requiresConfirm).map(action => action.id)))
+        .toMatchObject({ kind: 'executed', result: { success: true } });
+    }
+    const original = f.ctx.repos.environments.findById(f.environment.id)!.platformBindings;
+    const writes = f.native.writes.length, repository = path.join(directory, 'repository');
+    execFileSync('git', ['init', '-q', repository]);
+    execFileSync('git', ['-C', repository, 'remote', 'add', 'origin', 'https://github.com/acme/operator']);
+    vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', 'false');
+    await runWithWorkspaceDirectories([repository], async () => {
+      f.store.replace(f.project, f.desired);
+      f.ctx.repos.environments.syncRepoBindingsForId(f.environment.id);
+      const exported = JSON.parse(readFileSync(path.join(repository, '.hypervibe', 'bindings.json'), 'utf8'));
+      expect(exported.environments.staging.platformBindings).not.toHaveProperty('localPreparedHosting');
+      SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(path.join(directory, 'test.db')).migrate();
+      expect(await f.commands.execute('hv_spec', { project: f.project.name })).toMatchObject({ ok: true });
+      expect.soft(f.ctx.repos.environments.findById(f.environment.id)!.platformBindings).toEqual(original);
+      const declaration = { CLOUD_CONNECT_GOOGLE_CLIENT_SECRET: { destination: { provider: 'gcp-secret-manager', projectId: f.native.scope.projectId,
+        projectNumber: f.native.scope.projectNumber, secretId: 'operator-google-client' } } };
+      expect(await f.commands.execute('hv_spec', { project: f.project.name, spec: { environments: { staging: { secretDestinations: declaration } } } }))
+        .toMatchObject({ ok: true });
+      vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter: { secretDestinationSetup:
+        createGcpSecretContainerSetup({ projectId: f.native.scope.projectId, getAccessToken: async () => 'synthetic-transient-token' }, { fetch: async (url, options) => {
+          if (new URL(String(url)).hostname === 'secretmanager.googleapis.com') { expect(options?.method ?? 'GET').toBe('GET'); return Response.json({}, { status: 404 }); }
+          return f.native.request(url, options);
+        } }) } } as any);
+      const narrow = await f.commands.execute('hv_plan', { project: f.project.name, env: 'staging', scope: 'secret-destinations' });
+      expect(narrow, JSON.stringify(narrow)).toMatchObject({ ok: true, data: { scope: 'secret-destinations' } });
+      // Full planning also passes the retained holding stage, then isolates the
+      // declared operator's output prerequisite before reading private inputs.
+      expect(await f.commands.execute('hv_spec', { project: f.project.name, spec: { environments: { staging: {
+        operatorApplications: { google: { provider: 'google-oauth', originService: 'web', runtimeService: 'web',
+          profile: 'hypercloud-connect-v1', nativeScope: { projectId: f.native.scope.projectId },
+          outputs: { 'client-secret': 'CLOUD_CONNECT_GOOGLE_CLIENT_SECRET' } } },
+      } } } })).toMatchObject({ ok: true });
+      const full = await f.commands.execute('hv_plan', { project: f.project.name, env: 'staging', scope: 'full' });
+      expect(full, JSON.stringify(full)).toMatchObject({ ok: true, data: { scope: 'secret-destinations' } });
+      expect(await verifiedLocalHoldingReceipt(f.project, f.ctx.repos.environments.findById(f.environment.id)!)).toEqual(original.localPreparedHosting);
+      expect(f.ctx.repos.environments.findById(f.environment.id)!.platformBindings).toEqual(original);
+      expect(f.native.writes).toHaveLength(writes);
+    });
+  });
+
+  it('recovers only journal-proven empty runtime declarations from the observed older sanitized receipt shape', async () => {
+    const f = await fixture();
+    for (let step = 0; step < 2; step++) {
+      const plan = await f.plan(); if ('error' in plan) throw new Error(plan.error);
+      expect(await f.apply(plan.planRunId, plan.actions.filter(action => action.requiresConfirm).map(action => action.id)))
+        .toMatchObject({ kind: 'executed', result: { success: true } });
+    }
+    const original = f.ctx.repos.environments.findById(f.environment.id)!.platformBindings;
+    // Sanitized native profile observation 2026-10-27: both web and worker lost
+    // only empty runtimeSecrets; the immutable journal/digest remained complete.
+    const legacy: any = structuredClone(original.localPreparedHosting);
+    for (const workload of legacy.deployment.workloads) delete workload.runtimeSecrets;
+    expect.soft(mergeRepoPlatformBindings(original, { localPreparedHosting: legacy }).localPreparedHosting).toEqual(original.localPreparedHosting);
+    const changed = structuredClone(legacy); changed.preparedResources.workloads[0].lifetimeId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    expect.soft(() => mergeRepoPlatformBindings(original, { localPreparedHosting: changed })).toThrow();
+    expect.soft(() => mergeRepoPlatformBindings({}, { localPreparedHosting: legacy })).toThrow();
+    f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { localPreparedHosting: legacy });
+    SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(path.join(directory, 'test.db')).migrate();
+    const retained = f.ctx.repos.environments.findById(f.environment.id)!;
+    expect(await verifiedLocalHoldingReceipt(f.project, retained)).toEqual(original.localPreparedHosting);
+    expect(await localHoldingWorkRequired(f.project, 'staging', f.store.get(f.project)!.spec)).toBe(false);
+    for (const variant of ['runtime-reference', 'native-id', 'digest', 'owner']) {
+      const invalid: any = structuredClone(retained);
+      if (variant === 'runtime-reference') invalid.platformBindings.localPreparedHosting.deployment.workloads[0].runtimeSecrets = [{ key: 'TOKEN' }];
+      if (variant === 'native-id') invalid.platformBindings.localPreparedHosting.preparedResources.workloads[0].id += '-other';
+      if (variant === 'digest') invalid.platformBindings.preparedHosting.receiptDigest = 'f'.repeat(64);
+      if (variant === 'owner') invalid.platformBindings.localPreparedHosting.runtimeIdentities[0].owner = 'f'.repeat(64);
+      await expect(verifiedLocalHoldingReceipt(f.project, invalid)).rejects.toThrow();
+    }
+    expect(f.ctx.repos.environments.findById(f.environment.id)!.platformBindings).toEqual(retained.platformBindings);
+    expect(f.native.writes).toHaveLength(6);
+  });
+
+  it('cannot import a local holding receipt by creating a previously unrecorded environment', async () => {
+    const ctx = createCommandContext(), project = ctx.repos.projects.create({ name: 'operator', defaultPlatform: 'cloudrun', gitRemoteUrl: 'https://github.com/acme/operator' });
+    const repository = path.join(directory, 'unrecorded');
+    execFileSync('git', ['init', '-q', repository]);
+    execFileSync('git', ['-C', repository, 'remote', 'add', 'origin', project.gitRemoteUrl!]);
+    vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', 'false');
+    await runWithWorkspaceDirectories([repository], async () => {
+      new SpecStore().replace(project, { version: 1, project: project.name, environments: { staging: { hosting: { provider: 'cloudrun' }, email: { enabled: false } } } });
+      writeFileSync(path.join(repository, '.hypervibe', 'bindings.json'), JSON.stringify({ version: 1, project: project.name, environments: {
+        staging: { platformBindings: { localPreparedHosting: { purpose: 'local-holding' } } },
+      } }));
+      expect(() => ctx.resolveProjectOrThrow({ project: project.name })).toThrow(/local.*holding|holding.*local/i);
+      expect(ctx.repos.environments.findByProjectAndName(project.id, 'staging')).toBeNull();
+    });
   });
 
   it.each(['account', 'service', 'public'] as const)('reconciles a lost %s acknowledgment after SQLite restart without repeating the mutation', async lost => {
