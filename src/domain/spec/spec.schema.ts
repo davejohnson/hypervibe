@@ -1625,6 +1625,10 @@ export const environmentSpecSchema = z.object({
     provider: z.string().min(1),
     /** Optional desired placement. Omit to use the provider's sensible default. */
     region: z.string().trim().min(1).optional(),
+    /** Secret-free provider origin preparation; application release remains separate. */
+    preparation: z.object({ kind: z.literal('holding-v1'),
+      image: z.string().max(2048).regex(/^[^\s@]+@sha256:[a-f0-9]{64}$/),
+    }).strict().optional(),
     /** Isolated cloud allocation intent; native fields are validated by the selected provider. */
     scopePreparation: z.object({
       schemaVersion: z.literal(1),

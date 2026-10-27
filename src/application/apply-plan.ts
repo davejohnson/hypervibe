@@ -9,6 +9,7 @@ import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js
 import { applyApiPolicy, planApiPolicy } from '../domain/services/api-policy.js';
 import { applyDatabaseScopeBinding } from './apply-database-scope-binding.js';
 import { applyPreparedHosting } from './apply-prepared-hosting.js';
+import { applyLocalHolding } from '../domain/services/local-holding-preparation.service.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { isScopedSecretAction, scopedSecretObservation } from '../domain/plan/scoped-secrets.js';
@@ -834,12 +835,23 @@ export async function executePlanApply(ctx: CommandContext, params: {
     // A historical allocation may need recovery after the current provider
     // changes. This routing hint permits parsing only, never action authority.
     const saved = ctx.repos.runs.findById(planId);
-    if (saved?.type !== 'plan' || saved.projectId !== project.id || !['cloud-scope', 'operator-artifacts'].includes(String(asRecord(saved.plan)?.scope)))
+    if (saved?.type !== 'plan' || saved.projectId !== project.id || !['cloud-scope', 'operator-artifacts', 'hosting-preparation'].includes(String(asRecord(saved.plan)?.scope)))
       return invalidSpec;
   }
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(planId);
   if ('error' in loaded) return { kind: 'plan_not_found', error: loaded.error };
+  if (loaded.document.scope === 'hosting-preparation') {
+    const envName = loaded.document.environmentName;
+    const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap)
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'Holding preparation requires its exact saved scope and cannot release application code.' }] };
+    const unchangedPlan = () => isDeepStrictEqual(ctx.repos.runs.findById(planId)?.plan, loaded.run.plan);
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
+      handler: (action, execution) => applyLocalHolding({ project, environment, holdingPreparation: loaded.document.holdingPreparation, action,
+        authorize: () => ctx.repos.runs.findById(execution.applyRunId)?.status === 'running' && unchangedPlan() }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Only inert holding preparation or its exact binding was authorized. Application release remains separate.'] };
+  }
   if (loaded.document.scope === 'operator-artifacts') {
     const envName = loaded.document.environmentName;
     const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);

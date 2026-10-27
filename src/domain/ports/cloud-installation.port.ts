@@ -189,7 +189,7 @@ export interface CloudInstallationScopeDiscovery {
 }
 export interface CloudInstallationDriver<I extends CloudInstallationExecutableIntent = CloudInstallationIntent> {
   /** Local allocation or explicitly registered, predecessor-bound continuation. */
-  readonly localScopePreparation?: { hostingProvider: string; continuation?: true };
+  readonly localScopePreparation?: { hostingProvider: string; continuation?: true; preparation?: 'holding-v1' };
   readonly artifactPublication?: { providerName: string; authentication: OperatorArtifactIntent['execution']['authentication'] };
   readonly provider: CloudInstallationProvider;
   /** Explicit separate installation capability; collection support never implies deployment authority. */

@@ -11,6 +11,7 @@ import { HOSTING_PREPARED_OPERATION, isPreparedHostingAction } from '../services
 import { createHash } from 'crypto';
 import { z } from 'zod';
 import { isOperatorArtifactAction, OPERATOR_ARTIFACT_OPERATION, operatorArtifactPlanSchema } from '../ports/operator-artifact.port.js';
+import { isLocalHoldingAction, LOCAL_HOLDING_OPERATION, localHoldingPlanSchema } from '../ports/local-holding-preparation.port.js';
 import { isLocalCloudScopeAction, LOCAL_CLOUD_SCOPE_OPERATION, localCloudScopePlanSchema } from '../ports/local-cloud-scope.port.js';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import type { Run, RunReceipt } from '../entities/run.entity.js';
@@ -230,6 +231,7 @@ export const planRunDocumentSchema = z.object({
     'secret-destinations',
     'cloud-scope',
     'operator-artifacts',
+    'hosting-preparation',
     'credentials',
     'api-policy',
     'retained-cleanup',
@@ -252,6 +254,7 @@ export const planRunDocumentSchema = z.object({
   environmentName: z.string().min(1),
   cloudScope: localCloudScopePlanSchema.optional(),
   artifactPublication: operatorArtifactPlanSchema.optional(),
+  holdingPreparation: localHoldingPlanSchema.optional(),
   databaseCredentialAliasesReady: z.boolean().optional(),
   databaseCredentialAliasesVerification: databaseCredentialAliasesMetadataSchema.optional(),
   specRevision: z.number().int().nonnegative(),
@@ -276,6 +279,18 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'hosting-preparation') {
+    const proof = document.holdingPreparation;
+    if (!proof || !document.actions.length || document.actions.length > 100
+      || document.actions.some(action => !isLocalHoldingAction(action)
+        || !isDeepStrictEqual(Object.fromEntries(Object.keys(proof).map(key => [key, action.metadata?.[key]])), proof))
+      || document.cloudScope || document.artifactPublication || document.overrides || document.inputRequired?.length || document.sourceCommitSha
+      || document.integrationFingerprints || document.lockEnvironmentIds?.length || document.observedFingerprint !== null)
+      ctx.addIssue({ code: 'custom', message: 'Holding preparation requires exact isolated saved actions without application inputs.' });
+    return;
+  }
+  if (document.holdingPreparation || document.actions.some(action => action.metadata?.operation === LOCAL_HOLDING_OPERATION))
+    ctx.addIssue({ code: 'custom', message: 'Holding preparation requires its isolated plan stage.' });
   if (document.scope === 'operator-artifacts') {
     const proof = document.artifactPublication;
     if (!proof || document.actions.length > 300 || (proof.mode === 'verified') !== (document.actions.length === 0)

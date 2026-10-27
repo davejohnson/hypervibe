@@ -1,6 +1,7 @@
 import { planScheduleActivations } from '../domain/services/schedule-activation.service.js';
 import { inspectLocalCloudScope, localCloudScopeRequired } from '../domain/services/local-cloud-scope.service.js';
 import { operatorArtifactWorkRequired } from '../domain/services/operator-artifact.service.js';
+import { localHoldingWorkRequired } from '../domain/services/local-holding-preparation.service.js';
 import { classifyPlanBlocks } from '../domain/plan/plan-block.js';
 import { planApiPolicy } from '../domain/services/api-policy.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
@@ -800,12 +801,13 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const plannedEnvironment = currentSpec ? commandEnvironment(currentSpec, env) : env?.trim() || 'staging';
       const cloudScopeOnly = await localCloudScopeRequired(project, plannedEnvironment, currentSpec);
       const retainedArtifactOnly = await operatorArtifactWorkRequired(project, plannedEnvironment);
-      if (currentSpec && !cloudScopeOnly && !retainedArtifactOnly) validateInstalledProviders(currentSpec);
+      const holdingOnly = await localHoldingWorkRequired(project, plannedEnvironment, currentSpec);
+      if (currentSpec && !cloudScopeOnly && !retainedArtifactOnly && !holdingOnly) validateInstalledProviders(currentSpec);
       // Local dotenv preparation is part of the hv_plan contract. Establish
       // its git-safety and filesystem boundary before PlanService persists an
       // executable plan, so an unsafe tracked .env cannot leave an undisclosed
       // authorization record behind.
-      const preparedLocalEnv = currentSpec && !cloudScopeOnly && !retainedArtifactOnly && scope !== 'credentials' && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'secret-destinations'
+      const preparedLocalEnv = currentSpec && !cloudScopeOnly && !retainedArtifactOnly && !holdingOnly && scope !== 'credentials' && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'secret-destinations'
         ? ensureProjectLocalEnv({
           source: currentSpecResult?.source,
           projectName: project.name,
@@ -850,7 +852,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         : undefined;
       let localEnv: RepoEnvFileWrite | undefined;
       try {
-        localEnv = result.scope === 'cloud-scope' || result.scope === 'operator-artifacts' || scope === 'credentials' || scope === 'secrets' || scope === 'secret-destinations' ? undefined : mergeLocalEnvWrites(
+        localEnv = result.scope === 'cloud-scope' || result.scope === 'operator-artifacts' || result.scope === 'hosting-preparation' || scope === 'credentials' || scope === 'secrets' || scope === 'secret-destinations' ? undefined : mergeLocalEnvWrites(
           preparedLocalEnv,
           ensureProjectLocalEnv({
             source: currentSpecResult?.source,
@@ -1493,7 +1495,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       // The application revalidates this exact persisted plan before execution.
       // Historical scoped recovery must not depend on today's hosting selection.
       // The application validates the saved stage, identities and action proof.
-      if (!['cloud-scope', 'operator-artifacts'].includes(String(asRecord(ctx.repos.runs.findById(planId)?.plan)?.scope))) validateInstalledProviders(specResult.spec);
+      if (!['cloud-scope', 'operator-artifacts', 'hosting-preparation'].includes(String(asRecord(ctx.repos.runs.findById(planId)?.plan)?.scope))) validateInstalledProviders(specResult.spec);
 
       const outcome = await executePlanApply(ctx, {
         project,
@@ -1538,6 +1540,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const credentialPlan = appliedScope === 'credentials';
       const secretOnly = appliedScope === 'secrets' || credentialPlan;
       const cloudScopeOnly = appliedScope === 'cloud-scope';
+      const holdingOnly = appliedScope === 'hosting-preparation';
       const skipped = result.receipts.filter((r) => r.status === 'skipped_requires_confirm');
       const pending = result.receipts.filter((r) => r.status === 'pending');
       const blockedReceipts = result.receipts.filter((r) => r.status === 'blocked');
@@ -1577,12 +1580,14 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             : result.success
               ? cloudScopeOnly
                 ? 'The reviewed cloud preparation stage is verified. Further setup requires a separate current plan; hosting readiness is not verified.'
+                : holdingOnly
+                ? 'The reviewed holding stage is verified and remains inert. Run hv_plan for the next binding or separately reviewed application release.'
                 : secretOnly
                 ? 'The selected secrets are saved. They take effect after the managed CI deployment; select its workflow with hv_ci_status, then use hv_ci_trigger.'
                 : 'Apply complete. Check hv_status to verify convergence.'
               : 'Apply failed; compensations ran where registered. Inspect receipts and re-run hv_plan.',
           warnings: outcome.actionScopedWarnings,
-          next: [credentialPlan && !result.success ? 'hv_apply' : result.success && secretOnly ? 'hv_ci_status' : result.success || pending.length > 0 ? 'hv_status' : 'hv_plan'],
+          next: [credentialPlan && !result.success ? 'hv_apply' : result.success && holdingOnly ? 'hv_plan' : result.success && secretOnly ? 'hv_ci_status' : result.success || pending.length > 0 ? 'hv_status' : 'hv_plan'],
         }
       );
     })

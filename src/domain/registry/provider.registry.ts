@@ -362,6 +362,7 @@ export interface RegisteredProvider {
   transientAuthentication?: CloudDeploymentAdapterCapabilityV1;
   /** Explicit local scope allocation only; independent from hosting credentials or deployment. */
   localScopePreparation?: LocalCloudScopePreparationCapability;
+  holdingPreparation?: import('../ports/local-holding-preparation.port.js').LocalHoldingPreparationCapability;
   artifactPublication?: OperatorArtifactCapability;
   /** Optional hook to install CLI tools or other dependencies when a connection is created. */
   ensureDependencies?: () => Promise<{ installed: string[]; errors: string[] }>;
@@ -942,6 +943,9 @@ export class ProviderRegistry {
 
   getLocalScopePreparation(name: string): LocalCloudScopePreparationCapability | undefined {
     return this.providers.get(name)?.localScopePreparation;
+  }
+  getHoldingPreparation(name: string): import('../ports/local-holding-preparation.port.js').LocalHoldingPreparationCapability | undefined {
+    return this.providers.get(name)?.holdingPreparation;
   }
 }
 

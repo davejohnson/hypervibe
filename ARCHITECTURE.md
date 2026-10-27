@@ -72,6 +72,17 @@ configuration hashes and completed first releases change only through reviewed m
 actions backed by fresh native proof; stale repository replay cannot reinstate them.
 See [the prepared hosting contract](docs/connect-cloud-prepared-hosting.md).
 
+Local operator hosting may declare a provider-supported `hosting.preparation`
+prerequisite to obtain inert HTTPS endpoints before application credentials exist.
+The isolated `hosting-preparation` plan uses exact environment-scoped local
+authority, an already published immutable holding image and the existing durable
+installation journal. It creates no application configuration or secret access.
+Every native create/grant and the later nonsecret binding require their exact
+current actions. Its journal-proven local receipt is independent of hosted
+deployment authority; neither receipt permits first release without separate
+native verification. See [local holding preparation](docs/local-holding-preparation.md)
+for the named provider matrix and acceptance limits.
+
 Unreadable local state is not empty state. Non-empty corrupt or schema-invalid
 JSON in bindings, plans, receipts, service configuration, or policies blocks
 the operation; repositories must never replace it with `{}`/`[]` and continue

@@ -132,7 +132,6 @@ export async function planOperatorArtifacts(input: { project: Project; environme
       || !isDeepStrictEqual(record.intent.selection, selected.proof) || record.intent.artifactProvider !== selected.declaration.provider))
       return projected(record, name, 'recover', environment);
     if (!selected) continue;
-    if (input.options && ['serviceFilter', 'envVarOverrides', 'envFile', 'includeEnvFile', 'secretRefs'].some(key => Object.hasOwn(input.options!, key))) throw unavailable();
     let nextScope: { [key: string]: string } | undefined, predecessor: OperatorArtifactIntent['predecessor'];
     if (record?.status === 'scope-ready') {
       const changed = !isDeepStrictEqual(record.intent.selection, selected.proof) || !isDeepStrictEqual(record.intent.artifacts, selected.declaration.artifacts);
@@ -142,6 +141,7 @@ export async function planOperatorArtifacts(input: { project: Project; environme
       if (!next) continue;
       nextScope = next; predecessor = { installationId: record.installationId, planDigest: record.plan.digest }; record = undefined;
     } else if (!record) nextScope = selected.nativeScope;
+    if (input.options && ['serviceFilter', 'envVarOverrides', 'envFile', 'includeEnvFile', 'secretRefs'].some(key => Object.hasOwn(input.options!, key))) throw unavailable();
     if (!record) {
       record = history.find(candidate => !active(candidate) && isDeepStrictEqual(candidate.intent.source, selected!.source)
         && isDeepStrictEqual(candidate.intent.selection, selected!.proof) && isDeepStrictEqual(candidate.intent.predecessor, predecessor));

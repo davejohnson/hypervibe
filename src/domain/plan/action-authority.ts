@@ -17,6 +17,7 @@ import { API_POLICY_OPERATION } from '../services/api-policy.js';
 import { EMAIL_SIGNING_OPERATIONS } from '../services/email-signing.service.js';
 import type { PlanAction, PlanResourceKind } from './plan.types.js';
 import { isOperatorArtifactAction } from '../ports/operator-artifact.port.js';
+import { isLocalHoldingAction } from '../ports/local-holding-preparation.port.js';
 import { isLocalCloudScopeAction } from '../ports/local-cloud-scope.port.js';
 export { hasExactPlanActionConfirmationAuthority } from './action-confirmation.js';
 import { HOSTING_ENVIRONMENT_ENSURE_OPERATION } from './plan.service.js';
@@ -104,6 +105,7 @@ import {
 export type PlanMutationCapability =
   | 'cloud.scope.prepare'
   | 'operator.artifact.publish'
+  | 'hosting.holding.prepare'
   | 'credential.lifecycle.update'
   | 'database.credential-aliases.repair'
   | 'database.scope.bind'
@@ -500,6 +502,7 @@ export function resolvePlanActionAuthority(
   if (!action.id.trim() || !action.resource.name.trim() || !action.resource.provider.trim()) {
     return null;
   }
+  if (isLocalHoldingAction(action)) return authority(action, 'hosting.holding.prepare');
   if (isOperatorArtifactAction(action)) return authority(action, 'operator.artifact.publish');
   if (isLocalCloudScopeAction(action)) return authority(action, 'cloud.scope.prepare');
 

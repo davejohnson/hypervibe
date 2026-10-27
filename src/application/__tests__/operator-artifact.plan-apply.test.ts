@@ -149,6 +149,19 @@ describe('operator artifact publication through application and SQLite', () => {
     expect(f.ordinary).not.toHaveBeenCalled();
   });
 
+  it('passes completed unchanged publication to the ordinary planner with deployment inputs', async () => {
+    const f = fixture(); const planned = await f.plan(); if ('error' in planned) throw new Error(planned.error);
+    expect(await f.apply(planned.planRunId, planned.actions.map(action => action.id))).toMatchObject({ kind: 'executed', result: { success: true } });
+    f.ordinary.mockResolvedValue({ success: false, error: 'Synthetic ordinary native inspection unavailable' });
+    const next = await new PlanService().plan(f.project, 'staging', { envVarOverrides: { SYNTHETIC_SETTING: 'test' }, secretRefs: {} });
+    expect('error' in next ? next.error : next.scope).not.toMatch(/Operator artifacts|operator-artifacts/);
+    expect(f.ordinary).toHaveBeenCalled(); expect(f.native.writes).toEqual(['stack', 'object', 'object', 'policy']);
+    f.ordinary.mockClear(); const changed = structuredClone(f.desired);
+    changed.environments.staging.operatorArtifacts.templates.nativeScope.region = 'us-east-1'; f.store.replace(f.project, changed);
+    expect(await new PlanService().plan(f.project, 'staging', { envVarOverrides: { SYNTHETIC_SETTING: 'test' }, secretRefs: {} })).toHaveProperty('error');
+    expect(f.ordinary).not.toHaveBeenCalled(); expect(f.native.writes).toEqual(['stack', 'object', 'object', 'policy']);
+  });
+
   it.each(['stack', 'object', 'policy'] as const)('recovers lost %s acknowledgments with no repeated native mutation', async lost => {
     const f = fixture({ lost }); const planned = await f.plan(); if ('error' in planned) throw new Error(planned.error);
     let current = planned;

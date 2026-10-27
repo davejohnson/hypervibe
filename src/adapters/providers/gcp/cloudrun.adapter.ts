@@ -11,6 +11,7 @@ import { GcpDeploymentAuthentication, gcpDeploymentScopeSchema } from './gcp-dep
 import { GcpLocalDefaultAuthentication } from './gcp-local-default-authentication.js';
 import { GcpGithubWorkloadAuthentication, gcpGithubWorkloadIdentitySchema, gcpGithubCiBoundAuthentication } from './gcp-github-workload-identity.js';
 import { createGcpLocalProjectAllocationCapability } from './gcp-local-project-allocation.js';
+import { createGcpLocalHoldingCapability } from './gcp-local-holding-preparation.js';
 import { getGcpNativeAdminToken } from './gcp-runtime-client.js';
 import { validateRuntimeSecretReferences, runtimeSecretReferenceIdentity } from '../../../domain/services/runtime-secret-references.js';
 import type { RuntimeSecretReference } from '../../../domain/ports/secret-destination.port.js';
@@ -7001,6 +7002,7 @@ export class CloudRunAdapter implements
 providerRegistry.register({
   artifactPublication: createGcpOperatorArtifactCapability(),
   localScopePreparation: createGcpLocalProjectAllocationCapability(),
+  holdingPreparation: createGcpLocalHoldingCapability(),
   transientAuthentication: {
     provider: 'gcp', hostingProvider: 'cloudrun', parseScope: value => gcpDeploymentScopeSchema.parse(value), parsePreparedResources: parseGcpPreparedResources,
     createAdapter: async input => { const adapter = new CloudRunAdapter(); await adapter.connectDeployment(input); return adapter; },

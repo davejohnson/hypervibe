@@ -121,6 +121,7 @@ export function parseCloudInstallationIntentV1<I extends CloudInstallationExecut
         || Boolean(parsed.predecessor) !== Boolean(driver.localScopePreparation?.continuation)
         || Boolean(parsed.selection) !== Boolean(parsed.predecessor)
         || parsed.predecessor?.installationId === parsed.installationId) throw new Error();
+      if (driver.localScopePreparation?.preparation && (driver.localScopePreparation.continuation || parsed.predecessor || parsed.selection)) throw new Error();
       parsed.nativeScope = strings.parse(driver.parseScope(parsed.nativeScope));
       return parsed;
     }
@@ -149,10 +150,10 @@ function parseActions<I extends CloudInstallationExecutableIntent = CloudInstall
   return contract(() => {
     const actions = z.array(actionSchema).min(1).max(300).parse(value).map(raw => actionSchema.parse(driver.parseAction(raw, intent)));
     if (localIntent(intent)) {
-      if (!driver.localScopePreparation?.continuation && (actions.length !== 1 || actions[0].resource.kind !== 'project'
+      if (!driver.localScopePreparation?.continuation && !driver.localScopePreparation?.preparation && (actions.length !== 1 || actions[0].resource.kind !== 'project'
         || actions[0].metadata.category !== 'scope' || actions[0].metadata.execution !== 'api'
         || !['create', 'noop'].includes(actions[0].type) || actions[0].dependsOn?.length)) throw new Error();
-      if (driver.localScopePreparation?.continuation && actions.some(action => action.metadata.execution !== 'api'
+      if ((driver.localScopePreparation?.continuation || driver.localScopePreparation?.preparation) && actions.some(action => action.metadata.execution !== 'api'
         || !['scope', 'identity', 'trust', 'verification'].includes(action.metadata.category)
         || !['create', 'update', 'noop'].includes(action.type))) throw new Error();
     }
@@ -380,7 +381,8 @@ async function execute<I extends CloudInstallationExecutableIntent = CloudInstal
   let record = await read(input, input.installationId);
   if (!record) throw new CloudInstallationError('not_found');
   if (record.plan.digest !== input.planDigest) throw new CloudInstallationError('plan_mismatch');
-  if (input.onlyActionId && (!(localIntent(record.intent) && input.driver.localScopePreparation?.continuation || artifactIntent(record.intent) && input.driver.artifactPublication)
+  if (input.onlyActionId && (!(localIntent(record.intent) && (input.driver.localScopePreparation?.continuation || input.driver.localScopePreparation?.preparation)
+    || artifactIntent(record.intent) && input.driver.artifactPublication)
     || !record.plan.actions.some(action => action.id === input.onlyActionId))) throw new CloudInstallationError('invalid_contract');
   if (record.status === 'disconnected') {
     // A terminal removal receipt is historical evidence. Requiring the removed
@@ -511,8 +513,9 @@ export async function reviewCloudInstallationRetryV1(input: CloudInstallationCon
   installationId: string; planDigest: string;
 }): Promise<{ retryActions: Array<{ actionId: string; attemptId: string }>; review: CloudInstallationRecord['plan']['review'] }> {
   const record = await read(input, input.installationId);
-  if (!record || record.plan.digest !== input.planDigest || !record.intent.predecessor
-    || !input.driver.localScopePreparation?.continuation || record.plan.blockedReason) throw new CloudInstallationError('scope_mismatch');
+  if (!record || record.plan.digest !== input.planDigest || record.plan.blockedReason
+    || !(record.intent.predecessor && input.driver.localScopePreparation?.continuation || input.driver.localScopePreparation?.preparation === 'holding-v1'))
+    throw new CloudInstallationError('scope_mismatch');
   const pending = record.plan.actions.filter(action => !record.completed[action.id]).map(action =>
     record.attempts.filter(attempt => attempt.actionId === action.id).at(-1)).filter(attempt => !!attempt);
   if (!pending.length || pending.some(attempt => attempt.status !== 'rejected')) throw new CloudInstallationError('retry_confirmation_required');

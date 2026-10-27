@@ -65,7 +65,7 @@ export class CloudScopePreparationRepository<T extends JournalRecord> {
   constructor(scope: Scope, private readonly parseRecord: (value: unknown) => T,
     private readonly policy?: { allowHistoricalPredecessor?(parent: T, next: T): boolean; recordType?: string }) {
     this.scope = { ...scope }; this.type = policy?.recordType ?? TYPE;
-    if (this.type !== TYPE && !/^operator-artifacts:[a-z][a-z0-9-]{0,62}$/.test(this.type)) throw invalid();
+    if (this.type !== TYPE && this.type !== 'hosting-preparation' && !/^operator-artifacts:[a-z][a-z0-9-]{0,62}$/.test(this.type)) throw invalid();
   }
 
   private assertScope(): void {

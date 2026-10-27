@@ -1,0 +1,70 @@
+# Local holding preparation
+
+Design recorded before implementation. An operator needs the provider-assigned
+HTTPS origin before registering browser redirects. Missing application OAuth
+credentials must not require running application code or copying administrator
+credentials into a workload to obtain that origin.
+
+`hosting.preparation: {kind: "holding-v1", image: "…@sha256:…"}` selects an
+isolated spec/plan/apply prerequisite after the exact local project and registry
+are bound. The declaration selects immutable, already published holding bytes;
+it does not build or publish them. Every native identity, service create and
+public invoker grant has its own confirmed action and retained attempt. The
+existing local administrator actor stays separate from all hosted actors.
+Nonsecret evidence uses the existing SQLite run journal in a distinct namespace.
+
+| Hosting provider | Local holding prerequisite | Existing hosted preparation |
+| --- | --- | --- |
+| Cloud Run | Scoped Google user ADC; parentless, journal-owned project | Separate administrator-installed receipt |
+| ECS | Explicitly unsupported | Separate CloudFormation installation |
+| Azure Container Apps | Explicitly unsupported | Separate ARM installation |
+| Railway | Explicitly unsupported | No shared prepared receipt |
+| Fly.io | Explicitly unsupported | No shared prepared receipt |
+| DigitalOcean App Platform | Explicitly unsupported | No shared prepared receipt |
+| Vercel | Explicitly unsupported | No shared prepared receipt |
+
+The local receipt never becomes a hosted deployment connection. Shared prepared
+resource inspection and first-release transitions accept independently validated
+local journal authority or the existing hosted authority. Holding readiness is
+reported as prepared/inert, never application health. All declared web/worker
+resources are prepared together because the shared binding contract requires
+complete topology; cron remains unsupported. Inert containers have zero minimum
+instances, maximum one, request CPU and no environment, secrets, mounted data,
+network connectors or application commands. A distinct final runtime identity
+starts without grants. Normal worker CPU/floor requirements apply on release.
+The retained billing account is shown in the cost review and compared with fresh
+native billing information before every preparation phase; enabled billing alone
+does not authorize a different payer. Google does not provide a cross-service
+transaction locking the billing association and service creation together.
+
+Application image, configuration, final identity and runtime IAM are a later
+review. Direct release requires exact native current revision, image and final
+identity proof and transactional retirement of pending first-release metadata;
+it must not invent managed-CI provenance. Source changes or uncertain native
+outcomes preserve read-only recovery and cannot authorize unstarted writes.
+
+Independent contracts: [Cloud Run v2 create](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services/create)
+is a create operation returning an asynchronous operation, and [service identity](https://docs.cloud.google.com/run/docs/securing/service-identity)
+is separate from the caller. Existing serialized provider contract fixtures are
+reconstructed evidence, not live compatibility. New acceptance must exercise
+the real spec/plan/apply and SQLite boundaries, native serialized transport,
+missing secrets, exact confirmation, lost acknowledgments, restarts, replacement
+UIDs, unknown observation, source revocation, zero-write noop and first release.
+
+The normal application regression first failed at spec admission before this
+capability existed. It also exposed a rejected-attempt retry dead end, a parser
+that rejected native initial generation `1`, unexpected project IAM membership
+for a final identity, and generic apply guidance that implied application
+convergence. Additional counterexamples exposed completed holding/publication
+stages incorrectly rejecting later deployment inputs and enabled billing on an
+unreviewed account. Completed unchanged stages now reach ordinary native
+inspection; an unavailable inspector still blocks, and changed or pending
+preparation does not gain deployment authority. The resulting checks exercise actual command handling, saved-plan
+confirmation, SQLite restart and native client serialization. Holding/final
+identity membership is checked during preparation; later independently reviewed
+final runtime grants do not invalidate the local receipt. Native replacement,
+unknown reads, a foreign identity and lost authority fail closed. Lost account,
+service and public-grant acknowledgments recover through reads without replay.
+The synthetic responses establish those boundaries, not live Cloud Run support
+or the cause of any customer incident. Direct first-release acceptance is recorded
+separately by the shared prepared-hosting contract.

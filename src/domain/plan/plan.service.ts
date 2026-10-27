@@ -7,6 +7,7 @@ import { planDatabaseCredentialAliases } from '../services/database-credential-a
 import { planSecretContainers } from '../services/secret-container-setup.js';
 import { operatorArtifactWorkRequired, planOperatorArtifacts } from '../services/operator-artifact.service.js';
 import { localCloudScopeRequired, planLocalCloudScope } from '../services/local-cloud-scope.service.js';
+import { localHoldingWorkRequired, planLocalHolding } from '../services/local-holding-preparation.service.js';
 import type { CloudInstallationReview } from '../ports/cloud-installation.port.js';
 import { planScheduleActivations, SCHEDULE_ACTIVATION_OPERATION } from '../services/schedule-activation.service.js';
 import { scopedSecretObservation } from './scoped-secrets.js';
@@ -178,7 +179,7 @@ export interface EnvironmentPlan {
   webhookReadiness?: WebhookReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
-  scope: 'full' | 'credentials' | 'secrets' | 'database-credential-aliases' | 'secret-destinations' | 'cloud-scope' | 'operator-artifacts' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'hosting-prepared-bindings' | 'service-volumes' | 'runtime-access' | 'backup-runtime' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
+  scope: 'full' | 'credentials' | 'secrets' | 'database-credential-aliases' | 'secret-destinations' | 'cloud-scope' | 'operator-artifacts' | 'hosting-preparation' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'hosting-prepared-bindings' | 'service-volumes' | 'runtime-access' | 'backup-runtime' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
   backupReadiness?: BackupReadiness;
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
@@ -1770,6 +1771,21 @@ export class PlanService {
         }
       } catch { return { error: 'Operator artifacts could not be verified. Preserve saved native operations and receipts; no repeated publication or replacement target is authorized.' }; }
     }
+    try {
+      if (scope !== 'full' && await localHoldingWorkRequired(project, environmentName, specResult.spec))
+        return { error: 'Run hv_plan with scope=full to review or recover the isolated holding prerequisite; no narrower scope bypasses it.' };
+      const holding = scope === 'full' ? await planLocalHolding({ project, environmentName, specResult, options }) : undefined;
+      if (holding) {
+        const document: PlanRunDocument = { kind: 'hv_plan', scope: 'hosting-preparation', environmentName, specRevision: specResult.revision,
+          observedFingerprint: null, actions: holding.actions, holdingPreparation: holding.holdingPreparation, warnings: holding.warnings };
+        planRunDocumentSchema.parse(document);
+        const run = this.runRepo.create({ projectId: project.id, environmentId: holding.environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
+        this.runRepo.updateStatus(run.id, 'succeeded');
+        return { planRunId: run.id, scope: 'hosting-preparation', specRevision: specResult.revision, specSource: specResult.source ?? { kind: 'local' },
+          environmentName, verified: true, observed: null, actions: holding.actions, cloudScopeReview: holding.review,
+          unmanaged: [], warnings: holding.warnings, inputRequired: [], blocked: [] };
+      }
+    } catch { return { error: 'Holding preparation requires its exact reviewed local project scope, published holding image and retained native identity; no application deployment is authorized.' }; }
     const providerValidation = firstProviderSpecValidationFailure(specResult.spec);
     if (providerValidation) {
       return { error: providerValidation.message };
