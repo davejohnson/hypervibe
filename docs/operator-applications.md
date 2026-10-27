@@ -211,3 +211,49 @@ Actual
 SQLite tests verify encryption, concurrent consumption, source separation,
 delivery acknowledgement retention and final credential erasure. Cloud APIs
 are not called by these checks; they are in ordinary `npm test` acceptance.
+
+## Operator private output delivery
+
+Each credential-producing operator capability declares its exact private roles.
+Desired `outputs` maps those roles to declared environment secret keys. The full
+planner prepares only those empty containers before registration; an unsupported
+role, undeclared target or active uncertain registration blocks that prerequisite.
+The accepted intent retains the hosting provider, container owner, attempt and
+native creation time. A shared driver adds a separately confirmed, billable
+delivery action after the provider's credential capture action. No values enter
+the declaration, plan, installation journal or receipt.
+
+Cloud Run currently supplies the local operator output capability using selected
+user ADC and GCP Secret Manager. It reuses native project/destination validation,
+checks the prepared container lifetime before each write, and returns an enabled
+immutable version reference. No payload read is used for verification. AWS and
+Azure collaborative customer delivery remain their separate existing mechanisms;
+this operator bootstrap does not assume Hypercloud runs inside customer clouds.
+
+| Hosting registry entry | Local operator output capability |
+| --- | --- |
+| Cloud Run | GCP Secret Manager; prepared owned container and transient local operator authority. |
+| ECS | Not implemented for local operator bootstrap; AWS delivery uses its distinct stable ClientRequestToken contract. |
+| Azure Container Apps | Not implemented for local operator bootstrap; Key Vault SET creates a value and requires its own vault/name contract. |
+| Railway, Fly, Vercel, DigitalOcean | Not implemented; no reviewed immutable native secret-manager output lifecycle in this operator path. |
+
+The provider differences and official native sources are recorded in
+[secret destination delivery](secret-destination-delivery.md). Normal CI checks
+the complete seven-provider registry against the explicit capability selection.
+GCP addVersion has neither a request token nor an empty-container compare-and-set.
+Observed existing versions block first delivery, but simultaneous authorized
+writers cannot be atomically excluded. A lost acknowledgement remains uncertain
+without another POST. A definite rejection requires a new exact reviewed attempt;
+the journal retains the previous rejection. Private custody remains encrypted
+until every native version receipt verifies, then local erasure can finish after
+a crash without another provider write. The local source revision field carries
+the accepted spec digest, not an asserted Git commit identity.
+
+Observed RED/GREEN cases: the ordinary planner initially blocked registration
+before preparing its selected output container; the shared actor initially
+rejected its exact secret-output action; unsupported roles initially requested
+container preparation; and a lost local erasure acknowledgement retained private
+values indefinitely. The corrected checks exercise actual SQLite, the real
+cloud-installation parser/apply loop, and serialized GCP REST delivery/recovery.
+Native response fixtures are documentation-based reconstructions. Current native
+registration, browser exchange and live output delivery remain separate gates.

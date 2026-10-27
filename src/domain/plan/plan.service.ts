@@ -1,4 +1,4 @@
-import { operatorApplicationWorkRequired, planOperatorApplications, operatorApplicationUnavailable } from '../services/operator-application.service.js';
+import { operatorApplicationWorkRequired, planOperatorApplications, operatorApplicationUnavailable, operatorOutputPrerequisiteKeys } from '../services/operator-application.service.js';
 import { observeRecoveryRuntime, planRecoveryRuntime } from '../services/recovery-runtime.service.js';
 import { observeRuntimeAccess, planRuntimeAccess, projectRuntimeAccessInput } from '../services/runtime-access.service.js';
 import { credentialSourceInputKeys } from '../services/accepted-credential-inputs.js';
@@ -1700,7 +1700,7 @@ export class PlanService {
       observed, actions, unmanaged: [], warnings, inputRequired: [], blocked: [] };
   }
 
-  private async planSecretDestinations(project: Project, environmentName: string, specResult: SpecResult, options: PlanOptions): Promise<EnvironmentPlan | { error: string }> {
+  private async planSecretDestinations(project: Project, environmentName: string, specResult: SpecResult, options: PlanOptions, onlyKeys?: string[]): Promise<EnvironmentPlan | { error: string }> {
     if (['serviceFilter', 'envVarOverrides', 'envFile', 'includeEnvFile', 'secretRefs'].some(key => Object.hasOwn(options, key)))
       return { error: 'scope="secret-destinations" accepts no deploy or credential-value inputs.' };
     const desired = specResult.spec.environments[environmentName];
@@ -1711,7 +1711,7 @@ export class PlanService {
     const blocked = missing ? this.providerPreflight([desired.hosting.provider], project, environmentName) : [];
     if (blocked.length) return { error: blocked.map(block => block.reason).join(' ') };
     try {
-      const actions = await planSecretContainers({ project, spec: specResult.spec, environment });
+      const actions = await planSecretContainers({ project, spec: specResult.spec, environment, ...(onlyKeys ? { onlyKeys } : {}) });
       const warnings = ['This isolated plan prepares empty secret containers only. Writer authorization, credential delivery and application deployment require separate reviewed steps.'];
       const document: PlanRunDocument = { kind: 'hv_plan', scope: 'secret-destinations', environmentName,
         specRevision: specResult.revision, observedFingerprint: null, actions, warnings };
@@ -1789,6 +1789,8 @@ export class PlanService {
       }
     } catch { return { error: 'Holding preparation requires its exact reviewed local project scope, published holding image and retained native identity; no application deployment is authorized.' }; }
     try {
+      const outputPrerequisites = scope === 'full' ? await operatorOutputPrerequisiteKeys(project, environmentName, specResult.spec) : [];
+      if (outputPrerequisites.length) return this.planSecretDestinations(projectWithSpecGitRemoteUrl(project, specResult.spec), environmentName, specResult, options ?? {}, outputPrerequisites);
       if (scope !== 'full' && await operatorApplicationWorkRequired(project, environmentName, specResult.spec))
         return { error: 'Run hv_plan with scope=full to recover operator application registration before narrower work.' };
       const registration = scope === 'full' ? await planOperatorApplications({ project, environmentName, specResult, options }) : undefined;

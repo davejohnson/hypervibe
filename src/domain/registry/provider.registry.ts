@@ -365,6 +365,7 @@ export interface RegisteredProvider {
   holdingPreparation?: import('../ports/local-holding-preparation.port.js').LocalHoldingPreparationCapability;
   artifactPublication?: OperatorArtifactCapability;
   operatorApplication?: import('../ports/operator-application.port.js').OperatorApplicationCapability;
+  operatorOutputDelivery?: import('../ports/operator-output.port.js').OperatorOutputDeliveryCapability;
   /** Optional hook to install CLI tools or other dependencies when a connection is created. */
   ensureDependencies?: () => Promise<{ installed: string[]; errors: string[] }>;
   /** Optional provider-owned raw forensic reads used by hv_inspect. */
@@ -943,6 +944,9 @@ export class ProviderRegistry {
   }
   getOperatorApplication(name: string): import('../ports/operator-application.port.js').OperatorApplicationCapability | undefined {
     return this.providers.get(name)?.operatorApplication;
+  }
+  getOperatorOutputDelivery(name: string): import('../ports/operator-output.port.js').OperatorOutputDeliveryCapability | undefined {
+    return this.providers.get(name)?.operatorOutputDelivery;
   }
 
   getLocalScopePreparation(name: string): LocalCloudScopePreparationCapability | undefined {

@@ -17,6 +17,9 @@ import { providerRegistry } from '../registry/provider.registry.js';
 import { SpecStore, type SpecResult } from '../spec/spec.store.js';
 import { applyCloudInstallationV1, planCloudInstallationV1, reconcileCloudInstallationV1, reviewCloudInstallationRetryV1 } from './cloud-installation-runtime.js';
 import { verifiedLocalHoldingReceipt } from './local-holding-preparation.service.js';
+import { assertReadySecretContainers } from './secret-container-setup.js';
+import { operatorOutputSelectionSchema } from '../ports/operator-output.port.js';
+import { secretContainerBindings } from '../ports/secret-destination-lifecycle.port.js';
 type Registration = CloudInstallationRecord<OperatorApplicationIntent>;
 const route = z.object({ intent: z.object({ applicationProvider: z.string() }).passthrough() }).passthrough();
 export const operatorApplicationUnavailable = () => new Error('Operator application registration requires its verified native origin, exact owner/source and retained operation. Preserve uncertain attempts; no replacement registration or credential replay is authorized.');
@@ -40,9 +43,18 @@ async function selection(project: Project, environment: Environment, name: strin
   const capability = providerRegistry.getOperatorApplication(declaration.provider);
   if (!receipt || !originCapability?.verifyOperatorOrigin || !capability) throw operatorApplicationUnavailable();
   const verified = await originCapability.verifyOperatorOrigin(receipt, { service: declaration.originService, runtimeService: declaration.runtimeService });
+  const roles = capability.privateOutputRoles ?? [], selectedRoles = Object.keys(declaration.outputs ?? {});
+  if (!isDeepStrictEqual([...roles].sort(), selectedRoles.sort())) throw operatorApplicationUnavailable();
+  let outputs: OperatorApplicationIntent['outputs'];
+  if (declaration.outputs) {
+    const bindings = await assertReadySecretContainers({ project, environment, spec: result.spec, keys: Object.values(declaration.outputs) });
+    outputs = operatorOutputSelectionSchema.parse({ hostingProvider: result.spec.environments[environment.name].hosting.provider,
+      destinations: Object.entries(declaration.outputs).sort(([a], [b]) => a.localeCompare(b)).map(([role, key]) => ({ role, key, binding: bindings[key] })) });
+    if (!providerRegistry.getOperatorOutputDelivery(outputs.hostingProvider)) throw operatorApplicationUnavailable();
+  }
   const nativeScope = capability.parseDeclaration({ name, declaration, ...verified });
-  return { declaration, capability, nativeScope, source: source(project, result), proof: {
-    declarationDigest: canonicalJsonSha256(declaration), originDigest: canonicalJsonSha256({ receipt, selection: verified }), nativeScopeDigest: canonicalJsonSha256(nativeScope),
+  return { declaration, capability, nativeScope, outputs, source: source(project, result), proof: {
+    declarationDigest: canonicalJsonSha256(declaration), originDigest: canonicalJsonSha256({ receipt, selection: verified, ...(outputs ? { outputs } : {}) }), nativeScopeDigest: canonicalJsonSha256(nativeScope),
   } };
 }
 async function current(project: Project, environment: Environment, name: string, intent: OperatorApplicationIntent): Promise<boolean> {
@@ -134,6 +146,7 @@ export async function planOperatorApplications(input: { project: Project; enviro
           environment: input.environmentName, source: selected.source, provider: selected.declaration.provider, applicationProvider: selected.declaration.provider,
           mode: 'connect', stage: 'scope-preparation', keys: [], execution: { kind: 'operator-application', authentication: 'local-operator' },
           selection: selected.proof, nativeScope: selected.nativeScope };
+        if (selected.outputs) intent.outputs = selected.outputs;
         record = await planCloudInstallationV1({ ...await context(input.project, environment, name, intent, false), intent });
       }
     }
@@ -144,6 +157,26 @@ export async function planOperatorApplications(input: { project: Project; enviro
     return projected(record, name, retry ? 'prepare' : pending.length ? 'recover' : 'prepare', environment, retry?.retryActions);
   }
   return undefined;
+}
+
+/** Prepare declared output containers before credentials can be issued. Never bypass an active registration attempt. */
+export async function operatorOutputPrerequisiteKeys(project: Project, environmentName: string, spec: ProjectSpec): Promise<string[]> {
+  const declarations = spec.environments[environmentName]?.operatorApplications ?? {}, keys = [...new Set(Object.values(declarations).flatMap(item => Object.values(item.outputs ?? {})))];
+  if (!keys.length) return [];
+  const desired = spec.environments[environmentName], outputCapability = providerRegistry.getOperatorOutputDelivery(desired.hosting.provider);
+  for (const declaration of Object.values(declarations)) {
+    const capability = providerRegistry.getOperatorApplication(declaration.provider);
+    if (!capability || !isDeepStrictEqual([...(capability.privateOutputRoles ?? [])].sort(), Object.keys(declaration.outputs ?? {}).sort())) throw operatorApplicationUnavailable();
+  }
+  if (!outputCapability || keys.some(key => !desired.secretDestinations?.[key]
+    || !outputCapability.providers.includes(desired.secretDestinations[key].destination.provider))) throw operatorApplicationUnavailable();
+  const environment = new EnvironmentRepository().findByProjectAndName(project.id, environmentName); if (!environment) return keys;
+  for (const name of new Set([...names(project, environment), ...Object.keys(declarations)])) {
+    const record = acceptedJournalLeaf(await journal(project, environment, name).findByScope());
+    if (record && active(record) && record.status !== 'scope-ready') return [];
+  }
+  const retained = secretContainerBindings(environment.platformBindings.secretDestinationContainers);
+  return keys.some(key => retained[key]?.state !== 'ready') ? keys : [];
 }
 export async function applyOperatorApplications(input: { project: Project; environment: Environment; applicationRegistration: unknown; action: PlanAction; authorize(): boolean }): Promise<ActionResult> {
   try {

@@ -96,7 +96,8 @@ export class OperatorCredentialCustody {
   updateDelivery(previous: PrivateOperatorSnapshot, key: string, value: NonNullable<OperatorCustodyState['deliveries']>[string]): PrivateOperatorSnapshot | null {
     if (previous.state.phase !== 'credentials-stored') return null;
     const retained = previous.state.deliveries?.[key];
-    if (retained && (retained.attemptId !== value.attemptId || retained.status === 'delivered' && !isDeepStrictEqual(retained, value))) return null;
+    if (retained && (retained.attemptId !== value.attemptId && !(retained.status === 'rejected' && value.status === 'attempted')
+      || retained.status === 'delivered' && !isDeepStrictEqual(retained, value))) return null;
     return this.save(previous, { ...previous.state, deliveries: { ...previous.state.deliveries, [key]: value } });
   }
   eraseDeliveredCredentials(previous: PrivateOperatorSnapshot, keys: string[]): PrivateOperatorSnapshot | null {

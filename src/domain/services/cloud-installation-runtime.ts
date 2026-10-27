@@ -5,6 +5,7 @@ import { orderActions } from '../plan/order-actions.js';
 import { hasExactPlanActionConfirmationAuthority } from '../plan/action-confirmation.js';
 import { secretDestinationSchema, secretDestinationIdentity } from '../ports/secret-destination.port.js';
 import { cloudDeploymentTopologySchema, parseCloudDeploymentConnectionV1 } from './cloud-deployment-authentication.js';
+import { operatorOutputSelectionSchema } from '../ports/operator-output.port.js';
 import {
   CLOUD_INSTALLATION_PROVIDERS, OPERATOR_APPLICATION_PROVIDERS, CLOUD_INSTALLATION_SECRET_PROVIDERS, CLOUD_INSTALLATION_REASONS, CloudInstallationBoundaryError, type CloudInstallationAction, type CloudInstallationApplyInput,
   type CloudInstallationContext, type CloudInstallationDriver, type CloudInstallationEvidence,
@@ -53,6 +54,7 @@ const artifactIntentSchema = localIntentSchema.omit({ execution: true, hostingPr
 const applicationIntentSchema = localIntentSchema.omit({ execution: true, hostingProvider: true, provider: true }).extend({
   execution: z.object({ kind: z.literal('operator-application'), authentication: z.literal('local-operator') }).strict(),
   provider: z.enum(OPERATOR_APPLICATION_PROVIDERS), applicationProvider: z.enum(OPERATOR_APPLICATION_PROVIDERS),
+  outputs: operatorOutputSelectionSchema.optional(),
 }).strict();
 
 function localIntent(intent: CloudInstallationExecutableIntent): intent is LocalCloudScopePreparationIntent {
@@ -174,13 +176,13 @@ function parseActions<I extends CloudInstallationExecutableIntent = CloudInstall
       || !['scope', 'identity', 'trust', 'verification'].includes(action.metadata.category)
       || !['create', 'update', 'noop'].includes(action.type))) throw new Error();
     if (applicationIntent(intent) && actions.some(action => !['create', 'update', 'noop'].includes(action.type)
-      || !['identity', 'trust', 'verification'].includes(action.metadata.category))) throw new Error();
+      || !['identity', 'trust', 'verification', 'secret-container'].includes(action.metadata.category))) throw new Error();
     for (const action of actions) {
       if (action.resource.provider !== intent.provider || (!action.verified && !blockedReason) || (action.type !== 'noop' && action.requiresConfirm !== true)) throw new Error();
       if (intent.mode === 'disconnect' && action.type !== 'noop' && (action.metadata.category !== 'trust' || !['update', 'destroy'].includes(action.type))) throw new Error();
       if (intent.mode !== 'disconnect' && ['destroy', 'replace'].includes(action.type)) throw new Error();
       if (['migrate', 'connect-existing'].includes(intent.mode) && action.metadata.category === 'secret-container' && action.type !== 'noop') throw new Error();
-      if (intent.stage === 'scope-preparation' && action.metadata.category === 'secret-container') throw new Error();
+      if (intent.stage === 'scope-preparation' && !applicationIntent(intent) && action.metadata.category === 'secret-container') throw new Error();
       if (intent.purpose === 'deployment' && action.metadata.category === 'secret-container') throw new Error();
     }
     orderActions(actions);

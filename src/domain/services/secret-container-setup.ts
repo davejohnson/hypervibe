@@ -81,10 +81,12 @@ export async function assertReadySecretContainers(input: { project: Project; spe
   assertCurrent();
   return selected;
 }
-export async function planSecretContainers(input: { project: Project; spec: ProjectSpec; environment: Environment }): Promise<PlanAction[]> {
+export async function planSecretContainers(input: { project: Project; spec: ProjectSpec; environment: Environment; onlyKeys?: string[] }): Promise<PlanAction[]> {
   const { project, spec, environment } = input;
   const desired = spec.environments[environment.name];
-  const entries = Object.entries(desired.secretDestinations ?? {}).filter(([, value]) => value.version === undefined);
+  if (input.onlyKeys && input.onlyKeys.some(key => !desired.secretDestinations?.[key] || !spec.secrets[key]?.environments.includes(environment.name)))
+    throw new Error('Declare the exact operator output destinations and environment secret keys before registration.');
+  const entries = Object.entries(desired.secretDestinations ?? {}).filter(([key, value]) => value.version === undefined && (!input.onlyKeys || input.onlyKeys.includes(key)));
   if (!entries.length) return [];
   if (entries.length > 100) throw new Error('Prepare at most 100 secret destinations per environment.');
   const bindings = secretContainerBindings(environment.platformBindings.secretDestinationContainers);

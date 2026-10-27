@@ -2,12 +2,14 @@ import { z } from 'zod';
 import type { PlanAction } from '../plan/plan.types.js';
 import { OPERATOR_APPLICATION_PROVIDERS, type CloudInstallationDriver, type CloudInstallationRecord, type OperatorApplicationAuthentication, type OperatorApplicationIntent } from './cloud-installation.port.js';
 import type { CloudDeploymentRuntimeIdentityV1 } from './cloud-deployment.port.js';
+import { operatorOutputRolesSchema } from './operator-output.port.js';
 
 const name = z.string().regex(/^[a-z][a-z0-9-]{0,62}$/);
 export const operatorApplicationDeclarationSchema = z.object({
   provider: z.enum(OPERATOR_APPLICATION_PROVIDERS), profile: z.literal('hypercloud-connect-v1'),
   originService: name, runtimeService: name,
   nativeScope: z.record(z.string().min(1).max(100), z.string().min(1).max(2048)),
+  outputs: operatorOutputRolesSchema.optional(),
 }).strict();
 export type OperatorApplicationDeclaration = z.infer<typeof operatorApplicationDeclarationSchema>;
 export interface OperatorApplicationLocalContext {
@@ -15,6 +17,7 @@ export interface OperatorApplicationLocalContext {
 }
 export interface OperatorApplicationCapability {
   schemaVersion: 1;
+  privateOutputRoles?: readonly string[];
   parseDeclaration(input: { name: string; declaration: OperatorApplicationDeclaration; origin: string;
     runtimeIdentity: CloudDeploymentRuntimeIdentityV1['principal'] }): Record<string, string>;
   parseRecord(value: unknown): CloudInstallationRecord<OperatorApplicationIntent>;

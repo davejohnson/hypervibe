@@ -91,6 +91,7 @@ export interface OperatorArtifactCapability {
   receipts(record: CloudInstallationRecord<OperatorArtifactIntent>): Array<Record<string, string>>;
 }
 export interface OperatorApplicationIntent extends Omit<LocalCloudScopePreparationIntent, 'execution' | 'hostingProvider' | 'provider'> {
+  outputs?: import('./operator-output.port.js').OperatorOutputSelection;
   execution: { kind: 'operator-application'; authentication: 'local-operator' };
   provider: OperatorApplicationProvider;
   applicationProvider: OperatorApplicationProvider;
