@@ -310,4 +310,65 @@ describe('explicit fresh database initialization lifecycle', () => {
         providerScope: { projectId, environmentId: productionId } } });
   });
 
+
+  it.each(['secrets', 'retained-cleanup', 'database-credential-aliases'] as const)('blocks %s planning while initialization owns the database', async scope => {
+    const f = await fixture({ deploymentStatus: 'DEPLOYING' }); f.declare();
+    await f.apply(await f.plan());
+    const mutations = f.http.mutations.length;
+    const planned = await new PlanService().plan(f.project, 'production', { scope });
+    expect(planned).toHaveProperty('error', expect.stringMatching(/initialization/i));
+    expect(f.http.mutations).toHaveLength(mutations);
+  });
+
+  it.each(['local-identity', 'native-issuer'] as const)('rejects changed %s at apply before provider writes', async drift => {
+    const f = await fixture(); f.declare();
+    const planned = await f.plan();
+    if (drift === 'local-identity') ctx.repos.components.updateBindings(f.component.id, { pluginName: 'renamed-database' });
+    else f.http.variables.get(`${f.component.externalId}/${productionId}`)!.POSTGRES_PASSWORD = 'synthetic-unreviewed-password';
+    const result = await f.apply(planned);
+    expect(result).toMatchObject({ kind: 'executed', result: { success: false } });
+    expect(f.http.mutations).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain('synthetic-unreviewed-password');
+    expect(JSON.stringify(result)).not.toContain('synthetic-preserved-password');
+  });
+
+  it.each(['full-scope', 'extra-action', 'noop', 'unconfirmed-action', 'deploy-inputs', 'missing-private-review'] as const)(
+    'rejects persisted initialization authorization changed to %s', async tamper => {
+      const f = await fixture(); f.declare();
+      const planned = await f.plan();
+      const document = structuredClone(ctx.repos.runs.findById(planned.planRunId)!.plan) as Record<string, any>;
+      if (tamper === 'full-scope') document.scope = 'full';
+      if (tamper === 'extra-action') document.actions.push({ id: 'service:web', type: 'update', verified: true,
+        resource: { kind: 'service', provider: 'railway', name: 'web' }, reason: 'Unrelated application deploy' });
+      if (tamper === 'noop') document.actions[0].type = 'noop';
+      if (tamper === 'unconfirmed-action') document.actions[0].requiresConfirm = false;
+      if (tamper === 'deploy-inputs') document.overrides.envVarsEncrypted = 'unrelated-deploy-input';
+      if (tamper === 'missing-private-review') delete document.overrides;
+      const run = ctx.repos.runs.create({ projectId: f.project.id, environmentId: f.environment.id, type: 'plan', plan: document });
+      ctx.repos.runs.updateStatus(run.id, 'succeeded');
+      expect(await f.apply({ ...planned, planRunId: run.id })).toMatchObject({ kind: 'plan_not_found' });
+      expect(f.http.mutations).toEqual([]);
+    });
+
+  it('preserves an unresolved old backup-policy attempt and requires ordinary backup review after empty initialization', async () => {
+    const f = await fixture(); f.declare();
+    const backupAttempt = { 'backup-policy:database:railway:postgres': {
+      source: { provider: 'railway', primaryExternalId: f.component.externalId,
+        providerScope: { projectId, environmentId: productionId },
+        resourceIdentity: { volumeId: 'retained-old-backup-volume', volumeInstanceId: 'retained-old-backup-instance' } },
+      policyFingerprint: 'a'.repeat(64), preservationFingerprint: 'b'.repeat(64),
+    } };
+    ctx.repos.environments.updatePlatformBindings(f.environment.id, { backupPolicyAttempts: backupAttempt });
+    f.spec().environments.production.backups = { mode: 'daily' };
+    new SpecStore().replace(f.project, f.spec());
+    const planned = await f.plan();
+    expect(planned.scope).toBe('database-initialization');
+    expect(await f.apply(planned)).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(ctx.repos.environments.findById(f.environment.id)!.platformBindings.backupPolicyAttempts).toEqual(backupAttempt);
+    const after = await f.plan();
+    expect(after.scope).not.toBe('database-initialization');
+    expect(after.warnings.join(' ')).toMatch(/previous daily backup policy write|unresolved daily backup/i);
+    expect(after.actions.some(action => action.metadata?.operation === 'databaseFreshInitialize')).toBe(false);
+  });
+
 });

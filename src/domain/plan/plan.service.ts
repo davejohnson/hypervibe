@@ -1679,9 +1679,11 @@ export class PlanService {
       return { error: providerValidation.message };
     }
     const scope = options?.scope ?? 'full';
-    if (scope === 'credentials' && this.envRepo.findByProjectId(project.id).some(environment =>
+    const initializationEnvironments = this.envRepo.findByProjectId(project.id)
+      .filter(environment => scope === 'credentials' || environment.name === environmentName);
+    if (scope !== 'full' && initializationEnvironments.some(environment =>
       this.componentRepo.findByEnvironmentId(environment.id).some(component => hasPendingDatabaseInitialization(component.bindings)))) {
-      return { error: 'Recover pending database initialization before reviewing new credential changes.' };
+      return { error: 'Recover pending database initialization through its full-plan isolated stage before reviewing other changes.' };
     }
     if (scope === 'credentials') return planCredentialLifecycle(projectWithSpecGitRemoteUrl(project, specResult.spec), specResult.spec, specResult.revision, environmentName, options!);
     if (options?.credential || options?.intent) return { error: 'Credential review inputs require scope=credentials.' };

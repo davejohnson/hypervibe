@@ -171,6 +171,14 @@ backup protection retain their existing explicit lifecycle stages. No live
 initialization, discard, export, deployment or restore has been performed by this
 design review.
 
+Fresh storage also invalidates historical seed completion for the prior data
+generation. The seed regression observed the same command hash incorrectly yield
+a noop after fresh initialization. Seed planning and execution now compare the
+validated initialization receipt's generation, recheck it before and after the
+task, and record it only after success. Historical seed evidence is preserved;
+this does not run a seed or migration during initialization or bypass ordinary
+task, release or backup prerequisites.
+
 The native-scope conformance review found a separate shared-schema defect:
 reusing the recovery scope allowlist rejected Fly's `organizationSlug` and
 DigitalOcean's `accountUuid` before their unsupported capability could be
