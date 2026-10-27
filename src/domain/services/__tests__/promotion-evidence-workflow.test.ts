@@ -760,14 +760,19 @@ describe('generated managed-CI promotion evidence gate', () => {
     delete target.programFingerprint;
     delete target.deploymentContractFingerprint;
     const migration = { includeStep: false };
-    // Accepted input hash after the first discovery fix; keep its literal
-    // promotion revision independent of runtime constants.
+    // Keep the historical promotion revision independent of runtime constants.
+    // Shared dispatch revision 8 is a separate, byte-verified server migration;
+    // promotion revision 2 must affect only workflows with a promotion source.
     const previousHash = (inputTarget: BranchDeployTarget) => canonicalJsonSha256({
-      version: 1, rendererRevision: 7,
+      version: 1, rendererRevision: 8,
       ...(inputTarget.promoteFromEnvironment ? { promotionRendererRevision: 1 } : {}),
       provider: 'railway', target: inputTarget, migration,
     });
     expect(githubActionsWorkflowInputHash({ provider: 'railway', target, migration })).not.toBe(previousHash(target));
+    expect(githubActionsWorkflowInputHash({ provider: 'railway', target, migration })).toBe(canonicalJsonSha256({
+      version: 1, rendererRevision: 8, promotionRendererRevision: 2,
+      provider: 'railway', target, migration,
+    }));
     delete target.promoteFromEnvironment;
     expect(githubActionsWorkflowInputHash({ provider: 'railway', target, migration })).toBe(previousHash(target));
   });

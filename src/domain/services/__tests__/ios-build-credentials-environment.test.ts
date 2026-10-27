@@ -72,12 +72,18 @@ describe('build-only credential environment rendering', () => {
   it('requires a reviewed iOS workflow update without migrating server-only workflows', () => {
     const target = { environmentName: 'staging', kind: 'staging' as const, branch: 'main', autoDeployOnPush: true, serviceNames: ['web'], providerServiceIds: ['web-id'] };
     const input = { provider: 'railway', target, migration: { includeStep: false } };
-    const previousContract = { version: 1, rendererRevision: 7, ...input };
+    // Shared dispatch revision 8 changes every server workflow independently of
+    // iOS. Its emitted-byte migration is pinned in shared-workflow-dispatch-migration.test.ts.
+    const serverContract = { version: 1, rendererRevision: 8, ...input };
     const config = ios();
-    expect(githubActionsWorkflowInputHash(input)).toBe(canonicalJsonSha256(previousContract));
+    expect(githubActionsWorkflowInputHash(input)).toBe(canonicalJsonSha256(serverContract));
+    expect(githubActionsWorkflowInputHash({ ...input, ios: config })).toBe(canonicalJsonSha256({
+      ...serverContract,
+      ios: { rendererRevision: 6, buildContractFingerprint: iosBuildContractFingerprint(config), bundleId: config.bundleId, release: config.release },
+    }));
     for (const rendererRevision of [4, 5]) {
       expect(githubActionsWorkflowInputHash({ ...input, ios: config })).not.toBe(canonicalJsonSha256({
-        ...previousContract,
+        ...serverContract,
         ios: { rendererRevision, buildContractFingerprint: iosBuildContractFingerprint(config), bundleId: config.bundleId, release: config.release },
       }));
     }

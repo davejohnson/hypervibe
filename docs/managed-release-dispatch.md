@@ -80,3 +80,28 @@ branch or permission after the last observation, so native dispatch/receipt and
 final proof remain separate checks rather than a claimed cross-service atomic
 transaction. The journal deliberately contains no administrator token, credential
 input, environment value or raw provider response.
+
+The shared renderer migration also applies to Railway. Two existing isolation
+checks assumed its server-only workflow still had renderer revision 7; both
+failed before their fixture correction (68 other tests passed). To challenge the
+opposite assumption that only the hash had accidentally changed, the committed
+generic emitters at `eca6800ec5a2a758942dd769fd6bd57b488bf71c` (before) and
+`de83027a1f8ad6d56fc06feb2a47ff6896214573` (after) were executed with the same
+registered provider dependencies and synthetic staging target. The output grew
+from 58,270 to 58,516 bytes. Its SHA-256 changed from
+`08e30fc8e12e5d470613e9a5faee61d515c1b5681626b03eb931a9e5974a6f63` to
+`db1dc745b4428214a099446b1b1c42b2d3b3543639919012f8794581d5278d15`.
+The complete diff contained only the new `hypervibe_release_id` input and the
+run-name correlation marker; provider steps, permissions and evidence did not
+change. These are generated fixture observations, not live published workflows.
+
+The normal-CI `shared-workflow-dispatch-migration.test.ts` pins those bytes and
+the separate revision-7-to-8 migration. The existing iOS and promotion checks
+now use the explicit shared revision-8 baseline while still requiring their own
+historical revisions (iOS 4/5 and promotion 1) to migrate; they additionally pin
+their exact current revisions (6 and 2). Removing either local revision guard
+still fails the corresponding test. This corrects stale test premises without
+changing runtime code or weakening isolation. All 72 focused tests passed after
+the correction. Existing dispatch tests continue to require reviewed publication
+before a revision-7 workflow can dispatch, and legacy provider-byte checks remain
+independent of this shared wrapper migration.
