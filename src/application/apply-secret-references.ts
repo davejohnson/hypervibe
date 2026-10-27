@@ -64,6 +64,9 @@ export async function applySecretReference(input: { ctx: CommandContext; project
   const error = validateAction(spec, environment, action, before, confirmed);
   if (error) return fail(error);
   const metadata = secretReferenceActionMetadataSchema.parse(action.metadata);
+  if (metadata.activation === 'application-release'
+    && referenceState(before, metadata.services, action.resource.name, metadata.reference) !== 'matching')
+    return fail('The exact application release has not verified the requested native references; no separate secret write is authorized.');
   let applied = 0;
   let deploymentDeferred = false;
   let runtimeRolloutRequired = false;
@@ -102,7 +105,7 @@ export async function applySecretReference(input: { ctx: CommandContext; project
     || referenceState(after, metadata.services, action.resource.name, metadata.reference) !== 'matching')
     return fail('The provider has not verified the requested native secret reference. Re-observe before retrying.');
   const existing = latest.platformBindings.secretVersionBindings;
-  const { creationOnlyServices: _fulfilledCreation, ...acceptedMetadata } = metadata;
+  const { creationOnlyServices: _fulfilledCreation, activation: _activation, ...acceptedMetadata } = metadata;
   ctx.repos.environments.updatePlatformBindings(latest.id, { secretVersionBindings: {
     ...(existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {}),
     [action.resource.name]: acceptedMetadata,
@@ -133,9 +136,21 @@ export async function assertDeploymentSecretReferences(input: { ctx: CommandCont
   const observed = (await new PlanService().observeEnvironment(project, environment, env, { hostingOnly: true })).observed;
   const creationOnlyServices = new Set<string>();
   for (const key of Object.keys(refs)) {
-    const action = actions.find(candidate => candidate.id === `secret:${key}`);
+    let action = actions.find(candidate => candidate.id === `secret:${key}`);
     const current = planSecretReference({ key, slot: spec.secrets[key], spec, environmentName,
       hostingProvider: env.hosting.provider, environment, observed });
+    if (!action && !current.blockers.length && !current.inputRequired.length) {
+      const creation = current.action.metadata?.creationOnlyServices;
+      const existing = Object.keys(env.services).filter(name => !Array.isArray(creation) || !creation.includes(name));
+      if (Array.isArray(creation) && creation.length > 0
+        && (!existing.length || referenceState(observed, existing, key, refs[key]) === 'matching')
+        && creation.every(name => {
+          const creates = actions.filter(candidate => candidate.resource.kind === 'service' && candidate.resource.name === name);
+          const references = creates[0]?.metadata?.creationSecretReferences;
+          return creates.length === 1 && references && typeof references === 'object' && !Array.isArray(references)
+            && isDeepStrictEqual((references as Record<string, unknown>)[key], refs[key]);
+        })) action = current.action;
+    }
     if (!action) {
       const names = Object.keys(env.services);
       const error = identityError(environment, observed, names);

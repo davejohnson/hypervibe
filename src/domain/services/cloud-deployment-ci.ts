@@ -48,13 +48,13 @@ export function reviewedCloudDeploymentCiAccess(target: BranchDeployTarget): Clo
 }
 
 /** Executed inside actions/github-script; no credentials enter outputs, files or workflow declarations. */
-export function buildGitHubDeploymentSessionRuntime(target: BranchDeployTarget): string {
+export function buildGitHubDeploymentSessionRuntime(target: BranchDeployTarget, options: { retainSourceSpec?: boolean } = {}): string {
   const access = reviewedCloudDeploymentCiAccess(target);
   const proof = { origin: access.origin, projectId: access.projectId, connectionId: access.connectionId, environment: access.environment,
     branch: access.sourceBranch, repository: access.connection.source.repository.slice('github.com/'.length), principal: access.connection.principals.release,
     ...(access.sourceAuthorization ? { sourceAuthorityDigest: cloudDeploymentSourceAuthorityDigestV1(access.connection, access.sourceAuthorization) } : {}) };
   return `const hvDeploymentAccess = ${JSON.stringify(proof)};
-async function hvDeploymentSession(target) {
+${options.retainSourceSpec ? 'let hvDeploymentSource;\n' : ''}async function hvDeploymentSession(target) {
   const unavailable = () => new Error('Cloud deployment release access could not be verified.');
   const controller = new AbortController();
   let timer;
@@ -98,7 +98,7 @@ async function hvDeploymentSession(target) {
       || !Number.isFinite(Date.parse(session.expiresAt)) || Date.parse(session.expiresAt) <= Date.now() + 30000 || Date.parse(session.expiresAt) > Date.now() + 7200000
       || sensitive.some(key => typeof session[key] !== 'string' || !session[key] || session[key].length > 16384 || /[\\r\\n]/.test(session[key]))) throw unavailable();
     for (const key of sensitive) core.setSecret(session[key]);
-    return session;
+${options.retainSourceSpec ? '    hvDeploymentSource = JSON.parse(bytes.toString(\'utf8\'));\n' : ''}    return session;
   } catch { throw unavailable(); } finally { clearTimeout(timer); controller.abort(); }
 }
 `;

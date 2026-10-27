@@ -18,6 +18,7 @@ export const secretReferenceActionMetadataSchema = z.object({
   replacementPolicy: z.enum(['confirm', 'immutable']).optional(), conflictsWith: z.array(z.string()).optional(),
   /** Conditional creation intent; this is not evidence of provider absence. */
   creationOnlyServices: z.array(z.string().min(1)).min(1).optional(),
+  activation: z.literal('application-release').optional(),
 }).strict().superRefine((value, ctx) => {
   if (new Set(value.services).size !== value.services.length) ctx.addIssue({ code: 'custom', message: 'Duplicate services' });
   if (value.creationOnlyServices && (new Set(value.creationOnlyServices).size !== value.creationOnlyServices.length
@@ -99,6 +100,10 @@ export function planSecretReference(input: {
           && !input.observed!.services.some(service => service.name === name)) : [];
       if (creationOnlyServices.length) metadata.creationOnlyServices = creationOnlyServices;
       const existingServices = services.filter(name => !creationOnlyServices.includes(name));
+      if (!creationOnlyServices.length && existingServices.length && input.observed && !input.observed.partial
+        && existingServices.every(name => input.observed!.services.filter(service => service.name === name
+          && service.externalId === hosting?.services?.[name]?.serviceId
+          && service.runtimeSecretReferenceActivation === 'application-release').length === 1)) metadata.activation = 'application-release';
       const state = existingServices.length ? referenceState(input.observed, existingServices, key, parsed.data, input.destinationsAreKnownAbsent) : 'initializing';
       const prior = input.environment?.platformBindings.secretVersionBindings;
       const priorBinding = prior && typeof prior === 'object' && !Array.isArray(prior)
@@ -116,7 +121,7 @@ export function planSecretReference(input: {
           const service = input.observed!.services.find(candidate => candidate.name === name);
           return !service || !Array.isArray(service.envVarKeys) || service.envVarKeys.includes(conflict);
         })));
-      const { creationOnlyServices: _creationIntent, ...bindingMetadata } = metadata;
+      const { creationOnlyServices: _creationIntent, activation: _activation, ...bindingMetadata } = metadata;
       if (immutable && (state === 'replacement' || conflictsUnknownOrPresent || retainedLegacyConflict || retainedNativeConflict
         || priorBinding !== undefined && !isDeepStrictEqual(priorBinding, bindingMetadata))) {
         action.reason = `Immutable secret ${key} has a conflicting reference, lifecycle record, or unverified conflicting key`;
@@ -126,9 +131,12 @@ export function planSecretReference(input: {
         blocked = true;
       } else {
         action.verified = true;
-        action.type = state === 'matching' && !creationOnlyServices.length ? 'noop' : 'update';
+        action.type = state === 'matching' && !creationOnlyServices.length
+          && (metadata.activation === undefined || isDeepStrictEqual(priorBinding, bindingMetadata)) ? 'noop' : 'update';
         if (state === 'replacement') action.requiresConfirm = true;
-        action.reason = creationOnlyServices.length ? `Install ${key} only during conditional creation of ${creationOnlyServices.join(', ')}; verify the pinned reference after creation`
+        action.reason = metadata.activation === 'application-release' && action.type !== 'noop'
+          ? `Accept ${key} only after the exact managed application release; verify the immutable native reference without a separate write`
+          : creationOnlyServices.length ? `Install ${key} only during conditional creation of ${creationOnlyServices.join(', ')}; verify the pinned reference after creation`
           : state === 'matching' ? `${key} matches its pinned secret manager version`
           : `Install the pinned secret manager reference for ${key}`;
       }

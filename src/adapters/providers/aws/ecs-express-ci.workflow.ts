@@ -1,3 +1,4 @@
+import { ecsInstalledReleaseTargets } from './ecs-installed-configuration.js';
 import type {
   BranchDeployStepResult,
   BranchDeployTarget,
@@ -20,7 +21,8 @@ export function buildEcsExpressGitHubActionsSteps(
   target: BranchDeployTarget
 ): BranchDeployStepResult {
   const broker = Boolean(target.deploymentAccess);
-  const sessionRuntime = broker ? buildGitHubDeploymentSessionRuntime(target).trimEnd().split('\n').map(line => '            ' + line).join('\n') : '';
+  const installedTargets = ecsInstalledReleaseTargets(target);
+  const sessionRuntime = broker ? buildGitHubDeploymentSessionRuntime(target, { retainSourceSpec: true }).trimEnd().split('\n').map(line => '            ' + line).join('\n') : '';
   const buildCondition = target.promoteFromEnvironment
     ? "steps.deploy.outputs.operation != 'rollback' && !steps.promotion_release.outputs.image_uri"
     : "steps.deploy.outputs.operation != 'rollback'";
@@ -160,7 +162,7 @@ ${broker ? sessionRuntime + '\n            try {\n' : ''}            const crede
               ECSClient,
               UpdateExpressGatewayServiceCommand,
             } = require('@aws-sdk/client-ecs');
-${buildEcsExpressTaskDefinitionRuntime().split('\n').filter(Boolean).map(line => '            ' + line).join('\n')}
+${buildEcsExpressTaskDefinitionRuntime(broker).split('\n').filter(Boolean).map(line => '            ' + line).join('\n')}
             const clusterArn = (process.env.AWS_ECS_CLUSTER_ARN || '').trim();
             const cluster = clusterArn.split('/').at(-1);
             const region = clusterArn.split(':')[3];
@@ -196,30 +198,34 @@ ${buildEcsExpressTaskDefinitionRuntime().split('\n').filter(Boolean).map(line =>
             }` : ''} });
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
             const currentConfig = ecsCurrentConfiguration;
+${broker ? '            const installedTargets = ' + JSON.stringify(installedTargets) + ';\n' : ''}
             for (const serviceArn of serviceArns) {
               const before = (await client.send(
-                new DescribeExpressGatewayServiceCommand({ serviceArn })
+                new DescribeExpressGatewayServiceCommand({ serviceArn${broker ? ", include: ['TAGS']" : ''} })
               )).service;
               if (!before || before.serviceArn !== serviceArn || before.cluster !== clusterArn) {
                 throw new Error('Bound ECS Express service identity could not be verified: ' + serviceArn);
               }
-              const config = currentConfig(before);
+${broker ? `              const reviewed = installedTargets.find(item => item.serviceArn === serviceArn);
+              ecsInstalledReleaseIdentity(before, reviewed);
+              reviewed.environment = ecsInstalledReleaseEnvironment(hvDeploymentSource, hvDeploymentAccess.environment, reviewed);
+` : ''}              const config = currentConfig(before);
               if (!Array.isArray(config?.networkConfiguration?.subnets)
                 || config.networkConfiguration.subnets.length < 2
                 || !Array.isArray(config.networkConfiguration?.securityGroups)
                 || config.networkConfiguration.securityGroups.length !== 1) {
                 throw new Error('ECS Express workload-network configuration is missing or malformed for ' + serviceArn);
               }
-              const release = await ecsPrepareRelease(client, config, serviceArn, exactImage, sha, digest);
+              const release = await ecsPrepareRelease(client, config, serviceArn, exactImage, sha, digest${broker ? ', reviewed' : ''});
               const healthPath = release.healthPath;
               await client.send(new UpdateExpressGatewayServiceCommand(release.update));
               let endpoint;
               let deployedRevision;
               for (let attempt = 1; attempt <= 120; attempt += 1) {
                 const observed = (await client.send(
-                  new DescribeExpressGatewayServiceCommand({ serviceArn })
+                  new DescribeExpressGatewayServiceCommand({ serviceArn${broker ? ", include: ['TAGS']" : ''} })
                 )).service;
-                const active = currentConfig(observed);
+${broker ? '                ecsInstalledReleaseIdentity(observed, reviewed);\n' : ''}                const active = currentConfig(observed);
                 const deployed = await ecsReleaseContainer(client, active, serviceArn);
                 if (deployed.taskRoleArn !== release.taskRoleArn) throw new Error('ECS deployed task role changed from the reviewed runtime identity');
                 const activeEnv = deployed.container.environment || [];
@@ -229,7 +235,7 @@ ${buildEcsExpressTaskDefinitionRuntime().split('\n').filter(Boolean).map(line =>
                   && deployed.container.image === exactImage
                   && markerValue('HYPERVIBE_DEPLOY_SHA') === sha
                   && markerValue('HYPERVIBE_IMAGE_DIGEST') === digest) {
-                  deployedRevision = observed.currentDeployment;
+${broker ? '                  ecsInstalledFinalConfiguration(deployed, reviewed, true);\n' : ''}                  deployedRevision = observed.currentDeployment;
                   endpoint = active.ingressPaths?.find((item) => item.accessType === 'PUBLIC')?.endpoint
                     || active.ingressPaths?.[0]?.endpoint;
                   break;

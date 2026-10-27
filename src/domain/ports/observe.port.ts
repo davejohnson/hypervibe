@@ -69,6 +69,9 @@ export interface ObservedService {
     resource: string;
     version: string;
   }>;
+  /** Fresh native identity/ownership proof requires references to be attached with
+   * the application release. This is sequencing evidence, never value equality. */
+  runtimeSecretReferenceActivation?: 'application-release';
   /** Whether configured values were fully resolved by the provider. */
   envVarState?: 'resolved' | 'unknown';
   /** Recorded write metadata cannot prove the provider's current value. */

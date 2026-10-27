@@ -1,3 +1,4 @@
+import { ECS_BOOTSTRAP_IMAGE, ecsInstalledBootstrapTask } from './ecs-installed-configuration.js';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
@@ -165,6 +166,9 @@ function parsedPolicy(value: unknown): Policy { try { const parsed = typeof valu
 function topology(spec: ProjectSpec, intent: CloudInstallationIntent): CloudDeploymentTopologyV1 {
   const env = spec.environments[intent.environment];
   if (!env || env.hosting.provider !== 'ecs' || env.database || env.cache || Object.keys(env.storage ?? {}).length || Object.values(env.services).some(service => service.volume || service.workloadKind !== 'web' || service.releaseCommand) || env.domain || env.loadBalancer) throw new CloudDeploymentAccessError('unsupported');
+  if (Object.entries(spec.secrets ?? {}).some(([key, slot]) => slot.environments.includes(intent.environment) && !env.secretDestinations?.[key])) {
+    throw new CloudDeploymentAccessError('unsupported');
+  }
   const references = Object.entries(env.secretDestinations ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([key, reference]) => ({ key, reference: runtimeSecretReferenceSchema.parse(reference) }));
   return parseCloudDeploymentTopologyV1({ hostingProvider: 'ecs', region: env.hosting.region ?? 'us-west-2', workloads: Object.entries(env.services).sort(([a], [b]) => a.localeCompare(b))
     .map(([name, service]) => ({ name, kind: service.workloadKind, runtimeSecrets: references })) });
@@ -347,7 +351,8 @@ export function createAwsCloudDeploymentDriver(options: { templateUrl?: string; 
             const task = (await ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: config.taskDefinitionArn }), { abortSignal: input.signal })).taskDefinition;
             const runtime = input.connection.runtimeIdentities.filter(item => item.workload === workload.name && item.principal.kind === 'aws-role');
             const expected = (purpose: string) => { const principal = runtime.find(item => item.principal.kind === 'aws-role' && item.principal.purpose === purpose)?.principal; return principal?.kind === 'aws-role' ? principal.roleArn : undefined; };
-            if (!task || task.taskDefinitionArn !== config.taskDefinitionArn || task.taskRoleArn !== expected('task') || task.executionRoleArn !== expected('execution')) fail();
+            if (!task || task.taskDefinitionArn !== config.taskDefinitionArn || (task.containerDefinitions?.find(item => item.name === 'Main')?.image === ECS_BOOTSTRAP_IMAGE
+              ? !ecsInstalledBootstrapTask(task) : task.taskRoleArn !== expected('task')) || task.executionRoleArn !== expected('execution')) fail();
             targets.push({ workload: workload.name, kind: 'service' as const, service: { id: arn, lifetimeId: service.createdAt!.toISOString() }, registry: { id: repositoryArn, lifetimeId: repository.createdAt!.toISOString() } });
           }
           await input.beforeIssue(); return driver.deployment!.parseReleaseTargets!(targets, input.connection);

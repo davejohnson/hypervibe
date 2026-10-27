@@ -22,7 +22,7 @@ schema alone never proves cloud ownership.
 | Hosting provider | Native identity and completion contract | Prepared handoff status |
 | --- | --- | --- |
 | GCP Cloud Run | Exact project number/create time/observed parent; registry create time; service UID, original holding revision/generation, reconciliation state and terminal condition. Resource name alone is reusable. Holding creation and IAM are separately reviewed installation actions. | Shared and native installation/session/handoff/first-release contracts implemented with offline evidence; see [native evidence and prerequisites](connect-cloud-gcp-deployment-evidence.md). Live walkthrough and operator holding-image publication remain gates. Initial billing uses a separate reviewed reserved-project assignment; unsupported ancestry and cron remain explicit. |
-| AWS ECS | Exact account/region/cluster/service ARN plus creation evidence and deployment state; IAM RoleID separately pins runtime identities. Service-list failures cannot establish absence. Existing ECS installation/apply path does not create holding workloads. | Optional receipt absent preserves the existing path. Prepared handoff explicitly undeclared. |
+| AWS ECS | Exact account/region/cluster/service ARN plus creation evidence and deployment state; IAM RoleID separately pins runtime identities. Service-list failures cannot establish absence. The installer does not pre-create workloads. Ordinary hosted apply creates a secret-free bootstrap; the exact-image CI release attaches the reviewed application references and task role. | Optional receipt absent preserves the existing path. Prepared handoff explicitly undeclared. |
 | Azure Container Apps | Exact subscription/resource group/ARM resource ID plus native creation metadata and terminal deployment provenance; reusable ARM names are insufficient. PUT is create-or-update, requiring explicit reviewed namespace authority rather than an atomic-create claim. Original holding revision and container-inaccessible managed identities constrain first release. | Native installation, prepared handoff, final configuration and read-only release-target enrollment have offline coverage; see [Azure evidence](connect-cloud-azure-evidence.md). An approved disposable-account walkthrough remains outstanding. |
 | DigitalOcean App Platform | Existing adapter only; no installer-prepared lifetime/holding contract reviewed. | Undeclared. |
 | Fly | Existing adapter only; no installer-prepared lifetime/holding contract reviewed. | Undeclared. |
@@ -203,3 +203,103 @@ one PATCH per workload. A two-observation race regression reproduced a generated
 published Cloud Run Service contract; they are not live compatibility evidence.
 The existing hosted transport suite separately covers its authority path, while
 AWS and other undeclared prepared capabilities remain outside this change.
+
+
+## ECS ordinary first-release boundary
+
+ECS does not declare the optional installer-prepared handoff. Its existing hosted
+installation supplies separate task, execution and infrastructure roles, while
+ordinary apply creates the Express service and managed CI releases the application.
+The execution role is used by ECS; the bootstrap has no task role, application
+values, native secret references, environment files, additional containers or
+mounts. An existing local-key connection keeps its separate legacy behavior.
+
+The challenged assumption was that an immutable Secrets Manager reference could
+safely be configured before the application image. AWS documents that the value
+is injected when that container starts. The real SDK create regression first
+failed three assertions: the generic bootstrap received a native reference, an
+inline application value and the final task role. Executed generated-release
+regressions then showed missing final references/command/role, accepted native
+replacement and missing final reference. Additional RED checks covered unexpected
+mounts/volumes and final environment/command drift.
+
+Installed runtime inspection and release enrollment admit only the exact owned,
+lifetime-pinned secret-free bootstrap for the temporary missing task-role case.
+Reapplying it is read-only and remains pending an application release. Declared
+hosted runtime secret slots need immutable Secrets Manager destinations; inline
+credential updates are unsupported. The first release adds the reviewed references,
+final task role, command and configuration with the registry-returned image digest,
+then verifies native identity and final configuration. Existing runtime identities
+are preserved, and an uncertain create is never adopted or replayed by name.
+
+Only immutable references and identities enter generated workflow declarations.
+Nonsecret environment values come from the exact workflow source already verified
+by the release broker, in process memory. A real SQLite/managed-target regression
+first demonstrated environment-value changes rewriting workflow locks; it now
+keeps those locks stable. The default GCP/Azure broker program bytes remain equal
+to source `584342e`; ECS alone opts into retaining the verified source during the
+release. Its provider renderer revision is 2, requiring normal workflow review.
+
+Independent contracts: [ECS secret injection](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/secrets-envvar-secrets-manager.html),
+[Express creation](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_CreateExpressGatewayService.html),
+[Express update](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_UpdateExpressGatewayService.html).
+These regressions use reconstructed serialized AWS responses and execute emitted
+JavaScript. They do not establish a live AWS first deployment, successful runtime
+secret retrieval, or hosted browser compatibility.
+
+### Reference acceptance after application release
+
+A freshly observed workload may declare `runtimeSecretReferenceActivation:
+application-release` only after the provider verifies its exact bound identity,
+lifetime, installation ownership and runtime roles. This is sequencing evidence,
+not secret configuration evidence. For ECS it additionally verifies either the
+strict secret-free bootstrap or the installed final task role. Missing or
+unknown native proof blocks observation. Native version equality still comes
+only from independently read task-definition references.
+
+The named hosting matrix above remains exhaustive: installed ECS uses this
+mode; Cloud Run and Azure retain their separately verified prepared/direct
+release mechanisms; DigitalOcean, Fly, Railway and Vercel do not declare it.
+Existing local-key ECS behavior is unchanged. Shared planning uses this native
+observation contract without branching on a provider name.
+
+Reference acceptance uses the existing post-release dependency mechanism. It
+does not block the infrastructure-applied marker needed by the first CI run,
+but it depends on the exact managed release and then performs read-only native
+verification. The initial CI binding stage defers reference acceptance until
+replanning. The mode is never persisted as accepted-reference evidence. A stale
+plan, changed ownership, missing reference or unsupported release authority
+cannot authorize an acceptance or a separate reference write.
+
+An initial CI identity stage omits secret acceptance actions. Its exact service
+create retains the reviewed immutable `creationSecretReferences`; apply compares
+them with current desired state and requires every exact confirmed create. Any
+already-bound service must already match. This retains existing create-only
+authority without authorizing later reference writes or inventing acceptance.
+ECS and Cloud Run can use their existing conditional creation; Azure does not
+claim this contract and keeps its prepared lifecycle.
+
+Observed lifecycle evidence: the actual SQLite/PlanService/executePlanApply
+fixture first failed because the release-activation observation was absent. A
+second initial-CI case failed because the filtered identity stage had discarded
+its reference authority. Both pass after the fixes. The composed application
+cycle now orders marker, emitted AWS exact-image release and read-only reference
+acceptance, using one reconstructed AWS SDK transport. Separate tests construct
+the real managed marker/release actions. GitHub lifecycle responses in the
+composed execution fixture are explicitly synthetic; native GitHub provenance
+has separate existing contract tests. Denied release, lost native release ACK,
+replanning, replaced lifetimes, denied reads, missing references, altered mode
+and missing/mismatched creation authority retain unaccepted references.
+
+The focused AWS/application/shared group passes 404 tests across 27 files, and
+TypeScript checking passes. These tests are in ordinary Vitest discovery; the
+committed acceptance workflow runs `npm test`, and desired repository policy
+requires `Hypervibe / acceptance`. Live branch protection was not inspected by
+this change. No live ECS deployment was performed.
+
+**Remaining shared CI recovery prerequisite:** the existing GitHub release
+dispatch path has no durable pre-dispatch intent. Losing its acknowledgment can
+therefore lead to another dispatch after restart, particularly with
+`forceRelease`. The new ECS tests establish no acceptance or writes during
+replanning, not replay-safe later dispatch. This shared CI gap must be repaired
+and tested before claiming the full first-release lifecycle complete.

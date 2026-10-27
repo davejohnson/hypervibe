@@ -83,3 +83,12 @@ describe.each(['aws', 'gcp', 'azure'])('%s emitted CI after reviewed source tran
     expect(() => buildGitHubDeploymentSessionRuntime(second.target)).toThrow();
   });
 });
+
+it('preserves prior non-ECS broker runtime bytes', () => {
+  // Compared directly with the committed 584342e generator before pinning.
+  // ECS alone opts into retaining broker-verified source in transient memory.
+  const hashes = { gcp: '1cc9188c88a17be67d79f8a881e0f60e06fd7ae62fe57909b78421083eb431d2', azure: '178dd64cfd0df3f81c178866a388dd6485c4e4d540bd3c8633dc32473d56a064' };
+  for (const [provider, target] of [['gcp', gcpBrokerTarget()], ['azure', azureTarget()]] as const) {
+    expect(createHash('sha256').update(buildGitHubDeploymentSessionRuntime(target)).digest('hex')).toBe(hashes[provider]);
+  }
+});

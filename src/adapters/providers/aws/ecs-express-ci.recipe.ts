@@ -1,3 +1,4 @@
+import { ecsInstalledConfigurationRuntime } from './ecs-installed-configuration.js';
 import type { BranchDeployTarget, PortableCiDeployRecipe } from '../../../domain/ports/ci-deploy.port.js';
 import { HYPERVIBE_MANAGED_NPM_PACKAGES } from '../../../domain/services/managed-runtime.js';
 import { ecsCurrentConfiguration, ecsTaskDefinitionInput } from './ecs-volume-runtime.js';
@@ -5,9 +6,9 @@ import { ecsCurrentConfiguration, ecsTaskDefinitionInput } from './ecs-volume-ru
 export const ECS_EXPRESS_PORTABLE_RUNTIME_PATH = '.gitlab/hypervibe/ecs-express-deploy.cjs';
 
 /** Shared generated release logic: a task-definition update must retain storage and runtime identity. */
-export function buildEcsExpressTaskDefinitionRuntime(): string {
+export function buildEcsExpressTaskDefinitionRuntime(installed = false): string {
   return `const { DescribeTaskDefinitionCommand, RegisterTaskDefinitionCommand } = require('@aws-sdk/client-ecs');
-${ecsTaskDefinitionInput.toString()}
+${installed ? ecsInstalledConfigurationRuntime() : ''}${ecsTaskDefinitionInput.toString()}
 ${ecsCurrentConfiguration.toString()}
 function ecsRegistrationInput(definition, tags) {
   return { ...ecsTaskDefinitionInput(definition, {}), ...(tags?.length ? { tags } : {}) };
@@ -20,7 +21,7 @@ function ecsPreserves(expected, observed) {
 async function ecsReleaseContainer(client, config, serviceArn) {
   if (!config?.taskDefinitionArn) {
     if (!config?.primaryContainer) throw new Error('ECS returned no active container or task definition');
-    return { container: config.primaryContainer, taskRoleArn: config.taskRoleArn };
+    return { container: config.primaryContainer, taskRoleArn: config.taskRoleArn, executionRoleArn: config.executionRoleArn };
   }
   const arn = config.taskDefinitionArn;
   if (typeof arn !== 'string' || !arn.startsWith(serviceArn.split(':service/')[0] + ':task-definition/') || !/:\\d+$/.test(arn)) throw new Error('ECS task definition is outside the reviewed account or region');
@@ -32,14 +33,24 @@ async function ecsReleaseContainer(client, config, serviceArn) {
   if (config.taskRoleArn !== undefined && config.taskRoleArn !== definition.taskRoleArn) throw new Error('ECS current task role disagrees with the exact task definition');
   return { container: input.containerDefinitions.find(item => item.name === 'Main'), definition, tags: response.tags, taskRoleArn: definition.taskRoleArn };
 }
-async function ecsPrepareRelease(client, config, serviceArn, exactImage, sha, digest) {
+async function ecsPrepareRelease(client, config, serviceArn, exactImage, sha, digest${installed ? ', reviewed' : ''}) {
   const current = await ecsReleaseContainer(client, config, serviceArn);
+${installed ? `  if (!reviewed) throw new Error('Installed ECS release configuration is unavailable');
+  if (current.container.image === ECS_BOOTSTRAP_IMAGE) {
+    if (!ecsInstalledBootstrapConfiguration(current.container, current.taskRoleArn)
+      || (current.definition?.executionRoleArn ?? current.executionRoleArn) !== reviewed.executionRoleArn
+      || current.definition && !ecsInstalledBootstrapTask(current.definition)) throw new Error('Installed ECS bootstrap has application access');
+    current.container = { ...current.container, environment: reviewed.environment, secrets: reviewed.secrets };
+    current.taskRoleArn = reviewed.taskRoleArn;
+    if (current.definition) current.definition = { ...current.definition, taskRoleArn: reviewed.taskRoleArn };
+  } else ecsInstalledFinalConfiguration(current, reviewed);
+` : ''}
   const environment = [...(current.container.environment || [])].filter(item => !['HYPERVIBE_DEPLOY_SHA', 'HYPERVIBE_IMAGE_DIGEST'].includes(item.name));
   const marker = name => environment.find(item => item.name === name)?.value;
-  const startCommand = marker('HYPERVIBE_START_COMMAND');
-  const healthPath = marker('HYPERVIBE_HEALTH_CHECK_PATH') || config.healthCheckPath || '/';
+  const startCommand = ${installed ? 'reviewed.startCommand' : "marker('HYPERVIBE_START_COMMAND')"};
+  const healthPath = ${installed ? "reviewed.healthCheckPath || '/'" : "marker('HYPERVIBE_HEALTH_CHECK_PATH') || config.healthCheckPath || '/'"};
   environment.push({ name: 'HYPERVIBE_DEPLOY_SHA', value: sha }, { name: 'HYPERVIBE_IMAGE_DIGEST', value: digest });
-  const container = { ...current.container, image: exactImage, environment, ...(startCommand ? { command: ['sh', '-lc', startCommand] } : {}) };
+  const container = { ...current.container, image: exactImage, environment, ...(startCommand ? { command: ['sh', '-lc', startCommand] } : ${installed ? '{ command: [] }' : '{}'}) };
   const common = { serviceArn, healthCheckPath: healthPath, networkConfiguration: config.networkConfiguration, scalingTarget: config.scalingTarget };
   if (!current.definition) return { healthPath, taskRoleArn: current.taskRoleArn, update: { ...common, primaryContainer: container, executionRoleArn: config.executionRoleArn, taskRoleArn: current.taskRoleArn, cpu: config.cpu, memory: config.memory } };
   const registration = ecsRegistrationInput(current.definition, current.tags);

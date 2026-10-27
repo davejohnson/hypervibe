@@ -1,3 +1,4 @@
+import { ECS_BOOTSTRAP_IMAGE, ecsInstalledBootstrapTask, ecsInstalledReleaseIdentity } from './ecs-installed-configuration.js';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { GetRoleCommand, GetRolePolicyCommand, ListAttachedRolePoliciesCommand, ListRolePoliciesCommand, type IAMClient } from '@aws-sdk/client-iam';
@@ -64,10 +65,13 @@ export class EcsInstalledRuntimeIdentities implements IRuntimeIdentities {
       if (serviceArn !== clusterArn.replace(':cluster/', ':service/') + '/' + resourceName(workload.name, { maxLength: 255 })) throw new Error();
       const service = (await clients.ecs.send(new DescribeExpressGatewayServiceCommand({ serviceArn, include: ['TAGS'] }))).service;
       if (service?.serviceArn !== serviceArn || service.cluster !== clusterArn || !service.tags?.some(tag => tag.key === 'hypervibe-environment-id' && tag.value === request.environment.id)) throw new Error();
+      ecsInstalledReleaseIdentity(service, { serviceArn, lifetimeId: bindings.services?.[workload.name]?.resourceUid,
+        owner: roles.task.owner, installationId: connection.installationId });
       const config = ecsCurrentConfiguration(service);
       if (!config.taskDefinitionArn) throw new Error();
       const task = (await clients.ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: config.taskDefinitionArn }))).taskDefinition;
-      if (!task || task.taskDefinitionArn !== config.taskDefinitionArn || task.executionRoleArn !== roles.execution.arn || task.taskRoleArn !== roles.task.arn) throw new Error();
+      if (!task || task.taskDefinitionArn !== config.taskDefinitionArn || task.executionRoleArn !== roles.execution.arn || (task.containerDefinitions?.find(item => item.name === 'Main')?.image === ECS_BOOTSTRAP_IMAGE
+        ? !ecsInstalledBootstrapTask(task) : task.taskRoleArn !== roles.task.arn)) throw new Error();
     }
     const refs = new SecretsManagerClient({ region: names.region, credentials: clients.iam.config.credentials, requestHandler: clients.iam.config.requestHandler, maxAttempts: 1 });
     // The request handler belongs to the adapter, so this short-lived wrapper does not destroy it.

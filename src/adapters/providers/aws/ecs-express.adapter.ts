@@ -1,3 +1,4 @@
+import { ECS_BOOTSTRAP_IMAGE as BOOTSTRAP_IMAGE, ECS_BOOTSTRAP_COMMAND as BOOTSTRAP_COMMAND, ecsInstalledBootstrapConfiguration, ecsInstalledBootstrapTask, ecsInstalledReleaseIdentity } from './ecs-installed-configuration.js';
 import { AwsConnectionAuthentication, awsAuthenticationFields, awsConnectionRegion, checkedAwsAccountId, validateAwsAuthentication, canUseAwsCredentialsForAutomation } from './aws-authentication.js';
 import type { ProviderRuntimeIdentity } from '../../../domain/ports/provider.port.js';
 import type { ProviderEnvironmentVariablesRequest, ProviderEnvironmentVariablesResult } from '../../../domain/ports/provider-env-vars.port.js';
@@ -115,7 +116,6 @@ import type {
   VerifyResult,
 } from '../../../domain/ports/provider.port.js';
 import { providerRegistry, type ProviderInspectionRequest } from '../../../domain/registry/provider.registry.js';
-import { HYPERVIBE_MANAGED_NODE_VERSION } from '../../../domain/services/managed-runtime.js';
 import { environmentForInspection } from '../../../domain/registry/provider-inspection.js';
 import {
   buildEcsExpressGitHubActionsSteps,
@@ -132,12 +132,6 @@ import {
   workloadSecurityGroupTags,
 } from './aws-workload-network.js';
 
-const BOOTSTRAP_IMAGE = `public.ecr.aws/docker/library/node:${HYPERVIBE_MANAGED_NODE_VERSION}-alpine`;
-const BOOTSTRAP_COMMAND = [
-  'node',
-  '-e',
-  "require('http').createServer((_,res)=>{res.writeHead(200);res.end('hypervibe bootstrap')}).listen(8080)",
-];
 const EXECUTION_POLICY = 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy';
 const INFRASTRUCTURE_POLICY = 'arn:aws:iam::aws:policy/service-role/AmazonECSInfrastructureRoleforExpressGatewayServices';
 const START_COMMAND_KEY = 'HYPERVIBE_START_COMMAND';
@@ -557,12 +551,12 @@ export class EcsExpressAdapter implements IProviderAdapter {
 
     let attemptedServiceId: string | undefined;
     let createdService = false;
+    let createDispatched = false;
     try {
       const resources = this.projectResources(
         this.parseClusterArn(clusterArn).accountId,
         this.parseClusterArn(clusterArn).clusterName
       );
-      let preparedTaskRoleArn: string | undefined;
       if (this.transient) {
         const configured = this.transient.input.connection.deployment.workloads.find(item => item.name === service.name);
         const binding = (environment.platformBindings.runtimeIdentities as Record<string, { evidence?: Record<string, string> }> | undefined)?.[service.name];
@@ -572,7 +566,6 @@ export class EcsExpressAdapter implements IProviderAdapter {
           || binding.evidence.roleId !== task.principal.roleId || binding.evidence.runtimePlanDigest !== this.transient.input.connection.planDigest)
           throw new CloudDeploymentAccessError('scope_mismatch');
         await verifyAwsInstalledRoles(this.transient.input.connection, this.connected().clients, service.name);
-        preparedTaskRoleArn = task.principal.roleArn;
       }
       const workloadNetwork = await this.assertProjectResources(resources, environment);
       const binding = parseHostingBindings(environment).services?.[service.name]?.serviceId;
@@ -593,31 +586,39 @@ export class EcsExpressAdapter implements IProviderAdapter {
           throw new Error(`ECS Express service ${binding} has no observable active container configuration.`);
         }
         const usingBootstrap = runtime.container.image === BOOTSTRAP_IMAGE;
-        const { output, taskDefinitionArn } = await this.updateRuntimeConfiguration(binding, config, {
-          ...this.mergeRuntimeEnvironment(runtime.container, environmentValues, secretVersionRefs),
-          ...(usingBootstrap || !service.buildConfig.startCommand
-            ? { command: usingBootstrap ? BOOTSTRAP_COMMAND : undefined }
-            : { command: ['sh', '-lc', service.buildConfig.startCommand] }),
-        }, {
-            serviceArn: binding,
-            executionRoleArn: runtime.task?.executionRoleArn ?? config.executionRoleArn,
-            cpu: config.cpu ?? '256',
-            memory: config.memory ?? '512',
-            healthCheckPath: usingBootstrap
-              ? '/'
-              : service.buildConfig.healthCheckPath ?? '/',
-            networkConfiguration: this.expressNetworkConfiguration(workloadNetwork),
-            scalingTarget: config.scalingTarget,
-          });
-        express = await this.waitForExpress(
-          binding,
-          runtime.container.image,
-          existing.currentDeployment,
-          taskDefinitionArn,
-          runtime.task?.taskRoleArn ?? config.taskRoleArn ?? null
-        );
-        if (output.service?.serviceArn !== binding) {
-          throw new Error(`AWS update response did not preserve bound service ${binding}.`);
+        if (this.transient && usingBootstrap) {
+          ecsInstalledReleaseIdentity(express, { serviceArn: binding, lifetimeId: creationBinding?.resourceUid,
+            owner: this.transient.input.connection.runtimeIdentities.find(item => item.workload === service.name)?.owner, installationId: this.transient.input.connection.installationId });
+          if (!(runtime.task ? ecsInstalledBootstrapTask(runtime.task) : ecsInstalledBootstrapConfiguration(runtime.container, config.taskRoleArn))) throw new CloudDeploymentAccessError('scope_mismatch');
+          // First application configuration is applied only with its exact CI image.
+          // Reapplying this bootstrap is read-only, never a secret pre-sync.
+        } else {
+          const { output, taskDefinitionArn } = await this.updateRuntimeConfiguration(binding, config, {
+            ...this.mergeRuntimeEnvironment(runtime.container, environmentValues, secretVersionRefs),
+            ...(usingBootstrap || !service.buildConfig.startCommand
+              ? { command: usingBootstrap ? BOOTSTRAP_COMMAND : undefined }
+              : { command: ['sh', '-lc', service.buildConfig.startCommand] }),
+          }, {
+              serviceArn: binding,
+              executionRoleArn: runtime.task?.executionRoleArn ?? config.executionRoleArn,
+              cpu: config.cpu ?? '256',
+              memory: config.memory ?? '512',
+              healthCheckPath: usingBootstrap
+                ? '/'
+                : service.buildConfig.healthCheckPath ?? '/',
+              networkConfiguration: this.expressNetworkConfiguration(workloadNetwork),
+              scalingTarget: config.scalingTarget,
+            });
+          express = await this.waitForExpress(
+            binding,
+            runtime.container.image,
+            existing.currentDeployment,
+            taskDefinitionArn,
+            runtime.task?.taskRoleArn ?? config.taskRoleArn ?? null
+          );
+          if (output.service?.serviceArn !== binding) {
+            throw new Error(`AWS update response did not preserve bound service ${binding}.`);
+          }
         }
       } else {
         const serviceName = resourceName(service.name, { maxLength: 255 });
@@ -631,13 +632,13 @@ export class EcsExpressAdapter implements IProviderAdapter {
             `ECS service "${serviceName}" already exists (${duplicates.join(', ')}). Hypervibe will not silently adopt it.`
           );
         }
+        createDispatched = true;
         const output = await this.connected().clients.ecs.send(
           new CreateExpressGatewayServiceCommand({
             cluster: clusterArn,
             serviceName,
             executionRoleArn: resources.executionRoleArn,
             infrastructureRoleArn: resources.infrastructureRoleArn,
-            ...(preparedTaskRoleArn ? { taskRoleArn: preparedTaskRoleArn } : {}),
             cpu: '256',
             memory: '512',
             healthCheckPath: '/',
@@ -645,8 +646,8 @@ export class EcsExpressAdapter implements IProviderAdapter {
               image: BOOTSTRAP_IMAGE,
               containerPort: 8080,
               command: BOOTSTRAP_COMMAND,
-              environment: environmentValues,
-              secrets: this.nativeSecretReferences(secretVersionRefs),
+              environment: this.transient ? [] : environmentValues,
+              secrets: this.transient ? [] : this.nativeSecretReferences(secretVersionRefs),
             },
             networkConfiguration: this.expressNetworkConfiguration(workloadNetwork),
             scalingTarget: { minTaskCount: 1, maxTaskCount: 4 },
@@ -663,7 +664,9 @@ export class EcsExpressAdapter implements IProviderAdapter {
 
       const serviceArn = express.serviceArn!;
       const finalRuntime = await this.runtimeConfiguration(this.currentConfiguration(express), serviceArn);
-      for (const expected of this.nativeSecretReferences(secretVersionRefs)) {
+      const pendingInstalledRelease = Boolean(this.transient && finalRuntime.container.image === BOOTSTRAP_IMAGE);
+      if (pendingInstalledRelease && !(finalRuntime.task ? ecsInstalledBootstrapTask(finalRuntime.task) : ecsInstalledBootstrapConfiguration(finalRuntime.container, this.currentConfiguration(express)?.taskRoleArn))) throw new CloudDeploymentAccessError('scope_mismatch');
+      for (const expected of pendingInstalledRelease ? [] : this.nativeSecretReferences(secretVersionRefs)) {
         const matches = (finalRuntime.container.secrets ?? []).filter((entry: any) => entry.name === expected.name);
         if (matches.length !== 1 || matches[0].valueFrom !== expected.valueFrom
           || (finalRuntime.container.environment ?? []).some((entry: any) => entry.name === expected.name)) {
@@ -689,13 +692,16 @@ export class EcsExpressAdapter implements IProviderAdapter {
             ...(this.transient ? { resourceUid: express.createdAt!.toISOString() } : {}),
             createdService,
             deploymentDeferred: true,
-            pendingImage: (await this.runtimeConfiguration(this.currentConfiguration(express), serviceArn)).container.image === BOOTSTRAP_IMAGE,
+            pendingImage: finalRuntime.container.image === BOOTSTRAP_IMAGE,
+            ...(pendingInstalledRelease ? { runtimeRolloutRequired: true } : {}),
             ...(url ? { url } : {}),
           },
         },
       };
     } catch (error) {
-      return this.failedDeploy(service, this.formatError(error), attemptedServiceId, createdService);
+      const result = this.failedDeploy(service, this.formatError(error), attemptedServiceId, createdService);
+      if (createDispatched) result.receipt.data = { ...result.receipt.data, phase: 'serviceCreate', mutationAttempted: true };
+      return result;
     }
   }
 
@@ -727,6 +733,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
     vars: Record<string, string>,
     options: DeploymentMutationOptions = {}
   ): Promise<Receipt> {
+    if (options.requireCredentialUpdate && this.transient) return { success: false, message: 'Installed AWS deployments require immutable Secrets Manager references; inline credential updates are not supported.' };
     if (options.requireCredentialUpdate) {
       let attempted = false;
       try {
@@ -1065,6 +1072,15 @@ export class EcsExpressAdapter implements IProviderAdapter {
       this.assertExpressScope(express, bindings.projectId, binding.serviceId, environment.id);
       const config = this.currentConfiguration(express);
       const runtime = await this.runtimeConfiguration(config, binding.serviceId);
+      if (this.transient) {
+        const connection = this.transient.input.connection;
+        const roles = await verifyAwsInstalledRoles(connection, this.connected().clients, name);
+        ecsInstalledReleaseIdentity(express, { serviceArn: binding.serviceId, lifetimeId: binding.resourceUid,
+          owner: roles.task.owner, installationId: connection.installationId });
+        if (!runtime.task || runtime.task.executionRoleArn !== roles.execution.arn
+          || (runtime.container.image === BOOTSTRAP_IMAGE ? !ecsInstalledBootstrapTask(runtime.task)
+            : runtime.task.taskRoleArn !== roles.task.arn)) throw new CloudDeploymentAccessError('scope_mismatch');
+      }
       const environmentValues: KeyValuePair[] = runtime.container.environment ?? [];
       const values = Object.fromEntries(
         environmentValues
@@ -1102,6 +1118,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
         envVarKeys: [...new Set([...visible.map(([key]) => key), ...secretKeys])].sort(),
         envVarHashes: Object.fromEntries(visible.map(([key, value]) => [key, hashEnvValue(value)])),
         envVarSecretRefs,
+        ...(this.transient ? { runtimeSecretReferenceActivation: 'application-release' as const } : {}),
         envVarState: (runtime.container.secrets?.length ?? 0) > 0 ? 'unknown' : 'resolved',
         ...(express.currentDeployment ? { deployment: {
           id: express.currentDeployment, status: express.status?.statusCode,
@@ -2310,7 +2327,7 @@ providerRegistry.register({
       project: { shareAcrossEnvironments: false },
       diff: { workloadKindObservation: 'exact' },
       ci: {
-        rendererRevision: 1,
+        rendererRevision: 2,
         displayName: 'AWS ECS Express Mode',
         transientDeployment: 'github-oidc-broker-v1',
         requiredSecrets: ECS_EXPRESS_CI_REQUIRED_SECRETS,

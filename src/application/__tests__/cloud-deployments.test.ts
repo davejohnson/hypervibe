@@ -11,6 +11,7 @@ import { createCommandRegistry } from '../commands.js';
 import { runWithWorkspaceDirectories } from '../../lib/workspace-context.js';
 import { providerRegistry } from '../../domain/registry/provider.registry.js';
 import type { CloudDeploymentAdapterInputV1 } from '../../domain/ports/cloud-deployment.port.js';
+import { githubActionsWorkflowInputHash } from '../../domain/services/github-ops.service.js';
 import { resolveReviewedBranchDeployTargets } from '../../domain/services/managed-ci-targets.js';
 import { readRepoSpecFile } from '../../domain/spec/repo-spec-file.js';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
@@ -316,6 +317,21 @@ describe('device deployment authority through the ordinary command and adapter b
     expect(result.targets.find(target => target.environmentName === 'production')?.deploymentAccess).toBeUndefined();
     const row = f.context.repos.connections.findAllByProvider('hypervibe-deployment-access')[0]!; f.context.repos.connections.updateStatus(row.id, 'failed');
     await expect(resolve()).rejects.toThrow();
+  });
+  it('keeps committed environment value changes out of hosted workflow declarations and locks', async () => {
+    const f = fixture(); await f.pair(); await f.run({ action: 'connect' }); f.setReady(); await f.run({ action: 'status' });
+    const document = JSON.parse(readFileSync(path.join(root, '.hypervibe/spec.json'), 'utf8'));
+    document.environments.staging.deploy = { strategy: 'branch', trigger: 'ci', branch: 'main' };
+    const resolve = async (value: string) => {
+      document.environments.staging.envVars = { PUBLIC_MODE: value };
+      writeFileSync(path.join(root, '.hypervibe/spec.json'), JSON.stringify(document));
+      git('add', '.hypervibe/spec.json'); git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false', 'commit', '-m', 'reviewed configuration');
+      return runWithWorkspaceDirectories([root], async () => (await resolveReviewedBranchDeployTargets(f.project, readRepoSpecFile(root)!.spec)).targets.find(target => target.environmentName === 'staging')!);
+    };
+    const first = await resolve('first-value'), second = await resolve('next-value');
+    expect.soft(JSON.stringify(first)).not.toContain('first-value');
+    const hash = (target: typeof first) => githubActionsWorkflowInputHash({ provider: 'deployment-fixture', target, migration: { includeStep: false } });
+    expect(hash(first)).toBe(hash(second));
   });
   it('persists a release-policy request before posting and recovers its exact lost acknowledgment without authorizing release', async () => {
     const f = fixture(); await f.pair(); await f.run({ action: 'connect' }); f.setReady(); await f.run({ action: 'status' }); f.losePolicy();

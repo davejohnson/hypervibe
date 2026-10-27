@@ -2982,7 +2982,9 @@ export class PlanService {
       && action.metadata?.operation === 'databaseSeed'
       && environmentUsesManagedCi(specResult.spec, environmentName)
     );
-    const postReleaseActions = [...scheduleActivations, ...(managedCiSeedAction ? [managedCiSeedAction] : [])];
+    const releaseReferenceActions = actions.filter(action => action.type !== 'noop'
+      && action.metadata?.operation === 'secretReferenceSync' && action.metadata.activation === 'application-release');
+    const postReleaseActions = [...scheduleActivations, ...(managedCiSeedAction ? [managedCiSeedAction] : []), ...releaseReferenceActions];
     const postReleaseIds = new Set(postReleaseActions.map(action => action.id));
     const appliedSpecHashDependsOn = actions
       .filter((action) => action.type !== 'noop' && !postReleaseIds.has(action.id))
@@ -3206,6 +3208,16 @@ export class PlanService {
       actions = recoveryRuntimeActions;
       backupPolicy.warnings.push('This plan prepares only the current backup worker prerequisite. Re-plan to publish and run the recovery program after preparation converges.');
     } else if (ciBindingStageActive) {
+      // The binding stage omits reference acceptance. Retain only exact reviewed
+      // creation references on the service create that can install them; this
+      // never authorizes a write to an already-bound workload.
+      for (const service of actions.filter(action => action.resource.kind === 'service' && action.type === 'create')) {
+        const references = actions.filter(action => action.metadata?.operation === 'secretReferenceSync'
+          && Array.isArray(action.metadata.creationOnlyServices)
+          && action.metadata.creationOnlyServices.includes(service.resource.name));
+        if (references.length) service.metadata = { ...service.metadata, creationSecretReferences: Object.fromEntries(
+          references.map(action => [action.resource.name, action.metadata!.reference])) };
+      }
       const closure = actionDependencyClosure(
         actions,
         ciBindingPrerequisites.map((action) => action.id)

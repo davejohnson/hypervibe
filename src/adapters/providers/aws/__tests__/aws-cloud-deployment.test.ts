@@ -1,3 +1,4 @@
+import { ECS_BOOTSTRAP_COMMAND, ECS_BOOTSTRAP_IMAGE } from '../ecs-installed-configuration.js';
 import { describe, expect, it, vi } from 'vitest';
 import { createAwsCloudInstallationDriver } from '../aws-cloud-installation.js';
 import { createAwsCloudDeploymentTemplateV1 } from '../aws-cloud-deployment.js';
@@ -26,7 +27,7 @@ const intent: CloudInstallationIntent = { schemaVersion: 1, installationId: 'aaa
 async function nativeFixture() {
   const artifact = createAwsCloudDeploymentTemplateV1(), template = JSON.parse(artifact.body), parameters: Record<string, string> = {};
   const records = new Map<string, CloudInstallationRecord>(), requests: string[] = [];
-  const state = { replaced: false, replacedRuntime: false, replacedService: false, alteredTemplate: false, extraPolicy: false, loseCleanup: false, error: '', trust: {} as Record<string, any> };
+  const state = { bootstrap: false, unsafeBootstrap: false, replaced: false, replacedRuntime: false, replacedService: false, alteredTemplate: false, extraPolicy: false, loseCleanup: false, error: '', trust: {} as Record<string, any> };
   const kinds = ['provision', 'release', 'disconnector', 'task', 'execution', 'infrastructure'];
   const kindFor = (name: string) => kinds.find(kind => parameters[`${kind}RoleName`] === name)!;
   const roleId = (kind: string) => 'AROA' + String(kinds.indexOf(kind) + 1).repeat(17);
@@ -54,7 +55,13 @@ async function nativeFixture() {
       createdAt: state.replacedService ? 1_700_000_001 : 1_700_000_000, status: { statusCode: 'ACTIVE' }, currentDeployment: 'revision-1',
       tags: [{ key: 'hypervibe-owner', value: parameters.OwnerDigest }, { key: 'hypervibe-installation', value: parameters.InstallationId }],
       activeConfigurations: [{ serviceRevisionArn: 'revision-1', taskDefinitionArn: 'arn:aws:ecs:us-west-2:123456789012:task-definition/native:1' }] } });
-    if (operation === 'DescribeTaskDefinition') return json({ taskDefinition: { taskDefinitionArn: query.taskDefinition, taskRoleArn: `arn:aws:iam::123456789012:role/${parameters.taskRoleName}`, executionRoleArn: `arn:aws:iam::123456789012:role/${parameters.executionRoleName}` } });
+    if (operation === 'DescribeTaskDefinition') return json({ taskDefinition: { taskDefinitionArn: query.taskDefinition,
+      status: 'ACTIVE', networkMode: 'awsvpc', requiresCompatibilities: ['FARGATE'],
+      ...(state.bootstrap ? {} : { taskRoleArn: `arn:aws:iam::123456789012:role/${parameters.taskRoleName}` }),
+      executionRoleArn: `arn:aws:iam::123456789012:role/${parameters.executionRoleName}`,
+      containerDefinitions: [{ name: 'Main', image: state.bootstrap ? ECS_BOOTSTRAP_IMAGE : 'example/application@sha256:' + 'a'.repeat(64),
+        ...(state.bootstrap ? { command: ECS_BOOTSTRAP_COMMAND } : {}), portMappings: [{ name: 'http', containerPort: 8080, protocol: 'tcp' }],
+        environment: state.unsafeBootstrap ? [{ name: 'UNREVIEWED', value: 'unsafe' }] : [], secrets: [] }] } });
     if (operation === 'DescribeRepositories') return json({ repositories: [{ repositoryArn: `arn:aws:ecr:us-west-2:123456789012:repository/hypervibe/${parameters.ClusterName}`, repositoryName: `hypervibe/${parameters.ClusterName}`, createdAt: 1_700_000_000 }] });
     if (operation === 'ListTagsForResource') return json({ tags: [{ Key: 'hypervibe-owner', Value: parameters.OwnerDigest }, { Key: 'hypervibe-installation', Value: parameters.InstallationId }] });
     if (operation === 'AssumeRoleWithWebIdentity') {
@@ -110,8 +117,20 @@ describe('AWS reviewed deployment installation', () => {
       bindings: { provider: 'ecs', projectId: clusterArn, environmentId: clusterArn, services: { web: { serviceId: clusterArn.replace(':cluster/', ':service/') + '/web', resourceUid: '2023-11-14T22:13:20.000Z' } },
         awsDeploymentRegistry: { id: `arn:aws:ecr:us-west-2:123456789012:repository/hypervibe/${f.parameters.ClusterName}`, createdAt: '2023-11-14T22:13:20.000Z' } } };
     expect((await verifyCloudDeploymentReleaseTargetsV1(input)).targets).toHaveLength(1);
+    f.state.bootstrap = true; expect((await verifyCloudDeploymentReleaseTargetsV1(input)).targets).toHaveLength(1);
+    f.state.unsafeBootstrap = true; await expect(verifyCloudDeploymentReleaseTargetsV1(input)).rejects.toThrow(); f.state.unsafeBootstrap = false;
+    f.state.bootstrap = false;
     f.state.replacedRuntime = true; await expect(verifyCloudDeploymentReleaseTargetsV1(input)).rejects.toThrow(); f.state.replacedRuntime = false;
     f.state.replacedService = true; await expect(verifyCloudDeploymentReleaseTargetsV1(input)).rejects.toThrow();
+    expect(f.requests.some(operation => /^(Create|Update|Delete|Put|Tag|Attach)/.test(operation))).toBe(false);
+  });
+  it('rejects declared inline runtime secret slots before hosted source admission', async () => {
+    const f = await nativeFixture();
+    const ready = await reconcileCloudInstallationV1({ ...f.context, installationId: intent.installationId, planDigest: f.records.get(intent.installationId)!.plan.digest });
+    const connection = cloudInstallationDeploymentConnectionV1(ready, f.driver);
+    const spec = { secrets: { INLINE_KEY: { ownership: 'delegated', environments: ['production'] } },
+      environments: { production: { hosting: { provider: 'ecs', region: 'us-west-2' }, services: { web: { workloadKind: 'web' } } } } } as any;
+    expect(() => f.driver.deployment!.assertSourcePlacement!(spec, connection)).toThrow();
     expect(f.requests.some(operation => /^(Create|Update|Delete|Put|Tag|Attach)/.test(operation))).toBe(false);
   });
   it('verifies native stack, distinct roles and final session purpose through serialized transports', async () => {
