@@ -4,7 +4,7 @@ import type { PlanAction } from '../plan/plan.types.js';
 export const operatorArtifactDeclarationSchema = z.object({
   provider: z.string().min(1).max(100),
   nativeScope: z.record(z.string().min(1).max(100), z.string().min(1).max(2048)),
-  artifacts: z.array(z.enum(['aws-collection-template-v1', 'aws-deployment-template-v1', 'holding-v1', 'backup-runner-v1'])).min(1).max(4),
+  artifacts: z.array(z.enum(['aws-collection-template-v1', 'aws-deployment-template-v1', 'holding-v1', 'backup-runner-v1', 'application-candidate-v1'])).min(1).max(4),
 }).strict().refine(value => new Set(value.artifacts).size === value.artifacts.length, 'Select each artifact once.');
 export function parseOperatorArtifactDeclarationV1(value: unknown) { return operatorArtifactDeclarationSchema.parse(value); }
 export const OPERATOR_ARTIFACT_OPERATION = 'operatorArtifactPublication';

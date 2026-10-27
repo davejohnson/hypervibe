@@ -48,7 +48,7 @@ const localIntentSchema = intentSchema.omit({ hostIdentity: true, purpose: true,
 }).strict();
 const artifactIntentSchema = localIntentSchema.omit({ execution: true, hostingProvider: true }).extend({
   execution: z.object({ kind: z.literal('operator-artifact-publisher'), authentication: z.enum(['aws-session', 'google-user-adc']) }).strict(),
-  artifactProvider: text, artifacts: z.array(z.enum(['aws-collection-template-v1', 'aws-deployment-template-v1', 'holding-v1', 'backup-runner-v1'])).min(1).max(4),
+  artifactProvider: text, artifacts: z.array(z.enum(['aws-collection-template-v1', 'aws-deployment-template-v1', 'holding-v1', 'backup-runner-v1', 'application-candidate-v1'])).min(1).max(4),
 }).strict();
 
 function localIntent(intent: CloudInstallationExecutableIntent): intent is LocalCloudScopePreparationIntent {

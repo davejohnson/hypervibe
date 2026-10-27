@@ -1,6 +1,6 @@
 # Reviewed operator artifact publication
 
-Connect Cloud consumes immutable public operator assets. Verifying an already
+Connect Cloud consumes immutable operator assets and separately reviewed private application candidates. Verifying an already
 published URL does not prepare a new operator's target or publish the exact
 packaged templates and images. A new operator with no templates or holding image
 is the concrete counterexample to treating verify-only paths as onboarding.
@@ -18,14 +18,15 @@ ADC callbacks. It has no hosted identity and cannot enter hosted factories.
 | Publication provider | Artifacts and target | Native authority and recovery |
 | --- | --- | --- |
 | S3 | Exact packaged AWS collection/deployment JSON templates; operator-owned versioned bucket | Explicit CloudFormation target stack, retained StackId/request token/resources; conditional object creation; exact non-null VersionId plus SHA-256; separate anonymous GetObjectVersion policy for exact keys and versions, no bucket listing |
-| Cloud Run / Artifact Registry | Reviewed packaged holding and backup helper images; separately prepared public operator repository | Exact project/repository lifetime; transient user ADC; tested image identity and packaged provenance; immutable registry digest receipt verified anonymously |
+| Cloud Run / Artifact Registry | Packaged public holding/backup helpers, or an explicitly selected private application candidate in the already prepared `hypervibe` repository | Exact project/repository lifetime; transient user ADC; immutable registry digest verified against the reviewed local configuration; anonymous reads only for public helpers |
 | Azure Container Apps / ACR | Unsupported publisher here | Consumes the reviewed public operator image; no implicit ACR setup |
 | ECS / ECR | Unsupported publisher here | Uses S3 templates; no implicit ECR setup |
 | Railway, Fly, DigitalOcean, Vercel | Unsupported publisher here | No emulation or inherited publication capability |
 
-Only the two packaged AWS templates and the holding/backup helper images are in
-scope. This is not arbitrary file upload, a generic image build service or a
-replacement for existing release publication. Image preparation reuses the
+The two packaged AWS templates and holding/backup helpers retain their existing
+publication contract. The optional private candidate extension below publishes
+one clean committed application snapshot; it does not create a registry, grant
+IAM access, replace managed CI or perform a deployment. Image preparation reuses the
 packaged helper's restore smoke and source/image identity checks. A publication
 receipt must distinguish local preparation, provider acknowledgment and verified
 anonymous immutable content. Unknown outcomes require readback; no blind replay.
@@ -163,3 +164,102 @@ and late-failure checks. Its archive SHA-256 was
 that packaged dependency installation and helper execution work for those bytes;
 a final changed package requires its own build/smoke receipt. It is not evidence
 of a live GAR push, cloud download or publication approval.
+
+
+## Private application candidates
+
+The original app can publish its reviewed candidate through the same
+`hv_spec` → `hv_plan` → `hv_apply` lifecycle without changing its repository binding,
+merging an unfinished feature or replacing the remote default branch. The local
+candidate checkout must be clean, have the exact canonical origin of the app,
+and have the selected full commit checked out. A local commit is not evidence
+that this candidate was pushed to the code host.
+
+```json
+{
+  "operatorArtifacts": {
+    "candidate": {
+      "provider": "cloudrun",
+      "artifacts": ["application-candidate-v1"],
+      "nativeScope": {
+        "scopeKind": "gar-private-candidate-publication-v1",
+        "projectId": "operator-project",
+        "region": "us-central1",
+        "imageName": "operator-candidate",
+        "sourceDirectory": "/absolute/path/to/clean-candidate",
+        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",
+        "packageReadAuthentication": "github-package-read"
+      }
+    }
+  }
+}
+```
+
+This initial private publisher supports an owned Google project with no parent.
+It verifies the original project lifetime and creation markers, the private
+repository lifetime and original installation/attempt ownership, and both project
+and repository IAM reads. Public principals or unknown policy reads block
+publication. Organization/folder ancestors are explicitly unsupported here until
+their inherited authority can be verified. All other named hosting publishers
+(ECS/ECR, Azure Container Apps/ACR, Railway, Fly, DigitalOcean and Vercel) reject
+this candidate kind; existing deployment and public helper capabilities are
+unchanged. Historical bindings without the private repository ownership proof
+must complete a separately reviewed binding repair from their retained journals.
+The publisher cannot infer ownership from a repository name.
+
+Preparation archives only the selected Git commit. It verifies every archived
+blob against Git, rejects symlinks/submodules and private dotenv/config files,
+and hashes sorted file bytes/modes, the root Dockerfile and package lock. Ignored
+local secrets and Git metadata never enter the build context. The package token
+comes only from an exact verified repository connection's `packageReadToken`
+role; management tokens and owner/global fallback are not accepted for this build.
+
+The BuildKit secret is a private temporary file outside that context. A unique
+owned `docker-container` builder has bounded CPU/memory and no shared-cache
+fallback. The final image must be linux/amd64 and nonroot. All exported image
+entries (including gzip layers), image configuration and exported final filesystem
+are scanned for the exact credential before publication becomes reviewable.
+Failed/uncertain builds clean their exact owned image and builder/cache; a cleanup
+failure preserves a value-free recovery record and blocks publication. Successful
+images remain available for the later confirmed push after their builder is
+removed. These checks do not claim protection against malicious source making
+network requests or transforming a token: selecting the source commit is code
+execution authority.
+
+A single confirmed push targets a new per-attempt tag in the existing private
+repository. It creates no registry, IAM binding or workload. Recovery performs
+readback only, including after restart or removal of the declaration. The final
+receipt records the registry manifest digest separately from the local Docker
+configuration ID and compares exact source/image provenance using authenticated
+pull. Deploying that immutable image is another separately reviewed lifecycle
+step; successful publication is not application readiness.
+
+Independent evidence includes [Docker secret mounts](https://docs.docker.com/build/building/secrets/),
+[Docker's dedicated container builder and cache semantics](https://docs.docker.com/build/builders/drivers/docker-container/),
+[builder removal options](https://docs.docker.com/reference/cli/docker/buildx/rm/),
+and [GAR authentication and push/pull contracts](https://docs.cloud.google.com/artifact-registry/docs/docker/pushing-and-pulling).
+Docker's CLI plugin discovery source also explains why an isolated Docker config
+must explicitly retain the standard plugin location without copying registry
+credentials: the first actual local smoke failed at `docker buildx` when that
+location was omitted.
+
+Observed regressions before implementation: seven new candidate publication
+cases rejected the unknown actor kind; four builder cases rejected preparation
+before they could exercise exact source/secret custody; the exact-repository
+credential test incorrectly selected an owner wildcard token; and five cache
+cleanup cases exposed the absence of an isolated owned builder. These normal
+`npm test` cases now exercise real SQLite, Git archive/blob checks, tar/gzip
+scanning, serialized native transport and Docker command boundaries. Additional
+opt-in local Docker smoke exercises actual BuildKit and export/cleanup behavior.
+The committed acceptance workflow and desired required-check spec invoke
+`npm test` and `npm run typecheck`; this file does not establish live branch
+protection, GAR compatibility or provider publication approval.
+
+
+The local synthetic Docker boundary passed both actual cases: a clean BuildKit
+secret-mount build with full image/final-filesystem scanning, and a deliberately
+copied synthetic credential rejected before publication with the exact resulting
+image, builder container and cache volume verified absent. No GAR or other cloud
+calls were made. Two additional failing boundary cases showed that a numeric
+root-equivalent `USER 00` and a five-GiB image were initially accepted; the builder
+now requires a valid nonroot user and a bounded native image size before export.

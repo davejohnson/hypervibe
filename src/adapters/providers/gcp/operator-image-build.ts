@@ -1,3 +1,4 @@
+import { prepareApplicationCandidate } from './application-candidate-build.js';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -62,6 +63,7 @@ export function isolatedDockerEnvironment(directory: string): NodeJS.ProcessEnv 
 /** Build and smoke only. No registry login, push, cloud API or publication occurs. */
 export async function prepareOperatorImages(nativeScope: Record<string, string>, artifacts: string[], command: OperatorCommand = runOperatorCommand,
   root = operatorPackageRoot()): Promise<Record<string, string>> {
+  if (artifacts.length === 1 && artifacts[0] === 'application-candidate-v1') return prepareApplicationCandidate(nativeScope, command);
   if (!artifacts.length || artifacts.some(kind => !['holding-v1', 'backup-runner-v1'].includes(kind))) throw new Error('Unsupported operator image kind.');
   const directory = mkdtempSync(path.join(tmpdir(), 'hypervibe-artifact-build-'));
   const signal = AbortSignal.timeout(1_200_000);
