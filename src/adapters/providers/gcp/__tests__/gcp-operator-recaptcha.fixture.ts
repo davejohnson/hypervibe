@@ -4,7 +4,7 @@
 // values are copied so the actual journal's identity checks can execute.
 export function recaptchaNativeFixture(options: { enabled?: boolean; lost?: 'api' | 'key'; denied?: boolean; deniedCreate?: boolean;
   omitDefaults?: boolean; invisible?: boolean; partial?: boolean; wrongProject?: boolean; secretFailure?: boolean; createStatus?: number; wrongKeyConfig?: boolean;
-  projectId?: string; hostname?: string } = {}) {
+  projectId?: string; hostname?: string; legacySecret?: string } = {}) {
   const projectId = options.projectId ?? 'owned-project', projectNumber = '123456789012', keyName = `projects/${projectNumber}/keys/reconstructed-new-site-key`,
     apiName = `projects/${projectNumber}/services/recaptchaenterprise.googleapis.com`;
   let enabled = options.enabled ?? true, key: any;
@@ -41,7 +41,7 @@ export function recaptchaNativeFixture(options: { enabled?: boolean; lost?: 'api
     if (u.pathname === `/v1/${keyName}` && method === 'GET') return key && !options.invisible ? Response.json(key) : Response.json({}, { status: 404 });
     if (u.pathname === `/v1/${keyName}:retrieveLegacySecretKey` && method === 'GET') {
       if (options.secretFailure) return Response.json({ legacySecretKey: 'synthetic-private-captcha-secret' }, { status: 503 });
-      return Response.json({ legacySecretKey: 'synthetic-private-captcha-secret' });
+      return Response.json({ legacySecretKey: options.legacySecret ?? 'synthetic-private-captcha-secret' });
     }
     throw new Error(`Unexpected test transport ${method} ${u.pathname}`);
   };

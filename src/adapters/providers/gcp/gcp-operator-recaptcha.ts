@@ -6,6 +6,7 @@ import { CloudInstallationBoundaryError, type CloudInstallationAction, type Clou
   type CloudInstallationEvidence, type CloudInstallationProviderContext, type OperatorApplicationIntent } from '../../../domain/ports/cloud-installation.port.js';
 import type { OperatorApplicationCapability } from '../../../domain/ports/operator-application.port.js';
 import { OperatorCredentialCustody } from '../../../domain/services/operator-credential-custody.js';
+import { operatorOutputReceipts, withOperatorOutputDelivery } from '../../../domain/services/operator-output-delivery.js';
 import { parseCloudInstallationRecordV1 } from '../../../domain/services/cloud-installation-runtime.js';
 import { DestinationBoundaryError, DestinationBudget, destinationJson } from '../secret-destination-http.js';
 import { GcpLocalDefaultAuthentication } from './gcp-local-default-authentication.js';
@@ -200,7 +201,8 @@ export function createGcpOperatorRecaptchaDriver(options: { fetch?: typeof fetch
         if (context.action.id !== n.captureAction || !e || !options.custody || captured(context, e)) fail('not_installed');
         await context.beforeMutation();
         const value = await call(`https://${API}/v1/${e.resources[0].id}:retrieveLegacySecretKey`);
-        const privateValue = z.string().min(1).max(65_536).regex(/^[A-Za-z0-9_-]+$/).parse(value.legacySecretKey);
+        // The published legacy-secret field is opaque text, not a documented token grammar.
+        const privateValue = z.string().min(1).max(65_536).refine(value => !value.includes('\0')).parse(value.legacySecretKey);
         started = true;
         if (!options.custody.storeCredentials(null, { 'secret-key': privateValue }, custodyIdentity(e))) fail('not_converged');
         return { state: 'acknowledged' as const, evidence: captured(context, e)! };
@@ -211,24 +213,30 @@ export function createGcpOperatorRecaptchaDriver(options: { fetch?: typeof fetch
 }
 
 export function createGcpOperatorRecaptchaCapability(): OperatorApplicationCapability {
-  return { schemaVersion: 1,
+  const dependencies = (intent: Intent) => [settings(intent).captureAction];
+  return { schemaVersion: 1, privateOutputRoles: ['secret-key'],
     parseDeclaration({ name, declaration, origin, runtimeIdentity }) {
       const n = z.object({ projectId, projectNumber: number }).strict().parse(declaration.nativeScope);
       if (declaration.provider !== PROVIDER || declaration.profile !== 'hypercloud-connect-v1' || runtimeIdentity.kind !== 'gcp-service-account'
         || runtimeIdentity.projectId !== n.projectId || runtimeIdentity.projectNumber !== n.projectNumber) fail();
       return scopeSchema.parse({ ...n, name, origin });
-    }, parseRecord: value => parseCloudInstallationRecordV1(value, createGcpOperatorRecaptchaDriver()),
+    }, parseRecord: value => parseCloudInstallationRecordV1(value, withOperatorOutputDelivery(createGcpOperatorRecaptchaDriver(), undefined, dependencies)),
     async create(value, context) {
-      const n = scopeSchema.parse(value), auth = new GcpLocalDefaultAuthentication(n.projectId); await auth.initialize();
-      return { driver: createGcpOperatorRecaptchaDriver({ ...(context ? { custody: new OperatorCredentialCustody({ ...context, provider: PROVIDER }) } : {}) }),
+      if (!context) fail('not_installed');
+      const n = scopeSchema.parse(value), custody = new OperatorCredentialCustody({ ...context, provider: PROVIDER });
+      const auth = new GcpLocalDefaultAuthentication(n.projectId); await auth.initialize();
+      return { driver: withOperatorOutputDelivery(createGcpOperatorRecaptchaDriver({ custody }), context, dependencies),
         authentication: { kind: 'operator-application', administrator: { async getAccessToken(scope, signal) {
           if (scope !== 'https://www.googleapis.com/auth/cloud-platform' || signal.aborted) fail('authorization_expired'); return auth.token();
         } } } };
     }, receipts(record) {
       const n = settings(record.intent); if (record.status !== 'scope-ready') fail('not_converged');
       const e = parseEvidence(record.completed[n.keyAction], record.intent); parseEvidence(record.completed[n.captureAction], record.intent);
+      const delivered = operatorOutputReceipts(record.completed, record.intent);
+      if (record.intent.outputs?.destinations.length !== 1 || record.intent.outputs.destinations[0].role !== 'secret-key'
+        || delivered.length !== 1 || delivered[0].role !== 'secret-key') fail('not_converged');
       return [{ provider: PROVIDER, ...custodyIdentity(e), projectId: n.projectId, projectNumber: n.projectNumber, integrationType: 'SCORE',
-        privateCredential: 'encrypted-custody', delivery: 'separately-required', browserVerification: 'unverified' }];
+        privateCredential: 'delivered', browserVerification: 'unverified' }, ...delivered];
     },
   };
 }

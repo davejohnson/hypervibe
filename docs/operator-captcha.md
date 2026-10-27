@@ -44,6 +44,11 @@ again. Failures before custody commit do not authorize an unreviewed retrieval.
 
 Native secret delivery remains a separate shared action and must bind the
 declared output role `secret-key` to its exact reviewed secret-manager destination.
+Declare `outputs: { "secret-key": "RECAPTCHA_V3_SECRET_KEY" }` together with that
+environment's delegated secret slot and native destination. The ordinary planner
+prepares its empty container first. Registration remains incomplete until the
+separately confirmed delivery has an immutable reference; native capture alone
+cannot produce a delivered receipt.
 The public site-key ID can appear in a receipt; the legacy secret cannot. Hypervibe
 temporarily decrypts it only for its reviewed delivery. Do not use an operator
 management token in application runtime.
@@ -70,12 +75,18 @@ had the needed IAM permissions but its CAPTCHA API was disabled. The initial
 actual SpecStore test failed because `google-recaptcha` was not admitted. A second
 RED through the installation kernel rejected the explicit API prerequisite.
 The declaration and scope action now pass in the ordinary application boundary.
+Additional observed RED/GREEN cases removed an undocumented alphabet restriction
+from the opaque legacy-secret string and rejected execution without exact private
+custody context before reading local credentials. A further RED/GREEN case blocks
+a delivered claim when only native capture completed and no immutable reference
+exists.
 
 Reconstructed serialized native responses exercise strict key configuration,
 ProtoJSON omitted false defaults, existing-key preservation, denied reads,
 partial inventory, lost acknowledgements, no replay, changed identities and
 private error handling. Actual SQLite tests cover the application plan/apply/status
-boundary and encrypted credential custody. These are documentation-based contract
+boundary, empty-container prerequisite, private native delivery, reference readback
+and erasure after delivery. These are documentation-based contract
 checks, not a full provider schema validator or successful native creation,
 delivery, browser scoring, or cleanup evidence. All tests run under ordinary
 `npm test`; committed acceptance runs that command and typecheck and desired

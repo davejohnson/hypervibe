@@ -9,7 +9,8 @@ import { OperatorCredentialCustody } from '../../../../domain/services/operator-
 import { canonicalJsonSha256 } from '../../../../lib/canonical-json.js';
 import { applyCloudInstallationV1, planCloudInstallationV1, reconcileCloudInstallationV1, reviewCloudInstallationRetryV1 } from '../../../../domain/services/cloud-installation-runtime.js';
 import type { OperatorApplicationIntent, CloudInstallationRecord } from '../../../../domain/ports/cloud-installation.port.js';
-import { createGcpOperatorRecaptchaDriver } from '../gcp-operator-recaptcha.js';
+import { createGcpOperatorRecaptchaDriver, createGcpOperatorRecaptchaCapability } from '../gcp-operator-recaptcha.js';
+import { GcpLocalDefaultAuthentication } from '../gcp-local-default-authentication.js';
 import { recaptchaNativeFixture } from './gcp-operator-recaptcha.fixture.js';
 
 describe('isolated Google CAPTCHA allocation and private capture', () => {
@@ -110,5 +111,23 @@ describe('isolated Google CAPTCHA allocation and private capture', () => {
     const record = await applyCloudInstallationV1({ ...target, confirmActions: f.record().plan.actions.map(a => a.id) });
     expect(record.status).not.toBe('scope-ready'); expect(f.custody.read()).toBeNull();
     expect(JSON.stringify(record)).not.toMatch(/synthetic-private-captcha-secret|synthetic-transient-google-token/);
+  });
+  it('treats the documented legacy secret string as opaque instead of inventing a token grammar', async () => {
+    const secret = 'synthetic:opaque/provider+credential=value', f = fixture({ legacySecret: secret }), target = await f.target();
+    const record = await applyCloudInstallationV1({ ...target, confirmActions: f.record().plan.actions.map(a => a.id) });
+    expect(record.status).toBe('scope-ready'); expect(f.custody.read()?.state.credentials?.['secret-key']).toBe(secret);
+    expect(JSON.stringify(record)).not.toContain(secret);
+  });
+  it('refuses a live capability without exact private custody context before reading credentials', async () => {
+    const auth = vi.spyOn(GcpLocalDefaultAuthentication.prototype, 'initialize').mockResolvedValue();
+    await expect(createGcpOperatorRecaptchaCapability().create({ projectId: 'owned-project', projectNumber: '123456789012', name: 'captcha', origin: 'https://operator.example.test' }))
+      .rejects.toThrow();
+    expect(auth).not.toHaveBeenCalled();
+  });
+  it('does not report native capture as delivered without an immutable output receipt', async () => {
+    const f = fixture(), target = await f.target();
+    const nativeOnly = await applyCloudInstallationV1({ ...target, confirmActions: f.record().plan.actions.map(a => a.id) });
+    expect(nativeOnly.status).toBe('scope-ready');
+    expect(() => createGcpOperatorRecaptchaCapability().receipts(nativeOnly)).toThrow();
   });
 });
