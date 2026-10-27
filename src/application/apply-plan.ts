@@ -2,6 +2,7 @@ import { applyCredentialLifecycle, pendingCredentialUpdate } from '../domain/ser
 import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from '../domain/services/database-credential-aliases.service.js';
 import { applyDatabaseFreshInitialization } from '../domain/services/database-fresh-initialization.service.js';
 import { hasPendingDatabaseInitialization } from '../domain/plan/database-initialization.contract.js';
+import { databaseSeedGeneration } from '../domain/services/database-seed-generation.js';
 import { applyScheduleActivation } from '../domain/services/schedule-activation.service.js';
 import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js';
 import { applyApiPolicy, planApiPolicy } from '../domain/services/api-policy.js';
@@ -4944,6 +4945,10 @@ export async function applyDatabaseSeed(
     };
   }
 
+  const databaseGeneration = databaseSeedGeneration(component, environment.platformBindings);
+  if (databaseGeneration === null || action.metadata?.databaseGeneration !== databaseGeneration) {
+    return { success: false, status: 'blocked', message: 'The database generation changed or is unverified. Re-plan before running the seed command.' };
+  }
   const result = await runEnvironmentTask({
     project,
     environment,
@@ -4973,12 +4978,19 @@ export async function applyDatabaseSeed(
     };
   }
 
+  const currentComponent = ctx.repos.components.findById(component.id);
+  const currentEnvironment = ctx.repos.environments.findById(environment.id);
+  if (!currentComponent || !currentEnvironment || currentComponent.externalId !== component.externalId
+    || databaseSeedGeneration(currentComponent, currentEnvironment.platformBindings) !== databaseGeneration) {
+    return { success: false, status: 'blocked', message: 'The database generation changed during the seed task. Its outcome was not recorded as current seed completion.' };
+  }
   const seededAt = new Date().toISOString();
   ctx.repos.components.updateBindings(component.id, {
     seed: {
       commandHash,
       seededAt,
       source: 'hv_apply',
+      ...(databaseGeneration ? { databaseGeneration } : {}),
     },
   });
 
