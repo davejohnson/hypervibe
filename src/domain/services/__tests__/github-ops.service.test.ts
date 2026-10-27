@@ -25,6 +25,7 @@ import type { BranchDeployTarget } from '../../ports/ci-deploy.port.js';
 import { MANAGED_CI_RELEASE_EVIDENCE_VERSION } from '../managed-ci-evidence.js';
 import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
 import { iosBuildContractFingerprint } from '../ios-release-evidence.js';
+import { getManagedIosReleaseRuntimeBase64 } from '../ios-release-template.service.js';
 import {
   extractGitHubScript,
   extractWorkflowShell,
@@ -1373,31 +1374,66 @@ describe('github tools', () => {
       'core',
       extractGitHubScript(workflow.content, 'Write server release evidence')
     );
-    await expect(writeServerEvidence(
-      releaseEvidenceValidatorRequire(validator, {
-        writeFileSync: (_filename, content) => { producedEvidence = String(content); },
-      }),
-      {
-        env: {
-          HYPERVIBE_RELEASE_VALIDATOR_PATH: validator.validatorPath,
-          HYPERVIBE_RELEASE_VALIDATOR_SHA256: validator.validatorSha256,
-          HYPERVIBE_RELEASE_SHA: releaseSha,
-          HYPERVIBE_RELEASE_PROVIDER: 'railway',
-          HYPERVIBE_RELEASE_ENVIRONMENT: 'development',
-          HYPERVIBE_RELEASE_SERVICES: JSON.stringify(target.serviceNames),
-          HYPERVIBE_RELEASE_TARGET_SCOPE: JSON.stringify(target.releaseTarget!.scope),
-          HYPERVIBE_RELEASE_RESOURCES: JSON.stringify(target.releaseTarget!.resources),
-          HYPERVIBE_RELEASE_BINDINGS_FINGERPRINT: target.releaseTarget!.bindingsFingerprint,
-          HYPERVIBE_RELEASE_PROGRAM_FINGERPRINT: target.programFingerprint!,
-          HYPERVIBE_RELEASE_DEPLOYMENT_CONTRACT_FINGERPRINT: 'b'.repeat(64),
-          HYPERVIBE_RELEASE_REQUIRES_IMMUTABLE_IMAGE: 'true',
-          HYPERVIBE_RELEASE_IMAGE_URI: imageUri,
-          GITHUB_REPOSITORY: 'owner/repo',
+    const produceEvidence = async (credentialEnvironment: Record<string, string> = {}) => {
+      await writeServerEvidence(
+        releaseEvidenceValidatorRequire(validator, {
+          writeFileSync: (_filename, content) => { producedEvidence = String(content); },
+        }),
+        {
+          env: {
+            HYPERVIBE_RELEASE_VALIDATOR_PATH: validator.validatorPath,
+            HYPERVIBE_RELEASE_VALIDATOR_SHA256: validator.validatorSha256,
+            HYPERVIBE_RELEASE_SHA: releaseSha,
+            HYPERVIBE_RELEASE_PROVIDER: 'railway',
+            HYPERVIBE_RELEASE_ENVIRONMENT: 'development',
+            HYPERVIBE_RELEASE_SERVICES: JSON.stringify(target.serviceNames),
+            HYPERVIBE_RELEASE_TARGET_SCOPE: JSON.stringify(target.releaseTarget!.scope),
+            HYPERVIBE_RELEASE_RESOURCES: JSON.stringify(target.releaseTarget!.resources),
+            HYPERVIBE_RELEASE_BINDINGS_FINGERPRINT: target.releaseTarget!.bindingsFingerprint,
+            HYPERVIBE_RELEASE_PROGRAM_FINGERPRINT: target.programFingerprint!,
+            HYPERVIBE_RELEASE_DEPLOYMENT_CONTRACT_FINGERPRINT: 'b'.repeat(64),
+            HYPERVIBE_RELEASE_REQUIRES_IMMUTABLE_IMAGE: 'true',
+            HYPERVIBE_RELEASE_IMAGE_URI: imageUri,
+            // The generated workflow resolves these defaults even on a push with
+            // no credential operation. Omitting them hides producer/consumer drift.
+            HYPERVIBE_CREDENTIAL_OPERATIONS: '{}',
+            HYPERVIBE_CREDENTIAL_DEPLOYMENTS: '[]',
+            GITHUB_REPOSITORY: 'owner/repo',
+            ...credentialEnvironment,
+          },
         },
-      },
-      {}
-    )).resolves.toBeUndefined();
-    const evidence = JSON.parse(producedEvidence);
+        {}
+      );
+      return JSON.parse(producedEvidence);
+    };
+    const evidence = await produceEvidence();
+    expect(evidence.credentialActivation).toEqual({ version: 1, operations: [] });
+    const resource = target.releaseTarget!.resources[0]!;
+    const activatedEvidence = await produceEvidence({
+      HYPERVIBE_CREDENTIAL_OPERATIONS: JSON.stringify({ [resource.logicalName]: {
+        serviceId: resource.providerResourceId, operationId: 'accepted-operation', configurationVersion: 42,
+      } }),
+      HYPERVIBE_CREDENTIAL_DEPLOYMENTS: JSON.stringify([{
+        serviceId: resource.providerResourceId, deploymentIds: ['deployment-new'], configurationVersion: 42,
+      }]),
+    });
+    expect(activatedEvidence.credentialActivation.operations).toHaveLength(1);
+    const legacyEvidence = { ...evidence };
+    delete legacyEvidence.credentialActivation;
+    const sourceRuntime = new URL('../../../../templates/ios/hypervibe-ios-release.mjs', import.meta.url).href;
+    const emittedRuntime = 'data:text/javascript;base64,' + getManagedIosReleaseRuntimeBase64();
+    for (const runtimeUrl of [sourceRuntime, emittedRuntime]) {
+      const runtime = await import(runtimeUrl);
+      for (const candidate of [legacyEvidence, evidence, activatedEvidence]) {
+        const manifest = runtime.buildReleaseManifest({
+          environment: 'development', repository: 'owner/repo', releaseSha,
+          serverEvidenceVersion: MANAGED_CI_RELEASE_EVIDENCE_VERSION,
+          serverEvidenceSha256: 'f'.repeat(64),
+        }, candidate, { id: 'app-1' }, { id: 'build-1' }, new Date().toISOString());
+        expect(manifest.services).toEqual(target.releaseTarget!.resources.map(resource => resource.logicalName));
+      }
+    }
+
     const releaseDocument = parseDocument(releaseWorkflow, { uniqueKeys: true });
     expect(releaseDocument.errors).toEqual([]);
     const parsedRelease = releaseDocument.toJS() as {
@@ -1539,12 +1575,36 @@ describe('github tools', () => {
     };
 
     expect(runEvidenceGate(evidence, 'accepted')).toBe(`sha=${releaseSha}\n`);
+    expect(runEvidenceGate(activatedEvidence, 'activated')).toBe(`sha=${releaseSha}\n`);
+    expect(runEvidenceGate(legacyEvidence, 'legacy')).toBe(`sha=${releaseSha}\n`);
+    const operation = activatedEvidence.credentialActivation.operations[0];
+    for (const [index, activation] of [
+      null,
+      { version: 2, operations: [] },
+      { version: 1, operations: [], unexpected: true },
+      { version: 1, operations: {} },
+      { version: 1, operations: [null] },
+      { version: 1, operations: [{ ...operation, serviceId: 'other-service' }] },
+      { version: 1, operations: [{ ...operation, service: 'other-logical-service' }] },
+      { version: 1, operations: [{ ...operation, configurationVersion: -1 }] },
+      { version: 1, operations: [{ ...operation, deploymentIds: [] }] },
+      { version: 1, operations: [{ ...operation, deploymentIds: ['duplicate', 'duplicate'] }] },
+      { version: 1, operations: [{ ...operation, operationId: 'invalid identity' }] },
+      { version: 1, operations: [operation, operation] },
+    ].entries()) {
+      expect(() => runEvidenceGate({ ...evidence, credentialActivation: activation }, `invalid-activation-${index}`))
+        .toThrow(/Credential activation/);
+      expect(fs.existsSync(path.join(tempDir, `ios-gate-output-invalid-activation-${index}.txt`))).toBe(false);
+    }
+
     expect(runEvidenceGate({
       ...evidence,
       deploymentContractFingerprint: 'e'.repeat(64),
     }, 'new-contract')).toBe(`sha=${releaseSha}\n`);
 
     const mismatches = [
+      { ...evidence, unexpectedReleaseField: true },
+      { ...evidence, version: 3 },
       { ...evidence, provider: 'cloudrun' },
       { ...evidence, programFingerprint: 'd'.repeat(64) },
       { ...evidence, target: { ...evidence.target, scope: { providerProjectId: 'other-project' } } },

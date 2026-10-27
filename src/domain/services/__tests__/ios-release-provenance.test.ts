@@ -8,6 +8,7 @@ import path from 'node:path';
 import { IOS_RELEASE_EVIDENCE_VERSION } from '../ios-release-evidence.js';
 import { MANAGED_CI_RELEASE_EVIDENCE_VERSION } from '../managed-ci-evidence.js';
 import { buildIosReleaseWorkflow } from '../ios-release-workflow.service.js';
+import { getManagedIosReleaseRuntime } from '../ios-release-template.service.js';
 
 const runtimeUrl = new URL('../../../../templates/ios/hypervibe-ios-release.mjs', import.meta.url);
 const workflow = buildIosReleaseWorkflow({
@@ -191,6 +192,41 @@ describe.each(runtimes)('managed iOS release provenance: $name', ({ runtime }) =
     expect(existsSync(outputPath)).toBe(false);
   });
 
+  it.each([
+    { version: 1, operations: [] },
+    { version: 1, operations: [{ service: 'web', serviceId: 'web-1', operationId: 'operation-1', deploymentIds: ['deployment-1'], configurationVersion: 42 }] },
+  ])('accepts credential activation without weakening upload retry protection (%j)', async credentialActivation => {
+    const { evidencePath, outputPath, evidence } = setupRelease();
+    writeFileSync(evidencePath, JSON.stringify({
+      ...evidence,
+      target: { resources: [{ logicalName: 'web', providerResourceId: 'web-1' }] },
+      credentialActivation,
+    }));
+    const requests = stubAppStore();
+    await expect(runtime.main()).rejects.toThrow(/already exists.*provenance/);
+    expect(requests).toHaveLength(3);
+    expect(requests.every(({ method }) => method === 'GET')).toBe(true);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it.each([
+    null,
+    { version: 2, operations: [] },
+    { version: 1, operations: [{ service: 'web', serviceId: 'other-service', operationId: 'operation-1', deploymentIds: ['deployment-1'] }] },
+    { version: 1, operations: [{ service: 'web', serviceId: 'web-1', operationId: 'operation-1', deploymentIds: [] }] },
+  ])('rejects malformed credential activation before any App Store effects (%j)', async credentialActivation => {
+    const { evidencePath, outputPath, evidence } = setupRelease();
+    writeFileSync(evidencePath, JSON.stringify({
+      ...evidence,
+      target: { resources: [{ logicalName: 'web', providerResourceId: 'web-1' }] },
+      credentialActivation,
+    }));
+    const requests = stubAppStore();
+    await expect(runtime.main()).rejects.toThrow(/Credential activation/);
+    expect(requests).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
   it.each(['sha', 'version', 'invalid JSON'] as const)('validates server evidence (%s) before any App Store effects', async (invalid) => {
     const { evidencePath, outputPath, evidence } = setupRelease();
     if (invalid === 'sha') evidence.source.sha = 'a'.repeat(40);
@@ -362,7 +398,7 @@ globalThis.fetch = async input => {
     const line = readFileSync(environment.GITHUB_ENV!, 'utf8').trim();
     const separator = line.indexOf('=');
     environment[line.slice(0, separator)] = line.slice(separator + 1);
-    expect(readFileSync(environment.HYPERVIBE_MANAGED_RELEASE_RUNTIME!, 'utf8')).toBe(readFileSync(runtimeUrl, 'utf8'));
+    expect(readFileSync(environment.HYPERVIBE_MANAGED_RELEASE_RUNTIME!, 'utf8')).toBe(getManagedIosReleaseRuntime());
     const allocation = steps.find((step: any) => step.id === 'number');
     const result = spawnSync('bash', ['-eu', '-c', allocation.run], { encoding: 'utf8', cwd: directory, env: environment });
     expect(result.status, result.stderr).toBe(0);
