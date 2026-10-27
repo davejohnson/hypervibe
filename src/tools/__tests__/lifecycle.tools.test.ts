@@ -27,6 +27,11 @@ import { providerRegistry } from '../../domain/registry/provider.registry.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import { registerLifecycleTools } from '../lifecycle.tools.js';
 import { createToolContext } from '../../application/context.js';
+import { CommandRegistry } from '../../application/commands.js';
+import { runCli } from '../../interfaces/cli/run.js';
+import { databaseBootstrapRecoverySchema } from '../../domain/plan/database-bootstrap.contract.js';
+import { databaseInitializationAttemptSchema } from '../../domain/plan/database-initialization.contract.js';
+import { DATABASE_INITIALIZATION_AUTH_COMMAND_HASH } from '../../domain/services/database-initialization-program.js';
 import '../../application/providers.js';
 
 let tempDir: string;
@@ -79,7 +84,103 @@ async function makeFullClient() {
   };
 }
 
+function databaseRecoveryBinding(kind: 'bootstrap' | 'initialization', complete: boolean) {
+  const scope = { projectId: 'native-project', environmentId: 'native-production' };
+  const target = { provider: 'railway', externalId: 'database-1', providerScope: scope };
+  const fingerprint = 'a'.repeat(64), at = '2026-10-27T01:00:00.000Z';
+  if (kind === 'initialization') return { freshInitialization: databaseInitializationAttemptSchema.parse({
+    metadata: { operation: 'databaseFreshInitialize', componentId: 'database-component', intentId: 'fresh-once', target,
+      configurationFingerprint: fingerprint, bindingsFingerprint: fingerprint, environmentFingerprint: fingerprint },
+    inspectionEncrypted: 'synthetic-encrypted-review', startedAt: at,
+    progress: complete ? { phase: 'complete', storageId: 'new-volume', storageInstanceId: 'new-instance', deploymentId: 'db-deployment' }
+      : { phase: 'storage-attempted' },
+    ...(complete ? { storageBindings: { volumeId: 'new-volume', volumeInstanceId: 'new-instance' }, completed: {
+      intentId: 'fresh-once', target, storageId: 'new-volume', storageInstanceId: 'new-instance', deploymentId: 'db-deployment',
+      configurationFingerprint: fingerprint, verifiedAt: at,
+    } } : {}),
+  }) };
+  const executionIds = { authenticate: '11111111-1111-4111-8111-111111111111', migrate: '22222222-2222-4222-8222-222222222222' };
+  const checkpoint = (mode: 'authenticate' | 'migrate') => ({ version: 1, authorityHash: fingerprint,
+    phase: complete ? 'complete' : 'deployed', taskServiceId: `task-${mode}`, taskInstanceId: `instance-${mode}`, deploymentId: `deployment-${mode}`,
+    ...(complete ? { terminal: { status: 'succeeded', exitCode: 0, result: { version: 1, executionId: executionIds[mode], mode,
+      commandHash: mode === 'authenticate' ? DATABASE_INITIALIZATION_AUTH_COMMAND_HASH : fingerprint,
+      authentication: 'authenticated', migration: mode === 'authenticate' ? 'unchecked' : 'completed',
+      ...(mode === 'migrate' ? { exitCode: 0 } : {}),
+    } } } : {}),
+  });
+  return { databaseBootstrap: databaseBootstrapRecoverySchema.parse({ version: 1,
+    base: { componentId: 'database-component', generationHash: fingerprint, intentId: 'fresh-once', hostingProvider: 'railway',
+      service: 'web', image: `ghcr.io/example/app@sha256:${fingerprint}`, migrationCommandHash: fingerprint,
+      source: { provider: 'railway', primaryExternalId: target.externalId, providerScope: scope,
+        resourceIdentity: { volumeId: 'new-volume', volumeInstanceId: 'new-instance' } },
+      databaseDeploymentId: 'db-deployment', sourceServiceId: 'web-1', sourceInstanceId: 'web-instance', environmentFingerprint: fingerprint,
+      variableReferences: [{ sourceServiceId: target.externalId, variableName: 'DATABASE_URL', targetName: 'DATABASE_URL' }], approvedVariables: {},
+    }, inspectionEncrypted: 'synthetic-encrypted-review', authenticationExecutionId: executionIds.authenticate,
+    migrationExecutionId: executionIds.migrate, authentication: checkpoint('authenticate'),
+    ...(complete ? { migration: checkpoint('migrate'), authenticationVerifiedAt: at, consumedAt: at } : {}),
+  }) };
+}
+
+function makeCliLifecycleClient() {
+  const registry = new CommandRegistry();
+  registerLifecycleTools(registry, createToolContext());
+  return {
+    async call(_name: string, args: Record<string, unknown>) {
+      let stdout = '';
+      await runCli(['destroy', '--input', '-', '--json'], { registry, initialize: false, io: {
+        writeOut: value => { stdout += value; }, writeErr: () => {}, readStdin: async () => JSON.stringify(args),
+        confirm: async () => false, stdinIsTTY: false,
+      } });
+      return JSON.parse(stdout) as Record<string, any>;
+    },
+    async close() {},
+  };
+}
+
 describe('hv_destroy', () => {
+  describe.each(['mcp', 'cli'] as const)('%s database recovery preservation', transport => {
+    it.each(['bootstrap', 'initialization'] as const)('preserves pending and malformed %s records across every local deletion scope', async kind => {
+      const client = transport === 'mcp' ? await makeClient() : makeCliLifecycleClient();
+      try {
+        for (const malformed of [false, true]) {
+          const project = new ProjectRepository().create({ name: `database-recovery-${kind}-${malformed}` });
+          const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'production', platformBindings: {
+            services: { web: { serviceId: 'web-1' } },
+          } });
+          const service = new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {} });
+          const bindings = malformed ? kind === 'bootstrap' ? { databaseBootstrap: { consumedAt: '2026-10-27T01:00:00.000Z' } }
+            : { freshInitialization: { progress: { phase: 'complete' } } } : databaseRecoveryBinding(kind, false);
+          const component = new ComponentRepository().create({ environmentId: environment.id, type: 'postgres', externalId: 'database-1', bindings });
+          for (const selector of [{ scope: 'service', name: 'web' }, { scope: 'environment', env: 'production' }, { scope: 'project' }]) {
+            const result = await client.call('hv_destroy', { project: project.name, ...selector, confirm: true });
+            expect(result.ok).toBe(false);
+            expect(result.error.code).toBe('VALIDATION');
+            expect(result.error.message).toMatch(/recovery/i);
+          }
+          expect(new ServiceRepository().findById(service.id)).not.toBeNull();
+          expect(new EnvironmentRepository().findById(environment.id)?.platformBindings).toEqual(environment.platformBindings);
+          expect(new ComponentRepository().findById(component.id)?.bindings).toEqual(bindings);
+          expect(new ProjectRepository().findById(project.id)).not.toBeNull();
+        }
+      } finally { await client.close(); }
+    });
+
+    it.each(['bootstrap', 'initialization'] as const)('keeps ordinary confirmed deletion after valid completed %s recovery', async kind => {
+      const project = new ProjectRepository().create({ name: `completed-${kind}` });
+      const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'production', platformBindings: { services: { web: { serviceId: 'web-1' } } } });
+      new ComponentRepository().create({ environmentId: environment.id, type: 'postgres', externalId: 'database-1', bindings: databaseRecoveryBinding(kind, true) });
+      new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {} });
+      const client = transport === 'mcp' ? await makeClient() : makeCliLifecycleClient();
+      try {
+        for (const selector of [{ scope: 'service', name: 'web' }, { scope: 'environment', env: 'production' }, { scope: 'project' }]) {
+          const preview = await client.call('hv_destroy', { project: project.name, ...selector });
+          expect(preview.error.code).toBe('CONFIRM_REQUIRED');
+          expect((await client.call('hv_destroy', { project: project.name, ...selector, confirm: true })).ok).toBe(true);
+        }
+      } finally { await client.close(); }
+    });
+  });
+
   it.each(['database', 'aliases', 'credential', 'rollout'])('preserves %s credential recovery during local project, environment and service deletion', async kind => {
     const project = new ProjectRepository().create({ name: `credential-delete-${kind}` });
     const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'production', platformBindings: {

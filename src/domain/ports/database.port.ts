@@ -209,6 +209,7 @@ export interface IDatabaseAdapter {
   readonly credentialLifecycle?: import('./database-credential.port.js').DatabaseCredentialLifecycle;
   readonly credentialAliases?: import('./database-credential-aliases.port.js').IDatabaseCredentialAliases;
   readonly dailyBackups?: import('./daily-backup.port.js').IDailyBackupPolicy<import('./daily-backup.port.js').DatabaseBackupTarget>;
+  readonly freshInitialization?: import('./database-fresh-initialization.port.js').IDatabaseFreshInitialization;
 
   /** Optional read-only metadata normalization; absence means unsupported. */
   observeRuntimeReferenceBinding?(

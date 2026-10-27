@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "reviewedAt": "2026-10-24",
+  "reviewedAt": "2026-10-26",
   "purpose": "Named database persistence design review. Native storage contracts, offline request conformance, backup coverage and live recovery are separate claims. No live certification is established by this matrix.",
   "providers": [
     {
@@ -23,7 +23,22 @@
         "https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/commands/deploy.rs"
       ],
       "runtimeReferenceBinding": "implemented",
-      "runtimeReferenceEvidence": "Exact scoped service variable names select the existing direct connection reference; only an absent local variable-name marker can be normalized through the isolated database-bindings stage. No credential values are persisted or fingerprinted."
+      "runtimeReferenceEvidence": "Exact scoped service variable names select the existing direct connection reference; only an absent local variable-name marker can be normalized through the isolated database-bindings stage. No credential values are persisted or fingerprinted.",
+      "freshInitializationRepair": {
+        "implementation": "implemented",
+        "prerequisites": "Explicit one-use discardExistingData intent naming the exact bound service and complete project/environment scope, exact action confirmation, proven absence of any attached or pending volume, supported stock PostgreSQL 16 source/default startup and unchanged private issuer configuration. Require nonempty initializer password; preserve documented effective username/database defaults and matching aliases privately. Existing volumes, replicas, custom initialization settings and uncertain reads block.",
+        "nativeOperation": "Additive PGDATA child-directory update with skipDeploys:true, volumeCreate for the exact project/environment/service and reviewed mount, then serviceInstanceDeployV2 for that same instance. Never create another service, delete old storage, replace the full variable map or create a public proxy.",
+        "completion": "Require acknowledged volume ID, exact scoped volume-instance ID and attachment readback, acknowledged deployment ID correlated to the same service/environment, terminal SUCCESS and fresh mount/PGDATA readback. Provider configuration and successful deployment do not prove SQL authentication, application schema, populated seed data or restart durability.",
+        "recovery": "Persist encrypted private preparation and durable intent before mutation, then acknowledged volume/deployment IDs before dependent work. Uncertain writes retain a blocker and must not trigger another create/deploy or ownership-based cleanup. Preserve created storage after initialization may have begun; retry only from independently verified exact recovery evidence.",
+        "officialSources": [
+          "https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/integrations/api/manage-volumes.md",
+          "https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/integrations/api/manage-services.md",
+          "https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/integrations/api/manage-variables.md",
+          "https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/integrations/api/manage-deployments.md",
+          "https://docs.railway.com/volumes",
+          "https://docs.railway.com/volumes/reference"
+        ]
+      }
     },
     {
       "provider": "supabase",
@@ -41,7 +56,18 @@
         "https://supabase.com/docs/guides/platform/compute-and-disk"
       ],
       "runtimeReferenceBinding": "unsupported",
-      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred."
+      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred.",
+      "freshInitializationRepair": {
+        "implementation": "unsupported",
+        "prerequisites": "No fresh-initialization adapter capability is admitted. Existing managed database identity/storage must be preserved; explicit discard intent does not authorize invoking a different native reset, restore, delete or replacement API.",
+        "nativeOperation": "Unsupported here: Supabase projects own their PostgreSQL instance and managed disk. Project backup/restore operations are not attachment of an empty service volume and are not exposed through this capability.",
+        "officialSources": [
+          "https://supabase.com/docs/guides/platform/compute-and-disk",
+          "https://supabase.com/docs/guides/platform/backups"
+        ],
+        "completion": "No completion can be claimed for this unsupported capability. Native create/restore completion and SQL/application readiness belong to their separately reviewed lifecycle contracts.",
+        "recovery": "Reject this intent before provider mutations and preserve the existing bound resource. Do not fall back to generic hosting, native reset/restore, deletion or replacement; existing backup policy and recovery points remain unchanged."
+      }
     },
     {
       "provider": "neon",
@@ -59,7 +85,19 @@
         "https://neon.com/docs/introduction/architecture-overview"
       ],
       "runtimeReferenceBinding": "unsupported",
-      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred."
+      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred.",
+      "freshInitializationRepair": {
+        "implementation": "unsupported",
+        "prerequisites": "No fresh-initialization adapter capability is admitted. Existing managed database identity/storage must be preserved; explicit discard intent does not authorize invoking a different native reset, restore, delete or replacement API.",
+        "nativeOperation": "Unsupported here: Neon branches own durable data separately from compute. Branch restore and reset-from-parent change branch history/content; neither is a missing service-volume initialization operation.",
+        "officialSources": [
+          "https://neon.com/docs/introduction/architecture-overview",
+          "https://neon.com/docs/manage/branches",
+          "https://api-docs.neon.tech/reference/restoreprojectbranch"
+        ],
+        "completion": "No completion can be claimed for this unsupported capability. Native create/restore completion and SQL/application readiness belong to their separately reviewed lifecycle contracts.",
+        "recovery": "Reject this intent before provider mutations and preserve the existing bound resource. Do not fall back to generic hosting, native reset/restore, deletion or replacement; existing backup policy and recovery points remain unchanged."
+      }
     },
     {
       "provider": "cloudsql",
@@ -77,7 +115,18 @@
         "https://docs.cloud.google.com/sql/docs/postgres/instance-settings"
       ],
       "runtimeReferenceBinding": "unsupported",
-      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred."
+      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred.",
+      "freshInitializationRepair": {
+        "implementation": "unsupported",
+        "prerequisites": "No fresh-initialization adapter capability is admitted. Existing managed database identity/storage must be preserved; explicit discard intent does not authorize invoking a different native reset, restore, delete or replacement API.",
+        "nativeOperation": "Unsupported here: instances.restoreBackup can overwrite an existing managed instance and returns a Cloud SQL Operation; it is a separate restore contract, not blank-volume attachment to existing hosting compute.",
+        "officialSources": [
+          "https://docs.cloud.google.com/sql/docs/postgres/backup-recovery/restore",
+          "https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1/instances/restoreBackup"
+        ],
+        "completion": "No completion can be claimed for this unsupported capability. Native create/restore completion and SQL/application readiness belong to their separately reviewed lifecycle contracts.",
+        "recovery": "Reject this intent before provider mutations and preserve the existing bound resource. Do not fall back to generic hosting, native reset/restore, deletion or replacement; existing backup policy and recovery points remain unchanged."
+      }
     },
     {
       "provider": "rds",
@@ -95,7 +144,18 @@
         "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html"
       ],
       "runtimeReferenceBinding": "unsupported",
-      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred."
+      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred.",
+      "freshInitializationRepair": {
+        "implementation": "unsupported",
+        "prerequisites": "No fresh-initialization adapter capability is admitted. Existing managed database identity/storage must be preserved; explicit discard intent does not authorize invoking a different native reset, restore, delete or replacement API.",
+        "nativeOperation": "Unsupported here: RestoreDBInstanceFromDBSnapshot creates a new RDS instance with its own identity. RDS PostgreSQL storage remains managed by RDS; a generic missing-volume repair cannot be inferred from snapshot or instance APIs.",
+        "officialSources": [
+          "https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_RestoreDBInstanceFromDBSnapshot.html",
+          "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html"
+        ],
+        "completion": "No completion can be claimed for this unsupported capability. Native create/restore completion and SQL/application readiness belong to their separately reviewed lifecycle contracts.",
+        "recovery": "Reject this intent before provider mutations and preserve the existing bound resource. Do not fall back to generic hosting, native reset/restore, deletion or replacement; existing backup policy and recovery points remain unchanged."
+      }
     },
     {
       "provider": "azure-postgres",
@@ -113,7 +173,18 @@
         "https://learn.microsoft.com/en-us/azure/postgresql/compute-storage/concepts-storage"
       ],
       "runtimeReferenceBinding": "unsupported",
-      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred."
+      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred.",
+      "freshInitializationRepair": {
+        "implementation": "unsupported",
+        "prerequisites": "No fresh-initialization adapter capability is admitted. Existing managed database identity/storage must be preserved; explicit discard intent does not authorize invoking a different native reset, restore, delete or replacement API.",
+        "nativeOperation": "Unsupported here: Flexible Server point-in-time recovery creates a new server and does not overwrite the existing server. Managed server storage and restore are distinct from attaching an empty workload volume.",
+        "officialSources": [
+          "https://learn.microsoft.com/en-us/azure/postgresql/backup-restore/concepts-backup-restore",
+          "https://learn.microsoft.com/en-us/azure/postgresql/compute-storage/concepts-storage"
+        ],
+        "completion": "No completion can be claimed for this unsupported capability. Native create/restore completion and SQL/application readiness belong to their separately reviewed lifecycle contracts.",
+        "recovery": "Reject this intent before provider mutations and preserve the existing bound resource. Do not fall back to generic hosting, native reset/restore, deletion or replacement; existing backup policy and recovery points remain unchanged."
+      }
     },
     {
       "provider": "fly",
@@ -131,7 +202,18 @@
         "https://fly.io/docs/about/pricing/"
       ],
       "runtimeReferenceBinding": "unsupported",
-      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred."
+      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred.",
+      "freshInitializationRepair": {
+        "implementation": "unsupported",
+        "prerequisites": "No fresh-initialization adapter capability is admitted. Existing managed database identity/storage must be preserved; explicit discard intent does not authorize invoking a different native reset, restore, delete or replacement API.",
+        "nativeOperation": "Unsupported here: the registered database adapter uses Managed Postgres clusters. MPG restore creates a new cluster; unmanaged Fly Machines and their attachable volumes are outside this database capability.",
+        "officialSources": [
+          "https://fly.io/docs/flyctl/mpg/",
+          "https://fly.io/changelog/managed-postgres-machines-api/"
+        ],
+        "completion": "No completion can be claimed for this unsupported capability. Native create/restore completion and SQL/application readiness belong to their separately reviewed lifecycle contracts.",
+        "recovery": "Reject this intent before provider mutations and preserve the existing bound resource. Do not fall back to generic hosting, native reset/restore, deletion or replacement; existing backup policy and recovery points remain unchanged."
+      }
     },
     {
       "provider": "digitalocean",
@@ -149,7 +231,18 @@
         "https://docs.digitalocean.com/products/databases/postgresql/reference/api/"
       ],
       "runtimeReferenceBinding": "unsupported",
-      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred."
+      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred.",
+      "freshInitializationRepair": {
+        "implementation": "unsupported",
+        "prerequisites": "No fresh-initialization adapter capability is admitted. Existing managed database identity/storage must be preserved; explicit discard intent does not authorize invoking a different native reset, restore, delete or replacement API.",
+        "nativeOperation": "Unsupported here: POST /v2/databases with backup_restore creates a new managed database cluster, progressing from creating to online. It is a separate cluster-creation/restore contract, not an empty-volume repair.",
+        "officialSources": [
+          "https://docs.digitalocean.com/reference/api/reference/databases/",
+          "https://docs.digitalocean.com/products/databases/postgresql/how-to/create/"
+        ],
+        "completion": "No completion can be claimed for this unsupported capability. Native create/restore completion and SQL/application readiness belong to their separately reviewed lifecycle contracts.",
+        "recovery": "Reject this intent before provider mutations and preserve the existing bound resource. Do not fall back to generic hosting, native reset/restore, deletion or replacement; existing backup policy and recovery points remain unchanged."
+      }
     }
   ]
 }

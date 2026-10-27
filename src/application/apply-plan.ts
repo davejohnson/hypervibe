@@ -1,5 +1,10 @@
 import { applyCredentialLifecycle, pendingCredentialUpdate } from '../domain/services/credential-lifecycle.service.js';
 import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from '../domain/services/database-credential-aliases.service.js';
+import { applyDatabaseFreshInitialization } from '../domain/services/database-fresh-initialization.service.js';
+import { hasPendingDatabaseInitialization } from '../domain/plan/database-initialization.contract.js';
+import { databaseSeedGeneration } from '../domain/services/database-seed-generation.js';
+import { databaseBootstrapActionSchema, hasDatabaseBootstrapObservationOrCleanup, hasPendingDatabaseBootstrap, matchesDatabaseBootstrapObservationOrCleanup } from '../domain/plan/database-bootstrap.contract.js';
+import { applyDatabaseBootstrap } from '../domain/services/database-bootstrap.service.js';
 import { applyScheduleActivation } from '../domain/services/schedule-activation.service.js';
 import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js';
 import { applyApiPolicy, planApiPolicy } from '../domain/services/api-policy.js';
@@ -814,20 +819,20 @@ export async function executePlanApply(ctx: CommandContext, params: {
 }): Promise<PlanApplyOutcome> {
   const { project, spec, planId } = params;
   const providerValidation = firstProviderSpecValidationFailure(spec);
-  if (providerValidation) {
-    return {
-      kind: 'invalid_spec',
-      message: providerValidation.message,
-      hint: providerValidation.hint,
-      details: providerValidation.details,
-    };
+  const invalidSpec = providerValidation ? { kind: 'invalid_spec' as const, message: providerValidation.message,
+    hint: providerValidation.hint, details: providerValidation.details } : undefined;
+  // Ordinary unsupported desired state must still stop before plan loading.
+  // Only a retained native execution warrants inspecting an exact recovery plan.
+  if (invalidSpec && !ctx.repos.environments.findByProjectId(project.id).some(candidate =>
+    ctx.repos.components.findByEnvironmentId(candidate.id).some(component => hasDatabaseBootstrapObservationOrCleanup(component.bindings)))) {
+    return invalidSpec;
   }
   const planService = new PlanService();
 
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(planId);
   if ('error' in loaded) {
-    return { kind: 'plan_not_found', error: loaded.error };
+    return invalidSpec ?? { kind: 'plan_not_found', error: loaded.error };
   }
   const envName = loaded.document.environmentName;
   const planScope = loaded.document.scope ?? 'full';
@@ -837,22 +842,38 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const ciCredentialsOnly = planScope === 'managed-ci-credentials';
   const managedCiBindingsOnly = planScope === 'managed-ci-bindings' || planScope === 'hosting-bindings';
   const workflowPublicationOnly = planScope === 'managed-ci-publication' || planScope === 'backup-program-publication';
-  if (loaded.document.inputRequired?.length) {
-    return {
-      kind: 'input_required',
-      envName,
-      requirements: loaded.document.inputRequired,
-    };
-  }
   const projectForPreflight = spec.gitRemoteUrl
     ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
     : project;
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  const bootstrapAction = loaded.document.actions[0];
+  const observationOrCleanup = planScope === 'database-bootstrap' && environment
+    && loaded.run.projectId === project.id && loaded.run.environmentId === environment.id
+    && loaded.document.actions.length === 1 && bootstrapAction
+    && ctx.repos.components.findByEnvironmentId(environment.id).some(component =>
+      component.id === bootstrapAction.metadata?.componentId
+      && matchesDatabaseBootstrapObservationOrCleanup(component.bindings, bootstrapAction));
+  if (invalidSpec && !observationOrCleanup) return invalidSpec;
+  if (loaded.document.inputRequired?.length) {
+    return { kind: 'input_required', envName, requirements: loaded.document.inputRequired };
+  }
   const pendingDatabaseAliases = environment ? ctx.repos.components.findByEnvironmentId(environment.id)
     .some(component => component.bindings.credentialAliasRepair !== undefined) : false;
   if (pendingDatabaseAliases && planScope !== 'database-credential-aliases') {
     return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
       reason: 'A database reference repair needs readback verification. Recover its isolated plan before other mutations.' }] };
+  }
+  const initializationEnvironments = planScope === 'credentials'
+    ? ctx.repos.environments.findByProjectId(project.id) : environment ? [environment] : [];
+  if (planScope !== 'database-bootstrap' && initializationEnvironments.some(candidate =>
+    ctx.repos.components.findByEnvironmentId(candidate.id).some(component => hasPendingDatabaseBootstrap(component.bindings)))) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'Private database bootstrap has a retained attempt. Recover its isolated stage before other mutations.' }] };
+  }
+  if (planScope !== 'database-initialization' && initializationEnvironments.some(candidate =>
+    ctx.repos.components.findByEnvironmentId(candidate.id).some(component => hasPendingDatabaseInitialization(component.bindings)))) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'Database initialization needs exact readback verification. Recover its isolated stage before other mutations.' }] };
   }
   if (planScope === 'credentials') {
     if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'Credential plans require the exact existing environment and cannot bootstrap.' }] };
@@ -893,6 +914,41 @@ export async function executePlanApply(ctx: CommandContext, params: {
       : { kind: 'env_missing', envName };
   }
 
+  if (planScope === 'database-bootstrap') {
+    const reviewedAction = databaseBootstrapActionSchema.safeParse(loaded.document.actions[0]);
+    if (loaded.document.databaseBootstrapReady !== true || !environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
+      || loaded.document.actions.length !== 1 || !reviewedAction.success || params.alwaysRunBootstrap) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'Database bootstrap requires one exact action and the existing environment; it cannot deploy applications.' }] };
+    }
+    const blocked = planService.providerPreflight([reviewedAction.data.metadata.hostingProvider]);
+    if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision,
+      confirmActions: params.confirmActions, handler: action =>
+        resolvePlanActionAuthority(action)?.capability === 'database.bootstrap'
+          ? applyDatabaseBootstrap({ project: projectForPreflight, spec: envSpec, environmentName: envName,
+            action, confirmed: new Set(params.confirmActions), encrypted: loaded.document.overrides?.databaseBootstrapEncrypted })
+          : Promise.resolve({ success: false, status: 'blocked' as const, message: 'Only the exact reviewed database bootstrap action is authorized.' }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [
+      'Private task authentication and schema bootstrap do not prove running application readiness. Future backups, restore verification and managed deployment remain separate.' ] };
+  }
+  if (planScope === 'database-initialization') {
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
+      || loaded.document.actions.length !== 1 || params.alwaysRunBootstrap) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'Initialization requires its exact ready plan and existing environment; it cannot bootstrap applications.' }] };
+    }
+    const blocked = planService.providerPreflight([envSpec.database?.provider ?? 'unconfigured']);
+    if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision,
+      confirmActions: params.confirmActions, handler: action =>
+        resolvePlanActionAuthority(action)?.capability === 'database.fresh-initialization'
+          ? applyDatabaseFreshInitialization({ project: projectForPreflight, spec: envSpec, environmentName: envName,
+            action, confirmed: new Set(params.confirmActions), encrypted: loaded.document.overrides?.databaseInitializationEncrypted })
+          : Promise.resolve({ success: false, status: 'blocked' as const, message: 'Only the exact reviewed database initialization is authorized.' }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [
+      'This stage authorizes only database storage initialization. Application rollout, schema migrations, SQL access, backups and restore remain separate.' ] };
+  }
   if (planScope === 'database-credential-aliases') {
     if (loaded.document.databaseCredentialAliasesReady !== true || !environment || loaded.run.projectId !== project.id
       || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap) {
@@ -4918,6 +4974,10 @@ export async function applyDatabaseSeed(
     };
   }
 
+  const databaseGeneration = databaseSeedGeneration(component, environment.platformBindings);
+  if (databaseGeneration === null || action.metadata?.databaseGeneration !== databaseGeneration) {
+    return { success: false, status: 'blocked', message: 'The database generation changed or is unverified. Re-plan before running the seed command.' };
+  }
   const result = await runEnvironmentTask({
     project,
     environment,
@@ -4947,12 +5007,19 @@ export async function applyDatabaseSeed(
     };
   }
 
+  const currentComponent = ctx.repos.components.findById(component.id);
+  const currentEnvironment = ctx.repos.environments.findById(environment.id);
+  if (!currentComponent || !currentEnvironment || currentComponent.externalId !== component.externalId
+    || databaseSeedGeneration(currentComponent, currentEnvironment.platformBindings) !== databaseGeneration) {
+    return { success: false, status: 'blocked', message: 'The database generation changed during the seed task. Its outcome was not recorded as current seed completion.' };
+  }
   const seededAt = new Date().toISOString();
   ctx.repos.components.updateBindings(component.id, {
     seed: {
       commandHash,
       seededAt,
       source: 'hv_apply',
+      ...(databaseGeneration ? { databaseGeneration } : {}),
     },
   });
 

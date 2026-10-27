@@ -25,7 +25,9 @@ back to an ordinary hosting container would violate the declared database intent
 Provisioning must fail honestly when the provider cannot establish the required
 identity/storage contract. Observation must preserve unknown evidence instead of
 treating it as absence. Existing databases require preservation-safe inspection;
-attaching a fresh empty volume or recreating a same-named database is not repair.
+attaching a fresh empty volume or recreating a same-named database is not a
+preservation-safe implicit repair. Explicit discard-data initialization is a
+separate, narrowly scoped lifecycle operation described below.
 Desired backup policy, available recovery points and a successful restore remain
 three separate claims. No project incident cause is established by this review.
 
@@ -87,6 +89,105 @@ explicit configuration outranks the upstream image's default. Template metadata
 was read publicly without authentication; no database was created by recording
 this evidence. Nullable template provenance fields are not storage proof.
 
+## Explicit fresh initialization of an existing database
+
+Design reviewed 2026-10-26 before adapter implementation. Railway now
+**implements** this capability with offline contract coverage; the other seven database providers are explicitly
+**unsupported**. The matrix records implementation admission separately from
+official contract evidence and does not certify live support.
+
+The challenged assumption is that a missing persistent volume can be repaired
+without changing the meaning of the existing data. A running PostgreSQL service
+may contain valuable data only in its container filesystem. Mounting an empty
+volume and starting PostgreSQL there creates a different, empty database; it
+does not preserve those writes. This operation therefore requires explicit
+`database.freshInitialization = { id, discardExistingData: true, target: {
+externalId, providerScope } }` intent for the exact bound database, an isolated
+`database-initialization` plan, and confirmation of its data-bearing action.
+Ordinary persistence drift never authorizes it. A request to initialize this
+database does not authorize resetting any other environment or managed database.
+
+The optional provider-neutral `adapter.freshInitialization` capability must
+preserve the provider-native database identity, keep provider mechanics private,
+and report uncertainty and durable resume evidence explicitly. Private variable
+configuration stays encrypted. A completed one-use intent must not initialize
+the database again on later plans. Existing or pending volumes, unsupported
+images/startup overrides, ambiguous identity, unknown reads and changed reviewed
+configuration block the action. No current database contents are exported by
+this discard-data operation; it does not disable future backup intent or claim
+that an unavailable checkpoint succeeded.
+
+| Provider | Native boundary and admission for this operation |
+| --- | --- |
+| Railway | Implemented for the exact existing PostgreSQL 16 service using the supported stock startup, with complete project/environment scope and independently proven absence of a volume. [Volume creation](https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/integrations/api/manage-volumes.md) attaches a new persistent volume to a service; it does not recover old filesystem data. Offline contracts do not establish live initialization success. |
+| Supabase | Unsupported. Each project owns its [dedicated PostgreSQL instance and disk](https://supabase.com/docs/guides/platform/compute-and-disk); [project backups and restores](https://supabase.com/docs/guides/platform/backups) are separate operations. |
+| Neon | Unsupported. [Durable storage is separate from compute](https://neon.com/docs/introduction/architecture-overview); [branch reset and restore](https://neon.com/docs/manage/branches) change branch data/history, not a service volume. |
+| Cloud SQL | Unsupported. [Restore can overwrite the target instance and restart it](https://docs.cloud.google.com/sql/docs/postgres/backup-recovery/restore); the [restore API returns an Operation](https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1/instances/restoreBackup). That is a distinct restore lifecycle. |
+| RDS | Unsupported. [Snapshot restore creates a new DB instance](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_RestoreDBInstanceFromDBSnapshot.html), with its own identity; it is not initialization of an unattached hosting volume. |
+| Azure PostgreSQL | Unsupported. [Flexible Server restore creates a new server without overwriting the original](https://learn.microsoft.com/en-us/azure/postgresql/backup-restore/concepts-backup-restore). Managed storage cannot be treated as a missing workload mount. |
+| Fly | Unsupported. The registered adapter uses Managed Postgres; [MPG restore creates a new cluster](https://fly.io/docs/flyctl/mpg/). Unmanaged Fly Machines and volumes are outside this database operation. |
+| DigitalOcean | Unsupported. [Creating from a backup creates a new managed cluster, moving from `creating` to `online`](https://docs.digitalocean.com/reference/api/reference/databases/). It is not an empty-volume attachment to an existing service. |
+
+Railway's pinned official documentation distinguishes the required steps.
+[Variable updates](https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/integrations/api/manage-variables.md)
+can be additive and deferred with `skipDeploys: true`; replacing the complete map
+would delete omitted keys. The adapter stages the reviewed child-directory
+`PGDATA` before creating the volume, preserving the issuer credentials and raw
+references. It always supplies the exact project, service and environment on
+`volumeCreate`, even though the native environment field is optional.
+[Volumes are mounted at startup, not during builds or pre-deploy commands](https://docs.railway.com/volumes).
+Whether creating a volume automatically starts a deployment is unspecified by
+the reviewed contract and must not be assumed in either direction.
+
+The pinned [PostgreSQL 16 image](https://github.com/docker-library/postgres/blob/dfc76bb299b057785026eb2eea39556b6fe52983/16/bookworm/Dockerfile)
+defaults `PGDATA` to the mount root, while
+[PostgreSQL's initializer](https://github.com/postgres/postgres/blob/61aec3f3bc91c42cd08d1947794ddcc258020869/src/bin/initdb/initdb.c#L2987-L2998)
+recommends a child directory when mount contents such as `lost+found` are present.
+The pinned entrypoint initializes a directory without `PG_VERSION`; custom
+initialization arguments, WAL paths or password-file inputs can change that
+behavior and remain outside the narrow admission. The complete reviewed Railway
+docs, Docker source and explicit initializer excerpt are stored with
+[source hashes and immutable provenance](../test/provider-contracts/railway/database-initialization/source.json).
+An explicit nonempty initializer password is required. The documented empty or
+missing username/database defaults are resolved privately, and any existing
+credential aliases and URLs must agree with those effective initializer values.
+Raw credentials, references and other variable definitions remain unchanged.
+
+[Service deployment](https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/integrations/api/manage-services.md)
+returns a deployment ID. The action must retain the acknowledged volume ID,
+verify and retain its exact environment-specific volume instance ID, retain the deployment ID from
+`serviceInstanceDeployV2`, and correlate the terminal
+[deployment status](https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/integrations/api/manage-deployments.md)
+with the same instance before claiming configuration completion. Neither native
+mutation has an idempotency key in the reviewed pinned schema. A lost response
+must retain uncertainty instead of authorizing a second create/deploy or guessing
+cleanup ownership. Once initialization may have started, automatic volume
+deletion is not compensation.
+
+Exact mount/configuration readback and a successful provider deployment remain
+separate from authenticated SQL, application migrations, seed completion, running
+application health, and a restart durability experiment. Those checks and future
+backup protection retain their existing explicit lifecycle stages. No live
+initialization, discard, export, deployment or restore has been performed by this
+design review.
+
+Fresh storage also invalidates historical seed completion for the prior data
+generation. The seed regression observed the same command hash incorrectly yield
+a noop after fresh initialization. Seed planning and execution now compare the
+validated initialization receipt's generation, recheck it before and after the
+task, and record it only after success. Historical seed evidence is preserved;
+this does not run a seed or migration during initialization or bypass ordinary
+task, release or backup prerequisites.
+
+The native-scope conformance review found a separate shared-schema defect:
+reusing the recovery scope allowlist rejected Fly's `organizationSlug` and
+DigitalOcean's `accountUuid` before their unsupported capability could be
+reported. Both native-scope regression cases were observed failing against the
+original schema; the other five passed. Fresh initialization now accepts safe
+native scope coordinates, and lifecycle admission still requires every scope
+key declared by the actual provider registry. This does not add initialization
+support to either provider.
+
 ## Executable enforcement and evidence limits
 
 `database-provisioning-provider-contracts.test.ts` compares the named matrix with
@@ -101,12 +202,37 @@ lifecycle tests. They do not validate complete response schemas, successful
 creation, disk contents, restarts, or recovery. RDS has existing SDK-command
 coverage rather than a new create-transport case in this test.
 
+Fresh-initialization conformance also compares the matrix to actual adapter
+capability objects and requires executable rejection coverage for all seven
+unsupported providers. Those tests use the real registry, desired-state parser,
+SQLite repositories, `PlanService` and shared apply handler. Only adapter dispatch
+is substituted to supply each concrete adapter without authentication. An
+unsupported plan produces no actions; even a synthetic confirmed action and a
+noop are rejected without provider reads, creates or deletes, and leave durable
+database/environment bindings unchanged. These are local admission checks,
+not successful native API evidence.
+
 The regression suite is included by the ordinary `npm test` Vitest configuration.
+The committed `hypervibe-acceptance.yml` workflow runs typecheck and `npm test`,
+and the desired project spec declares `Hypervibe / acceptance` required.
 Passing offline checks do not establish live branch-protection enforcement or
 provider certification. Railway's persistence regression and its observed
 before/after result belong in the accompanying implementation change; the
 cross-provider audit tests are baseline conformance checks, not newly reproduced
 bugs in those seven providers.
+
+Fresh-initialization regressions first observed the missing adapter capability
+and ordinary full planning where the explicit intent required an isolated
+`database-initialization` plan. Provider tests use the real Railway client and
+serialized GraphQL transport against pinned schema/source evidence, with
+synthetic success, rejection and uncertainty responses. They cover exact scope,
+storage/deployment identity, delayed visibility, preserved configuration and
+uncertain-write recovery. The initial username/database default counterexamples
+also failed before the implementation followed the pinned PostgreSQL entrypoint.
+Shared lifecycle checks cover confirmation, outstanding-work vetoes, durable
+progress and lost local acknowledgements. Neither these results nor a persisted
+completion receipt proves SQL authentication, migrated/seeded application data,
+restart durability or live provider compatibility.
 
 ## Railway regression record
 

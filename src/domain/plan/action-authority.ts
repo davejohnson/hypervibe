@@ -1,4 +1,6 @@
 import { isDatabasePasswordAction, DATABASE_PASSWORD_OPERATIONS } from './database-password-plan.contract.js';
+import { isDatabaseBootstrapAction } from './database-bootstrap.contract.js';
+import { DATABASE_FRESH_INITIALIZATION_OPERATION, isDatabaseInitializationAction } from './database-initialization.contract.js';
 import { isCredentialAction, CREDENTIAL_OPERATION } from './credential-plan.contract.js';
 import { databaseCredentialAliasesActionSchema, DATABASE_CREDENTIAL_ALIASES_OPERATION } from '../services/database-credential-aliases.service.js';
 import { scheduleActivationActionMetadataSchema } from '../services/schedule-activation.service.js';
@@ -93,6 +95,8 @@ import {
 } from '../services/managed-code-repository.contract.js';
 
 export type PlanMutationCapability =
+  | 'database.bootstrap'
+  | 'database.fresh-initialization'
   | 'credential.lifecycle.update'
   | 'database.credential-aliases.repair'
   | 'database.scope.bind'
@@ -487,6 +491,7 @@ export function resolvePlanActionAuthority(
   action: PlanAction
 ): PlanActionAuthority | null {
   if (action.type === 'noop') return null;
+  if (isDatabaseBootstrapAction(action)) return authority(action, 'database.bootstrap');
   if (DATABASE_PASSWORD_OPERATIONS.includes(action.metadata?.operation as typeof DATABASE_PASSWORD_OPERATIONS[number])) return isDatabasePasswordAction(action) ? authority(action, 'credential.lifecycle.update') : null;
   if (action.metadata?.operation === CREDENTIAL_OPERATION) return isCredentialAction(action) ? authority(action, 'credential.lifecycle.update') : null;
   if (!action.id.trim() || !action.resource.name.trim() || !action.resource.provider.trim()) {
@@ -500,6 +505,9 @@ export function resolvePlanActionAuthority(
 
   if (action.metadata?.operation === DATABASE_SCOPE_BIND_OPERATION) {
     return isDatabaseScopeBindingAction(action) ? authority(action, 'database.scope.bind') : null;
+  }
+  if (action.metadata?.operation === DATABASE_FRESH_INITIALIZATION_OPERATION) {
+    return isDatabaseInitializationAction(action) ? authority(action, 'database.fresh-initialization') : null;
   }
 
   if (action.metadata?.operation === DAILY_BACKUP_OPERATION) {

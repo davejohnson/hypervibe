@@ -230,6 +230,13 @@ export interface ProviderMetadata {
         /** Native database references the private helper can actually resolve. */
         databaseProviders: readonly string[];
       };
+      /** Fresh-generation SQL verification and reviewed schema bootstrap only. */
+      databaseInitializationTasks?: {
+        variableMode: 'references';
+        execution: 'temporary-workload';
+        status: 'ready-for-live';
+        databaseProviders: readonly string[];
+      };
       /** Smallest provider-owned boundary that completely removes one Hypervibe environment. */
       teardownBoundary: 'services' | 'environment' | 'project';
     };

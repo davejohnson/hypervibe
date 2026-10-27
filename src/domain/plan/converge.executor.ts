@@ -1,4 +1,6 @@
 import { DATABASE_PASSWORD_OPERATIONS, isDatabasePasswordPlan } from './database-password-plan.contract.js';
+import { isDatabaseBootstrapAction } from './database-bootstrap.contract.js';
+import { DATABASE_FRESH_INITIALIZATION_OPERATION, isDatabaseInitializationAction } from './database-initialization.contract.js';
 import { isCredentialAction, CREDENTIAL_OPERATION } from './credential-plan.contract.js';
 import { databaseCredentialAliasesActionSchema, databaseCredentialAliasesMetadataSchema,
   DATABASE_CREDENTIAL_ALIASES_OPERATION } from '../services/database-credential-aliases.service.js';
@@ -229,6 +231,8 @@ export const planRunDocumentSchema = z.object({
     'database-checkpoint',
     'database-credential-aliases',
     'database-bindings',
+    'database-initialization',
+    'database-bootstrap',
     'backup-policy',
     'backup-provisioning',
     'backup-readiness',
@@ -238,6 +242,7 @@ export const planRunDocumentSchema = z.object({
   ]).optional(),
   environmentName: z.string().min(1),
   databaseCredentialAliasesReady: z.boolean().optional(),
+  databaseBootstrapReady: z.boolean().optional(),
   databaseCredentialAliasesVerification: databaseCredentialAliasesMetadataSchema.optional(),
   specRevision: z.number().int().nonnegative(),
   /** Immutable application revision reviewed with this deployment plan. */
@@ -257,10 +262,41 @@ export const planRunDocumentSchema = z.object({
     envVarKeys: z.array(z.string()).optional(),
     envVarsEncrypted: z.string().optional(),
     databaseCredentialAliasesEncrypted: z.string().min(1).optional(),
+    databaseInitializationEncrypted: z.string().min(1).optional(),
+    databaseBootstrapEncrypted: z.string().min(1).optional(),
     delegatedSecretKeys: z.array(z.string()).optional(),
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'database-bootstrap') {
+    if (document.actions.length > 1 || document.actions.some(action => !isDatabaseBootstrapAction(action))
+      || (document.actions.length === 1) !== (document.databaseBootstrapReady === true)
+      || (document.actions.length === 1) !== Boolean(document.overrides?.databaseBootstrapEncrypted)
+      || document.overrides && Object.keys(document.overrides).some(key => key !== 'databaseBootstrapEncrypted')
+      || document.observedFingerprint !== null || document.integrationFingerprints || document.sourceCommitSha
+      || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
+      ctx.addIssue({ code: 'custom', message: 'Database bootstrap requires one exact confirmed action and encrypted private evidence, without rollout inputs.' });
+    }
+    return;
+  }
+  if (document.databaseBootstrapReady !== undefined || document.overrides?.databaseBootstrapEncrypted || document.actions.some(action =>
+    ['databaseBootstrapAuthenticate', 'databaseBootstrapMigrate'].includes(String(action.metadata?.operation)))) {
+    ctx.addIssue({ code: 'custom', message: 'Database bootstrap requires its isolated stage.' });
+  }
+  if (document.scope === 'database-initialization') {
+    if (document.actions.length > 1 || document.actions.some(action => !isDatabaseInitializationAction(action))
+      || (document.actions.length === 1) !== Boolean(document.overrides?.databaseInitializationEncrypted)
+      || document.overrides && Object.keys(document.overrides).some(key => key !== 'databaseInitializationEncrypted')
+      || document.observedFingerprint !== null || document.integrationFingerprints || document.sourceCommitSha
+      || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
+      ctx.addIssue({ code: 'custom', message: 'Database initialization requires one exact confirmed action and encrypted private evidence, without rollout inputs.' });
+    }
+    return;
+  }
+  if (document.overrides?.databaseInitializationEncrypted
+    || document.actions.some(action => action.metadata?.operation === DATABASE_FRESH_INITIALIZATION_OPERATION)) {
+    ctx.addIssue({ code: 'custom', message: 'Fresh database initialization requires its isolated stage.' });
+  }
   if (document.scope === 'credentials') {
     if (!document.actions.length || (!isDatabasePasswordPlan(document.actions) && document.actions.some(a => !isCredentialAction(a)))
       || new Set(document.actions.map(a => a.id)).size !== document.actions.length

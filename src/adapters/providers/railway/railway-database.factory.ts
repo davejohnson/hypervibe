@@ -14,7 +14,7 @@ import type { RailwayDailyBackupTarget } from './railway-daily-backup.js';
 import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
 import { recoveryIdentityStringSchema } from '../../../domain/services/recovery-source.js';
 import { isRailwayPostgresImage, railwayDatabaseReferences, selectRailwayDatabaseDirectUrlVariable } from './railway-postgres-template.js';
-import { bindingIdentityFingerprint } from '../../../domain/services/binding-identity.js';
+import { bindingIdentityFingerprint, providerIdentityScopeMatches } from '../../../domain/services/binding-identity.js';
 import { isExternallyUsableDatabaseUrl } from '../../../domain/services/database-ops.service.js';
 import type { EnvironmentRepository } from '../../db/repositories/environment.repository.js';
 import type { IDatabaseCheckpointAdapter, DatabaseCheckpointIdentity, DatabaseCheckpointSource,
@@ -27,6 +27,7 @@ import type {
 } from './railway.adapter.js';
 
 interface RailwayHostingOps {
+  railwayDatabaseInitialization?: import('./railway-database-initialization.js').RailwayDatabaseInitialization;
   railwayDatabaseRotationConfiguration?: import('../../../domain/ports/database-credential.port.js').DatabaseCredentialRuntimeConfiguration;
   synchronizeDatabasePasswordIssuer?: (target: { projectId: string; environmentId: string; serviceId: string }, password: string) => Promise<void>;
   railwayCredentialAliases?: import('../../../domain/ports/database-credential-aliases.port.js').IDatabaseCredentialAliases;
@@ -439,8 +440,40 @@ export function createRailwayDatabaseAdapter(params: {
     } catch { return unknown; }
   };
 
+  const initializationTarget = (environment: Environment, component: Component) => {
+    const current = envRepo.findById(environment.id) ?? environment;
+    const projectId = current.platformBindings.projectId, environmentId = current.platformBindings.environmentId;
+    const explicitScope = component.bindings.providerScope;
+    if (component.type !== 'postgres' || component.environmentId !== current.id || component.bindings.provider !== 'railway'
+      || component.bindings.resourceKind !== 'service' || component.bindings.retainedCleanup
+      || component.bindings.provisioningIncomplete || !recoveryIdentityStringSchema.safeParse(component.externalId).success
+      || !recoveryIdentityStringSchema.safeParse(projectId).success || !recoveryIdentityStringSchema.safeParse(environmentId).success
+      || Object.hasOwn(component.bindings, 'providerScope') && (!explicitScope || typeof explicitScope !== 'object' || Array.isArray(explicitScope))
+      || !providerIdentityScopeMatches({ componentBindings: component.bindings, environmentBindings: current.platformBindings,
+        provider: 'railway', liveScope: { projectId: projectId as string, environmentId: environmentId as string } })
+      || ['projectId', 'environmentId'].some(key => Object.hasOwn(component.bindings, key)
+        && component.bindings[key] !== current.platformBindings[key])
+      || !recoveryIdentityStringSchema.safeParse(component.bindings.pluginName).success
+      || ['volumeId', 'volumeTarget', 'unresolvedMutation', 'volumeCreateAttempted'].some(key => Object.hasOwn(component.bindings, key))) {
+      throw new Error('Database initialization requires a complete existing service binding without retained storage operations.');
+    }
+    return { projectId: projectId as string, environmentId: environmentId as string, serviceId: component.externalId!,
+      serviceName: component.bindings.pluginName as string };
+  };
+
   const databaseAdapter: IDatabaseAdapter & IDatabaseCheckpointAdapter = {
     name: 'railway',
+    ...(railway.railwayDatabaseInitialization ? { freshInitialization: {
+      inspect: async (input: Parameters<NonNullable<IDatabaseAdapter['freshInitialization']>['inspect']>[0]) => {
+        try { return await railway.railwayDatabaseInitialization!.inspect(initializationTarget(input.environment, input.component)); }
+        catch { return { state: 'unknown' as const, reason: 'Fresh initialization requires the exact bound database service and environment.' }; }
+      },
+      apply: async (input: Parameters<NonNullable<IDatabaseAdapter['freshInitialization']>['apply']>[0]) => {
+        try { return await railway.railwayDatabaseInitialization!.apply(initializationTarget(input.environment, input.component), input); }
+        catch { return { state: 'unknown' as const, progress: input.progress,
+          reason: 'Fresh initialization requires the exact bound database service and environment.' }; }
+      },
+    } } : {}),
     get credentialLifecycle() {
       return { ...createPostgresCredentialLifecycle(() => databaseAdapter, {
         passwordEncoding: 'scram-sha-256',

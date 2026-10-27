@@ -1,7 +1,11 @@
+import { hasPendingDatabaseInitialization } from './database-initialization.contract.js';
+import { hasDatabaseBootstrapObservationOrCleanup, hasPendingDatabaseBootstrap } from './database-bootstrap.contract.js';
+import { planDatabaseBootstrap } from '../services/database-bootstrap.service.js';
 import { credentialSourceInputKeys } from '../services/accepted-credential-inputs.js';
 import { databaseConsumerReadiness, type DatabaseConsumerReadiness } from '../services/database-consumer-readiness.service.js';
 import { planCredentialLifecycle, pendingCredentialUpdate } from '../services/credential-lifecycle.service.js';
 import { planDatabaseCredentialAliases } from '../services/database-credential-aliases.service.js';
+import { planDatabaseFreshInitialization } from '../services/database-fresh-initialization.service.js';
 import { planScheduleActivations, SCHEDULE_ACTIVATION_OPERATION } from '../services/schedule-activation.service.js';
 import { scopedSecretObservation } from './scoped-secrets.js';
 import { planApiPolicy } from '../services/api-policy.js';
@@ -168,7 +172,7 @@ export interface EnvironmentPlan {
   webhookReadiness?: WebhookReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
-  scope: 'full' | 'credentials' | 'secrets' | 'database-credential-aliases' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
+  scope: 'full' | 'credentials' | 'secrets' | 'database-credential-aliases' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'database-checkpoint' | 'database-bindings' | 'database-initialization' | 'database-bootstrap' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
   backupReadiness?: BackupReadiness;
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
@@ -1672,16 +1676,40 @@ export class PlanService {
     if (!specResult) {
       return { error: `Project "${project.name}" has no spec. Set one with hv_spec.` };
     }
-    const providerValidation = firstProviderSpecValidationFailure(specResult.spec);
-    if (providerValidation) {
-      return { error: providerValidation.message };
-    }
     const scope = options?.scope ?? 'full';
+    const lifecycleEnvironments = this.envRepo.findByProjectId(project.id)
+      .filter(environment => scope === 'credentials' || environment.name === environmentName);
+    const observationOrCleanup = scope === 'full' && lifecycleEnvironments.some(environment =>
+      this.componentRepo.findByEnvironmentId(environment.id).some(component => hasDatabaseBootstrapObservationOrCleanup(component.bindings)));
+    const providerValidation = observationOrCleanup ? undefined : firstProviderSpecValidationFailure(specResult.spec);
+    if (providerValidation) return { error: providerValidation.message };
+    const pendingBootstrap = lifecycleEnvironments.some(environment =>
+      this.componentRepo.findByEnvironmentId(environment.id).some(component => hasPendingDatabaseBootstrap(component.bindings)));
+    if (scope !== 'full' && pendingBootstrap) {
+      return { error: 'Recover the pending private database bootstrap through its isolated plan before other lifecycle changes.' };
+    }
+    if (scope !== 'full' && lifecycleEnvironments.some(environment =>
+      this.componentRepo.findByEnvironmentId(environment.id).some(component => hasPendingDatabaseInitialization(component.bindings)))) {
+      return { error: 'Recover pending database initialization through its full-plan isolated stage before reviewing other changes.' };
+    }
     if (scope === 'credentials') return planCredentialLifecycle(projectWithSpecGitRemoteUrl(project, specResult.spec), specResult.spec, specResult.revision, environmentName, options!);
     if (options?.credential || options?.intent) return { error: 'Credential review inputs require scope=credentials.' };
     if (Object.keys(options?.secretRefs ?? {}).some(key => specResult.spec.secrets[key]?.credential)) return { error: 'Tracked credentials require a reviewed credential adoption or rotation plan.' };
+    // Retained executions must remain observable/cleanable when current source
+    // configuration drifts. New initialization or alias repairs cannot preempt
+    // the isolated recovery that apply requires before those mutations.
+    if (scope === 'full' && pendingBootstrap) {
+      return await planDatabaseBootstrap({ project: projectWithSpecGitRemoteUrl(project, specResult.spec),
+        spec: specResult.spec, revision: specResult.revision, environmentName, options })
+        ?? { error: 'The retained private database bootstrap could not be reconciled.' };
+    }
     const pendingCredential = pendingCredentialUpdate(project.id);
     if (pendingCredential && scope !== 'database-credential-aliases' && scope !== 'full') return { error: `Credential synchronization is incomplete. Recover hv_apply planId="${pendingCredential}" before planning deployment.` };
+    if (scope === 'full' && !pendingCredential) {
+      const initialization = await planDatabaseFreshInitialization({ project: projectWithSpecGitRemoteUrl(project, specResult.spec),
+        spec: specResult.spec, revision: specResult.revision, environmentName, options });
+      if (initialization) return initialization;
+    }
     if (scope === 'database-credential-aliases' || scope === 'full') {
       const aliases = await planDatabaseCredentialAliases({ project: projectWithSpecGitRemoteUrl(project, specResult.spec),
         spec: specResult.spec, revision: specResult.revision, environmentName,
@@ -1689,6 +1717,11 @@ export class PlanService {
       if (aliases && (!pendingCredential || !('actions' in aliases) || aliases.actions.length === 0)) return aliases;
     }
     if (pendingCredential) return { error: `Credential synchronization is incomplete. Recover hv_apply planId="${pendingCredential}" before planning deployment.` };
+    if (scope === 'full') {
+      const bootstrap = await planDatabaseBootstrap({ project: projectWithSpecGitRemoteUrl(project, specResult.spec),
+        spec: specResult.spec, revision: specResult.revision, environmentName, options });
+      if (bootstrap) return bootstrap;
+    }
     if (scope === 'secrets') return this.planSecrets(projectWithSpecGitRemoteUrl(project, specResult.spec), environmentName, specResult, options!);
     if (scope === 'retained-cleanup') {
       const incompatibleInputs = [

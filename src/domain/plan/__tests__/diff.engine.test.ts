@@ -2792,6 +2792,39 @@ describe('diffEnvironment — release-command migrations', () => {
 });
 
 describe('diffEnvironment — database seed command', () => {
+  it.each([false, true])('requires seed completion for the current database generation (current receipt: %s)', currentReceipt => {
+    // A newly initialized volume contains none of the old seed's rows, even
+    // when service identity and the desired seed command remain unchanged.
+    // Synthetic durable local evidence; this is not a live storage assertion.
+    const command = 'npm run db:seed';
+    const target = { provider: 'railway', externalId: 'db-1', providerScope: {
+      projectId: 'rail-proj-1', environmentId: 'rail-env-1',
+    } };
+    const completed = { intentId: 'new-generation', target, storageId: 'new-volume',
+      storageInstanceId: 'new-volume-instance', deploymentId: 'initialized-deployment',
+      configurationFingerprint: 'a'.repeat(64), verifiedAt: '2026-10-26T00:00:00.000Z' };
+    const result = diffEnvironment({
+      spec: spec({ database: { provider: 'railway', seedCommand: command } }),
+      envName: 'production', observed: observed({ databases: [{ provider: 'railway', engine: 'postgres',
+        externalId: 'db-1', providerScope: target.providerScope, status: 'running' }] }), local: local({ components: [localComponent({
+        provider: 'railway', providerScope: target.providerScope,
+        volumeId: completed.storageId, volumeInstanceId: completed.storageInstanceId,
+        seed: { commandHash: sha256(command), seededAt: '2026-07-05T12:00:00.000Z',
+          ...(currentReceipt ? { databaseGeneration: bindingIdentityFingerprint(completed) } : {}) },
+        freshInitialization: { metadata: { operation: 'databaseFreshInitialize', componentId: 'local-postgres',
+          intentId: completed.intentId, target, configurationFingerprint: completed.configurationFingerprint,
+          bindingsFingerprint: 'b'.repeat(64), environmentFingerprint: 'c'.repeat(64) },
+          inspectionEncrypted: 'opaque-encrypted-inspection', startedAt: '2026-10-25T23:59:00.000Z',
+          progress: { phase: 'complete', storageId: completed.storageId,
+            storageInstanceId: completed.storageInstanceId, deploymentId: completed.deploymentId },
+          storageBindings: { volumeId: completed.storageId, volumeInstanceId: completed.storageInstanceId }, completed },
+      })] }),
+    });
+    const seed = result.actions.find(action => action.id === 'database:railway:seed');
+    expect(seed?.type).toBe(currentReceipt ? 'noop' : 'update');
+    expect(seed?.metadata?.databaseGeneration).toBe(bindingIdentityFingerprint(completed));
+  });
+
   it('plans a one-shot database seed action when seedCommand has not completed', () => {
     const result = diffEnvironment({
       spec: spec({ database: { provider: 'railway', seedCommand: 'npm run db:seed' } }),

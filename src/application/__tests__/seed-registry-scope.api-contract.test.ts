@@ -9,6 +9,7 @@ import '../../adapters/providers/railway/railway.adapter.js';
 import type { PlanAction } from '../../domain/plan/plan.types.js';
 import { applyDatabaseSeed } from '../apply-plan.js';
 import { createCommandContext, type CommandContext } from '../context.js';
+import { bindingIdentityFingerprint } from '../../domain/services/binding-identity.js';
 
 const schema = buildSchema(readFileSync('test/provider-contracts/railway/schema.graphql', 'utf8'));
 const repository = 'davejohnson/invoice-express';
@@ -25,7 +26,7 @@ const invoiceCredentials = { username: 'invoice-reader', password: 'synthetic-in
  * selection, adapter construction, task execution and cleanup remain real.
  * This proves selection/transport, not live registry authentication or image boot.
  */
-function installRailwayTransport(failFirstAttempt = false) {
+function installRailwayTransport(failFirstAttempt = false, beforeDeploy?: () => void) {
   const services = new Map([
     ['web-id', { id: 'web-id', name: 'web', projectId: 'rail-project', deletedAt: null }],
   ]);
@@ -62,7 +63,7 @@ function installRailwayTransport(failFirstAttempt = false) {
       configured.push(args);
       return true;
     },
-    serviceInstanceDeployV2: () => 'task-deployment',
+    serviceInstanceDeployV2: () => { beforeDeploy?.(); return 'task-deployment'; },
     deployment: () => ({ status: failFirstAttempt && configured.length === 1 ? 'FAILED' : 'SUCCESS' }),
     deploymentLogs: () => failFirstAttempt && configured.length === 1 ? [] : [{
       timestamp: '2026-10-22T00:00:00.000Z', message: '__HYPERVIBE_TASK_EXIT:0__', severity: 'INFO',
@@ -109,6 +110,54 @@ describe('database seed private-image credential scope', () => {
     SecretStore.resetInstance();
     rmSync(directory, { recursive: true, force: true });
   });
+
+  it.each(['current', 'stale-plan', 'generation-changed-during-task', 'invalid-marker'] as const)(
+    'retains seed history and binds completion to the exact storage generation: %s', async scenario => {
+      const connection = ctx.repos.connections.create({ provider: 'railway', scope: null,
+        credentialsEncrypted: ctx.secretStore.encryptObject({ apiToken: 'synthetic-railway-token' }) });
+      ctx.repos.connections.updateStatus(connection.id, 'verified');
+      const project = ctx.repos.projects.create({ name: 'generation-test', defaultPlatform: 'railway' });
+      const environment = ctx.repos.environments.create({ projectId: project.id, name: 'staging',
+        platformBindings: { provider: 'railway', projectId: 'rail-project', environmentId: 'rail-staging',
+          services: { web: { serviceId: 'web-id' } } } });
+      ctx.repos.services.create({ projectId: project.id, name: 'web', buildConfig: { workloadKind: 'web' }, envVarSpec: {} });
+      const component = ctx.repos.components.create({ environmentId: environment.id, type: 'postgres', externalId: 'database-id' });
+      const target = { provider: 'railway', externalId: 'database-id',
+        providerScope: { projectId: 'rail-project', environmentId: 'rail-staging' } };
+      const completed = { intentId: 'fresh-storage', target, storageId: 'volume-new', storageInstanceId: 'instance-new',
+        deploymentId: 'database-deploy', configurationFingerprint: 'a'.repeat(64), verifiedAt: '2026-10-26T00:00:00.000Z' };
+      const history = { commandHash: 'old-command', seededAt: '2026-07-01T00:00:00.000Z' };
+      ctx.repos.components.updateBindings(component.id, { provider: 'railway', providerScope: target.providerScope,
+        volumeId: completed.storageId, volumeInstanceId: completed.storageInstanceId, seed: history,
+        freshInitialization: scenario === 'invalid-marker' ? { progress: { phase: 'complete' } } : {
+          metadata: { operation: 'databaseFreshInitialize', componentId: component.id, intentId: completed.intentId, target,
+            configurationFingerprint: completed.configurationFingerprint, bindingsFingerprint: 'b'.repeat(64), environmentFingerprint: 'c'.repeat(64) },
+          inspectionEncrypted: 'opaque-encrypted-inspection', startedAt: '2026-10-25T23:59:00.000Z',
+          progress: { phase: 'complete', storageId: completed.storageId, storageInstanceId: completed.storageInstanceId,
+            deploymentId: completed.deploymentId }, storageBindings: { volumeId: completed.storageId,
+            volumeInstanceId: completed.storageInstanceId }, completed,
+        } });
+      const generation = bindingIdentityFingerprint(completed);
+      const action: PlanAction = { id: 'database:railway:seed', type: 'update', verified: true, reason: 'Seed this new generation',
+        resource: { kind: 'database', name: 'seed', provider: 'railway' }, metadata: {
+          operation: 'databaseSeed', engine: 'postgres', command: 'npm run db:seed', commandHash: 'reviewed-command',
+          ...(scenario !== 'stale-plan' ? { databaseGeneration: generation } : {}),
+        } };
+      const transport = installRailwayTransport(false, scenario === 'generation-changed-during-task'
+        ? () => { ctx.repos.components.updateBindings(component.id, { volumeId: 'replacement-volume' }); } : undefined);
+      const result = await applyDatabaseSeed(ctx, project, environment.name, action);
+      expect(transport.contractErrors).toEqual([]);
+      if (scenario === 'current') {
+        expect(result.success).toBe(true);
+        expect(ctx.repos.components.findById(component.id)?.bindings.seed).toMatchObject({
+          commandHash: 'reviewed-command', databaseGeneration: generation,
+        });
+      } else {
+        expect(result).toMatchObject({ success: false, status: 'blocked' });
+        expect(ctx.repos.components.findById(component.id)?.bindings.seed).toEqual(history);
+        expect(transport.configured).toHaveLength(scenario === 'generation-changed-during-task' ? 1 : 0);
+      }
+    });
 
   it.each([
     { label: 'exact repository ahead of stale global', global: true, invoice: true, remote: `git@github.com:${repository}.git`, expected: invoiceCredentials },
