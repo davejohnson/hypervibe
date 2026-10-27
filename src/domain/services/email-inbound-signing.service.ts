@@ -10,7 +10,7 @@ import { parseHostingBindings } from '../ports/hosting.port.js';
 import { SENDGRID_INBOUND_PUBLIC_KEY, type EnvironmentSpec } from '../spec/spec.schema.js';
 import { redactExactValues } from '../../utils/redact-exact-values.js';
 import { observeHosting, runtimeKey, type EventSigningReadiness } from './email-signing.service.js';
-import { serviceBindingFor } from './spec.service.js';
+import { resolveInboundCallback } from './email-inbound-url.service.js';
 import { syncHostingEnvVars } from './hosting-env.service.js';
 import { parseRuntimeRolloutBindings } from './runtime-rollout.service.js';
 
@@ -31,15 +31,6 @@ function hostingIdentity(environment: Environment | null, service: string | unde
     scope: Object.entries(binding.providerScope ?? {}).sort(([a], [b]) => a.localeCompare(b)),
     service, serviceId: target?.serviceId, jobName: target?.jobName, url: target?.url}));
 }
-function expectedUrl(environment: Environment | null, spec: EnvironmentSpec): string | undefined {
-  const target = spec.email.inbound;
-  const base = environment && target ? serviceBindingFor(environment, target.service)?.url : undefined;
-  try {
-    const url = new URL(target!.path, String(base));
-    return url.protocol === 'https:' && !url.username && !url.password ? url.toString() : undefined;
-  } catch { return undefined; }
-}
-
 /** Missing association/signature fields are unknown, never evidence of an unsigned route. */
 export async function observeInboundSigning(adapter: SendGridAdapter, hostname: string): Promise<InboundSigningState> {
   try {
@@ -73,7 +64,8 @@ export function planInboundSigning(params: {
   const binding = inboundSigningBinding(params.environment);
   if (target?.signatureVerification === undefined && !Object.keys(binding).length) return { actions: [] };
   const live = params.state?.status === 'known' ? params.state : undefined;
-  const url = expectedUrl(params.environment, params.spec);
+  const callback = resolveInboundCallback({ environment: params.environment, spec: params.spec, observed: params.observed });
+  const url = callback.url?.startsWith('https:') ? callback.url : undefined;
   const runtime = target ? runtimeKey(params.observed, target.service, params.environment, SENDGRID_INBOUND_PUBLIC_KEY) : { known: false };
   const keyHash = live ? hashEnvValue(live.policy.publicKey) : undefined;
   const blockedReason = inboundSigningTargetBlock(params.environment, params.spec)
@@ -147,9 +139,20 @@ export async function applyInboundSigningKey(params: {
     || action.resource.kind !== 'email' || action.resource.name !== 'inbound-key' || action.resource.provider !== spec.hosting.provider
     || metadata.operation !== INBOUND_SIGNING_KEY_OPERATION || metadata.key !== SENDGRID_INBOUND_PUBLIC_KEY || metadata.blockedReason
     || metadata.environmentId !== environment.id || metadata.hostname !== target.hostname.toLowerCase() || metadata.service !== target.service
-    || metadata.hostingHash !== hostingIdentity(environment, target.service) || !expectedUrl(environment, spec)
-    || metadata.expectedUrl !== expectedUrl(environment, spec) || inboundSigningTargetBlock(environment, spec)) return blocked('Inbound signing action or target changed; re-plan.');
+    || metadata.hostingHash !== hostingIdentity(environment, target.service)
+    || inboundSigningTargetBlock(environment, spec)) return blocked('Inbound signing action or target changed; re-plan.');
   if (action.requiresConfirm !== true || !params.confirmedActionIds?.has(action.id)) return blocked('Confirm this exact inbound key-publication action before applying.');
+  let callback = resolveInboundCallback({ environment, spec });
+  let callbackObservation: ObservedState | null | undefined;
+  if (callback.blockedReason) {
+    try {
+      callbackObservation = await observeHosting(params.project, environment, spec);
+      callback = resolveInboundCallback({ environment, spec, observed: callbackObservation });
+    } catch { return blocked('The accepted inbound callback attachment could not be observed.'); }
+  }
+  if (callback.blockedReason || !callback.url?.startsWith('https:') || metadata.expectedUrl !== callback.url) {
+    return blocked(callback.blockedReason ?? 'Inbound signing callback changed; re-plan.');
+  }
   const binding = inboundSigningBinding(environment);
   const check = async (): Promise<boolean> => {
     const live = await observeInboundSigning(params.adapter, target.hostname.toLowerCase());
@@ -164,7 +167,7 @@ export async function applyInboundSigningKey(params: {
       || binding.status === 'pending' && binding.keyHash !== metadata.expectedHash) return blocked('The exact inbound policy or verification key changed; review a fresh plan.');
     const service = new ServiceRepository().findByProjectAndName(params.project.id, target.service);
     if (!service) return blocked('The receiving service is not tracked.');
-    const before = await observeHosting(params.project, environment, spec);
+    const before = callbackObservation ?? await observeHosting(params.project, environment, spec);
     const current = runtimeKey(before, target.service, environment, SENDGRID_INBOUND_PUBLIC_KEY);
     if (!current.known) return blocked('Runtime key observation is unknown; no hosting write was attempted.');
     const repo = new EnvironmentRepository();
