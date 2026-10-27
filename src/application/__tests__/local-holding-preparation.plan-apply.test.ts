@@ -125,6 +125,19 @@ describe('local inert holding preparation', () => {
     expect(applied).toMatchObject({ ok: true, data: { applied: true }, hint: expect.stringMatching(/inert.*release/i), next: ['hv_plan'] });
   });
 
+  it('offers read-only recovery without another user approval after an uncertain holding create', async () => {
+    const f = await fixture({ lost: 'service' });
+    const plan = await f.plan(); if ('error' in plan) throw new Error(plan.error);
+    const result = await f.commands.execute('hv_apply', { project: f.project.name, planId: plan.planRunId,
+      confirmActions: plan.actions.map(action => action.id) });
+    expect(result).toMatchObject({ ok: true, data: { applied: false }, next: ['hv_plan'], agentInstruction: { action: 'continue' } });
+    expect(result.agentInstruction?.message).toMatch(/read-only/);
+    const writes = f.native.writes.length;
+    const recovered = await f.plan(); if ('error' in recovered) throw new Error(recovered.error);
+    expect(f.native.writes).toHaveLength(writes);
+    expect(recovered.actions.find(action => action.id === 'gcp:holding:service:web')?.type).toBe('noop');
+  });
+
   it('rechecks source after the final native absence read and before the write', async () => {
     const f = await fixture(); const planned = await f.plan(); if ('error' in planned) throw new Error(planned.error);
     f.native.options.afterRead = () => { const changed = structuredClone(f.desired); changed.environments.staging.hosting.preparation.image = changed.environments.staging.hosting.preparation.image.replace(/d+$/, 'e'.repeat(64));

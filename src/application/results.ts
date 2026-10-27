@@ -171,7 +171,7 @@ function hasConnectionSetup(data: Record<string, unknown>): boolean {
 
 const CONNECTION_SETUP_AGENT_MESSAGE = 'Stop before any dependent operation. Show the user the exact clickable setup links and required permissions from connectionSetup, recommend its recommendedSetupUrl, and offer to open that page in their browser. Preserve the complete query string, including the name and description; Hypervibe has prepared the supported known fields. Never replace a pre-filled form link with a dashboard URL or a click-by-click navigation checklist, and do not invent or rewrite query parameters. Explain only the remaining manual fields, review, or consent from the guidance; never put secrets in URLs. Then explain where to save the credential and show the complete credentialExample with /absolute/path replaced by the real local path. Never summarize this as a vague "Hypervibe credential flow" or ask the user to paste a token into chat.';
 
-function successAgentInstruction(data: unknown): CommandEnvelope['agentInstruction'] | undefined {
+function successAgentInstruction(data: unknown, next?: string[]): CommandEnvelope['agentInstruction'] | undefined {
   if (!isRecord(data)) return undefined;
   if (isNonEmptyArrayField(data, 'blocked') || isNonEmptyArrayField(data, 'actionScopedBlocked')) {
     if (hasConnectionSetup(data)) {
@@ -183,6 +183,15 @@ function successAgentInstruction(data: unknown): CommandEnvelope['agentInstructi
     return {
       action: 'ask_user',
       message: 'Stop here. Summarize the blockers and ask the user to provide the missing connection, confirmation, or direction before running more apply/deploy tools.',
+    };
+  }
+  if (next?.length && next.every(command => ['hv_plan', 'hv_status', 'hv_ci_status'].includes(command))
+    && data.error === undefined && hasReceiptStatus(data.receipts, new Set(['pending']))
+    && Array.isArray(data.receipts) && data.receipts.every(receipt => isRecord(receipt)
+      && typeof receipt.status === 'string' && ['succeeded', 'skipped_noop', 'pending', 'aborted'].includes(receipt.status))) {
+    return {
+      action: 'continue',
+      message: 'Report the pending receipts, then continue only with the suggested read-only recovery calls. Do not repeat any mutation or start dependent work while its outcome is uncertain. Preserve existing approvals for unchanged actions; review any new or changed action separately.',
     };
   }
   if (data.applied === false || data.success === false || hasReceiptStatus(data.receipts, new Set(['failed', 'blocked', 'pending', 'aborted']))) {
@@ -861,7 +870,7 @@ export function redactCommandEnvelope(payload: CommandEnvelope): CommandEnvelope
 }
 
 export function commandSuccess(data?: unknown, extras?: ResponseExtras): CommandEnvelope {
-  const agentInstruction = extras?.agentInstruction ?? successAgentInstruction(data);
+  const agentInstruction = extras?.agentInstruction ?? successAgentInstruction(data, extras?.next);
   return redactCommandEnvelope({
     ok: true,
     ...(data !== undefined ? { data } : {}),

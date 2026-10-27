@@ -92,6 +92,21 @@ local and hosted setup, observation and emitted first release; it does not estab
 live application rollout or all-cloud onboarding. Maximum instances are not an
 absolute spending ceiling and Google documents temporary exceedance under load.
 
+The corrected packaged library subsequently recovered the actual web operation
+without another create, completed the two remaining approved actions, and verified
+all six native holding actions. Public invocation is limited to the web service;
+the worker remains internal. This proves the inert prerequisite on this disposable
+project, not application startup, OAuth exchange or secret collection.
+
+The same walkthrough challenged guidance that treated every pending receipt as
+requiring another user approval. Four command/SQLite regressions failed before the
+change, followed by three cases including native `skipped_noop` receipts. Explicit
+suggested read-only recovery now continues for pending-only outcomes; failures,
+blockers, confirmation skips, unknown states and mutation follow-ups still stop.
+Holding recovery points to `hv_plan`, which reconciles its retained journal before
+ordinary application bindings exist. All 64 focused guidance checks and typecheck
+pass. This adds no write authority and never permits replay of an uncertain write.
+
 ### Cloud SQL first release
 
 The local operator path reuses Cloud Run's existing `cloudsql` volume and

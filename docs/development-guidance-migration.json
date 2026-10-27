@@ -1314,6 +1314,12 @@
       "sourcePath": "AGENTS.md",
       "destination": "docs/development-guidance-lifecycle.md#connect-cloud-project-allocation-exception",
       "reason": "Preserve the owner-approved 2026-10-25 create-exclusive-v1 exception when integrating the maintainer guidance migration; existing DG-039 remains unchanged."
+    },
+    {
+      "sourcePath": "docs/development-guidance-product.md#dg-081",
+      "destination": "docs/development-guidance-product.md#dg-081",
+      "destinationSha256": "2d56d1d0fd6ad12862b7fc3611cccbbd7ef4ebe615c4184a47faf6a50835c8b9",
+      "reason": "User-requested autonomous setup: an explicit bounded read-only continuation may recover pending identities without renewed approval. Dependent mutations, unknown-write replay, changed consequential actions and blocked/failed results retain their existing boundaries."
     }
   ]
 }

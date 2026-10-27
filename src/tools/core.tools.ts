@@ -1585,7 +1585,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             : blockedReceipts.length > 0
               ? `Apply is blocked by actions that need user/provider intervention: ${blockedReceipts.map((r) => r.actionId).join(', ')}. Inspect receipts, complete the required action, then re-run hv_plan and hv_apply.`
               : pending.length > 0
-                ? `Apply has pending provider workflows: ${pending.map((r) => r.actionId).join(', ')}. Re-run hv_plan and hv_apply after they progress.`
+                ? `Apply has pending provider workflows: ${pending.map((r) => r.actionId).join(', ')}. Use the suggested read-only recovery call to check their exact retained identities before any further apply.`
             : result.success
               ? cloudScopeOnly
                 ? 'The reviewed cloud preparation stage is verified. Further setup requires a separate current plan; hosting readiness is not verified.'
@@ -1598,7 +1598,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
                 : 'Apply complete. Check hv_status to verify convergence.'
               : 'Apply failed; compensations ran where registered. Inspect receipts and re-run hv_plan.',
           warnings: outcome.actionScopedWarnings,
-          next: [credentialPlan && !result.success ? 'hv_apply' : result.success && (holdingOnly || operatorOnly) ? 'hv_plan' : result.success && secretOnly ? 'hv_ci_status' : result.success || pending.length > 0 ? 'hv_status' : 'hv_plan'],
+          next: [credentialPlan && !result.success ? 'hv_apply' : (result.success || pending.length > 0) && (holdingOnly || operatorOnly || cloudScopeOnly) ? 'hv_plan' : result.success && secretOnly ? 'hv_ci_status' : result.success || pending.length > 0 ? 'hv_status' : 'hv_plan'],
         }
       );
     })
