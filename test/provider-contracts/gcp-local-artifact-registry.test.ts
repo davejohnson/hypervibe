@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { createGcpLocalArtifactRegistryDriver } from '../../src/adapters/providers/gcp/gcp-local-artifact-registry.js';
+import { createGcpLocalProjectAllocationCapability } from '../../src/adapters/providers/gcp/gcp-local-project-allocation.js';
 import { applyCloudInstallationV1, planCloudInstallationV1, reconcileCloudInstallationV1 } from '../../src/domain/services/cloud-installation-runtime.js';
 import type { CloudInstallationRecord, LocalCloudScopePreparationIntent } from '../../src/domain/ports/cloud-installation.port.js';
 
@@ -93,6 +94,22 @@ function fixture(fault?: 'lost-ack' | 'forbidden' | 'collision' | 'operation-err
     recover: () => reconcileCloudInstallationV1({ ...context, installationId, planDigest: saved!.plan.digest }), driver };
 }
 describe('reviewed local image repository preparation', () => {
+  it.each([false, true])('retains private creation authority in the final binding; separate public repository=%s', async publicRegistry => {
+    const f = fixture(undefined, false, publicRegistry); await f.plan(); await f.apply();
+    const record = f.saved()!;
+    const expected = publicRegistry
+      ? { artifactInstallationId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', artifactAttemptId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee' }
+      : { artifactInstallationId: installationId, artifactAttemptId: record.attempts[0].id };
+    // The installation and exact acknowledged attempt belong to the retained
+    // creation journal, never a new binding, publication or public-reader grant.
+    const binding = createGcpLocalProjectAllocationCapability().continuation!.binding(record, { region: 'us-central1' });
+    expect(binding.platformBindings.providerScope).toMatchObject(expected);
+    expect(binding.platformBindings.providerScope).toMatchObject({ billingAccountName: 'billingAccounts/ABCDEF-123456-789ABC' });
+    const before = f.writes.length;
+    await f.recover();
+    expect(createGcpLocalProjectAllocationCapability().continuation!.binding(f.saved()!, { region: 'us-central1' }).platformBindings).toEqual(binding.platformBindings);
+    expect(f.writes).toHaveLength(before);
+  });
   it('pins the independent native operation result and repository lifetime contracts', () => {
     const base = new URL('./gcp/artifact-registry/', import.meta.url);
     const source = JSON.parse(readFileSync(new URL('source.json', base), 'utf8'));

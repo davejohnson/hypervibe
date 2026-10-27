@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { LocalCloudScopePreparationCapability } from '../../../domain/ports/cloud-installation.port.js';
+import type { CloudInstallationRecord, LocalCloudScopePreparationCapability, LocalCloudScopePreparationIntent } from '../../../domain/ports/cloud-installation.port.js';
 import { CloudInstallationBoundaryError } from '../../../domain/ports/cloud-installation.port.js';
 import { parseCloudInstallationRecordV1 } from '../../../domain/services/cloud-installation-runtime.js';
 import { DestinationBudget } from '../secret-destination-http.js';
@@ -7,7 +7,7 @@ import { GcpLocalDefaultAuthentication } from './gcp-local-default-authenticatio
 import { createGcpLocalProjectAllocationDriver, gcpLocalProjectAllocationScopeSchema } from './gcp-project-installation.js';
 import { createGcpBillingPreparationDriver, gcpBillingPreparationScopeSchema } from './gcp-billing-installation.js';
 import { createGcpLocalArtifactRegistryDriver, deriveGcpLocalArtifactRegistryScope, gcpLocalArtifactRegistryBinding, gcpLocalArtifactRegistryScopeSchema,
-  gcpLocalPublicArtifactRegistryScopeSchema, deriveGcpLocalPublicArtifactRegistryScope, gcpLocalPublicArtifactBinding, gcpLocalPublicArtifactProofShape } from './gcp-local-artifact-registry.js';
+  gcpLocalPublicArtifactRegistryScopeSchema, deriveGcpLocalPublicArtifactRegistryScope, gcpLocalPublicArtifactBinding, gcpLocalPublicArtifactProofShape, gcpLocalPrivateArtifactProof } from './gcp-local-artifact-registry.js';
 import { createGcpLocalServicesDriver, gcpLocalServicesScopeSchema, isGcpLocalServicesReviewCurrent } from './gcp-local-services-installation.js';
 import { createGcpGithubCiPreparationDriver, deriveGcpGithubCiPreparationScope, gcpGithubCiPreparationBinding,
   gcpGithubCiPreparationScopeSchema, gcpGithubCiPreparationSelectionSchema, gcpGithubCiDisconnectionScopeSchema,
@@ -26,6 +26,44 @@ function driver(nativeScope: Record<string, string>, request?: typeof fetch) {
   if (nativeScope.scopeKind === 'project-services') return createGcpLocalServicesDriver({ fetch: request });
   return createGcpLocalProjectAllocationDriver({ fetch: request });
 }
+function privateRegistryAncestor(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>, history: CloudInstallationRecord<LocalCloudScopePreparationIntent>[]) {
+  let current = record;
+  const visited = new Set<string>();
+  while (current.intent.predecessor) {
+    const predecessor = current.intent.predecessor;
+    const parents = history.filter(item => item.installationId === predecessor.installationId);
+    if (parents.length !== 1 || visited.has(predecessor.installationId) || visited.size >= 20) throw new CloudInstallationBoundaryError('ownership_mismatch');
+    visited.add(predecessor.installationId);
+    const parent = parents[0];
+    if (parent.plan.digest !== predecessor.planDigest
+      || parent.intent.appId !== record.intent.appId || parent.intent.customerId !== record.intent.customerId
+      || parent.intent.environment !== record.intent.environment || parent.intent.source.repository !== record.intent.source.repository
+      || parent.intent.hostingProvider !== record.intent.hostingProvider || parent.intent.provider !== record.intent.provider)
+      throw new CloudInstallationBoundaryError('ownership_mismatch');
+    if (parent.intent.nativeScope.scopeKind === 'operator-artifact-registry-v1') {
+      if (parent.intent.nativeScope.artifactRepositoryName !== record.intent.nativeScope.artifactRepositoryName) throw new CloudInstallationBoundaryError('ownership_mismatch');
+      return parent;
+    }
+    current = parent;
+  }
+  throw new CloudInstallationBoundaryError('not_converged');
+}
+function privateRegistryProof(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>, history?: CloudInstallationRecord<LocalCloudScopePreparationIntent>[]) {
+  if (record.intent.nativeScope.scopeKind === 'operator-artifact-registry-v1') return gcpLocalPrivateArtifactProof(record);
+  const proof = z.object({ artifactInstallationId: z.string().guid(), artifactAttemptId: z.string().guid() });
+  if (record.intent.nativeScope.artifactInstallationId || record.intent.nativeScope.artifactAttemptId) return proof.parse(record.intent.nativeScope);
+  // Preserve immutable historical private→CI scopes; their original registry
+  // ancestry remains authoritative after CI trust is intentionally removed.
+  if (!history) return undefined;
+  const parent = privateRegistryAncestor(record, history), binding = gcpLocalArtifactRegistryBinding(parent);
+  if (Object.entries(binding).some(([key, value]) => record.intent.nativeScope[key] !== value)) throw new CloudInstallationBoundaryError('ownership_mismatch');
+  return gcpLocalPrivateArtifactProof(parent);
+}
+function registryProviderScope(scope: Record<string, string>, privateProof?: Record<string, string>, publicProof?: Record<string, string>) {
+  const keys = ['projectId', 'projectNumber', 'projectCreateTime', 'projectParent', 'projectInstallationId', 'projectAttemptId', 'billingAccountName',
+    'region', 'artifactRepository', 'artifactRepositoryName', 'artifactRepositoryCreateTime'];
+  return { ...Object.fromEntries(keys.map(key => [key, scope[key]])), ...(privateProof ?? {}), ...(publicProof ?? {}) };
+}
 
 /** Local operator bootstrap only; no hosting identity exists or is invented here. */
 export function createGcpLocalProjectAllocationCapability(): LocalCloudScopePreparationCapability {
@@ -37,6 +75,9 @@ export function createGcpLocalProjectAllocationCapability(): LocalCloudScopePrep
       return parseCloudInstallationRecordV1(value, driver(routing.intent.nativeScope));
     },
     continuation: {
+      repairableProviderScopeFields: ['artifactInstallationId', 'artifactAttemptId', 'billingAccountName'],
+      bindingPrerequisiteIds: (record, history) => record.intent.nativeScope.scopeKind === 'github-ci-disconnection'
+        ? [privateRegistryAncestor(record, history).installationId] : [],
       parseSelection: (value, placement) => selectionSchema.parse({ ...selectionInputSchema.parse(value), hostingRegion: placement?.region ?? 'us-central1' }),
       permitsBoundCleanup: scope => gcpGithubCiDisconnectionScopeSchema.safeParse(scope).success,
       isReviewCurrent: record => record.intent.nativeScope.scopeKind !== 'project-services' || isGcpLocalServicesReviewCurrent(record),
@@ -79,11 +120,13 @@ export function createGcpLocalProjectAllocationCapability(): LocalCloudScopePrep
           throw new CloudInstallationBoundaryError('ownership_mismatch');
         return null;
       },
-      binding(record, placement) {
+      binding(record, placement, history) {
         if (record.intent.nativeScope.scopeKind === 'github-ci-disconnection') {
           const identity = gcpGithubCiDisconnectionBinding(record);
           const scope = gcpGithubCiDisconnectionScopeSchema.parse(record.intent.nativeScope);
-          return { platformBindings: { provider: 'cloudrun', projectId: scope.projectId, environmentId: scope.region }, connections: [],
+          const publicProof = scope.publicArtifactRepository ? z.object(gcpLocalPublicArtifactProofShape).parse(scope) : undefined;
+          return { platformBindings: { provider: 'cloudrun', projectId: scope.projectId, environmentId: scope.region,
+            providerScope: registryProviderScope(scope, privateRegistryProof(record, history), publicProof) }, connections: [],
             removeBindings: [{ key: 'gcpGithubWorkloadIdentity', expectedValue: JSON.stringify(identity) }] };
         }
         const current = driver(record.intent.nativeScope);
@@ -99,8 +142,7 @@ export function createGcpLocalProjectAllocationCapability(): LocalCloudScopePrep
         if (!/^[a-z]+(?:-[a-z0-9]+)+$/.test(region)) throw new CloudInstallationBoundaryError('identity_mismatch');
         const config = { projectId: scope.projectId, authMode: 'default', region };
         return { platformBindings: { provider: 'cloudrun', projectId: scope.projectId, environmentId: region,
-          providerScope: { projectId: scope.projectId, projectNumber: scope.projectNumber, projectCreateTime: scope.projectCreateTime,
-            projectParent: scope.projectParent, projectInstallationId: scope.projectInstallationId, projectAttemptId: scope.projectAttemptId, ...registry, ...(publicProof ?? {}) },
+          providerScope: registryProviderScope({ ...scope, ...registry } as Record<string, string>, privateRegistryProof(record, history), publicProof),
           ...(identity ? { gcpGithubWorkloadIdentity: JSON.stringify(identity) } : {}) },
           connections: [{ provider: 'cloudrun', config }, { provider: 'cloudsql', config }, { provider: 'gcs', config: { authMode: 'default' } }] };
       },

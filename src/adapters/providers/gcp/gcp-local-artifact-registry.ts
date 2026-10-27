@@ -109,6 +109,11 @@ export function gcpLocalArtifactRegistryBinding(record: CloudInstallationRecord<
   return { region: n.region, artifactRepository: n.artifactRepository, artifactRepositoryName: n.artifactRepositoryName,
     artifactRepositoryCreateTime: resource.identity.createTime };
 }
+export function gcpLocalPrivateArtifactProof(record: CloudInstallationRecord<Intent>) {
+  gcpLocalArtifactRegistryBinding(record);
+  const proof = parseEvidence(record.completed[ACTION], record.intent);
+  return { artifactInstallationId: record.intent.installationId, artifactAttemptId: proof.resources[0]!.identity.attemptId };
+}
 
 export function deriveGcpLocalPublicArtifactRegistryScope(record: CloudInstallationRecord<Intent>): Record<string, string> {
   if (record.status !== 'scope-ready' || record.intent.nativeScope.scopeKind !== 'operator-artifact-registry-v1') fail('not_converged');

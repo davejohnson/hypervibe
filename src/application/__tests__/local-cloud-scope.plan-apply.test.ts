@@ -531,7 +531,7 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       expect(JSON.stringify({ reviewed, applied })).not.toContain(token);
     });
 
-  it.each(['normal', 'legacy-api-review', 'legacy-api-pending', 'legacy-api-rejected', 'legacy-api-satisfied', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-lost-ack', 'github-ci-rejected-first', 'github-ci-rejected-middle', 'public-registry', 'public-grant-lost-ack', 'public-grant-rejected', 'github-ci-public-registry'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
+  it.each(['normal', 'legacy-binding-repair', 'legacy-binding-source-edit', 'legacy-binding-declaration-removed', 'legacy-binding-stale', 'legacy-binding-conflict', 'legacy-binding-unknown', 'legacy-binding-replaced', 'legacy-api-review', 'legacy-api-pending', 'legacy-api-rejected', 'legacy-api-satisfied', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-disconnected-metadata', 'github-ci-disconnected-metadata-foreign-owner', 'github-ci-legacy-binding-repair', 'github-ci-lost-ack', 'github-ci-rejected-first', 'github-ci-rejected-middle', 'public-registry', 'public-grant-lost-ack', 'public-grant-rejected', 'github-ci-public-registry', 'github-ci-public-registry-prerequisite-drift'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
     const f = fixture(); const allocated = await f.plan(); if ('error' in allocated) throw new Error(allocated.error);
     expect(await f.apply(allocated.planRunId)).toMatchObject({ kind: 'executed', result: { success: true } });
     const desired = structuredClone(f.desired) as any;
@@ -763,9 +763,84 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
     expect(f.ctx.repos.environments.findByProjectAndName(f.project.id, 'staging')?.platformBindings).toMatchObject({ provider: 'cloudrun', projectId: nativeId });
     expect(f.ctx.repos.environments.findByProjectAndName(f.project.id, 'staging')?.platformBindings.providerScope).toMatchObject({
       projectId: nativeId, projectNumber: number, projectCreateTime: '2026-10-25T08:00:00.123456Z', projectParent: 'none',
-      projectInstallationId: expect.stringMatching(/^[a-f0-9-]{36}$/), projectAttemptId: expect.stringMatching(/^[a-f0-9-]{36}$/) });
+      projectInstallationId: expect.stringMatching(/^[a-f0-9-]{36}$/), projectAttemptId: expect.stringMatching(/^[a-f0-9-]{36}$/),
+      ...(!scenario.includes('legacy-binding-') ? { artifactInstallationId: expect.stringMatching(/^[a-f0-9-]{36}$/), artifactAttemptId: expect.stringMatching(/^[a-f0-9-]{36}$/) } : {}) });
     expect(f.ctx.repos.connections.findByProviderAndScope('cloudrun', 'github.com/acme/operator-host#environment=staging')?.status).toBe('verified');
     expect(f.ctx.repos.connections.findByProviderAndScope('cloudsql', 'github.com/acme/operator-host#environment=staging')?.status).toBe('verified');
+    if (scenario.includes('legacy-binding-')) {
+      // Reconstruct the previously accepted binding format. The old immutable
+      // installation journal is preserved; only its final projection omitted
+      // these two ownership fields. Repair may add them after native readback.
+      const environment = f.ctx.repos.environments.findByProjectAndName(f.project.id, 'staging')!;
+      const accepted = structuredClone(environment.platformBindings);
+      const legacy = structuredClone(accepted);
+      const legacyScope = legacy.providerScope as Record<string, string>;
+      delete legacyScope.artifactInstallationId; delete legacyScope.artifactAttemptId; delete legacyScope.billingAccountName;
+      if (scenario === 'legacy-binding-conflict') legacyScope.artifactAttemptId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+      f.ctx.repos.environments.update(environment.id, { platformBindings: legacy });
+      const connections = ['cloudrun', 'cloudsql', 'gcs'].map(provider => f.ctx.repos.connections.findByProviderAndScope(provider, 'github.com/acme/operator-host#environment=staging'));
+      const retainedHistory = f.ctx.repos.runs.findById((f.ctx.repos.runs.findById(registryPlan.planRunId)!.plan as any).cloudScope.installationId)!.plan as any;
+      Object.assign(accepted.providerScope as Record<string, unknown>, {
+        artifactInstallationId: retainedHistory.installationId,
+        artifactAttemptId: retainedHistory.completed['gcp:local-scope:artifact-registry'].resources[0].identity.attemptId,
+      });
+      const historicalIntent = structuredClone(retainedHistory.intent), historicalPlan = structuredClone(retainedHistory.plan);
+      const before = [...writes];
+      if (scenario === 'legacy-binding-source-edit') {
+        desired.environments.staging.services.web.healthCheckPath = '/changed-after-binding';
+        f.store.replace(f.project, desired);
+      }
+      if (scenario === 'legacy-binding-declaration-removed') {
+        delete desired.environments.staging.hosting.scopePreparation;
+        f.store.replace(f.project, desired);
+      }
+      if (scenario === 'legacy-binding-replaced') {
+        const name = `projects/${nativeId}/locations/us-central1/repositories/hypervibe`;
+        registries.set(name, { ...registries.get(name), createTime: '2026-10-26T00:00:00Z' });
+      }
+      if (scenario === 'legacy-binding-unknown') {
+        const original = globalThis.fetch;
+        vi.stubGlobal('fetch', async (input: Parameters<typeof fetch>[0], init?: RequestInit) => new URL(String(input)).hostname === 'artifactregistry.googleapis.com'
+          ? Response.json({}, { status: 403 }) : original(input, init));
+      }
+      expect(await localCloudScopeRequired(f.project, 'staging', f.store.get(f.project)!.spec)).toBe(true);
+      const repair = await f.plan();
+      if (['legacy-binding-conflict', 'legacy-binding-unknown', 'legacy-binding-replaced'].includes(scenario)) {
+        expect('error' in repair || repair.blocked.length > 0 || !repair.actions.some(action => action.id === 'cloud-scope:normalize')).toBe(true);
+        expect(f.ctx.repos.environments.findById(environment.id)!.platformBindings).toEqual(legacy);
+        expect(writes).toEqual(before); return;
+      }
+      if ('error' in repair) throw new Error(repair.error);
+      expect(repair.actions.map(action => action.id)).toEqual(['cloud-scope:normalize']);
+      expect(await f.apply(repair.planRunId, [])).toMatchObject({ kind: 'executed', result: { success: false } });
+      expect(f.ctx.repos.environments.findById(environment.id)!.platformBindings).toEqual(legacy);
+      const reviewed = await f.plan(); if ('error' in reviewed) throw new Error(reviewed.error);
+      if (scenario === 'legacy-binding-stale') {
+        const changed = structuredClone(legacy);
+        (changed.providerScope as Record<string, unknown>).artifactAttemptId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+        f.ctx.repos.environments.update(environment.id, { platformBindings: changed });
+        const stale = await f.apply(reviewed.planRunId, ['cloud-scope:normalize']);
+        expect(stale.kind === 'executed' && stale.result.success).toBe(false);
+        expect(f.ctx.repos.environments.findById(environment.id)!.platformBindings).toEqual(changed);
+        expect(writes).toEqual(before); return;
+      }
+      expect(await f.apply(reviewed.planRunId, ['cloud-scope:normalize'])).toMatchObject({ kind: 'executed', result: { success: true } });
+      expect(f.ctx.repos.environments.findById(environment.id)!.platformBindings).toEqual(accepted);
+      expect(['cloudrun', 'cloudsql', 'gcs'].map(provider => f.ctx.repos.connections.findByProviderAndScope(provider, 'github.com/acme/operator-host#environment=staging'))).toEqual(connections);
+      const afterHistory = f.ctx.repos.runs.findById(retainedHistory.installationId)!.plan as any;
+      expect(afterHistory.intent).toEqual(historicalIntent); expect(afterHistory.plan).toEqual(historicalPlan);
+      expect(writes).toEqual(before);
+      expect(await localCloudScopeRequired(f.project, 'staging', f.store.get(f.project)!.spec)).toBe(false);
+      // Only test re-entry here; the provider transport contract above already
+      // verified the repair. Stop at the ordinary adapter boundary so this
+      // offline fixture cannot start the separate SDK credential chain.
+      f.adapters.mockResolvedValue({ success: false, error: 'Synthetic ordinary observation boundary' } as any);
+      const resumed = await new PlanService().plan(f.project, 'staging', { envVarOverrides: { SYNTHETIC_SETTING: 'test' }, secretRefs: {} });
+      expect('error' in resumed ? resumed.error : resumed.scope).not.toMatch(/Cloud project preparation|isolated plan stage|cloud-scope/);
+      expect(f.adapters).toHaveBeenCalled();
+      expect(writes).toEqual(before);
+      return;
+    }
     expect(f.writes).toHaveLength(1);
     if (publicImages) expect(f.ctx.repos.environments.findByProjectAndName(f.project.id, 'staging')!.platformBindings.providerScope).toMatchObject({ artifactRepository: 'hypervibe', artifactRepositoryCreateTime: '2026-10-25T08:30:00Z', publicArtifactRepository: 'operator-public', publicArtifactRepositoryCreateTime: '2026-10-25T08:35:00Z' });
     if (github) {
@@ -792,6 +867,39 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       expect(writes).toHaveLength(before + 3); expect(accountPolicy.bindings).toEqual([]);
       expect(projectPolicy.bindings).toEqual([unrelated]); expect(registryPolicy.bindings).toEqual([unrelated]);
       expect([...native]).toEqual(identities);
+      if (scenario === 'github-ci-public-registry-prerequisite-drift') {
+        const name = `projects/${nativeId}/locations/us-central1/repositories/hypervibe`;
+        registries.set(name, { ...registries.get(name), description: 'foreign registry with unchanged lifetime' });
+        const blocked = await f.plan();
+        expect(blocked).toMatchObject({ scope: 'cloud-scope', cloudScopeReview: expect.any(Object) });
+        if ('error' in blocked) throw new Error(blocked.error);
+        expect(blocked.actions.every(action => action.metadata?.mode === 'recover' && action.billable === false)).toBe(true);
+        // A previous prerequisite failure cannot disappear merely because the
+        // local final binding still has complete cached creation identifiers.
+        expect(await localCloudScopeRequired(f.project, 'staging', f.store.get(f.project)!.spec)).toBe(true);
+        expect(writes).toHaveLength(before + 3); return;
+      }
+      if (scenario.startsWith('github-ci-disconnected-metadata')) {
+        const legacy = structuredClone(after.platformBindings), oldScope = legacy.providerScope as Record<string, unknown>;
+        delete oldScope.artifactInstallationId; delete oldScope.artifactAttemptId; delete oldScope.billingAccountName;
+        f.ctx.repos.environments.update(after.id, { platformBindings: legacy });
+        if (scenario.endsWith('foreign-owner')) {
+          const name = `projects/${nativeId}/locations/us-central1/repositories/hypervibe`;
+          registries.set(name, { ...registries.get(name), description: 'foreign registry owner with the same name and creation time' });
+          const blocked = await f.plan();
+          expect('error' in blocked || blocked.blocked.length > 0 || !blocked.actions.some(action => action.id === 'cloud-scope:normalize')).toBe(true);
+          expect(f.ctx.repos.environments.findById(after.id)!.platformBindings).toEqual(legacy);
+          expect(writes).toHaveLength(before + 3); expect(accountPolicy.bindings).toEqual([]);
+          return;
+        }
+        const repair = await f.plan(); if ('error' in repair) throw new Error(repair.error);
+        expect(repair.actions.map(action => action.id)).toEqual(['cloud-scope:normalize']);
+        expect(await f.apply(repair.planRunId, ['cloud-scope:normalize'])).toMatchObject({ kind: 'executed', result: { success: true } });
+        expect(f.ctx.repos.environments.findById(after.id)!.platformBindings).toEqual(preserved);
+        expect(writes).toHaveLength(before + 3); expect(accountPolicy.bindings).toEqual([]);
+        expect(projectPolicy.bindings).toEqual([unrelated]); expect(registryPolicy.bindings).toEqual([unrelated]);
+        expect([...native]).toEqual(identities);
+      }
       if (publicImages) expect(publicPolicy.bindings).toEqual([unrelated, { role: 'roles/artifactregistry.reader', members: ['allUsers'] }]); expect(JSON.stringify({ bind, after })).not.toMatch(/synthetic-local-allocation-token|synthetic-refresh/);
       return;
     }

@@ -105,7 +105,11 @@ export interface LocalCloudScopePreparationCapability {
     /** Historical reviews remain readable; false requires a new review before any fresh write. */
     isReviewCurrent?(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>): boolean;
     nextScope(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>, selection: Record<string, string>): Record<string, string> | null;
-    binding(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>, placement: { region?: string }): { platformBindings: Record<string, unknown>; connections: Array<{ provider: string; config: Record<string, string> }>; removeBindings?: Array<{ key: string; expectedValue: unknown }> };
+    /** Only these absent nonsecret fields may be restored from verified history. */
+    repairableProviderScopeFields?: readonly string[];
+    /** Exact historical ancestors that must be freshly observed for binding, including after trust removal. */
+    bindingPrerequisiteIds?(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>, history: CloudInstallationRecord<LocalCloudScopePreparationIntent>[]): string[];
+    binding(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>, placement: { region?: string }, history?: CloudInstallationRecord<LocalCloudScopePreparationIntent>[]): { platformBindings: Record<string, unknown>; connections: Array<{ provider: string; config: Record<string, string> }>; removeBindings?: Array<{ key: string; expectedValue: unknown }> };
   };
   create(nativeScope: Record<string, string>, signal?: AbortSignal): Promise<{ driver: CloudInstallationDriver<LocalCloudScopePreparationIntent>;
     authentication: LocalCloudScopePreparationAuthentication }>;

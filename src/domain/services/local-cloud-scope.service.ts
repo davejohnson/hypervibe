@@ -103,7 +103,11 @@ async function context(project: Project, environment: Environment, intent: Local
 function projection(record: Record, mode: LocalCloudScopePlan['mode'], retryActions?: LocalCloudScopePlan['retryActions']): { cloudScope: LocalCloudScopePlan; actions: PlanAction[] } {
   const cloudScope: LocalCloudScopePlan = { schemaVersion: 1, installationId: record.installationId,
     installationPlanDigest: record.plan.digest, hostingProvider: record.intent.hostingProvider, mode, ...(retryActions ? { retryActions } : {}) };
-  let originals: PlanAction[] = mode === 'bind' ? [{ id: 'cloud-scope:bind', type: 'update',
+  let originals: PlanAction[] = mode === 'normalize' ? [{ id: 'cloud-scope:normalize', type: 'update',
+    resource: { kind: 'project', name: record.intent.nativeScope.projectId, provider: record.intent.provider },
+    verified: true, requiresConfirm: true,
+    reason: 'Restore only missing nonsecret ownership metadata from the verified original installation journal; preserve cloud resources, connections and existing bindings.' }]
+    : mode === 'bind' ? [{ id: 'cloud-scope:bind', type: 'update',
     resource: { kind: 'project', name: record.intent.nativeScope.projectId, provider: record.intent.provider },
     verified: true, requiresConfirm: true,
     reason: 'Record nonsecret local-default connections for this exact application/environment and bind its verified cloud project; grant no cloud permissions.' }] : mode === 'recover' && record.intent.predecessor
@@ -131,39 +135,78 @@ function projection(record: Record, mode: LocalCloudScopePlan['mode'], retryActi
     metadata: { ...cloudScope, operation: LOCAL_CLOUD_SCOPE_OPERATION, nativeActionId: original.id } }));
   return { cloudScope, actions };
 }
-function binding(project: Project, environment: Environment, record: Record) {
+async function binding(project: Project, environment: Environment, record: Record) {
   const capability = providerRegistry.getLocalScopePreparation(record.intent.hostingProvider);
   const current = new SpecStore().getForInspection(project);
   if (!capability?.continuation || !current || !sameCurrentSource(project, environment, record.intent)) throw unavailable();
-  const selected = capability.continuation.binding(record, current.spec.environments[environment.name].hosting);
+  const selected = capability.continuation.binding(record, current.spec.environments[environment.name].hosting, await journal(project, environment).findByScope());
   const scope = environmentConnectionScope(record.intent.source.repository, environment.name);
   return { ...selected, scope };
 }
-function isBound(project: Project, environment: Environment, record: Record): boolean {
-  if (record.status !== 'scope-ready' || !record.intent.predecessor) return false;
+async function acceptedBinding(project: Project, environment: Environment, record: Record) {
+  if (record.status !== 'scope-ready' || !record.intent.predecessor || emptyLocalScope(environment)) return undefined;
+  const current = new SpecStore().getForInspection(project); const desired = current?.spec.environments[environment.name]?.hosting;
+  const capability = providerRegistry.getLocalScopePreparation(record.intent.hostingProvider);
+  const actual = new EnvironmentRepository().findById(environment.id)?.platformBindings;
+  if (!current || !desired || desired.provider !== record.intent.hostingProvider || !actual || !capability?.continuation
+    || repository(project, current) !== record.intent.source.repository
+    || desired.scopePreparation && (desired.scopePreparation.nativeScope.projectId !== record.intent.nativeScope.projectId
+      || !desired.scopePreparation.continuation || !isDeepStrictEqual(capability.continuation.parseSelection(desired.scopePreparation.continuation.nativeScope, desired), record.intent.selection))) return undefined;
+  // Accepted connection/binding identity survives subsequent ordinary deployment
+  // source edits. New desired placement belongs to the normal hosting lifecycle.
+  const expected = capability.continuation.binding(record, { region: typeof actual.environmentId === 'string' ? actual.environmentId : undefined }, await journal(project, environment).findByScope());
+  const scope = environmentConnectionScope(record.intent.source.repository, environment.name);
+  return { expected, actual, scope, repairable: capability.continuation.repairableProviderScopeFields ?? [] };
+}
+function connectionsMatch(selected: NonNullable<Awaited<ReturnType<typeof acceptedBinding>>>): boolean {
+  return selected.expected.connections.every(item => {
+    const existing = new ConnectionRepository().findByProviderAndScope(item.provider, selected.scope);
+    return existing?.status === 'verified' && isDeepStrictEqual(getSecretStore().decryptObject(existing.credentialsEncrypted), item.config);
+  });
+}
+async function isBound(project: Project, environment: Environment, record: Record): Promise<boolean> {
   try {
-    const current = new SpecStore().getForInspection(project); const desired = current?.spec.environments[environment.name]?.hosting;
-    const capability = providerRegistry.getLocalScopePreparation(record.intent.hostingProvider);
-    const actual = new EnvironmentRepository().findById(environment.id)?.platformBindings;
-    if (!current || !desired || desired.provider !== record.intent.hostingProvider || !actual || !capability?.continuation
-      || repository(project, current) !== record.intent.source.repository
-      || desired.scopePreparation && (desired.scopePreparation.nativeScope.projectId !== record.intent.nativeScope.projectId
-        || !desired.scopePreparation.continuation || !isDeepStrictEqual(capability.continuation.parseSelection(desired.scopePreparation.continuation.nativeScope, desired), record.intent.selection))) return false;
-    // Accepted connection/binding identity survives subsequent ordinary deployment
-    // source edits. New desired placement belongs to the normal hosting lifecycle.
-    const expected = capability.continuation.binding(record, { region: typeof actual.environmentId === 'string' ? actual.environmentId : undefined });
-    const scope = environmentConnectionScope(record.intent.source.repository, environment.name);
-    return Object.entries(expected.platformBindings).every(([key, value]) => isDeepStrictEqual(actual[key], value))
-      && (expected.removeBindings ?? []).every(item => !Object.hasOwn(actual, item.key))
-      && expected.connections.every(item => {
-        const existing = new ConnectionRepository().findByProviderAndScope(item.provider, scope);
-        return existing?.status === 'verified' && isDeepStrictEqual(getSecretStore().decryptObject(existing.credentialsEncrypted), item.config);
-      });
+    const selected = await acceptedBinding(project, environment, record);
+    return Boolean(selected && Object.entries(selected.expected.platformBindings).every(([key, value]) => isDeepStrictEqual(selected.actual[key], value))
+      && (selected.expected.removeBindings ?? []).every(item => !Object.hasOwn(selected.actual, item.key)) && connectionsMatch(selected));
   } catch { return false; }
 }
+async function bindingNormalization(project: Project, environment: Environment, record: Record) {
+  const selected = await acceptedBinding(project, environment, record);
+  if (!selected || !selected.repairable.length || !connectionsMatch(selected)
+    || selected.expected.removeBindings?.some(item => Object.hasOwn(selected.actual, item.key) && !isDeepStrictEqual(selected.actual[item.key], item.expectedValue))
+    || Object.entries(selected.expected.platformBindings).some(([key, value]) => key !== 'providerScope' && !isDeepStrictEqual(selected.actual[key], value))) return undefined;
+  const shape = z.record(z.string(), z.unknown());
+  const actual = shape.safeParse(selected.actual.providerScope), expected = shape.safeParse(selected.expected.platformBindings.providerScope);
+  if (!actual.success || !expected.success) return undefined;
+  const missing = Object.keys(expected.data).filter(key => !Object.hasOwn(actual.data, key));
+  if (!missing.length || missing.some(key => !selected.repairable.includes(key))
+    || Object.entries(actual.data).some(([key, value]) => !Object.hasOwn(expected.data, key) || !isDeepStrictEqual(expected.data[key], value))) return undefined;
+  return { ...selected.actual, providerScope: { ...actual.data, ...Object.fromEntries(missing.map(key => [key, expected.data[key]])) } };
+}
+async function verifyBindingPrerequisites(project: Project, environment: Environment, record: Record): Promise<void> {
+  const capability = providerRegistry.getLocalScopePreparation(record.intent.hostingProvider)?.continuation;
+  if (!capability?.bindingPrerequisiteIds) return;
+  const history = await journal(project, environment).findByScope();
+  const ids = capability.bindingPrerequisiteIds(record, history);
+  if (ids.length > 20 || new Set(ids).size !== ids.length) throw unavailable();
+  const ancestors = new Set<string>(); let cursor = record;
+  while (cursor.intent.predecessor) {
+    const prior = history.filter(item => item.installationId === cursor.intent.predecessor!.installationId);
+    if (prior.length !== 1 || prior[0].plan.digest !== cursor.intent.predecessor.planDigest || ancestors.has(prior[0].installationId) || ancestors.size >= 20) throw unavailable();
+    cursor = prior[0]; ancestors.add(cursor.installationId);
+  }
+  for (const id of ids) {
+    const ancestor = history.find(item => item.installationId === id);
+    if (!ancestor || !ancestors.has(id)) throw unavailable();
+    const verified = await reconcileCloudInstallationV1({ ...await context(project, environment, ancestor.intent, 'recover'),
+      installationId: id, planDigest: ancestor.plan.digest });
+    if (verified.status !== 'scope-ready') throw unavailable();
+  }
+}
 
-function bindLocalScope(project: Project, environment: Environment, record: Record, authorize: () => boolean): void {
-  const expected = binding(project, environment, record); const connections = new ConnectionRepository(); const secrets = getSecretStore();
+async function bindLocalScope(project: Project, environment: Environment, record: Record, authorize: () => boolean): Promise<void> {
+  const expected = await binding(project, environment, record); const connections = new ConnectionRepository(); const secrets = getSecretStore();
   getDb().transaction(() => {
     if (!authorize() || !sameCurrentSource(project, environment, record.intent)) throw unavailable();
     if (expected.removeBindings?.length) {
@@ -188,6 +231,15 @@ function bindLocalScope(project: Project, environment: Environment, record: Reco
     if (!new EnvironmentRepository().updatePlatformBindings(environment.id, expected.platformBindings)) throw unavailable();
   }).immediate();
 }
+async function normalizeLocalBinding(project: Project, environment: Environment, record: Record, authorize: () => boolean): Promise<void> {
+  const previous = new EnvironmentRepository().findById(environment.id)?.platformBindings;
+  const next = await bindingNormalization(project, environment, record);
+  if (!next) throw unavailable();
+  getDb().transaction(() => {
+    if (!authorize() || !isDeepStrictEqual(new EnvironmentRepository().findById(environment.id)?.platformBindings, previous)) throw unavailable();
+    if (!new EnvironmentRepository().update(environment.id, { platformBindings: next })) throw unavailable();
+  }).immediate();
+}
 
 /** Isolated prerequisite before credential lookup. Creating a local row never creates a cloud resource. */
 export async function planLocalCloudScope(input: { project: Project; environmentName: string; specResult: SpecResult;
@@ -200,8 +252,8 @@ export async function planLocalCloudScope(input: { project: Project; environment
   const history = await journal(project, environment).findByScope();
   let record = acceptedLeaf(history);
   if (!record && !desired?.scopePreparation) return undefined;
-  if (input.options && ['serviceFilter', 'envVarOverrides', 'envFile', 'includeEnvFile', 'secretRefs'].some(key => Object.hasOwn(input.options!, key)))
-    throw new Error('Cloud project preparation is an isolated plan stage and accepts no deployment or credential-value inputs.');
+  const deploymentInputs = input.options && ['serviceFilter', 'envVarOverrides', 'envFile', 'includeEnvFile', 'secretRefs'].some(key => Object.hasOwn(input.options!, key));
+  const isolatedInputs = () => new Error('Cloud project preparation is an isolated plan stage and accepts no deployment or credential-value inputs.');
   const capability = providerRegistry.getLocalScopePreparation(record?.intent.hostingProvider ?? desired!.provider);
   if (!capability) throw unavailable();
   if (record) {
@@ -222,6 +274,20 @@ export async function planLocalCloudScope(input: { project: Project; environment
     if (record.status === 'scope-ready' && desired?.scopePreparation && (!allocation || desired.provider !== record.intent.hostingProvider
       || !isDeepStrictEqual(capability.parseScope(desired.scopePreparation.nativeScope), allocation.intent.nativeScope)))
       throw new Error('This environment already allocated a cloud project. Its accepted identity is retained; editing desired names does not authorize a replacement.');
+    if (record.status === 'scope-ready') await verifyBindingPrerequisites(project, environment, record);
+    if (deploymentInputs) {
+      // A completed binding is an ordinary deployment prerequisite. Verify it
+      // before passing input handling back to full planning; unfinished or
+      // changed scope work must still reject all deployment-value inputs.
+      if (await isBound(project, environment, record)) return undefined;
+      throw isolatedInputs();
+    }
+    if (record.status === 'scope-ready' && await bindingNormalization(project, environment, record)) {
+      return { ...projection(record, 'normalize'), environment, review: {
+        resources: [{ kind: 'local-environment-binding', name: environment.name, scope: record.intent.nativeScope.projectId }],
+        permissions: [], costs: [], warnings: ['Restore only missing nonsecret ownership metadata after verifying the original native creation. Cloud resources, saved credentials and existing metadata remain unchanged.'],
+      }, warnings: ['This isolated metadata repair requires confirmation and performs no cloud writes.'] };
+    }
     if (record.status === 'scope-ready' && !desired?.scopePreparation && !emptyLocalScope(environment)) return undefined;
     if ((record.status === 'scope-ready' || cleanupScope) && desired?.scopePreparation?.continuation) {
       if (!capability.continuation) throw unavailable();
@@ -238,10 +304,10 @@ export async function planLocalCloudScope(input: { project: Project; environment
           const intent: LocalCloudScopePreparationIntent = { ...record.intent, installationId: randomUUID(), source: currentSource, nativeScope: nextScope, predecessor, selection };
           record = await planCloudInstallationV1({ ...await context(project, environment, intent, 'allocate'), intent });
         }
-      } else if (isBound(project, environment, record)) return undefined;
+      } else if (await isBound(project, environment, record)) return undefined;
       else {
         if (!sameCurrentSource(project, environment, record.intent)) throw new Error('The prepared scope source changed before binding. Retain the accepted preparation and review the exact source before a handoff.');
-        const expected = binding(project, environment, record);
+        const expected = await binding(project, environment, record);
         return { ...projection(record, 'bind'), environment, review: { ...record.plan.review,
           resources: [{ kind: 'local-environment-binding', name: environment.name, scope: record.intent.nativeScope.projectId },
             ...expected.connections.map(item => ({ kind: 'local-default-connection', name: item.provider, scope: expected.scope }))],
@@ -250,6 +316,7 @@ export async function planLocalCloudScope(input: { project: Project; environment
       }
     }
   } else {
+    if (deploymentInputs) throw isolatedInputs();
     if (!desired?.scopePreparation || !emptyLocalScope(environment)) throw unavailable();
     const nativeScope = capability.parseScope(desired.scopePreparation.nativeScope); const currentSource = source(project, specResult);
     record = history.find(item => !item.intent.predecessor && item.intent.hostingProvider === desired.provider
@@ -294,11 +361,13 @@ export async function localCloudScopeRequired(project: Project, environmentName:
   if (spec?.environments[environmentName]?.hosting.scopePreparation) {
     const existing = new EnvironmentRepository().findByProjectAndName(project.id, environmentName);
     const leaf = existing && acceptedLeaf(await journal(project, existing).findByScope());
-    return !existing || !leaf || !isBound(project, existing, leaf);
+    return !existing || !leaf || !await isBound(project, existing, leaf);
   }
   const environment = new EnvironmentRepository().findByProjectAndName(project.id, environmentName);
   if (!environment) return false;
-  return (await journal(project, environment).findByScope()).some(record => record.attempts.length > 0
+  const history = await journal(project, environment).findByScope(), leaf = acceptedLeaf(history);
+  if (leaf && await bindingNormalization(project, environment, leaf)) return true;
+  return history.some(record => record.attempts.length > 0
     && (record.status !== 'scope-ready' || emptyLocalScope(environment)));
 }
 
@@ -371,13 +440,16 @@ export async function applyLocalCloudScope(input: { project: Project; environmen
     }
     const updated = readOnly
       ? await reconcileCloudInstallationV1({ ...execution, installationId: record.installationId, planDigest: record.plan.digest,
-        ...(record.intent.predecessor && input.action && proof.mode !== 'bind' ? { onlyActionId: input.action.id } : {}) })
+        ...(record.intent.predecessor && input.action && !['bind', 'normalize'].includes(proof.mode) ? { onlyActionId: input.action.id } : {}) })
       : await applyCloudInstallationV1({ ...execution, installationId: record.installationId, planDigest: record.plan.digest, confirmActions: [input.action!.id],
         ...(record.intent.predecessor ? { onlyActionId: input.action!.id } : {}), ...(retryAction ? { retryActions: [retryAction] } : {}) });
-    if (proof.mode === 'bind' && updated.status === 'scope-ready') bindLocalScope(input.project, input.environment, updated, input.authorize);
+    if (['bind', 'normalize'].includes(proof.mode) && updated.status === 'scope-ready') await verifyBindingPrerequisites(input.project, input.environment, updated);
+    if (proof.mode === 'bind' && updated.status === 'scope-ready') await bindLocalScope(input.project, input.environment, updated, input.authorize);
+    if (proof.mode === 'normalize' && updated.status === 'scope-ready') await normalizeLocalBinding(input.project, input.environment, updated, input.authorize);
     const complete = updated.status === 'scope-ready' || ['allocate', 'recover'].includes(proof.mode) && updated.status === 'pending' && !updated.reason && Boolean(updated.completed[input.action!.id]);
     return { success: complete, ...(complete ? {} : { status: updated.status === 'pending' ? 'pending' as const : 'blocked' as const }),
-      message: complete ? proof.mode === 'bind' ? 'Bound the exact verified cloud project and nonsecret local connections to this application environment.'
+      message: complete ? proof.mode === 'normalize' ? 'Restored missing nonsecret ownership metadata from the verified original installation; cloud resources and connections were preserved.'
+        : proof.mode === 'bind' ? 'Bound the exact verified cloud project and nonsecret local connections to this application environment.'
         : updated.intent.predecessor ? 'Verified this exact preparation action. Later stages require a separate current plan.'
         : 'Verified the exact empty project allocation. Billing and hosting have not been configured.'
         : updated.intent.predecessor

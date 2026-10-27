@@ -21,7 +21,8 @@ const intent: LocalCloudScopePreparationIntent = { schemaVersion: 1, installatio
     artifactRepositoryName: 'projects/synthetic-project/locations/us-central1/repositories/hypervibe',
     artifactRepositoryCreateTime: '2026-10-25T01:00:00Z' } };
 
-function boundary(options: { lose?: string; unknown?: boolean; collision?: boolean; conflict?: boolean; registryReplacement?: boolean; denyWrites?: boolean } = {}) {
+const privateProof = { artifactInstallationId: '11111111-1111-4111-8111-111111111111', artifactAttemptId: '22222222-2222-4222-8222-222222222222' };
+function boundary(options: { lose?: string; unknown?: boolean; collision?: boolean; conflict?: boolean; registryReplacement?: boolean; denyWrites?: boolean; privateProof?: boolean; wrongRegistryOwner?: boolean } = {}) {
   let record: CloudInstallationRecord<LocalCloudScopePreparationIntent> | null = null;
   const resources = new Map<string, Record<string, unknown>>();
   const operations = new Map<string, Record<string, unknown>>();
@@ -45,7 +46,8 @@ function boundary(options: { lose?: string; unknown?: boolean; collision?: boole
     if (url.hostname === 'cloudbilling.googleapis.com') return Response.json({ name: 'projects/synthetic-project/billingInfo',
       projectId: 'synthetic-project', billingAccountName: selection.billingAccountName, billingEnabled: true });
     if (url.hostname === 'artifactregistry.googleapis.com' && !url.pathname.includes(':')) return Response.json({
-      name: intent.nativeScope.artifactRepositoryName, format: 'DOCKER', mode: 'STANDARD_REPOSITORY', createTime: options.registryReplacement ? '2026-10-25T02:00:00Z' : intent.nativeScope.artifactRepositoryCreateTime });
+      name: intent.nativeScope.artifactRepositoryName, format: 'DOCKER', mode: 'STANDARD_REPOSITORY', createTime: options.registryReplacement ? '2026-10-25T02:00:00Z' : intent.nativeScope.artifactRepositoryCreateTime,
+      ...(options.privateProof ? { description: `hypervibe:operator-registry:${options.wrongRegistryOwner ? 'f'.repeat(64) : createHash('sha256').update(JSON.stringify([intent.customerId, intent.appId, intent.environment, privateProof.artifactInstallationId])).digest('hex')}:${privateProof.artifactAttemptId}` } : {}) });
     if (url.pathname.endsWith(':testIamPermissions')) return Response.json({ permissions: ['iam.workloadIdentityPools.create',
       'iam.workloadIdentityPoolProviders.create', 'iam.serviceAccounts.create', 'iam.serviceAccounts.setIamPolicy', 'iam.roles.create', 'resourcemanager.projects.setIamPolicy', 'artifactregistry.repositories.setIamPolicy'] });
     if (url.pathname.endsWith(':getIamPolicy')) return Response.json(url.hostname === 'iam.googleapis.com' ? accountPolicy : url.hostname === 'artifactregistry.googleapis.com' ? registryPolicy : projectPolicy);
@@ -99,6 +101,25 @@ function boundary(options: { lose?: string; unknown?: boolean; collision?: boole
 }
 
 describe('reviewed local GitHub→Google workload identity lifecycle', () => {
+  it('accepts complete private ownership proof independently of public helper preparation', () => {
+    expect(gcpGithubCiPreparationScopeSchema.parse({ ...intent.nativeScope, ...privateProof })).toMatchObject(privateProof);
+    for (const key of Object.keys(privateProof)) {
+      const incomplete = { ...privateProof } as Record<string, string>; delete incomplete[key];
+      expect(gcpGithubCiPreparationScopeSchema.safeParse({ ...intent.nativeScope, ...incomplete }).success).toBe(false);
+    }
+    expect(gcpGithubCiPreparationScopeSchema.safeParse(intent.nativeScope).success).toBe(true);
+  });
+  it('checks private ownership before CI writes even when no public helper exists', async () => {
+    const options = { privateProof: true, wrongRegistryOwner: false };
+    const f = boundary(options), selected = { ...intent, nativeScope: { ...intent.nativeScope, ...privateProof } };
+    const planned = await planCloudInstallationV1({ ...f.input, intent: selected });
+    expect(f.writes).toHaveLength(0);
+    options.wrongRegistryOwner = true;
+    const action = planned.plan.actions[0];
+    const result = await applyCloudInstallationV1({ ...f.input, installationId: intent.installationId, planDigest: planned.plan.digest,
+      confirmActions: [action.id], onlyActionId: action.id });
+    expect(result.status).toBe('blocked'); expect(f.writes).toHaveLength(0);
+  });
   it('retains complete public helper proof without granting CI permission to that repository', () => {
     const proof = { artifactInstallationId: '11111111-1111-4111-8111-111111111111', artifactAttemptId: '22222222-2222-4222-8222-222222222222',
       publicArtifactRepository: 'operator-public', publicArtifactRepositoryName: 'projects/synthetic-project/locations/us-central1/repositories/operator-public',

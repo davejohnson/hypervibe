@@ -29,8 +29,9 @@ function registryScope(value: { projectId: string; region: string; artifactRepos
   publicArtifactRepositoryCreateTime?: string; publicArtifactInstallationId?: string; publicArtifactAttemptId?: string }, ctx: z.RefinementCtx) {
   if (value.artifactRepositoryName !== `projects/${value.projectId}/locations/${value.region}/repositories/${value.artifactRepository}`)
     ctx.addIssue({ code: 'custom', message: 'Image repository does not match the reviewed project and region.' });
-  const count = Object.keys(optionalPublicProof).filter(key => (value as Record<string, unknown>)[key] !== undefined).length;
-  if (count !== 0 && count !== Object.keys(optionalPublicProof).length || count > 0
+  const privateCount = ['artifactInstallationId', 'artifactAttemptId'].filter(key => (value as Record<string, unknown>)[key] !== undefined).length;
+  const count = Object.keys(gcpLocalPublicArtifactProofShape).filter(key => (value as Record<string, unknown>)[key] !== undefined).length;
+  if (privateCount !== 0 && privateCount !== 2 || count !== 0 && (count !== Object.keys(gcpLocalPublicArtifactProofShape).length || privateCount !== 2) || count > 0
     && value.publicArtifactRepositoryName !== `projects/${value.projectId}/locations/${value.region}/repositories/operator-public`)
     ctx.addIssue({ code: 'custom', message: 'Public helper proof must be complete and retain its separate exact repository.' });
 }
@@ -180,13 +181,15 @@ export function createGcpGithubCiPreparationDriver(options: { fetch?: typeof fet
       const registry = await client.json(`https://artifactregistry.googleapis.com/v1/${n.artifactRepositoryName}`);
       if (registry.name !== n.artifactRepositoryName || registry.format !== 'DOCKER' || registry.mode !== 'STANDARD_REPOSITORY'
         || registry.createTime !== n.artifactRepositoryCreateTime) fail('identity_mismatch');
+      const ownerHash = (id: string) => createHash('sha256').update(JSON.stringify([context.intent.customerId, context.intent.appId, context.intent.environment, id])).digest('hex');
+      if (n.artifactInstallationId) {
+        if (registry.description !== `hypervibe:operator-registry:${ownerHash(n.artifactInstallationId)}:${n.artifactAttemptId}`) fail('identity_mismatch');
+      }
       if (n.publicArtifactRepositoryName) {
-        const owner = (id: string) => createHash('sha256').update(JSON.stringify([context.intent.customerId, context.intent.appId, context.intent.environment, id])).digest('hex');
-        if (registry.description !== `hypervibe:operator-registry:${owner(n.artifactInstallationId!)}:${n.artifactAttemptId}`) fail('identity_mismatch');
         const helper = await client.json(`https://artifactregistry.googleapis.com/v1/${n.publicArtifactRepositoryName}`);
         if (helper.name !== n.publicArtifactRepositoryName || helper.format !== 'DOCKER' || helper.mode !== 'STANDARD_REPOSITORY'
           || helper.createTime !== n.publicArtifactRepositoryCreateTime
-          || helper.description !== `hypervibe:operator-registry:${owner(n.publicArtifactInstallationId!)}:${n.publicArtifactAttemptId}`) fail('identity_mismatch');
+          || helper.description !== `hypervibe:operator-registry:${ownerHash(n.publicArtifactInstallationId!)}:${n.publicArtifactAttemptId}`) fail('identity_mismatch');
       }
       return await work(client);
     } finally { budget.close(); }
