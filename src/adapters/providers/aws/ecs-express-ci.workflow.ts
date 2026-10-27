@@ -198,8 +198,7 @@ ${buildEcsExpressTaskDefinitionRuntime(broker).split('\n').filter(Boolean).map(l
             }` : ''} });
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
             const currentConfig = ecsCurrentConfiguration;
-${broker ? '            const installedTargets = ' + JSON.stringify(installedTargets) + ';\n' : ''}
-            for (const serviceArn of serviceArns) {
+${broker ? '            const installedTargets = ' + JSON.stringify(installedTargets) + ';\n' : ''}            for (const serviceArn of serviceArns) {
               const before = (await client.send(
                 new DescribeExpressGatewayServiceCommand({ serviceArn${broker ? ", include: ['TAGS']" : ''} })
               )).service;

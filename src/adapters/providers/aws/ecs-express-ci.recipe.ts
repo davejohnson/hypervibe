@@ -21,7 +21,7 @@ function ecsPreserves(expected, observed) {
 async function ecsReleaseContainer(client, config, serviceArn) {
   if (!config?.taskDefinitionArn) {
     if (!config?.primaryContainer) throw new Error('ECS returned no active container or task definition');
-    return { container: config.primaryContainer, taskRoleArn: config.taskRoleArn, executionRoleArn: config.executionRoleArn };
+    return { container: config.primaryContainer, taskRoleArn: config.taskRoleArn${installed ? ', executionRoleArn: config.executionRoleArn' : ''} };
   }
   const arn = config.taskDefinitionArn;
   if (typeof arn !== 'string' || !arn.startsWith(serviceArn.split(':service/')[0] + ':task-definition/') || !/:\\d+$/.test(arn)) throw new Error('ECS task definition is outside the reviewed account or region');
@@ -44,8 +44,7 @@ ${installed ? `  if (!reviewed) throw new Error('Installed ECS release configura
     current.taskRoleArn = reviewed.taskRoleArn;
     if (current.definition) current.definition = { ...current.definition, taskRoleArn: reviewed.taskRoleArn };
   } else ecsInstalledFinalConfiguration(current, reviewed);
-` : ''}
-  const environment = [...(current.container.environment || [])].filter(item => !['HYPERVIBE_DEPLOY_SHA', 'HYPERVIBE_IMAGE_DIGEST'].includes(item.name));
+` : ''}  const environment = [...(current.container.environment || [])].filter(item => !['HYPERVIBE_DEPLOY_SHA', 'HYPERVIBE_IMAGE_DIGEST'].includes(item.name));
   const marker = name => environment.find(item => item.name === name)?.value;
   const startCommand = ${installed ? 'reviewed.startCommand' : "marker('HYPERVIBE_START_COMMAND')"};
   const healthPath = ${installed ? "reviewed.healthCheckPath || '/'" : "marker('HYPERVIBE_HEALTH_CHECK_PATH') || config.healthCheckPath || '/'"};

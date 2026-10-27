@@ -1,3 +1,4 @@
+import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import '../../../application/providers.js';
@@ -6,7 +7,7 @@ import { buildEcsExpressGitHubActionsSteps } from '../../../adapters/providers/a
 import { buildCloudRunGitHubActionsSteps } from '../../../adapters/providers/gcp/cloudrun-ci.workflow.js';
 import { buildAzureContainerAppsGitHubActionsSteps } from '../../../adapters/providers/azure/azure-container-apps-ci.workflow.js';
 import { providerRegistry } from '../../registry/provider.registry.js';
-import { githubActionsWorkflowInputHash } from '../github-ops.service.js';
+import { githubActionsWorkflowInputHash, GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION } from '../github-ops.service.js';
 import { brokerTarget } from './cloud-deployment-ci.fixture.js';
 
 const base: BranchDeployTarget = { environmentName: 'production', kind: 'production', branch: 'main',
@@ -33,12 +34,19 @@ describe('legacy deployment workflow compatibility', () => {
     expect(createHash('sha256').update(JSON.stringify(render({ ...target, providerServiceIds: [...target.providerServiceIds] }))).digest('hex')).toBe(expected);
   });
 
-  it('preserves existing provider revisions while the explicit new connection changes semantic inputs', () => {
-    expect(providerRegistry.getMetadata('ecs')?.orchestration?.ci?.rendererRevision).toBe(1);
+  it('requires reviewed ECS bootstrap revision migration while preserving the legacy emitter bytes', () => {
+    expect(providerRegistry.getMetadata('ecs')?.orchestration?.ci?.rendererRevision).toBe(2);
     expect(providerRegistry.getMetadata('azure-container-apps')?.orchestration?.ci?.rendererRevision).toBe(1);
     expect(providerRegistry.getMetadata('cloudrun')?.orchestration?.ci?.rendererRevision).toBe(2);
     const broker = brokerTarget(), legacy = { ...broker }; delete legacy.deploymentAccess;
     const hash = (target: BranchDeployTarget) => githubActionsWorkflowInputHash({ provider: 'ecs', target, migration: { includeStep: false } });
     expect(hash(broker)).not.toBe(hash(legacy));
+    // Freeze the previous ECS provider contract independently of its registered
+    // revision. A global renderer migration must not mask this provider change.
+    const previousTarget = { ...broker }; delete previousTarget.providerImageUris;
+    delete previousTarget.programFingerprint; delete previousTarget.deploymentContractFingerprint;
+    const previousEcs = canonicalJsonSha256({ version: 1, rendererRevision: GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION,
+      providerRendererRevision: 1, provider: 'ecs', target: previousTarget, migration: { includeStep: false } });
+    expect(hash(broker)).not.toBe(previousEcs);
   });
 });

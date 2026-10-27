@@ -318,3 +318,13 @@ remove reviewed settings from ordinary existing local-key workloads. Final
 installed release verification independently rejects executable entry-point or
 health-command drift. The remaining shared CI recovery prerequisite above is
 unchanged.
+
+
+The legacy emitter compatibility check caught an additional regression: installed
+ECS changes leaked an extra internal return field and blank lines into the
+local-key renderer. Its frozen main-branch SHA-256 failed before the correction;
+the legacy bytes are now restored exactly without updating the fixture hash.
+The provider revision assertion separately freezes the old ECS revision 1
+semantic contract and requires review of revision 2. The focused legacy and
+emitted ECS task-definition suites pass 31 checks; this is offline compatibility
+evidence, not a live AWS deployment claim.
