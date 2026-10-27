@@ -2357,6 +2357,25 @@ appropriate.
 
 Fresh-environment seed/bootstrap data belongs in desired state as `database.seedCommand`. It should plan a visible one-shot seed action, run through the provider-neutral environment task runner during `hv_apply`, and record completion on the database component only after terminal success. In a managed-CI environment, a non-noop seed has an explicit dependency on a verified exact-SHA release of the desired commit. If that release remains in progress, apply stops pending before the seed; it never runs the older image or races newly issued integration credentials.
 
+An explicitly discarded and newly initialized database may separately declare
+`database.freshInitialization.bootstrap: { service, image }`. This selects a
+declared service and an immutable configured application image, then uses the
+existing canonical release-command configuration for first schema initialization.
+It does not reinterpret `seedCommand` or certify an application release. Only the
+exact completed fresh-storage receipt admits the isolated `database-bootstrap`
+stage before old-source backup readiness. A private authentication task and the
+schema command require separate reviewed actions. Both use selected native
+database references, the application's PostgreSQL client and value-free results.
+Authentication proves the task connection; command completion is not an independent
+schema audit or proof of running application operation.
+
+Each attempt retains its immutable scope and acknowledged task identities before
+continuing. Unknown writes block replay; terminal execution is persisted before
+exact cleanup. A consumed generation cannot rerun its command, and unrelated
+deployment, backup and restore gates resume afterward. Historical seed receipts
+are valid only for their recorded database generation. See the
+[bootstrap contract and provider review](docs/database-initialization-bootstrap.md).
+
 `runEnvironmentTask` carries the authoritative `Project.gitRemoteUrl` through the shared `EnvironmentTaskOptions` port. Railway uses the existing GitHub remote parser and package-credential selector for private GHCR task images: exact repository, matching organization wildcard, then verified global fallback. Missing or non-GitHub repository context permits only global credentials, never an unrelated scoped connection or a guess from the image name or current directory. Named CI tasks and managed recovery retain their explicitly supplied registry credentials. The seed transport regression covers these choices and a failed task followed by reapply; completion is still recorded only after terminal success.
 
 `hv_db_migrate` must not exist in the command registry, MCP surface, or CLI.

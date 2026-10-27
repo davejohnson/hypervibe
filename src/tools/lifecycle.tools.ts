@@ -85,9 +85,9 @@ export function registerLifecycleTools(commands: CommandRegistrar, ctx: CommandC
       }
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const credentialOwners = credentialRecoveryDeletionOwners(project.id, { ...(scope === 'environment' && env ? { environment: env } : {}), ...(scope === 'service' && name ? { service: name } : {}) });
-      if (credentialOwners.length) return commandError('VALIDATION', 'Credential recovery or activation evidence would be lost. Local deletion is blocked.', {
+      if (credentialOwners.length) return commandError('VALIDATION', 'Credential or database recovery, or activation evidence would be lost. Local deletion is blocked.', {
         details: { environments: credentialOwners },
-        hint: 'Preserve the reviewed credential plan and exact consumer identities. Complete recovery and establish a verified transfer or retirement before deleting local records.',
+        hint: 'Preserve reviewed plans, database recovery journals and exact consumer identities. Complete pending recovery and establish any required verified transfer or retirement before deleting local records.',
       });
       const providerNote = 'Provider resources were not touched — destroy live infrastructure via hv_spec + hv_plan + hv_apply with exact confirmActions ids.';
       const volumeOwners = ctx.repos.environments.findByProjectId(project.id).filter((e) =>
