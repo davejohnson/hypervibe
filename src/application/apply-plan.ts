@@ -3,6 +3,8 @@ import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from 
 import { applyDatabaseFreshInitialization } from '../domain/services/database-fresh-initialization.service.js';
 import { hasPendingDatabaseInitialization } from '../domain/plan/database-initialization.contract.js';
 import { databaseSeedGeneration } from '../domain/services/database-seed-generation.js';
+import { databaseBootstrapActionSchema, hasPendingDatabaseBootstrap, matchesDatabaseBootstrapObservationOrCleanup } from '../domain/plan/database-bootstrap.contract.js';
+import { applyDatabaseBootstrap } from '../domain/services/database-bootstrap.service.js';
 import { applyScheduleActivation } from '../domain/services/schedule-activation.service.js';
 import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js';
 import { applyApiPolicy, planApiPolicy } from '../domain/services/api-policy.js';
@@ -816,15 +818,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
   alwaysRunBootstrap?: boolean;
 }): Promise<PlanApplyOutcome> {
   const { project, spec, planId } = params;
-  const providerValidation = firstProviderSpecValidationFailure(spec);
-  if (providerValidation) {
-    return {
-      kind: 'invalid_spec',
-      message: providerValidation.message,
-      hint: providerValidation.hint,
-      details: providerValidation.details,
-    };
-  }
   const planService = new PlanService();
 
   const executor = new ConvergeExecutor();
@@ -840,17 +833,25 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const ciCredentialsOnly = planScope === 'managed-ci-credentials';
   const managedCiBindingsOnly = planScope === 'managed-ci-bindings' || planScope === 'hosting-bindings';
   const workflowPublicationOnly = planScope === 'managed-ci-publication' || planScope === 'backup-program-publication';
-  if (loaded.document.inputRequired?.length) {
-    return {
-      kind: 'input_required',
-      envName,
-      requirements: loaded.document.inputRequired,
-    };
-  }
   const projectForPreflight = spec.gitRemoteUrl
     ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
     : project;
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  const bootstrapAction = loaded.document.actions[0];
+  const observationOrCleanup = planScope === 'database-bootstrap' && environment
+    && loaded.run.projectId === project.id && loaded.run.environmentId === environment.id
+    && loaded.document.actions.length === 1 && bootstrapAction
+    && ctx.repos.components.findByEnvironmentId(environment.id).some(component =>
+      component.id === bootstrapAction.metadata?.componentId
+      && matchesDatabaseBootstrapObservationOrCleanup(component.bindings, bootstrapAction));
+  const providerValidation = observationOrCleanup ? undefined : firstProviderSpecValidationFailure(spec);
+  if (providerValidation) {
+    return { kind: 'invalid_spec', message: providerValidation.message,
+      hint: providerValidation.hint, details: providerValidation.details };
+  }
+  if (loaded.document.inputRequired?.length) {
+    return { kind: 'input_required', envName, requirements: loaded.document.inputRequired };
+  }
   const pendingDatabaseAliases = environment ? ctx.repos.components.findByEnvironmentId(environment.id)
     .some(component => component.bindings.credentialAliasRepair !== undefined) : false;
   if (pendingDatabaseAliases && planScope !== 'database-credential-aliases') {
@@ -859,6 +860,11 @@ export async function executePlanApply(ctx: CommandContext, params: {
   }
   const initializationEnvironments = planScope === 'credentials'
     ? ctx.repos.environments.findByProjectId(project.id) : environment ? [environment] : [];
+  if (planScope !== 'database-bootstrap' && initializationEnvironments.some(candidate =>
+    ctx.repos.components.findByEnvironmentId(candidate.id).some(component => hasPendingDatabaseBootstrap(component.bindings)))) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'Private database bootstrap has a retained attempt. Recover its isolated stage before other mutations.' }] };
+  }
   if (planScope !== 'database-initialization' && initializationEnvironments.some(candidate =>
     ctx.repos.components.findByEnvironmentId(candidate.id).some(component => hasPendingDatabaseInitialization(component.bindings)))) {
     return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
@@ -903,6 +909,24 @@ export async function executePlanApply(ctx: CommandContext, params: {
       : { kind: 'env_missing', envName };
   }
 
+  if (planScope === 'database-bootstrap') {
+    const reviewedAction = databaseBootstrapActionSchema.safeParse(loaded.document.actions[0]);
+    if (loaded.document.databaseBootstrapReady !== true || !environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
+      || loaded.document.actions.length !== 1 || !reviewedAction.success || params.alwaysRunBootstrap) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'Database bootstrap requires one exact action and the existing environment; it cannot deploy applications.' }] };
+    }
+    const blocked = planService.providerPreflight([reviewedAction.data.metadata.hostingProvider]);
+    if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision,
+      confirmActions: params.confirmActions, handler: action =>
+        resolvePlanActionAuthority(action)?.capability === 'database.bootstrap'
+          ? applyDatabaseBootstrap({ project: projectForPreflight, spec: envSpec, environmentName: envName,
+            action, confirmed: new Set(params.confirmActions), encrypted: loaded.document.overrides?.databaseBootstrapEncrypted })
+          : Promise.resolve({ success: false, status: 'blocked' as const, message: 'Only the exact reviewed database bootstrap action is authorized.' }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [
+      'Private task authentication and schema bootstrap do not prove running application readiness. Future backups, restore verification and managed deployment remain separate.' ] };
+  }
   if (planScope === 'database-initialization') {
     if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
       || loaded.document.actions.length !== 1 || params.alwaysRunBootstrap) {

@@ -1,0 +1,185 @@
+{
+  "schemaVersion": 1,
+  "reviewedAt": "2026-10-26",
+  "evidenceBoundary": "Official-source design review and offline contract checks; no live database authentication, schema migration, workload activation or cleanup certification. Unsupported means this Hypervibe lifecycle is not implemented, not that the native product lacks jobs or PostgreSQL.",
+  "hosting": [
+    {
+      "provider": "railway",
+      "implementation": "implemented",
+      "databaseProviders": ["railway"],
+      "identity": "Project, environment, source service, acknowledged temporary service and exact deployment; database volume and volume-instance are separate retained identities.",
+      "completionAndRecovery": "Require the fixed correlated SQL or migration result and terminal exit, then exact temporary-service absence. Persist acknowledged identities and result before cleanup; unresolved creation or execution blocks replay.",
+      "prerequisites": "Completed exact fresh-initialization receipt, approved immutable configured application image, selected database reference keys, private environment network and scoped image-pull access.",
+      "limitations": "One private task proves only its own connection and reviewed command outcome. Application rollout, old-deployment drainage, schema correctness and restore readiness remain separate; no public proxy or CLI fallback.",
+      "officialSources": [
+        "https://docs.railway.com/networking/private-networking",
+        "https://docs.railway.com/variables",
+        "https://docs.railway.com/volumes",
+        "https://docs.railway.com/builds/private-registries",
+        "https://raw.githubusercontent.com/railwayapp/cli/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/gql/schema.json"
+      ]
+    },
+    {
+      "provider": "cloudrun",
+      "implementation": "unsupported",
+      "databaseProviders": [],
+      "identity": "Cloud project, location, Job, Execution and individual Task are distinct resources.",
+      "completionAndRecovery": "Native execution status and task outcomes must be correlated; cancellation retains the execution, while deletion removes its history. Restarting a job is another execution.",
+      "prerequisites": "Reviewed image, job service identity, scoped execution permissions, secret access and appropriate VPC egress for a private database.",
+      "limitations": "No fresh-generation bootstrap admission, finite SQL receipt or durable task-recovery implementation is registered. Existing runJob or Cloud SQL connectivity does not admit this lifecycle.",
+      "officialSources": [
+        "https://docs.cloud.google.com/run/docs/execute/jobs",
+        "https://docs.cloud.google.com/sql/docs/postgres/connect-run"
+      ]
+    },
+    {
+      "provider": "ecs",
+      "implementation": "unsupported",
+      "databaseProviders": [],
+      "identity": "AWS account, region, cluster ARN, task definition revision and returned task ARN.",
+      "completionAndRecovery": "RunTask supports a clientToken tied to request parameters. DescribeTasks is eventually consistent and reports container exits; stopped task visibility is retained for at least one hour, not indefinitely.",
+      "prerequisites": "Exact task and execution roles, immutable image, approved subnet/security groups and a separately admitted private database credential source.",
+      "limitations": "No fresh-generation bootstrap admission or finite SQL/task recovery contract is implemented. An available RDS instance or RUNNING task cannot prove SQL authentication or migration completion.",
+      "officialSources": [
+        "https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html",
+        "https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_DescribeTasks.html",
+        "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ConnectToPostgreSQLInstance.html"
+      ]
+    },
+    {
+      "provider": "azure-container-apps",
+      "implementation": "unsupported",
+      "databaseProviders": [],
+      "identity": "Full job ARM identity, Container Apps environment and returned execution identity.",
+      "completionAndRecovery": "Manual jobs execute finite replicas with separate timeout, retry, parallelism and completion-count settings. Native retry behavior must not silently replay an uncertain migration.",
+      "prerequisites": "Approved job image and identity, registry access, credential references and networking to the selected PostgreSQL server.",
+      "limitations": "No fresh-generation receipt or resumable finite SQL/migration executor is registered. Shared environment networking alone does not establish database or command compatibility.",
+      "officialSources": [
+        "https://learn.microsoft.com/en-us/azure/container-apps/jobs",
+        "https://learn.microsoft.com/en-us/azure/postgresql/network/concepts-networking-private"
+      ]
+    },
+    {
+      "provider": "fly",
+      "implementation": "unsupported",
+      "databaseProviders": [],
+      "identity": "Organization, application, Machine id and Machine instance id; an MPG cluster is a separate resource.",
+      "completionAndRecovery": "Machines expose image, init command, state waits and auto-destroy. Completion and deletion need retained evidence before an automatically destroyed Machine disappears.",
+      "prerequisites": "Exact immutable image, private organization network, approved application secrets and selected MPG connection mode.",
+      "limitations": "No fresh-generation receipt or durable finite SQL/migration executor is registered. Native release commands and app attachment do not establish this separate plan authority.",
+      "officialSources": [
+        "https://docs.fly.io/machines/api/machines-resource",
+        "https://fly.io/mpg/",
+        "https://fly.io/changelog/managed-postgres-machines-api/"
+      ]
+    },
+    {
+      "provider": "digitalocean",
+      "implementation": "unsupported",
+      "databaseProviders": [],
+      "identity": "App id, declared job component and its deployment/job execution; managed PostgreSQL cluster UUID is separate.",
+      "completionAndRecovery": "App Platform documents deploy-time and scheduled jobs. Adding a job updates the app spec; this review establishes no isolated temporary-workload replay/cleanup contract.",
+      "prerequisites": "Reviewed image, exact app scope, approved job variables and private VPC database routing with correct TLS configuration.",
+      "limitations": "The isolated fresh-generation SQL/migration lifecycle is unimplemented. An app deployment must not be used as a hidden substitute for an independently reviewed bootstrap action.",
+      "officialSources": [
+        "https://docs.digitalocean.com/products/app-platform/how-to/manage-jobs/",
+        "https://docs.digitalocean.com/products/databases/postgresql/how-to/connect/"
+      ]
+    },
+    {
+      "provider": "vercel",
+      "implementation": "unsupported",
+      "databaseProviders": [],
+      "identity": "Vercel project/deployment and Function invocation; these are not the shared temporary-container execution identity.",
+      "completionAndRecovery": "Functions have runtime and duration limits. This bounded review establishes no exact temporary private container execution, resumption or cleanup contract for the registered adapter.",
+      "prerequisites": "A separately reviewed execution and database-connectivity design would be required before admission.",
+      "limitations": "No fresh-generation bootstrap capability is registered. This is an implementation gap, not a claim that all Vercel products lack arbitrary compute.",
+      "officialSources": ["https://vercel.com/docs/functions/limitations"]
+    }
+  ],
+  "database": [
+    {
+      "provider": "railway",
+      "hostingProviders": ["railway"],
+      "identity": "Exact database service in its project/environment plus the newly acknowledged volume and volume-instance identities.",
+      "completionAndRecovery": "PostgreSQL image initialization variables apply only to an empty data directory. A container's local trust connection does not prove the password; require a fresh private task connection and retained generation receipt.",
+      "prerequisites": "Retained provider credential/reference sources and intended database/role; no existing-data replacement or password rotation is inferred.",
+      "limitations": "Configured persistence and matching references are not SQL proof. Replacing storage invalidates earlier bootstrap completion; the future backup/restore gate remains in force.",
+      "officialSources": [
+        "https://github.com/docker-library/docs/blob/master/postgres/README.md",
+        "https://docs.railway.com/volumes",
+        "https://raw.githubusercontent.com/railwayapp/cli/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/gql/schema.json",
+        "https://www.postgresql.org/docs/18/auth-password.html"
+      ]
+    },
+    {
+      "provider": "supabase",
+      "hostingProviders": [],
+      "identity": "Supabase project reference and selected logical database/role, with direct and pooler endpoint identities kept distinct.",
+      "completionAndRecovery": "Official guidance selects direct connections for migrations; pooler hostnames and usernames cannot be inferred from a direct URL or region. Provider readiness is not command completion.",
+      "prerequisites": "Approved direct connection, suitable network/IP support, TLS and narrowly selected runtime credentials.",
+      "limitations": "Fresh-generation admission and private temporary bootstrap transport are unsupported. Existing project or SQL access is not authority to waive backups.",
+      "officialSources": ["https://supabase.com/docs/guides/database/connecting-to-postgres"]
+    },
+    {
+      "provider": "neon",
+      "hostingProviders": [],
+      "identity": "Project, branch, compute endpoint, logical database and role; compute is separate from durable branch storage.",
+      "completionAndRecovery": "Direct endpoints are recommended for migration tools needing session semantics; transaction pooling restricts session features. Suspended/replaced compute is not a new empty database generation.",
+      "prerequisites": "Reviewed branch and direct endpoint, connection security and an independently admitted runtime transport.",
+      "limitations": "No fresh-generation receipt or private bootstrap provider pair is implemented. A successful pooled connection cannot certify migration compatibility.",
+      "officialSources": [
+        "https://neon.com/docs/introduction/architecture-overview",
+        "https://neon.com/docs/connect/connection-pooling"
+      ]
+    },
+    {
+      "provider": "cloudsql",
+      "hostingProviders": [],
+      "identity": "Cloud project, instance and region/connection name, selected database and database identity.",
+      "completionAndRecovery": "Private Cloud Run connectivity requires the instance private IP and the appropriate VPC egress path. Instance state, connector IAM authorization and SQL login are different evidence.",
+      "prerequisites": "Approved runtime identity and database user, Cloud SQL API/permissions, exact VPC route and connection mode.",
+      "limitations": "Fresh-generation bootstrap is unsupported. No Railway variable interpolation, empty-volume semantics or public-IP fallback may be inferred.",
+      "officialSources": ["https://docs.cloud.google.com/sql/docs/postgres/connect-run"]
+    },
+    {
+      "provider": "rds",
+      "hostingProviders": [],
+      "identity": "AWS account, region, DB instance identifier/ARN, endpoint and selected database/role.",
+      "completionAndRecovery": "An available instance must also be network-accessible before SQL connection. A private instance requires VPC access; control-plane availability does not prove the supplied SQL password.",
+      "prerequisites": "Approved task network/security groups, database authentication mode and endpoint/TLS configuration.",
+      "limitations": "No fresh-generation bootstrap pair is implemented. Existing ECS task support is not migration or old-data backup-waiver authority.",
+      "officialSources": ["https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ConnectToPostgreSQLInstance.html"]
+    },
+    {
+      "provider": "azure-postgres",
+      "hostingProviders": [],
+      "identity": "Flexible Server ARM id with subscription/resource group, selected database and role.",
+      "completionAndRecovery": "Private access uses virtual network integration and DNS; another network needs the appropriate connectivity. Server readiness is separate from a fresh SQL connection and migration result.",
+      "prerequisites": "Approved identity, database role, VNet/subnet/private DNS route and exact TLS configuration.",
+      "limitations": "Fresh-generation receipt and bootstrap executor are unsupported. ARM authorization must not be treated as database login authority.",
+      "officialSources": ["https://learn.microsoft.com/en-us/azure/postgresql/network/concepts-networking-private"]
+    },
+    {
+      "provider": "fly",
+      "hostingProviders": [],
+      "identity": "Organization and Managed Postgres cluster id with selected database and role; app attachments are separate metadata.",
+      "completionAndRecovery": "MPG runs on the organization's private network. V2 create/restore operations are asynchronous; a ready cluster precedes database/user setup, and app attachment does not itself configure connection secrets through the API.",
+      "prerequisites": "Approved MPG version/cluster, private organization network and explicitly selected direct or pooled connection semantics.",
+      "limitations": "No fresh-generation bootstrap pair is implemented. Native app attachment, cluster readiness and pooled application connectivity do not prove migration compatibility.",
+      "officialSources": [
+        "https://fly.io/mpg/",
+        "https://fly.io/changelog/managed-postgres-machines-api/"
+      ]
+    },
+    {
+      "provider": "digitalocean",
+      "hostingProviders": [],
+      "identity": "Account, managed PostgreSQL cluster UUID, VPC/region, selected logical database or pool and user.",
+      "completionAndRecovery": "Private hostnames require the same VPC; selected user/database and TLS settings change connection behavior. Online cluster status is separate from SQL and schema evidence.",
+      "prerequisites": "Approved VPC connectivity, exact database/user endpoint and appropriate TLS certificate verification.",
+      "limitations": "Fresh-generation bootstrap admission is unsupported. An App Platform job or managed database alone does not provide the necessary pair-specific transport.",
+      "officialSources": ["https://docs.digitalocean.com/products/databases/postgresql/how-to/connect/"]
+    }
+  ]
+}

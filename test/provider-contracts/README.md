@@ -8,6 +8,15 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+The [fresh database bootstrap review](../../docs/database-initialization-bootstrap.md)
+and `database-initialization-bootstrap-provider-matrix.json` cover all registered
+hosting and PostgreSQL providers. Only the Railway/Railway private task pair is
+implemented. Normal tests include the registry roster, pinned GraphQL inspection
+and task transport, executable shell wrapper, durable retry and exact cleanup
+boundaries, plus disposable PostgreSQL authentication and migration programs.
+Configuration, SQL authentication, command exit, cleanup and application operation
+remain separate evidence; these tests do not establish live provider readiness.
+
 The [database credential rotation review](../../docs/database-credential-rotation.md)
 covers all eight registered PostgreSQL providers. Normal `npm test` checks port
 coverage, native REST and AWS Query serialization, PostgreSQL wire authentication,

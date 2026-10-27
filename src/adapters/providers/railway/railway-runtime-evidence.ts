@@ -5,6 +5,7 @@ import { isAbsolute } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { gql, type GraphQLClient } from 'graphql-request';
 import { z } from 'zod';
+import { POSTGRES_AUTHENTICATION_PROGRAM_SOURCE } from '../../../domain/services/database-initialization-program.js';
 
 export type RailwayRuntimeTarget = { projectId: string; environmentId: string; serviceId: string; deploymentId: string };
 export type RailwayRuntimeRequest = { keys: string[]; expectedHashes?: Record<string, string>;
@@ -30,6 +31,7 @@ export const RAILWAY_RUNTIME_PROGRAM = String.raw`
 'use strict';
 const {createHash} = require('node:crypto');
 const digest = value => createHash('sha256').update(value).digest('hex');
+${POSTGRES_AUTHENTICATION_PROGRAM_SOURCE}
 async function main(request) {
   const unknown = () => process.stdout.write(JSON.stringify({version:1,nonce:request.nonce,state:'unknown'})+'\n');
   try {
@@ -52,37 +54,8 @@ async function main(request) {
     }
     let authentication = 'unchecked';
     if (request.authentication) {
-      if (['PGHOST','PGPORT','PGUSER','PGPASSWORD','PGDATABASE','PGSSLMODE','PGOPTIONS','PGAPPNAME','PGCLIENT_ENCODING','PGREPLICATION','NODE_TLS_REJECT_UNAUTHORIZED'].some(key=>process.env[key])) return unknown();
-      const {Client} = require('pg');
-      authentication = 'authenticated';
-      for (const connectionString of new Set(Object.values(values))) {
-        let client;
-        try {
-          const url = new URL(connectionString);
-          if (!['postgres:','postgresql:'].includes(url.protocol) || !url.hostname || !url.password || url.hash
-            || decodeURIComponent(url.username)!==request.authentication.username || decodeURIComponent(url.pathname.slice(1))!==request.authentication.database
-            || [...url.searchParams.keys()].some(key=>!['sslmode','application_name'].includes(key))
-            || [...new Set(url.searchParams.keys())].some(key=>url.searchParams.getAll(key).length!==1)
-            || (url.searchParams.has('sslmode')&&!['disable','require','verify-full','no-verify'].includes(url.searchParams.get('sslmode')))) return unknown();
-          client = new Client({ssl:false,connectionString,connectionTimeoutMillis:5000,statement_timeout:5000,query_timeout:5000,idle_in_transaction_session_timeout:5000});
-          client.on('error',()=>{});
-          let passwordChallenge = false;
-          client.connection.once('authenticationCleartextPassword', () => { passwordChallenge = true; });
-          client.connection.once('authenticationMD5Password', () => { passwordChallenge = true; });
-          client.connection.once('authenticationSASL', message => {
-            passwordChallenge = message.mechanisms?.some(value => value === 'SCRAM-SHA-256' || value === 'SCRAM-SHA-256-PLUS') === true;
-          });
-          await client.connect();
-          if (!passwordChallenge) return unknown();
-          await client.query('BEGIN READ ONLY');
-          const result = await client.query('SELECT session_user AS username, current_user AS active_user, current_database() AS database');
-          await client.query('ROLLBACK');
-          if (result.rows.length!==1 || result.rows[0].username!==request.authentication.username || result.rows[0].active_user!==request.authentication.username || result.rows[0].database!==request.authentication.database) return unknown();
-        } catch(error) {
-          if (error && error.code==='28P01') authentication='rejected';
-          else return unknown();
-        } finally { if(client) await client.end().catch(()=>{}); }
-      }
+      authentication = await authenticatePostgresUrls(values, request.authentication);
+      if (authentication === 'unknown') return unknown();
     }
     process.stdout.write(JSON.stringify({version:1,nonce:request.nonce,state:'verified',replicaHash:digest(process.env.RAILWAY_REPLICA_ID),envVarHashes:hashes,authentication})+'\n');
   } catch { unknown(); }

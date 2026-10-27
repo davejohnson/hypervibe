@@ -134,6 +134,22 @@ operation. Preserve the exact environment, provider target, and deployment lock;
 an uncertain previous execution must be reconciled before any repeat that might
 duplicate effects.
 
+For an explicitly discarded database with completed `freshInitialization`, the
+optional `database.freshInitialization.bootstrap: { service, image }` selects a
+declared application service and an exact immutable configured image. The image
+must be independently observed; this review does not claim a successful release
+or a source commit. Preserve the application's existing canonical migration
+release command. Run `hv_plan` and confirm its private authentication action,
+then plan and confirm the separate schema-bootstrap action. Each action creates
+and removes one private temporary task through the supported provider capability.
+No public database access or standalone migration command is needed.
+
+Resume retained attempts through their reviewed plans; never clear recovery
+markers or rerun an uncertain migration manually. Report authentication,
+command exit, task cleanup and application operation separately. A successful
+bootstrap leaves ordinary backup/restore and application-deployment gates in
+place. Providers without the exact private task capability remain unsupported.
+
 For rollback or restore, inspect existing evidence through the supported
 Hypervibe workflow before proposing the action. Keep source identity, retained
 recovery point, release provenance, and requested destination explicit. Distinguish

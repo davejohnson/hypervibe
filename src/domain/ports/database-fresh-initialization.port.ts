@@ -13,6 +13,11 @@ export const databaseFreshInitializationIntentSchema = z.object({
   id: z.string().min(1).max(63).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
   discardExistingData: z.literal(true),
   target: databaseFreshInitializationTargetSchema.omit({ provider: true }),
+  /** Separate reviewed schema bootstrap after storage activation. Never a release receipt. */
+  bootstrap: z.object({
+    service: z.string().min(1).max(128),
+    image: z.string().regex(/^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$/),
+  }).strict().optional(),
 }).strict();
 export const databaseFreshInitializationInspectionSchema = z.object({
   target: databaseFreshInitializationTargetSchema,
