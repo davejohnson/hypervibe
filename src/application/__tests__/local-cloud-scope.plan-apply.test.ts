@@ -15,6 +15,9 @@ import { providerRegistry } from '../../domain/registry/provider.registry.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { CommandRegistry } from '../commands.js';
 import { registerCoreTools } from '../../tools/core.tools.js';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
+import { randomUUID } from 'node:crypto';
+import { createGcpLocalServicesDriver } from '../../adapters/providers/gcp/gcp-local-services-installation.js';
 
 // Reconstructed Google OAuth and Resource Manager v3 serialized responses.
 // https://cloud.google.com/resource-manager/reference/rest/v3/projects/create
@@ -472,7 +475,7 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       expect(JSON.stringify({ reviewed, applied })).not.toContain(token);
     });
 
-  it.each(['normal', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-lost-ack', 'github-ci-rejected-first', 'github-ci-rejected-middle', 'public-registry', 'public-grant-lost-ack', 'public-grant-rejected', 'github-ci-public-registry'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
+  it.each(['normal', 'legacy-api-review', 'legacy-api-pending', 'legacy-api-rejected', 'legacy-api-satisfied', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-lost-ack', 'github-ci-rejected-first', 'github-ci-rejected-middle', 'public-registry', 'public-grant-lost-ack', 'public-grant-rejected', 'github-ci-public-registry'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
     const f = fixture(); const allocated = await f.plan(); if ('error' in allocated) throw new Error(allocated.error);
     expect(await f.apply(allocated.planRunId)).toMatchObject({ kind: 'executed', result: { success: true } });
     const desired = structuredClone(f.desired) as any;
@@ -573,12 +576,68 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       desired.environments.staging.hosting.scopePreparation.continuation.nativeScope.billingAccountName = 'billingAccounts/111111-222222-333333';
       f.store.replace(f.project, desired);
     }
-    const apiPlan = await f.plan();
+    let apiPlan = await f.plan();
     if (['unknown-api-state', 'changed-billing-selection'].includes(scenario)) {
       expect('error' in apiPlan || apiPlan.blocked.length > 0).toBe(true); expect(writes).toEqual(['billing']); return;
     }
     if ('error' in apiPlan) throw new Error(apiPlan.error);
     expect(apiPlan.actions.map(action => action.id)).toEqual(['gcp:local-scope:services']);
+    if (scenario.startsWith('legacy-api-')) {
+      // Historical e828ba3 journal contract, not a newly authorized review.
+      const outer = structuredClone(f.ctx.repos.runs.findById(apiPlan.planRunId)!.plan) as any;
+      const retained = structuredClone(f.ctx.repos.runs.findById(outer.cloudScope.installationId)!.plan) as any;
+      const oldReason = 'Enable only the reviewed operator hosting APIs in the exact allocated project; create no workloads or identities.';
+      retained.plan.actions[0].reason = oldReason;
+      retained.plan.review.warnings = ['API enablement creates no workloads. Later separately approved resources can incur charges.',
+        'This native batch is atomic. An uncertain acknowledgment is recovered by reading these exact APIs; it never causes an automatic resubmission.'];
+      retained.plan.digest = canonicalJsonSha256({ intent: retained.intent, actions: retained.plan.actions, review: retained.plan.review });
+      outer.cloudScope.installationPlanDigest = retained.plan.digest;
+      outer.actions[0].metadata.installationPlanDigest = retained.plan.digest;
+      outer.actions[0].reason = oldReason;
+      if (scenario !== 'legacy-api-review') {
+        retained.status = 'pending'; retained.reason = 'provider_error';
+        retained.attempts = [{ id: randomUUID(), actionId: 'gcp:local-scope:services', status: scenario === 'legacy-api-rejected' ? 'rejected' : 'uncertain',
+          startedAt: '2026-10-25T08:10:00Z', updatedAt: '2026-10-25T08:10:00Z', reason: 'provider_error' }];
+        apis = scenario === 'legacy-api-satisfied';
+      }
+      f.ctx.repos.runs.updatePlan(retained.installationId, retained);
+      f.ctx.repos.runs.updatePlan(apiPlan.planRunId, outer);
+      if (scenario === 'legacy-api-review') {
+        const getAccessToken = vi.fn().mockResolvedValue(token), request = vi.fn().mockRejectedValue(new Error('No legacy dispatch'));
+        expect.soft(await createGcpLocalServicesDriver({ fetch: request }).mutate({ intent: retained.intent, action: retained.plan.actions[0],
+          attempt: { id: randomUUID(), actionId: 'gcp:local-scope:services', status: 'attempted', startedAt: '2026-10-25T08:10:00Z', updatedAt: '2026-10-25T08:10:00Z' },
+          authentication: { kind: 'local-administrator', administrator: { getAccessToken } }, completed: {}, attempts: [],
+          signal: AbortSignal.timeout(1000), beforeMutation: vi.fn() })).toMatchObject({ state: 'rejected', reason: 'confirmation_required' });
+        expect.soft(getAccessToken).not.toHaveBeenCalled(); expect.soft(request).not.toHaveBeenCalled();
+        const calls = f.request.mock.calls.length;
+        expect.soft(await f.apply(apiPlan.planRunId, ['gcp:local-scope:services'])).toMatchObject({ kind: 'executed', result: { success: false } });
+        expect.soft(f.request.mock.calls).toHaveLength(calls);
+        expect.soft(writes).toEqual(['billing']);
+        apiPlan = await f.plan(); if ('error' in apiPlan) throw new Error(apiPlan.error);
+        const fresh = f.ctx.repos.runs.findById(apiPlan.planRunId)!.plan as any;
+        expect.soft(fresh.cloudScope.installationId).not.toBe(retained.installationId);
+        expect.soft(f.ctx.repos.runs.findById(retained.installationId)!.plan).toEqual(retained);
+      } else {
+        const recovered = await f.plan(); if ('error' in recovered) throw new Error(recovered.error);
+        expect(recovered.actions.map(action => action.id)).toEqual([scenario === 'legacy-api-satisfied'
+          ? 'gcp:local-scope:artifact-registry' : 'gcp:local-scope:services']);
+        if (scenario !== 'legacy-api-satisfied') {
+          expect(recovered.actions[0]).toMatchObject({ requiresConfirm: false, billable: false });
+          expect(await f.apply(recovered.planRunId, [])).toMatchObject({ kind: 'executed', result: { success: false } });
+        }
+        expect(writes).toEqual(['billing']);
+        expect((f.ctx.repos.runs.findById(retained.installationId)!.plan as any).attempts.map((attempt: any) => attempt.id))
+          .toEqual(retained.attempts.map((attempt: any) => attempt.id));
+        return;
+      }
+    }
+    // Official IAM docs: API activation/use may create service agents/default
+    // accounts and grant roles. A plan must disclose this before confirmation.
+    // https://docs.cloud.google.com/iam/docs/service-account-types
+    const disclosure = /Google may automatically create service agents or default service accounts and grant IAM roles/;
+    expect.soft(apiPlan.actions[0].reason).toMatch(disclosure);
+    expect.soft(apiPlan.cloudScopeReview?.warnings.join(' ')).toMatch(disclosure);
+    expect.soft(apiPlan.warnings.join(' ')).toMatch(disclosure);
     expect(await f.apply(apiPlan.planRunId, ['gcp:local-scope:services'])).toMatchObject({ kind: 'executed', result: { success: scenario !== 'lost-api-ack' } });
     const registryPlan = await f.plan(); if ('error' in registryPlan) throw new Error(registryPlan.error);
     expect(registryPlan.actions.map(action => action.id)).toEqual(['gcp:local-scope:artifact-registry']);

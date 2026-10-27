@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { CloudInstallationBoundaryError, type CloudInstallationAction, type CloudInstallationDriver,
-  type CloudInstallationEvidence, type CloudInstallationProviderContext, type LocalCloudScopePreparationIntent } from '../../../domain/ports/cloud-installation.port.js';
+  type CloudInstallationEvidence, type CloudInstallationProviderContext, type CloudInstallationRecord, type LocalCloudScopePreparationIntent } from '../../../domain/ports/cloud-installation.port.js';
 import { DestinationBoundaryError, DestinationBudget } from '../secret-destination-http.js';
 import { GcpSecretWriterClient } from './gcp-secret-writer.client.js';
 import { gcpBillingPreparationScopeSchema } from './gcp-billing-installation.js';
@@ -18,12 +18,17 @@ const evidenceSchema = z.object({ resources: z.array(z.object({ kind: z.literal(
   native: z.object({ operation: z.literal('enable-operator-services-v1'), installationId: z.string().guid(),
     operationName: z.string().regex(/^operations\/[A-Za-z0-9._~-]{1,255}$/).optional() }).strict() }).strict();
 type Context = CloudInstallationProviderContext<LocalCloudScopePreparationIntent>;
+const legacyReason = 'Enable only the reviewed operator hosting APIs in the exact allocated project; create no workloads or identities.';
+const automaticIdentityNotice = 'Google may automatically create service agents or default service accounts and grant IAM roles when APIs are enabled or used.';
 function action(intent: LocalCloudScopePreparationIntent): CloudInstallationAction {
   const scope = gcpLocalServicesScopeSchema.parse(intent.nativeScope);
   return { id: 'gcp:local-scope:services', type: 'update', resource: { kind: 'project', name: `projects/${scope.projectNumber}`, provider: 'gcp' },
     verified: true, requiresConfirm: true,
-    reason: 'Enable only the reviewed operator hosting APIs in the exact allocated project; create no workloads or identities.',
+    reason: `Enable only the reviewed operator hosting APIs in the exact allocated project; request no application workloads. ${automaticIdentityNotice}`,
     metadata: { operation: 'enable-operator-services-v1', category: 'scope', execution: 'api', native: { services: [...GCP_OPERATOR_SERVICES] } } };
+}
+export function isGcpLocalServicesReviewCurrent(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>): boolean {
+  return isDeepStrictEqual(record.plan.actions, [action(record.intent)]);
 }
 function evidence(intent: LocalCloudScopePreparationIntent, complete: boolean, operationName?: string): CloudInstallationEvidence {
   const scope = gcpLocalServicesScopeSchema.parse(intent.nativeScope);
@@ -67,7 +72,14 @@ export function createGcpLocalServicesDriver(options: { fetch?: typeof fetch } =
   const driver: CloudInstallationDriver<LocalCloudScopePreparationIntent> = {
     provider: 'gcp', localScopePreparation: { hostingProvider: 'cloudrun', continuation: true },
     parseScope: value => gcpLocalServicesScopeSchema.parse(value),
-    parseAction(value, intent) { const expected = action(intent); if (!isDeepStrictEqual(expected, value)) throw new CloudInstallationBoundaryError('identity_mismatch'); return expected; },
+    parseAction(value, intent) {
+      const expected = action(intent);
+      if (isDeepStrictEqual(expected, value)) return expected;
+      // Retain the exact historical digest for observation/recovery only.
+      const legacy = { ...expected, reason: legacyReason };
+      if (isDeepStrictEqual(legacy, value)) return legacy;
+      throw new CloudInstallationBoundaryError('identity_mismatch');
+    },
     parseEvidence(value, intent) {
       const parsed = evidenceSchema.parse(value);
       if (parsed.native.installationId !== intent.installationId || (!parsed.resources.length && !parsed.native.operationName)
@@ -90,7 +102,8 @@ export function createGcpLocalServicesDriver(options: { fetch?: typeof fetch } =
       return { actions: [action(context.intent)], review: { resources: GCP_OPERATOR_SERVICES.map(name => ({ kind: 'api', name, scope: `projects/${context.intent.nativeScope.projectNumber}` })),
         permissions: [{ principal: 'Local browser-authorized administrator', scope: `projects/${context.intent.nativeScope.projectNumber}`,
           actions: ['serviceusage.services.get', 'serviceusage.services.enable'], purpose: 'installation-verification' }],
-        costs: [], warnings: ['API enablement creates no workloads. Later separately approved resources can incur charges.',
+        costs: [], warnings: [automaticIdentityNotice,
+          'API enablement requests no application workloads. Later separately approved resources can incur charges.',
           'This native batch is atomic. An uncertain acknowledgment is recovered by reading these exact APIs; it never causes an automatic resubmission.'] } };
     },
     async inspect(context) {
@@ -101,6 +114,7 @@ export function createGcpLocalServicesDriver(options: { fetch?: typeof fetch } =
     async mutate(context) {
       let write = false;
       try {
+        if (!isDeepStrictEqual(context.action, action(context.intent))) throw new CloudInstallationBoundaryError('confirmation_required');
         driver.parseAction(context.action, context.intent);
         return await withClient(context, async client => {
           if (await enabled(client, context.intent)) throw new CloudInstallationBoundaryError('not_converged');

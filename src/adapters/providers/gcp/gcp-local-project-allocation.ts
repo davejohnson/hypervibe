@@ -8,7 +8,7 @@ import { createGcpLocalProjectAllocationDriver, gcpLocalProjectAllocationScopeSc
 import { createGcpBillingPreparationDriver, gcpBillingPreparationScopeSchema } from './gcp-billing-installation.js';
 import { createGcpLocalArtifactRegistryDriver, deriveGcpLocalArtifactRegistryScope, gcpLocalArtifactRegistryBinding, gcpLocalArtifactRegistryScopeSchema,
   gcpLocalPublicArtifactRegistryScopeSchema, deriveGcpLocalPublicArtifactRegistryScope, gcpLocalPublicArtifactBinding, gcpLocalPublicArtifactProofShape } from './gcp-local-artifact-registry.js';
-import { createGcpLocalServicesDriver, gcpLocalServicesScopeSchema } from './gcp-local-services-installation.js';
+import { createGcpLocalServicesDriver, gcpLocalServicesScopeSchema, isGcpLocalServicesReviewCurrent } from './gcp-local-services-installation.js';
 import { createGcpGithubCiPreparationDriver, deriveGcpGithubCiPreparationScope, gcpGithubCiPreparationBinding,
   gcpGithubCiPreparationScopeSchema, gcpGithubCiPreparationSelectionSchema, gcpGithubCiDisconnectionScopeSchema,
   deriveGcpGithubCiDisconnectionScope, gcpGithubCiDisconnectionReady, gcpGithubCiDisconnectionBinding } from './gcp-github-ci-preparation.js';
@@ -39,6 +39,7 @@ export function createGcpLocalProjectAllocationCapability(): LocalCloudScopePrep
     continuation: {
       parseSelection: (value, placement) => selectionSchema.parse({ ...selectionInputSchema.parse(value), hostingRegion: placement?.region ?? 'us-central1' }),
       permitsBoundCleanup: scope => gcpGithubCiDisconnectionScopeSchema.safeParse(scope).success,
+      isReviewCurrent: record => record.intent.nativeScope.scopeKind !== 'project-services' || isGcpLocalServicesReviewCurrent(record),
       nextScope(record, selection) {
         const selected = selectionSchema.parse(selection);
         if ('githubAccess' in selected && selected.githubAccess === 'disconnect') {

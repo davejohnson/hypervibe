@@ -15,6 +15,28 @@ nonsecret connection and project binding. No stage
 implicitly authorizes the next stage. The original project number, creation time,
 parent, ownership labels and retained predecessor digest are checked again.
 
+The API preparation review covers the same fixed 14 APIs. Enabling or using them
+may cause Google to create service agents or default service accounts and grant
+IAM roles. Hypervibe requests no application workload in this stage; it does not
+promise that Google creates no identities or grants. See Google's
+[service account types](https://docs.cloud.google.com/iam/docs/service-account-types)
+and [service agents](https://docs.cloud.google.com/iam/docs/service-agents).
+These provider-managed effects are distinct from the later, separately reviewed
+application runtime identities and federation grants.
+
+The optional provider-owned `continuation.isReviewCurrent` predicate prevents
+reuse of an obsolete unattempted review. Providers that omit it retain their
+existing behavior. An untouched old API proposal remains in the journal while
+the same desired source receives a new review and installation plan. Old actions
+remain parseable with their original digest for observation and recovery, but
+cannot authorize a fresh write. Attempted histories remain authoritative and
+read-only; unknown outcomes cannot be bypassed by a replacement review.
+A legacy attempt that was definitely rejected is also retained as read-only:
+this correction does not migrate its immutable retry authorization to the new
+review text. It cannot be renewed by ordinary replanning. No such service-stage
+attempt has been observed in the current test project; its retained attempts are
+for the preceding billing stage, whose authorization contract is unchanged.
+
 ## Provider contract matrix before implementation
 
 | Registered hosting provider | Local operator continuation | Native evidence |
@@ -176,3 +198,28 @@ broader six-suite run's 111 passes and two timeouts are retained as an incomplet
 run, rather than reported as an uninterrupted green gate. These regressions remain
 in the ordinary acceptance test path; the corrected source needs its own CI and
 package/consumer acceptance before replacing the historical candidate.
+
+### API-enablement identity disclosure (2026-10-26)
+
+The challenged assumption was that enabling APIs creates no identities. Google's
+IAM documentation above independently states that enabling or using services may
+create default accounts or service agents and automatically grant roles. The
+existing 14-service batch includes Compute Engine and Cloud Scheduler, making its
+no-identities approval text a concrete counterexample. The action reason and both
+public warning surfaces now disclose those effects; the API list, requested
+permissions and serialized mutation are unchanged.
+
+The normal application/SQLite/real-client boundary first failed two of four
+regressions: the new review lacked the disclosure, and a retained old plan still
+performed the write. The two historical recovery cases passed. A separate direct
+driver assertion also failed because the old action reached authentication and
+transport. After correction all four passed, and the whole application file passed
+53 tests including definite legacy rejection, lost acknowledgments, billing,
+registry and federation continuation. Type checking passed. Historical action
+digests remain unchanged; an obsolete direct mutation is denied before credentials
+or network access, and untouched old proposals are retained while a new plan is
+reviewed. This is reconstructed offline evidence, not proof of live service-agent
+creation. No cloud writes occurred. The regression remains in ordinary `npm test`,
+which the committed acceptance workflow and desired required check execute; live
+branch-protection enforcement was not re-queried for this correction. Previously
+verified package and image bytes do not contain this source correction.

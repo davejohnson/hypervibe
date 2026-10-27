@@ -231,7 +231,8 @@ export async function planLocalCloudScope(input: { project: Project; environment
         if (!emptyLocalScope(environment) && !capability.continuation.permitsBoundCleanup?.(nextScope)) throw unavailable();
         const currentSource = source(project, specResult); const predecessor = { installationId: record.installationId, planDigest: record.plan.digest };
         const proposed = history.find(item => !active(item) && isDeepStrictEqual(item.intent.source, currentSource)
-          && isDeepStrictEqual(item.intent.predecessor, predecessor) && isDeepStrictEqual(item.intent.nativeScope, nextScope) && isDeepStrictEqual(item.intent.selection, selection));
+          && isDeepStrictEqual(item.intent.predecessor, predecessor) && isDeepStrictEqual(item.intent.nativeScope, nextScope) && isDeepStrictEqual(item.intent.selection, selection)
+          && capability.continuation!.isReviewCurrent?.(item) !== false);
         if (proposed) record = proposed;
         else {
           const intent: LocalCloudScopePreparationIntent = { ...record.intent, installationId: randomUUID(), source: currentSource, nativeScope: nextScope, predecessor, selection };
@@ -264,7 +265,8 @@ export async function planLocalCloudScope(input: { project: Project; environment
   if (record.plan.blockedReason && !record.attempts.length) throw unavailable();
   const incompleteAttempts = record.plan.actions.filter(action => !record!.completed[action.id]).map(action =>
     record!.attempts.filter(attempt => attempt.actionId === action.id).at(-1)).filter(attempt => !!attempt);
-  const retry = record.intent.predecessor && incompleteAttempts.length && incompleteAttempts.every(attempt => attempt.status === 'rejected')
+  const retry = capability.continuation?.isReviewCurrent?.(record) !== false
+    && record.intent.predecessor && incompleteAttempts.length && incompleteAttempts.every(attempt => attempt.status === 'rejected')
     ? await reviewCloudInstallationRetryV1({ ...await context(project, environment, record.intent, 'allocate'),
       installationId: record.installationId, planDigest: record.plan.digest }) : undefined;
   const mode = record.status === 'scope-ready' ? 'verified' : retry ? 'allocate' : record.intent.predecessor
@@ -360,6 +362,8 @@ export async function applyLocalCloudScope(input: { project: Project; environmen
     const attempt = record.attempts.filter(attempt => attempt.actionId === input.action?.id).at(-1);
     const retryAction = proof.retryActions?.find(retry => retry.actionId === input.action?.id && retry.attemptId === attempt?.id && attempt.status === 'rejected');
     const readOnly = proof.mode !== 'allocate' || (record.intent.predecessor ? !!attempt && !retryAction : record.attempts.length > 0);
+    if (!readOnly && providerRegistry.getLocalScopePreparation(record.intent.hostingProvider)?.continuation?.isReviewCurrent?.(record) === false)
+      throw unavailable();
     const execution = await context(input.project, input.environment, record.intent, readOnly ? 'recover' : 'allocate', input.authorize);
     if (proof.retryActions) {
       const current = await reviewCloudInstallationRetryV1({ ...execution, installationId: record.installationId, planDigest: record.plan.digest });

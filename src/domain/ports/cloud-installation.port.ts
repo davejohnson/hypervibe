@@ -102,6 +102,8 @@ export interface LocalCloudScopePreparationCapability {
     parseSelection(value: unknown, placement?: { region?: string }): Record<string, string>;
     /** Explicit trust removal may preserve an existing hosting binding. */
     permitsBoundCleanup?(nativeScope: Record<string, string>): boolean;
+    /** Historical reviews remain readable; false requires a new review before any fresh write. */
+    isReviewCurrent?(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>): boolean;
     nextScope(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>, selection: Record<string, string>): Record<string, string> | null;
     binding(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>, placement: { region?: string }): { platformBindings: Record<string, unknown>; connections: Array<{ provider: string; config: Record<string, string> }>; removeBindings?: Array<{ key: string; expectedValue: unknown }> };
   };
