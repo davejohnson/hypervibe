@@ -7,6 +7,10 @@ import type { ProjectSpec } from '../spec/spec.schema.js';
 /** Reviewed roster, not a claim of live compatibility. */
 export const CLOUD_INSTALLATION_PROVIDERS = ['aws', 'azure', 'gcp'] as const;
 export type CloudInstallationProvider = typeof CLOUD_INSTALLATION_PROVIDERS[number];
+/** Registration identities do not expand the hosted cloud roster. */
+export const OPERATOR_APPLICATION_PROVIDERS = ['microsoft-entra', 'github-app', 'google-oauth'] as const;
+export type OperatorApplicationProvider = typeof OPERATOR_APPLICATION_PROVIDERS[number];
+export type CloudInstallationExecutableProvider = CloudInstallationProvider | OperatorApplicationProvider;
 export type CloudInstallationStage = 'scope-preparation' | 'collection' | 'deployment';
 export const CLOUD_INSTALLATION_SECRET_PROVIDERS = { aws: 'aws-secrets', azure: 'azure-key-vault', gcp: 'gcp-secret-manager' } as const;
 
@@ -86,14 +90,25 @@ export interface OperatorArtifactCapability {
   refreshScope?(record: CloudInstallationRecord<OperatorArtifactIntent>, declaration: Record<string, string>, artifacts: string[]): Record<string, string>;
   receipts(record: CloudInstallationRecord<OperatorArtifactIntent>): Array<Record<string, string>>;
 }
-export type CloudInstallationExecutableIntent = CloudInstallationIntent | LocalCloudScopePreparationIntent | OperatorArtifactIntent;
+export interface OperatorApplicationIntent extends Omit<LocalCloudScopePreparationIntent, 'execution' | 'hostingProvider' | 'provider'> {
+  execution: { kind: 'operator-application'; authentication: 'local-operator' };
+  provider: OperatorApplicationProvider;
+  applicationProvider: OperatorApplicationProvider;
+}
+/** Callbacks are transient; native authority must be verified by each driver. */
+export interface OperatorApplicationAuthentication {
+  kind: 'operator-application';
+  administrator?: { getAccessToken(scope: string, signal: AbortSignal): Promise<string> };
+}
+export type CloudInstallationExecutableIntent = CloudInstallationIntent | LocalCloudScopePreparationIntent | OperatorArtifactIntent | OperatorApplicationIntent;
 export interface LocalCloudScopePreparationAuthentication {
   kind: 'local-administrator';
   administrator: { getAccessToken(scope: string, signal: AbortSignal): Promise<string> };
 }
 export type CloudInstallationAuthenticationFor<I extends CloudInstallationExecutableIntent> =
   I extends LocalCloudScopePreparationIntent ? LocalCloudScopePreparationAuthentication
-    : I extends OperatorArtifactIntent ? OperatorArtifactAuthentication : CloudInstallationAuthentication;
+    : I extends OperatorArtifactIntent ? OperatorArtifactAuthentication
+      : I extends OperatorApplicationIntent ? OperatorApplicationAuthentication : CloudInstallationAuthentication;
 export interface LocalCloudScopePreparationCapability {
   schemaVersion: 1;
   parseScope(value: unknown): Record<string, string>;
@@ -115,7 +130,7 @@ export interface LocalCloudScopePreparationCapability {
     authentication: LocalCloudScopePreparationAuthentication }>;
 }
 export interface CloudInstallationAction extends PlanAction {
-  resource: PlanAction['resource'] & { provider: CloudInstallationProvider };
+  resource: PlanAction['resource'] & { provider: CloudInstallationExecutableProvider };
   metadata: {
     operation: string;
     category: 'scope' | 'identity' | 'trust' | 'secret-container' | 'verification';
@@ -195,7 +210,8 @@ export interface CloudInstallationDriver<I extends CloudInstallationExecutableIn
   /** Local allocation or explicitly registered, predecessor-bound continuation. */
   readonly localScopePreparation?: { hostingProvider: string; continuation?: true; preparation?: 'holding-v1' };
   readonly artifactPublication?: { providerName: string; authentication: OperatorArtifactIntent['execution']['authentication'] };
-  readonly provider: CloudInstallationProvider;
+  readonly operatorApplication?: { providerName: OperatorApplicationProvider };
+  readonly provider: I['provider'];
   /** Explicit separate installation capability; collection support never implies deployment authority. */
   deployment?: {
     hostingProvider: string;

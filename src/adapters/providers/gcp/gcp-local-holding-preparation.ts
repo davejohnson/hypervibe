@@ -333,5 +333,17 @@ export function createGcpLocalHoldingCapability(): LocalHoldingPreparationCapabi
         async getAccessToken(scope, signal) { if (scope !== 'https://www.googleapis.com/auth/cloud-platform' || signal.aborted) fail('authorization_expired'); return authentication.token(); },
       } } };
     }, receipt: gcpLocalHoldingReceipt,
+    async verifyOperatorOrigin(receipt, selection) {
+      const origin = receipt.origins[selection.service], identity = receipt.runtimeIdentities.find(item => item.workload === selection.runtimeService)?.principal;
+      if (!origin || !identity || identity.kind !== 'gcp-service-account'
+        || !receipt.deployment.workloads.some(item => item.name === selection.service && item.kind === 'web' && item.public)
+        || !receipt.deployment.workloads.some(item => item.name === selection.runtimeService)) fail('identity_mismatch');
+      const url = new URL(origin);
+      if (url.protocol !== 'https:' || url.origin !== origin || url.username || url.password) fail('identity_mismatch');
+      const { authentication } = await this.create(receipt.nativeScope);
+      const signal = AbortSignal.timeout(30_000);
+      await readGcpLocalPreparedResources(receipt, await authentication.administrator.getAccessToken('https://www.googleapis.com/auth/cloud-platform', signal), signal);
+      return { origin, runtimeIdentity: identity };
+    },
   };
 }

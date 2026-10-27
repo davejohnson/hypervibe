@@ -1,0 +1,113 @@
+{
+  "reviewedAt": "2026-10-27",
+  "coverage": "Design evidence for operator application registration; no native registration, callback, code conversion, federation or delivery has executed.",
+  "sources": [
+    {
+      "provider": "microsoft-entra",
+      "repository": "https://github.com/microsoftgraph/microsoft-graph-docs-contrib",
+      "revision": "02cb3eb0ca9f3f278a8ffa934a1304f640e6e792",
+      "paths": [
+        "api-reference/v1.0/api/application-post-applications.md",
+        "api-reference/v1.0/api/federatedidentitycredential-post.md",
+        "api-reference/v1.0/api/application-addpassword.md",
+        "api-reference/v1.0/api/application-removepassword.md",
+        "api-reference/v1.0/api/application-upsert.md",
+        "api-reference/v1.0/resources/application.md"
+      ],
+      "documentation": [
+        "https://learn.microsoft.com/en-us/graph/api/application-post-applications?view=graph-rest-1.0",
+        "https://learn.microsoft.com/en-us/graph/api/federatedidentitycredential-post?view=graph-rest-1.0"
+      ],
+      "uncertainties": [
+        "AppRegistration.Create does not establish FIC management or read/recovery authority.",
+        "Atomic application/password creation has conflicting status and resource documentation; this design creates no Entra password.",
+        "Upsert may update an existing app and is not a create-only primitive."
+      ],
+      "files": [
+        {
+          "path": "api-reference/v1.0/api/application-post-applications.md",
+          "sha256": "e884ddb194f531867cdf1a3492a5c8663f4660401254cece598a392ca3d8f945",
+          "bytes": 10688,
+          "url": "https://raw.githubusercontent.com/microsoftgraph/microsoft-graph-docs-contrib/02cb3eb0ca9f3f278a8ffa934a1304f640e6e792/api-reference/v1.0/api/application-post-applications.md"
+        },
+        {
+          "path": "api-reference/v1.0/api/federatedidentitycredential-post.md",
+          "sha256": "0b643761fe61c16e7eb366287a274237ac7d20dfe6c0d96b5383d878c0798e61",
+          "bytes": 7681,
+          "url": "https://raw.githubusercontent.com/microsoftgraph/microsoft-graph-docs-contrib/02cb3eb0ca9f3f278a8ffa934a1304f640e6e792/api-reference/v1.0/api/federatedidentitycredential-post.md"
+        },
+        {
+          "path": "api-reference/v1.0/api/application-addpassword.md",
+          "sha256": "b4f0261fcef7d6bcb3d0aab167aa6815d1bc1f9e234cd4cb2f94797edf109fb6",
+          "bytes": 6068,
+          "url": "https://raw.githubusercontent.com/microsoftgraph/microsoft-graph-docs-contrib/02cb3eb0ca9f3f278a8ffa934a1304f640e6e792/api-reference/v1.0/api/application-addpassword.md"
+        },
+        {
+          "path": "api-reference/v1.0/api/application-removepassword.md",
+          "sha256": "09a36c2735ce03b4f03e642508ece8d12e2f7bf31eac1f2695dcde07c0de8be9",
+          "bytes": 4381,
+          "url": "https://raw.githubusercontent.com/microsoftgraph/microsoft-graph-docs-contrib/02cb3eb0ca9f3f278a8ffa934a1304f640e6e792/api-reference/v1.0/api/application-removepassword.md"
+        },
+        {
+          "path": "api-reference/v1.0/api/application-upsert.md",
+          "sha256": "184b8dcb3fd25d6e9ea7a21baf8d990f7454bcf358461503c205d394a8a5220d",
+          "bytes": 9352,
+          "url": "https://raw.githubusercontent.com/microsoftgraph/microsoft-graph-docs-contrib/02cb3eb0ca9f3f278a8ffa934a1304f640e6e792/api-reference/v1.0/api/application-upsert.md"
+        },
+        {
+          "path": "api-reference/v1.0/resources/application.md",
+          "sha256": "3af0d36e6018d3b7beee1a6a1b60c2f91b0d8a27003dd8757c6c995c5009944e",
+          "bytes": 23723,
+          "url": "https://raw.githubusercontent.com/microsoftgraph/microsoft-graph-docs-contrib/02cb3eb0ca9f3f278a8ffa934a1304f640e6e792/api-reference/v1.0/resources/application.md"
+        }
+      ]
+    },
+    {
+      "provider": "microsoft-entra",
+      "repository": "https://github.com/AzureAD/microsoft-authentication-library-for-dotnet.wiki.git",
+      "revision": "83b376c443c259de6ae87377da898cc4b18a5fe5",
+      "path": "Credentials.md",
+      "sha256": "7dd8f723d4705366cd125ff8426dad38228a88ecad7576f74487c579f0dd94c3",
+      "documentation": "https://github.com/AzureAD/microsoft-authentication-library-for-dotnet/wiki/Credentials",
+      "contract": "The maintained federated WithClientAssertion example explicitly applies to AcquireTokenByAuthorizationCode; the following section extends the pattern to other identity providers.",
+      "limit": "Primary SDK-maintainer evidence; no live multitenant authorization-code exchange is claimed."
+    },
+    {
+      "provider": "microsoft-entra",
+      "documentation": "https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation-google-cloud",
+      "reviewedAt": "2026-10-27",
+      "contract": "Google service-account ID-token issuer https://accounts.google.com, immutable unique-ID subject, audience api://AzureADTokenExchange; no service-account key or retained assertion."
+    },
+    {
+      "provider": "github-app",
+      "repository": "https://github.com/github/docs",
+      "revision": "3869faed240317911b720c484aef61931b8474ec",
+      "path": "content/apps/sharing-github-apps/registering-a-github-app-from-a-manifest.md",
+      "documentation": [
+        "https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest",
+        "https://docs.github.com/en/rest/apps/apps#create-a-github-app-from-a-manifest"
+      ],
+      "contract": "Owner-approved manifest POST, bound random state, three-step completion within one hour, one-time code conversion returning native app identity and credentials.",
+      "limits": [
+        "No blind replay after an uncertain conversion.",
+        "Manifest loopback redirect acceptance and actual repository installation require native verification.",
+        "No undocumented App deletion or private-key revocation API is assumed."
+      ],
+      "files": [
+        {
+          "path": "content/apps/sharing-github-apps/registering-a-github-app-from-a-manifest.md",
+          "sha256": "9e92d531be9bce0ca93caf4e8146ce16831b2fcfd8c217c4e9f84b0619ca1af4",
+          "bytes": 14141,
+          "url": "https://raw.githubusercontent.com/github/docs/3869faed240317911b720c484aef61931b8474ec/content/apps/sharing-github-apps/registering-a-github-app-from-a-manifest.md"
+        }
+      ]
+    },
+    {
+      "provider": "google-oauth",
+      "documentation": "https://developers.google.com/identity/protocols/oauth2/resources/best-practices#manual-creation-and-configuration-of-oauth-clients",
+      "reviewedAt": "2026-10-27",
+      "contract": "Standard OAuth clients require manual Console creation/configuration and acknowledgement. No programmatic client-creation implementation is claimed.",
+      "limit": "Imported owner-selected configuration is not verified native authority or redirect proof."
+    }
+  ]
+}

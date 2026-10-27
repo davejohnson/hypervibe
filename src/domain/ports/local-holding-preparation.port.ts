@@ -30,6 +30,11 @@ export interface LocalHoldingPreparationCapability {
   parseRecord(value: unknown): CloudInstallationRecord<LocalCloudScopePreparationIntent>;
   create(nativeScope: Record<string, string>): Promise<{ driver: CloudInstallationDriver<LocalCloudScopePreparationIntent>; authentication: LocalCloudScopePreparationAuthentication }>;
   receipt(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>): LocalPreparedHostingReceiptV1;
+  /** Fresh native origin/public access and immutable runtime principal proof.
+   * This grants neither application release nor registration authority. */
+  verifyOperatorOrigin?(receipt: LocalPreparedHostingReceiptV1, selection: { service: string; runtimeService: string }): Promise<{
+    origin: string; runtimeIdentity: CloudDeploymentRuntimeIdentityV1['principal'];
+  }>;
 }
 export const LOCAL_HOLDING_OPERATION = 'localHoldingPreparation';
 export const localHoldingPlanSchema = z.object({ schemaVersion: z.literal(1), installationId: z.string().guid(),

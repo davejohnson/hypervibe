@@ -81,6 +81,26 @@ describe('local inert holding preparation', () => {
     expect(f.native.writes).toHaveLength(writes);
   });
 
+  it('revalidates the owned HTTPS origin and immutable runtime identity before operator registration', async () => {
+    const f = await fixture();
+    for (let step = 0; step < 2; step++) {
+      const plan = await f.plan(); if ('error' in plan) throw new Error(plan.error);
+      expect(await f.apply(plan.planRunId, plan.actions.filter(action => action.requiresConfirm).map(action => action.id)))
+        .toMatchObject({ kind: 'executed', result: { success: true } });
+    }
+    const receipt = await verifiedLocalHoldingReceipt(f.project, f.ctx.repos.environments.findById(f.environment.id)!);
+    const capability = providerRegistry.getHoldingPreparation('cloudrun')!;
+    const verify = (capability as any).verifyOperatorOrigin;
+    expect(verify, 'Cached origin metadata cannot establish current native identity or public access').toBeTypeOf('function');
+    const writes = f.native.writes.length;
+    const proof = await verify.call(capability, receipt, { service: 'web', runtimeService: 'web' });
+    expect(proof).toEqual({ origin: receipt!.origins.web, runtimeIdentity: receipt!.runtimeIdentities.find(item => item.workload === 'web')!.principal });
+    await expect(verify.call(capability, receipt, { service: 'worker', runtimeService: 'web' })).rejects.toThrow();
+    f.native.options.corrupt = true;
+    await expect(verify.call(capability, receipt, { service: 'web', runtimeService: 'web' })).rejects.toThrow();
+    expect(f.native.writes).toHaveLength(writes);
+  });
+
   it.each(['account', 'service', 'public'] as const)('reconciles a lost %s acknowledgment after SQLite restart without repeating the mutation', async lost => {
     const f = await fixture({ lost }); let plan = await f.plan(); if ('error' in plan) throw new Error(plan.error);
     for (let step = 0; step < 12; step++) {

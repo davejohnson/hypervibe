@@ -6,11 +6,11 @@ import { hasExactPlanActionConfirmationAuthority } from '../plan/action-confirma
 import { secretDestinationSchema, secretDestinationIdentity } from '../ports/secret-destination.port.js';
 import { cloudDeploymentTopologySchema, parseCloudDeploymentConnectionV1 } from './cloud-deployment-authentication.js';
 import {
-  CLOUD_INSTALLATION_PROVIDERS, CLOUD_INSTALLATION_SECRET_PROVIDERS, CLOUD_INSTALLATION_REASONS, CloudInstallationBoundaryError, type CloudInstallationAction, type CloudInstallationApplyInput,
+  CLOUD_INSTALLATION_PROVIDERS, OPERATOR_APPLICATION_PROVIDERS, CLOUD_INSTALLATION_SECRET_PROVIDERS, CLOUD_INSTALLATION_REASONS, CloudInstallationBoundaryError, type CloudInstallationAction, type CloudInstallationApplyInput,
   type CloudInstallationContext, type CloudInstallationDriver, type CloudInstallationEvidence,
   type CloudInstallationIntent, type CloudInstallationObservation, type CloudInstallationReason,
   type CloudInstallationRecord, type CloudInstallationProviderContext,
-  type CloudInstallationMutation, type CloudInstallationExecutableIntent, type LocalCloudScopePreparationIntent, type OperatorArtifactIntent,
+  type CloudInstallationMutation, type CloudInstallationExecutableIntent, type LocalCloudScopePreparationIntent, type OperatorArtifactIntent, type OperatorApplicationIntent,
 } from '../ports/cloud-installation.port.js';
 
 export class CloudInstallationError extends Error {
@@ -50,6 +50,10 @@ const artifactIntentSchema = localIntentSchema.omit({ execution: true, hostingPr
   execution: z.object({ kind: z.literal('operator-artifact-publisher'), authentication: z.enum(['aws-session', 'google-user-adc']) }).strict(),
   artifactProvider: text, artifacts: z.array(z.enum(['aws-collection-template-v1', 'aws-deployment-template-v1', 'holding-v1', 'backup-runner-v1', 'application-candidate-v1'])).min(1).max(4),
 }).strict();
+const applicationIntentSchema = localIntentSchema.omit({ execution: true, hostingProvider: true, provider: true }).extend({
+  execution: z.object({ kind: z.literal('operator-application'), authentication: z.literal('local-operator') }).strict(),
+  provider: z.enum(OPERATOR_APPLICATION_PROVIDERS), applicationProvider: z.enum(OPERATOR_APPLICATION_PROVIDERS),
+}).strict();
 
 function localIntent(intent: CloudInstallationExecutableIntent): intent is LocalCloudScopePreparationIntent {
   return 'execution' in intent && intent.execution.kind === 'local-administrator';
@@ -57,9 +61,12 @@ function localIntent(intent: CloudInstallationExecutableIntent): intent is Local
 function artifactIntent(intent: CloudInstallationExecutableIntent): intent is OperatorArtifactIntent {
   return 'execution' in intent && intent.execution.kind === 'operator-artifact-publisher';
 }
+function applicationIntent(intent: CloudInstallationExecutableIntent): intent is OperatorApplicationIntent {
+  return 'execution' in intent && intent.execution.kind === 'operator-application';
+}
 const actionSchema = z.object({ id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9:_.\/-]{0,255}$/).refine(value => !['constructor', 'prototype', '__proto__'].includes(value)), type: z.enum(['create', 'update', 'replace', 'destroy', 'noop']),
   resource: z.object({ kind: z.enum(['project', 'environment', 'service', 'volume', 'database', 'cache', 'storage', 'retained-resource', 'load-balancer', 'domain',
-    'email', 'messaging', 'ci', 'repo', 'ios', 'queue', 'secret', 'payment', 'maintenance']), name: text, provider: z.enum(CLOUD_INSTALLATION_PROVIDERS) }).strict(),
+    'email', 'messaging', 'ci', 'repo', 'ios', 'queue', 'secret', 'payment', 'maintenance']), name: text, provider: z.enum([...CLOUD_INSTALLATION_PROVIDERS, ...OPERATOR_APPLICATION_PROVIDERS]) }).strict(),
   verified: z.boolean(), reason: text, diff: z.array(z.object({ field: text, from: z.string().max(2048).optional(), to: z.string().max(2048).optional() }).strict()).max(100).optional(),
   dataBearing: z.boolean().optional(), billable: z.boolean().optional(), requiresConfirm: z.boolean().optional(), dependsOn: z.array(text).max(300).optional(),
   metadata: z.object({ operation: text, category: z.enum(['scope', 'identity', 'trust', 'secret-container', 'verification']),
@@ -105,9 +112,15 @@ export function parseCloudInstallationIntentV1<I extends CloudInstallationExecut
     const actor = value && typeof value === 'object' && 'execution' in value ? (value as { execution?: { kind?: unknown } }).execution?.kind : undefined;
     const isArtifact = actor === 'operator-artifact-publisher';
     const isLocal = actor === 'local-administrator';
+    const isApplication = actor === 'operator-application';
     if (isLocal !== Boolean(driver.localScopePreparation) || isArtifact !== Boolean(driver.artifactPublication)
-      || actor !== undefined && !isLocal && !isArtifact || isLocal && isArtifact) throw new Error();
-    const parsed = (isArtifact ? artifactIntentSchema.parse(value) : isLocal ? localIntentSchema.parse(value) : intentSchema.parse(value)) as I;
+      || isApplication !== Boolean(driver.operatorApplication) || actor !== undefined && !isLocal && !isArtifact && !isApplication) throw new Error();
+    const parsed = (isApplication ? applicationIntentSchema.parse(value) : isArtifact ? artifactIntentSchema.parse(value) : isLocal ? localIntentSchema.parse(value) : intentSchema.parse(value)) as I;
+    if (applicationIntent(parsed)) {
+      if (!driver.scopePreparation || driver.deployment || parsed.provider !== driver.provider || parsed.provider !== parsed.applicationProvider
+        || parsed.applicationProvider !== driver.operatorApplication?.providerName || parsed.predecessor?.installationId === parsed.installationId) throw new Error();
+      parsed.nativeScope = strings.parse(driver.parseScope(parsed.nativeScope)); return parsed;
+    }
     if (artifactIntent(parsed)) {
       if (!driver.scopePreparation || driver.deployment || parsed.provider !== driver.provider
         || parsed.artifactProvider !== driver.artifactPublication?.providerName
@@ -160,6 +173,8 @@ function parseActions<I extends CloudInstallationExecutableIntent = CloudInstall
     if (artifactIntent(intent) && actions.some(action => action.metadata.execution !== 'api'
       || !['scope', 'identity', 'trust', 'verification'].includes(action.metadata.category)
       || !['create', 'update', 'noop'].includes(action.type))) throw new Error();
+    if (applicationIntent(intent) && actions.some(action => !['create', 'update', 'noop'].includes(action.type)
+      || !['identity', 'trust', 'verification'].includes(action.metadata.category))) throw new Error();
     for (const action of actions) {
       if (action.resource.provider !== intent.provider || (!action.verified && !blockedReason) || (action.type !== 'noop' && action.requiresConfirm !== true)) throw new Error();
       if (intent.mode === 'disconnect' && action.type !== 'noop' && (action.metadata.category !== 'trust' || !['update', 'destroy'].includes(action.type))) throw new Error();
@@ -241,7 +256,7 @@ export function cloudInstallationResolvedScopeV1<I extends CloudInstallationExec
   return contract(() => { const resolved = driver.scopePreparation!.resolvedScope(record); return strings.parse(localIntent(record.intent) || artifactIntent(record.intent) ? resolved : driver.parseScope(resolved)); });
 }
 export function cloudInstallationNextStageV1(value: unknown, driver: CloudInstallationDriver): 'scope-preparation' | 'collection' | 'deployment' {
-  if (driver.localScopePreparation || driver.artifactPublication) throw new CloudInstallationError('unsupported');
+  if (driver.localScopePreparation || driver.artifactPublication || driver.operatorApplication) throw new CloudInstallationError('unsupported');
   const record = parseCloudInstallationRecordV1(value, driver);
   cloudInstallationResolvedScopeV1(record, driver);
   return contract(() => {
@@ -309,7 +324,10 @@ async function authorized<T, I extends CloudInstallationExecutableIntent>(contex
   attempts: CloudInstallationRecord['attempts'] = []): Promise<T> {
   return bounded(context, async signal => {
     if (!await context.authorize({ intent: structuredClone(intent), phase, planDigest, actionId })) throw new CloudInstallationError('authorization_revoked');
-    if (artifactIntent(intent)) {
+    if (applicationIntent(intent)) {
+      if (!context.driver.operatorApplication || !('kind' in context.authentication) || context.authentication.kind !== 'operator-application'
+        || 'host' in context.authentication) throw new CloudInstallationError('authorization_expired');
+    } else if (artifactIntent(intent)) {
       if (!context.driver.artifactPublication || !('kind' in context.authentication) || context.authentication.kind !== 'operator-artifact-publisher'
         || 'host' in context.authentication || (intent.execution.authentication === 'aws-session' ? !context.authentication.awsSession : !context.authentication.administrator))
         throw new CloudInstallationError('authorization_expired');
@@ -382,7 +400,7 @@ async function execute<I extends CloudInstallationExecutableIntent = CloudInstal
   if (!record) throw new CloudInstallationError('not_found');
   if (record.plan.digest !== input.planDigest) throw new CloudInstallationError('plan_mismatch');
   if (input.onlyActionId && (!(localIntent(record.intent) && (input.driver.localScopePreparation?.continuation || input.driver.localScopePreparation?.preparation)
-    || artifactIntent(record.intent) && input.driver.artifactPublication)
+    || artifactIntent(record.intent) && input.driver.artifactPublication || applicationIntent(record.intent) && input.driver.operatorApplication)
     || !record.plan.actions.some(action => action.id === input.onlyActionId))) throw new CloudInstallationError('invalid_contract');
   if (record.status === 'disconnected') {
     // A terminal removal receipt is historical evidence. Requiring the removed
@@ -541,7 +559,7 @@ export async function planCloudInstallationContinuationV1(input: CloudInstallati
   /** Exact independently read source; required to derive final deployment topology. */
   spec?: ProjectSpec;
 }): Promise<CloudInstallationRecord> {
-  if (input.driver.localScopePreparation || input.driver.artifactPublication) throw new CloudInstallationError('unsupported');
+  if (input.driver.localScopePreparation || input.driver.artifactPublication || input.driver.operatorApplication) throw new CloudInstallationError('unsupported');
   if (input.installationId === input.scopePreparationId) throw new CloudInstallationError('scope_mismatch');
   const previous = await reconcileCloudInstallationV1({ ...input, installationId: input.scopePreparationId, planDigest: input.scopePreparationDigest });
   const nativeScope = cloudInstallationResolvedScopeV1(previous, input.driver);
