@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { verifySendGridRuntimeMail } from './sendgrid-runtime-mail.js';
+import type { RuntimeMailProbe } from '../../../domain/ports/runtime-mail-authentication.port.js';
 import { createPublicKey } from 'node:crypto';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import { readSendGridEmailLogs, SendGridLogsError, type SendGridEmailLogsInput } from './sendgrid-email-logs.js';
@@ -253,6 +255,8 @@ export class SendGridAdapter {
   connect(credentials: unknown): void {
     this.credentials = credentials as SendGridCredentials;
   }
+
+  verifyRuntimeMail(input: RuntimeMailProbe) { return verifySendGridRuntimeMail(this.credentials?.apiKey, input); }
 
   async readEmailLogs(input: SendGridEmailLogsInput) {
     if (!this.credentials?.apiKey) throw new SendGridLogsError('access_denied');

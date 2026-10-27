@@ -1,3 +1,5 @@
+import { runtimeMailProbeSchema } from '../domain/ports/runtime-mail-authentication.port.js';
+import { verifyRuntimeMailConnection } from '../application/runtime-mail-authentication.js';
 import { parseCredentialRef, resolveLocalSecretRef, type ResolvedCredentialSource } from '../application/credential-reference.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
@@ -107,7 +109,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       provider: z.string().optional().describe(`Omit to list. Otherwise select a provider (available: ${providerNames.join(', ')}). action="remove" also accepts unregistered providers so stale connections can be deleted.`),
       action: z.enum(['add', 'describe', 'verify', 'remove', 'prepare', 'bootstrap']).optional().describe('With provider: operation to perform (default: "add"). "describe" returns contextual forms without resolving credentials, observing providers, or writing state. GCP "bootstrap" is an explicit legacy setup that creates a deployment service-account key. New Connect Cloud customers use hv_cloud_connections purpose="connect-cloud".'),
       credentials: z.record(z.string(), z.unknown()).optional().describe('action="add": provider-specific credentials object. Omit for providers supporting native CLI/default authentication. credentialsRef is recommended for explicit credentials, but raw credentials are accepted when intentional.'),
-      credentialsRef: z.string().optional().describe('action="add": recommended credential reference resolved by Hypervibe. Supports env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path for token/JSON files, secret-manager refs like 1password://vault/item#field, or an already-pulled active Stripe Projects environment with stripe-projects://<environment>/<provider>/<service>. The resolved value may be a JSON credentials object or a scalar.'),
+      credentialsRef: z.string().optional().describe('action="add", or action="verify" with runtimeMail: recommended credential reference resolved privately by Hypervibe. Supports env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path for token/JSON files, secret-manager refs like 1password://vault/item#field, or an already-pulled active Stripe Projects environment with stripe-projects://<environment>/<provider>/<service>. The resolved value may be a JSON credentials object or a scalar.'),
+      runtimeMail: runtimeMailProbeSchema.optional().describe('action="verify" with an explicit private credentialsRef: validate a fixed sandbox Mail Send request without sending email or saving a connection. Requires sender and a consenting test recipient; does not prove least privilege, sender authorization or live delivery.'),
       credentialsKey: z.string().optional().describe('action="add": wraps a scalar credentialsRef value under this provider credential key, e.g. apiToken or accessToken. Optional for common single-token providers.'),
       credentialsMap: z.record(z.string(), z.string()).optional().describe('action="add": for dotenv or structured secret-manager references, maps provider credential keys to source fields, e.g. {"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}.'),
       scope: z.string().optional().describe('Optional scope for fine-grained tokens (e.g., "owner/repo" for GitHub, "example.com" for Cloudflare). Use "org/*" for wildcard matching. Leave empty for global except action="bootstrap", which derives an exact repository scope from the selected project when omitted and never creates global GCP access.'),
@@ -131,6 +134,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       action,
       credentials,
       credentialsRef,
+      runtimeMail,
       credentialsKey,
       credentialsMap,
       scope,
@@ -182,6 +186,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         const mutationInput = action !== undefined
           || credentials !== undefined
           || credentialsRef !== undefined
+          || runtimeMail !== undefined
           || credentialsKey !== undefined
           || credentialsMap !== undefined
           || scope !== undefined
@@ -212,6 +217,14 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         return commandError('VALIDATION', `Unknown provider: ${provider}.`, {
           hint: `Available providers: ${providerNames.join(', ')}`,
         });
+      }
+      if (runtimeMail !== undefined) {
+        const incompatible = suppliedOptionNames({ credentials, credentialsKey, credentialsMap, scope, project: projectRef, repositoryContext,
+          gcpProjectId, billingAccountName, deployServiceAccountEmail, gcsAccess, memorystoreAccess, queueAccess,
+          adminAuth, adminCredentialsJson, adminCredentialsJsonRef, adminAccessToken, adminAccessTokenRef, confirm });
+        if (requestedAction !== 'verify' || !credentialsRef || incompatible.length)
+          return commandError('VALIDATION', 'runtimeMail requires action="verify", an explicit private credentialsRef, and no saved scope, raw credentials or setup options.');
+        return verifyRuntimeMailConnection(provider, credentialsRef, runtimeMail);
       }
       if (requestedAction === 'describe') {
         const incompatible = suppliedOptionNames({ credentials, credentialsRef, credentialsKey, credentialsMap,
