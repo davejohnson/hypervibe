@@ -1140,6 +1140,22 @@ describe('hv_connections', () => {
             sensitive: false,
             inputKind: 'text',
           },
+          {
+            name: 'sshIdentityFile',
+            label: 'Ssh Identity File',
+            required: false,
+            sensitive: false,
+            inputKind: 'text',
+            description: 'Existing registered SSH identity; Hypervibe never creates or registers a key.',
+          },
+          {
+            name: 'sshKnownHostsFile',
+            label: 'Ssh Known Hosts File',
+            required: false,
+            sensitive: false,
+            inputKind: 'text',
+            description: 'Existing independently trusted SSH host file; no host key is accepted automatically.',
+          },
         ],
         requiredPermissions: expect.arrayContaining([
           expect.stringContaining('create projects, services, environments, variables, databases, domains, and deployments'),

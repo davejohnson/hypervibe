@@ -21,6 +21,8 @@ import type { Environment } from '../../../domain/entities/environment.entity.js
 import type { Service } from '../../../domain/entities/service.entity.js';
 import type { IServiceVolumes, ServiceVolumeTarget, ServiceVolumeObservation } from '../../../domain/ports/service-volume.port.js';
 import { railwayDeployedConfiguration } from './railway-runtime-configuration.js';
+import { createRailwayRuntimeEvidence } from './railway-runtime-evidence.js';
+import { createRailwayDatabaseRotationConfiguration } from './railway-database-rotation.js';
 import {
   createHostingServiceCreateRecovery,
   parseHostingBindings,
@@ -92,6 +94,8 @@ export const RailwayCredentialsSchema = z.object({
   apiToken: z.string().min(1, 'API token is required'),
   workspaceId: z.string().optional(),
   teamId: z.string().optional(),
+  sshIdentityFile: z.string().startsWith('/').optional().describe('Existing registered SSH identity; Hypervibe never creates or registers a key.'),
+  sshKnownHostsFile: z.string().startsWith('/').optional().describe('Existing independently trusted SSH host file; no host key is accepted automatically.'),
 });
 
 export type RailwayCredentials = z.infer<typeof RailwayCredentialsSchema>;
@@ -254,6 +258,8 @@ export class RailwayAdapter implements
   readonly name = 'railway';
   readonly registryCredentialLifecycle = createRailwayRegistryCredentialLifecycle(() => this.client);
   readonly railwayCredentialAliases = createRailwayCredentialAliases(() => this.client);
+  readonly railwayRuntimeEvidence = createRailwayRuntimeEvidence(() => this.client, () => this.credentials);
+  readonly railwayDatabaseRotationConfiguration = createRailwayDatabaseRotationConfiguration(() => this.client, this.railwayRuntimeEvidence);
 
   readonly capabilities: ProviderCapabilities = {
     supportedBuilders: ['nixpacks', 'dockerfile'],
@@ -7479,7 +7485,9 @@ export class RailwayAdapter implements
       if (!service.deployment || !environmentId || bindings.services?.[service.name]?.serviceId !== service.externalId) continue;
       Object.assign(service.deployment, await railwayDeployedConfiguration(this.client!, {
         projectId, environmentId, serviceId: service.externalId, deploymentId: service.deployment.id,
-      }));
+      }, { keys: [...new Set([...(Object.keys(options?.databaseEnvAliases?.[service.name] ?? {}).length ? ['DATABASE_URL'] : []), ...Object.keys(options?.databaseEnvAliases?.[service.name] ?? {}),
+        ...(options?.runtimeConfigurationKeys?.[service.name] ?? [])])].sort(),
+      read: (target, request) => this.railwayRuntimeEvidence.read(target, request) }));
     }
 
     const serviceObservationComplete = !partial;

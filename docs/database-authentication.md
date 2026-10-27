@@ -9,6 +9,14 @@ The native credential probe checks the intended replacement against the bound
 role and database. Provider configuration, deployment activation and drainage,
 application connection compatibility, and application operation are independent
 evidence. Passing an administrative connection check never clears those gaps.
+An explicitly declared `database.applicationDriver: "node-postgres"` can add a
+read-only Railway runtime check after normal activation and retirement. It uses
+existing trusted SSH access, each exact running replica's URL-contained settings,
+and its installed driver. Unsupported extra driver settings remain unknown; a
+password challenge is required before authentication can pass. This optional
+capability creates no access or endpoints and preserves the native two-action
+lifecycle for declarations without it.
+
 See the [rotation lifecycle](database-password-rotation.md) and
 [provider matrix](../test/provider-contracts/database-password-provider-matrix.json)
 for the registered capabilities, recovery behavior and remaining limitations.

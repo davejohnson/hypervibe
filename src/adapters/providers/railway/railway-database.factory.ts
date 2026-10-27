@@ -27,6 +27,7 @@ import type {
 } from './railway.adapter.js';
 
 interface RailwayHostingOps {
+  railwayDatabaseRotationConfiguration?: import('../../../domain/ports/database-credential.port.js').DatabaseCredentialRuntimeConfiguration;
   synchronizeDatabasePasswordIssuer?: (target: { projectId: string; environmentId: string; serviceId: string }, password: string) => Promise<void>;
   railwayCredentialAliases?: import('../../../domain/ports/database-credential-aliases.port.js').IDatabaseCredentialAliases;
   railwayDailyBackups?: IDailyBackupPolicy<RailwayDailyBackupTarget>;
@@ -441,7 +442,7 @@ export function createRailwayDatabaseAdapter(params: {
   const databaseAdapter: IDatabaseAdapter & IDatabaseCheckpointAdapter = {
     name: 'railway',
     get credentialLifecycle() {
-      return createPostgresCredentialLifecycle(() => databaseAdapter, {
+      return { ...createPostgresCredentialLifecycle(() => databaseAdapter, {
         passwordEncoding: 'scram-sha-256',
         rotate: async (_component, _target, password) => {
           // Existing native aliases interpolate this issuer into URL password
@@ -474,7 +475,7 @@ export function createRailwayDatabaseAdapter(params: {
           const variables = await railway.getServiceVariables(target.projectId, target.serviceId, target.environmentId);
           return variables.POSTGRES_PASSWORD === password ? 'match' : variables.POSTGRES_PASSWORD ? 'different' : 'unknown';
         },
-      });
+      }), ...(railway.railwayDatabaseRotationConfiguration ? { runtimeConfiguration: railway.railwayDatabaseRotationConfiguration } : {}) };
     },
     ...(railway.getServiceVariables ? { observeRuntimeReferenceBinding } : {}),
     ...(railway.railwayCredentialAliases ? { credentialAliases: railway.railwayCredentialAliases } : {}),

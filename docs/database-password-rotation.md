@@ -34,6 +34,35 @@ ownership and recover the exact current replacement after an uncertain response.
 No production
 rotation was performed or authorized by this implementation work.
 
+## Optional deployed application authentication
+
+A supplied-mode rotation may opt into `database.applicationDriver: "node-postgres"`.
+This adds a third read-only action after the existing authentication and issuer
+stages. It remains pending until the normal deployment lifecycle proves exact
+consumer activation and old deployment retirement, then authenticates using each
+running replica's unchanged runtime URLs and its installed `pg` driver. A real
+password challenge and matching session user/database are required; passwordless
+trust, successful deployments and current variables alone cannot finish the action.
+Reapply the same plan after the separate managed rollout. Removing its verification
+action or changing private references invalidates the encrypted review. Existing
+two-action plans, adoption and provider-generated recovery retain their authority.
+
+The current runtime capability is Railway-only and has offline validation. Existing
+`sshIdentityFile` and `sshKnownHostsFile` connection fields must identify an already
+registered private key and independently trusted host file. Hypervibe uses native
+SSH with strict host checking; it does not register keys, accept hosts, invoke the
+Railway CLI or create network access. Missing access or any idle/unknown replica
+blocks this opt-in before SQL mutation. The native SQL route must also already be
+reachable. Idle cron workloads, custom driver connection options and non-Node
+applications have no deployed-driver verifier. Other database providers reject this
+new opt-in while retaining their existing native rotation capabilities; the provider
+matrix separately records this boundary for all eight providers.
+
+A delegated supplied-mode role may use positive `rotationGeneration` instead of
+`source`. The private root key and exact project/environment/component/role/generation
+derive one stable replacement for repeated review. Increase the generation after
+acceptance; it is not a provider-generated reset or permission to replay a write.
+
 ## Authority and recovery
 
 The plan contains two explicit, confirmed, data-bearing database actions:
@@ -132,3 +161,27 @@ the desired required check is `Hypervibe / acceptance`. Live branch-protection
 enforcement was not verified. Provider permissions, real network access and
 application behavior are verified by the user's reviewed apply, authentication
 and managed rollout evidence; offline contracts do not claim a live rotation.
+
+### Reconciled runtime evidence
+
+The [native Railway SSH implementation](https://github.com/railwayapp/cli/blob/v5.27.0/src/commands/ssh/native.rs)
+selects exact deployment-instance usernames. Railway's
+[variable reference contract](https://docs.railway.com/variables) separates raw
+references from resolved runtime values. The pinned SDL does not validate opaque
+snapshot contents; tests label those reconstructed responses explicitly. A raw
+snapshot reference therefore stays unknown unless existing trusted runtime access
+covers every exact instance before and after the read. All discovered credential
+alias names travel from encrypted rollout expectations into normal observation;
+values and comparison hashes do not travel in that observation context.
+
+Reconciliation observed failures for omitted retained alias names, removed optional
+verification authority, changed private references before SQL, and a runtime
+`AuthenticationOk` without a password challenge. Focused checks now exercise those
+boundaries through real SQLite/encryption, serialized GraphQL, and the emitted Node
+program using the real `pg` driver against a synthetic PostgreSQL wire peer.
+The disposable real PostgreSQL suite remains in ordinary `npm test`, but this
+macOS run could not initialize it because the host exhausted shared-memory IDs
+(`shmget`). Host settings and other processes were left unchanged. No live Railway
+SSH, SQL rotation, application business operation or customer incident cause was
+verified. The committed and desired acceptance commands still include these tests;
+live branch-protection enforcement was not inspected.

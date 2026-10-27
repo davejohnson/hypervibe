@@ -7,6 +7,7 @@ import { scopedSecretObservation } from './scoped-secrets.js';
 import { planApiPolicy } from '../services/api-policy.js';
 import path from 'path';
 import { observeServiceVolumes, planServiceVolumes, retainedVolumeHostingBlock, wireServiceVolumeActions } from '../services/service-volume.service.js';
+import { runtimeRolloutConfigurationKeys } from '../services/runtime-rollout.service.js';
 import { environmentResourceName } from '../services/resource-names.js';
 import { parseUnresolvedDatastoreMutation } from '../ports/database.port.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
@@ -376,9 +377,10 @@ export class PlanService {
     }
 
     try {
+      const runtimeConfigurationKeys = runtimeRolloutConfigurationKeys(environment, provider);
       const observed = await adapter.observe(environment, { databaseEnvAliases: Object.fromEntries(
         Object.entries(environmentSpec.services).map(([name, service]) => [name, service.databaseEnvAliases ?? {}])
-      ) });
+      ), ...(Object.keys(runtimeConfigurationKeys).length ? { runtimeConfigurationKeys } : {}) });
       const reportedCompleteness = observed.completeness;
       const providerHasSeparateEnvironment = providerRegistry
         .getMetadata(provider)
