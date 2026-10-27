@@ -9,13 +9,13 @@ import type { CloudInstallationRecord, OperatorArtifactIntent } from '../../../.
 // boundaries. Synthetic credentials and content IDs; not a live compatibility claim.
 const digest = 'sha256:' + 'd'.repeat(64), imageId = 'sha256:' + 'a'.repeat(64);
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-export function candidateBoundary(options: { lostAck?: boolean; replaced?: boolean; denied?: boolean; wrongImage?: boolean; wrongPulledImage?: boolean; publicRemoved?: boolean; absentAfterPush?: boolean } = {}) {
+export function candidateBoundary(options: { lostAck?: boolean; replaced?: boolean; denied?: boolean; wrongImage?: boolean; wrongPulledImage?: boolean; publicRemoved?: boolean; absentAfterPush?: boolean; billingChanged?: boolean; billingDisabled?: boolean } = {}) {
   const intent: OperatorArtifactIntent = { schemaVersion: 1, installationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', customerId: 'customer', appId: 'app', environment: 'staging',
     source: { kind: 'local-spec', repository: 'github.com/acme/operator', specRevision: 1, specDigest: 'c'.repeat(64) },
     provider: 'gcp', artifactProvider: 'cloudrun', execution: { kind: 'operator-artifact-publisher', authentication: 'google-user-adc' },
     mode: 'connect', stage: 'scope-preparation', keys: [], artifacts: ['application-candidate-v1'], nativeScope: {
       scopeKind: 'gar-private-candidate-publication-v1', projectId: 'operator-project', projectNumber: '123456789012', projectCreateTime: '2026-10-25T00:00:00Z', projectParent: 'none',
-      projectInstallationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', projectAttemptId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      projectInstallationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', projectAttemptId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', billingAccountName:'billingAccounts/000000-000000-000000',
       region: 'us-central1', artifactRepository: 'hypervibe', artifactRepositoryName: 'projects/operator-project/locations/us-central1/repositories/hypervibe',
       artifactRepositoryCreateTime: '2026-10-25T01:00:00Z', artifactInstallationId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', artifactAttemptId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
       candidateBuildId:'ffffffff-ffff-4fff-8fff-ffffffffffff',builderCleanup:'verified',sourceDirectory: '/synthetic/committed-app', sourceCommit: '1'.repeat(40), sourceRepository: 'github.com/acme/operator', imageName: 'candidate', packageReadAuthentication: 'github-package-read', sourceManifestSha256: 'e'.repeat(64), dockerfileSha256: 'f'.repeat(64), dependencyLockSha256: 'c'.repeat(64), candidateImageId: imageId, credentialScan: 'verified',
@@ -28,6 +28,8 @@ export function candidateBoundary(options: { lostAck?: boolean; replaced?: boole
     const url = String(input); requests.push(url);
     expect(init.method??'GET').toBe(url.includes(':testIamPermissions')||url.includes('cloudresourcemanager.googleapis.com')&&url.includes(':getIamPolicy')?'POST':'GET'); expect(new Headers(init.headers).get('authorization')).toBe('Bearer synthetic-short-lived-token');
     if (options.denied) return Response.json({}, { status: 403 });
+    if (url === `https://cloudbilling.googleapis.com/v1/projects/${scope.projectId}/billingInfo`) return Response.json({name:`projects/${scope.projectId}/billingInfo`,projectId:scope.projectId,
+      billingEnabled:!options.billingDisabled,billingAccountName:options.billingChanged?'billingAccounts/999999-999999-999999':'billingAccounts/000000-000000-000000'});
     if (url.includes('cloudresourcemanager.googleapis.com') && !url.includes(':getIamPolicy')) return Response.json({ name: `projects/${scope.projectNumber}`, projectId: scope.projectId,
       createTime: scope.projectCreateTime, state: 'ACTIVE', labels: { 'hv-installation': hash([intent.customerId,intent.appId,intent.environment,scope.projectInstallationId]).slice(0,63), 'hv-attempt': scope.projectAttemptId } });
     if (url === `https://artifactregistry.googleapis.com/v1/${repository}`) return Response.json({ name: repository, format: 'DOCKER', mode: 'STANDARD_REPOSITORY',

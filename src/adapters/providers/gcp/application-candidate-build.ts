@@ -41,11 +41,15 @@ export async function inspectApplicationCandidate(image: string, scope: Record<s
 }
 
 /** Stream bytes; no archive entry or command output containing the credential is
- * exposed or persisted. GAR/Docker OCI exports may contain gzip layer blobs. */
+ * exposed or persisted. Unsupported zstd OCI layers must not pass a raw-byte scan. */
 async function scan(stream: NodeJS.ReadableStream, credential: Buffer, compressed: boolean, signal: AbortSignal): Promise<void> {
   let carry=Buffer.alloc(0), bytes=0;
   const iterator=(stream as AsyncIterable<Buffer>)[Symbol.asyncIterator](); let first=Buffer.alloc(0);
-  while(first.length<2) {const next=await iterator.next();if(next.done)break;first=Buffer.concat([first,next.value]);}
+  while(first.length<4) {const next=await iterator.next();if(next.done)break;first=Buffer.concat([first,next.value]);}
+  // OCI permits zstd layers; RFC 8878 also permits leading skippable frames.
+  // Until bounded zstd decoding is supported, reject both forms before scanning.
+  if(compressed&&first.length>=4&&(first.readUInt32LE(0)===0xfd2fb528
+    || (first.readUInt32LE(0)&0xfffffff0)===0x184d2a50)) {await iterator.return?.();fail();}
   const input=Readable.from((async function*(){yield first;for(;;){const next=await iterator.next();if(next.done)break;yield next.value;}})());
   const decoded=compressed&&first[0]===0x1f&&first[1]===0x8b?input.pipe(createGunzip()):input;
   input.on('error',error=>decoded.destroy(error));

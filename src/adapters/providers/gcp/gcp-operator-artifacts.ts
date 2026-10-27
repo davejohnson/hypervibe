@@ -11,6 +11,7 @@ import { DestinationBoundaryError, DestinationBudget } from '../secret-destinati
 import { GcpSecretWriterClient } from './gcp-secret-writer.client.js';
 import { GcpLocalDefaultAuthentication } from './gcp-local-default-authentication.js';
 import { gcpLocalPublicArtifactProofShape } from './gcp-local-artifact-registry.js';
+import { gcpBillingPreparationScopeSchema } from './gcp-billing-installation.js';
 import { applicationCandidateDeclarationShape, applicationCandidatePreparedShape, inspectApplicationCandidate } from './application-candidate-build.js';
 import { inspectOperatorImage, isolatedDockerEnvironment, packageProvenance, prepareOperatorImages, runOperatorCommand, type OperatorCommand } from './operator-image-build.js';
 
@@ -19,11 +20,12 @@ const declarationSchema = z.object({ scopeKind: z.literal('gar-image-publication
   region: z.string().regex(/^[a-z]+(?:-[a-z0-9]+)+$/), packageVersion: z.string().regex(/^\d+\.\d+\.\d+$/) }).strict();
 const baseSchema = declarationSchema.extend({ projectNumber: z.string().regex(/^[1-9]\d*$/), projectCreateTime: z.string().datetime(),
   projectParent: z.string().regex(/^(none|organizations\/[1-9]\d*|folders\/[1-9]\d*)$/), projectInstallationId: uuid, projectAttemptId: uuid,
-  ...gcpLocalPublicArtifactProofShape, packageLockSha256: sha }).strict();
+  ...gcpLocalPublicArtifactProofShape, packageLockSha256: sha,
+  billingAccountName: gcpBillingPreparationScopeSchema.shape.billingAccountName.optional() }).strict();
 const publicScopeSchema = baseSchema.extend({ packageArchiveSha256: sha, holdingImageId: imageId.optional(), backupImageId: imageId.optional() }).strict();
 const candidateDeclarationSchema = declarationSchema.omit({ packageVersion: true }).extend({ scopeKind: z.literal('gar-private-candidate-publication-v1'), ...applicationCandidateDeclarationShape }).strict();
 const candidateProofShape = { artifactRepository: z.literal('hypervibe'), artifactRepositoryName: z.string().min(1), artifactRepositoryCreateTime: z.string().datetime(), artifactInstallationId: uuid, artifactAttemptId: uuid };
-const projectProofKeys = ['projectNumber','projectCreateTime','projectParent','projectInstallationId','projectAttemptId'] as const;
+const projectProofKeys = ['projectNumber','projectCreateTime','projectParent','projectInstallationId','projectAttemptId','billingAccountName'] as const;
 const candidateBaseSchema = candidateDeclarationSchema.extend({ ...Object.fromEntries(projectProofKeys.map(key=>[key,baseSchema.shape[key]])) as Pick<typeof baseSchema.shape,typeof projectProofKeys[number]>, ...candidateProofShape }).strict();
 const candidateScopeSchema = candidateBaseSchema.extend(applicationCandidatePreparedShape).strict();
 export const gcpOperatorArtifactScopeSchema = z.discriminatedUnion('scopeKind',[publicScopeSchema,candidateScopeSchema]);
@@ -89,17 +91,24 @@ function reason(error: unknown) { return error instanceof CloudInstallationBound
   ? error.status === 403 ? 'insufficient_permissions' as const : error.status === 401 ? 'authorization_expired' as const : 'provider_error' as const : 'provider_error' as const; }
 export function createGcpOperatorArtifactDriver(options: { fetch?: typeof fetch; command?: OperatorCommand } = {}): CloudInstallationDriver<Intent> {
   const command = options.command ?? runOperatorCommand;
-  async function withClient<T>(context: Context, work: (client: GcpSecretWriterClient, token: string) => Promise<T>): Promise<T> {
+  async function withClient<T>(context: Context, work: (client: GcpSecretWriterClient, token: string) => Promise<T>, requireBilling = false): Promise<T> {
+    const n = names(context.intent);
+    // Historical receipts stay readable; missing approved billing is never new
+    // plan or mutation authority. Fresh declarations require the retained field.
+    if(requireBilling&&!n.billingAccountName)fail('authorization_revoked');
     const budget = new DestinationBudget({ signal: context.signal, deadlineMs: 30_000 });
     try {
       if (!context.authentication.administrator) fail('authorization_expired');
       const token = await budget.wait(context.authentication.administrator.getAccessToken('https://www.googleapis.com/auth/cloud-platform', budget.signal));
       const client = new GcpSecretWriterClient({ token, budget, request: options.fetch ?? fetch, beforeWrite: context.beforeMutation, sleep: async () => {} });
-      const n = names(context.intent);
       const p = await client.json(`https://cloudresourcemanager.googleapis.com/v3/projects/${n.projectNumber}`);
       const labels = p.labels as Record<string,string> | undefined;
       if (p.name !== `projects/${n.projectNumber}` || p.projectId !== n.projectId || p.state !== 'ACTIVE' || p.createTime !== n.projectCreateTime
         || (p.parent ?? 'none') !== n.projectParent || labels?.['hv-installation'] !== n.projectOwner.slice(0,63) || labels?.['hv-attempt'] !== n.projectAttemptId) fail('ownership_mismatch');
+      if(n.billingAccountName) {
+        const billing=await client.bootstrap.getProjectBillingInfo(n.projectId);
+        if(!billing||!billing.billingEnabled||billing.billingAccountName!==n.billingAccountName)fail('authorization_revoked');
+      }
       const r = await client.json(`https://artifactregistry.googleapis.com/v1/${n.repositoryName}`);
       if (r.name !== n.repositoryName || r.createTime !== n.repositoryCreateTime || r.format !== 'DOCKER'
         || r.mode !== 'STANDARD_REPOSITORY' || r.description !== `hypervibe:operator-registry:${n.registryOwner}:${n.registryAttemptId}`) fail('ownership_mismatch');
@@ -155,12 +164,12 @@ export function createGcpOperatorArtifactDriver(options: { fetch?: typeof fetch;
         const permissions=['artifactregistry.repositories.uploadArtifacts','artifactregistry.repositories.downloadArtifacts'];
         const response=await client.json(`https://artifactregistry.googleapis.com/v1/${n.repositoryName}:testIamPermissions`,{method:'POST',body:JSON.stringify({permissions})});
         if(!Array.isArray(response.permissions)||!permissions.every(permission=>(response.permissions as unknown[]).includes(permission))) fail('insufficient_permissions');
-      });
+      },true);
       for(const kind of context.intent.artifacts) if(await inspectImage(artifact(context.intent,kind).imageId,kind,context.intent.nativeScope,command,{signal:context.signal})!==artifact(context.intent,kind).imageId) fail();
       return {actions:actions(context.intent),review:{ resources:context.intent.artifacts.map(kind=>({kind:'image',name:artifact(context.intent,kind).image,scope:n.repositoryName})),
         permissions:[{principal:'Local browser-authorized operator',scope:n.repositoryName,actions:['artifactregistry.repositories.uploadArtifacts','artifactregistry.repositories.downloadArtifacts',
           ...(n.candidate?['artifactregistry.repositories.get','artifactregistry.repositories.getIamPolicy','artifactregistry.dockerImages.get','artifactregistry.tags.get']:[])],purpose:'installation-verification'},
-          ...(n.candidate?[{principal:'Local browser-authorized operator',scope:`projects/${n.projectNumber}`,actions:['resourcemanager.projects.get','resourcemanager.projects.getIamPolicy'],purpose:'installation-verification' as const}]:[])],
+          {principal:'Local browser-authorized operator',scope:`projects/${n.projectNumber}`,actions:['resourcemanager.projects.get',...(n.candidate?['resourcemanager.projects.getIamPolicy']:[])],purpose:'installation-verification'}],
         costs:[{resource:n.repositoryName,description:'Published image storage and download egress can incur charges. This plan creates no repository, IAM binding or application workload.',pricingUrl:'https://cloud.google.com/artifact-registry/pricing'}],
         warnings:[...(n.candidate?[`Publish exact ${n.sourceRepository} commit ${n.sourceCommit}, source manifest ${n.sourceManifestSha256}, Dockerfile ${n.dockerfileSha256} and dependency lock ${n.dependencyLockSha256}.`, 'The package-read credential is transient in a BuildKit secret mount. The prepared image passed exact-credential layer, configuration and filesystem scans. This is a private application candidate, not a running deployment.']:[`Publish exact Hypervibe ${n.packageVersion} archive ${n.packageArchiveSha256} with dependency lock ${n.packageLockSha256}.`, 'This repository was separately reviewed for anonymous reads. Every published image is public.']),
           'Docker pushes have no native conditional tag create. A fresh per-attempt tag is checked before push; the final receipt verifies immutable digest and the exact tested image configuration. Uncertain results are read back without resubmission.']}};
@@ -171,7 +180,7 @@ export function createGcpOperatorArtifactDriver(options: { fetch?: typeof fetch;
       try{
         driver.parseAction(context.action,context.intent);const n=names(context.intent),a=artifact(context.intent,context.action.metadata.operation),env=isolatedDockerEnvironment(directory);
         if(await inspectImage(a.imageId,a.kind,context.intent.nativeScope,command,{env,signal:context.signal})!==a.imageId)fail();
-        const token=await withClient(context,async(client,token)=>{if(await tag(client,context,a.kind,context.attempt.id))fail('ownership_mismatch');return token;});
+        const token=await withClient(context,async(client,token)=>{if(await tag(client,context,a.kind,context.attempt.id))fail('ownership_mismatch');return token;},true);
         await command('docker',['login','--username','oauth2accesstoken','--password-stdin',n.host],{env,signal:context.signal,input:token});
         const target=`${a.image}:hv-${context.attempt.id}`;
         await command('docker',['tag',a.imageId,target],{env,signal:context.signal});
@@ -192,6 +201,7 @@ export function createGcpOperatorArtifactCapability(): OperatorArtifactCapabilit
         const declaration=candidateDeclarationSchema.parse(value);
         if(artifacts.length!==1||artifacts[0]!=='application-candidate-v1')fail();
         const selected=z.record(z.string(),z.unknown()).parse(bindings.providerScope);
+        gcpBillingPreparationScopeSchema.shape.billingAccountName.parse(selected.billingAccountName);
         if(selected.projectId!==declaration.projectId||selected.artifactRepositoryName!==`projects/${declaration.projectId}/locations/${declaration.region}/repositories/hypervibe`)fail();
         return candidateBaseSchema.parse({...declaration,...Object.fromEntries([...projectProofKeys,...Object.keys(candidateProofShape)].map(key=>[key,selected[key]]))});
       }
@@ -199,8 +209,9 @@ export function createGcpOperatorArtifactCapability(): OperatorArtifactCapabilit
       if(declaration.packageVersion!==provenance.packageVersion||!artifacts.length||artifacts.some(kind=>!kinds.includes(kind)))fail();
       const binding=bindings.providerScope;if(!binding||typeof binding!=='object'||Array.isArray(binding))fail();
       const selected=binding as Record<string,unknown>;
+      gcpBillingPreparationScopeSchema.shape.billingAccountName.parse(selected.billingAccountName);
       if(selected.projectId!==declaration.projectId||selected.publicArtifactRepositoryName!==`projects/${declaration.projectId}/locations/${declaration.region}/repositories/operator-public`)fail();
-      const inherited=Object.fromEntries(['projectNumber','projectCreateTime','projectParent','projectInstallationId','projectAttemptId',...Object.keys(gcpLocalPublicArtifactProofShape)].map(key=>[key,selected[key]]));
+      const inherited=Object.fromEntries([...projectProofKeys,...Object.keys(gcpLocalPublicArtifactProofShape)].map(key=>[key,selected[key]]));
       return baseSchema.parse({...declaration,...provenance,...inherited});
     },
     parseRecord:value=>parseCloudInstallationRecordV1(value,createGcpOperatorArtifactDriver()),
@@ -211,7 +222,7 @@ export function createGcpOperatorArtifactCapability(): OperatorArtifactCapabilit
     refreshScope(record,declaration,artifacts){
       const n=names(record.intent),next=(n.candidate?candidateBaseSchema:baseSchema).parse(declaration);
       if(n.candidate){for(const key of ['projectId',...projectProofKeys,...Object.keys(candidateProofShape)])if(n[key]!==((next as unknown) as Record<string,string>)[key])fail('ownership_mismatch');if(artifacts.length!==1||artifacts[0]!=='application-candidate-v1')fail();return next;}
-      for(const key of ['projectId','projectNumber','projectCreateTime','projectParent','projectInstallationId','projectAttemptId',...Object.keys(gcpLocalPublicArtifactProofShape)])
+      for(const key of ['projectId',...projectProofKeys,...Object.keys(gcpLocalPublicArtifactProofShape)])
         if(n[key as keyof typeof n]!==next[key as keyof typeof next])fail('ownership_mismatch');
       if(!artifacts.length||artifacts.some(kind=>!kinds.includes(kind)))fail();return next;
     },

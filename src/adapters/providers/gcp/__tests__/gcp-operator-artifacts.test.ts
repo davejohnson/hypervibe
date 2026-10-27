@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { createGcpOperatorArtifactDriver } from '../gcp-operator-artifacts.js';
+import { createGcpOperatorArtifactCapability, createGcpOperatorArtifactDriver } from '../gcp-operator-artifacts.js';
 import { artifactImageLabels, type OperatorCommand } from '../operator-image-build.js';
 import { applyCloudInstallationV1, planCloudInstallationV1, reconcileCloudInstallationV1 } from '../../../../domain/services/cloud-installation-runtime.js';
 import type { CloudInstallationRecord, OperatorArtifactIntent } from '../../../../domain/ports/cloud-installation.port.js';
@@ -10,13 +10,13 @@ import type { CloudInstallationRecord, OperatorArtifactIntent } from '../../../.
 // boundaries. Synthetic credentials and content IDs; not a live compatibility claim.
 const digest = 'sha256:' + 'd'.repeat(64), imageId = 'sha256:' + 'a'.repeat(64);
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-function fixture(options: { lostAck?: boolean; replaced?: boolean; denied?: boolean; wrongImage?: boolean; publicRemoved?: boolean; absentAfterPush?: boolean } = {}) {
+function fixture(options: { lostAck?: boolean; replaced?: boolean; denied?: boolean; wrongImage?: boolean; publicRemoved?: boolean; absentAfterPush?: boolean; billingChanged?: boolean; billingDisabled?: boolean } = {}) {
   const intent: OperatorArtifactIntent = { schemaVersion: 1, installationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', customerId: 'customer', appId: 'app', environment: 'staging',
     source: { kind: 'local-spec', repository: 'github.com/acme/operator', specRevision: 1, specDigest: 'c'.repeat(64) },
     provider: 'gcp', artifactProvider: 'cloudrun', execution: { kind: 'operator-artifact-publisher', authentication: 'google-user-adc' },
     mode: 'connect', stage: 'scope-preparation', keys: [], artifacts: ['holding-v1'], nativeScope: {
       scopeKind: 'gar-image-publication-v1', projectId: 'operator-project', projectNumber: '123456789012', projectCreateTime: '2026-10-25T00:00:00Z', projectParent: 'none',
-      projectInstallationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', projectAttemptId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      projectInstallationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', projectAttemptId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', billingAccountName:'billingAccounts/000000-000000-000000',
       region: 'us-central1', publicArtifactRepository: 'operator-public', publicArtifactRepositoryName: 'projects/operator-project/locations/us-central1/repositories/operator-public',
       publicArtifactRepositoryCreateTime: '2026-10-25T01:00:00Z', publicArtifactInstallationId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', publicArtifactAttemptId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
       packageVersion: '0.1.44', packageLockSha256: 'e'.repeat(64), packageArchiveSha256: 'f'.repeat(64), holdingImageId: imageId,
@@ -27,6 +27,8 @@ function fixture(options: { lostAck?: boolean; replaced?: boolean; denied?: bool
   const request: typeof fetch = async (input, init = {}) => {
     const url = String(input); requests.push(url); expect(new Headers(init.headers).get('authorization')).toBe('Bearer synthetic-short-lived-token');
     if (options.denied) return Response.json({}, { status: 403 });
+    if (url === `https://cloudbilling.googleapis.com/v1/projects/${scope.projectId}/billingInfo`) return Response.json({name:`projects/${scope.projectId}/billingInfo`,projectId:scope.projectId,
+      billingEnabled:!options.billingDisabled,billingAccountName:options.billingChanged?'billingAccounts/999999-999999-999999':'billingAccounts/000000-000000-000000'});
     if (url.includes('cloudresourcemanager.googleapis.com')) return Response.json({ name: `projects/${scope.projectNumber}`, projectId: scope.projectId,
       createTime: scope.projectCreateTime, state: 'ACTIVE', labels: { 'hv-installation': hash([intent.customerId,intent.appId,intent.environment,scope.projectInstallationId]).slice(0,63), 'hv-attempt': scope.projectAttemptId } });
     if (url === `https://artifactregistry.googleapis.com/v1/${repository}`) return Response.json({ name: repository, format: 'DOCKER', mode: 'STANDARD_REPOSITORY',
@@ -84,7 +86,7 @@ describe('GAR operator immutable image publication', () => {
     expect(JSON.stringify(record)).toContain(digest); expect(JSON.stringify(record)).not.toContain('synthetic-short-lived-token');
     expect(f.commands.filter(value => value.args[0] === 'pull').length).toBeGreaterThan(0);
   });
-  it.each(['replaced','denied','publicRemoved','wrongImage'] as const)('rejects %s before publication', async variant => {
+  it.each(['replaced','denied','publicRemoved','wrongImage','billingChanged','billingDisabled'] as const)('rejects %s before publication', async variant => {
     const f = fixture(); let record = await planCloudInstallationV1({ ...f.context, intent: f.intent });
     f.options[variant] = true;
     record = await applyCloudInstallationV1({ ...f.context, installationId: record.installationId, planDigest: record.plan.digest, confirmActions: record.plan.actions.map(action => action.id) });
@@ -95,5 +97,23 @@ describe('GAR operator immutable image publication', () => {
     record = await applyCloudInstallationV1({ ...f.context, installationId: record.installationId, planDigest: record.plan.digest, confirmActions: record.plan.actions.map(action => action.id) });
     for (let i = 0; i < 2; i++) record = await reconcileCloudInstallationV1({ ...f.context, installationId: record.installationId, planDigest: record.plan.digest });
     expect(record.status).not.toBe('scope-ready'); expect(f.writes).toHaveLength(1);
+  });
+
+  it('preserves immutable legacy publication receipts without granting another push',async()=>{
+    const f=fixture();let record=await planCloudInstallationV1({...f.context,intent:f.intent});
+    record=await applyCloudInstallationV1({...f.context,installationId:record.installationId,planDigest:record.plan.digest,confirmActions:record.plan.actions.map(a=>a.id)});
+    expect(record.status).toBe('scope-ready');
+    const capability=createGcpOperatorArtifactCapability(),receipts=capability.receipts(record);
+    // Historical publication schema omitted approved billing. Receipt identity
+    // remains immutable; it cannot authorize a new plan or direct mutation.
+    delete record.intent.nativeScope.billingAccountName;
+    expect(f.context.driver.parseScope(record.intent.nativeScope)).toEqual(record.intent.nativeScope);
+    expect(capability.receipts(record)).toEqual(receipts);
+    const requests=f.requests.length;
+    const result=await f.context.driver.mutate({intent:record.intent,action:record.plan.actions[0],completed:{},
+      authentication:f.context.authentication,signal:AbortSignal.timeout(1000),beforeMutation:async()=>{},
+      attempt:{id:'ffffffff-ffff-4fff-8fff-ffffffffffff',actionId:record.plan.actions[0].id,status:'attempted',startedAt:new Date().toISOString(),updatedAt:new Date().toISOString()}});
+    expect(result).toMatchObject({state:'rejected',reason:'authorization_revoked'});
+    expect(f.requests).toHaveLength(requests);expect(f.writes).toHaveLength(1);
   });
 });

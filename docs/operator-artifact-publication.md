@@ -219,6 +219,9 @@ owned `docker-container` builder has bounded CPU/memory and no shared-cache
 fallback. The final image must be linux/amd64 and nonroot. All exported image
 entries (including gzip layers), image configuration and exported final filesystem
 are scanned for the exact credential before publication becomes reviewable.
+Zstd layers, including leading skippable frames, are explicitly unsupported and
+reject preparation; scanning their compressed bytes cannot establish that the
+decoded layer is free of the credential.
 Failed/uncertain builds clean their exact owned image and builder/cache; a cleanup
 failure preserves a value-free recovery record and blocks publication. Successful
 images remain available for the later confirmed push after their builder is
@@ -263,3 +266,33 @@ image, builder container and cache volume verified absent. No GAR or other cloud
 calls were made. Two additional failing boundary cases showed that a numeric
 root-equivalent `USER 00` and a five-GiB image were initially accepted; the builder
 now requires a valid nonroot user and a bounded native image size before export.
+
+The assumption that gzip decoding plus raw scanning covers all OCI layers was
+falsified by two real tar fixtures: a zstd-compressed layer containing the exact
+synthetic credential, with or without an RFC 8878 skippable frame, followed by a
+whiteout that leaves the final filesystem clean. Both initially returned a
+verified scan. The [OCI layer contract](https://github.com/opencontainers/image-spec/blob/main/layer.md)
+explicitly permits zstd and whiteouts; [RFC 8878](https://www.rfc-editor.org/rfc/rfc8878.html)
+defines both frame signatures. Normal acceptance now checks explicit rejection
+and owned image/cache cleanup through the actual tar boundary. This closes the
+unsupported-compression gap; it does not establish detection of transformed
+credentials or prevent malicious source from exfiltrating a build secret.
+
+Both public helper and private candidate publication also retain the approved
+billing account from the verified project binding. Before new plan/mutation
+authority, the native billing read must report enabled billing on that exact
+account. A live association is mutable even when the project and registry remain
+owned: Google's [ProjectBillingInfo contract](https://docs.cloud.google.com/billing/docs/reference/rest/v1/ProjectBillingInfo)
+reports account identity separately from enabled status. Four serialized
+boundary cases initially allowed publication after account replacement or
+disabled billing; they now block both publishers before a push. Historical
+scopes and immutable receipts remain readable, but missing billing proof cannot
+authorize a fresh plan or mutation. These reads are not an atomic billing lock
+against changes by another independently authorized administrator.
+
+The AWS federation transport fixture separately reproduces a clock-boundary
+assertion failure: regenerating the expected synthetic JWT changed its expiry
+claim after the actual token was sent. Advancing the clock on each read produced
+RED; capturing the supplied token once produced GREEN while preserving exact
+serialized STS token, role, session-duration and native expiry validation. This
+is a test timing defect, not evidence of an AWS interoperability failure.

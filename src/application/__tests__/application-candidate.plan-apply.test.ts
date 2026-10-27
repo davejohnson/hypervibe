@@ -23,7 +23,7 @@ describe('reviewed private candidate publication through application and SQLite'
     const ctx=createCommandContext(),project=ctx.repos.projects.create({name:'original-operator-app',defaultPlatform:'cloudrun',gitRemoteUrl:'https://github.com/acme/operator.git'});
     native.intent.customerId=project.id;native.intent.appId=project.id;
     const n=native.intent.nativeScope;
-    const providerScope=Object.fromEntries(['projectId','projectNumber','projectCreateTime','projectParent','projectInstallationId','projectAttemptId','region','artifactRepository','artifactRepositoryName','artifactRepositoryCreateTime','artifactInstallationId','artifactAttemptId'].map(key=>[key,n[key]]));
+    const providerScope=Object.fromEntries(['projectId','projectNumber','projectCreateTime','projectParent','projectInstallationId','projectAttemptId','billingAccountName','region','artifactRepository','artifactRepositoryName','artifactRepositoryCreateTime','artifactInstallationId','artifactAttemptId'].map(key=>[key,n[key]]));
     const environment=ctx.repos.environments.create({projectId:project.id,name:'staging',platformBindings:{provider:'cloudrun',projectId:n.projectId,providerScope}});
     const desired={version:1,project:project.name,environments:{staging:{hosting:{provider:'cloudrun'},services:{web:{}},email:{enabled:false},operatorArtifacts:{candidate:{provider:'cloudrun',artifacts:['application-candidate-v1'],nativeScope:Object.fromEntries(['scopeKind','projectId','region','sourceDirectory','sourceCommit','imageName','packageReadAuthentication'].map(key=>[key,n[key]]))}}}}};
     const store=new SpecStore();store.replace(project,desired);

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createAwsFederatedCredentialProvider } from '../aws-federated-auth.js';
 
 // Reconstructed official STS Query response contract, through real SDK transport.
@@ -27,12 +27,18 @@ function fixture(options: { roleId?: string; expiration?: string; token?: string
   return { requests, provider };
 }
 describe('AWS Google federation (reconstructed serialized STS boundary)', () => {
+  afterEach(() => vi.restoreAllMocks());
   it('uses unsigned web identity, exact scope,900-second sessions and verifies actual caller identity', async () => {
-    const f = fixture(); const credentials = await f.provider(AbortSignal.timeout(1000));
+    // STS must receive the exact issued token even if transport crosses a second.
+    // Regenerating a JWT in the assertion changes its exp claim independently.
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => { const current = now; now += 1000; return current; });
+    const suppliedToken = token();
+    const f = fixture({ token: suppliedToken }); const credentials = await f.provider(AbortSignal.timeout(1000));
     expect(credentials.expiration.getTime()).toBeGreaterThan(Date.now());
     expect(f.requests.map(item => item.operation)).toEqual(['AssumeRoleWithWebIdentity', 'GetCallerIdentity']);
     expect(f.requests[0].authorization).toBeUndefined();
-    expect(f.requests[0].query).toMatchObject({ RoleArn: roleArn, DurationSeconds: '900', WebIdentityToken: token() });
+    expect(f.requests[0].query).toMatchObject({ RoleArn: roleArn, DurationSeconds: '900', WebIdentityToken: suppliedToken });
     expect(f.requests[0].query.ExternalId).toBeUndefined();
   });
   it('rejects same-name role replacement and expired credentials', async () => {
