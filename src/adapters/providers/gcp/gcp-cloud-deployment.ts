@@ -528,7 +528,7 @@ export function createGcpCloudDeploymentDriver(options: { fetch?: typeof fetch; 
       return { state: 'satisfied', evidence: evidence(context, [proof]) };
     }
     if (op === 'enable-api') {
-      const value = await client.json(`https://serviceusage.googleapis.com/v1/${context.action.resource.name}`);
+      const value = await client.service(context.action.resource.name);
       if (value.name !== context.action.resource.name || !['ENABLED', 'DISABLED'].includes(String(value.state))) fail();
       return value.state === 'ENABLED' ? { state: 'satisfied', evidence: evidence(context, [{ kind: 'api', id: context.action.resource.name, identity: {} }]) }
         : context.attempt ? { state: 'pending', reason: 'not_converged' } : { state: 'action-required' };

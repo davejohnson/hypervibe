@@ -1,3 +1,4 @@
+import { serviceUsageResponse } from './helpers/gcp-service-usage.js';
 import { describe, expect, it } from 'vitest';
 import { createGcpCloudInstallationDriver } from '../../src/adapters/providers/gcp/gcp-cloud-installation.js';
 import type { CloudInstallationIntent, CloudInstallationProviderContext, CloudInstallationAction } from '../../src/domain/ports/cloud-installation.port.js';
@@ -66,7 +67,7 @@ function transport(options: { denyPermissions?: boolean; loseCreateAck?: boolean
         enabled.add(name);
         return Response.json({ name: 'operations/acf.601db672-88e6-4f98-8ceb-aa3b5725533c', done: true, response: { '@type': 'type.googleapis.com/google.api.serviceusage.v1.EnableServiceResponse' } });
       }
-      return Response.json({ name, state: !options.servicesDisabled || enabled.has(name) ? 'ENABLED' : 'DISABLED', config: { name: path.split('/').at(-1) } });
+      return serviceUsageResponse(url, name, !options.servicesDisabled || enabled.has(name) ? 'ENABLED' : 'DISABLED');
     }
     if (path.endsWith(':getIamPolicy')) return Response.json(policies.get(path.replace(':getIamPolicy', '')) ?? { etag: 'BwWWja0YfJA=', version: 3, bindings: [
       { role: 'roles/viewer', members: ['user:owner@example.test'], condition: { title: 'keep', expression: 'true' } },

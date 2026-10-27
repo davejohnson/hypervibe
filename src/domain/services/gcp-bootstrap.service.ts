@@ -639,6 +639,9 @@ async function observeBootstrapTarget(
   if (billing === null) {
     throw new Error('GCP billing lookup could not verify the existing target project.');
   }
+  if (iamServiceState !== 'ENABLED' && iamServiceState !== 'DISABLED') {
+    throw new Error('GCP IAM service state could not be verified for the existing target project.');
+  }
   const [serviceAccount, runtimeServiceAccount] = iamServiceState === 'ENABLED'
     ? await Promise.all([
         client.getServiceAccount(projectId, GCP_BOOTSTRAP_ACCOUNT_ID),

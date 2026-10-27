@@ -1,3 +1,4 @@
+import { serviceUsageResponse } from './helpers/gcp-service-usage.js';
 import { describe, expect, it, vi } from 'vitest';
 import { createGcpCloudInstallationDriver } from '../../src/adapters/providers/gcp/gcp-cloud-installation.js';
 import { prepareCloudDeploymentIntentV1, issueCloudDeploymentSessionV1, verifyCloudDeploymentReleaseTargetsV1, prepareCloudDeploymentSourceAuthorizationV1 } from '../../src/application/hosted/cloud-deployment-session.js';
@@ -71,7 +72,7 @@ function nativeFixture(callLimit = Number.POSITIVE_INFINITY) {
         bindings: [{ role: 'roles/owner', members: ['user:administrator@example.test'] }] });
       return Response.json({ name: 'projects/123456789012', projectId: 'customer-project', state: 'ACTIVE', createTime: '2026-10-24T00:00:00Z', ...(state.parent ? { parent: state.parent } : {}) });
     }
-    if (parsed.hostname === 'serviceusage.googleapis.com') return Response.json({ name: parsed.pathname.replace(/^\/v1\//, ''), state: 'ENABLED' });
+    if (parsed.hostname === 'serviceusage.googleapis.com') return serviceUsageResponse(parsed, parsed.pathname.replace(/^\/v1\//, ''), 'ENABLED');
     if (parsed.hostname === 'artifactregistry.googleapis.com' && parsed.pathname.includes('/dockerImages/')) {
       expect(new Headers(init.headers).has('Authorization')).toBe(false);
       return Response.json({ name: `projects/holding-project/locations/us-west1/repositories/public/dockerImages/holding@sha256:${'f'.repeat(64)}`, uri: image });

@@ -206,7 +206,7 @@ export function createGcpCloudInstallationDriver(options: { fetch?: typeof fetch
     const n = names(context.intent); const op = context.action.metadata.operation; const native = context.action.metadata.native;
     if (op === 'enable-api') {
       const name = context.action.resource.name;
-      const value = await client.json(`https://serviceusage.googleapis.com/v1/${name}`);
+      const value = await client.service(name);
       if (value.name !== name || !['ENABLED', 'DISABLED'].includes(String(value.state))) throw new InstallationError('identity_mismatch');
       return value.state === 'ENABLED' ? { state: 'satisfied', evidence: evidence(context, [{ kind: 'service', id: name, identity: {} }]) }
         : context.attempt ? { state: 'pending', reason: 'not_converged' } : { state: 'action-required' };

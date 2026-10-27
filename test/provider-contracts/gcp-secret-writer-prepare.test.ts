@@ -27,7 +27,7 @@ describe('scoped GCP writer preparation real HTTP and durable boundary', () => {
     const cloud = { projectId, account: null as Record<string, unknown> | null, roles: new Map<string, Record<string, unknown>>(),
       policies: new Map<string, any>(), accounts: new Map<string, Record<string, unknown>>(), apis: new Set(['iam.googleapis.com']), failCreateReply: false, hideCreatedAccount: false,
       foreign: false, missingSecret: false, failPolicyReply: false, rejectPolicyFor: '', rejectionStatus: 0, unresolvedApiEnable: false,
-      differentCreateIdentity: false, policyWrites: 0 };
+      differentCreateIdentity: false, policyWrites: 0, apiState: undefined as string | undefined, apiStateService: 'iam.googleapis.com' };
     const retained = { role: 'roles/viewer', members: ['user:other@example.test'], condition: { title: 'retained', expression: 'true' } };
     cloud.policies.set(`projects/${projectNumber}`, { version: 3, etag: 'old-project-etag', bindings: [retained], auditConfigs: [{ service: 'allServices' }] });
     const request: typeof fetch = async (input, init = {}) => {
@@ -46,7 +46,7 @@ describe('scoped GCP writer preparation real HTTP and durable boundary', () => {
         const api = resource.split('/services/')[1].replace(/:enable$/, '');
         if (resource.endsWith(':enable')) { if (!cloud.unresolvedApiEnable) cloud.apis.add(api); return Response.json({ name: 'operations/api-enable' }); }
         return Response.json({ name: `projects/${projectNumber}/services/${api}`, parent: `projects/${projectNumber}`, config: { name: api },
-          state: cloud.apis.has(api) ? 'ENABLED' : 'DISABLED' });
+          state: (api === cloud.apiStateService ? cloud.apiState : undefined) ?? (cloud.apis.has(api) ? 'ENABLED' : 'DISABLED') });
       }
       if (resource.endsWith(':getIamPolicy')) {
         const key = resource.replace(/:getIamPolicy$/, '');
@@ -120,6 +120,12 @@ describe('scoped GCP writer preparation real HTTP and durable boundary', () => {
     const f = fixture(); if (mode === 'projectMismatch') f.cloud.projectId = 'other-project'; else f.cloud[mode] = true;
     const result = await prepare(f); expect(result.success).toBe(false);
     expect(f.events.filter(e => e.method === 'POST' && !e.url.endsWith(':getIamPolicy'))).toEqual([]);
+  });
+  it.each(['iam.googleapis.com', 'iamcredentials.googleapis.com'])('rejects unknown %s state before recording or dispatching preparation work', async api => {
+    const f = fixture(); f.cloud.apiState = 'STATE_UNSPECIFIED'; f.cloud.apiStateService = api;
+    const result = await prepare(f); expect(result.success).toBe(false);
+    expect(f.events.filter(event => event.method !== 'GET')).toEqual([]);
+    expect(repository.findById(f.params.project.id)!.policies.secretWriterPreparation).toBeUndefined();
   });
   it('recovers uncertain creation only with persisted attempt marker and immutable unique ID', async () => {
     const f = fixture(); f.cloud.failCreateReply = true;

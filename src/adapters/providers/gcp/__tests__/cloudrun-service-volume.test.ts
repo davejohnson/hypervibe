@@ -64,6 +64,24 @@ describe('Cloud Run staged retained Filestore volumes', () => {
     expect(result.mutationAttempted).toBe(true);
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
   });
+  it('filters API state reads before enablement and convergence without changing the write request', async () => {
+    let enabled = false;
+    const name = 'projects/12345/services/compute.googleapis.com';
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = new URL(input);
+      if (init?.method === 'POST') {
+        expect(url.search).toBe(''); expect(url.pathname).toBe(`/v1/${name}:enable`);
+        enabled = true; return Response.json({ name: 'operations/enable-compute' });
+      }
+      // Google system parameters support filtering this Service response.
+      expect(url.searchParams.get('fields')).toBe('name,state');
+      return Response.json({ name, state: enabled ? 'ENABLED' : 'DISABLED' });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await volumes().staged.applyComponent(target, 'compute-api', {})).toMatchObject({ success: true, mutationAttempted: true, externalId: name });
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method !== 'POST')).toHaveLength(3);
+  });
   it('blocks an unavailable reviewed zone instead of selecting another one', async () => {
     const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => Response.json({ ...zone, status: 'DOWN' }));
     vi.stubGlobal('fetch', fetchMock);

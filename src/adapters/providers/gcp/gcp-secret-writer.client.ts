@@ -59,6 +59,11 @@ export class GcpSecretWriterClient {
   async project(projectId: string, projectNumber: string): Promise<void> {
     return assertGcpProjectIdentity({ request: this.input.request, budget: this.input.budget, token: this.input.token, projectId, projectNumber });
   }
+  service(name: string): Promise<Record<string, unknown>> {
+    // Service.config can exceed the bounded reader. Only identity and enabled
+    // state are needed here; keep the body limit and caller validation intact.
+    return this.json(`https://serviceusage.googleapis.com/v1/${name}?fields=name,state`);
+  }
   async secret(resource: string): Promise<void> {
     const result = await this.json(`https://secretmanager.googleapis.com/v1/${resource}`);
     if (result.name !== resource) throw new DestinationBoundaryError('scope_mismatch');

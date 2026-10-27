@@ -110,7 +110,12 @@ export async function runGcpSecretWriterPrepare(params: GcpSecretWriterPreparePa
     for (const id of target.secretIds) await client.secret(`projects/${target.projectNumber}/secrets/${id}`);
     // Inspect the existing principal before granting/enabling anything when IAM
     // is already available. An API permission error never means missing account.
-    const iamEnabled = await client.bootstrap.getServiceState(target.projectId, 'iam.googleapis.com') === 'ENABLED';
+    const apiEnabled = async (api: string) => {
+      const state = await client.bootstrap.getServiceState(target.projectId, api);
+      if (state !== 'ENABLED' && state !== 'DISABLED') throw new DestinationBoundaryError('invalid_response');
+      return state === 'ENABLED';
+    };
+    const iamEnabled = await apiEnabled('iam.googleapis.com');
     let account = iamEnabled ? await client.account(target.projectId, accountId) : null;
     const marker = (kind: string) => `Hypervibe secret-writer v1 ${hash(nativeScope)} ${record.attemptId} ${kind}`;
     const verifyAccount = () => {
@@ -143,7 +148,7 @@ export async function runGcpSecretWriterPrepare(params: GcpSecretWriterPreparePa
     };
     for (const api of plan.enableApis) {
       await mutation(`api:${api}`, () => client.bootstrap.enableService(target.projectId, api),
-        async () => await client.bootstrap.getServiceState(target.projectId, api) === 'ENABLED');
+        () => apiEnabled(api));
     }
     await mutation('account:create', async () => {
       const created = await client.createAccount(target.projectId, accountId, marker('account'));

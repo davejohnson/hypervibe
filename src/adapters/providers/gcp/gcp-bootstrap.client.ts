@@ -333,6 +333,7 @@ export class GcpBootstrapClient {
     const expectedName = `${project.name}/services/${serviceName}`;
     const initial = await this.getService(projectId, serviceName, expectedName);
     if (initial?.state === 'ENABLED') return 'already_enabled';
+    if (initial?.state !== 'DISABLED') throw new Error('GCP service enablement requires a verified disabled state.');
 
     const payload = await this.requestJson(
       `${SERVICE_USAGE_BASE}/projects/${encodeURIComponent(projectId)}`
@@ -557,7 +558,7 @@ export class GcpBootstrapClient {
   ): Promise<{ name: string; state: GcpServiceState } | null> {
     const payload = await this.getNullable(
       `${SERVICE_USAGE_BASE}/projects/${encodeURIComponent(projectId)}`
-        + `/services/${encodeURIComponent(serviceName)}`,
+        + `/services/${encodeURIComponent(serviceName)}?fields=name,parent,config/name,state`,
       'service lookup'
     );
     if (payload === null) return null;

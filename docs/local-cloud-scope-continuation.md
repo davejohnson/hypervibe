@@ -250,3 +250,44 @@ of the observed quota rejection. They remain in the ordinary `npm test` gate.
 
 The focused billing-provider and application group passed all 89 tests after the
 fix, and `npm run typecheck` passed. No native cloud request was made.
+
+## Service Usage state reads and response size
+
+A read-only operator plan observed Compute's Service Usage `services.get` return
+HTTP 200 with the exact resource name and `DISABLED` state, but a 1,389,505-byte
+body. Its service configuration exceeded the shared client's 1,048,576-byte
+limit. This falsifies the assumption that a complete service configuration fits
+that bounded state reader; it does not indicate missing permission or an enabled
+API. No API-enable request was dispatched by that observation.
+
+Google documents that [services.get returns configuration and state](https://docs.cloud.google.com/service-usage/docs/reference/rest/v1/services/get),
+that [Service.config contains API definitions and documentation](https://docs.cloud.google.com/service-usage/docs/reference/rest/v1/services),
+and that the [fields system parameter filters responses](https://docs.cloud.google.com/apis/docs/system-parameters).
+The provider now requests `fields=name,state` for local and hosted installation
+reads, including inspection, prewrite checks and recovery. The legacy bootstrap
+reader also requests `parent,config/name`, preserving its existing identity
+checks. Volume prerequisite reads use the same state projection. Enable request
+payloads and long-running-operation polling are unchanged; no shared byte limit
+was raised.
+
+The legacy read method still exposes Google's explicit `STATE_UNSPECIFIED` value,
+but bootstrap previews and secret-writer preparation no longer interpret it as
+disabled. They stop before proposing dependent creation or recording an enable
+attempt, and the enable client requires a verified `DISABLED` state before POST.
+Serialized transport regressions reproduced both the earlier unsolicited POST
+and the misleading proposal/journal attempt before these guards were added.
+
+The new normal-CI contract uses reconstructed Service JSON with more than 1 MiB
+of synthetic documentation through the real bounded client. The local positive
+cases and legacy reader failed before the fix; hosted billing, collection,
+deployment and volume regressions also failed before their state reads were
+corrected. Missing/unspecified/unknown state, wrong resource identity and a server
+ignoring the mask remain unknown and dispatch no enable request. Synthetic field
+filtering is offline contract evidence; native support and the subsequent real
+plan must still be verified with the corrected package.
+
+The final focused provider, legacy caller and local command group passed all 230
+tests in nine suites. The ordinary `npm run typecheck` passed against a clean
+snapshot containing only this change, isolating concurrent publication work.
+These regressions remain in the normal `npm test` acceptance path; both the
+committed acceptance workflow and desired required-check configuration invoke it.

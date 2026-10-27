@@ -1,3 +1,4 @@
+import { serviceUsageResponse } from './helpers/gcp-service-usage.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { createGcpCloudInstallationDriver } from '../../src/adapters/providers/gcp/gcp-cloud-installation.js';
@@ -66,7 +67,7 @@ function fixture(options: { raceAssociation?: boolean; extraUnlink?: boolean; ot
     if (url.hostname === 'serviceusage.googleapis.com') {
       const name = path.slice(4).replace(':enable', '');
       if (method === 'POST') { apis.add(name); return Response.json({ name: 'operations/acf.123456', done: true }); }
-      return Response.json({ name, state: apis.has(name) ? 'ENABLED' : 'DISABLED' });
+      return serviceUsageResponse(url, name, apis.has(name) ? 'ENABLED' : 'DISABLED');
     }
     if (path.endsWith(':generateAccessToken')) {
       expect(token).toBe('Bearer synthetic-host-token'); expect(body.lifetime).toBe('900s');

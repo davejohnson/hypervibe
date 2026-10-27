@@ -215,7 +215,7 @@ export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetc
   async function observe(client: GcpSecretWriterClient, context: ActionContext): Promise<CloudInstallationObservation> {
     const n = names(context.intent); const op = context.action.metadata.operation;
     if (op === 'enable-api') {
-      const value = await client.json(`https://serviceusage.googleapis.com/v1/${context.action.resource.name}`);
+      const value = await client.service(context.action.resource.name);
       if (value.name !== context.action.resource.name || !['ENABLED', 'DISABLED'].includes(String(value.state))) throw new BillingError('identity_mismatch');
       return value.state === 'ENABLED' ? { state: 'satisfied', evidence: proof(context, [{ kind: 'service', id: value.name as string, identity: {} }]) }
         : context.attempt ? { state: 'pending', reason: 'not_converged' } : { state: 'action-required' };

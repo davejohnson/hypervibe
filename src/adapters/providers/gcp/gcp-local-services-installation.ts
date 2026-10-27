@@ -63,7 +63,7 @@ export function createGcpLocalServicesDriver(options: { fetch?: typeof fetch } =
     const scope = gcpLocalServicesScopeSchema.parse(intent.nativeScope); let complete = true;
     for (const api of GCP_OPERATOR_SERVICES) {
       const name = `projects/${scope.projectNumber}/services/${api}`;
-      const response = await client.json(`https://serviceusage.googleapis.com/v1/${name}`);
+      const response = await client.service(name);
       if (response.name !== name || typeof response.state !== 'string' || !['ENABLED', 'DISABLED'].includes(response.state)) throw new CloudInstallationBoundaryError('provider_error');
       if (response.state !== 'ENABLED') complete = false;
     }
