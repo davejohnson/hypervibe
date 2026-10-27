@@ -14,12 +14,16 @@ export const operatorApplicationDeclarationSchema = z.object({
 export type OperatorApplicationDeclaration = z.infer<typeof operatorApplicationDeclarationSchema>;
 export interface OperatorApplicationLocalContext {
   projectId: string; environmentId: string; installationId: string; intentDigest: string;
+  /** Revalidate the accepted native origin/source before redisplaying a browser form. Never serialized. */
+  authorizeCurrent?(): Promise<boolean>;
 }
 export interface OperatorApplicationCapability {
   schemaVersion: 1;
   privateOutputRoles?: readonly string[];
+  privateVerificationRoles?: Readonly<Record<string, 'github-app-signing-key'>>;
+  privateOutputEncodings?: Readonly<Record<string, 'base64'>>;
   parseDeclaration(input: { name: string; declaration: OperatorApplicationDeclaration; origin: string;
-    runtimeIdentity: CloudDeploymentRuntimeIdentityV1['principal'] }): Record<string, string>;
+    runtimeIdentity: CloudDeploymentRuntimeIdentityV1['principal'] }): Record<string, string> | Promise<Record<string, string>>;
   parseRecord(value: unknown): CloudInstallationRecord<OperatorApplicationIntent>;
   create(scope: Record<string, string>, context?: OperatorApplicationLocalContext): Promise<{ driver: CloudInstallationDriver<OperatorApplicationIntent>; authentication: OperatorApplicationAuthentication }>;
   receipts(record: CloudInstallationRecord<OperatorApplicationIntent>): Array<Record<string, string>>;

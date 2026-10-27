@@ -26,19 +26,47 @@ function actions(intent: Intent, dependencies: string[]): CloudInstallationActio
   }));
 }
 const evidenceSchema = z.object({ resources: z.array(z.object({ kind: z.literal('operator-output'), id: z.string().min(1).max(2048),
-  identity: z.object({ role: z.string(), key: z.string(), reference: z.string().max(2048), createTime: z.string() }).strict() }).strict()).length(1),
+  identity: z.object({ role: z.string(), key: z.string(), reference: z.string().max(2048), createTime: z.string(), encoding: z.literal('base64').optional() }).strict() }).strict()).length(1),
   native: z.object({ operation: z.literal(operation), installationId: z.string().guid(), attemptId: z.string().guid() }).strict(),
 }).strict();
 export function parseOperatorOutputEvidence(value: unknown, intent: Intent): CloudInstallationEvidence {
   const parsed = evidenceSchema.parse(value), resource = parsed.resources[0], target = outputs(intent)?.destinations.find(item => item.role === resource.identity.role);
   const reference = runtimeSecretReferenceSchema.parse(JSON.parse(resource.identity.reference));
   if (!target || target.key !== resource.identity.key || target.binding.resource !== resource.id || target.binding.createTime !== resource.identity.createTime
-    || !isDeepStrictEqual(reference.destination, target.binding.destination) || parsed.native.installationId !== intent.installationId) fail();
+    || resource.identity.encoding !== target.encoding || !isDeepStrictEqual(reference.destination, target.binding.destination) || parsed.native.installationId !== intent.installationId) fail();
   return parsed;
 }
 export function operatorOutputReceipts(completed: Record<string, CloudInstallationEvidence>, intent: Intent): Array<Record<string, string>> {
   return Object.values(completed).filter(item => item.native.operation === operation)
     .map(item => ({ ...parseOperatorOutputEvidence(item, intent).resources[0].identity }));
+}
+/** Private GitHub App metadata verification only; no command exposes this read. */
+export async function readGithubOperatorSigningKey(intent: Intent, local: OperatorApplicationLocalContext, signal: AbortSignal): Promise<string> {
+  if (intent.applicationProvider !== 'github-app' || intent.appId !== local.projectId || intent.installationId !== local.installationId
+    || canonicalJsonSha256(intent) !== local.intentDigest) fail();
+  const selected = outputs(intent), target = selected?.destinations.find(item => item.role === 'private-key');
+  if (!selected || target?.verificationPurpose !== 'github-app-signing-key') fail();
+  const store = new OperatorCredentialCustody({ ...local, provider: 'github-app' }), retained = store.read();
+  const delivery = retained?.state.deliveries?.[target.key];
+  if (retained?.state.phase !== 'delivered' || delivery?.status !== 'delivered' || !delivery.reference
+    || !isDeepStrictEqual(delivery.reference.destination, target.binding.destination)) fail();
+  const authorize = async () => {
+    if (!await local.authorizeCurrent?.()) fail();
+    const project = new ProjectRepository().findById(local.projectId), environment = new EnvironmentRepository().findById(local.environmentId);
+    const spec = project && new SpecStore().getForInspection(project)?.spec;
+    if (!project || !environment || !spec || environment.projectId !== project.id || environment.name !== intent.environment
+      || spec.environments[environment.name]?.hosting.provider !== selected.hostingProvider) fail();
+    const current = await assertReadySecretContainers({ project, environment, spec, keys: [target.key] });
+    if (!isDeepStrictEqual(current[target.key], target.binding) || !await local.authorizeCurrent?.()) fail();
+  };
+  await authorize();
+  const capability = providerRegistry.getOperatorOutputDelivery(selected.hostingProvider);
+  if (!capability || !capability.providers.includes(target.binding.destination.provider)) fail();
+  const client = await capability.create(target.binding); if (!client.readGithubSigningKey) fail();
+  const value = await client.readGithubSigningKey(delivery.reference, signal, authorize);
+  if (target.encoding !== 'base64') fail();
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) fail();
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(value, 'base64')); } catch { fail(); }
 }
 /** Adds separate reviewed deliveries to a native operator registration. Never replays a value write. */
 export function withOperatorOutputDelivery(native: CloudInstallationDriver<Intent>, local?: OperatorApplicationLocalContext,
@@ -76,7 +104,7 @@ export function withOperatorOutputDelivery(native: CloudInstallationDriver<Inten
           if (!store.eraseDeliveredCredentials(snapshot, keys) && store.read()?.state.phase !== 'delivered') fail();
         }
         const evidence = parseOperatorOutputEvidence({ resources: [{ kind: operation, id: target.binding.resource,
-          identity: { role, key: target.key, reference: JSON.stringify(delivery.reference), createTime: target.binding.createTime } }],
+          identity: { role, key: target.key, reference: JSON.stringify(delivery.reference), createTime: target.binding.createTime, ...(target.encoding ? { encoding: target.encoding } : {}) } }],
           native: { operation, installationId: context.intent.installationId, attemptId: delivery.attemptId } }, context.intent);
         return { state: 'satisfied' as const, evidence };
       }
@@ -101,7 +129,7 @@ export function withOperatorOutputDelivery(native: CloudInstallationDriver<Inten
     async plan(context) {
       const plan = await native.plan(context), targets = outputs(context.intent);
       if (!targets) return plan;
-      const { capability } = await selection(context.intent), reviews = Object.values(targets.destinations).map(item => ({ target: item, review: capability.review(item.binding) }));
+      const { capability } = await selection(context.intent), reviews = Object.values(targets.destinations).map(item => ({ target: item, review: capability.review(item.binding, item.verificationPurpose) }));
       return { ...plan, actions: [...plan.actions, ...actions(context.intent, dependencies(context.intent))], review: { ...plan.review,
         resources: [...plan.review.resources ?? [], ...Object.values(targets.destinations).map(item => ({ kind: 'operator-secret-version', name: item.key, scope: item.binding.resource! }))],
         permissions: [...plan.review.permissions, ...reviews.map(({ target, review }) => ({ principal: 'current transient local operator', scope: target.binding.resource!, actions: review.permissions, purpose: 'writer' as const }))],
@@ -124,7 +152,8 @@ export function withOperatorOutputDelivery(native: CloudInstallationDriver<Inten
         const previous = snapshot.state.deliveries?.[target.key];
         if (previous && (previous.status !== 'rejected' || previous.attemptId === context.attempt.id
           || !context.attempts?.some(item => item.id === previous.attemptId && item.actionId === action.id && item.status === 'rejected'))) fail();
-        const value = snapshot.state.credentials[role], client = await capability.create(target.binding);
+        const raw = snapshot.state.credentials[role], value = target.encoding === 'base64' ? Buffer.from(raw, 'utf8').toString('base64') : raw,
+          client = await capability.create(target.binding);
         await context.beforeMutation();
         snapshot = store.updateDelivery(snapshot, target.key, { attemptId: context.attempt.id, status: 'attempted' }); if (!snapshot) fail(); claimed = true;
         const result = await client.driver.deliver({ attemptId: context.attempt.id, destination: target.binding.destination,

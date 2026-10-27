@@ -454,6 +454,18 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Use operatorApplications through hv_spec, hv_plan and hv_apply with nativeScope.projectId and a private file: credentialsRef to the downloaded JSON. Never paste the client secret into chat or create a persistent operator connection. Private import and native Secret Manager delivery are separately reviewed; browser exchange remains unverified until tested.',
     ],
   },
+  'github-app': {
+    provider: 'github-app', displayName: 'GitHub operator application',
+    tokenType: 'Owner-approved GitHub App manifest; no saved administrator token',
+    setupUrl: 'https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest',
+    permissions: ['The reviewed public App requests read-only actions, administration, checks, contents and metadata for separately selected repositories. The owner approves its creation in GitHub; repository installation is a separate authorization.'],
+    credentialExample: 'hv_connections provider="github-app" action="describe"',
+    notes: [
+      'Use operatorApplications through hv_spec, hv_plan and hv_apply with nativeScope.ownerType (user or organization), ownerLogin, and verified originService/runtimeService. Do not create a persistent connection for this provider.',
+      'The fixed Hypercloud profile delivers private-key to GITHUB_APP_PRIVATE_KEY_BASE64 (base64 encoding), client-secret to GITHUB_APP_CLIENT_SECRET and webhook-secret to GITHUB_APP_WEBHOOK_SECRET. Declare those output destinations before registration; never paste credentials or callback codes into chat.',
+      'Keep the bounded Hypervibe CLI, SDK or MCP process running while opening its private local browser link. Callback capture and one-time code conversion are separate reviewed stages. Uncertain conversions cannot be retried; the owner may need to clean up the registered App in GitHub.',
+    ],
+  },
   bitwarden: {
     provider: 'bitwarden',
     displayName: 'Bitwarden Secrets Manager',

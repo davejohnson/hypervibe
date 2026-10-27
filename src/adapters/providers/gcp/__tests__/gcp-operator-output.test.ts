@@ -27,4 +27,21 @@ describe('local operator GCP output transport', () => {
     const error = await client.verifyReference({ destination: binding.destination, version: '1' }, AbortSignal.timeout(1000)).catch(value => value);
     expect(error).toBeInstanceOf(Error); expect(String(error)).not.toContain('synthetic-provider-echo');
   });
+  it('reads only the exact immutable operator signing-key reference after authorization, with checksum verification', async () => {
+    let authorized = false;
+    const request: typeof fetch = async input => {
+      const url = new URL(String(input));
+      if (url.hostname === 'cloudresourcemanager.googleapis.com') return Response.json({ name: 'projects/123456789012', projectId: 'operator-test', state: 'ACTIVE' });
+      if (url.pathname.endsWith(':access')) {
+        expect(authorized).toBe(true); expect(url.pathname).toBe(`/v1/${binding.resource}/versions/1:access`);
+        // Standard CRC32C known-answer vector; independent of implementation.
+        return Response.json({ name: `${binding.resource}/versions/1`, payload: { data: 'MTIzNDU2Nzg5', dataCrc32c: '3808858755' } });
+      }
+      if (url.pathname.endsWith('/versions/1')) return Response.json({ name: `${binding.resource}/versions/1`, state: 'ENABLED' });
+      if (url.pathname.endsWith('/versions')) return Response.json({ versions: [{ name: `${binding.resource}/versions/1` }] });
+      return Response.json({ name: binding.resource, createTime: binding.createTime });
+    };
+    const client = createGcpOperatorOutputClient(binding, { token: async () => 'synthetic-token', request });
+    expect(await client.readGithubSigningKey({ destination: binding.destination, version: '1' }, AbortSignal.timeout(1000), async () => { authorized = true; })).toBe('123456789');
+  });
 });

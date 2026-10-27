@@ -49,10 +49,12 @@ async function selection(project: Project, environment: Environment, name: strin
   if (declaration.outputs) {
     const bindings = await assertReadySecretContainers({ project, environment, spec: result.spec, keys: Object.values(declaration.outputs) });
     outputs = operatorOutputSelectionSchema.parse({ hostingProvider: result.spec.environments[environment.name].hosting.provider,
-      destinations: Object.entries(declaration.outputs).sort(([a], [b]) => a.localeCompare(b)).map(([role, key]) => ({ role, key, binding: bindings[key] })) });
+      destinations: Object.entries(declaration.outputs).sort(([a], [b]) => a.localeCompare(b)).map(([role, key]) => ({ role, key, binding: bindings[key],
+        ...(capability.privateVerificationRoles?.[role] ? { verificationPurpose: capability.privateVerificationRoles[role] } : {}),
+        ...(capability.privateOutputEncodings?.[role] ? { encoding: capability.privateOutputEncodings[role] } : {}) })) });
     if (!providerRegistry.getOperatorOutputDelivery(outputs.hostingProvider)) throw operatorApplicationUnavailable();
   }
-  const nativeScope = capability.parseDeclaration({ name, declaration, ...verified });
+  const nativeScope = await capability.parseDeclaration({ name, declaration, ...verified });
   return { declaration, capability, nativeScope, outputs, source: source(project, result), proof: {
     declarationDigest: canonicalJsonSha256(declaration), originDigest: canonicalJsonSha256({ receipt, selection: verified, ...(outputs ? { outputs } : {}) }), nativeScopeDigest: canonicalJsonSha256(nativeScope),
   } };
@@ -72,7 +74,7 @@ async function context(project: Project, environment: Environment, name: string,
   const capability = providerRegistry.getOperatorApplication(intent.applicationProvider);
   if (!capability || intent.customerId !== project.id || intent.appId !== project.id || intent.environment !== environment.name) throw operatorApplicationUnavailable();
   return { ...await capability.create(intent.nativeScope, { projectId: project.id, environmentId: environment.id,
-    installationId: intent.installationId, intentDigest: canonicalJsonSha256(intent) }), store: journal(project, environment, name),
+    installationId: intent.installationId, intentDigest: canonicalJsonSha256(intent), authorizeCurrent: () => current(project, environment, name, intent) }), store: journal(project, environment, name),
     authorize: async input => {
       const fresh = new EnvironmentRepository().findById(environment.id);
       return !!fresh && fresh.projectId === project.id && fresh.name === environment.name && authorize() && isDeepStrictEqual(input.intent, intent)
@@ -190,10 +192,13 @@ export async function applyOperatorApplications(input: { project: Project; envir
       installationId: record.installationId, planDigest: record.plan.digest, onlyActionId: input.action.id };
     if (proof.retryActions && !isDeepStrictEqual((await reviewCloudInstallationRetryV1(target)).retryActions, proof.retryActions)) throw operatorApplicationUnavailable();
     const updated = readOnly ? await reconcileCloudInstallationV1(target) : await applyCloudInstallationV1({ ...target, confirmActions: [input.action.id], ...(retry ? { retryActions: [retry] } : {}) });
+    const browserHandoff = target.driver.operatorApplication?.pendingBrowser && await current(input.project, input.environment, proof.name, updated.intent)
+      ? await target.driver.operatorApplication.pendingBrowser(updated) : undefined;
     const success = updated.status === 'scope-ready' || updated.status === 'pending' && !updated.reason && !!updated.completed[input.action.id];
     return { success, ...(success ? {} : { status: updated.status === 'pending' ? 'pending' as const : 'blocked' as const }),
       message: success ? 'Verified the exact operator registration action; customer access and deployment remain separate.' : operatorApplicationUnavailable().message,
       data: { installationId: updated.installationId, status: updated.status, ...(updated.reason ? { reason: updated.reason } : {}),
+        ...(browserHandoff ? { browserHandoff } : {}),
         ...(updated.status === 'scope-ready' ? { receipts: providerRegistry.getOperatorApplication(proof.provider)!.receipts(updated) } : {}) } };
   } catch { return { success: false, status: 'blocked', message: operatorApplicationUnavailable().message }; }
 }
@@ -206,9 +211,13 @@ export async function inspectOperatorApplications(project: Project, environmentN
   for (const name of new Set([...names(project, environment), ...declared])) {
     const history = await journal(project, environment, name).findByScope(); let record = acceptedJournalLeaf(history) ?? history.at(-1);
     if (!record) { registrations.push({ name, status: 'review-required', verified: false }); continue; }
-    if (active(record)) record = await reconcileCloudInstallationV1({ ...await context(project, environment, name, record.intent, true), installationId: record.installationId, planDigest: record.plan.digest });
+    const target = active(record) ? await context(project, environment, name, record.intent, true) : undefined;
+    if (target) record = await reconcileCloudInstallationV1({ ...target, installationId: record.installationId, planDigest: record.plan.digest });
     const verified = record.status === 'scope-ready' && (!declared.includes(name) || await current(project, environment, name, record.intent));
+    const browserHandoff = target?.driver.operatorApplication?.pendingBrowser && await current(project, environment, name, record.intent)
+      ? await target.driver.operatorApplication.pendingBrowser(record) : undefined;
     registrations.push({ name, installationId: record.installationId, status: record.status, verified,
+      ...(browserHandoff ? { browserHandoff } : {}),
       ...(record.reason ? { reason: record.reason } : {}), ...(verified ? { receipts: providerRegistry.getOperatorApplication(record.intent.applicationProvider)!.receipts(record) } : {}) });
   }
   if (!registrations.length) return undefined;

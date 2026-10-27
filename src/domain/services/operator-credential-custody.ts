@@ -35,7 +35,10 @@ export class OperatorCredentialCustody {
   private readonly context: OperatorCustodyContext;
   private readonly scope: string;
   constructor(context: OperatorCustodyContext) {
-    this.context = contextSchema.parse(context);
+    // Provider-local contexts may also carry transient authorization callbacks.
+    // Persist only this closed nonsecret identity tuple.
+    this.context = contextSchema.parse({ projectId: context.projectId, environmentId: context.environmentId,
+      installationId: context.installationId, intentDigest: context.intentDigest, provider: context.provider });
     this.scope = `${context.projectId}/${context.environmentId}/${context.installationId}`;
   }
   private assertScope() {

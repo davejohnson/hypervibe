@@ -257,3 +257,63 @@ values indefinitely. The corrected checks exercise actual SQLite, the real
 cloud-installation parser/apply loop, and serialized GCP REST delivery/recovery.
 Native response fixtures are documentation-based reconstructions. Current native
 registration, browser exchange and live output delivery remain separate gates.
+
+## GitHub manifest implementation and remaining native evidence
+
+The `github-app` provider accepts `ownerType` (`user` or `organization`) and
+`ownerLogin`. Native public account lookup pins its immutable account ID; it
+does not establish administrator authority. The reviewed browser manifest uses
+the exact verified origin, a globally unique name within GitHub's 34-character
+limit, the Hypercloud user/setup/webhook routes, and read-only actions,
+administration, checks, contents and metadata. GitHub's owner approval remains
+the authority to register the public App. Repository installation is separate.
+
+The callback listener returns the exact private link through apply/status. Its
+form rechecks current source/origin authority before display. The process stays
+alive until the callback or original expiry; restarting reopens only the retained
+port and manifest. A fresh-process regression demonstrated that an unreferenced
+listener exited before the user could open it (RED), and now verifies bounded
+process survival and exit after callback (GREEN). HTTP is admitted only for a
+registered local actor's strictly parsed 127.0.0.1 handoff, never for hosted cloud
+installation links. Callback receipt stages an encrypted code; status cannot
+convert it. The separate confirmed conversion consumes its code before one POST,
+requires GitHub's documented 201 response and never replays an uncertain result.
+
+Complete returned credentials are encrypted before native App identity,
+ownership, creation time, permissions/events and webhook configuration are
+verified using a short-lived App JWT. A wrong owner or partial verification
+retains private recovery custody and blocks output delivery. No App deletion
+or private-key revocation API is invented. An expired or uncertain one-time
+conversion can require explicit owner cleanup in GitHub.
+
+The fixed profile requires these exact outputs:
+
+| Private role | Hypercloud runtime key | Stored bytes |
+| --- | --- | --- |
+| `private-key` | `GITHUB_APP_PRIVATE_KEY_BASE64` | Base64 of the PEM text |
+| `client-secret` | `GITHUB_APP_CLIENT_SECRET` | Opaque returned client credential |
+| `webhook-secret` | `GITHUB_APP_WEBHOOK_SECRET` | Opaque returned webhook credential |
+
+The profile fixes encoding in the accepted intent; users cannot choose an
+arbitrary transform. A combined real-client regression reproduced raw PEM being
+delivered into Hypercloud's base64-only slot (RED), then checked the stored bytes,
+RSA decoding and immutable receipt encoding (GREEN). Public App ID, slug and
+client ID are separate receipt metadata for an explicit desired-state edit.
+
+After local credential erasure, fresh authenticated GitHub verification reads
+only the exact immutable operator signing-key reference, transiently and inside
+the provider path. Its review separately lists `secretmanager.versions.access`
+for that owned target. It verifies current source authorization, container
+ownership/lifetime, enabled native version and CRC32C before decoding the
+profile's base64 representation. No command exposes this payload read, and the
+client-secret, webhook-secret and customer secret values are not read. Tests
+cover source revocation before any payload access, rejected permission drift,
+strict response status, wrong owner, restart and lost acknowledgement without
+another conversion. The checksum test uses an independent standard known-answer
+vector; the combined transport fixture uses the separately maintained AWS SDK
+CRC implementation for reconstructed Google responses.
+
+REST App metadata does not expose OAuth callback URLs. Receipts keep callback
+verification explicitly unverified until the actual browser exchange. Native
+GitHub acceptance of the loopback manifest redirect, real owner approval,
+repository installation and webhook delivery are still required walkthroughs.

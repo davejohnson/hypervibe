@@ -109,6 +109,15 @@ function contract<T>(work: () => T): T {
 function parseEvidence<I extends CloudInstallationExecutableIntent = CloudInstallationIntent>(value: unknown, intent: I, driver: CloudInstallationDriver<I>): CloudInstallationEvidence {
   return contract(() => evidenceSchema.parse(driver.parseEvidence(evidenceSchema.parse(value), intent)));
 }
+function externalUrl<I extends CloudInstallationExecutableIntent>(value: string, intent: I, driver: CloudInstallationDriver<I>): string {
+  const url = new URL(value); if (url.username || url.password) throw new Error();
+  if (applicationIntent(intent) && driver.operatorApplication?.parseBrowserHandoff
+    && driver.operatorApplication.parseBrowserHandoff(value, intent) !== url.toString()) throw new Error();
+  if (url.protocol === 'https:') return url.toString();
+  if (!applicationIntent(intent) || !driver.operatorApplication?.parseBrowserHandoff || url.protocol !== 'http:' || url.hostname !== '127.0.0.1'
+    || url.search || url.hash || !/^\/begin\/[A-Za-z0-9_-]{43}$/.test(url.pathname)) throw new Error();
+  const parsed = driver.operatorApplication.parseBrowserHandoff(value, intent); if (parsed !== url.toString()) throw new Error(); return parsed;
+}
 export function parseCloudInstallationIntentV1<I extends CloudInstallationExecutableIntent = CloudInstallationIntent>(value: unknown, driver: CloudInstallationDriver<I>): I {
   return contract(() => {
     const actor = value && typeof value === 'object' && 'execution' in value ? (value as { execution?: { kind?: unknown } }).execution?.kind : undefined;
@@ -207,7 +216,8 @@ export function parseCloudInstallationRecordV1<I extends CloudInstallationExecut
       if (!ids.has(attempt.actionId) || attempts.has(attempt.id)) throw new Error();
       attempts.add(attempt.id);
       if (attempt.evidence) attempt.evidence = parseEvidence(attempt.evidence, parsed.intent, driver);
-      if (attempt.externalUrl && new URL(attempt.externalUrl).protocol !== 'https:') throw new Error();
+      if (attempt.externalUrl && (parsed.plan.actions.find(action => action.id === attempt.actionId)?.metadata.execution !== 'external'
+        || externalUrl(attempt.externalUrl, parsed.intent, driver) !== attempt.externalUrl)) throw new Error();
     }
     for (const [id, evidence] of Object.entries(parsed.completed)) {
       if (!ids.has(id)) throw new Error();
@@ -500,11 +510,9 @@ async function execute<I extends CloudInstallationExecutableIntent = CloudInstal
       nextAttempt.status = 'acknowledged';
       if (mutation.evidence) nextAttempt.evidence = parseEvidence(mutation.evidence, record.intent, input.driver);
     } else if (mutation.state === 'external') {
-      const externalUrl = mutation.url;
       const url = contract(() => {
-        const parsed = new URL(externalUrl);
-        if (action.metadata.execution !== 'external' || parsed.protocol !== 'https:' || parsed.username || parsed.password) throw new Error();
-        return parsed.toString();
+        if (action.metadata.execution !== 'external') throw new Error();
+        return externalUrl(mutation.url, record!.intent, input.driver);
       });
       nextAttempt.status = 'pending'; nextAttempt.externalUrl = url;
     } else { nextAttempt.status = mutation.state; const mutationReason = mutation.reason; nextAttempt.reason = contract(() => reasonSchema.parse(mutationReason)); }

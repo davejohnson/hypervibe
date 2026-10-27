@@ -32,6 +32,7 @@ import '../adapters/providers/cloudflare/cloudflare.adapter.js';
 import '../adapters/providers/sendgrid/sendgrid.adapter.js';
 import '../adapters/providers/twilio/twilio.adapter.js';
 import '../adapters/providers/github/github.adapter.js';
+import '../adapters/providers/github/github-operator-app.js';
 import '../adapters/providers/gitlab/gitlab.adapter.js';
 import '../adapters/providers/openai/openai.adapter.js';
 import '../adapters/providers/database/database.adapter.js';

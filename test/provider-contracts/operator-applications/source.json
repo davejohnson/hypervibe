@@ -1,6 +1,6 @@
 {
   "reviewedAt": "2026-10-27",
-  "coverage": "Design evidence for operator application registration; no native registration, callback, code conversion, federation or delivery has executed.",
+  "coverage": "Design and reconstructed transport evidence for operator application registration, real local HTTP and SQLite recovery. No live provider registration, browser authorization, code conversion, federation or private output delivery is certified here.",
   "sources": [
     {
       "provider": "microsoft-entra",
@@ -141,6 +141,36 @@
         "No live allocation, browser scoring, native secret delivery or cleanup is established by these offline tests.",
         "Named operator matrix remains Entra/Graph, GitHub manifest, Google OAuth owner import and Google CAPTCHA allocation; hosted AWS/Azure/GCP roster is unchanged."
       ]
+    },
+    {
+      "provider": "github-app",
+      "reviewedAt": "2026-10-27",
+      "documentation": [
+        "https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app",
+        "https://docs.github.com/en/rest/apps/apps",
+        "https://docs.github.com/en/rest/apps/webhooks",
+        "https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app"
+      ],
+      "contract": "App names are globally unique and at most 34 characters. Manifest conversion returns 201 and a complete credential bundle. Authenticated App and webhook reads use App JWTs. The native App response does not expose OAuth callback URLs.",
+      "limit": "Real serialized transport and RSA signatures with reconstructed responses; loopback manifest acceptance and actual user installation remain live gates."
+    },
+    {
+      "provider": "gcp-secret-manager",
+      "reviewedAt": "2026-10-27",
+      "documentation": [
+        "https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets.versions/access",
+        "https://cloud.google.com/secret-manager/docs/reference/rest/v1/SecretPayload"
+      ],
+      "contract": "Exact version access requires secretmanager.versions.access and returns a named base64 payload with its stored CRC32C. The narrowly scoped internal GitHub signing-key read verifies owner/container lifetime, enabled immutable version, current source authority and checksum before private use.",
+      "limit": "No customer-secret read capability or generic command is exposed. Metadata checks cannot atomically exclude concurrent external resource changes."
+    },
+    {
+      "provider": "hypercloud-consumer",
+      "path": "config/environment.js",
+      "sha256": "f46531c672b8c82b803c27b06c12fa9b3b68ab1c64a47b59d0b7b11dd5b735db",
+      "reviewedAt": "2026-10-27",
+      "contract": "Hypercloud decodes GITHUB_APP_PRIVATE_KEY_BASE64 and requires App ID, slug, client ID, client secret and webhook secret together. The operator profile therefore delivers base64 PEM rather than raw PEM to that exact private-key slot.",
+      "limit": "This records the independent local consumer source; Hypercloud must also execute its consumer test against the actual packaged Hypervibe producer."
     }
   ]
 }

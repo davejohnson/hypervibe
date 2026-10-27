@@ -211,7 +211,11 @@ export interface CloudInstallationDriver<I extends CloudInstallationExecutableIn
   /** Local allocation or explicitly registered, predecessor-bound continuation. */
   readonly localScopePreparation?: { hostingProvider: string; continuation?: true; preparation?: 'holding-v1' };
   readonly artifactPublication?: { providerName: string; authentication: OperatorArtifactIntent['execution']['authentication'] };
-  readonly operatorApplication?: { providerName: OperatorApplicationProvider };
+  readonly operatorApplication?: { providerName: OperatorApplicationProvider;
+    /** Narrow provider-owned local browser handoff; hosted actors retain HTTPS-only URLs. */
+    parseBrowserHandoff?(url: string, intent: OperatorApplicationIntent): string;
+    pendingBrowser?(record: CloudInstallationRecord<OperatorApplicationIntent>): Promise<{ url: string; expiresAt: string; description: string } | undefined>;
+  };
   readonly provider: I['provider'];
   /** Explicit separate installation capability; collection support never implies deployment authority. */
   deployment?: {
