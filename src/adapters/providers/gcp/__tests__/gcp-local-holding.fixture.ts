@@ -9,7 +9,7 @@ import { artifactImageLabels, type OperatorCommand } from '../operator-image-bui
 // synthetic native resources do not establish live provider compatibility.
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export function localHoldingBoundary(appId: string, environment = 'staging', options: { lost?: 'account' | 'service' | 'public'; denied?: boolean; corrupt?: boolean;
-  reject?: boolean; afterRead?: () => void; projectMembers?: string[]; billingAccountName?: string } = {}) {
+  reject?: boolean; afterRead?: () => void; projectMembers?: string[]; billingAccountName?: string; serviceScaling?: unknown } = {}) {
   const scope = { projectId: 'operator-project', projectNumber: '123456789012', projectCreateTime: '2026-10-25T00:00:00Z', projectParent: 'none',
     billingAccountName: 'billingAccounts/000000-111111-222222',
     projectInstallationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', projectAttemptId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', region: 'us-central1',
@@ -63,7 +63,9 @@ export function localHoldingBoundary(appId: string, environment = 'staging', opt
       if (method === 'POST' && pathname.endsWith('/services')) {
         const full = `${name}/${url.searchParams.get('serviceId')}`;
         if (services.has(full)) return Response.json({}, { status: 409 });
-        const service = { ...body, name: full, uid: randomUUID(), generation: '1', observedGeneration: '1', etag: 'service-etag-1',
+        // Independent observed native response (2026-10-27): Google can add
+        // service max=20 while retaining the reviewed revision max=1.
+        const service = { ...body, ...(options.serviceScaling === undefined ? {} : { scaling: options.serviceScaling }), name: full, uid: randomUUID(), generation: '1', observedGeneration: '1', etag: 'service-etag-1',
           reconciling: false, terminalCondition: { state: 'CONDITION_SUCCEEDED' }, latestCreatedRevision: `${full}/revisions/first`, latestReadyRevision: `${full}/revisions/first`,
           uri: `https://${url.searchParams.get('serviceId')}-synthetic.run.app` };
         services.set(full, service); const operationName = `projects/${scope.projectId}/locations/${scope.region}/operations/${randomUUID()}`;

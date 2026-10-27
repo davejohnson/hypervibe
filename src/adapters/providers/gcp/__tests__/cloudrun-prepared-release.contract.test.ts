@@ -276,13 +276,14 @@ describe('prepared Cloud Run first application release', () => {
       { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control });
     expect(result.receipt.success).toBe(false); expect(f.writes).toHaveLength(1);
   });
-  it.each(['first-release', 'first-release-bounds', 'bounds-lost', 'reverted-holding', 'operation-error', 'terminal-error'] as const)('executes the emitted CI %s with native first-release authority', async scenario => {
+  it.each(['first-release', 'first-release-bounds', 'holding-service-scaling', 'bounds-lost', 'reverted-holding', 'operation-error', 'terminal-error'] as const)('executes the emitted CI %s with native first-release authority', async scenario => {
     const echoedValue = 'synthetic-provider-echoed-submission';
-    const bounds = scenario === 'first-release-bounds' || scenario === 'bounds-lost';
+    const bounds = scenario === 'first-release-bounds' || scenario === 'holding-service-scaling' || scenario === 'bounds-lost';
     const f = fixture({ bounds, ...(scenario === 'bounds-lost' ? { finalResponse: (value: any) => ({ ...value, scaling: { maxInstanceCount: 5 } }) } : {}),
       ...(scenario === 'operation-error' ? { operationError: echoedValue } : {}),
       ...(scenario === 'terminal-error' ? { finalResponse: (value: any) => ({ ...value,
         terminalCondition: { state: 'CONDITION_FAILED', reason: echoedValue, message: echoedValue } }) } : {}) });
+    if (scenario === 'holding-service-scaling') f.current().scaling = { maxInstanceCount: 20 };
     if (scenario === 'reverted-holding') Object.assign(f.current(), { generation: '3', observedGeneration: '3',
       latestCreatedRevision: `${resource}/revisions/web-production-00003-hld`, latestReadyRevision: `${resource}/revisions/web-production-00003-hld` });
     const target: BranchDeployTarget = { environmentName: 'production', kind: 'production', branch: 'main', autoDeployOnPush: true,

@@ -47,8 +47,8 @@ describe('local inert holding preparation', () => {
     expect(planned).toMatchObject({ error: expect.stringMatching(/holding.*project|holding.*scope/i) });
   });
 
-  it('creates only confirmed inert resources, then separately binds exact origins with all app secrets still absent', async () => {
-    const f = await fixture(); const first = await f.plan(); if ('error' in first) throw new Error(first.error);
+  it.each([undefined, { maxInstanceCount: 20 }])('creates and binds reviewed inert resources with native service scaling %j and all app secrets still absent', async serviceScaling => {
+    const f = await fixture({ serviceScaling }); const first = await f.plan(); if ('error' in first) throw new Error(first.error);
     expect(first.scope).toBe('hosting-preparation'); expect(first.actions).toHaveLength(6); expect(first.inputRequired).toEqual([]);
     expect(f.native.writes).toEqual([]);
     expect(await f.apply(first.planRunId, [])).toMatchObject({ kind: 'executed', result: { success: false } }); expect(f.native.writes).toEqual([]);
@@ -102,7 +102,7 @@ describe('local inert holding preparation', () => {
   });
 
   it.each(['account', 'service', 'public'] as const)('reconciles a lost %s acknowledgment after SQLite restart without repeating the mutation', async lost => {
-    const f = await fixture({ lost }); let plan = await f.plan(); if ('error' in plan) throw new Error(plan.error);
+    const f = await fixture({ lost, serviceScaling: { maxInstanceCount: 20 } }); let plan = await f.plan(); if ('error' in plan) throw new Error(plan.error);
     for (let step = 0; step < 12; step++) {
       await f.apply(plan.planRunId, plan.actions.filter(action => action.requiresConfirm).map(action => action.id));
       SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(path.join(directory, 'test.db')).migrate();

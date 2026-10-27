@@ -16,6 +16,11 @@ portable releases, prepared first release, and unchanged legacy renderer bytes.
 Synthetic serialized transport establishes offline behavior, not live scaling
 or a spending ceiling.
 
+`gcp-holding-service-scaling.test.ts` retains a sanitized native holding response
+with service maximum 20 and revision maximum 1. Application/SQLite recovery and
+executed generated-release tests exercise the same interpretation through actual
+clients. See the [observed counterexample and RED/GREEN record](../../docs/local-holding-preparation.md#observed-service-scaling-during-holding-recovery).
+
 The [local registry prerequisite](../../docs/local-artifact-registry.md) and
 [operator GitHub identity](../../docs/gcp-github-operator-identity.md) extend that
 same normal gate. Real serialized provider clients and the application/SQLite

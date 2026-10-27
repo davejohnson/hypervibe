@@ -69,6 +69,29 @@ The synthetic responses establish those boundaries, not live Cloud Run support
 or the cause of any customer incident. Direct first-release acceptance is recorded
 separately by the shared prepared-hosting contract.
 
+### Observed service scaling during holding recovery
+
+On 2026-10-27 the approved test service completed creation with native service
+`scaling.maxInstanceCount: 20` and revision `template.scaling.maxInstanceCount: 1`.
+Hypervibe incorrectly assumed any nonempty service scaling changed the reviewed
+holding configuration. Google's [maximum-instance contract](https://docs.cloud.google.com/run/docs/configuring/max-instances)
+specifies the lesser maximum; this response preserves the reviewed revision cap.
+The sanitized native field projection is pinned in
+`test/provider-contracts/gcp/holding-service-observation.json`. Identity strings,
+labels and etag are replaced; configuration values and omitted defaults remain.
+The observed value 20 is not assumed to be a universal provider default.
+
+Before the fix, the real application/SQLite recovery and executed generated-CI
+checks failed five cases; four additional projection cases failed. The shared
+holding interpreter now accepts only automatic service scaling with a zero floor
+and valid nonnegative integer maximum, while retaining the exact revision cap,
+identity, readiness, traffic and inert-container checks. Manual scaling, added
+fields, nonzero floors and altered revision maxima remain rejected. All 90 focused
+checks pass in normal `npm test`. This validates recovery interpretation across
+local and hosted setup, observation and emitted first release; it does not establish
+live application rollout or all-cloud onboarding. Maximum instances are not an
+absolute spending ceiling and Google documents temporary exceedance under load.
+
 ### Cloud SQL first release
 
 The local operator path reuses Cloud Run's existing `cloudsql` volume and

@@ -27,6 +27,15 @@ export function gcpObservedHoldingConfiguration(resource: unknown, expected: {
   const noFields = (value: unknown) => value === undefined || value && typeof value === 'object' && !Array.isArray(value) && !Object.keys(value).length;
   const keys = (value: Record<string, unknown>, allowed: string[]) => Object.keys(value).every(key => allowed.includes(key));
   const r = object(resource), template = object(r.template), containers = template.containers;
+  // Google can add a service maximum independently of the revision maximum.
+  // Effective maximum is the lesser; a nonzero service floor or manual scaling
+  // would change the reviewed inactive configuration and must still be rejected.
+  if (r.scaling !== undefined) {
+    const serviceScaling = object(r.scaling), maximum = serviceScaling.maxInstanceCount ?? 0;
+    if (!keys(serviceScaling, ['scalingMode', 'minInstanceCount', 'maxInstanceCount'])
+      || serviceScaling.scalingMode !== undefined && !['', 'SCALING_MODE_UNSPECIFIED', 'AUTOMATIC'].includes(serviceScaling.scalingMode)
+      || (serviceScaling.minInstanceCount ?? 0) !== 0 || !Number.isSafeInteger(maximum) || maximum < 0) fail();
+  }
   if (r.name !== expected.id || typeof r.uid !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(r.uid)
     || expected.lifetimeId && r.uid !== expected.lifetimeId || typeof r.etag !== 'string' || !r.etag
     || typeof r.generation !== 'string' || !/^[1-9]\d*$/.test(r.generation) || r.observedGeneration !== r.generation
@@ -34,7 +43,7 @@ export function gcpObservedHoldingConfiguration(resource: unknown, expected: {
     || typeof r.latestCreatedRevision !== 'string' || !r.latestCreatedRevision.startsWith(`${expected.id}/revisions/`)
     || r.latestReadyRevision !== r.latestCreatedRevision || r.invokerIamDisabled !== undefined && r.invokerIamDisabled !== false
     || r.ingress !== (expected.publicAccess ? 'INGRESS_TRAFFIC_ALL' : 'INGRESS_TRAFFIC_INTERNAL_ONLY')
-    || !noFields(r.scaling) || !empty(r.customAudiences) || !empty(r.iapEnabled === false ? undefined : r.iapEnabled)
+    || !empty(r.customAudiences) || !empty(r.iapEnabled === false ? undefined : r.iapEnabled)
     || !Array.isArray(containers) || containers.length !== 1 || !empty(template.volumes) || !noFields(template.vpcAccess)
     || template.serviceAccount !== expected.serviceAccountEmail || template.executionEnvironment !== 'EXECUTION_ENVIRONMENT_GEN2'
     || template.timeout !== '300s' || template.maxInstanceRequestConcurrency !== 1
