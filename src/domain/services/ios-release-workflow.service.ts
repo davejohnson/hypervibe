@@ -8,12 +8,13 @@ import { HYPERVIBE_MANAGED_NODE_VERSION } from './managed-runtime.js';
 import { iosReleaseAttemptRuntimeBase64 } from './ios-release-attempt.js';
 import {
   MANAGED_CI_RELEASE_EVIDENCE_VERSION,
+  MANAGED_CI_CREDENTIAL_ACTIVATION_VALIDATOR_SOURCE,
   MANAGED_CI_DEPLOYMENT_CONTRACT_RUNTIME_SOURCE,
   managedCiReleaseArtifactPrefix,
 } from './managed-ci-evidence.js';
 
 // Bump for intentional migrations of the generated iOS release contract.
-export const IOS_RELEASE_WORKFLOW_RENDERER_REVISION = 6;
+export const IOS_RELEASE_WORKFLOW_RENDERER_REVISION = 7;
 
 export const IOS_RELEASE_REQUIRED_SECRETS = [
   'APP_STORE_CONNECT_KEY_ID',
@@ -135,6 +136,7 @@ export function buildIosReleaseWorkflow(params: {
     BUILD_ENVIRONMENT: credentialsEnvironment.toLowerCase() === environmentName.toLowerCase()
       ? environmentName
       : JSON.stringify({ name: credentialsEnvironment, deployment: false }),
+    CREDENTIAL_ACTIVATION_VALIDATOR_JSON: JSON.stringify(Buffer.from(MANAGED_CI_CREDENTIAL_ACTIVATION_VALIDATOR_SOURCE).toString('base64')),
     SERVER_CONTRACT_RUNTIME_JSON: JSON.stringify(Buffer.from(MANAGED_CI_DEPLOYMENT_CONTRACT_RUNTIME_SOURCE).toString('base64')),
     IOS_BUILD_CONTRACT_RUNTIME_JSON: JSON.stringify(iosBuildContractRuntimeBase64()),
     IOS_RELEASE_ATTEMPT_RUNTIME_JSON: JSON.stringify(iosReleaseAttemptRuntimeBase64()),

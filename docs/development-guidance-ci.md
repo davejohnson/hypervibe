@@ -73,6 +73,14 @@ Keep workflow-source provenance separate from deployed-source identity. A dispat
 
 Version release evidence and operational receipts from their shared validators and migrate every producer, generated consumer, runtime consumer, and fixture together. Enumerate success gates as well as failure alerts; execute actual producer results through every generated consumer instead of maintaining separate hand-written success fixtures. Validate historical provenance against the exact source revision; compare current program/resource compatibility separately so a compatible env-only update preserves immutable rollback. Execute a generated consumer against producer-shaped evidence so stale schemas cannot pass on matching mocks.
 
+The optional v4 `credentialActivation` extension is owned by
+`templates/managed-ci/credential-activation.mjs`, exposed to TypeScript and
+renderers through `managed-ci-evidence.ts`. Producers, iOS eligibility/runtime,
+and App Store submission must share its exact-resource validation. Retained
+artifacts without the extension and valid empty or populated operations remain
+compatible; malformed metadata never becomes permission to proceed. Execute
+producer output through these consumers in ordinary acceptance tests.
+
 ## DG-128
 
 The managed iOS runtime (`templates/ios/hypervibe-ios-release.mjs`) must validate server evidence before provider effects and must never reuse an existing Apple build solely by version/build number. Without original-upload identity proof, retries and collisions fail closed before distribution or success evidence. Advance the iOS-only renderer revision in `ios-release-workflow.service.ts` for intentional runtime migrations; the shared workflow input hash must preserve server-only projects. Keep source/emitted-runtime HTTP-boundary regressions and the deliberately old-contract workflow-lock regression in ordinary acceptance tests.
