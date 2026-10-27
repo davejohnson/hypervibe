@@ -1,5 +1,6 @@
 import { createServer, type Server } from 'node:http';
 import { OperatorCredentialCustody } from '../../domain/services/operator-credential-custody.js';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 interface ManifestForm { postUrl: string; manifest: Record<string, unknown> }
 const listeners = new Map<string, { server: Server; url: string; timer: ReturnType<typeof setTimeout> }>();
 const unavailable = () => new Error('The private operator browser handoff is unavailable. Preserve its saved operation and expiry; no provider exchange was repeated.');
@@ -32,6 +33,7 @@ export async function openOperatorAppCallback(store: OperatorCredentialCustody, 
         if (destination.origin !== 'https://github.com' || destination.search || destination.hash || destination.username || destination.password
           || !/^\/(?:settings\/apps\/new|organizations\/[A-Za-z0-9-]{1,39}\/settings\/apps\/new)$/.test(destination.pathname)) return reject();
         const manifest = JSON.stringify(action.manifest); if (manifest.length > 65_536) return reject();
+        if (current.formDigest !== canonicalJsonSha256(action)) return reject();
         const issued = store.issueForm(snapshot); if (!issued) return reject(409);
         response.end(`<!doctype html><html><head><meta charset="utf-8"><title>Connect the operator GitHub App</title></head><body><p>Continue to GitHub to review and create the operator application.</p><form method="POST" action="${escapeHtml(action.postUrl)}"><input type="hidden" name="manifest" value="${escapeHtml(manifest)}"><input type="hidden" name="state" value="${escapeHtml(current.state)}"><button type="submit">Review on GitHub</button></form></body></html>`);
         return;
@@ -49,6 +51,8 @@ export async function openOperatorAppCallback(store: OperatorCredentialCustody, 
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.removeListener('error', reject); resolve(); }); });
     const address = server.address(); if (!address || typeof address === 'string') throw unavailable(); port = address.port;
     if (!browser.port && !store.configurePort(initial, port)) throw unavailable();
+    const configured = store.read();
+    if (!configured || !store.configureForm(configured, canonicalJsonSha256(form(`http://127.0.0.1:${port}/callback/${browser.launch}`)))) throw unavailable();
     const url = `http://127.0.0.1:${port}/begin/${browser.launch}`;
     const timer = setTimeout(() => { server.close(); server.closeAllConnections(); listeners.delete(key); }, Math.max(1, Date.parse(browser.expiresAt) - Date.now()));
     timer.unref(); server.unref(); listeners.set(key, { server, url, timer }); return { url };

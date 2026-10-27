@@ -10,7 +10,7 @@ const contextSchema = z.object({ projectId: z.string().guid(), environmentId: z.
 export type OperatorCustodyContext = z.infer<typeof contextSchema>;
 const privateText = z.string().min(1).max(65_536), nonce = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 const browserSchema = z.object({ attemptId: z.string().guid(), expiresAt: z.string().datetime(), state: nonce, launch: nonce,
-  port: z.number().int().min(1024).max(65535).optional(), issued: z.boolean().default(false) }).strict();
+  port: z.number().int().min(1024).max(65535).optional(), formDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(), issued: z.boolean().default(false) }).strict();
 const stateSchema = z.object({ schemaVersion: z.literal(1), context: contextSchema,
   phase: z.enum(['awaiting-browser', 'code-staged', 'conversion-started', 'credentials-stored', 'delivered']),
   browser: browserSchema.optional(), code: privateText.optional(),
@@ -69,8 +69,13 @@ export class OperatorCredentialCustody {
   }
   issueForm(previous: PrivateOperatorSnapshot): PrivateOperatorSnapshot | null {
     const browser = previous.state.browser;
-    if (previous.state.phase !== 'awaiting-browser' || !browser || browser.issued || Date.parse(browser.expiresAt) <= Date.now()) return null;
+    if (previous.state.phase !== 'awaiting-browser' || !browser || Date.parse(browser.expiresAt) <= Date.now()) return null;
     return this.save(previous, { ...previous.state, browser: { ...browser, issued: true } });
+  }
+  configureForm(previous: PrivateOperatorSnapshot, formDigest: string): PrivateOperatorSnapshot | null {
+    const browser = previous.state.browser;
+    if (previous.state.phase !== 'awaiting-browser' || !browser || browser.formDigest && browser.formDigest !== formDigest) return null;
+    return this.save(previous, { ...previous.state, browser: { ...browser, formDigest } });
   }
   stageCode(previous: PrivateOperatorSnapshot, state: string, code: string, now = Date.now()): boolean {
     const browser = previous.state.browser;

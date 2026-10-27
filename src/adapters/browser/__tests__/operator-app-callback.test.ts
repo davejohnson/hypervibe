@@ -24,7 +24,7 @@ describe('operator manifest private HTTP boundary', () => {
       manifest: { name: 'Synthetic operator', url: 'https://operator.example.test', redirect_url: callback } }));
     return { store, listener, state, launch };
   }
-  it('serves one manifest POST form, rejects wrong host/state, stages code privately and removes the query', async () => {
+  it('redisplays only the unconsumed manifest form, rejects wrong host/state and stages code privately', async () => {
     const f = await fixture();
     expect(f.listener.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/begin\/[A-Za-z0-9_-]{43}$/);
     // Node fetch normalizes Host, so exercise the actual serialized header with HTTP.
@@ -35,7 +35,7 @@ describe('operator manifest private HTTP boundary', () => {
     const html = await form.text(); expect(html).toContain('method="POST"'); expect(html).toContain('https://github.com/settings/apps/new');
     expect(html).not.toMatch(/localStorage|sessionStorage|<script|synthetic-manifest-code/);
     expect(form.headers.get('cache-control')).toBe('no-store'); expect(form.headers.get('referrer-policy')).toBe('no-referrer');
-    expect((await fetch(f.listener.url)).status).toBe(409);
+    expect((await fetch(f.listener.url)).status).toBe(200);
     const callback = new URL(`/callback/${f.launch}`, f.listener.url);
     callback.search = new URLSearchParams({ state: 'x'.repeat(43), code: 'synthetic-manifest-code' }).toString();
     expect((await fetch(callback, { redirect: 'manual' })).status).toBe(403);
@@ -43,11 +43,21 @@ describe('operator manifest private HTTP boundary', () => {
     const response = await fetch(callback, { redirect: 'manual' }); expect(response.status).toBe(303);
     expect(response.headers.get('location')).toBe('/done'); expect(await response.text()).not.toContain('synthetic-manifest-code');
     expect(f.store.read()!.state).toMatchObject({ phase: 'code-staged', code: 'synthetic-manifest-code' });
+    expect((await fetch(f.listener.url)).status).toBe(409);
   });
   it('can resume only the same retained listener address after a process restart', async () => {
-    const f = await fixture(); await closeOperatorAppCallbacks();
-    const resumed = await openOperatorAppCallback(f.store, callback => ({ postUrl: 'https://github.com/settings/apps/new', manifest: { redirect_url: callback } }));
+    const f = await fixture();
+    const original = await fetch(f.listener.url); expect(original.status).toBe(200); await original.body?.cancel();
+    await closeOperatorAppCallbacks();
+    const resumed = await openOperatorAppCallback(f.store, callback => ({ postUrl: 'https://github.com/settings/apps/new',
+      manifest: { name: 'Synthetic operator', url: 'https://operator.example.test', redirect_url: callback } }));
     expect(resumed.url).toBe(f.listener.url);
     expect((await fetch(resumed.url)).status).toBe(200);
+  });
+  it('rejects a changed manifest after restart without losing its retained private callback', async () => {
+    const f = await fixture(); await closeOperatorAppCallbacks();
+    await expect(openOperatorAppCallback(f.store, callback => ({ postUrl: 'https://github.com/settings/apps/new',
+      manifest: { name: 'Changed operator', redirect_url: callback } }))).rejects.toThrow(/unavailable/);
+    expect(f.store.read()!.state).toMatchObject({ phase: 'awaiting-browser', browser: { issued: false } });
   });
 });

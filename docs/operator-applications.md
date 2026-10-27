@@ -201,7 +201,13 @@ Native GitHub acceptance of this loopback redirect remains unverified.
 
 The boundary regression first demonstrated acceptance of a code before form
 handoff (RED); the custody state now rejects it (GREEN). Actual HTTP tests verify
-Host/state checks, once-only form delivery and retained-port restart. Actual
+Host/state checks, exact unconsumed form redisplay and retained-port restart. A
+lost form response previously stranded the handoff with HTTP 409 (observed RED).
+Redisplay now uses the retained state, port and manifest digest until a callback
+is accepted; changed forms and any redisplay after code staging are rejected
+(GREEN). This does not make GitHub's owner-reviewed browser submission idempotent;
+an owner must finish an already submitted registration rather than create another.
+Actual
 SQLite tests verify encryption, concurrent consumption, source separation,
 delivery acknowledgement retention and final credential erasure. Cloud APIs
 are not called by these checks; they are in ordinary `npm test` acceptance.
