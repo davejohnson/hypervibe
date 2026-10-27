@@ -80,6 +80,12 @@ const SENSITIVE_KEYS = new Set([
   'signingsecret',
   'token',
   'webhooksecret',
+  // First-release configuration may include inline secrets. Its digest and
+  // enclosing binding fingerprints are internal authority, not public proof.
+  'firstreleaseconfigurationdigests',
+  'configurationdigest',
+  'beforebindingsfingerprint',
+  'afterbindingsfingerprint',
 ]);
 
 function normalizedKey(key: string): string {

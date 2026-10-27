@@ -52,8 +52,8 @@ transaction; a competing update after native observation cannot be silently over
 
 `preparedHosting` retains installation/plan/receipt digests and a per-workload
 `pendingFirstRelease` list. When present, `firstReleaseConfigurationDigests` covers
-exactly that list. It hashes reviewed nonsecret desired configuration and immutable
-secret references, never submitted secret values. A changed desired configuration needs
+exactly that list. For hosted managed CI it hashes reviewed nonsecret desired configuration and
+immutable secret references, never submitted secret values. A changed desired configuration needs
 a new metadata plan before replacing its expected digest. Reading or importing an older
 repository export cannot reinstate a completed first release or silently replace local
 authority. The strict journal survives export even when workload names contain words
@@ -138,3 +138,23 @@ Publication still needs owner approval. Publish to the reviewed public operator
 registry, observe its immutable manifest digest and anonymous pull availability,
 then configure that exact reference in Hypercloud. No image was published or
 configured in a live environment by this change.
+
+## Local inline configuration custody
+
+The local operator first-release path also accepts managed runtime inputs through
+the encrypted plan boundary. Its expected configuration digest can therefore be
+an offline verifier for a guessed inline secret. Unlike hosted reference-only
+digests, local first-release digests and direct attempt/completion journals remain
+in authoritative local recovery state. Repository export retains native resource
+identities and pending workload names but omits those private fields. Repository
+replay preserves the local journals and cannot supply replacement recovery
+authority. Shared command output redacts configuration digests and the enclosing
+binding fingerprints before either MCP or CLI rendering.
+
+Five actual file-export/import and shared command-boundary tests failed before
+this correction; the focused 63-test group passes afterward, including existing
+hosted reference-only round trips. The independent requirement is the existing
+architecture rule keeping secret acceptance verifiers local. The counterexample
+uses a digest of a four-digit synthetic value; removing plaintext alone did not
+prevent an offline guess check. These are local custody tests, not cloud delivery
+or native first-deployment evidence.

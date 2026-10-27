@@ -42,6 +42,8 @@ const LOCAL_ONLY_BINDING_KEYS = new Set([
   'credentialUpdates',
   'runtimeRollouts',
   'delegatedActionsBindings',
+  'preparedDirectReleaseAttempts',
+  'preparedDirectReleaseEvidence',
 ]);
 
 function bindingsPath(root: string): string {
@@ -99,6 +101,8 @@ export function mergeRepoPlatformBindings(
   if (Object.hasOwn(repoBindings, 'recoveryRuntimeSecretInputs')) throw new Error('Private recovery inputs are local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'credentialUpdates')) throw new Error('Credential acceptance and recovery state are local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'runtimeRollouts')) throw new Error('Runtime configuration expectations and activation requirements are local only and cannot be imported.');
+  if (Object.hasOwn(repoBindings, 'preparedDirectReleaseAttempts') || Object.hasOwn(repoBindings, 'preparedDirectReleaseEvidence'))
+    throw new Error('Direct first-release attempts and configuration evidence are local only and cannot be imported.');
   if (existing.recoveryDatabases !== undefined) recoveryDatabaseBindings(existing.recoveryDatabases);
   if (repoBindings.recoveryDatabases !== undefined) recoveryDatabaseBindings(repoBindings.recoveryDatabases);
   const localVolumes = parseServiceVolumeBindings({ platformBindings: existing });
@@ -110,6 +114,8 @@ export function mergeRepoPlatformBindings(
   if (existing.preparedHosting !== undefined || repoBindings.preparedHosting !== undefined) {
     const local = existing.preparedHosting === undefined ? undefined : preparedHostingMarkerSchema.parse(existing.preparedHosting);
     const incoming = repoBindings.preparedHosting === undefined ? undefined : preparedHostingMarkerSchema.parse(repoBindings.preparedHosting);
+    if ((existing.localPreparedHosting !== undefined || repoBindings.localPreparedHosting !== undefined) && incoming?.firstReleaseConfigurationDigests !== undefined)
+      throw new Error('Inline first-release configuration expectations are local only and cannot be imported.');
     if (local && incoming) {
       if ((['installationId', 'planDigest', 'receiptDigest'] as const).some(key => local[key] !== incoming[key])
         || local.pendingFirstRelease.some(name => incoming.firstReleaseConfigurationDigests?.[name] !== undefined
@@ -222,8 +228,13 @@ function presentStorageInstanceScopes(platformBindings: Record<string, unknown>)
 
 function sanitizePlatformBindings(raw: Record<string, unknown>): Record<string, unknown> {
   const sanitized = sanitize(raw) as Record<string, unknown>;
-  // Only the closed value-free schema bypasses redaction for workload names.
-  if (raw.preparedHosting !== undefined) sanitized.preparedHosting = preparedHostingMarkerSchema.parse(raw.preparedHosting);
+  // Hosted reference-only configuration remains portable for managed CI. Local
+  // inline configuration digests can verify guessed secrets and stay local.
+  if (raw.preparedHosting !== undefined) {
+    const marker = preparedHostingMarkerSchema.parse(raw.preparedHosting);
+    const { firstReleaseConfigurationDigests: _private, ...identity } = marker;
+    sanitized.preparedHosting = raw.localPreparedHosting !== undefined ? identity : marker;
+  }
   const access = runtimeAccessBindings({ platformBindings: raw });
   if (!access) throw new Error('Malformed runtime permission bindings cannot be exported safely.');
   for (const key of ['runtimeIdentities', 'storageRuntimeAccess'] as const) {
