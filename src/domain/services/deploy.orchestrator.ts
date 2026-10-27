@@ -27,8 +27,10 @@ import { prepareHostingBindingTransition } from './hosting-binding-transition.js
 import { parseServiceVolumeBindings } from './service-volume.service.js';
 import { validateRuntimeSecretReferences } from './runtime-secret-references.js';
 import type { RuntimeSecretReference } from '../ports/secret-destination.port.js';
+import { completePreparedDirectRelease } from './prepared-direct-release.service.js';
 
 export interface DeployOptions {
+  preparedRelease?: import('../ports/hosting-prepared.port.js').PreparedDirectReleaseControl;
   project: Project;
   environment: Environment;
   services?: Service[];
@@ -103,7 +105,7 @@ export class DeployOrchestrator {
     // the persisted plan — runs.plan is returned verbatim by hv_runs, so
     // values (which include DATABASE_URL and resolved secrets) must never
     // be stored. The step reads the live options.envVars at execution time.
-    if (!options.requireNewWorkload && ((options.envVars && Object.keys(options.envVars).length > 0) || (options.envVarsByService && Object.keys(options.envVarsByService).length > 0) || Object.keys(options.secretVersionRefs ?? {}).length > 0)) {
+    if (!options.requireNewWorkload && !options.preparedRelease && ((options.envVars && Object.keys(options.envVars).length > 0) || (options.envVarsByService && Object.keys(options.envVarsByService).length > 0) || Object.keys(options.secretVersionRefs ?? {}).length > 0)) {
       steps.push({
         name: 'set_env_vars',
         action: 'setEnvVars',
@@ -586,6 +588,7 @@ export class DeployOrchestrator {
             ...(options.envVarsByService?.[service.name] ?? {}),
           };
           const mutationOptions: DeploymentMutationOptions = {
+            ...(options.preparedRelease ? { preparedRelease: options.preparedRelease } : {}),
             ...(Object.keys(options.secretVersionRefs ?? {}).length ? { secretVersionRefs: options.secretVersionRefs } : {}),
             ...(options.deferProviderDeployment ? { deferDeployment: true } : {}),
             ...(options.deferWorkload ? { deferWorkload: true } : {}),
@@ -679,7 +682,15 @@ export class DeployOrchestrator {
               environmentId: options.environment.id,
               label: `environment_bindings_deploy_${service.name}`,
             });
-            this.envRepo.updatePlatformBindings(options.environment.id, bindingUpdates);
+            if (deployData.preparedRelease !== undefined) {
+              const completed = completePreparedDirectRelease(latestEnvironment, deployData.preparedRelease);
+              const evidence = deployData.preparedRelease as import('../ports/hosting-prepared.port.js').PreparedDirectReleaseEvidence;
+              if (evidence.target.workload !== service.name || evidence.target.resourceId !== externalId
+                || evidence.target.resourceUid !== deployData.resourceUid || evidence.target.imageUri !== deployData.imageUri
+                || !this.envRepo.compareAndSwapPlatformBindings(options.environment.id, latestEnvironment.platformBindings, { ...completed, ...bindingUpdates })) {
+                throw new Error('Prepared release completion or its exact local binding changed.');
+              }
+            } else this.envRepo.updatePlatformBindings(options.environment.id, bindingUpdates);
 
             const createdService = result.receipt.data?.createdService === true || result.receipt.data?.created === true;
             if (createdService) {

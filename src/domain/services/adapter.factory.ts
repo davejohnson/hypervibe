@@ -11,6 +11,8 @@ import { supportsLoadBalancer, type ILoadBalancerAdapter } from '../ports/load-b
 import { environmentConnectionScope, getProjectScopeHints } from './project-scope.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import { resolveDeploymentAdapter } from '../../adapters/cloud/deployment-access.client.js';
+import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
+import { verifiedLocalHoldingReceipt } from './local-holding-preparation.service.js';
 
 /**
  * Result of resolving an adapter
@@ -60,12 +62,12 @@ export class AdapterFactory {
   ): Promise<AdapterResult<IHostingAdapter>> {
     const maturityBlock = this.lifecycleMutationBlock<IHostingAdapter>(providerName, 'hosting');
     if (maturityBlock) return maturityBlock;
-    return this.getAdapter<IHostingAdapter>(
+    return this.withLocalPreparation(await this.getAdapter<IHostingAdapter>(
       providerName,
       'deployment',
       project ? getProjectScopeHints(project) : undefined,
       environment
-    );
+    ), project, environment);
   }
 
   /**
@@ -142,12 +144,30 @@ export class AdapterFactory {
     scopeHints?: string[],
     environment?: string
   ): Promise<AdapterResult<IProviderAdapter>> {
-    return this.getAdapter<IProviderAdapter>(
+    return this.withLocalPreparation(await this.getAdapter<IProviderAdapter>(
       providerName,
       undefined,
       scopeHints ?? (project ? getProjectScopeHints(project) : undefined),
       environment
-    );
+    ), project, environment);
+  }
+
+  private async withLocalPreparation<T>(result: AdapterResult<T>, project?: Project, environmentName?: string): Promise<AdapterResult<T>> {
+    if (!result.success || !result.adapter || !project || !environmentName) return result;
+    const environments = new EnvironmentRepository(), environment = environments.findByProjectAndName(project.id, environmentName);
+    if (!environment?.platformBindings.localPreparedHosting) return result;
+    const adapter = result.adapter as T & Pick<IHostingAdapter, 'name'> & Partial<Pick<IHostingAdapter, 'configureLocalPreparedHosting'>>;
+    try {
+      if (!providerRegistry.getHoldingPreparation(adapter.name) || !adapter.configureLocalPreparedHosting) throw new Error();
+      const load = async () => {
+        const fresh = environments.findById(environment.id);
+        if (!fresh || fresh.projectId !== project.id || fresh.name !== environmentName || fresh.platformBindings.provider !== adapter.name) throw new Error();
+        const receipt = await verifiedLocalHoldingReceipt(project, fresh);
+        if (!receipt || receipt.appId !== project.id || receipt.environment !== environmentName || receipt.hostingProvider !== adapter.name) throw new Error();
+        return receipt;
+      };
+      await load(); adapter.configureLocalPreparedHosting(load); return result;
+    } catch { return { success: false, error: 'Exact local prepared hosting journal or native connection is unavailable; no alternate authority was selected.' }; }
   }
 
   /**

@@ -366,6 +366,9 @@ export function parseHostingBindings(
 export interface IHostingAdapter {
   readonly recoveryRuntime?: import('./recovery-runtime.port.js').IRecoveryRuntime;
   readonly preparedHosting?: import('./hosting-prepared.port.js').IPreparedHosting;
+  /** Install a journal-backed read callback; never infer local preparation from
+   * spec or binding bytes alone. Credentials remain the existing connection. */
+  configureLocalPreparedHosting?(load: import('./hosting-prepared.port.js').LocalPreparedHostingLoader): void;
   readonly runtimeIdentities?: import('./runtime-identity.port.js').IRuntimeIdentities;
   readonly serviceVolumes?: import('./service-volume.port.js').IServiceVolumes;
   readonly name: string;

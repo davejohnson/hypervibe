@@ -8,7 +8,7 @@ import { isPreparedHostingAction, mergePreparedHostingBindings, observePreparedH
   preparedHostingActionMetadataSchema } from '../domain/services/hosting-prepared.service.js';
 
 export async function applyPreparedHosting(input: { ctx: CommandContext; project: Project; environmentName: string; environmentSpec: EnvironmentSpec;
-  spec?: ProjectSpec; action: PlanAction; confirmedActionIds: ReadonlySet<string>; authorize(): boolean }): Promise<ActionResult> {
+  spec?: ProjectSpec; managedSecretValues?: Record<string, string>; action: PlanAction; confirmedActionIds: ReadonlySet<string>; authorize(): boolean }): Promise<ActionResult> {
   const blocked = (): ActionResult => ({ success: false, status: 'blocked', message: 'Exact prepared hosting evidence, authorization or local persistence changed. Reconcile this reviewed metadata step; no cloud mutation occurred.' });
   try {
     if (!isPreparedHostingAction(input.action) || !input.confirmedActionIds.has(input.action.id) || input.action.resource.name !== input.environmentName || !input.authorize()) return blocked();
@@ -22,7 +22,7 @@ export async function applyPreparedHosting(input: { ctx: CommandContext; project
     const adapter = await input.ctx.adapterFactory.getHostingAdapter(input.project, input.environmentName);
     if (!adapter.success || !adapter.adapter || adapter.adapter.name !== input.action.resource.provider) return blocked();
     const proof = await observePreparedHosting({ environment, environmentSpec: input.environmentSpec, hosting: adapter.adapter, project: input.project, spec: input.spec,
-      reviewedRelease: meta.proof.releaseEvidence, reviewedPreparation: meta.previousPreparation });
+      managedSecretValues: input.managedSecretValues, reviewedRelease: meta.proof.releaseEvidence, reviewedPreparation: meta.previousPreparation });
     if (!isDeepStrictEqual(proof, meta.proof)) return blocked();
     environment = load();
     if (preparedBindingFingerprint(environment.platformBindings) !== before || !input.authorize()) return blocked();

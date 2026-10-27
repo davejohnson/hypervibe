@@ -379,8 +379,12 @@ export const planRunDocumentSchema = z.object({
     ctx.addIssue({ code: 'custom', message: 'Prepared hosting binding requires its isolated metadata stage.' });
   }
   if (document.scope === 'hosting-prepared-bindings') {
+    const keys = document.overrides?.delegatedSecretKeys;
+    const acceptedRuntimeInputs = document.overrides === undefined || Boolean(keys?.length && new Set(keys).size === keys.length
+      && document.overrides.delegatedSecretVarsEncrypted
+      && Object.keys(document.overrides).every(key => ['delegatedSecretKeys', 'delegatedSecretVarsEncrypted'].includes(key)));
     if (document.actions.length !== 1 || !document.actions.every(isPreparedHostingAction) || document.observedFingerprint !== null
-      || document.overrides || document.integrationFingerprints || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
+      || !acceptedRuntimeInputs || document.integrationFingerprints || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
       ctx.addIssue({ code: 'custom', message: 'Prepared hosting binding contains only one exact confirmed metadata action and no rollout inputs.' });
     }
     return;

@@ -8,6 +8,7 @@ import { environmentSpecSchema } from '../../../../domain/spec/spec.schema.js';
 import { observeRuntimeAccess, planRuntimeAccess } from '../../../../domain/services/runtime-access.service.js';
 import { resourceName } from '../../../../domain/services/resource-names.js';
 import { canonicalJsonSha256 } from '../../../../lib/canonical-json.js';
+import { createPreparedDirectReleaseControl, reviewPreparedDirectReleaseActions } from '../../../../domain/services/prepared-direct-release.service.js';
 import { parse } from 'yaml';
 import { createRequire } from 'node:module';
 import { buildCloudRunGitHubActionsSteps } from '../cloudrun-ci.workflow.js';
@@ -118,6 +119,7 @@ function fixture(options: { bounds?: boolean; secretCreateTime?: string; finalRe
     if (url.startsWith(`https://run.googleapis.com/v2/${resource}`)) {
       if (method === 'GET') return Response.json(current);
       if (method === 'PATCH') {
+        if (environment.platformBindings.preparedDirectReleaseAttempts) expect(environment.platformBindings.preparedDirectReleaseAttempts.web.status).toBe('attempted');
         writes.push({ url, body: JSON.parse(String(init.body)) });
         if (options.rejectWrite) return Response.json({ error: { code: 409, status: 'ABORTED' } }, { status: 409 });
         // Independent final native response; not an echo of the submitted body.
@@ -138,10 +140,20 @@ function fixture(options: { bounds?: boolean; secretCreateTime?: string; finalRe
   vi.stubGlobal('fetch', request);
   const create = () => providerRegistry.createTransientAdapter<CloudRunAdapter>('cloudrun', { connection, capability: 'provision',
     authentication: { kind: 'gcp-impersonation', principal: provision, getAccessToken: async () => ({ token, expiresAt: new Date(Date.now() + 900_000).toISOString() }) } });
-  return { create, connection, environment, service, environmentSpec, request, writes, current: () => current };
+  const control = createPreparedDirectReleaseControl({ planRunId: 'reviewed-plan', expectedImage: candidateImage, confirmed: true,
+    action: reviewPreparedDirectReleaseActions([{ id: 'service:web', type: 'update', verified: true, requiresConfirm: true, resource: { kind: 'service', provider: 'cloudrun', name: 'web' }, reason: 'Reviewed first application release' }], environment, { web: candidateImage })[0]!,
+    load: () => environment, save: (before, next) => { if (before.platformBindings !== environment.platformBindings) return false; environment.platformBindings = next; return true; }, authorize: () => true });
+  return { create, connection, environment, service, environmentSpec, request, writes, control, current: () => current };
 }
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 describe('prepared Cloud Run first application release', () => {
+  it('requires a durable reviewed direct-release attempt before sending the first PATCH', async () => {
+    const f = fixture(), adapter = await f.create();
+    const result = await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },
+      { secretVersionRefs: { API_TOKEN: reference } });
+    expect.soft(result.receipt.success).toBe(false);
+    expect(f.writes).toEqual([]);
+  });
   it('rejects a recreated secret container even when its name, version and reader policy match', async () => {
     const f = fixture({ secretCreateTime: '2026-10-25T11:00:00Z' }), hosting = await f.create();
     const observation = await observeRuntimeAccess({ hosting, environment: f.environment, environmentSpec: f.environmentSpec, storageAdapters: {} });
@@ -198,7 +210,7 @@ describe('prepared Cloud Run first application release', () => {
   it.each([false, true])('applies the exact candidate, final reader and immutable reference with reviewed bounds=%s', async bounds => {
     const f = fixture({ bounds }), adapter = await f.create();
     const result = await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },
-      { secretVersionRefs: { API_TOKEN: reference } });
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control });
     expect(result.receipt.success).toBe(true);
     expect(f.writes).toHaveLength(1);
     expect(f.writes[0]!.body).toMatchObject({ etag: 'holding-etag', template: { serviceAccount: runtime.serviceAccountEmail,
@@ -214,7 +226,7 @@ describe('prepared Cloud Run first application release', () => {
     const f = fixture(), adapter = await f.create();
     f.current().template.labels = { 'customer-label': 'keep' };
     const result = await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },
-      { secretVersionRefs: { API_TOKEN: reference } });
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control });
     expect(result.receipt.success).toBe(true);
     expect(f.writes[0]!.body.template.labels).toEqual({ 'customer-label': 'keep' });
   });
@@ -222,15 +234,33 @@ describe('prepared Cloud Run first application release', () => {
     const f = fixture({ finalResponse: value => ({ ...value, traffic: [], template: { ...value.template,
       sessionAffinity: false, healthCheckDisabled: false, gpuZonalRedundancyDisabled: false } }) }), adapter = await f.create();
     const result = await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },
-      { secretVersionRefs: { API_TOKEN: reference } });
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control });
     expect(result.receipt.success).toBe(true); expect(f.writes).toHaveLength(1);
   });
   it.each(['rejected', 'acknowledgment-lost'] as const)('does not retry an %s first release', async outcome => {
     const f = fixture({ rejectWrite: outcome === 'rejected', loseAcknowledgment: outcome === 'acknowledgment-lost' }), adapter = await f.create();
     const result = await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },
-      { secretVersionRefs: { API_TOKEN: reference } });
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control });
     expect(result.receipt.success).toBe(false); expect(f.writes).toHaveLength(1);
     expect(JSON.stringify(result)).not.toContain('Synthetic transport');
+  });
+  it('recovers a lost first-release acknowledgment by exact native readback without another PATCH', async () => {
+    const f = fixture({ loseAcknowledgment: true }), adapter = await f.create();
+    const options = { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control };
+    expect((await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' }, options)).receipt.success).toBe(false);
+    expect(f.environment.platformBindings.preparedDirectReleaseAttempts.web.status).toBe('uncertain');
+    const recovered = await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' }, options);
+    expect(recovered.receipt).toMatchObject({ success: true, data: { preparedRelease: { kind: 'native-direct',
+      attemptId: f.environment.platformBindings.preparedDirectReleaseAttempts.web.id } } });
+    expect(f.writes).toHaveLength(1);
+  });
+  it('does not recover a changed native image after losing the first-release acknowledgment', async () => {
+    const f = fixture({ loseAcknowledgment: true }), adapter = await f.create();
+    const options = { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control };
+    await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' }, options);
+    f.current().template.containers[0].image = candidateImage.replace('f'.repeat(64), 'a'.repeat(64));
+    expect((await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' }, options)).receipt.success).toBe(false);
+    expect(f.writes).toHaveLength(1);
   });
   it.each([
     ['wrong-reference', (native: any) => { native.template.containers[0].env[0].valueSource.secretKeyRef.version = '8'; return native; }],
@@ -243,7 +273,7 @@ describe('prepared Cloud Run first application release', () => {
   ] as const)('does not report a converged first release with %s', async (_name, finalResponse) => {
     const f = fixture({ finalResponse }), adapter = await f.create();
     const result = await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },
-      { secretVersionRefs: { API_TOKEN: reference } });
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control });
     expect(result.receipt.success).toBe(false); expect(f.writes).toHaveLength(1);
   });
   it.each(['first-release', 'first-release-bounds', 'bounds-lost', 'reverted-holding', 'operation-error', 'terminal-error'] as const)('executes the emitted CI %s with native first-release authority', async scenario => {

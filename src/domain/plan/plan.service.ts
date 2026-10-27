@@ -26,6 +26,7 @@ import { selectedDeploymentAccess } from '../../adapters/cloud/deployment-access
 import { getProjectScopeHints } from '../services/project-scope.js';
 import { planDatabaseScopeBinding } from '../services/database-scope-binding.service.js';
 import { planPreparedHosting } from '../services/hosting-prepared.service.js';
+import { reviewPreparedDirectReleaseActions } from '../services/prepared-direct-release.service.js';
 import { observeBackupPolicy } from '../services/backup-policy.service.js';
 import { planBackupPolicy } from '../services/backup-policy-plan.service.js';
 import { observeBackupHealth } from '../services/backup-health.service.js';
@@ -2435,6 +2436,7 @@ export class PlanService {
     if (backupPolicyStageActive && serviceFilter) {
       return { error: 'A service-filtered plan cannot skip pending daily backup policy configuration. Run hv_plan without services to review the isolated backup policy stage.' };
     }
+    let preparedDirectEvidence: import('../ports/hosting-prepared.port.js').PreparedDirectReleaseEvidence[] = [];
     if (!providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive && environment?.platformBindings.projectId
       && (hostingMetadata?.lifecycle?.hosting?.preparedResources === 'installer-receipt-v1' || environment.platformBindings.preparedHosting !== undefined)) {
       try {
@@ -2450,13 +2452,15 @@ export class PlanService {
         // connection/unknown-observation blockers. A present or unreadable
         // hosted binding above must never bypass initial receipt discovery.
         const prepared = hosting.success && hosting.adapter ? await planPreparedHosting({ environment, environmentSpec,
-          hosting: hosting.adapter, project: projectForPlan, spec: specResult.spec }) : null;
+          hosting: hosting.adapter, project: projectForPlan, spec: specResult.spec, managedSecretValues, onObservation: proof => { preparedDirectEvidence = proof.directReleaseEvidence ?? []; } }) : null;
         if (prepared) {
-          if (serviceFilter || envVarOverrides || envFileVars && Object.keys(envFileVars).length || options?.secretRefs)
+          if (serviceFilter || envVarOverrides || envFileVars && Object.keys(envFileVars).length)
             return { error: 'Prepared hosting binding is an isolated metadata stage; remove runtime inputs and service filters before reviewing it.' };
           const warnings = ['This step records verified hosting identities only. Pending first releases, runtime configuration and application rollout remain separate.'];
           const document: PlanRunDocument = { kind: 'hv_plan', scope: 'hosting-prepared-bindings', environmentName, specRevision: specResult.revision,
-            observedFingerprint: null, actions: [prepared], warnings, ...(sourceCommitSha ? { sourceCommitSha } : {}) };
+            observedFingerprint: null, actions: [prepared], warnings, ...(sourceCommitSha ? { sourceCommitSha } : {}),
+            ...(Object.keys(managedSecretValues).length ? { overrides: { delegatedSecretKeys: Object.keys(managedSecretValues).sort(),
+              delegatedSecretVarsEncrypted: getSecretStore().encryptObject(managedSecretValues) } } : {}) };
           planRunDocumentSchema.parse(document);
           const run = this.runRepo.create({ projectId: project.id, environmentId: environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
           this.runRepo.updateStatus(run.id, 'succeeded');
@@ -2710,6 +2714,8 @@ export class PlanService {
         ]));
       }
     }
+    actions = reviewPreparedDirectReleaseActions(actions, environment, Object.fromEntries(Object.keys(environmentSpec.services).map(name => [name,
+      environmentSpec.envVars[`IMAGE_URI_${name.toUpperCase().replace(/[^A-Z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '')}`]?.trim() || environmentSpec.envVars.IMAGE_URI?.trim() || ''])), preparedDirectEvidence);
     for (const managedSecretAction of delegatedSecrets.actions) {
       if (managedSecretAction.type === 'noop') continue;
       const serviceNames = Array.isArray(managedSecretAction.metadata?.services)
@@ -2724,6 +2730,13 @@ export class PlanService {
           && action.type !== 'destroy'
         ))
         .map((action) => action.id);
+      const pendingFirstRelease = (environment?.platformBindings.preparedHosting as { pendingFirstRelease?: string[] } | undefined)?.pendingFirstRelease;
+      if (environment?.platformBindings.localPreparedHosting && serviceNames.length > 0
+        && serviceNames.every(name => pendingFirstRelease?.includes(name) && serviceDependencies.includes(`service:${name}`)
+          || preparedDirectEvidence.some(item => item.target.workload === name) && actions.some(action => action.id === `service:${name}` && action.type === 'noop'))) {
+        managedSecretAction.metadata = { ...managedSecretAction.metadata, preparedReleaseBinding: true };
+        managedSecretAction.reason = `Record ${managedSecretAction.resource.name} only after the reviewed first revisions independently verify its accepted value; no separate secret write.`;
+      }
       if (serviceDependencies.length > 0) {
         managedSecretAction.dependsOn = Array.from(new Set([
           ...(managedSecretAction.dependsOn ?? []),

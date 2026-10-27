@@ -199,7 +199,7 @@ export async function applyRuntimeAccessAction(input: Input & { action: PlanActi
       const item = observed.identities.find(candidate => candidate.serviceName === serviceName)!;
       if (!input.hosting?.runtimeIdentities || item.observation.state !== 'action') return block();
       const step = item.observation.step;
-      const attemptId = randomUUID();
+      const attemptId = item.binding?.pending?.attemptId ?? randomUUID();
       const binding = { provider: environmentSpec.hosting.provider, evidence: item.binding?.evidence ?? {}, ...item.binding, pending: { attemptId, step } };
       await input.save({ runtimeIdentities: { ...state.runtimeIdentities, [serviceName]: binding } });
       const result = await input.hosting.runtimeIdentities.apply({ environment, environmentSpec, service: { name: serviceName, buildConfig: environmentSpec.services[serviceName] ?? {} }, binding, mode: item.mode, step, attemptId });

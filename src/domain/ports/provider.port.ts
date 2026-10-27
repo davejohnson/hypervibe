@@ -11,6 +11,7 @@ export interface Receipt {
 }
 
 export interface DeploymentMutationOptions {
+  preparedRelease?: import('./hosting-prepared.port.js').PreparedDirectReleaseControl;
   /** Immutable provider references only; never resolved into local secret values. */
   secretVersionRefs?: Record<string, import('./secret-destination.port.js').RuntimeSecretReference>;
   /**

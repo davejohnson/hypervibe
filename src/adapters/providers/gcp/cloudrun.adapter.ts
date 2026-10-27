@@ -39,9 +39,12 @@ import * as pubsub from './pubsub.api.js';
 import { CloudRunServiceVolumes } from './cloudrun-service-volume.js';
 import { CloudRunRuntimeIdentities } from './cloudrun-runtime-identities.js';
 import { CloudRunInstalledRuntimeIdentities } from './cloudrun-installed-runtime.js';
-import { CloudRunPreparedHosting } from './cloudrun-prepared-hosting.js';
+import { CloudRunPreparedHosting, gcpPreparedRuntimeEnvVars } from './cloudrun-prepared-hosting.js';
+import { CloudRunLocalPreparedRuntime } from './cloudrun-local-prepared-runtime.js';
+import { describePreparedHosting } from '../../../domain/services/hosting-prepared.service.js';
+import { preparedHostingMarkerSchema, type LocalPreparedHostingLoader, type PreparedDirectReleaseTarget } from '../../../domain/ports/hosting-prepared.port.js';
 import { parseGcpPreparedResources } from './gcp-cloud-deployment.js';
-import { gcpPreparedApplicationConfiguration, gcpPreparedApplicationDigest, gcpObservedPreparedApplicationConfiguration, gcpPreparedHoldingTransition } from './gcp-prepared-release.js';
+import { cloudRunCloudSqlVolumeConfig, gcpPreparedApplicationConfiguration, gcpPreparedApplicationDigest, gcpObservedPreparedApplicationConfiguration, gcpPreparedHoldingTransition } from './gcp-prepared-release.js';
 import type { RuntimeIdentityBinding } from '../../../domain/ports/runtime-identity.port.js';
 import { cloudRunFilesystemIdentity } from './cloudrun-volume-runtime.js';
 import { cloudRunJobUpdateBody } from './cloudrun-job-request.js';
@@ -602,12 +605,27 @@ export class CloudRunAdapter implements
     if (!this.deploymentConnection) throw new Error('Reviewed Google deployment installation is unavailable.');
     return this.deploymentConnection;
   }, () => this.getAccessToken());
-  get runtimeIdentities() { return this.deploymentConnection ? this.installedRuntimeIdentities : this.legacyRuntimeIdentities; }
+  private localPreparedLoader?: LocalPreparedHostingLoader;
+  private localPreparedRuntime?: CloudRunLocalPreparedRuntime;
+  configureLocalPreparedHosting(load: LocalPreparedHostingLoader): void {
+    if (!this.localDefaultAuthentication || this.deploymentConnection) throw new Error('Local preparation requires its independently verified local administrator connection.');
+    this.localPreparedLoader = load;
+    this.localPreparedRuntime = new CloudRunLocalPreparedRuntime(load, () => this.getAccessToken(), (input, init) => this.request(input, init));
+  }
+  get runtimeIdentities() { return this.localPreparedRuntime ?? (this.deploymentConnection ? this.installedRuntimeIdentities : this.legacyRuntimeIdentities); }
   private readonly installedPreparedHosting = new CloudRunPreparedHosting(() => {
     if (!this.deploymentConnection?.preparedResources) throw new Error('Reviewed Google prepared resources are unavailable.');
     return this.deploymentConnection;
-  }, () => this.getAccessToken(), fetch, () => this.deploymentSourceAuthorization);
-  get preparedHosting() { return this.deploymentConnection?.preparedResources ? this.installedPreparedHosting : undefined; }
+  }, () => this.getAccessToken(), (input, init) => this.request(input, init), () => this.deploymentSourceAuthorization, () => this.localPreparedLoader);
+  get preparedHosting() { return this.deploymentConnection?.preparedResources || this.localPreparedLoader ? this.installedPreparedHosting : undefined; }
+  private async preparedDescriptor() {
+    if (this.localPreparedLoader) {
+      const receipt = await this.localPreparedLoader();
+      if (receipt.nativeScope.projectId !== this.credentials?.projectId || receipt.deployment.region !== this.credentials?.region) throw new Error();
+      return describePreparedHosting(receipt);
+    }
+    return this.deploymentConnection?.preparedResources ? describePreparedHosting(this.deploymentConnection) : undefined;
+  }
 
   async connectDeployment(input: CloudDeploymentAdapterInputV1): Promise<void> {
     const checked = validateCloudDeploymentAdapterInputV1(input, { provider: 'gcp', hostingProvider: 'cloudrun', parseScope: value => gcpDeploymentScopeSchema.parse(value), parsePreparedResources: parseGcpPreparedResources });
@@ -764,6 +782,8 @@ export class CloudRunAdapter implements
     this.githubWorkloadAuthentication = null;
     this.deploymentConnection = null;
     this.deploymentSourceAuthorization = undefined;
+    this.localPreparedLoader = undefined;
+    this.localPreparedRuntime = undefined;
   }
 
   async repairLoggingAccess(): Promise<Receipt> {
@@ -895,33 +915,61 @@ export class CloudRunAdapter implements
     try { await this.verifySecretReferenceProjects(secretVersionRefs); }
     catch { return { serviceId: service.id, status: 'failed', receipt: { success: false, message: 'The native secret reference project identity could not be verified.' } }; }
 
-    if (this.deploymentConnection?.preparedResources) {
+    if (this.preparedHosting || environment.platformBindings.preparedHosting) {
+      let attempted: string | undefined;
+      let settled = false;
       try {
         const prepared = await this.preparedApplicationTransition(environment, service, envVars, secretVersionRefs);
         if (prepared) {
+          if (options.deferDeployment && prepared.recovering) throw new Error();
           if (options.deferDeployment) return { serviceId: service.id, externalId: prepared.name, status: 'configured',
             receipt: this.preparedRolloutReceipt(prepared) };
           const image = this.imageUriForService(service, envVars);
-          if (!image || !this.isImmutableContainerImage(image) || image === prepared.transition.prepared.holding.image) throw new Error();
+          if (!image || !this.isImmutableContainerImage(image) || image === prepared.transition.prepared.holding.image || !options.preparedRelease) throw new Error();
+          if (!image.startsWith(`${this.credentials.region}-docker.pkg.dev/${this.credentials.projectId}/${prepared.connection.preparedResources.registry.id.split('/').at(-1)}/`)) throw new Error();
           const token = await this.getAccessToken(), resource = prepared.transition.prepared.id;
+          const target: PreparedDirectReleaseTarget = { schemaVersion: 1, installationId: prepared.connection.installationId,
+            planDigest: prepared.connection.planDigest, receiptDigest: prepared.connection.receiptDigest, workload: service.name,
+            provider: this.name, projectId: this.credentials.projectId, environmentId: this.credentials.region,
+            resourceId: prepared.name, resourceUid: prepared.transition.prepared.lifetimeId,
+            holdingRevision: prepared.transition.prepared.holding.revision!, configurationDigest: prepared.transition.configurationDigest, imageUri: image };
+          const retained = await options.preparedRelease.read(target);
+          const resultFor = (observed: CloudRunService, attemptId: string): DeployResult => {
+            if (observed.uid !== target.resourceUid || observed.template?.serviceAccount !== prepared.transition.principal.serviceAccountEmail
+              || observed.template?.containers?.[0]?.image !== image || observed.latestReadyRevision === target.holdingRevision
+              || gcpPreparedApplicationDigest(gcpObservedPreparedApplicationConfiguration(observed)) !== target.configurationDigest) throw new Error();
+            return { serviceId: service.id, externalId: prepared.name, url: observed.uri, status: 'deployed', receipt: { success: true,
+              message: 'Verified the exact first application release and its dedicated runtime identity.', data: {
+                serviceName: prepared.name, resourceUid: observed.uid, imageUri: image, environmentId: this.credentials!.region, createdService: false,
+                preparedRelease: { schemaVersion: 1, kind: 'native-direct', attemptId, target, revision: observed.latestReadyRevision, generation: observed.generation } } } };
+          };
+          if (prepared.recovering) {
+            if (!retained || !['attempted', 'uncertain'].includes(retained.status)) throw new Error();
+            return resultFor(prepared.native, retained.id);
+          }
+          if (retained && retained.status !== 'rejected') throw new Error();
           const body = { etag: prepared.transition.etag, ...prepared.configuration,
             template: { ...prepared.configuration.template,
               ...(prepared.native.template?.labels ? { labels: prepared.native.template.labels } : {}),
               containers: [{ ...prepared.configuration.template.containers[0], image }] } };
+          attempted = (await options.preparedRelease.begin(target)).id;
           const response = await this.request(`https://run.googleapis.com/v2/${resource}?updateMask=ingress,template${prepared.configuration.scaling ? ',scaling' : ''}`, {
             method: 'PATCH', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-          if (!response.ok) throw new Error();
+          if (!response.ok) {
+            await options.preparedRelease.settle(attempted, response.status >= 400 && response.status < 500 && ![408, 429].includes(response.status) ? 'rejected' : 'uncertain');
+            settled = true; throw new Error();
+          }
           await this.waitForCloudRunOperation(token, await response.json() as CloudRunOperation, 'first application release', resource);
           const observed = await this.waitForCloudRunServiceReady(prepared.name, token, { resourceName: resource, imageUri: image,
             runtimeServiceAccountEmail: prepared.transition.principal.serviceAccountEmail,
             startCommand: service.buildConfig.startCommand?.trim() || null, healthCheckPath: service.buildConfig.healthCheckPath?.trim() || null });
-          if (observed?.uid !== prepared.transition.prepared.lifetimeId
-            || gcpPreparedApplicationDigest(gcpObservedPreparedApplicationConfiguration(observed)) !== prepared.transition.configurationDigest) throw new Error();
-          return { serviceId: service.id, externalId: prepared.name, url: observed.uri, status: 'deployed', receipt: {
-            success: true, message: 'Released the application with its installed runtime identity and immutable secret references.',
-            data: { serviceName: prepared.name, resourceUid: observed.uid, imageUri: image, environmentId: this.credentials.region, createdService: false } } };
+          if (!observed) throw new Error();
+          return resultFor(observed, attempted);
         }
-      } catch { return { serviceId: service.id, status: 'failed', receipt: { success: false, message: 'The prepared Google application release could not be verified; no retry was attempted.' } }; }
+      } catch {
+        if (attempted && !settled) try { await options.preparedRelease!.settle(attempted, 'uncertain'); } catch { /* Retained attempted state still forbids replay. */ }
+        return { serviceId: service.id, status: 'failed', receipt: { success: false, message: 'The prepared Google application release could not be verified; no retry was attempted.' } };
+      }
     }
 
     const workloadKind = serviceWorkloadKind(service);
@@ -1048,7 +1096,7 @@ export class CloudRunAdapter implements
       // Only a provider-confirmed 404 means the service does not exist.
       // Permission, transport, and server failures must not authorize a create.
       const cloudRunService = await this.getService(serviceName);
-      const deploymentEtag = this.assertDeploymentServiceIdentity(environment, service, cloudRunService);
+      const deploymentEtag = await this.assertDeploymentServiceIdentity(environment, service, cloudRunService);
       const instanceBounds = service.buildConfig.instanceBounds;
       if (instanceBounds && cloudRunService && !cloudRunInstanceBounds(cloudRunService.scaling)) {
         throw new Error('Manual Cloud Run scaling must be resolved before applying automatic instance bounds.');
@@ -1913,12 +1961,16 @@ export class CloudRunAdapter implements
     return references;
   }
 
-  private assertDeploymentServiceIdentity(environment: Environment, service: Service, current: CloudRunService | null): string | undefined {
-    if (!this.deploymentConnection) return;
+  private async assertDeploymentServiceIdentity(environment: Environment, service: Service, current: CloudRunService | null): Promise<string | undefined> {
+    const connection = await this.preparedDescriptor() ?? this.deploymentConnection;
+    if (!connection) {
+      if (environment.platformBindings.preparedHosting) throw new Error('Prepared hosting requires its verified receipt loader.');
+      return;
+    }
     const bound = parseHostingBindings(environment).services?.[service.name];
     if (!current && !bound) return;
-    const runtime = this.deploymentConnection.runtimeIdentities.find(item => item.workload === service.name)?.principal;
-    const prepared = current ? gcpPreparedHoldingTransition(this.deploymentConnection, environment, service.name, current) : null;
+    const runtime = connection.runtimeIdentities.find(item => item.workload === service.name)?.principal;
+    const prepared = current ? gcpPreparedHoldingTransition(connection, environment, service.name, current) : null;
     if (!current || !bound?.serviceId || !bound.resourceUid || current.uid !== bound.resourceUid || !current.etag?.trim()
       || current.name !== `projects/${this.credentials!.projectId}/locations/${this.credentials!.region}/services/${bound.serviceId}`
       || runtime?.kind !== 'gcp-service-account' || !prepared && this.serviceRuntimeIdentity(current) !== runtime.serviceAccountEmail) {
@@ -1928,25 +1980,37 @@ export class CloudRunAdapter implements
   }
 
   private async preparedApplicationTransition(environment: Environment, service: Service, vars: Record<string, string>, references: Record<string, RuntimeSecretReference>) {
-    const connection = this.deploymentConnection;
-    if (!connection?.preparedResources) return null;
+    const connection = await this.preparedDescriptor();
+    if (!connection) {
+      if (environment.platformBindings.preparedHosting) throw new Error();
+      return null;
+    }
     const bound = parseHostingBindings(environment).services?.[service.name];
     if (!bound?.serviceId) throw new Error();
     const native = await this.getService(bound.serviceId);
-    this.assertDeploymentServiceIdentity(environment, service, native);
+    await this.assertDeploymentServiceIdentity(environment, service, native);
     const transition = gcpPreparedHoldingTransition(connection, environment, service.name, native);
-    if (!transition) return null;
+    const marker = preparedHostingMarkerSchema.parse(environment.platformBindings.preparedHosting);
+    if (!transition && !marker.pendingFirstRelease.includes(service.name)) return null;
     const reviewed = connection.deployment.workloads.find(item => item.name === service.name);
     const kind = serviceWorkloadKind(service);
     if (!reviewed || kind === 'cron' || this.shouldAllowUnauthenticated(service) !== reviewed.public) throw new Error();
-    const identity = await this.installedRuntimeIdentities.inspect({ environment, service, mode: 'ensure' });
+    const identity = await this.runtimeIdentities.inspect({ environment, service,
+      binding: (environment.platformBindings.runtimeIdentities as Record<string, RuntimeIdentityBinding> | undefined)?.[service.name], mode: 'ensure' });
     if (identity.state === 'unknown' || identity.state === 'waiting') throw new Error();
+    const prepared = connection.preparedResources.workloads.find(item => item.workload === service.name)!;
+    const principal = connection.runtimeIdentities.find(item => item.workload === service.name)?.principal;
+    if (principal?.kind !== 'gcp-service-account' || !prepared || !marker.firstReleaseConfigurationDigests?.[service.name]) throw new Error();
+    const resolved = transition ?? { prepared, principal, configurationDigest: marker.firstReleaseConfigurationDigests[service.name],
+      deploymentId: native!.latestReadyRevision!, etag: native!.etag! };
     const configuration = gcpPreparedApplicationConfiguration({ workloadKind: kind, publicAccess: reviewed.public === true,
-      serviceAccountEmail: transition.principal.serviceAccountEmail, envVars: this.runtimeEnvVarsForService(service, vars), secretVersionRefs: references,
+      serviceAccountEmail: principal.serviceAccountEmail, envVars: this.runtimeEnvVarsForService(service, vars), secretVersionRefs: references,
       instanceBounds: service.buildConfig.instanceBounds,
       startCommand: service.buildConfig.startCommand?.trim() || null, healthCheckPath: service.buildConfig.healthCheckPath?.trim() || null });
-    if (gcpPreparedApplicationDigest(configuration) !== transition.configurationDigest) throw new Error();
-    return { name: bound.serviceId, native: native!, transition, configuration };
+    if(configuration.template.volumes?.length&&(identity.state!=='ready'
+      ||(environment.platformBindings.runtimeIdentities as Record<string,RuntimeIdentityBinding>|undefined)?.[service.name]?.evidence.cloudsqlClient!=='required'))throw new Error();
+    if (gcpPreparedApplicationDigest(configuration) !== resolved.configurationDigest) throw new Error();
+    return { name: bound.serviceId, native: native!, transition: resolved, configuration, connection, recovering: !transition };
   }
 
   private preparedRolloutReceipt(prepared: NonNullable<Awaited<ReturnType<CloudRunAdapter['preparedApplicationTransition']>>>): Receipt {
@@ -2006,7 +2070,7 @@ export class CloudRunAdapter implements
     try { await this.verifySecretReferenceProjects(secretVersionRefs); }
     catch { return { success: false, message: 'The native secret reference project identity could not be verified.' }; }
 
-    if (this.deploymentConnection?.preparedResources) {
+    if (this.preparedHosting || environment.platformBindings.preparedHosting) {
       try {
         const prepared = await this.preparedApplicationTransition(environment, service, vars, secretVersionRefs);
         if (prepared) {
@@ -2120,7 +2184,7 @@ export class CloudRunAdapter implements
 
       // Get current service
       const currentService = await this.getService(serviceName);
-      const deploymentEtag = this.assertDeploymentServiceIdentity(environment, service, currentService);
+      const deploymentEtag = await this.assertDeploymentServiceIdentity(environment, service, currentService);
       if (options.deferDeployment) {
         const deferredProblem = this.deferredWorkloadProblem({
           expectedExisting: Boolean(bindings.services?.[service.name]?.serviceId),
@@ -2435,7 +2499,7 @@ export class CloudRunAdapter implements
       }
 
       const currentService = await this.getService(serviceName);
-      const deploymentEtag = this.assertDeploymentServiceIdentity(environment, service, currentService);
+      const deploymentEtag = await this.assertDeploymentServiceIdentity(environment, service, currentService);
       const currentContainer = this.primaryContainer(currentService);
       if (!currentService || !currentContainer?.image) {
         return {
@@ -6713,21 +6777,7 @@ export class CloudRunAdapter implements
   }
 
   private cloudSqlVolumeConfig(connectionNames: string[] | undefined): { volume: Record<string, unknown>; volumeMount: Record<string, unknown> } | undefined {
-    if (!connectionNames || connectionNames.length === 0) {
-      return undefined;
-    }
-    return {
-      volume: {
-        name: 'cloudsql',
-        cloudSqlInstance: {
-          instances: connectionNames,
-        },
-      },
-      volumeMount: {
-        name: 'cloudsql',
-        mountPath: '/cloudsql',
-      },
-    };
+    return cloudRunCloudSqlVolumeConfig(connectionNames);
   }
 
   private mergeVolumes(
@@ -6954,18 +7004,7 @@ export class CloudRunAdapter implements
   }
 
   private runtimeEnvVarsForService(service: Service, envVars: Record<string, string>): Record<string, string> {
-    const internalKeys = new Set([
-      'IMAGE_URI',
-      this.imageEnvKey(service),
-      'HYPERVIBE_SOURCE_REPO_URL',
-      'HYPERVIBE_SOURCE_REVISION',
-      'HYPERVIBE_ARTIFACT_REPOSITORY',
-      'HYPERVIBE_GITHUB_TOKEN',
-      'HYPERVIBE_CRON_TIME_ZONE',
-    ]);
-    return Object.fromEntries(
-      Object.entries(envVars).filter(([key]) => !internalKeys.has(key))
-    );
+    return gcpPreparedRuntimeEnvVars(envVars, service.name);
   }
 
   private imageEnvKey(service: Service): string {

@@ -77,8 +77,7 @@ evidence leaves the first release pending and does not block initial resource bi
 A changed run or source invalidates the reviewed completion action. Its saved prior
 marker permits exact verification/export recovery after SQLite committed completion
 but the repository export failed. It does not fabricate release provenance from current
-desired state. Direct deployments without managed-CI artifact evidence currently retain
-the pending completion marker; that path has no equivalent completion proof yet.
+desired state. GCP direct first releases use the distinct native-direct completion evidence described below; it does not substitute a managed-CI artifact or hosted grant.
 The producer target resolver also receives that exact project/environment's reviewed
 prior marker during recovery. Merely restoring an observation object was insufficient:
 the resolver otherwise read the newer SQLite marker and changed the semantic hash.
@@ -158,3 +157,49 @@ architecture rule keeping secret acceptance verifiers local. The counterexample
 uses a digest of a four-digit synthetic value; removing plaintext alone did not
 prevent an offline guess check. These are local custody tests, not cloud delivery
 or native first-deployment evidence.
+
+
+## Guarded local and hosted GCP direct first release
+
+A local holding receipt is loaded from its accepted SQLite installation journal,
+then checked against the exact current application/environment and native resource
+lifetimes. Its shared descriptor contains preparation facts only. It creates no
+hosted deployment connection, token exchange permission, CI authority or release
+artifact. Hosted preparation retains its independent connection/source checks.
+
+The ordinary saved-plan executor now passes a durable direct-release control
+through bootstrap and orchestration. Only a current confirmed `service:<name>`
+action can create its exact attempt, immediately before PATCH. Definite rejection
+needs a fresh plan naming that rejected attempt. Attempted/uncertain writes cannot
+be replayed. Fresh native image, final principal, original service UID, complete
+runtime configuration and converged revision/generation establish completion;
+SQLite retires only that workload in the same compare-and-swap as its binding.
+A lost acknowledgment can be reconciled through a read-only metadata plan without
+resupplying delegated secrets. That recovery preserves the prior reviewed inputs
+for remaining workloads. A completed image-selector-only diff becomes noop only
+with the same exact freshly verified native evidence; unrelated drift stays an
+update.
+
+First-release review and execution share the existing bootstrap runtime-input
+projection, including database/cache values, service aliases, queues and storage.
+Generated values are stable and are re-derived at apply; delegated values remain
+frozen in the existing encrypted saved plan. Only the reviewed candidate revision
+receives these values. The coordinator omits its preliminary environment-variable
+write for this guarded transition. Follow-up managed-secret actions independently
+verify all exact completed revisions and live value hashes, then record acceptance
+without a redundant provider write. Native secret references remain immutable and
+version-bound; their values are never materialized by this resolver.
+
+Observed RED counterexamples included a missing durable attempt permitting PATCH,
+a replaced original holding revision, raw-spec configuration digests rejecting
+resolved secret/component inputs, release metadata corrupting a runtime-identity
+action's authority, the legacy preparation flag blocking a verified local handoff,
+pre-sync trying to configure the holding image, redundant post-release secret
+writes, and lost-acknowledgment continuation attempting the already completed image.
+The actual SQLite/PlanService/executePlanApply regression now covers metadata,
+runtime binding, both web/worker first revisions, missing confirmation, encrypted
+input freezing, stable generation, native recovery without resubmitted input and
+one PATCH per workload. A two-observation race regression reproduced a generated value disappearing after its first verification and triggering two extra secret PATCHes; acceptance now blocks with zero additional writes. The integrated six-suite group passes 86 tests, and the adjacent plan/secret/custody/rollback checks pass (the legacy bootstrap prerequisite-order regression was retained and corrected). Native transport responses are reconstructed from the
+published Cloud Run Service contract; they are not live compatibility evidence.
+The existing hosted transport suite separately covers its authority path, while
+AWS and other undeclared prepared capabilities remain outside this change.

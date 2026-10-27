@@ -1,3 +1,6 @@
+import { isDeepStrictEqual } from 'node:util';
+import { SpecStore } from '../spec/spec.store.js';
+import { preparedHostingMarkerSchema } from '../ports/hosting-prepared.port.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { adapterFactory } from './adapter.factory.js';
@@ -71,6 +74,7 @@ function recordConnectedDeploySource(params: {
 }
 
 export async function executeBootstrap(params: {
+  preparedRelease?: import('../ports/hosting-prepared.port.js').PreparedDirectReleaseControl;
   projectName: string;
   environmentName: string;
   /** Non-secret desired hosting placement; provider default when omitted. */
@@ -234,8 +238,28 @@ export async function executeBootstrap(params: {
   }
 
   const targetPlatform = hostingProviderForEnvironment(project, environment);
+  const hostingProject = project.defaultPlatform?.toLowerCase() === targetPlatform
+    ? project
+    : { ...project, defaultPlatform: targetPlatform };
+  const preparedHostingResult = params.preparedRelease ? await adapterFactory.getHostingAdapter(hostingProject, environment.name) : undefined;
   const cloudPrepareProfile = getCloudPrepareProfile(targetPlatform);
-  if (cloudPrepareProfile && !isCloudPrepared(project, targetPlatform)) {
+  let verifiedPreparation = false;
+  if (preparedHostingResult?.success && preparedHostingResult.adapter?.preparedHosting) {
+    try {
+      const marker = preparedHostingMarkerSchema.parse(environment.platformBindings.preparedHosting);
+      const environmentSpec = new SpecStore().getForInspection(project)?.spec.environments[environment.name];
+      if (environmentSpec && workloads.every(service => marker.pendingFirstRelease.includes(service.name))) {
+        const proof = await preparedHostingResult.adapter.preparedHosting.inspect({ environment, environmentSpec,
+          runtimeEnvVarsByService: Object.fromEntries(workloads.map(service => [service.name,
+            { ...params.queueEnvVars, ...params.envVars, ...params.envVarsByService?.[service.name] }])) });
+        verifiedPreparation = proof.state === 'verified' && marker.receiptDigest === proof.preparation.receiptDigest
+          && marker.installationId === proof.preparation.installationId && marker.planDigest === proof.preparation.planDigest
+          && workloads.every(service => proof.preparation.pendingFirstRelease.includes(service.name)
+            && isDeepStrictEqual(marker.firstReleaseConfigurationDigests?.[service.name], proof.preparation.firstReleaseConfigurationDigests?.[service.name]));
+      }
+    } catch { /* A missing native or current-source proof retains the ordinary prerequisite blocker. */ }
+  }
+  if (cloudPrepareProfile && !isCloudPrepared(project, targetPlatform) && !verifiedPreparation) {
     const cleanup = await tx.rollback();
     return {
       success: false,
@@ -252,10 +276,7 @@ export async function executeBootstrap(params: {
     };
   }
 
-  const hostingProject = project.defaultPlatform?.toLowerCase() === targetPlatform
-    ? project
-    : { ...project, defaultPlatform: targetPlatform };
-  const hostingResult = await adapterFactory.getHostingAdapter(hostingProject, environment.name);
+  const hostingResult = preparedHostingResult ?? await adapterFactory.getHostingAdapter(hostingProject, environment.name);
   if (!hostingResult.success || !hostingResult.adapter) {
     const cleanup = await tx.rollback();
     return {
@@ -359,6 +380,7 @@ export async function executeBootstrap(params: {
     ...(params.expectedSourceCommitSha ? { expectedSourceCommitSha: params.expectedSourceCommitSha } : {}),
     ensureProject: params.ensureHostingProject !== false,
     adapter: hostingAdapter,
+    ...(params.preparedRelease ? { preparedRelease: params.preparedRelease } : {}),
   });
 
   const rolloutBaselines: Record<string, unknown> = {};

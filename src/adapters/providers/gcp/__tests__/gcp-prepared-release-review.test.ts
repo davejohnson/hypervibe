@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { gcpObservedPreparedApplicationConfiguration, gcpPreparedApplicationConfiguration } from '../gcp-prepared-release.js';
+import { buildGcpPreparedReleaseRuntime, gcpObservedPreparedApplicationConfiguration, gcpPreparedApplicationConfiguration, gcpPreparedApplicationDigest } from '../gcp-prepared-release.js';
+import { canonicalJsonSha256 } from '../../../../lib/canonical-json.js';
 import { githubActionsWorkflowInputHash } from '../../../../domain/services/github-ops.service.js';
 import { gcpBrokerTarget } from '../../../../domain/services/__tests__/cloud-deployment-ci.fixture.js';
 
@@ -21,6 +22,41 @@ function native() {
         startupProbe: { tcpSocket: { port: 8080 }, periodSeconds: 240, timeoutSeconds: 240, failureThreshold: 1 } }] } }));
 }
 describe('independent prepared first-release readback counterexamples', () => {
+  it('renders the Cloud SQL socket volume required by the resolved database connection',()=>{
+    const value=native(),connection='customer-project:us-west2:primary';
+    const configuration=gcpPreparedApplicationConfiguration({workloadKind:'web',publicAccess:false,serviceAccountEmail:value.template.serviceAccount,
+      envVars:{CLOUD_SQL_CONNECTION_NAME:connection},secretVersionRefs:{},startCommand:null,healthCheckPath:null});
+    expect(configuration.template).toMatchObject({volumes:[{name:'cloudsql',cloudSqlInstance:{instances:[connection]}}],
+      containers:[{volumeMounts:[{name:'cloudsql',mountPath:'/cloudsql'}]}]});
+  });
+  it('verifies independently serialized Cloud SQL mounts as part of first-release configuration',()=>{
+    const value=native(),connection='customer-project:us-west2:primary';
+    value.template.volumes=[{name:'cloudsql',cloudSqlInstance:{instances:[connection]}}];
+    value.template.containers[0].volumeMounts=[{name:'cloudsql',mountPath:'/cloudsql'}];
+    value.template.containers[0].env=[{name:'CLOUD_SQL_CONNECTION_NAME',value:connection}];
+    expect(gcpObservedPreparedApplicationConfiguration(JSON.parse(JSON.stringify(value))).template).toMatchObject({
+      volumes:[{name:'cloudsql',cloudSqlInstance:{instances:[connection]}}],containers:[{volumeMounts:[{name:'cloudsql',mountPath:'/cloudsql'}]}]});
+  });
+  it('executes the emitted Cloud SQL readback with its shared volume helper and rejects changed mounts',()=>{
+    const value=native(),connectionName='customer-project:us-west2:primary',target=gcpBrokerTarget(),connection=target.deploymentAccess!.connection;
+    value.template.volumes=[{name:'cloudsql',cloudSqlInstance:{instances:[connectionName]}}];
+    value.template.containers[0].volumeMounts=[{name:'cloudsql',mountPath:'/cloudsql'}];
+    value.template.containers[0].env=[{name:'CLOUD_SQL_CONNECTION_NAME',value:connectionName}];
+    connection.deployment.workloads[0].public=false;
+    connection.preparedResources={schemaVersion:1,project:{id:'projects/987654321',lifetimeId:'2026-10-24T00:00:00Z'},registry:{id:'projects/customer-project/locations/us-west2/repositories/images',lifetimeId:'2026-10-24T00:00:00Z',owner:'b'.repeat(64)},
+      workloads:[{workload:'web',kind:'service',id:value.name,lifetimeId:value.uid,owner:'b'.repeat(64),holding:{image:`us-west2-docker.pkg.dev/customer-project/images/holding@sha256:${'e'.repeat(64)}`,
+        principal:{...connection.runtimeIdentities[0].principal,serviceAccountEmail:'holding@customer-project.iam.gserviceaccount.com'} as any,configurationDigest:'d'.repeat(64),generation:'1',revision:value.name+'/revisions/holding'}}]};
+    target.runtimeResources![0]={...target.runtimeResources![0],providerResourceUid:value.uid,startCommand:null,healthCheckPath:null};
+    const config=gcpPreparedApplicationConfiguration({workloadKind:'web',publicAccess:false,serviceAccountEmail:value.template.serviceAccount,envVars:{CLOUD_SQL_CONNECTION_NAME:connectionName},secretVersionRefs:{},startCommand:null,healthCheckPath:null});
+    target.preparedRuntime={envVars:{CLOUD_SQL_CONNECTION_NAME:connectionName},preparation:{schemaVersion:1,installationId:connection.installationId,planDigest:connection.planDigest,
+      receiptDigest:canonicalJsonSha256(connection),pendingFirstRelease:['web'],firstReleaseConfigurationDigests:{web:gcpPreparedApplicationDigest(config)}}};
+    const execute=new Function('value',buildGcpPreparedReleaseRuntime(target)+'\nreturn gcpObservedPreparedApplicationConfiguration(value);');
+    expect(execute(value)).toEqual(config);
+    value.template.containers[0].volumeMounts[0].mountPath='/different';expect(()=>execute(value)).toThrow();
+  });
+  it.each(['','other-project:us-west2:primary','customer-project:bad:'])('rejects unsupported prepared SQL target %s',connection=>{
+    expect(()=>gcpPreparedApplicationConfiguration({workloadKind:'web',publicAccess:false,serviceAccountEmail:'runtime@customer-project.iam.gserviceaccount.com',envVars:{CLOUD_SQL_CONNECTION_NAME:connection},secretVersionRefs:{},startCommand:null,healthCheckPath:null})).toThrow();
+  });
   it('retains service-wide capacity in both the reviewed first release and independent native evidence', () => {
     const value = native(); value.scaling = { maxInstanceCount: 1 };
     const expected = { scalingMode: 'AUTOMATIC', minInstanceCount: 0, maxInstanceCount: 1 };

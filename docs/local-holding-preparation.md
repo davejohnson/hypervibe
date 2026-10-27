@@ -68,3 +68,43 @@ service and public-grant acknowledgments recover through reads without replay.
 The synthetic responses establish those boundaries, not live Cloud Run support
 or the cause of any customer incident. Direct first-release acceptance is recorded
 separately by the shared prepared-hosting contract.
+
+### Cloud SQL first release
+
+The local operator path reuses Cloud Run's existing `cloudsql` volume and
+`/cloudsql` mount for the resolved `CLOUD_SQL_CONNECTION_NAME` (or existing
+`INSTANCE_CONNECTION_NAME` fallback). Prepared configuration, direct apply,
+generated CI and independent native readback carry the same mount shape. The
+prepared path admits exact connection names in the runtime service account's
+project; cross-project SQL, private VPC routes and arbitrary extra mounts remain
+unsupported here. Existing ordinary deployment behavior is preserved.
+
+Google's [Cloud Run connection guide](https://docs.cloud.google.com/sql/docs/postgres/connect-run)
+requires Cloud SQL client authority on the workload service identity; local
+administrator sign-in cannot substitute for it. The existing runtime-access
+plan/apply frontier now offers an explicitly confirmed project-level
+`roles/cloudsql.client` grant to the journal-verified final account. It preserves
+unrelated IAM and its etag, never grants the holding account, and verifies the
+native policy before readiness. Unknown reads block. Acknowledged or uncertain
+writes retain their exact pending attempt for read-only recovery; a failed
+readback cannot become permission to resubmit. Grants and final runtime accounts
+remain retained during local holding cleanup, as separately authorized runtime
+access. This is connector authorization, not SQL password or live connectivity
+verification.
+
+The challenged assumption was that ordinary database input projection was
+sufficient for prepared first deployment. Two independent serialized Service
+cases showed a missing socket mount and rejection of a valid native mount.
+Four real SQLite/shared-runtime cases then showed missing client-grant review,
+no grant execution/recovery, and false readiness after a denied IAM read. All
+were observed RED before runtime changes. Google documents the native shape in
+[CloudSqlInstance](https://docs.cloud.google.com/run/docs/reference/rest/v2/Volume#CloudSqlInstance).
+The normal acceptance cases now execute the generated readback, exact confirmed
+grant, unchanged holding identities, lost acknowledgments, readback denial and
+no-repeat recovery. An actual adapter deployment also remains blocked before
+the grant, then verifies the serialized socket volume, final account, independent
+native revision and local completion without retiring another pending workload.
+Recovery also exposed a shared identity-attempt bug: apply
+assigned a fresh ID to pending recovery; it now retains the original ID, matching
+the existing storage-access recovery path. Focused GCP, ECS and Azure lifecycle checks
+pass; these reconstructed transport tests are not live Cloud SQL certification.

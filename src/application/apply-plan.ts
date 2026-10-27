@@ -11,6 +11,7 @@ import { applyDatabaseScopeBinding } from './apply-database-scope-binding.js';
 import { applyPreparedHosting } from './apply-prepared-hosting.js';
 import { applyLocalHolding } from '../domain/services/local-holding-preparation.service.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
+import { preparedReleaseAttempts, createPreparedDirectReleaseControl } from '../domain/services/prepared-direct-release.service.js';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { isScopedSecretAction, scopedSecretObservation } from '../domain/plan/scoped-secrets.js';
 import { actionRequiresBackupReadiness, deploymentPrerequisitePhase, isManagedCiCredentialAction } from '../domain/plan/plan-stage.js';
@@ -45,8 +46,9 @@ import {
 } from '../domain/services/domain-registration.service.js';
 import { applyIosAction } from '../domain/services/appstore-plan.service.js';
 import { applyQueueAction } from '../domain/services/queue-plan.service.js';
-import { resolveQueueEnvVars } from '../domain/services/queue-env.js';
-import { applyStorageAction, resolveStorageServiceEnvVars } from '../domain/services/storage-plan.service.js';
+import { resolveBootstrapRuntimeInputs } from '../domain/services/bootstrap-runtime-inputs.js';
+import { validatePreparedManagedInputs } from '../domain/services/hosting-prepared.service.js';
+import { applyStorageAction } from '../domain/services/storage-plan.service.js';
 import { applyServiceVolumeAction, hasRetainedServiceVolumes, observeServiceVolumes, planServiceVolumes, retainedVolumeHostingBlock } from '../domain/services/service-volume.service.js';
 import {
   generatedSecretBindingEvidence,
@@ -128,11 +130,6 @@ import type {
 } from '../domain/ports/provider.port.js';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
 import { runEnvironmentTask } from '../domain/services/environment-task.service.js';
-import {
-  buildDatabaseAliasEnvVars,
-  buildDatabaseEnvVarsFromComponent,
-} from '../domain/services/database-env.js';
-import { buildCacheEnvVarsFromComponent } from '../domain/services/cache-env.js';
 import {
   parseUnresolvedCacheNetworkMutation,
   type CacheEngine,
@@ -1032,8 +1029,12 @@ export async function executePlanApply(ctx: CommandContext, params: {
       return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'Prepared hosting requires its exact existing environment and isolated metadata plan.' }] };
     const blocked = planService.providerPreflight([envSpec.hosting.provider], projectForPreflight, envName);
     if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
+    const encrypted = loaded.document.overrides?.delegatedSecretVarsEncrypted;
+    const managedSecretValues = encrypted ? getSecretStore().decryptObject<Record<string, string>>(encrypted) : undefined;
+    if (managedSecretValues && JSON.stringify(Object.keys(managedSecretValues).sort()) !== JSON.stringify([...(loaded.document.overrides?.delegatedSecretKeys ?? [])].sort()))
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'Accepted prepared runtime input keys changed.' }] };
     const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
-      handler: (action, execution) => applyPreparedHosting({ ctx, project: projectForPreflight, environmentName: envName, environmentSpec: envSpec, spec,
+      handler: (action, execution) => applyPreparedHosting({ ctx, project: projectForPreflight, environmentName: envName, environmentSpec: envSpec, spec, managedSecretValues,
         action, confirmedActionIds: new Set(params.confirmActions), authorize: () => ctx.repos.runs.findById(execution.applyRunId)?.status === 'running'
           && new SpecStore().get(project)?.revision === params.specRevision }) });
     return { kind: 'executed', envName, result, actionScopedWarnings: ['Prepared bindings are metadata only; pending first releases are not application convergence.'] };
@@ -1327,75 +1328,35 @@ export async function executePlanApply(ctx: CommandContext, params: {
       bootstrapParams = { ...bootstrapParams, verifyHttpHealth: true };
     }
     const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
-    const queueEnvVars = await resolveQueueEnvVars(applyProject, envSpec, latestEnvironment);
-    if (queueEnvVars) {
-      bootstrapParams = { ...bootstrapParams, queueEnvVars };
-    }
-    const storageServiceEnvVars = await resolveStorageServiceEnvVars(applyProject, envSpec, latestEnvironment);
-    if (storageServiceEnvVars) {
-      bootstrapParams = { ...bootstrapParams, envVarsByService: storageServiceEnvVars };
-    }
-    const database = latestEnvironment && envSpec.database
-      ? ctx.repos.components.findByEnvironmentAndType(latestEnvironment.id, envSpec.database.engine)
-      : null;
-    if (database) {
-      const databaseEnvVars = buildDatabaseEnvVarsFromComponent(database).envVars;
-      const databaseAliasEnvVars = Object.fromEntries(
-        Object.entries(envSpec.services)
-          .map(([serviceName, serviceSpec]) => [
-            serviceName,
-            buildDatabaseAliasEnvVars(databaseEnvVars, serviceSpec.databaseEnvAliases),
-          ])
-          .filter(([, aliases]) => Object.keys(aliases as Record<string, string>).length > 0)
-      ) as Record<string, Record<string, string>>;
-      bootstrapParams = {
-        ...bootstrapParams,
-        envVars: {
-          ...databaseEnvVars,
-          ...(bootstrapParams.envVars ?? {}),
-        },
-        ...(Object.keys(databaseAliasEnvVars).length > 0
-          ? {
-            envVarsByService: Object.fromEntries(
-              Array.from(new Set([
-                ...Object.keys(bootstrapParams.envVarsByService ?? {}),
-                ...Object.keys(databaseAliasEnvVars),
-              ])).map((serviceName) => [
-                serviceName,
-                {
-                  ...(bootstrapParams.envVarsByService?.[serviceName] ?? {}),
-                  ...(databaseAliasEnvVars[serviceName] ?? {}),
-                },
-              ])
-            ),
-          }
-          : {}),
-      };
-    }
-    const cache = latestEnvironment
-      ? ctx.repos.components.findByEnvironmentAndType(latestEnvironment.id, 'redis')
-      : null;
-    if (cache) {
-      bootstrapParams = {
-        ...bootstrapParams,
-        envVars: {
-          ...buildCacheEnvVarsFromComponent(cache).envVars,
-          ...(bootstrapParams.envVars ?? {}),
-        },
-      };
-    }
+    bootstrapParams = await resolveBootstrapRuntimeInputs({ project: applyProject, environment: latestEnvironment, environmentSpec: envSpec, params: bootstrapParams,
+      ...(latestEnvironment?.platformBindings.localPreparedHosting && stringArrayField(asRecord(latestEnvironment.platformBindings.preparedHosting), 'pendingFirstRelease').length
+        ? { managedSecretValues: validatePreparedManagedInputs(spec, envName, delegatedSecretEnvVars) } : {}) });
     return bootstrapParams;
   };
 
   let deployBootstrap: { success: boolean; summary: Record<string, unknown> } | null = null;
   const serviceBootstraps = new Map<string, { success: boolean; summary: Record<string, unknown> }>();
 
-  const ensureServiceBootstrap = async (serviceName: string, requireNewWorkload = false) => {
+  const ensureServiceBootstrap = async (serviceName: string, requireNewWorkload = false, action?: PlanAction, execution?: ActionExecutionContext) => {
     const existing = serviceBootstraps.get(serviceName);
     if (existing) return existing;
     const base = await buildDeployBootstrapParams();
+    const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+    const preparedRelease = environment && stringArrayField(asRecord(environment.platformBindings.preparedHosting), 'pendingFirstRelease').includes(serviceName) && action && execution ? createPreparedDirectReleaseControl({
+      planRunId: planId, action, confirmed: confirmedActionIds.has(action.id),
+      expectedImage: base.envVars?.[`IMAGE_URI_${serviceName.toUpperCase().replace(/[^A-Z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '')}`]?.trim() || base.envVars?.IMAGE_URI?.trim(),
+      load: () => { const fresh = ctx.repos.environments.findById(environment.id); if (!fresh) throw new Error('Prepared environment is unavailable.'); return fresh; },
+      save: (before, bindings) => !!ctx.repos.environments.compareAndSwapPlatformBindings(before.id, before.platformBindings, bindings),
+      authorize: () => {
+        const current = new SpecStore().getForInspection(project);
+        return ctx.repos.runs.findById(execution.applyRunId)?.status === 'running'
+          && isDeepStrictEqual(ctx.repos.runs.findById(planId)?.plan, loaded.run.plan)
+          && current?.revision === params.specRevision && isDeepStrictEqual(current.spec, spec);
+      },
+    }) : undefined;
     const referenceCreation = base.creationOnlyServices?.includes(serviceName) === true;
     const result = await executeBootstrap({ ...scopeBootstrapParamsToService(base, serviceName),
+      ...(preparedRelease ? { preparedRelease } : {}),
       ...(serviceIdentityOnly || referenceCreation ? { provisionOnly: true } : {}),
       ...(requireNewWorkload || referenceCreation ? { requireNewWorkload: true } : {}),
     });
@@ -1861,8 +1822,28 @@ export async function executePlanApply(ctx: CommandContext, params: {
         );
       }
 
+      const preparedReleaseBinding = metadata?.preparedReleaseBinding === true;
+      if (preparedReleaseBinding) {
+        const attempts = preparedReleaseAttempts(latestEnvironment);
+        if (!latestEnvironment.platformBindings.localPreparedHosting || destinationServices.some(name => {
+          const attempt = attempts[name], serviceAction = loaded.document.actions.find(candidate => candidate.id === `service:${name}`);
+          return !attempt || attempt.status !== 'completed' || attempt.actionId !== serviceAction?.id
+            || serviceAction.type !== 'noop' && (attempt.planRunId !== planId
+              || !serviceAction.metadata?.preparedReleaseReview || attempt.target.imageUri !== asRecord(serviceAction.metadata.preparedReleaseReview)?.imageUri);
+        })) return blockedActionIdentity(action, 'Managed value acceptance requires every exact completed first-release action from this reviewed plan.');
+        const hosting = await ctx.adapterFactory.getHostingAdapter(applyProject, envName);
+        const native = await hosting.adapter?.preparedHosting?.inspect({ environment: latestEnvironment, environmentSpec: envSpec });
+        if (!hosting.success || native?.state !== 'verified' || destinationServices.some(name =>
+          !native.directReleaseEvidence?.some(evidence => evidence.attemptId === attempts[name]?.id
+            && isDeepStrictEqual(evidence.target, attempts[name]?.target))))
+          return blockedActionIdentity(action, 'The exact completed first revisions could not be reverified before managed value acceptance.');
+        const live = (await planService.observeEnvironment(applyProject, latestEnvironment, envSpec, { hostingOnly: true })).observed;
+        const values = liveHashesForSecret(live, destinationServices, key);
+        if (values.hasUnknownDestination || values.state !== 'consistent' || values.hash !== hashEnvValue(value))
+          return blockedActionIdentity(action, 'The accepted managed value was not independently observed on every completed first revision.');
+      }
       const hypervibeOwned = declaredSecret.ownership === 'hypervibe';
-      let bindingOnly = false;
+      let bindingOnly = preparedReleaseBinding;
       let bindingEnvironment = latestEnvironment;
       let immutableContract: {
         expectedValueHash: string;
@@ -1967,7 +1948,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
 
         bindingOnly = liveState.state === 'consistent'
           && liveState.hash === expectedValueHash;
-        if ((metadata?.bindingOnly === true) !== bindingOnly) {
+        if (preparedReleaseBinding && !bindingOnly)
+          return blockedActionIdentity(action, 'The generated value changed before first-release acceptance; this reviewed action cannot write or replace it.');
+        if (!preparedReleaseBinding && (metadata?.bindingOnly === true) !== bindingOnly) {
           return blockedActionIdentity(
             action,
             bindingOnly
@@ -2462,7 +2445,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
           error: 'Resolve or explicitly clean up the retained provider service identity before applying another service create. No hosting mutation was attempted.',
         };
       }
-      const result = await ensureServiceBootstrap(action.resource.name, requireNewWorkload);
+      const result = await ensureServiceBootstrap(action.resource.name, requireNewWorkload, action, executionContext);
       return bootstrapActionResultFromSummary(action, result);
     }
     return {

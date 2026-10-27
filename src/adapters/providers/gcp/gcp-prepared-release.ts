@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { CloudDeploymentConnectionV1 } from '../../../domain/ports/cloud-deployment.port.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { RuntimeSecretReference } from '../../../domain/ports/secret-destination.port.js';
-import { preparedHostingMarkerSchema } from '../../../domain/ports/hosting-prepared.port.js';
+import { preparedHostingMarkerSchema, type PreparedHostingDescriptor } from '../../../domain/ports/hosting-prepared.port.js';
 import { gcpHoldingConfigurationDigest, gcpObservedHoldingConfiguration } from './gcp-prepared-hosting.js';
 import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
 import type { BranchDeployTarget } from '../../../domain/ports/ci-deploy.port.js';
@@ -17,6 +17,12 @@ export interface GcpPreparedApplicationInput {
   startCommand: string | null;
   healthCheckPath: string | null;
   instanceBounds?: { min: number; max: number };
+}
+
+/** Same native socket volume used by ordinary and prepared Cloud Run releases. */
+export function cloudRunCloudSqlVolumeConfig(connectionNames: string[] | undefined) {
+  if(!connectionNames?.length)return undefined;
+  return {volume:{name:'cloudsql',cloudSqlInstance:{instances:connectionNames}},volumeMount:{name:'cloudsql',mountPath:'/cloudsql'}};
 }
 
 /** Self-contained native renderer shared with the emitted first release. All
@@ -51,12 +57,18 @@ export function gcpPreparedApplicationConfiguration(input: GcpPreparedApplicatio
   const bounds = input.instanceBounds;
   if (bounds && (!Number.isSafeInteger(bounds.min) || !Number.isSafeInteger(bounds.max)
     || bounds.min < (worker ? 1 : 0) || bounds.max < 1 || bounds.min > bounds.max)) fail();
+  const rawSql=input.envVars.CLOUD_SQL_CONNECTION_NAME??input.envVars.INSTANCE_CONNECTION_NAME;
+  const sqlNames=rawSql===undefined?[]:[...new Set(rawSql.split(',').map(value=>value.trim()))];
+  const sqlProject=input.serviceAccountEmail.split('@')[1].replace('.iam.gserviceaccount.com','');
+  if(sqlNames.length>100||sqlNames.some(value=>!new RegExp(`^${sqlProject}:[a-z]+(?:-[a-z0-9]+)+:[a-z][a-z0-9-]*$`).test(value)))fail();
+  const cloudSql=cloudRunCloudSqlVolumeConfig(sqlNames);
   return {
     ingress: !worker && input.publicAccess ? 'INGRESS_TRAFFIC_ALL' : 'INGRESS_TRAFFIC_INTERNAL_ONLY', invokerIamDisabled: false,
     ...(bounds ? { scaling: { scalingMode: 'AUTOMATIC', minInstanceCount: bounds.min, maxInstanceCount: bounds.max } } : {}),
     template: { serviceAccount: input.serviceAccountEmail, executionEnvironment: 'EXECUTION_ENVIRONMENT_GEN2',
       scaling: { minInstanceCount: worker ? 1 : 0, maxInstanceCount: 100 }, timeout: '300s', maxInstanceRequestConcurrency: 80,
-      containers: [{ ports: [{ containerPort: port }], env,
+      ...(cloudSql?{volumes:[cloudSql.volume]}:{}),
+      containers: [{ ports: [{ containerPort: port }], env,...(cloudSql?{volumeMounts:[cloudSql.volumeMount]}:{}),
         ...(input.startCommand ? { command: ['/bin/sh'], args: ['-lc', input.startCommand] } : {}),
         resources: { limits: { cpu, memory }, cpuIdle: !worker, startupCpuBoost: false },
         startupProbe: input.healthCheckPath
@@ -96,7 +108,7 @@ export function gcpObservedPreparedApplicationConfiguration(resource: unknown): 
     || !['INGRESS_TRAFFIC_ALL', 'INGRESS_TRAFFIC_INTERNAL_ONLY'].includes(r.ingress)
     || r.invokerIamDisabled !== undefined && r.invokerIamDisabled !== false
     || !empty(r.customAudiences) || r.iapEnabled !== undefined && r.iapEnabled !== false
-    || !Array.isArray(containers) || containers.length !== 1 || !empty(t.volumes) || !noFields(t.vpcAccess)
+    || !Array.isArray(containers) || containers.length !== 1 || !noFields(t.vpcAccess)
     || t.sessionAffinity !== undefined && t.sessionAffinity !== false || t.healthCheckDisabled !== undefined && t.healthCheckDisabled !== false
     || t.gpuZonalRedundancyDisabled !== undefined && t.gpuZonalRedundancyDisabled !== false
     || t.executionEnvironment !== 'EXECUTION_ENVIRONMENT_GEN2' || t.timeout !== '300s' || t.maxInstanceRequestConcurrency !== 80
@@ -118,7 +130,7 @@ export function gcpObservedPreparedApplicationConfiguration(resource: unknown): 
   }
   const c = object(containers[0]), scaling = object(t.scaling), resources = object(c.resources), limits = object(resources.limits);
   if (!keys(c, ['name', 'image', 'ports', 'env', 'command', 'args', 'resources', 'startupProbe', 'volumeMounts', 'dependsOn'])
-    || !empty(c.volumeMounts) || !empty(c.dependsOn) || !Array.isArray(c.ports) || c.ports.length !== 1
+    || !empty(c.dependsOn) || !Array.isArray(c.ports) || c.ports.length !== 1
     || !keys(object(c.ports[0]), ['name', 'containerPort']) || c.ports[0].name && c.ports[0].name !== 'http1'
     || !keys(scaling, ['minInstanceCount', 'maxInstanceCount']) || ![0, 1].includes(scaling.minInstanceCount ?? 0) || scaling.maxInstanceCount !== 100
     || !keys(resources, ['limits', 'cpuIdle', 'startupCpuBoost']) || !keys(limits, ['cpu', 'memory'])
@@ -160,11 +172,23 @@ export function gcpObservedPreparedApplicationConfiguration(resource: unknown): 
   const env = (c.env ?? []).map((raw: any) => raw.valueSource
     ? { name: raw.name, valueSource: { secretKeyRef: { secret: raw.valueSource.secretKeyRef.secret, version: raw.valueSource.secretKeyRef.version } } }
     : { name: raw.name, value: raw.value ?? '' }).sort((a: any, b: any) => a.name.localeCompare(b.name));
+  let cloudSql:ReturnType<typeof cloudRunCloudSqlVolumeConfig>;
+  if(!empty(t.volumes)||!empty(c.volumeMounts)){
+    if(!Array.isArray(t.volumes)||t.volumes.length!==1||!Array.isArray(c.volumeMounts)||c.volumeMounts.length!==1)fail();
+    const volume=object(t.volumes[0]),mount=object(c.volumeMounts[0]),sql=object(volume.cloudSqlInstance),instances=sql.instances;
+    const sqlProject=String(t.serviceAccount).split('@')[1]?.replace('.iam.gserviceaccount.com','');
+    if(!keys(volume,['name','cloudSqlInstance'])||volume.name!=='cloudsql'||!keys(sql,['instances'])
+      ||!Array.isArray(instances)||!instances.length||instances.length>100||new Set(instances).size!==instances.length
+      ||instances.some(value=>typeof value!=='string'||!new RegExp(`^${sqlProject}:[a-z]+(?:-[a-z0-9]+)+:[a-z][a-z0-9-]*$`).test(value))
+      ||!keys(mount,['name','mountPath'])||mount.name!=='cloudsql'||mount.mountPath!=='/cloudsql')fail();
+    cloudSql=cloudRunCloudSqlVolumeConfig(instances);
+  }
   return { ingress: r.ingress, invokerIamDisabled: false,
     ...(serviceScaling ? { scaling: serviceScaling } : {}),
     template: { serviceAccount: t.serviceAccount, executionEnvironment: 'EXECUTION_ENVIRONMENT_GEN2',
       scaling: { minInstanceCount: worker ? 1 : 0, maxInstanceCount: 100 }, timeout: '300s', maxInstanceRequestConcurrency: 80,
-      containers: [{ ports: [{ containerPort: port }], env,
+      ...(cloudSql?{volumes:[cloudSql.volume]}:{}),
+      containers: [{ ports: [{ containerPort: port }], env,...(cloudSql?{volumeMounts:[cloudSql.volumeMount]}:{}),
         ...(startCommand ? { command: ['/bin/sh'], args: ['-lc', startCommand] } : {}),
         resources: { limits: { cpu: limits.cpu, memory: limits.memory }, cpuIdle: !worker, startupCpuBoost: false },
         startupProbe: healthCheckPath
@@ -175,7 +199,7 @@ export function gcpObservedPreparedApplicationConfiguration(resource: unknown): 
 /** Only the saved explicit metadata action authorizes holding -> final identity.
  * Already transitioned workloads use ordinary preserved-runtime update rules.
  */
-export function gcpPreparedHoldingTransition(connection: CloudDeploymentConnectionV1, environment: Environment, workload: string, native: any) {
+export function gcpPreparedHoldingTransition(connection: CloudDeploymentConnectionV1 | PreparedHostingDescriptor, environment: Environment, workload: string, native: any) {
   const prepared = connection.preparedResources?.workloads.find(item => item.workload === workload);
   if (!prepared) return null;
   const final = connection.runtimeIdentities.find(item => item.workload === workload)?.principal;
@@ -185,7 +209,7 @@ export function gcpPreparedHoldingTransition(connection: CloudDeploymentConnecti
   if (boundImage && boundImage !== prepared.holding.image) throw new Error('A completed Google first release cannot be rearmed.');
   const marker = preparedHostingMarkerSchema.parse(environment.platformBindings.preparedHosting);
   if (marker.installationId !== connection.installationId || marker.planDigest !== connection.planDigest
-    || marker.receiptDigest !== canonicalJsonSha256(connection)
+    || marker.receiptDigest !== ('receiptDigest' in connection ? connection.receiptDigest : canonicalJsonSha256(connection))
     || !marker.pendingFirstRelease.includes(workload) || !marker.firstReleaseConfigurationDigests?.[workload]) throw new Error('Prepared Google rollout authority is unavailable.');
   if (native.generation !== prepared.holding.generation || native.latestReadyRevision !== prepared.holding.revision)
     throw new Error('The original prepared Google revision changed.');
@@ -222,7 +246,8 @@ export function buildGcpPreparedReleaseRuntime(target: BranchDeployTarget): stri
     return { prepared, publicAccess: workload.public === true, runtimeEmail: runtime.serviceAccountEmail, pending,
       configuration, ...(configurationDigest ? { configurationDigest } : {}) };
   });
-  return `${gcpObservedHoldingConfiguration.toString()}
+  return `${cloudRunCloudSqlVolumeConfig.toString()}
+${gcpObservedHoldingConfiguration.toString()}
 ${gcpObservedPreparedApplicationConfiguration.toString()}
 const hvPreparedReleases = ${JSON.stringify(entries)};
 const hvPreparedDigest = value => require('node:crypto').createHash('sha256').update(JSON.stringify(value)).digest('hex');
