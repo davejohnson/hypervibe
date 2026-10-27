@@ -36,7 +36,7 @@ describe('Google operator owner-selected confidential web configuration', () => 
     const file = path.join(directory, 'owner-selected.json'); writeFileSync(file, JSON.stringify(config), { mode: 0o600 });
     const capability = providerRegistry.getOperatorApplication('google-oauth');
     expect(capability, 'Google owner JSON import must be reachable through the real registry').toBeDefined();
-    const nativeScope = capability!.parseDeclaration({ name: 'google', origin, runtimeIdentity: { kind: 'gcp-service-account',
+    const nativeScope = await capability!.parseDeclaration({ name: 'google', origin, runtimeIdentity: { kind: 'gcp-service-account',
       projectId: 'operator-project', projectNumber: '123456789012', serviceAccountEmail: 'operator@operator-project.iam.gserviceaccount.com', serviceAccountUniqueId: '123456789012345678901' },
       declaration: { provider: 'google-oauth', profile: 'hypercloud-connect-v1', originService: 'web', runtimeService: 'web',
         nativeScope: { projectId: 'operator-project', credentialsRef: `file:${file}` }, outputs: { 'client-secret': 'GOOGLE_CLIENT_SECRET' } } });

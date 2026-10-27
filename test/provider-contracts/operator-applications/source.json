@@ -153,7 +153,9 @@
       ],
       "contract": "App names are globally unique and at most 34 characters. Manifest conversion returns 201 and a complete credential bundle. Authenticated App and webhook reads use App JWTs. The native App response does not expose OAuth callback URLs.",
       "limit": "Real serialized transport and RSA signatures with reconstructed responses; loopback manifest acceptance and actual user installation remain live gates."
-    },
+    }
+  ],
+  "supportingSources": [
     {
       "provider": "gcp-secret-manager",
       "reviewedAt": "2026-10-27",
