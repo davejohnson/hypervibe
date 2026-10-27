@@ -144,8 +144,8 @@ describe('read-only credential inventory', () => {
       configurationState: 'resolved', envVarHashes: { ANTHROPIC_API_KEY: hashEnvValue('old-private-value') } });
     const result = await f.read();
     const activation = result.data.roles[0].consumers[0].activation;
-    expect(activation).toMatchObject({ state: 'replacement-deployed', allInstances: coverage === 'instances' ? 'confirmed' : 'unknown', coverage });
-    expect(activation.lastConfirmedAt).toBe(f.observed.observedAt);
+    expect(activation).toMatchObject({ state: coverage === 'instances' ? 'replacement-deployed' : 'pending', allInstances: coverage === 'instances' ? 'confirmed' : 'unknown', coverage });
+    expect(activation.lastConfirmedAt).toBe(coverage === 'instances' ? f.observed.observedAt : null);
   });
 
   it('compares a source to its accepted input while comparing each rendered consumer privately', async () => {
@@ -262,7 +262,9 @@ describe('read-only credential inventory', () => {
     const f = acceptedRole({ verification: true, coverage: 'traffic' });
     const role = (await f.read()).data.roles.find((entry: any) => entry.id === 'role:document-extraction');
     expect(role.consumers[0].activation.allInstances).toBe('unknown');
-    expect(role.nextAction).toContain('hv_health');
+    expect(role.consumers[0].activation.state).toBe('pending');
+    expect(role.nextAction).toContain('provider capability cannot prove');
+    expect(role.nextAction).not.toContain('hv_ci_trigger');
     expect(role.nextAction).toMatch(/revocation.*pending/i);
     expect(role.nextAction).toContain('old-instance retirement');
   });

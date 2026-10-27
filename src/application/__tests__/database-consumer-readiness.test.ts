@@ -14,7 +14,7 @@ import { hashEnvValue, type ObservedState } from '../../domain/ports/observe.por
 // Synthetic application-boundary observations. Independent incident requirement:
 // unchanged raw references and resolved configuration equality do not establish
 // deployed configuration or SQL authentication. Real SCRAM coverage lives in
-// database-authentication.test.ts; these tests do not claim live Railway evidence.
+// database-credential.postgres.test.ts; these tests do not claim live Railway evidence.
 let root: string;
 beforeEach(() => {
   root = mkdtempSync(path.join(tmpdir(), 'hv-db-consumers-'));
@@ -54,6 +54,28 @@ function fixture() {
 }
 
 describe('upstream database credential consumer readiness', () => {
+  it('does not equate an idle cron schedule with known selected deployment activation', async () => {
+    const f = fixture();
+    f.observed.services.forEach(service => { service.deployment = { id: `new-${service.name}`, activeDeploymentIds: [`new-${service.name}`], configurationState: 'resolved', envVarHashes: f.hashes }; });
+    const cron = f.observed.services.find(service => service.name === 'cron')!;
+    cron.config.cronSchedule = '0 * * * *';
+    cron.deployment!.activeDeploymentIds = [];
+    const result = await f.read();
+    expect(result.data.databaseConsumers.find((entry: any) => entry.service === 'cron')).toMatchObject({
+      deployedConfiguration: 'match', oldDeployments: 'unknown', authentication: 'unchecked', applicationOperation: 'unchecked',
+    });
+    expect(result.data.inSync).toBe(false);
+    expect(result.data.runtimeConfiguration.status).toBe('unknown');
+  });
+
+  it.each(['deployment-snapshot', 'runtime-instances'] as const)('reports %s provenance without implying authentication', async evidence => {
+    const f = fixture();
+    f.observed.services.forEach(service => { service.deployment = { id: `new-${service.name}`, activeDeploymentIds: [`new-${service.name}`],
+      configurationState: 'resolved', configurationEvidence: evidence, envVarHashes: f.hashes }; });
+    const result = await f.read();
+    expect(result.data.databaseConsumers.every((entry: any) => entry.deployedConfigurationEvidence === evidence && entry.authentication === 'unchecked')).toBe(true);
+  });
+
   it('requires activation for unchanged references whose current resolved values differ from every deployed consumer', async () => {
     const f = fixture(); const before = f.ctx.repos.environments.findById(f.environment.id);
     const result = await f.read();
@@ -85,11 +107,12 @@ describe('upstream database credential consumer readiness', () => {
     expect(complete.data.databaseConsumers.every((entry: any) => entry.authentication === 'unchecked')).toBe(true);
   });
 
-  it.each(['missing-snapshot', 'missing-drain', 'different-scope', 'duplicate-identity', 'missing-bound-scope', 'unresolved-configured', 'unknown-workload'])('keeps %s evidence unknown rather than current', async failure => {
+  it.each(['missing-snapshot', 'missing-drain', 'traffic-only-coverage', 'different-scope', 'duplicate-identity', 'missing-bound-scope', 'unresolved-configured', 'unknown-workload'])('keeps %s evidence unknown rather than current', async failure => {
     const f = fixture();
     f.observed.services.forEach(service => { service.deployment = { id: `new-${service.name}`, activeDeploymentIds: [`new-${service.name}`], configurationState: 'resolved', envVarHashes: f.hashes }; });
     if (failure === 'missing-snapshot') delete f.observed.services[0].deployment!.envVarHashes;
     if (failure === 'missing-drain') delete f.observed.services[0].deployment!.activeDeploymentIds;
+    if (failure === 'traffic-only-coverage') f.observed.services[0].deployment!.activeDeploymentCoverage = 'traffic';
     if (failure === 'different-scope') f.observed.environmentId = 'staging';
     if (failure === 'duplicate-identity') f.observed.services.push({ ...f.observed.services[0] });
     if (failure === 'missing-bound-scope') f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { projectId: undefined, environmentId: undefined });

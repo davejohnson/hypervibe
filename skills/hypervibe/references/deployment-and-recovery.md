@@ -79,12 +79,44 @@ Keep each affected workload pending until its intended deployment configuration
 is active and older deployments have drained. Unknown provider evidence is not
 proof of completion.
 
-Use `hv_db_verify_auth` with a private `credentialsRef`, the supported application
-driver and intended username/database to test a fresh connection without creating
-access paths. Preserve application connection/TLS settings; administrative access
-does not validate them. Its configured/deployed source label is caller-declared,
-and a successful result does not prove deployment provenance or application use.
-Database names and schemas are distinct. Do not rename either as a credential fix.
+Database authentication belongs to the reviewed credential lifecycle. Its native
+probe verifies the selected replacement, role and database; administrative access
+does not establish application connection settings, runtime provenance or use.
+Separately authorized `hv_db_query` diagnostics can check session identity, but
+its managed connection path may require temporary access authorization. Report
+that evidence separately from application authentication. Database names and
+schemas are distinct. Do not rename either as a credential fix.
+
+Railway database operations do not create public TCP proxies. Existing reachable
+endpoints and cleanup of access recorded by earlier operations remain supported.
+Without a verified private connection or reachable endpoint, report the access
+limitation rather than opening a public port.
+
+If the user explicitly authorizes a private diagnostic connection, an operator
+may use Railway CLI in their own terminal. Check `railway connect --help` for
+`--ssh`, `--project` and `--environment`; older versions require an upgrade.
+The [official CLI v5.27.0 source](https://github.com/railwayapp/cli/blob/v5.27.0/src/commands/connect.rs)
+supports this scoped command without changing the linked project:
+
+```sh
+railway connect '<verified-service-name>' --project '<project-id>' --environment '<environment-id>' --ssh
+```
+
+Independently match the current service name to the exact bound service first:
+this command accepts a name, not a service ID. Always pass `--ssh`; bare
+`connect` may choose a public proxy. Forced SSH errors do not fall back to public
+access. Use the CLI's own authorized session and an already registered local SSH
+key. [First-time key registration](https://docs.railway.com/cli/ssh) is a separate
+access grant, requiring its own authorization. Exit the database client to close
+the local tunnel. No public endpoint is created.
+
+Do not run `--tunnel-only` through agent-captured output: it
+[prints passwords and connection URLs](https://docs.railway.com/cli/connect).
+Keep this operator terminal workflow separate from Hypervibe automation; do not
+collect CLI output, process arguments or connection strings as evidence. A tunnel
+or administrative SQL login does not verify application credentials, deployment
+provenance or operation. This exception authorizes no SQL mutations, credential
+rotation, deployment or other infrastructure changes.
 
 Password rotation requires the dedicated reviewed database credential lifecycle
 through `hv_spec`, `hv_plan scope="credentials"`, and exact confirmed `hv_apply`

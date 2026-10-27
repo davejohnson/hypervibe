@@ -41,6 +41,16 @@ export async function railwayPostgresTemplate(client: GraphQLClient) {
     || !record(service.variables) || !record(service.volumeMounts) || !record(service.deploy)) {
     throw new Error('The official PostgreSQL template has an unsupported service or storage configuration.');
   }
+  // The recorded template has no public networking. The CLI forwards this
+  // opaque scalar verbatim, so reject public endpoints and unreviewed shapes
+  // before templateDeployV2 can create them. Empty endpoint collections declare
+  // no access; private DNS and DATABASE_URL references remain unchanged.
+  if (service.networking !== undefined && (!record(service.networking)
+    || Object.entries(service.networking).some(([key, endpoints]) =>
+      !['tcpProxies', 'serviceDomains', 'customDomains'].includes(key)
+      || !record(endpoints) || Object.keys(endpoints).length !== 0))) {
+    throw new Error('The PostgreSQL template declares public or unreviewed networking. Hypervibe will not create public database access.');
+  }
   const mounts = Object.values(service.volumeMounts);
   if (mounts.length !== 1 || !record(mounts[0]) || !identity(mounts[0].mountPath)) {
     throw new Error('The official PostgreSQL template must declare one persistent data volume.');

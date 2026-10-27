@@ -16,7 +16,7 @@ received the first replacement.
 
 | Registered provider | Actual authentication update | Bound identity and recovery |
 | --- | --- | --- |
-| Railway | PostgreSQL `ALTER ROLE` through the existing temporary access lease; then additive `POSTGRES_PASSWORD` issuer update with `skipDeploys: true`. | Exact project, environment, service, database and SQL session user. Copied aliases must first pass the existing `database-credential-aliases` reviewed plan; authored references remain intact. A fresh password connection recovers uncertain SQL, and exact issuer readback recovers its separate metadata update. |
+| Railway | PostgreSQL `ALTER ROLE` through an existing reachable connection, followed by an additive `POSTGRES_PASSWORD` issuer update with `skipDeploys: true`. Public proxy creation is disabled. | Exact project, environment, service, database and SQL session user. Copied aliases must first pass the existing `database-credential-aliases` reviewed plan; authored references remain intact. A fresh password connection recovers uncertain SQL, and exact issuer readback recovers its separate metadata update. |
 | Supabase | The managed `postgres` owner uses `PATCH /v1/projects/{ref}/database/password`; explicitly bound other roles use their own PostgreSQL session. | Project and organization/region bindings, exact SQL user/database. The replacement is frozen before mutation; an independent fresh connection proves authentication. |
 | Neon | PostgreSQL `ALTER ROLE` for the existing bound role. | Project/account plus branch and endpoint bindings. A supplied frozen password avoids a second API-generated password on retry. Fresh authentication confirms the result. |
 | Cloud SQL | `users.update` sends only the exact user's name and frozen password. | Bound GCP project/instance and database/user. The returned operation and its completion must belong to that project/instance. Operation completion and fresh SQL authentication are separate evidence. |
@@ -37,6 +37,21 @@ connection with the exact database/user, not the application's business operatio
 Railway's authored password references require URI-unreserved password characters;
 Hypervibe's existing base64url generator satisfies that constraint. A replacement
 that would break those references is refused before changing SQL authentication.
+
+Native password probes require a password challenge from the real PostgreSQL
+driver before a completed session can prove the candidate password. This shared
+boundary applies to all eight adapters: `trust`, peer, or certificate-only
+authentication remains unknown, even when the selected user and database match.
+
+Railway's SQL fallback sends a salted SCRAM-SHA-256 verifier instead of the
+plaintext replacement in its bound parameter. Its existing URI-unreserved
+password restriction avoids unsupported SASLprep differences. PostgreSQL accepts
+that verifier independently of the role's `password_encryption` default. The
+verifier can still appear in private server logs; no verifier is returned or
+persisted in Hypervibe's public results. Other providers' SQL fallback paths
+retain their previous encoding; their server-side parameter logging remains a
+separate gap. Provider-native REST/SDK resets and temporary access ownership are
+unchanged.
 
 ## Independent official sources
 
@@ -69,6 +84,25 @@ that would break those references is refused before changing SQL authentication.
 
 ## Executable evidence and limits
 
+The logging/password-challenge regressions use disposable real PostgreSQL with
+`log_statement=all`, unlimited parameter logging, both SCRAM and `trust` access,
+and a role defaulting to MD5 password storage. Six of seven cases failed on the
+pre-fix code; all seven pass after the fix. The independent contracts are
+PostgreSQL 17's [parameter logging](https://www.postgresql.org/docs/17/runtime-config-logging.html),
+[pre-encrypted password handling](https://www.postgresql.org/docs/17/sql-createrole.html),
+[trust authentication](https://www.postgresql.org/docs/17/auth-trust.html), and
+the pinned [REL_17_6 SCRAM implementation](https://github.com/postgres/postgres/blob/REL_17_6/src/common/scram-common.c).
+Three separate shared rollout/readiness regressions failed because traffic
+selection cleared credential deployment requirements; they now retain pending
+work until retirement evidence is sufficient. A private malformed-plan regression
+also exposed decrypted input in a JSON parsing error before the action executor;
+the narrow decoding boundary now returns an authored value-free error. Inventory
+guidance no longer suggests deployment as a remedy for unsupported retirement
+observation. The combined focused run passes 234 tests across 17 files, plus
+TypeScript checking. These checks run in the
+ordinary acceptance suite and do not establish live provider compatibility or
+the cause of the Invoice Perfect incident.
+
 `test/provider-contracts/database-credential-provider-contracts.test.ts` requires
 every registered PostgreSQL provider to implement the port. It exercises real REST
 clients, AWS Query serialization and response parsing using reconstructed official
@@ -82,12 +116,12 @@ old-password rejection, and lost COMMIT recovery. The wire regression first expo
 an unhandled client connection-loss event; the fixed operation now reports unknown
 without crashing. The peer does not execute a real PostgreSQL server.
 
-`src/application/__tests__/database-authentication.test.ts` also runs the native
+`src/adapters/providers/database/__tests__/database-credential.postgres.test.ts` also runs the native
 rotation port against a disposable local PostgreSQL server with SCRAM. It proves
 that editing the configured password leaves authentication unchanged; an actual
 role password update accepts the replacement and rejects the old password for
 new connections, while an existing authenticated session remains usable. The
-seven real-engine tests passed. This checks PostgreSQL behavior independently of
+retained real-engine lifecycle test passes. This checks PostgreSQL behavior independently of
 the synthetic transport fixtures; it does not establish cloud account access.
 
 The initial provider roster and native-update tests failed because the ports and

@@ -1,95 +1,59 @@
 # Database authentication evidence
 
-`hv_db_verify_auth` / `hypervibe db verify auth` opens one fresh connection using
-the exact application configuration resolved privately through `credentialsRef`.
-Provide the expected PostgreSQL username and **database**, plus the explicit
-`node-postgres` driver. A URL or JSON object with `connectionString` and optional
-`ssl`, `options`, `application_name`, `client_encoding`, and
-`enableChannelBinding` is accepted. Certificate material belongs in the private
-JSON input; URL options that read arbitrary certificate files are unsupported.
+Database authentication is an internal verification step of the reviewed
+credential lifecycle: `hv_spec` → `hv_plan scope="credentials"` → `hv_apply`.
+The retained plan owns the database identity, intended replacement and affected
+consumers. Authentication does not need a separate public command.
 
-The command executes fixed identity SQL in a read-only transaction, checks
-`session_user`, `current_user`, and `current_database()`, then closes the session.
-It preserves the application's endpoint, password, TLS and startup options.
-Connection, statement and query deadlines are bounded at five seconds each.
-Unspecified settings cannot silently inherit conflicting `PG*` options from the
-agent process. Unknown drivers, URI identity overrides and unsupported options
-are rejected. There are no provider API calls, credential mutations, alternate
-endpoints, tunnels, firewall rules, proxy creation, or plaintext persistence.
+The native credential probe checks the intended replacement against the bound
+role and database. Provider configuration, deployment activation and drainage,
+application connection compatibility, and application operation are independent
+evidence. Passing an administrative connection check never clears those gaps.
+An explicitly declared `database.applicationDriver: "node-postgres"` can add a
+read-only Railway runtime check after normal activation and retirement. It uses
+existing trusted SSH access, each exact running replica's URL-contained settings,
+and its installed driver. Unsupported extra driver settings remain unknown; a
+password challenge is required before authentication can pass. This optional
+capability creates no access or endpoints and preserves the native two-action
+lifecycle for declarations without it.
 
-For a private reference already available on the credential reader's machine:
+See the [rotation lifecycle](database-password-rotation.md) and
+[provider matrix](../test/provider-contracts/database-password-provider-matrix.json)
+for the registered capabilities, recovery behavior and remaining limitations.
 
-```json
-{
-  "credentialsRef": "env:APP_DATABASE_CONNECTION_CONFIG",
-  "driver": "node-postgres",
-  "expectedUsername": "postgres",
-  "expectedDatabase": "railway",
-  "configurationSource": "configured"
-}
-```
+For separately authorized administrative diagnostics, the existing `hv_db_query`
+can execute a bounded read-only identity query. Its managed connection path may
+create temporary provider access, so obtain the required access authorization
+first and observe cleanup. Its result proves only the selected connection; it
+does not establish the running application's configuration or SQL compatibility.
+Database names and schemas are distinct; `public` is not a database name.
 
-`configurationSource` is caller-declared provenance. Even the value `deployed`
-does not prove that this input came from a running workload. A successful result
-proves a fresh session from this machine with that input, not workload routing,
-old deployment retirement, application queries, or deployed configuration.
-Those layers remain explicitly unchecked. A server `28P01` is an authentication
-rejection; TLS, routing, timeouts, unavailable configuration and other errors
-remain unknown or invalid. Error messages and rejected input values never leave
-this boundary. Re-running the check opens a new session; it makes no recovery
-mutations and does not clear rollout requirements.
-
-The independent contracts are PostgreSQL's
-[SQLSTATE table](https://www.postgresql.org/docs/current/errcodes-appendix.html),
-[session identity functions](https://www.postgresql.org/docs/current/functions-info.html),
-and the exact installed node-postgres client's
-[connection settings](https://node-postgres.com/apis/client) and
-[TLS precedence](https://node-postgres.com/features/ssl). Configuration equality
-and an administrative query are not proofs of application authentication.
-
-## Provider review
-
-All eight managed database providers share this boundary only when the operator
-already possesses a usable, exact node-postgres application configuration.
-Provider-side configuration retrieval, execution in the workload's private
-network, driver substitution, IAM/token refresh, and deployment attestation are
-unsupported by this command. No live provider compatibility is claimed.
-
-| Provider | Native connection distinction and prerequisite |
-| --- | --- |
-| `railway` | [Service references and private networking](https://docs.railway.com/databases/postgresql) differ from external TCP proxy URLs. A private hostname is not replaced with a public proxy. Existing routing is required. |
-| `supabase` | [Direct and pooled connections](https://supabase.com/docs/guides/database/connecting-to-postgres) have distinct endpoints and may use qualified pooler logins. A login rewritten to another session identity is unsupported; a direct administrative URL cannot substitute for the app URL. |
-| `neon` | [Connection strings](https://neon.com/docs/connect/connect-from-any-app) select endpoint, database, role and TLS; pooled and direct endpoints remain distinct. HTTP/WebSocket serverless drivers are unsupported here. |
-| `cloudsql` | [Network path, connector and authentication](https://docs.cloud.google.com/sql/docs/postgres/connection-options) are separate choices. This command does not initialize a connector or acquire IAM credentials. |
-| `rds` | [Public/private VPC reachability](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ConnectToPostgreSQLInstance.html) precedes PostgreSQL authentication. No security-group change or IAM token issuance occurs. |
-| `azure-postgres` | [TLS client settings and CA trust](https://learn.microsoft.com/en-us/azure/postgresql/security/security-tls) must match the app; TLS failure never causes a less strict retry. Entra token issuance is unsupported. |
-| `fly` | [Managed Postgres client configuration](https://fly.io/docs/mpg/client-configuration/) distinguishes pooled and direct URLs and private routing. No WireGuard or proxy setup occurs. |
-| `digitalocean` | [Connection details, SSL and trusted sources](https://docs.digitalocean.com/products/databases/postgresql/how-to/connect/) are required independently. The supplied application target is retained exactly. |
+PostgreSQL's [SQLSTATE table](https://www.postgresql.org/docs/current/errcodes-appendix.html)
+defines `28P01` as invalid password. Its
+[session identity functions](https://www.postgresql.org/docs/current/functions-info.html)
+distinguish the login, active role and selected database. Connection failures
+such as routing, TLS and timeouts remain unknown rather than proving a bad
+password. Existing authenticated sessions are distinct from fresh connections.
 
 ## Regression evidence
 
-The challenged assumption is that valid references plus matching configured
-values establish functioning database credentials. The counterexample keeps
-`DATABASE_URL` and `POSTGRES_DB_URL` references/configuration aligned while an old
-consumer URL fails a **fresh real SCRAM PostgreSQL connection** with `28P01`.
-The initial command-boundary regression failed with `NOT_FOUND` before this
-verification capability existed. It now distinguishes rejected old input from
-authenticated current input and rejects a schema name (`public`) as the expected
-database. TLS failure, malformed private input, unsupported URL overrides and
-the actual MCP/CLI shared result boundary are covered. The PostgreSQL instance
-is disposable and local; no customer database is used.
+`database-credential.postgres.test.ts` preserves the real PostgreSQL lifecycle
+test independently of the removed command. Against a disposable local server
+using SCRAM, changing configured metadata leaves authentication unchanged.
+An actual role password update admits the replacement, rejects the previous
+password on new connections and leaves an existing session usable.
 
-The Railway alignment regression separately failed because the declared
-`POSTGRES_DB_URL` consumer was omitted. It now passes through the real GraphQL
-client, pinned schema and public MCP command. These provider responses are
-synthetic, not a live incident recording. Raw references, deployed configuration,
-SQL authentication and application operation are explicitly distinguished.
-When accepted desired state cannot be read, independent inspection continues
-with database alias coverage explicitly unknown; it neither adopts repository
-edits nor invents missing alias declarations.
+The consumer-readiness and rollout regressions separately exercise stale
+deployment configuration despite matching provider values, partial activation,
+retries and missing drainage. Their synthetic provider observations establish
+orchestration behavior, not live workload authentication compatibility.
 
-Both suites run under ordinary `npm test`. The committed acceptance workflow and
-desired required acceptance command include that suite and type checking; live
-branch-protection enforcement is unverified. Successful local PostgreSQL
-authentication does not certify any provider's network, TLS or application
-operation.
+The public-interface cleanup first failed seven checks against the actual MCP
+tool list, shared CLI registry and presentation coverage. They pass after removal
+of the standalone command, its unused helper and port. Ordinary `npm test`
+includes both the retained PostgreSQL test and these interface checks. The
+committed acceptance workflow and desired required check invoke that suite and
+type checking; live branch-protection enforcement is unverified.
+
+These checks do not prove any provider's live network, TLS, application operation,
+or the cause of the Invoice Perfect incident.

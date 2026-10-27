@@ -92,7 +92,6 @@ const READ_ONLY_COMMANDS = new Set([
   'hv_inspect',
   'hv_logs',
   'hv_health',
-  'hv_db_verify_auth',
   'hv_ci_status',
   'hv_appstore_status',
   'hv_runs',

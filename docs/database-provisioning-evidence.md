@@ -187,3 +187,28 @@ fingerprint. Separate template regressions also reproduced a stale serialized
 pointing at the wrong component references. Both now fail safely or use the
 official default as appropriate. These checks do not establish live URL
 resolution or database authentication.
+
+## Public database access admission
+
+Railway database operations no longer create public TCP proxies. Private-only
+query and migration access returns a value-free limitation with operator SSH
+guidance; existing endpoints and cleanup of earlier owned leases are preserved.
+The recorded official template has empty `networking`. Before `templateDeployV2`,
+Hypervibe rejects public endpoint entries and unknown or malformed networking
+inside that opaque configuration. Private DNS and URL references remain intact.
+
+Two real-client query/migration regressions first failed because they serialized
+`tcpProxyCreate`; they now pass with no provider mutations. Six template
+regressions first failed by sending deployment requests with public or unreviewed
+networking, then passed after admission checks. Fixtures use the pinned official
+GraphQL schema and independently recorded template metadata. These normal
+acceptance tests do not establish live template deployment or CLI tunnel
+compatibility. The operator workflow and secret-output limits are in the
+[installed recovery guidance](../skills/hypervibe/references/deployment-and-recovery.md).
+
+Review also reproduced lost existing-endpoint reuse in migration and credential
+operations after creation was disabled. Both regressions failed, then passed
+with a read-only resolver scoped to the exact component. It preserves the
+configured identity, credentials and connection options, changes only the
+transport address, and leaves runtime URLs and explicit connections intact.
+Synthetic SQL responses in these route tests do not prove authentication.

@@ -72,8 +72,22 @@ export async function railwayHttpFixture(options: {
   const backupSchedules = new Map<string, Array<Record<string, unknown>>>();
   let nextVolumeId = 0;
   const variables = new Map<string, Record<string, string>>();
+  // Official documented `${{ Service.KEY }}` references. Synthetic values are
+  // resolved from independently held service/environment state, never requests.
+  const resolvedVariables = (serviceId: string, environmentId: string, seen = new Set<string>()): Record<string, string> => {
+    const identity = `${serviceId}/${environmentId}`;
+    if (seen.has(identity)) throw new Error('Synthetic reference cycle');
+    const raw = variables.get(identity) ?? {};
+    const cross = Object.fromEntries(Object.entries(raw).map(([key, value]) => [key,
+      value.replace(/\$\{\{\s*([^{}.]+)\.([A-Z_][A-Z0-9_]*)\s*\}\}/g, (token, name: string, source: string) => {
+        const matches = [...services.values()].filter(service => service.name === name.trim() && service.instances.has(environmentId));
+        return matches.length === 1 ? resolvedVariables(matches[0].id, environmentId, new Set([...seen, identity]))[source] ?? token : token;
+      })]));
+    return renderVariables(cross);
+  };
   // Snapshot evidence is deliberately separate from mutable service variables.
-  const deployments = new Map<string, { id: string; projectId: string; environmentId: string; serviceId: string; snapshotId: string }>();
+  const deployments = new Map<string, { id: string; projectId: string; environmentId: string; serviceId: string; snapshotId: string;
+    status?: string; deploymentStopped?: boolean; instances?: Array<{ id: string; status: string }> }>();
   const deploymentSnapshots = new Map<string, { id: string; variables: unknown }>();
   const mutations: Array<{ field: string; args: Record<string, any> }> = [];
   const requests: Array<{ query: string; variables: Record<string, any> }> = [];
@@ -225,6 +239,12 @@ export async function railwayHttpFixture(options: {
     },
     environment: ({ id }) => ({
       ...environments.get(id), projectId: options.environmentProjectId ?? projectId, deletedAt: null,
+      serviceInstances: ({ first, after }: { first?: number; after?: string }) => {
+        const nodes = [...services.values()].flatMap(service => [...service.instances.values()]
+          .filter(instance => instance.environmentId === id).map(instance => ({ ...instance, service: serviceNode(service) })));
+        const start = after ? Number(after) : 0, end = start + Math.min(first ?? 100, options.pageSize ?? 100);
+        return connection(nodes.slice(start, end), end < nodes.length, end < nodes.length ? String(end) : null);
+      },
       volumeInstances: ({ after }: { after?: string }) => {
         const visible = [...volumes.entries()]
           .filter(([volumeId, volume]) => volume.environmentId === id
@@ -248,10 +268,11 @@ export async function railwayHttpFixture(options: {
     },
     variables: ({ serviceId, environmentId, unrendered }) => {
       const raw = variables.get(`${serviceId}/${environmentId}`) ?? {};
-      return options.renderVariableReferences && !unrendered ? renderVariables(raw) : raw;
+      return options.renderVariableReferences && !unrendered ? resolvedVariables(serviceId, environmentId) : raw;
     },
     variablesForServiceDeployment: ({ serviceId, environmentId }) =>
-      renderVariables(variables.get(`${serviceId}/${environmentId}`) ?? {}),
+      options.renderVariableReferences ? resolvedVariables(serviceId, environmentId)
+        : renderVariables(variables.get(`${serviceId}/${environmentId}`) ?? {}),
     deployment: ({ id }) => deployments.get(id) ?? [...services.values()].flatMap(service => [...service.instances.values()]
       .filter(instance => instance.latestDeployment?.id === id).map(instance => ({ id, projectId, environmentId: instance.environmentId, serviceId: service.id, snapshotId: null })))[0],
     deploymentSnapshot: ({ deploymentId }) => deploymentSnapshots.get(deploymentId) ?? null,
@@ -394,7 +415,7 @@ export async function railwayHttpFixture(options: {
     if (options.dropScheduleUpdateResponse && request.query.includes('mutation DailyBackupScheduleUpdate')) {
       throw new TypeError('Synthetic connection reset after schedule update committed');
     }
-    if (options.dropVariableResponse && request.query.includes('mutation UpsertVariables')) {
+    if (options.dropVariableResponse && (request.query.includes('mutation UpsertVariables') || request.query.includes('mutation SynchronizeDatabaseRotationIssuer'))) {
       throw new TypeError('Synthetic connection reset after variable update committed');
     }
     return Response.json(result);

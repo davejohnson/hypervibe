@@ -41,7 +41,6 @@ const COMMAND_PRESENTATION = {
   hv_deploy: { label: 'DEPLOY' },
   hv_rollback: { label: 'ROLLBACK' },
   hv_inspect: { label: 'INSPECT' },
-  hv_db_verify_auth: { label: 'VERIFY DATABASE AUTHENTICATION' },
   hv_import: { label: 'IMPORT' },
   hv_destroy: { label: 'DESTROY' },
   hv_logs: { label: 'LOGS' },
