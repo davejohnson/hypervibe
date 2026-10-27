@@ -109,3 +109,37 @@ The added regression checks that behavior; it required no runtime change.
 Billing continuity uses the independent
 [ProjectBillingInfo read contract](https://docs.cloud.google.com/billing/docs/reference/rest/v1/projects/getBillingInfo);
 these offline results do not establish live publication or deployment.
+
+
+## Terminal operation timestamp recovery
+
+The challenged assumption was that every terminal CreateRepository response
+contains the output-only `createTime`. A read-only `hv_status` on 2026-10-27
+observed a completed operation with the expected type, name, Docker format,
+standard mode and exact owner/attempt description, but no timestamp. Recovery
+stopped before reading the repository. The value-free observed shape is retained
+with the [pinned official contracts](../test/provider-contracts/gcp/artifact-registry/source.json).
+This reproduces the observed pending verification; it does not yet establish the
+repository's full GET identity or successful live recovery.
+
+Both private and public repository recovery now validate the original operation
+and all required ownership/configuration fields, then obtain a missing timestamp
+from a mandatory fresh repository GET. A supplied timestamp must match that GET;
+previously verified lifetimes remain immutable. [ProtoJSON null semantics](https://protobuf.dev/programming-guides/json/#null-values)
+likewise leave the optional operation timestamp unset. Missing or null timestamps
+on the required GET still block verification, as do malformed timestamps,
+conflicting lifetimes and wrong identities. No additional create, adoption,
+journal rewrite or public grant is authorized by this interpretation.
+
+Four serialized-client/application regressions failed before the correction;
+two additional private/public null cases failed before its ProtoJSON correction.
+The application tests recover a pending attempt through real SQLite with the
+same operation and attempt IDs and exactly one create. The complete affected
+two-suite check passed 90 tests before adding the null variants. The final
+focused group passed all 25 native cases and both application recovery cases;
+ordinary TypeScript checking also passed. These checks run in ordinary
+`npm test`, as declared by the acceptance workflow and desired required check;
+live branch-protection enforcement was not inspected. Other registry providers
+in the named matrix retain their own operation contracts. The shared GCP driver
+is the only Artifact Registry Repository operation interpreter found in this
+source audit. Live recovery and the public-helper stage remain separate checks.

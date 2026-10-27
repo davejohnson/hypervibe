@@ -531,7 +531,7 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       expect(JSON.stringify({ reviewed, applied })).not.toContain(token);
     });
 
-  it.each(['normal', 'legacy-binding-repair', 'legacy-binding-source-edit', 'legacy-binding-declaration-removed', 'legacy-binding-stale', 'legacy-binding-conflict', 'legacy-binding-unknown', 'legacy-binding-replaced', 'legacy-api-review', 'legacy-api-pending', 'legacy-api-rejected', 'legacy-api-satisfied', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-disconnected-metadata', 'github-ci-disconnected-metadata-foreign-owner', 'github-ci-legacy-binding-repair', 'github-ci-lost-ack', 'github-ci-rejected-first', 'github-ci-rejected-middle', 'public-registry', 'public-grant-lost-ack', 'public-grant-rejected', 'github-ci-public-registry', 'github-ci-public-registry-prerequisite-drift'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
+  it.each(['normal', 'private-operation-missing-time', 'public-operation-missing-time', 'legacy-binding-repair', 'legacy-binding-source-edit', 'legacy-binding-declaration-removed', 'legacy-binding-stale', 'legacy-binding-conflict', 'legacy-binding-unknown', 'legacy-binding-replaced', 'legacy-api-review', 'legacy-api-pending', 'legacy-api-rejected', 'legacy-api-satisfied', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-disconnected-metadata', 'github-ci-disconnected-metadata-foreign-owner', 'github-ci-legacy-binding-repair', 'github-ci-lost-ack', 'github-ci-rejected-first', 'github-ci-rejected-middle', 'public-registry', 'public-grant-lost-ack', 'public-grant-rejected', 'github-ci-public-registry', 'github-ci-public-registry-prerequisite-drift'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
     const f = fixture(); const allocated = await f.plan(); if ('error' in allocated) throw new Error(allocated.error);
     expect(await f.apply(allocated.planRunId)).toMatchObject({ kind: 'executed', result: { success: true } });
     const desired = structuredClone(f.desired) as any;
@@ -547,6 +547,7 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       f.store.replace(f.project, desired);
     }
     const native = new Map<string, any>(), operations = new Map<string, any>(); let lostCiAck = false; let rejectedCi = false;
+    let registryOperationComplete = !scenario.endsWith('operation-missing-time');
     const unrelated = { role: 'roles/viewer', members: ['user:unrelated@example.invalid'], condition: { title: 'retained', expression: 'true' } };
     const projectPolicy = { version: 3, etag: 'project-etag', bindings: [unrelated] } as any;
     const accountPolicy = { version: 3, etag: 'account-etag', bindings: [] } as any;
@@ -614,11 +615,11 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
           const registry = { name, ...JSON.parse(String(init?.body)), createTime: id === 'hypervibe' ? '2026-10-25T08:30:00Z' : '2026-10-25T08:35:00Z' };
           registries.set(name, registry); writes.push('registry');
           const operation = `projects/${nativeId}/locations/us-central1/operations/registry-${id}`;
-          operations.set(operation, { name: operation, done: true, response: { '@type': 'type.googleapis.com/google.devtools.artifactregistry.v1.Repository', ...registry } });
+          operations.set(operation, { name: operation, done: true, response: { '@type': 'type.googleapis.com/google.devtools.artifactregistry.v1.Repository', ...registry, ...(scenario.endsWith('operation-missing-time') ? { createTime: undefined } : {}) } });
           return Response.json({ name: operation });
         }
         const name = url.pathname.replace('/v1/', '');
-        if (url.pathname.includes('/operations/')) return Response.json(operations.get(name));
+        if (url.pathname.includes('/operations/')) return Response.json(registryOperationComplete ? operations.get(name) : { name, done: false });
         return registries.has(name) ? Response.json(registries.get(name)) : Response.json({}, { status: 404 });
       }
       return base(input, init);
@@ -697,7 +698,21 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
     expect(await f.apply(apiPlan.planRunId, ['gcp:local-scope:services'])).toMatchObject({ kind: 'executed', result: { success: scenario !== 'lost-api-ack' } });
     const registryPlan = await f.plan(); if ('error' in registryPlan) throw new Error(registryPlan.error);
     expect(registryPlan.actions.map(action => action.id)).toEqual(['gcp:local-scope:artifact-registry']);
-    expect(await f.apply(registryPlan.planRunId, ['gcp:local-scope:artifact-registry'])).toMatchObject({ kind: 'executed', result: { success: true } });
+    const missingOperationTime = scenario.endsWith('operation-missing-time');
+    expect(await f.apply(registryPlan.planRunId, ['gcp:local-scope:artifact-registry'])).toMatchObject({ kind: 'executed', result: { success: !missingOperationTime } });
+    if (missingOperationTime) {
+      const nativeId = (f.ctx.repos.runs.findById(registryPlan.planRunId)!.plan as any).cloudScope.installationId;
+      const before = f.ctx.repos.runs.findById(nativeId)!.plan as any;
+      expect(before.attempts).toHaveLength(1);
+      registryOperationComplete = true;
+      const recovery = await f.plan(); if ('error' in recovery) throw new Error(recovery.error);
+      const after = f.ctx.repos.runs.findById(nativeId)!.plan as any;
+      expect(after.status).toBe('scope-ready');
+      expect(after.attempts).toHaveLength(1); expect(after.attempts[0].id).toBe(before.attempts[0].id);
+      expect(after.attempts[0].evidence.native.operationName).toBe(before.attempts[0].evidence.native.operationName);
+      expect(after.attempts[0].evidence.resources[0].identity.createTime).toBe('2026-10-25T08:30:00Z');
+      expect(writes.filter(write => write === 'registry')).toHaveLength(1);
+    }
     if (publicImages) {
       const publicPlan = await f.plan(); if ('error' in publicPlan) throw new Error(publicPlan.error);
       expect(publicPlan.actions.map(action => action.id)).toEqual(['gcp:local-scope:public-artifact-registry', 'gcp:local-scope:public-artifact-reader']);

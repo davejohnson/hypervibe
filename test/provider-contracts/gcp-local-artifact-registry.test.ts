@@ -25,7 +25,7 @@ const intent = { schemaVersion: 1, installationId, customerId: 'app', appId: 'ap
     projectAttemptId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', billingAccountName: 'billingAccounts/ABCDEF-123456-789ABC',
     region: 'us-central1', artifactRepository: 'hypervibe', artifactRepositoryName: repository } };
 
-function fixture(fault?: 'lost-ack' | 'forbidden' | 'collision' | 'operation-error' | 'wrong-operation' | 'replaced' | 'missing-time' | 'operation-replacement' | 'grant-lost-ack' | 'grant-conflict' | 'grant-forbidden' | 'policy-no-etag' | 'private-replacement', declaredLifetime = false, publicRegistry = false) {
+function fixture(fault?: 'lost-ack' | 'forbidden' | 'collision' | 'operation-error' | 'wrong-operation' | 'replaced' | 'missing-time' | 'null-time' | 'operation-missing-time' | 'operation-null-time' | 'operation-malformed-time' | 'operation-replacement' | 'grant-lost-ack' | 'grant-conflict' | 'grant-forbidden' | 'policy-no-etag' | 'private-replacement', declaredLifetime = false, publicRegistry = false) {
   const repository = `projects/local-operator-project/locations/us-central1/repositories/${publicRegistry ? 'operator-public' : 'hypervibe'}`;
   const selectedIntent = publicRegistry ? { ...intent, nativeScope: { ...intent.nativeScope, scopeKind: 'operator-public-artifact-registry-v1', artifactRepositoryCreateTime: '2026-10-25T00:30:00Z', artifactInstallationId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', artifactAttemptId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', publicArtifactRepository: 'operator-public', publicArtifactRepositoryName: repository } } : intent;
   let policy = { version: 3, etag: 'initial-etag', bindings: [{ role: 'roles/artifactregistry.reader', members: ['user:retained@example.test'] }] };
@@ -34,7 +34,7 @@ function fixture(fault?: 'lost-ack' | 'forbidden' | 'collision' | 'operation-err
   const writes: string[] = [];
   const nativeRepository = () => ({ name: repository, format: 'DOCKER', mode: 'STANDARD_REPOSITORY',
     description: `hypervibe:operator-registry:${owner}:${createdAttempt || saved!.attempts.at(-1)!.id}`,
-    ...(fault === 'missing-time' ? {} : { createTime: replace ? '2026-10-25T02:00:00Z' : '2026-10-25T01:00:00Z' }) });
+    ...(fault === 'missing-time' ? {} : { createTime: fault === 'null-time' ? null : replace ? '2026-10-25T02:00:00Z' : '2026-10-25T01:00:00Z' }) });
   const request: typeof fetch = async (input, init = {}) => {
     const url = new URL(String(input)); const method = init.method ?? 'GET';
     expect(new Headers(init.headers).get('authorization')).toBe('Bearer synthetic-user-token');
@@ -79,7 +79,8 @@ function fixture(fault?: 'lost-ack' | 'forbidden' | 'collision' | 'operation-err
     }
     if (url.pathname === '/v1/' + operation) return Response.json({ name: operation, done: true,
       ...(fault === 'operation-error' ? { error: { code: 7, message: 'synthetic-user-token' } } : { response: {
-        '@type': 'type.googleapis.com/google.devtools.artifactregistry.v1.Repository', ...nativeRepository() } }) });
+        '@type': 'type.googleapis.com/google.devtools.artifactregistry.v1.Repository', ...nativeRepository(),
+        ...(fault === 'operation-missing-time' ? { createTime: undefined } : fault === 'operation-null-time' ? { createTime: null } : fault === 'operation-malformed-time' ? { createTime: 'invalid' } : {}) } }) });
     throw new Error('Unexpected reconstructed native request');
   };
   const driver = createGcpLocalArtifactRegistryDriver({ fetch: request, public: publicRegistry } as any);
@@ -124,6 +125,9 @@ describe('reviewed local image repository preparation', () => {
     expect(snapshots.get('repository.proto')).toMatch(/google\.protobuf\.Timestamp create_time = 5\s*\[\(google\.api\.field_behavior\) = OUTPUT_ONLY\]/);
     const create = snapshots.get('service.proto')!.split('rpc CreateRepository(')[1].split('rpc UpdateRepository(')[0];
     expect(create).toContain('response_type: "google.devtools.artifactregistry.v1.Repository"');
+    expect(source.redactedObservations[0]).toMatchObject({ done: true, nameMatched: true, ownerAndAttemptMatched: true,
+      responseType: 'type.googleapis.com/google.devtools.artifactregistry.v1.Repository', createTimePresent: false });
+    expect(source.redactedObservations[0].responseFields).not.toContain('createTime');
   });
   it('requires exact confirmation and records only independently observed native lifetime', async () => {
     const f = fixture(); await f.plan(); await f.apply(false); expect(f.writes).toEqual([]);
@@ -133,6 +137,24 @@ describe('reviewed local image repository preparation', () => {
     await f.recover(); await f.apply(); expect(f.writes).toHaveLength(1);
     expect(JSON.stringify(f.saved())).not.toContain('synthetic-user-token');
   });
+  // The live 2026-10-27 terminal create operation omitted output-only createTime
+  // while retaining type/name/format/mode and the exact owner+attempt marker.
+  // This reconstructed response keeps that observed omission; GET supplies its
+  // independently observed lifetime, which must remain stable after completion.
+  it.each([
+    ['operation-missing-time', false], ['operation-missing-time', true],
+    ['operation-null-time', false], ['operation-null-time', true],
+  ] as const)('recovers %s using exact fresh GET lifetime; public=%s', async (fault, publicRegistry) => {
+    const f = fixture(fault, false, publicRegistry); await f.plan();
+    expect((await f.apply()).status).toBe('scope-ready');
+    const record = f.saved()!;
+    expect(record.attempts[0].evidence?.resources[0].identity.createTime).toBe('2026-10-25T01:00:00Z');
+    expect(record.attempts[0].evidence?.native.operationName).toBe(operation);
+    const before = f.writes.length;
+    await f.recover(); await f.apply(); expect(f.writes).toHaveLength(before);
+    f.replace(); await f.recover();
+    expect(f.saved()?.status).not.toBe('scope-ready'); expect(f.writes).toHaveLength(before);
+  });
   it('recovers a lost acknowledgment only from exact attempt ownership, never a second create', async () => {
     const f = fixture('lost-ack'); await f.plan(); await f.apply(); await f.recover(); await f.apply();
     expect(f.writes).toHaveLength(1); expect(f.saved()?.status).toBe('scope-ready');
@@ -140,7 +162,7 @@ describe('reviewed local image repository preparation', () => {
   it.each(['forbidden', 'collision'] as const)('rejects %s before any create', async fault => {
     const f = fixture(fault); await expect(f.plan()).rejects.toThrow(); expect(f.writes).toEqual([]);
   });
-  it.each(['operation-error', 'wrong-operation', 'missing-time', 'operation-replacement'] as const)('does not complete or blindly resubmit %s', async fault => {
+  it.each(['operation-error', 'wrong-operation', 'missing-time', 'null-time', 'operation-malformed-time', 'operation-replacement'] as const)('does not complete or blindly resubmit %s', async fault => {
     const f = fixture(fault); await f.plan(); await f.apply(); await f.recover(); await f.apply();
     expect(f.saved()?.status).not.toBe('scope-ready'); expect(f.writes).toHaveLength(1);
     expect(JSON.stringify(f.saved())).not.toContain('synthetic-user-token');

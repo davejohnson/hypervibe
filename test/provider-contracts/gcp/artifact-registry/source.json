@@ -14,5 +14,38 @@
       "sha256": "a8d0ec85e55349d51c6b18b55cf1deb1409c129661833e3217373fef99e73ba5"
     }
   ],
-  "extraction": "Full unchanged official protobuf source; tests inspect package/message and CreateRepository response-type declarations. This is not a full REST/protobuf schema validator."
+  "extraction": "Full unchanged official protobuf source; tests inspect package/message and CreateRepository response-type declarations. This is not a full REST/protobuf schema validator.",
+  "redactedObservations": [
+    {
+      "observedAt": "2026-10-27T16:29:41.469Z",
+      "interface": "actual packaged hv_status; retained approved private CreateRepository operation",
+      "transport": "GET exact retained regional Operation returned HTTP 200",
+      "operationNameMatched": true,
+      "done": true,
+      "responseType": "type.googleapis.com/google.devtools.artifactregistry.v1.Repository",
+      "responseFields": [
+        "@type",
+        "description",
+        "format",
+        "mode",
+        "name",
+        "satisfiesPzi",
+        "vulnerabilityScanningConfig"
+      ],
+      "nameMatched": true,
+      "format": "DOCKER",
+      "mode": "STANDARD_REPOSITORY",
+      "ownerAndAttemptMatched": true,
+      "createTimePresent": false,
+      "remoteVirtualOrKmsConfigurationPresent": false,
+      "scope": "Only the allowlisted response shape is retained; native IDs and provider body are omitted. No repository GET had executed because the pre-fix operation check stopped first."
+    }
+  ],
+  "formatContracts": [
+    {
+      "url": "https://protobuf.dev/programming-guides/json/#null-values",
+      "reviewedAt": "2026-10-27",
+      "rule": "A null field parses as unset. The optional operation timestamp may defer to GET; the required GET lifetime remains unproven when absent or null."
+    }
+  ]
 }

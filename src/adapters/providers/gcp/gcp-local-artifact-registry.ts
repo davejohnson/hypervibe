@@ -160,11 +160,16 @@ export function createGcpLocalArtifactRegistryDriver(options: { fetch?: typeof f
     try { return await client.json(`https://artifactregistry.googleapis.com/v1/${names(context.intent).repositoryName}`); }
     catch (error) { if (error instanceof DestinationBoundaryError && error.status === 404) return null; throw error; }
   }
-  function owned(value: Record<string, unknown>, context: ActionContext, attemptId: string, createTime?: string) {
+  function ownedConfiguration(value: Record<string, unknown>, context: ActionContext, attemptId: string) {
     const n = names(context.intent);
     if (value.name !== n.repositoryName || value.format !== 'DOCKER' || value.mode !== 'STANDARD_REPOSITORY'
-      || value.description !== `hypervibe:operator-registry:${n.owner}:${attemptId}` || !z.string().datetime().safeParse(value.createTime).success
-      || createTime && value.createTime !== createTime || value.remoteRepositoryConfig || value.virtualRepositoryConfig || value.kmsKeyName) fail();
+      || value.description !== `hypervibe:operator-registry:${n.owner}:${attemptId}`
+      || value.remoteRepositoryConfig || value.virtualRepositoryConfig || value.kmsKeyName) fail();
+  }
+  function owned(value: Record<string, unknown>, context: ActionContext, attemptId: string, createTime?: string) {
+    const n = names(context.intent);
+    ownedConfiguration(value, context, attemptId);
+    if (!z.string().datetime().safeParse(value.createTime).success || createTime && value.createTime !== createTime) fail();
     return { kind: 'registry', id: n.repositoryName, identity: { owner: n.owner, attemptId, createTime: String(value.createTime) } };
   }
   async function createdPublic(client: GcpSecretWriterClient, context: ActionContext) {
@@ -272,7 +277,14 @@ export function createGcpLocalArtifactRegistryDriver(options: { fetch?: typeof f
           const resource = result.response;
           if (!resource || typeof resource !== 'object' || Array.isArray(resource)
             || (resource as Record<string, unknown>)['@type'] !== 'type.googleapis.com/google.devtools.artifactregistry.v1.Repository') fail('identity_mismatch');
-          verifiedCreateTime = owned(resource as Record<string, unknown>, context, context.attempt.id, verifiedCreateTime).identity.createTime;
+          const repository = resource as Record<string, unknown>;
+          ownedConfiguration(repository, context, context.attempt.id);
+          // A terminal create response may omit this output-only timestamp;
+          // ProtoJSON null also leaves an optional field unset.
+          // Fresh GET must still establish the exact owned lifetime, and any
+          // supplied or previously verified timestamp must agree with that GET.
+          if (repository.createTime !== undefined && repository.createTime !== null)
+            verifiedCreateTime = owned(repository, context, context.attempt.id, verifiedCreateTime).identity.createTime;
         }
         const value = await read(client, context);
         if (!value) return { state: 'pending' as const, reason: 'not_converged' as const };
