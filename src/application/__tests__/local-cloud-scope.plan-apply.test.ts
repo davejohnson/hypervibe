@@ -294,6 +294,62 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       const full = await registry.execute('hv_plan', { project: f.project.name, env: 'staging', scope: 'full' });
       expect(full).toMatchObject({ ok: true, data: { scope: 'cloud-scope', actions: [expect.objectContaining({ id: 'gcp:project' })] } });
     });
+  it('shows the observed billing account name with its immutable ID on fresh and retry command reviews', async () => {
+    // User requirement: people must choose a readable billing account before an
+    // initial attachment. Google BillingAccount.displayName is descriptive; name
+    // is the identity. Renaming a label must neither change that target nor rewrite
+    // the historical approval digest. Native responses below are reconstructed.
+    // https://docs.cloud.google.com/billing/docs/reference/rest/v1/billingAccounts
+    const f = fixture(); const allocated = await f.plan(); if ('error' in allocated) throw new Error(allocated.error);
+    expect(await f.apply(allocated.planRunId)).toMatchObject({ kind: 'executed', result: { success: true } });
+    const account = 'billingAccounts/ABCDEF-123456-789ABC';
+    const desired = structuredClone(f.desired) as any;
+    desired.environments.staging.hosting.scopePreparation.continuation = { nativeScope: {
+      scopeKind: 'operator-hosting-v1', billingAccountName: account,
+    } };
+    f.store.replace(f.project, desired);
+    const base = f.request.getMockImplementation()!;
+    let displayName = 'Studio billing'; let billingWrites = 0;
+    f.request.mockImplementation(async (input, init) => {
+      const url = new URL(String(input)); const method = init?.method ?? 'GET';
+      if (url.pathname.endsWith(':testIamPermissions')) return Response.json({ permissions: [
+        'billing.accounts.get', 'billing.resourceAssociations.create', 'resourcemanager.projects.get',
+        'resourcemanager.projects.createBillingAssignment', 'serviceusage.services.list', 'serviceusage.effectivepolicy.get',
+      ] });
+      if (url.host === 'cloudbilling.googleapis.com') {
+        if (url.pathname === `/v1/${account}`) return Response.json({ name: account, displayName, open: true });
+        expect(url.pathname).toBe(`/v1/projects/${nativeId}/billingInfo`);
+        if (method === 'PUT') {
+          expect(JSON.parse(String(init?.body))).toEqual({ billingAccountName: account });
+          billingWrites++; return new Response(null, { status: 400 });
+        }
+        return Response.json({ name: `projects/${nativeId}/billingInfo`, projectId: nativeId, billingAccountName: '', billingEnabled: false });
+      }
+      return base(input, init);
+    });
+    const registry = new CommandRegistry(); registerCoreTools(registry, f.ctx);
+    const plan = () => registry.execute('hv_plan', { project: f.project.name, env: 'staging' });
+    const assertNamedReview = (result: Awaited<ReturnType<typeof plan>>, label: string) => {
+      expect(result.ok).toBe(true);
+      for (const warnings of [result.warnings, (result.data as any).cloudScopeReview.warnings]) {
+        expect.soft(warnings?.some((warning: string) => warning.includes(label) && warning.includes(account))).toBe(true);
+      }
+    };
+    const first = await plan(); assertNamedReview(first, displayName);
+    const planId = (first.data as any).planId;
+    const installationId = (f.ctx.repos.runs.findById(planId)!.plan as any).cloudScope.installationId;
+    const originalReview = structuredClone((f.ctx.repos.runs.findById(installationId)!.plan as any).plan);
+    expect(billingWrites).toBe(0);
+    expect(await registry.execute('hv_apply', { project: f.project.name, planId,
+      confirmActions: ['gcp:billing:initial-assignment-v1'] })).toMatchObject({ ok: true, data: { applied: false } });
+    displayName = 'Renamed studio billing';
+    const retry = await plan(); assertNamedReview(retry, displayName);
+    expect((f.ctx.repos.runs.findById(installationId)!.plan as any).plan).toEqual(originalReview);
+    expect((retry.data as any).cloudScopeReview.resources).toContainEqual(expect.objectContaining({ kind: 'billing-account', name: account }));
+    expect(billingWrites).toBe(1); expect(f.writes).toHaveLength(1);
+    expect(JSON.stringify({ first, retry, originalReview })).not.toContain(token);
+  });
+
   it.each(['rejected', 'ready', 'project-read-denied', 'project-lifetime-replaced'] as const)('reports the allocated project separately from billing preparation: %s', async scenario => {
     // Independent evidence: Plan Honesty requires stage-specific partial progress;
     // the observed live initial-assignment PUT returned HTTP 400 while a later

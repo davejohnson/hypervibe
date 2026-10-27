@@ -22,17 +22,17 @@ const intent: CloudInstallationIntent = {
     serviceAccountEmail: 'delivery@hosting-project.iam.gserviceaccount.com', subject: '123456789012345678901', issuer: 'https://accounts.google.com' },
 };
 type BillingReply = 'normal' | 'not-found' | 'missing-name' | 'missing-project-id' | 'omitted-defaults' | 'null-defaults';
-function fixture() {
+function fixture(options: { accountDisplayName?: unknown; initiallyLinked?: boolean; legacyAssignment?: boolean } = {}) {
   const records = new Map<string, CloudInstallationRecord>();
   const calls: Array<{ method: string; path: string }> = [];
   let project: Record<string, unknown> | undefined;
-  let billingReply: BillingReply = 'normal'; let finalReadFault = false; let attemptedReads = 0; let linked = false;
+  let billingReply: BillingReply = 'normal'; let finalReadFault = false; let attemptedReads = 0; let linked = options.initiallyLinked ?? false;
   const request: typeof fetch = async (input, init = {}) => {
     const path = new URL(String(input)).pathname; const method = init.method ?? 'GET';
     const body = typeof init.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : {};
     calls.push({ method, path });
     if (path.endsWith(':testIamPermissions')) return Response.json({ permissions: body.permissions });
-    if (path === `/v1/${selectedAccount}`) return Response.json({ name: selectedAccount, open: true });
+    if (path === `/v1/${selectedAccount}`) return Response.json({ name: selectedAccount, open: true, displayName: options.accountDisplayName });
     if (path === '/v3/projects' && method === 'POST') {
       expect(records.get(projectOperationId)?.attempts.at(-1)?.status).toBe('attempted');
       project = { name: 'projects/987654321012', projectId, displayName: 'Sequence', state: 'ACTIVE',
@@ -73,7 +73,9 @@ function fixture() {
   const apply = (record: CloudInstallationRecord) => applyCloudInstallationV1({ ...context, installationId: record.installationId,
     planDigest: record.plan.digest, confirmActions: record.plan.actions.map(action => action.id) });
   const prepareProject = async () => {
-    const record = await apply(await planCloudInstallationV1({ ...context, intent }));
+    const selectedIntent = structuredClone(intent);
+    if (options.legacyAssignment) delete selectedIntent.nativeScope.assignmentMode;
+    const record = await apply(await planCloudInstallationV1({ ...context, intent: selectedIntent }));
     expect(record.status).toBe('scope-ready'); return record;
   };
   const planBilling = (projectRecord: CloudInstallationRecord) => planCloudInstallationContinuationV1({ ...context,
@@ -83,6 +85,39 @@ function fixture() {
 }
 
 describe('independent reviewed initial billing boundary', () => {
+  // BillingAccount.displayName is a human label, independent of its resource name:
+  // https://docs.cloud.google.com/billing/docs/reference/rest/v1/billingAccounts
+  // These serialized responses reconstruct that contract; they are not live evidence.
+  it.each(['initial assignment', 'already linked', 'blocked legacy assignment'] as const)(
+    'keeps the verified billing name and exact account ID in the %s review', async mode => {
+      const f = fixture({ accountDisplayName: 'Studio & Partners', initiallyLinked: mode === 'already linked',
+        legacyAssignment: mode === 'blocked legacy assignment' });
+      const project = await f.prepareProject(); const before = f.calls.length;
+      const plan = await f.planBilling(project);
+      expect(plan.plan.review.warnings).toContain(`Billing account: Studio & Partners (${selectedAccount}).`);
+      expect(plan.intent.nativeScope.billingAccountName).toBe(selectedAccount);
+      expect(plan.plan.actions[0].type).toBe(mode === 'already linked' ? 'noop' : mode === 'initial assignment' ? 'update' : 'create');
+      if (mode === 'blocked legacy assignment') expect(plan.plan.blockedReason).toBe('billing_assignment_unverified');
+      expect(f.calls.slice(before).every(call => call.method === 'GET' || call.path.endsWith(':testIamPermissions'))).toBe(true);
+    });
+
+  it.each([undefined, null, '', '  ', 42, {}, 'x'.repeat(257), 'Studio\nInjected review'])(
+    'retains exact account identity when the optional human label is absent or unsafe (%j)', async accountDisplayName => {
+      const f = fixture({ accountDisplayName });
+      const plan = await f.planBilling(await f.prepareProject());
+      expect(plan.plan.review.warnings).toContain(`Billing account: ${selectedAccount}.`);
+      expect(plan.intent.nativeScope.billingAccountName).toBe(selectedAccount);
+      expect(f.calls.filter(call => call.method === 'PUT')).toHaveLength(0);
+    });
+
+  it.each(['synthetic-admin-token', 'ghp_' + 'a'.repeat(30)])('redacts reflected credentials from a human billing label (%s)', async secret => {
+    const f = fixture({ accountDisplayName: `Studio ${secret}` });
+    const plan = await f.planBilling(await f.prepareProject());
+    expect(plan.plan.review.warnings).toContain(`Billing account: Studio [redacted] (${selectedAccount}).`);
+    expect(JSON.stringify([...f.records.values()])).not.toContain(secret);
+    expect(f.calls.filter(call => call.method === 'PUT')).toHaveLength(0);
+  });
+
   it('does not turn a known project’s missing BillingInfo into an unassociated project during review', async () => {
     const f = fixture(); const project = await f.prepareProject(); f.setReply('not-found');
     await expect(f.planBilling(project)).rejects.toMatchObject({ code: 'provider_error' });

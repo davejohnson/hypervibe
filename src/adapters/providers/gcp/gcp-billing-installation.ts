@@ -5,6 +5,8 @@ import { CloudInstallationBoundaryError, type CloudInstallationAction, type Clou
   type CloudInstallationDriver, type CloudInstallationEvidence, type CloudInstallationObservation,
   type CloudInstallationProviderContext, type CloudInstallationExecutableIntent, type LocalCloudScopePreparationIntent, type CloudInstallationReason } from '../../../domain/ports/cloud-installation.port.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
+import { redactExactValues } from '../../../utils/redact-exact-values.js';
+import { redactSensitiveString } from '../../../utils/redact-sensitive-string.js';
 import { DestinationBoundaryError, DestinationBudget, destinationJson } from '../secret-destination-http.js';
 import { GcpSecretWriterClient, type WriterIamPolicy } from './gcp-secret-writer.client.js';
 
@@ -159,7 +161,7 @@ export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetc
     const n = names(intent); const billing = await knownProjectBilling(client, n.projectId);
     if (billing?.billingAccountName && billing.billingAccountName !== n.billingAccountName) throw new BillingError('ownership_mismatch');
   }
-  async function withClient<T>(context: Context, run: (client: GcpSecretWriterClient, budget: DestinationBudget) => Promise<T>, recovery = false): Promise<T> {
+  async function withClient<T>(context: Context, run: (client: GcpSecretWriterClient, budget: DestinationBudget, token: string) => Promise<T>, recovery = false): Promise<T> {
     const n = names(context.intent); if (!context.authentication.administrator) throw new BillingError('authorization_expired');
     const budget = new DestinationBudget({ signal: context.signal, deadlineMs: 30_000 });
     try {
@@ -172,7 +174,7 @@ export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetc
         || (project.parent ?? 'none') !== n.projectParent || project.labels?.['hv-installation'] !== n.projectOwner.slice(0, 63)
         || project.labels?.['hv-attempt'] !== n.projectAttemptId) throw new BillingError('ownership_mismatch');
       if (!recovery) await verifyBilling(client, context.intent);
-      return await run(client, budget);
+      return await run(client, budget, token);
     } finally { budget.close(); }
   }
   async function account(client: GcpSecretWriterClient, context: Context) {
@@ -334,9 +336,16 @@ export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetc
               'Previously minted tokens expire within 15 minutes; IAM revocation can take time to propagate. Failed or unknown removal remains recoverable.'] } };
         }
         let alreadyLinked = false;
-        await withClient(context, async client => {
+        let billingAccountReview = `Billing account: ${n.billingAccountName}.`;
+        await withClient(context, async (client, _budget, token) => {
           const account = await client.json(`https://cloudbilling.googleapis.com/v1/${n.billingAccountName}`);
           if (account.name !== n.billingAccountName || account.open !== true) throw new BillingError('insufficient_permissions');
+          // A provider label helps the human review; only the exact resource ID
+          // selects the payer. Scrub supplied credentials before formatting it.
+          const displayName = typeof account.displayName === 'string' && account.displayName.length <= 256
+            ? redactSensitiveString(redactExactValues(account.displayName, [token])).trim() : '';
+          if (displayName && !/[\u0000-\u001f\u007f]/u.test(displayName))
+            billingAccountReview = `Billing account: ${displayName} (${n.billingAccountName}).`;
           const billing = await knownProjectBilling(client, n.projectId);
           if (billing?.billingAccountName && billing.billingAccountName !== n.billingAccountName) throw new BillingError('ownership_mismatch');
           alreadyLinked = billing?.billingAccountName === n.billingAccountName && billing.billingEnabled === true;
@@ -357,14 +366,14 @@ export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetc
         if (alreadyLinked) return { actions: [verificationAction(context.intent)], review: { resources: [
           { kind: 'project', name: n.projectId, scope: n.projectParent === 'none' ? 'No organization (observed)' : n.projectParent },
           { kind: 'billing-account', name: n.billingAccountName, scope: `projects/${n.projectNumber}` }],
-          permissions: [], costs: [], warnings: ['The selected billing association already exists. This stage verifies it without any billing or IAM changes.'] } };
+          permissions: [], costs: [], warnings: [billingAccountReview, 'The selected billing association already exists. This stage verifies it without any billing or IAM changes.'] } };
         if (n.assignmentMode === 'initial-reviewed-v1') return { actions: [initialAssignmentAction(context.intent)], review: {
           resources: [{ kind: 'project', name: n.projectId, scope: `${n.projectParent}; projects/${n.projectNumber}; created ${n.projectCreateTime}` },
             { kind: 'billing-account', name: n.billingAccountName, scope: `projects/${n.projectNumber}` }],
           permissions: [{ principal: 'Browser-authorized administrator', scope: `projects/${n.projectNumber}`, actions: rolePermissions.link, purpose: 'installation-verification' },
             { principal: 'Browser-authorized administrator', scope: n.billingAccountName, actions: ['billing.accounts.get', 'billing.resourceAssociations.create'], purpose: 'installation-verification' }],
           costs: [{ resource: n.billingAccountName, description: 'This account will pay for resource usage in the exact newly created project. This step creates no application workloads.', pricingUrl: 'https://cloud.google.com/pricing' }],
-          warnings: ['Reserve this newly created project for this setup and coordinate billing changes with other administrators until it finishes.',
+          warnings: [billingAccountReview, 'Reserve this newly created project for this setup and coordinate billing changes with other administrators until it finishes.',
             'Google’s billing API can replace a concurrent external billing selection after our final check. This review authorizes the selected account for this initial assignment; it is not an atomic link-only operation.',
             'A different account observed before the write is preserved and blocks setup. An uncertain response is recovered by reading, never by automatically repeating the assignment.',
             'Only transient browser authorization is used. This step creates no temporary identities or IAM grants, and stores no administrator credential.'] } };
@@ -375,7 +384,7 @@ export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetc
             { principal: hostedEmail(context.intent), scope: n.account, actions: rolePermissions.impersonator, purpose: 'installation-verification' },
             { principal: 'Browser administrator', scope: n.billingAccountName, actions: ['billing.accounts.getIamPolicy', 'billing.accounts.setIamPolicy'], purpose: 'installation-verification' }],
           costs: [{ resource: n.billingAccountName, description: 'Enable billing for this exact project. Future approved resources can incur charges; this stage creates no paid workloads.', pricingUrl: 'https://cloud.google.com/pricing' }],
-          warnings: ['Automatic attachment is blocked before temporary resources or grants are installed. No verified native guard currently prevents replacing a concurrent billing association when the principal has inherited unlink permission on another account.',
+          warnings: [billingAccountReview, 'Automatic attachment is blocked before temporary resources or grants are installed. No verified native guard currently prevents replacing a concurrent billing association when the principal has inherited unlink permission on another account.',
             'The displayed temporary-principal actions are an unverified candidate and cannot be authorized by confirmation. Selected-account permission probes do not prove absence of permissions on all other accounts.',
             'All temporary project, billing-account and host-impersonation grants are removed after verification. The service account and custom roles remain without these Hypervibe grants.',
             'Partial cleanup stays pending and needs renewed administrator authorization. Previously minted tokens expire within 15 minutes; IAM changes can take time to propagate.',

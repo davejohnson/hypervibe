@@ -223,3 +223,30 @@ creation. No cloud writes occurred. The regression remains in ordinary `npm test
 which the committed acceptance workflow and desired required check execute; live
 branch-protection enforcement was not re-queried for this correction. Previously
 verified package and image bytes do not contain this source correction.
+
+### Billing account names in reviews (2026-10-27)
+
+The challenged assumption was that an opaque billing account ID was enough for
+an informed account choice. Google's [BillingAccount contract](https://docs.cloud.google.com/billing/docs/reference/rest/v1/billingAccounts)
+separately defines `name` as the resource identity and `displayName` as the name
+shown in its console. A selected account whose successful GET includes a human
+name, followed by a review that omits it, is the counterexample.
+
+Fresh attachment, already-linked and blocked billing reviews now identify the
+verified account by its optional human name and exact ID in an existing warning.
+Both local `hv_plan` warning surfaces and the hosted escaped warning renderer
+already consume that field. Missing, malformed, overlong or control-containing
+labels fall back to the ID; exact transient credentials and recognized secret
+patterns are redacted before formatting. No account is selected by its label,
+and actions, scopes, write authority and historical review digests are unchanged.
+Previously saved reviews remain historical; a fresh retry can show a renamed
+account without rewriting the original receipt.
+
+Before the runtime change, 13 reconstructed serialized-provider regressions
+failed on missing review labels, and the application regression failed its four
+fresh/retry public-warning assertions. These checks cover presentation and
+credential redaction, not a successful native billing attachment or the cause
+of the observed quota rejection. They remain in the ordinary `npm test` gate.
+
+The focused billing-provider and application group passed all 89 tests after the
+fix, and `npm run typecheck` passed. No native cloud request was made.
