@@ -179,3 +179,29 @@ by those files.
 GitHub manifest custody, Google owner-import/delivery, native registration and
 the real browser exchanges remain in progress. This slice does not establish
 complete operator onboarding or customer onboarding.
+
+## Private operator custody and callback boundary
+
+Operator credentials use encrypted compare-and-swap records in the existing
+local connection store, scoped to project, environment, installation and exact
+intent digest. These are operator-owned application credentials, not customer
+secret submissions. The public installation journal contains no credential or
+browser code. Browser codes can be consumed once only after the reviewed form
+was issued; the durable conversion-started state is committed before any remote
+exchange. A lost exchange response cannot authorize another exchange. Credentials
+are erased only after every selected output has an immutable delivery receipt.
+
+The GitHub manifest adapter uses a bounded 127.0.0.1 HTTP listener with an exact
+Host check, expiring random launch/state, no-store responses, no external assets
+or browser storage, and a manual GitHub POST form. It stages the callback code
+only in encrypted custody and immediately redirects away from its query string.
+It does not call GitHub or consume the code. An active local MCP process keeps
+the callback available; restart can reopen only the retained port before expiry.
+Native GitHub acceptance of this loopback redirect remains unverified.
+
+The boundary regression first demonstrated acceptance of a code before form
+handoff (RED); the custody state now rejects it (GREEN). Actual HTTP tests verify
+Host/state checks, once-only form delivery and retained-port restart. Actual
+SQLite tests verify encryption, concurrent consumption, source separation,
+delivery acknowledgement retention and final credential erasure. Cloud APIs
+are not called by these checks; they are in ordinary `npm test` acceptance.

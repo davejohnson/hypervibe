@@ -10,12 +10,15 @@ export const operatorApplicationDeclarationSchema = z.object({
   nativeScope: z.record(z.string().min(1).max(100), z.string().min(1).max(2048)),
 }).strict();
 export type OperatorApplicationDeclaration = z.infer<typeof operatorApplicationDeclarationSchema>;
+export interface OperatorApplicationLocalContext {
+  projectId: string; environmentId: string; installationId: string; intentDigest: string;
+}
 export interface OperatorApplicationCapability {
   schemaVersion: 1;
   parseDeclaration(input: { name: string; declaration: OperatorApplicationDeclaration; origin: string;
     runtimeIdentity: CloudDeploymentRuntimeIdentityV1['principal'] }): Record<string, string>;
   parseRecord(value: unknown): CloudInstallationRecord<OperatorApplicationIntent>;
-  create(scope: Record<string, string>): Promise<{ driver: CloudInstallationDriver<OperatorApplicationIntent>; authentication: OperatorApplicationAuthentication }>;
+  create(scope: Record<string, string>, context?: OperatorApplicationLocalContext): Promise<{ driver: CloudInstallationDriver<OperatorApplicationIntent>; authentication: OperatorApplicationAuthentication }>;
   receipts(record: CloudInstallationRecord<OperatorApplicationIntent>): Array<Record<string, string>>;
 }
 export const OPERATOR_APPLICATION_OPERATION = 'operatorApplicationRegistration';

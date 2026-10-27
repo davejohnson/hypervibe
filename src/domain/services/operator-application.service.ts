@@ -59,7 +59,8 @@ async function context(project: Project, environment: Environment, name: string,
   authorize: () => boolean = () => true): Promise<CloudInstallationContext<OperatorApplicationIntent>> {
   const capability = providerRegistry.getOperatorApplication(intent.applicationProvider);
   if (!capability || intent.customerId !== project.id || intent.appId !== project.id || intent.environment !== environment.name) throw operatorApplicationUnavailable();
-  return { ...await capability.create(intent.nativeScope), store: journal(project, environment, name),
+  return { ...await capability.create(intent.nativeScope, { projectId: project.id, environmentId: environment.id,
+    installationId: intent.installationId, intentDigest: canonicalJsonSha256(intent) }), store: journal(project, environment, name),
     authorize: async input => {
       const fresh = new EnvironmentRepository().findById(environment.id);
       return !!fresh && fresh.projectId === project.id && fresh.name === environment.name && authorize() && isDeepStrictEqual(input.intent, intent)
