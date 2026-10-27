@@ -43,6 +43,10 @@ describe('operator manifest private HTTP boundary', () => {
     const response = await fetch(callback, { redirect: 'manual' }); expect(response.status).toBe(303);
     expect(response.headers.get('location')).toBe('/done'); expect(await response.text()).not.toContain('synthetic-manifest-code');
     expect(f.store.read()!.state).toMatchObject({ phase: 'code-staged', code: 'synthetic-manifest-code' });
+    const retainedCipher = f.store.read()!.cipher;
+    expect((await fetch(callback, { redirect: 'manual' })).status).toBe(303);
+    expect(f.store.read()!.cipher).toBe(retainedCipher);
+    callback.searchParams.set('code', 'different-synthetic-code'); expect((await fetch(callback, { redirect: 'manual' })).status).toBe(403);
     expect((await fetch(f.listener.url)).status).toBe(409);
   });
   it('can resume only the same retained listener address after a process restart', async () => {

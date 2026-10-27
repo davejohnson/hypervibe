@@ -33,6 +33,10 @@ describe('private operator credential custody', () => {
     const first = restarted.consumeCode(staged), second = f.store.consumeCode(staged);
     expect(first).toEqual({ code: 'synthetic-one-time-manifest-code' }); expect(second).toBeNull();
     expect(restarted.read()!.state).toMatchObject({ phase: 'conversion-started' }); expect(restarted.read()!.state).not.toHaveProperty('code');
+    const consumed = restarted.read()!;
+    expect(restarted.stageCode(consumed, 's'.repeat(43), 'synthetic-one-time-manifest-code')).toBe(true);
+    expect(restarted.stageCode(consumed, 's'.repeat(43), 'synthetic-different-code')).toBe(false);
+    expect(restarted.consumeCode(consumed)).toBeNull(); expect(restarted.read()!.cipher).toBe(consumed.cipher);
   });
   it('rejects wrong state, expired callbacks and changed source authority without changing custody', () => {
     const f = fixture(), started = f.store.createBrowser({ attemptId: randomUUID(), expiresAt: new Date(Date.now() + 60_000).toISOString(), state: 's'.repeat(43), launch: 'l'.repeat(43) });

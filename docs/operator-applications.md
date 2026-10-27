@@ -313,6 +313,12 @@ another conversion. The checksum test uses an independent standard known-answer
 vector; the combined transport fixture uses the separately maintained AWS SDK
 CRC implementation for reconstructed Google responses.
 
+A lost local callback acknowledgement previously returned 403 when the owner
+retried the same callback (observed RED). The exact retained state and private
+code fingerprint now acknowledge the same receipt without another state write
+or code consumption (GREEN); changed codes remain rejected. The fingerprint
+stays inside encrypted private custody and is erased with the browser state.
+
 REST App metadata does not expose OAuth callback URLs. Receipts keep callback
 verification explicitly unverified until the actual browser exchange. Native
 GitHub acceptance of the loopback manifest redirect, real owner approval,
