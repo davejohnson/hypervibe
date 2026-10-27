@@ -176,7 +176,7 @@ function parseActions<I extends CloudInstallationExecutableIntent = CloudInstall
       || !['scope', 'identity', 'trust', 'verification'].includes(action.metadata.category)
       || !['create', 'update', 'noop'].includes(action.type))) throw new Error();
     if (applicationIntent(intent) && actions.some(action => !['create', 'update', 'noop'].includes(action.type)
-      || !['identity', 'trust', 'verification', 'secret-container'].includes(action.metadata.category))) throw new Error();
+      || !['scope', 'identity', 'trust', 'verification', 'secret-container'].includes(action.metadata.category))) throw new Error();
     for (const action of actions) {
       if (action.resource.provider !== intent.provider || (!action.verified && !blockedReason) || (action.type !== 'noop' && action.requiresConfirm !== true)) throw new Error();
       if (intent.mode === 'disconnect' && action.type !== 'noop' && (action.metadata.category !== 'trust' || !['update', 'destroy'].includes(action.type))) throw new Error();

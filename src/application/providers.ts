@@ -55,3 +55,4 @@ registerProviderImport('railway', importRailwayProvider);
 
 // Operator browser applications have separate registration authority.
 import '../adapters/providers/entra/entra-operator-application.js';
+import '../adapters/providers/gcp/gcp-operator-recaptcha.js';
