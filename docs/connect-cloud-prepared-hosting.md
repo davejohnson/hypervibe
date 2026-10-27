@@ -303,3 +303,18 @@ therefore lead to another dispatch after restart, particularly with
 `forceRelease`. The new ECS tests establish no acceptance or writes during
 replanning, not replay-safe later dispatch. This shared CI gap must be repaired
 and tested before claiming the full first-release lifecycle complete.
+
+Independent review found that task `entryPoint` and `healthCheck` overrides could
+survive the bootstrap image replacement and execute with final application
+authority. AWS documents both fields as executable container configuration in
+[ContainerDefinition](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_ContainerDefinition.html).
+Four emitted-native cases failed before restriction (unsafe bootstrap and final
+readback for both fields). Ten additional initial-bootstrap cases failed for
+user, working directory, privilege, Linux capabilities, hosts, system controls,
+security options, limits, credential specifications and FireLens configuration.
+Initial bootstrap validation now rejects those unreviewed inherited overrides;
+empty lists and false native boolean defaults remain allowed. This does not
+remove reviewed settings from ordinary existing local-key workloads. Final
+installed release verification independently rejects executable entry-point or
+health-command drift. The remaining shared CI recovery prerequisite above is
+unchanged.

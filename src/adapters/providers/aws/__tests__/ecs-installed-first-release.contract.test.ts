@@ -11,7 +11,7 @@ import '../ecs-express.adapter.js';
 // first runtime values must be attached with the exact image, never its bootstrap.
 // https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RegisterTaskDefinition.html
 // https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_UpdateExpressGatewayService.html
-function fixture(options: { replacement?: boolean; missingSecret?: boolean; unsafeBootstrap?: boolean; wrongCommand?: boolean; wrongEnvironment?: boolean; wrongExecutionRole?: boolean; unexpectedMount?: boolean; unexpectedVolume?: boolean; extraContainer?: boolean; environmentValue?: string } = {}) {
+function fixture(options: { replacement?: boolean; missingSecret?: boolean; unsafeBootstrap?: boolean; wrongCommand?: boolean; wrongEnvironment?: boolean; wrongExecutionRole?: boolean; unexpectedMount?: boolean; unexpectedVolume?: boolean; extraContainer?: boolean; unexpectedEntryPoint?: boolean; unexpectedHealthCheck?: boolean; finalEntryPoint?: boolean; finalHealthCheck?: boolean; environmentValue?: string; unsafeOverride?: { field: string; value: unknown } } = {}) {
   const target = brokerTarget(), connection = target.deploymentAccess!.connection;
   const secretArn = 'arn:aws:secretsmanager:us-west-2:123456789012:secret:api-AbCdEf', version = 'd'.repeat(32);
   connection.deployment.workloads[0].runtimeSecrets = [{ key: 'API_KEY', reference: {
@@ -27,6 +27,9 @@ function fixture(options: { replacement?: boolean; missingSecret?: boolean; unsa
       command: ['node', '-e', "require('http').createServer((_,res)=>{res.writeHead(200);res.end('hypervibe bootstrap')}).listen(8080)"],
       portMappings: [{ name: 'http', containerPort: 8080, protocol: 'tcp' }], environment: [],
       secrets: options.unsafeBootstrap ? [{ name: 'API_KEY', valueFrom: secretArn + ':::' + version }] : [] }] };
+  if (options.unsafeOverride) bootstrap.containerDefinitions[0][options.unsafeOverride.field] = options.unsafeOverride.value;
+  if (options.unexpectedEntryPoint) bootstrap.containerDefinitions[0].entryPoint = ['sh', '-lc', 'echo unexpected'];
+  if (options.unexpectedHealthCheck) bootstrap.containerDefinitions[0].healthCheck = { command: ['CMD-SHELL', 'echo unexpected'], interval: 30, timeout: 5, retries: 3 };
   if (options.unexpectedMount) bootstrap.containerDefinitions[0].mountPoints = [{ sourceVolume: 'unexpected', containerPath: '/data' }];
   if (options.unexpectedVolume) bootstrap.volumes = [{ name: 'unexpected', efsVolumeConfiguration: { fileSystemId: 'fs-12345678' } }];
   if (options.extraContainer) bootstrap.containerDefinitions.push({ name: 'sidecar', image: 'example/sidecar:latest' });
@@ -49,6 +52,8 @@ function fixture(options: { replacement?: boolean; missingSecret?: boolean; unsa
       result = { taskDefinition: registered };
     } else if (operation === 'UpdateExpressGatewayService') {
       selected = structuredClone(registered);
+      if (options.finalEntryPoint) selected.containerDefinitions[0].entryPoint = ['sh', '-lc', 'echo unexpected'];
+      if (options.finalHealthCheck) selected.containerDefinitions[0].healthCheck = { command: ['CMD-SHELL', 'echo unexpected'], interval: 30, timeout: 5, retries: 3 };
       if (options.missingSecret) selected.containerDefinitions[0].secrets = [];
       if (options.wrongCommand) selected.containerDefinitions[0].command = ['node', 'unexpected.js'];
       if (options.wrongEnvironment) selected.containerDefinitions[0].environment = (selected.containerDefinitions[0].environment as any[]).filter(item => item.name !== 'NODE_ENV') as never[];
@@ -92,11 +97,25 @@ describe('installed ECS first exact-image release', () => {
     const registration = changed.calls.find(call => call.operation === 'RegisterTaskDefinition')!.body;
     expect(registration.containerDefinitions[0].environment).toContainEqual({ name: 'NODE_ENV', value: 'reviewed-next-value' });
   });
-  it.each([{ replacement: true }, { unsafeBootstrap: true }, { wrongExecutionRole: true }, { unexpectedMount: true }, { unexpectedVolume: true }, { extraContainer: true }])('blocks changed or unsafe bootstrap before release: %j', async options => {
+  it.each([['entryPoint', []], ['privileged', false], ['readonlyRootFilesystem', false], ['systemControls', []]])('accepts documented empty/false bootstrap default %s', async (field, value) => {
+    const f = fixture({ unsafeOverride: { field: String(field), value } }); await f.run();
+    expect(f.calls.filter(call => call.operation === 'UpdateExpressGatewayService')).toHaveLength(1);
+  });
+  it.each([
+    ['user', '0'], ['workingDirectory', '/unexpected'], ['privileged', true],
+    ['linuxParameters', { capabilities: { add: ['SYS_PTRACE'] } }], ['extraHosts', [{ hostname: 'secrets.example.test', ipAddress: '127.0.0.1' }]],
+    ['systemControls', [{ namespace: 'net.ipv4.ip_local_port_range', value: '1024 65000' }]],
+    ['dockerSecurityOptions', ['credentialspec:unexpected']], ['ulimits', [{ name: 'nofile', softLimit: 1, hardLimit: 1 }]],
+    ['credentialSpecs', ['credentialspec:unexpected']], ['firelensConfiguration', { type: 'fluentbit', options: { 'config-file-type': 'file', 'config-file-value': '/unexpected' } }],
+  ])('rejects unreviewed bootstrap override %s before registering the final task', async (field, value) => {
+    const f = fixture({ unsafeOverride: { field: String(field), value } }); await expect(f.run()).rejects.toThrow();
+    expect(f.calls.some(call => ['RegisterTaskDefinition', 'UpdateExpressGatewayService'].includes(call.operation))).toBe(false);
+  });
+  it.each([{ replacement: true }, { unsafeBootstrap: true }, { wrongExecutionRole: true }, { unexpectedMount: true }, { unexpectedVolume: true }, { extraContainer: true }, { unexpectedEntryPoint: true }, { unexpectedHealthCheck: true }])('blocks changed or unsafe bootstrap before release: %j', async options => {
     const f = fixture(options); await expect(f.run()).rejects.toThrow();
     expect(f.calls.some(call => ['RegisterTaskDefinition', 'UpdateExpressGatewayService'].includes(call.operation))).toBe(false);
   });
-  it.each([{ missingSecret: true }, { wrongCommand: true }, { wrongEnvironment: true }])('cannot report success when native final configuration drifts: %j', async options => {
+  it.each([{ missingSecret: true }, { wrongCommand: true }, { wrongEnvironment: true }, { finalEntryPoint: true }, { finalHealthCheck: true }])('cannot report success when native final configuration drifts: %j', async options => {
     const f = fixture(options); await expect(f.run()).rejects.toThrow();
     expect(f.outputs).toEqual([]);
   });

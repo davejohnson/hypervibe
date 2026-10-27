@@ -14,9 +14,14 @@ export function ecsInstalledBootstrapConfiguration(container: any, taskRoleArn: 
       && [undefined, 'tcp'].includes(container.portMappings[0].protocol))
     && JSON.stringify(container.command) === JSON.stringify(ECS_BOOTSTRAP_COMMAND)
     && taskRoleArn === undefined
-    && [container.environment, container.secrets, container.environmentFiles, container.logConfiguration?.secretOptions, container.mountPoints, container.volumesFrom]
+    && [container.environment, container.secrets, container.environmentFiles, container.logConfiguration?.secretOptions, container.mountPoints, container.volumesFrom,
+      container.entryPoint, container.extraHosts, container.systemControls, container.dockerSecurityOptions, container.ulimits,
+      container.credentialSpecs, container.dependsOn, container.links, container.dnsServers, container.dnsSearchDomains]
       .every(entries => entries === undefined || Array.isArray(entries) && entries.length === 0)
-    && container.repositoryCredentials === undefined);
+    && [container.repositoryCredentials, container.healthCheck, container.user, container.workingDirectory, container.linuxParameters,
+      container.firelensConfiguration, container.hostname].every(value => value === undefined)
+    && [container.privileged, container.disableNetworking, container.interactive, container.pseudoTerminal, container.readonlyRootFilesystem]
+      .every(value => value === undefined || value === false));
 }
 export function ecsInstalledBootstrapTask(task: any): boolean {
   return Boolean(task && task.status === 'ACTIVE' && task.networkMode === 'awsvpc'
@@ -84,6 +89,8 @@ export function ecsInstalledFinalConfiguration(runtime: any, expected: any, veri
   const executionRoleArn = runtime.definition?.executionRoleArn ?? runtime.executionRoleArn;
   const secrets = runtime.container?.secrets ?? [];
   if (runtime.taskRoleArn !== expected.taskRoleArn || executionRoleArn !== expected.executionRoleArn
+    || runtime.container?.healthCheck !== undefined
+    || runtime.container?.entryPoint !== undefined && (!Array.isArray(runtime.container.entryPoint) || runtime.container.entryPoint.length > 0)
     || !Array.isArray(secrets) || secrets.length !== expected.secrets.length
     || expected.secrets.some((item: any) => secrets.filter((actual: any) => actual.name === item.name && actual.valueFrom === item.valueFrom).length !== 1)
     || (runtime.container.environment ?? []).some((item: any) => expected.secrets.some((secret: any) => item.name === secret.name))) {
