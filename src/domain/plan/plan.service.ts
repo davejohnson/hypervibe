@@ -1,3 +1,4 @@
+import { operatorApplicationWorkRequired, planOperatorApplications, operatorApplicationUnavailable } from '../services/operator-application.service.js';
 import { observeRecoveryRuntime, planRecoveryRuntime } from '../services/recovery-runtime.service.js';
 import { observeRuntimeAccess, planRuntimeAccess, projectRuntimeAccessInput } from '../services/runtime-access.service.js';
 import { credentialSourceInputKeys } from '../services/accepted-credential-inputs.js';
@@ -180,7 +181,7 @@ export interface EnvironmentPlan {
   webhookReadiness?: WebhookReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
-  scope: 'full' | 'credentials' | 'secrets' | 'database-credential-aliases' | 'secret-destinations' | 'cloud-scope' | 'operator-artifacts' | 'hosting-preparation' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'hosting-prepared-bindings' | 'service-volumes' | 'runtime-access' | 'backup-runtime' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
+  scope: 'full' | 'credentials' | 'secrets' | 'database-credential-aliases' | 'secret-destinations' | 'cloud-scope' | 'operator-artifacts' | 'operator-applications' | 'hosting-preparation' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'hosting-prepared-bindings' | 'service-volumes' | 'runtime-access' | 'backup-runtime' | 'database-checkpoint' | 'database-bindings' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
   backupReadiness?: BackupReadiness;
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
@@ -1787,6 +1788,22 @@ export class PlanService {
           unmanaged: [], warnings: holding.warnings, inputRequired: [], blocked: [] };
       }
     } catch { return { error: 'Holding preparation requires its exact reviewed local project scope, published holding image and retained native identity; no application deployment is authorized.' }; }
+    try {
+      if (scope !== 'full' && await operatorApplicationWorkRequired(project, environmentName, specResult.spec))
+        return { error: 'Run hv_plan with scope=full to recover operator application registration before narrower work.' };
+      const registration = scope === 'full' ? await planOperatorApplications({ project, environmentName, specResult, options }) : undefined;
+      if (registration) {
+        const document: PlanRunDocument = { kind: 'hv_plan', scope: 'operator-applications', environmentName,
+          specRevision: specResult.revision, observedFingerprint: null, actions: registration.actions,
+          applicationRegistration: registration.applicationRegistration, warnings: registration.warnings };
+        planRunDocumentSchema.parse(document);
+        const run = this.runRepo.create({ projectId: project.id, environmentId: registration.environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
+        this.runRepo.updateStatus(run.id, 'succeeded');
+        return { planRunId: run.id, scope: 'operator-applications', specRevision: specResult.revision, environmentName,
+          verified: true, observed: null, actions: registration.actions, cloudScopeReview: registration.review,
+          unmanaged: [], warnings: registration.warnings, inputRequired: [], blocked: [] };
+      }
+    } catch { return { error: operatorApplicationUnavailable().message }; }
     const providerValidation = firstProviderSpecValidationFailure(specResult.spec);
     if (providerValidation) {
       return { error: providerValidation.message };

@@ -526,13 +526,14 @@ export function reconcileCloudInstallationV1<I extends CloudInstallationExecutab
   return execute({ ...input, confirmActions: [] }, true);
 }
 
-/** Fresh authority review for exact rejected local continuation attempts; never mutates or rewrites their history. */
-export async function reviewCloudInstallationRetryV1(input: CloudInstallationContext<LocalCloudScopePreparationIntent> & {
+/** Fresh authority review for exact rejected local operations; never mutates or rewrites their history. */
+export async function reviewCloudInstallationRetryV1<I extends LocalCloudScopePreparationIntent | OperatorApplicationIntent>(input: CloudInstallationContext<I> & {
   installationId: string; planDigest: string;
 }): Promise<{ retryActions: Array<{ actionId: string; attemptId: string }>; review: CloudInstallationRecord['plan']['review'] }> {
   const record = await read(input, input.installationId);
   if (!record || record.plan.digest !== input.planDigest || record.plan.blockedReason
-    || !(record.intent.predecessor && input.driver.localScopePreparation?.continuation || input.driver.localScopePreparation?.preparation === 'holding-v1'))
+    || !(record.intent.predecessor && input.driver.localScopePreparation?.continuation || input.driver.localScopePreparation?.preparation === 'holding-v1'
+      || applicationIntent(record.intent) && input.driver.operatorApplication))
     throw new CloudInstallationError('scope_mismatch');
   const pending = record.plan.actions.filter(action => !record.completed[action.id]).map(action =>
     record.attempts.filter(attempt => attempt.actionId === action.id).at(-1)).filter(attempt => !!attempt);

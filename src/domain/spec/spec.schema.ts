@@ -1,6 +1,7 @@
 import { credentialTrackingSchema } from './credential.schema.js';
 import { z } from 'zod';
 import { operatorArtifactDeclarationSchema } from '../ports/operator-artifact.port.js';
+import { operatorApplicationDeclarationSchema } from '../ports/operator-application.port.js';
 import { secretDestinationSchema, runtimeSecretReferenceSchema, secretDestinationIdentity } from '../ports/secret-destination.port.js';
 import { parse as parseDomain } from 'tldts';
 import { isReservedRuntimeEnvKey, RESERVED_RUNTIME_ENV_ERROR } from '../services/runtime-env-policy.js';
@@ -1620,6 +1621,7 @@ export const secretDestinationBindingSchema = z.object({
 export const environmentSpecSchema = z.object({
   /** Operator release assets; target, content and public-read changes are separately reviewed. */
   operatorArtifacts: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,62}$/), operatorArtifactDeclarationSchema).optional(),
+  operatorApplications: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,62}$/), operatorApplicationDeclarationSchema).optional(),
   hosting: z.object({
     /** Hosting provider name; validated against the adapter registry at spec_set time. */
     provider: z.string().min(1),

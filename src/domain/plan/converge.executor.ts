@@ -1,3 +1,4 @@
+import { OPERATOR_APPLICATION_OPERATION, isOperatorApplicationAction, operatorApplicationPlanSchema } from '../ports/operator-application.port.js';
 import { isRecoveryRuntimeAction } from '../services/recovery-runtime.service.js';
 import { isRuntimeAccessAction } from '../services/runtime-access.service.js';
 import { DATABASE_PASSWORD_OPERATIONS, isDatabasePasswordPlan } from './database-password-plan.contract.js';
@@ -231,6 +232,7 @@ export const planRunDocumentSchema = z.object({
     'secret-destinations',
     'cloud-scope',
     'operator-artifacts',
+    'operator-applications',
     'hosting-preparation',
     'credentials',
     'api-policy',
@@ -254,6 +256,7 @@ export const planRunDocumentSchema = z.object({
   environmentName: z.string().min(1),
   cloudScope: localCloudScopePlanSchema.optional(),
   artifactPublication: operatorArtifactPlanSchema.optional(),
+  applicationRegistration: operatorApplicationPlanSchema.optional(),
   holdingPreparation: localHoldingPlanSchema.optional(),
   databaseCredentialAliasesReady: z.boolean().optional(),
   databaseCredentialAliasesVerification: databaseCredentialAliasesMetadataSchema.optional(),
@@ -279,6 +282,18 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'operator-applications') {
+    const proof = document.applicationRegistration;
+    if (!proof || !document.actions.length || document.actions.length > 100
+      || document.actions.some(action => !isOperatorApplicationAction(action)
+        || !isDeepStrictEqual(Object.fromEntries(Object.keys(proof).map(key => [key, action.metadata?.[key]])), proof))
+      || document.cloudScope || document.artifactPublication || document.holdingPreparation || document.overrides || document.inputRequired?.length
+      || document.sourceCommitSha || document.integrationFingerprints || document.lockEnvironmentIds?.length || document.observedFingerprint !== null)
+      ctx.addIssue({ code: 'custom', message: 'Operator registration requires exact isolated actions without deployment inputs.' });
+    return;
+  }
+  if (document.applicationRegistration || document.actions.some(action => action.metadata?.operation === OPERATOR_APPLICATION_OPERATION))
+    ctx.addIssue({ code: 'custom', message: 'Operator registration requires its isolated stage.' });
   if (document.scope === 'hosting-preparation') {
     const proof = document.holdingPreparation;
     if (!proof || !document.actions.length || document.actions.length > 100

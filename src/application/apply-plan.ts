@@ -1,3 +1,4 @@
+import { applyOperatorApplications, operatorApplicationUnavailable } from '../domain/services/operator-application.service.js';
 import { applyRecoveryRuntimeAction } from '../domain/services/recovery-runtime.service.js';
 import { applyRuntimeAccessAction, observeRuntimeAccess, planRuntimeAccess, projectRuntimeAccessInput } from '../domain/services/runtime-access.service.js';
 import { applyCredentialLifecycle, pendingCredentialUpdate } from '../domain/services/credential-lifecycle.service.js';
@@ -832,12 +833,22 @@ export async function executePlanApply(ctx: CommandContext, params: {
     // A historical allocation may need recovery after the current provider
     // changes. This routing hint permits parsing only, never action authority.
     const saved = ctx.repos.runs.findById(planId);
-    if (saved?.type !== 'plan' || saved.projectId !== project.id || !['cloud-scope', 'operator-artifacts', 'hosting-preparation'].includes(String(asRecord(saved.plan)?.scope)))
+    if (saved?.type !== 'plan' || saved.projectId !== project.id || !['cloud-scope', 'operator-artifacts', 'operator-applications', 'hosting-preparation'].includes(String(asRecord(saved.plan)?.scope)))
       return invalidSpec;
   }
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(planId);
   if ('error' in loaded) return { kind: 'plan_not_found', error: loaded.error };
+  if (loaded.document.scope === 'operator-applications') {
+    const envName = loaded.document.environmentName, environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap)
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: operatorApplicationUnavailable().message }] };
+    const unchangedPlan = () => isDeepStrictEqual(ctx.repos.runs.findById(planId)?.plan, loaded.run.plan);
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
+      handler: (action, execution) => applyOperatorApplications({ project, environment, applicationRegistration: loaded.document.applicationRegistration, action,
+        authorize: () => ctx.repos.runs.findById(execution.applyRunId)?.status === 'running' && unchangedPlan() }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Only exact operator application actions were authorized; deployment and customer access remain separate.'] };
+  }
   if (loaded.document.scope === 'hosting-preparation') {
     const envName = loaded.document.environmentName;
     const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);

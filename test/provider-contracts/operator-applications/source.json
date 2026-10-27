@@ -108,6 +108,17 @@
       "reviewedAt": "2026-10-27",
       "contract": "Standard OAuth clients require manual Console creation/configuration and acknowledgement. No programmatic client-creation implementation is claimed.",
       "limit": "Imported owner-selected configuration is not verified native authority or redirect proof."
+    },
+    {
+      "provider": "microsoft-entra",
+      "reviewedAt": "2026-10-27",
+      "documentation": [
+        "https://learn.microsoft.com/en-us/graph/api/application-list?view=graph-rest-1.0",
+        "https://learn.microsoft.com/en-us/graph/api/organization-list?view=graph-rest-1.0",
+        "https://learn.microsoft.com/en-us/graph/api/application-list-federatedidentitycredentials?view=graph-rest-1.0"
+      ],
+      "contract": "Organization tenant identity read, bounded application list and FIC readback use native IDs; directory pagination must retain the exact Graph origin and collection path. Application and FIC creates require 201; reads require 200.",
+      "limit": "Documentation-based reconstructed transport, no live tenant or write-permission proof."
     }
   ]
 }

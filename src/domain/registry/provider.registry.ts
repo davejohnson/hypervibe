@@ -13,7 +13,7 @@ import type { CloudDeploymentAdapterCapabilityV1, CloudDeploymentAdapterInputV1 
 import type { LocalCloudScopePreparationCapability, OperatorArtifactCapability } from '../ports/cloud-installation.port.js';
 import { CloudDeploymentAccessError, validateCloudDeploymentAdapterInputV1 } from '../services/cloud-deployment-authentication.js';
 
-export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'messaging' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
+export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'messaging' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai' | 'identity';
 export type ProviderLifecycleCapability =
   | 'hosting'
   | 'database'
@@ -364,6 +364,7 @@ export interface RegisteredProvider {
   localScopePreparation?: LocalCloudScopePreparationCapability;
   holdingPreparation?: import('../ports/local-holding-preparation.port.js').LocalHoldingPreparationCapability;
   artifactPublication?: OperatorArtifactCapability;
+  operatorApplication?: import('../ports/operator-application.port.js').OperatorApplicationCapability;
   /** Optional hook to install CLI tools or other dependencies when a connection is created. */
   ensureDependencies?: () => Promise<{ installed: string[]; errors: string[] }>;
   /** Optional provider-owned raw forensic reads used by hv_inspect. */
@@ -939,6 +940,9 @@ export class ProviderRegistry {
 
   getArtifactPublication(name: string): OperatorArtifactCapability | undefined {
     return this.providers.get(name)?.artifactPublication;
+  }
+  getOperatorApplication(name: string): import('../ports/operator-application.port.js').OperatorApplicationCapability | undefined {
+    return this.providers.get(name)?.operatorApplication;
   }
 
   getLocalScopePreparation(name: string): LocalCloudScopePreparationCapability | undefined {

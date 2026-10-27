@@ -138,3 +138,44 @@ approved native multitenant browser exchange before claiming live support.
 
 Pinned source identities and documented uncertainties are recorded in
 [`operator-applications/source.json`](../test/provider-contracts/operator-applications/source.json).
+
+## Implemented Entra slice and evidence
+
+`operatorApplications.<name>` now accepts the fixed `hypercloud-connect-v1`
+profile, `originService`, `runtimeService`, and provider-owned `nativeScope`.
+For `microsoft-entra`, the declaration's only native selector is `tenantId`.
+The normal plan shows the exact verified callback, tenant and immutable Google
+service-account subject. Two confirmed native actions create the application
+and its FIC; neither creates a password. The resulting nonsecret receipt exposes
+the client ID and `google-workload-identity` authentication selection. Configuring
+these application environment fields remains a separate desired-state edit.
+
+Graph calls use a transient tenant-selected default credential and the Graph
+resource scope, independently of ARM. The fresh organization read verifies the
+tenant. The reviewed permissions are Application.ReadWrite.All and
+Organization.Read.All. This read is not proof of write permission: tenant policy
+can still reject the native create. Native 403 remains a definite rejection;
+a fresh exact retry review is required. An uncertain POST is reconciled by
+native object ID or its exact retained attempt tag, creation time and complete
+configuration, and never blindly resubmitted. The correlated tags are
+ownership evidence only with the retained attempt, not a standalone adoption
+capability. External administrators can still change the app between reads.
+
+Observed tests include: initial declaration rejection (RED) through actual
+SpecStore/PlanService, followed by admitted isolated plans (GREEN); unexpected
+200 create responses incorrectly accepted as success (RED), followed by uncertain
+outcome and no replay (GREEN); definite 403 incorrectly treated as uncertain and
+new actor retry admission rejected (RED), followed by separately reviewed new
+attempts retaining the rejected history (GREEN). Serialized Graph tests cover
+exact callback/FIC, no password issuance, denied reads, changed callbacks,
+restarts, lost acknowledgements and error redaction. Actual SQLite plan/apply
+and the shared command registry status path run under ordinary `npm test`.
+These reconstructed responses are documentation-based contracts, not a full
+Graph schema validator or live tenant evidence. The committed required workflow
+runs `npm run typecheck` and `npm test`; its desired required check is
+`Hypervibe / acceptance`. Live branch-protection enforcement is not established
+by those files.
+
+GitHub manifest custody, Google owner-import/delivery, native registration and
+the real browser exchanges remain in progress. This slice does not establish
+complete operator onboarding or customer onboarding.

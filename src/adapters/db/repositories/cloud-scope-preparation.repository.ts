@@ -48,14 +48,20 @@ export function acceptedJournalLeaf<T extends JournalRecord>(history: T[]): T | 
 
 /** Discover durable publication namespaces independently of the mutable spec. */
 export function operatorArtifactJournalNames(scope: Scope): string[] {
+  return namedJournalNames(scope, 'operator-artifacts');
+}
+export function operatorApplicationJournalNames(scope: Scope): string[] {
+  return namedJournalNames(scope, 'operator-applications');
+}
+function namedJournalNames(scope: Scope, prefix: 'operator-artifacts' | 'operator-applications'): string[] {
   const db = getDb();
   const environment = db.prepare('SELECT project_id, name FROM environments WHERE id = ?').get(scope.environmentId) as
     { project_id: string; name: string } | undefined;
   if (!environment || environment.project_id !== scope.projectId || environment.name !== scope.environmentName) throw invalid();
-  const rows = db.prepare("SELECT DISTINCT type FROM runs WHERE project_id = ? AND environment_id = ? AND type LIKE 'operator-artifacts:%' ORDER BY type LIMIT ?")
-    .all(scope.projectId, scope.environmentId, HISTORY_LIMIT + 1) as Array<{ type: string }>;
-  if (rows.length > HISTORY_LIMIT || rows.some(row => !/^operator-artifacts:[a-z][a-z0-9-]{0,62}$/.test(row.type))) throw invalid();
-  return rows.map(row => row.type.slice('operator-artifacts:'.length));
+  const rows = db.prepare('SELECT DISTINCT type FROM runs WHERE project_id = ? AND environment_id = ? AND type LIKE ? ORDER BY type LIMIT ?')
+    .all(scope.projectId, scope.environmentId, `${prefix}:%`, HISTORY_LIMIT + 1) as Array<{ type: string }>;
+  if (rows.length > HISTORY_LIMIT || rows.some(row => !new RegExp(`^${prefix}:[a-z][a-z0-9-]{0,62}$`).test(row.type))) throw invalid();
+  return rows.map(row => row.type.slice(prefix.length + 1));
 }
 
 /** Nonsecret operation history in existing runs; no new schema or credential store. */
@@ -65,7 +71,7 @@ export class CloudScopePreparationRepository<T extends JournalRecord> {
   constructor(scope: Scope, private readonly parseRecord: (value: unknown) => T,
     private readonly policy?: { allowHistoricalPredecessor?(parent: T, next: T): boolean; recordType?: string }) {
     this.scope = { ...scope }; this.type = policy?.recordType ?? TYPE;
-    if (this.type !== TYPE && this.type !== 'hosting-preparation' && !/^operator-artifacts:[a-z][a-z0-9-]{0,62}$/.test(this.type)) throw invalid();
+    if (this.type !== TYPE && this.type !== 'hosting-preparation' && !/^operator-(artifacts|applications):[a-z][a-z0-9-]{0,62}$/.test(this.type)) throw invalid();
   }
 
   private assertScope(): void {

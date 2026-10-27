@@ -52,3 +52,6 @@ import { registerProviderImport } from './import-provider.js';
 import { importRailwayProvider } from './provider-imports/railway.js';
 
 registerProviderImport('railway', importRailwayProvider);
+
+// Operator browser applications have separate registration authority.
+import '../adapters/providers/entra/entra-operator-application.js';
