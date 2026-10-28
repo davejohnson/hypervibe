@@ -100,6 +100,8 @@ export async function prepareOperatorImages(nativeScope: Record<string, string>,
       if (kind === 'backup-runner-v1') {
         const version = (await command('docker', [...run, imageId, '-p', "require('/opt/hypervibe/package.json').version"], { env: environment, signal })).trim();
         if (version !== scope.packageVersion) throw new Error('Packaged helper version changed.');
+        await command('docker', [...run, imageId, '--input-type=module', '-e',
+          "await import('/opt/hypervibe/dist/ci/backup-runner.js'); await import('/opt/hypervibe/dist/ci/backup-controller.js');"], { env: environment, signal });
         await command('docker', [...run, '--mount', `type=bind,src=${path.join(packageRoot, 'test/backup-runner-smoke.mjs')},dst=/opt/hypervibe/backup-runner-smoke.mjs,readonly`,
           imageId, '/opt/hypervibe/backup-runner-smoke.mjs'], { env: environment, signal });
       } else {

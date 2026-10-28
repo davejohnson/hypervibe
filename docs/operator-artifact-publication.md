@@ -95,6 +95,28 @@ After an uncertain push, recovery only reads the retained tag/digest and pulls t
 immutable image; it never repeats the push. Public target grants and runtime
 reader access are not modified by publication.
 
+The packaged backup image must load both `backup-runner.js` and
+`backup-controller.js` before publication. A real packaged-image regression
+failed because its final Docker stage omitted `templates/`, including the
+controller's transitive managed-CI imports. The source-build Dockerfile had
+already been corrected, while the operator publisher uses `Dockerfile.packaged`.
+The packaged stage now copies those assets; the normal acceptance test builds
+both Dockerfiles, imports both entrypoints with no network and runs the
+PostgreSQL/files restore smoke. Operator preparation performs the same entrypoint
+check before accepting a local image. This establishes local package/image
+behavior, not native backup execution or the behavior of an older published image.
+
+An existing immutable publication remains tied to its original package archive.
+Installing another unpublished candidate with the same version and dependency
+lock does not silently replace that receipt. To refresh the backup helper from a
+previous two-helper selection, review an explicit change of that declaration's
+`artifacts` to `["backup-runner-v1"]`. The existing lifecycle prepares a new image
+and predecessor-linked publication plan, retaining historical receipts and the
+holding image's independent runtime bindings. After the new upload and immutable
+pull are verified, separately update `backups.runnerImage` to that exact receipt
+and review the resulting recovery program. Neither selecting a new helper nor
+publishing it changes an existing pinned backup program automatically.
+
 ## Contract evidence
 
 Official sources reviewed for native behavior:

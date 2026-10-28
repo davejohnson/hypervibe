@@ -13,5 +13,6 @@ WORKDIR /opt/hypervibe
 COPY --from=build /opt/hypervibe/package.json ./package.json
 COPY --from=build /opt/hypervibe/dist ./dist
 COPY --from=build /opt/hypervibe/node_modules ./node_modules
+COPY --from=build /opt/hypervibe/templates ./templates
 USER postgres
 ENTRYPOINT ["node", "/opt/hypervibe/dist/ci/backup-runner.js"]

@@ -36,7 +36,7 @@ describe('operator image package and command boundary', () => {
       if(args[0]==='run'){
         expect(args).toEqual(expect.arrayContaining(['--network','none','--read-only','--pull','never']));
         if(args.includes('-p'))return pkg.version;
-        if(kind==='backup-runner-v1'){
+        if(kind==='backup-runner-v1'&&args.includes('--mount')){
           const mount=args[args.indexOf('--mount')+1],file=mount.match(/src=(.*),dst=/)![1];
           expect(readFileSync(file,'utf8')).toBe(readFileSync(path.join(root,'test/backup-runner-smoke.mjs'),'utf8'));
         }
@@ -48,6 +48,10 @@ describe('operator image package and command boundary', () => {
     expect(result).toMatchObject({packageVersion:pkg.version,packageArchiveSha256:archiveHash,
       packageLockSha256:createHash('sha256').update(lock).digest('hex'),holdingImageId:'sha256:'+'a'.repeat(64),backupImageId:'sha256:'+'b'.repeat(64)});
     expect(operations.filter(args=>args[0]==='build')).toHaveLength(2);
+    const runtimeImports=operations.find(args=>args[0]==='run'&&args.includes('--input-type=module'));
+    expect(runtimeImports).toEqual(expect.arrayContaining(['sha256:'+'b'.repeat(64),'-e']));
+    expect(runtimeImports?.at(-1)).toContain("import('/opt/hypervibe/dist/ci/backup-runner.js')");
+    expect(runtimeImports?.at(-1)).toContain("import('/opt/hypervibe/dist/ci/backup-controller.js')");
     expect(operations.some(args=>['push','login','pull'].includes(args[0]))).toBe(false);
   });
   it('rejects a credential echo from an actual failing child process without exposing its output', async () => {
