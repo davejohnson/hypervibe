@@ -76,7 +76,9 @@ export class AwsConnectionAuthentication {
       ...(this.input.sessionToken ? { sessionToken: this.input.sessionToken } : {}),
     };
     let resolved: Awaited<ReturnType<ReturnType<typeof defaultProvider>>>;
-    try { resolved = await this.source!(); }
+    // Login refresh needs the caller's region when its selected profile omits it.
+    // The SDK still gives an explicit login-profile region precedence.
+    try { resolved = await this.source!({ callerClientConfig: { region: async () => this.region } }); }
     catch { throw new Error('AWS local credentials could not be resolved. Check the selected profile or sign-in; no cloud operation was authorized.'); }
     for (const value of [resolved.accessKeyId, resolved.secretAccessKey, resolved.sessionToken]) if (value) this.privateValues.add(value);
     if (resolved.expiration && resolved.expiration.getTime() <= Date.now()) throw new Error('The local AWS session has expired. Sign in to the selected profile before continuing.');

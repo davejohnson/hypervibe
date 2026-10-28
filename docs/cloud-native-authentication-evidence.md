@@ -64,6 +64,40 @@ required acceptance configuration include it. Repository configuration does not
 prove live branch-protection enforcement. No live authentication, login, cloud
 mutation, release, publication or customer-incident root cause was established.
 
+## Login refresh without an ambient region
+
+A later read-only check on 2026-10-28 found a native AWS console-login profile
+containing `login_session` but no region. The packaged SDK could use its cached
+short-lived credentials, then failed to refresh after expiry because no region
+was available. Supplying the already selected region let the official SDK refresh
+and independently verify the same account; no new browser consent or profile
+edit was necessary. This disproves the assumption that cached-token success
+establishes that the credential chain can refresh under the same process inputs.
+
+The [AWS login provider contract](https://docs.aws.amazon.com/sdkref/latest/guide/feature-login-credentials.html)
+describes automatic renewal. The installed, lockfile-pinned SDK's public
+`AwsIdentityProperties.callerClientConfig.region` context and
+[LoginCredentialsFetcher](https://github.com/aws/aws-sdk-js-v3/blob/main/packages-internal/credential-provider-login/src/LoginCredentialsFetcher.ts)
+establish the region handoff: an explicit login-profile region takes precedence,
+then the caller region, then the ambient region. Passing an inner `clientConfig`
+override would change that precedence and is deliberately avoided.
+
+Hypervibe now passes the selected region when invoking all three local AWS
+credential-chain paths: shared ECS/RDS/ElastiCache/S3 authentication, operator
+template publication, and existing Secrets Manager connection setup. The profile,
+SSO configuration, native account checks, temporary-session restrictions and
+hosted role boundaries are unchanged. This does not add ongoing renewal to the
+legacy secret manager's already connected credential snapshot.
+
+Four regressions failed before runtime correction while three explicit-profile
+controls passed. Tests use an isolated synthetic expired login cache and execute
+the real SDK chain, DPoP generation, serialized Signin refresh, cache update and
+STS verification with only transport replaced. They cover missing ambient region,
+explicit profile-region precedence and a changed account after refresh. All seven
+pass after correction; the focused eight-file group passes 98 tests and normal
+typechecking passes. These tests run in ordinary `npm test`. The native observation
+proves refresh and account identity only, not cloud write authority or publication.
+
 ## Preserved work that was superseded
 
 The original `aws-connection-bootstrap`, `azure-connection-bootstrap`, generic

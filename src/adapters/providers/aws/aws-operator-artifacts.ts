@@ -359,10 +359,10 @@ export function createAwsOperatorArtifactCapability():OperatorArtifactCapability
     },
     parseRecord:value=>parseCloudInstallationRecordV1(value,createAwsOperatorArtifactDriver()),
     async create(scope,signal) {
-      awsOperatorArtifactScopeSchema.parse(scope);if(signal?.aborted)fail('cancelled');
+      const { region } = awsOperatorArtifactScopeSchema.parse(scope);if(signal?.aborted)fail('cancelled');
       const read=defaultProvider();
       return {driver:createAwsOperatorArtifactDriver(),authentication:{kind:'operator-artifact-publisher',awsSession:{async getCredentials(signal){
-        const budget=new DestinationBudget({signal,deadlineMs:15000});try{const credentials=await budget.wait(read());
+        const budget=new DestinationBudget({signal,deadlineMs:15000});try{const credentials=await budget.wait(read({callerClientConfig:{region:async()=>region}}));
           if(!credentials.sessionToken||!(credentials.expiration instanceof Date)||credentials.expiration.getTime()<=Date.now()+30000)fail('authorization_expired');
           return {accessKeyId:credentials.accessKeyId,secretAccessKey:credentials.secretAccessKey,sessionToken:credentials.sessionToken,expiration:credentials.expiration};
         }catch{fail('authorization_expired');}finally{budget.close();}
