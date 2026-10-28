@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import '../providers.js';
@@ -20,7 +20,68 @@ describe('operator application desired-state admission', () => {
     vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', 'true');
     SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(path.join(directory, 'test.db')).migrate();
   });
-  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true }); });
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true }); });
+  it.each([false, true])('preserves fractional Entra acknowledgment through second-precision readback and SQLite restart=%s', async restart => {
+    const nativeEvidence = JSON.parse(readFileSync(new URL('../../../test/provider-contracts/operator-applications/entra-application-timestamp-observation.json', import.meta.url), 'utf8'));
+    const f = await localHoldingApplicationFixture();
+    for (let step = 0; step < 2; step++) {
+      const plan = await f.plan(); if ('error' in plan) throw new Error(plan.error);
+      expect(await f.apply(plan.planRunId, plan.actions.filter(action => action.requiresConfirm).map(action => action.id)))
+        .toMatchObject({ kind: 'executed', result: { success: true } });
+    }
+    const receipt = await verifiedLocalHoldingReceipt(f.project, f.ctx.repos.environments.findById(f.environment.id)!);
+    const principal = receipt!.runtimeIdentities.find(item => item.workload === 'web')!.principal;
+    if (principal.kind !== 'gcp-service-account') throw new Error('Unexpected fixture identity');
+    const options = { origin: receipt!.origins.web, subject: principal.serviceAccountUniqueId,
+      applicationCreatedDateTime: nativeEvidence.createdDateTime.acknowledged,
+      applicationReadCreatedDateTime: nativeEvidence.createdDateTime.observed, denyApplicationReadAfterCreate: restart };
+    const native = entraNativeFixture(options);
+    vi.spyOn(DefaultAzureCredential.prototype, 'getToken').mockResolvedValue({ token: 'synthetic-transient-graph-token', expiresOnTimestamp: Date.parse(nativeEvidence.attemptStartedAt) + 3_600_000 });
+    vi.stubGlobal('fetch', (input: any, init: any) => new URL(String(input)).hostname === 'graph.microsoft.com' ? native.request(input, init) : f.native.request(input, init));
+    const desired: any = structuredClone(f.desired);
+    desired.environments.staging.operatorApplications = { azure: { provider: 'microsoft-entra', originService: 'web', runtimeService: 'web',
+      profile: 'hypercloud-connect-v1', nativeScope: { tenantId: native.tenantId } } };
+    f.store.replace(f.project, desired);
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(nativeEvidence.attemptStartedAt));
+    const plan = await f.plan(); if ('error' in plan) throw new Error(plan.error);
+    const confirmations = plan.actions.map(action => action.id);
+    const first = await f.apply(plan.planRunId, confirmations);
+    if (restart) {
+      expect(first).toMatchObject({ kind: 'executed', result: { success: false } });
+      const before = f.ctx.repos.runs.findByProjectId(f.project.id).find(row => row.type === 'operator-applications:azure')!.plan as any;
+      expect(before.attempts[0]).toMatchObject({ status: 'acknowledged', evidence: { resources: [{ identity: { createdDateTime: nativeEvidence.createdDateTime.acknowledged } }] } });
+      expect(before.completed).toEqual({}); expect(native.writes).toHaveLength(1);
+      SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(path.join(directory, 'test.db')).migrate();
+      options.denyApplicationReadAfterCreate = false;
+      // Actual shared status must recover the existing fractional ACK without
+      // creating the remaining FIC or replacing the approved installation.
+      await f.commands.execute('hv_status', { project: f.project.name, env: 'staging' });
+      expect(native.writes).toHaveLength(1);
+      const recovered = f.ctx.repos.runs.findByProjectId(f.project.id).find(row => row.type === 'operator-applications:azure')!.plan as any;
+      expect(recovered.completed[plan.actions[0].id]).toEqual(before.attempts[0].evidence);
+      expect(recovered.installationId).toBe(before.installationId); expect(recovered.plan.digest).toBe(before.plan.digest);
+      await f.commands.execute('hv_status', { project: f.project.name, env: 'staging' });
+      expect(native.writes).toHaveLength(1);
+      // The original CREATE projection is obsolete after read-only completion;
+      // the existing loop reviews only the remaining FIC on the same native plan.
+      expect(await f.apply(plan.planRunId, confirmations)).toMatchObject({ kind: 'executed', result: { success: false } });
+      expect(native.writes).toHaveLength(1);
+      const continuation = await f.plan(); if ('error' in continuation) throw new Error(continuation.error);
+      expect(continuation.actions.map(action => action.type)).toEqual(['noop', 'create']);
+      const resumed = await f.apply(continuation.planRunId, continuation.actions.filter(action => action.requiresConfirm).map(action => action.id));
+      expect(resumed, JSON.stringify(resumed)).toMatchObject({ kind: 'executed', result: { success: true } });
+    } else expect(first).toMatchObject({ kind: 'executed', result: { success: true } });
+    const rows = f.ctx.repos.runs.findByProjectId(f.project.id).filter(row => row.type === 'operator-applications:azure');
+    expect(rows).toHaveLength(1);
+    const record = rows[0].plan as any;
+    expect(record.status).toBe('scope-ready');
+    expect(native.writes.map(write => write.path)).toEqual(['/v1.0/applications', `/v1.0/applications/${native.applicationId}/federatedIdentityCredentials`]);
+    for (const evidence of Object.values(record.completed) as any[])
+      expect(evidence.resources[0].identity.createdDateTime).toBe(nativeEvidence.createdDateTime.acknowledged);
+    expect(record.attempts[0].evidence).toEqual(record.completed[plan.actions[0].id]);
+    await f.commands.execute('hv_status', { project: f.project.name, env: 'staging' });
+    expect(native.writes).toHaveLength(2);
+  });
   it('retains an exact registration declaration and refuses to use a cached or absent origin', async () => {
     const f = await localHoldingApplicationFixture();
     const desired: any = structuredClone(f.desired);

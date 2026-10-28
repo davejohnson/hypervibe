@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { planCloudInstallationV1, applyCloudInstallationV1, reconcileCloudInstallationV1, reviewCloudInstallationRetryV1 } from '../../../../domain/services/cloud-installation-runtime.js';
 import { createEntraOperatorApplicationDriver } from '../entra-operator-application.js';
@@ -20,6 +21,55 @@ function fixture(options: Parameters<typeof entraNativeFixture>[0] = {}) {
   return { native, driver, intent, context, record: () => record };
 }
 describe('Entra keyless operator registration', () => {
+  afterEach(() => { vi.useRealTimers(); });
+  it('uses the verified retained precision at the existing five-second attempt boundary', async () => {
+    // Synthetic boundary around the independently observed precision projection:
+    // ACK is within five seconds; the whole-second read alone appears older.
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-10-28T04:04:55.500Z'));
+    const f = fixture({ applicationCreatedDateTime: '2026-10-28T04:04:50.6001234Z', applicationReadCreatedDateTime: '2026-10-28T04:04:50Z' });
+    const plan = await planCloudInstallationV1({ ...f.context, intent: f.intent });
+    const target = { ...f.context, installationId: plan.installationId, planDigest: plan.plan.digest };
+    const applied = await applyCloudInstallationV1({ ...target, confirmActions: plan.plan.actions.map(action => action.id) });
+    expect(applied.status).toBe('scope-ready');
+    expect(applied.completed[plan.plan.actions[0].id].resources[0].identity.createdDateTime).toBe('2026-10-28T04:04:50.6001234Z');
+    expect(f.native.writes).toHaveLength(2);
+  });
+  it('does not accept a new acknowledgment outside the existing five-second bound', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-10-28T04:04:55.500Z'));
+    const f = fixture({ applicationCreatedDateTime: '2026-10-28T04:04:50.4991234Z', applicationReadCreatedDateTime: '2026-10-28T04:04:50Z' });
+    const plan = await planCloudInstallationV1({ ...f.context, intent: f.intent });
+    const result = await applyCloudInstallationV1({ ...f.context, installationId: plan.installationId, planDigest: plan.plan.digest, confirmActions: plan.plan.actions.map(action => action.id) });
+    expect(result.completed).toEqual({}); expect(result.status).not.toBe('scope-ready'); expect(f.native.writes).toHaveLength(1);
+  });
+  it.each(['different-second', 'conflicting-fraction', 'submillisecond-conflict', 'unobserved-shorter-fraction', 'object-id', 'client-id', 'tenant', 'owner-tag', 'attempt-tag', 'credential', 'missing'] as const)(
+    'rejects %s despite a compatible native whole-second projection', async changed => {
+      const observed = JSON.parse(readFileSync(new URL('../../../../../test/provider-contracts/operator-applications/entra-application-timestamp-observation.json', import.meta.url), 'utf8'));
+      vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(observed.attemptStartedAt));
+      const options: Parameters<typeof entraNativeFixture>[0] = { applicationCreatedDateTime: observed.createdDateTime.acknowledged,
+        applicationReadCreatedDateTime: observed.createdDateTime.observed };
+      const f = fixture(options), planned = await planCloudInstallationV1({ ...f.context, intent: f.intent });
+      const target = { ...f.context, installationId: planned.installationId, planDigest: planned.plan.digest };
+      const [application, federation] = planned.plan.actions;
+      const ready = await applyCloudInstallationV1({ ...target, confirmActions: [application.id], onlyActionId: application.id });
+      expect(ready.completed[application.id].resources[0].identity.createdDateTime).toBe(observed.createdDateTime.acknowledged);
+      if (changed === 'different-second') options.applicationReadCreatedDateTime = '2026-10-28T04:04:51Z';
+      else if (changed === 'conflicting-fraction') options.applicationReadCreatedDateTime = '2026-10-28T04:04:50.071Z';
+      else if (changed === 'submillisecond-conflict') options.applicationReadCreatedDateTime = '2026-10-28T04:04:50.0704783Z';
+      else if (changed === 'unobserved-shorter-fraction') options.applicationReadCreatedDateTime = '2026-10-28T04:04:50.070Z';
+      else if (changed === 'object-id') f.native.changeApplication({ id: '55555555-5555-4555-8555-555555555555' });
+      else if (changed === 'client-id') f.native.changeApplication({ appId: '55555555-5555-4555-8555-555555555555' });
+      else if (changed === 'tenant') options.observedTenantId = '55555555-5555-4555-8555-555555555555';
+      else if (changed === 'missing') options.missingApplicationRead = true;
+      else if (changed === 'credential') f.native.changeApplication({ passwordCredentials: [{ keyId: 'unreviewed' }] });
+      else f.native.changeApplication({ tags: f.native.writes[0].body.tags.map((tag: string) => tag.startsWith(changed === 'owner-tag' ? 'hypervibe:owner:' : 'hypervibe:attempt:')
+        ? changed === 'owner-tag' ? `hypervibe:owner:${'f'.repeat(64)}` : 'hypervibe:attempt:55555555-5555-4555-8555-555555555555' : tag) });
+      const rejected = await reconcileCloudInstallationV1({ ...target, onlyActionId: application.id });
+      expect(rejected.completed[application.id]).toBeUndefined();
+      expect(rejected.reason).toMatch(/identity_mismatch|ownership_mismatch|provider_error/);
+      await applyCloudInstallationV1({ ...target, confirmActions: [federation.id], onlyActionId: federation.id });
+      await applyCloudInstallationV1({ ...target, confirmActions: [application.id], onlyActionId: application.id });
+      expect(f.native.writes).toHaveLength(1);
+    });
   it('creates an exact multi-tenant callback then separate FIC without issuing any password', async () => {
     const f = fixture(); let record = await planCloudInstallationV1({ ...f.context, intent: f.intent });
     expect(f.native.writes).toEqual([]); expect(record.plan.actions).toHaveLength(2);

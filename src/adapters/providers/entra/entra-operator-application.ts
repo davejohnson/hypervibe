@@ -44,6 +44,14 @@ function parseEvidence(value: unknown, intent: Intent): CloudInstallationEvidenc
 function reason(error: unknown) { return error instanceof CloudInstallationBoundaryError ? error.reason : error instanceof DestinationBoundaryError
   ? error.status === 403 ? 'insufficient_permissions' as const : error.status === 401 ? 'authorization_expired' as const : 'provider_error' as const : 'provider_error' as const; }
 const fields = 'id,appId,displayName,createdDateTime,signInAudience,web,tags,passwordCredentials,keyCredentials,requiredResourceAccess';
+function sameApplicationCreationTime(observed: string, retained: string): boolean {
+  if (observed === retained) return true;
+  // Native Graph create ACKs include fractional seconds while both list and
+  // exact-ID reads can return only the UTC second. Preserve the ACK verbatim;
+  // do not round arbitrary fractions or relax other providers' lifetime checks.
+  const second = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})Z$/.exec(observed)?.[1];
+  return !!second && /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.\d+Z$/.exec(retained)?.[1] === second;
+}
 export function createEntraOperatorApplicationDriver(options: { fetch?: typeof fetch } = {}): CloudInstallationDriver<Intent> {
   async function withClient<T>(context: Context, work: (read: (path: string, body?: unknown) => Promise<Record<string, any>>) => Promise<T>) {
     const n = settings(context.intent), budget = new DestinationBudget({ signal: context.signal, deadlineMs: 30_000 });
@@ -86,17 +94,28 @@ export function createEntraOperatorApplicationDriver(options: { fetch?: typeof f
       || !isDeepStrictEqual(value.web?.redirectUris, [n.redirectUri])
       || value.web?.implicitGrantSettings?.enableAccessTokenIssuance !== false || value.web?.implicitGrantSettings?.enableIdTokenIssuance !== false
       || !isDeepStrictEqual(value.passwordCredentials, []) || !isDeepStrictEqual(value.keyCredentials, []) || !isDeepStrictEqual(value.requiredResourceAccess, [])
-      || !isDeepStrictEqual(value.tags?.slice().sort(), [`hypervibe:owner:${n.owner}`, `hypervibe:attempt:${attempt.id}`].sort())
-      || Date.parse(createdDateTime) < Date.parse(attempt.startedAt) - 5000) fail('ownership_mismatch');
+      || !isDeepStrictEqual(value.tags?.slice().sort(), [`hypervibe:owner:${n.owner}`, `hypervibe:attempt:${attempt.id}`].sort())) fail('ownership_mismatch');
     const evidence = parseEvidence({ resources: [{ kind: 'application', id, identity: { tenantId: n.tenantId, applicationId: id, clientId, createdDateTime,
       owner: n.owner, origin: n.origin, googleSubject: n.googleSubject, attemptId: attempt.id } }],
       native: { operation: 'application', installationId: context.intent.installationId, attemptId: attempt.id } }, context.intent);
-    if (expected && !isDeepStrictEqual(evidence, expected)) fail('identity_mismatch'); return evidence;
+    if (expected) {
+      const retainedTime = expected.resources[0]?.identity.createdDateTime;
+      if (typeof retainedTime !== 'string' || !sameApplicationCreationTime(createdDateTime, retainedTime)) fail('identity_mismatch');
+      evidence.resources[0].identity.createdDateTime = retainedTime;
+      if (!isDeepStrictEqual(evidence, expected)) fail('identity_mismatch');
+    }
+    // Evaluate the unchanged attempt-age bound only after matching all retained
+    // evidence: a precision-losing read must not age the verified ACK by 1s.
+    if (Date.parse(String(evidence.resources[0].identity.createdDateTime)) < Date.parse(attempt.startedAt) - 5000) fail('ownership_mismatch');
+    return evidence;
   }
   async function application(context: Context, call: (path: string) => Promise<Record<string, any>>) {
-    const n = settings(context.intent), evidence = context.completed[n.appAction], attempt = context.attempts?.filter(value => value.actionId === n.appAction).at(-1);
+    const n = settings(context.intent), attempt = context.attempts?.filter(value => value.actionId === n.appAction).at(-1);
+    const acknowledged = attempt && ['acknowledged', 'succeeded'].includes(attempt.status) ? attempt.evidence : undefined;
+    const evidence = context.completed[n.appAction] ?? acknowledged;
     if (evidence) {
-      const retained = parseEvidence(evidence, context.intent); if (!attempt) fail();
+      const retained = parseEvidence(evidence, context.intent);
+      if (!attempt || retained.resources[0].kind !== 'application' || retained.native.attemptId !== attempt.id) fail();
       return verifyApplication(await call(`applications/${retained.resources[0].id}?$select=${fields}`), context, attempt, retained);
     }
     const candidates = await list(call, `applications?$filter=${encodeURIComponent(`displayName eq '${n.displayName}'`)}&$select=${fields}&$top=100`);

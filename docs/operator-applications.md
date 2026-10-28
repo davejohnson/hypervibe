@@ -180,6 +180,36 @@ GitHub manifest custody, Google owner-import/delivery, native registration and
 the real browser exchanges remain in progress. This slice does not establish
 complete operator onboarding or customer onboarding.
 
+### Observed Entra creation-time precision
+
+The adapter previously assumed Graph returned an identical `createdDateTime`
+string after creation. A retained native 201 acknowledgment recorded
+`2026-10-28T04:04:50.0704782Z`; independent list and exact-object GETs returned
+`2026-10-28T04:04:50Z` for the same object, client, tenant, attempt/owner tags and
+complete reviewed configuration. Graph documents a read-only UTC
+[DateTimeOffset](https://learn.microsoft.com/en-us/graph/api/resources/application?view=graph-rest-1.0),
+without promising identical fractional precision across responses. The sanitized
+[observation](../test/provider-contracts/operator-applications/entra-application-timestamp-observation.json)
+retains the actual timestamp pair; transport tests replace customer identifiers.
+
+Actual PlanService/apply and SQLite restart tests failed before the fix. The
+Entra boundary now accepts only an identical timestamp or the observed
+whole-second UTC projection of an already verified fractional acknowledgment,
+after verifying every other identity and configuration field. It preserves the
+acknowledgment verbatim, including when carrying the application identity into
+the FIC receipt. It does not round arbitrary fractional timestamps or change
+shared journal equality. The existing five-second attempt-age bound uses that
+verified retained precision; a synthetic edge case also failed before this
+correction. Conflicting fractions (including submillisecond differences), other
+seconds, changed authority/configuration and a missing object remain blocked.
+
+The passing normal-CI regressions exercise initial apply, repeated read-only
+status after SQLite restart, preserved native plan/attempt identity, no CREATE
+replay, and a fresh outer plan for the remaining FIC. After status completes the
+application, the previous outer CREATE action remains obsolete and cannot be
+reused. Native diagnostics performed no writes; these tests do not establish
+successful native FIC creation or browser federation.
+
 ## Private operator custody and callback boundary
 
 Operator credentials use encrypted compare-and-swap records in the existing
