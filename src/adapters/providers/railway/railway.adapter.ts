@@ -3881,8 +3881,8 @@ export class RailwayAdapter implements
         variables: vars,
         skipDeploys: options.deferDeployment === true,
       });
-      if (options.requireDeferredSecretUpdate && acknowledged.variableCollectionUpsert !== true) {
-        return safeReceipt({ success: false, message: 'Railway did not acknowledge the selected secret update. Re-observe before retrying.' });
+      if (acknowledged.variableCollectionUpsert !== true) {
+        return safeReceipt({ success: false, message: 'Railway did not acknowledge the variable update. Re-observe before retrying.' });
       }
 
       if (options.deferDeployment) {
