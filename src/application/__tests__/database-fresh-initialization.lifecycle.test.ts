@@ -101,6 +101,34 @@ async function fixture(options: Parameters<typeof railwayHttpFixture>[0] = {}) {
 // official Railway schema. PostgreSQL entrypoint/volume contracts are recorded
 // with the provider tests. This does not establish live SQL or durability proof.
 describe('explicit fresh database initialization lifecycle', () => {
+  it('projects bounded activation diagnostics through hv_apply without exposing arbitrary provider reasons', async () => {
+    const f = await fixture({ deploymentStatus: 'FAILED' }); f.declare();
+    const planned = await f.plan();
+    const providerApply = f.database.freshInitialization!.apply.bind(f.database.freshInitialization);
+    // Execute the real Railway transport and then inject an unsafe provider
+    // reason to exercise the public envelope boundary, not its regex patterns.
+    const unsafeReason = 'opaque-provider-message-sentinel';
+    vi.spyOn(f.database.freshInitialization!, 'apply').mockImplementation(async input => ({
+      ...await providerApply(input), reason: unsafeReason,
+    }));
+    const result = await createCommandRegistry(ctx).execute('hv_apply', { project: f.project.name, planId: planned.planRunId,
+      confirmActions: planned.actions.map(action => action.id) });
+    expect(result).toMatchObject({ ok: true, data: { applied: false, receipts: [{ status: 'blocked', data: {
+      providerState: 'failed', diagnostic: { stage: 'activation', code: 'deployment-failed' },
+      acknowledgedProgress: { phase: 'activation-identified', deploymentId: expect.any(String), storageId: expect.any(String) },
+      recoveryRequired: true,
+    } }] } });
+    const data = result.data as { applyRunId: string; receipts: Array<{ data: Record<string, unknown> }> };
+    const retained = ctx.repos.components.findById(f.component.id)!.bindings.freshInitialization as { progress: unknown };
+    expect(data.receipts[0].data.acknowledgedProgress).toEqual(retained.progress);
+    expect(f.http.requests.some(request => request.query.includes('InitializedDatabaseDeployment'))).toBe(true);
+    for (const boundary of [result, ctx.repos.runs.findById(data.applyRunId)]) {
+      expect(JSON.stringify(boundary)).not.toContain(unsafeReason);
+      expect(JSON.stringify(boundary)).not.toContain('synthetic-preserved-password');
+    }
+    expect(f.http.contractErrors).toEqual([]);
+  });
+
   it('offers only the confirmed exact-database initialization after explicit discard intent', async () => {
     const f = await fixture();
     expect((await f.status()).drift.find(action => action.id === 'database:railway')?.metadata?.blockedReason)

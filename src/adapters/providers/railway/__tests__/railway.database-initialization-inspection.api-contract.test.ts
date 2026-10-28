@@ -83,6 +83,23 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 // A configured immutable app image can exist alongside a failed app deployment.
 // No provider mutation, SQL authentication or successful app release is claimed.
 describe('Railway private bootstrap inspection', () => {
+  it('observes the verified storage activation while retaining the original acknowledgement in its input', async () => {
+    const f = await setup();
+    const completedInitialization = { ...f.input.completedInitialization, deploymentId: 'removed-original-acknowledgement',
+      activationReconciliation: { version: 1, kind: 'storage-attachment',
+        deploymentId: 'initialized-db-deployment', operationId: 'volume-attachment-patch' } };
+    const result = await f.inspect({ completedInitialization });
+    expect(result.databaseDeploymentId).toBe('initialized-db-deployment');
+    expect(completedInitialization.deploymentId).toBe('removed-original-acknowledgement');
+    expect(result.verification.sqlAuthentication).toBe('unchecked');
+    expect(f.requests.find(request => request.query.includes('query DatabaseInitializationIdentity'))?.variables.deploymentId)
+      .toBe('initialized-db-deployment');
+    f.db.instances.get(stagingId)!.activeDeployments = [{ id: completedInitialization.deploymentId }];
+    await expect(f.inspect({ completedInitialization })).rejects.toThrow();
+    expect(f.mutations).toEqual([]);
+    expect(f.contractErrors).toEqual([]);
+  });
+
   it('binds exact native references and fresh generation while leaving SQL and app deployment unchecked', async () => {
     const f = await setup({ pageSize: 1 });
     const result = await f.inspect();

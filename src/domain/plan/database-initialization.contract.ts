@@ -4,7 +4,8 @@ import type { Component } from '../entities/component.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 import { providerIdentityScopeMatches } from '../services/binding-identity.js';
 import type { PlanAction } from './plan.types.js';
-import { databaseFreshInitializationProgressSchema, databaseFreshInitializationTargetSchema } from '../ports/database-fresh-initialization.port.js';
+import { databaseFreshInitializationActivationReconciliationSchema, databaseFreshInitializationProgressSchema,
+  databaseFreshInitializationTargetSchema } from '../ports/database-fresh-initialization.port.js';
 
 export const DATABASE_FRESH_INITIALIZATION_OPERATION = 'databaseFreshInitialize';
 export const databaseInitializationActionId = (componentId: string, intentId: string) =>
@@ -22,9 +23,17 @@ export const completedDatabaseInitializationReceiptSchema = z.object({
   intentId: databaseInitializationMetadataSchema.shape.intentId,
   target: databaseFreshInitializationTargetSchema,
   storageId: z.string().min(1), storageInstanceId: z.string().min(1), deploymentId: z.string().min(1),
+  activationReconciliation: databaseFreshInitializationActivationReconciliationSchema.optional(),
   configurationFingerprint: z.string().regex(/^[a-f0-9]{64}$/), verifiedAt: z.iso.datetime(),
 }).strict();
 export type CompletedDatabaseInitializationReceipt = z.infer<typeof completedDatabaseInitializationReceiptSchema>;
+/** Resolve only an already validated receipt. Legacy receipt identities and
+ * generation fingerprints stay unchanged; the original acknowledgment is kept. */
+export function completedDatabaseInitializationDeploymentId(
+  receipt: Pick<CompletedDatabaseInitializationReceipt, 'deploymentId' | 'activationReconciliation'>,
+): string {
+  return receipt.activationReconciliation?.deploymentId ?? receipt.deploymentId;
+}
 export const databaseInitializationAttemptSchema = z.object({
   metadata: databaseInitializationMetadataSchema,
   inspectionEncrypted: z.string().min(1), startedAt: z.iso.datetime(),
@@ -39,6 +48,7 @@ export const databaseInitializationAttemptSchema = z.object({
     || value.completed.intentId !== value.metadata.intentId || !isDeepStrictEqual(value.completed.target, value.metadata.target)
     || value.completed.configurationFingerprint !== value.metadata.configurationFingerprint
     || value.completed.storageId !== value.progress.storageId || value.completed.storageInstanceId !== value.progress.storageInstanceId
+    || !isDeepStrictEqual(value.completed.activationReconciliation, value.progress.activationReconciliation)
     || value.completed.deploymentId !== value.progress.deploymentId || Date.parse(value.completed.verifiedAt) < Date.parse(value.startedAt))) {
     ctx.addIssue({ code: 'custom', message: 'Completed initialization receipt contradicts its reviewed attempt.' });
   }

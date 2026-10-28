@@ -45,6 +45,14 @@ zero provider mutations and unchanged local bindings. Pinned source contracts ar
 under `railway/database-initialization`; synthetic transport outcomes and local
 lifecycle checks do not establish a successful live initialization.
 
+Railway initialization also pins a sanitized observation of a volume-attachment
+activation replacing the explicitly acknowledged deployment. Its opaque patch,
+manifest and raw snapshot fields have narrow reconstructed transport coverage;
+the official SDL alone does not validate those nested semantics. Completion keeps
+the original acknowledgment alongside a separately verified activation/operation,
+with shared receipt, retry, bootstrap and seed-generation checks. No SQL or live
+durability claim follows from these fixtures.
+
 `src/application/__tests__/seed-registry-scope.api-contract.test.ts` exercises
 database seed dispatch through real encrypted connection selection and Railway
 HTTP serialization. Its synthetic responses execute against the pinned official

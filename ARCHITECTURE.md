@@ -2059,7 +2059,15 @@ uncertain-write recovery; generic lifecycle code does not branch on providers.
 Railway's implementation admits only a supported existing PostgreSQL 16 service
 with no volume, preserves its identity/private credentials and references, stages
 an additive deferred `PGDATA` change, then verifies the newly attached volume and
-exact deployment. Existing storage and unknown evidence block. Supabase, Neon,
+exact deployment. When Railway replaces the acknowledged deployment with its
+volume attachment activation, read-only reconciliation requires an exact scoped
+committed patch that only creates and mounts that acknowledged volume, preserved
+deployment snapshots/configuration, and one successful current activation with the
+original deployment stopped. Preserve the original deployment acknowledgment and
+record the separately verified activation and patch in the completed receipt.
+Bootstrap and seed consumers validate the same receipt; a latest deployment or
+matching image alone is never replacement authority.
+Existing storage and unknown evidence block. Supabase, Neon,
 Cloud SQL, RDS, Azure PostgreSQL, Fly MPG and DigitalOcean are unsupported for
 this operation; their managed reset/restore APIs must not be used as fallbacks.
 Discard permission covers only the reviewed old data. Future backups, SQL

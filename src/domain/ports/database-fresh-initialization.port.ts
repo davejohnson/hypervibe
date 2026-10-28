@@ -28,6 +28,13 @@ export const databaseFreshInitializationInspectionSchema = z.object({
 }).strict();
 export type DatabaseFreshInitializationInspection = z.infer<typeof databaseFreshInitializationInspectionSchema>;
 
+/** Non-secret provider proof that the exact storage attachment activated a
+ * successor. The original deployment acknowledgment remains immutable. */
+export const databaseFreshInitializationActivationReconciliationSchema = z.object({
+  version: z.literal(1), kind: z.literal('storage-attachment'),
+  deploymentId: recoveryIdentityStringSchema, operationId: recoveryIdentityStringSchema,
+}).strict();
+
 export const databaseFreshInitializationProgressSchema = z.object({
   phase: z.enum(['prepared', 'configuration-attempted', 'configuration-verified',
     'storage-attempted', 'storage-identified', 'storage-verified',
@@ -35,6 +42,7 @@ export const databaseFreshInitializationProgressSchema = z.object({
   storageId: recoveryIdentityStringSchema.optional(),
   storageInstanceId: recoveryIdentityStringSchema.optional(),
   deploymentId: recoveryIdentityStringSchema.optional(),
+  activationReconciliation: databaseFreshInitializationActivationReconciliationSchema.optional(),
 }).strict().superRefine((value, ctx) => {
   const storageIdentified = ['storage-identified', 'storage-verified', 'activation-attempted', 'activation-identified', 'complete'].includes(value.phase);
   const storageVerified = ['storage-verified', 'activation-attempted', 'activation-identified', 'complete'].includes(value.phase);
@@ -48,17 +56,27 @@ export const databaseFreshInitializationProgressSchema = z.object({
   if (!storageIdentified && (value.storageId || value.storageInstanceId) || !activationIdentified && value.deploymentId) {
     ctx.addIssue({ code: 'custom', message: 'Initialization progress cannot contain identities before their acknowledged phase.' });
   }
+  if (value.activationReconciliation && (value.phase !== 'complete' || value.activationReconciliation.deploymentId === value.deploymentId)) {
+    ctx.addIssue({ code: 'custom', message: 'Activation reconciliation requires a separately verified successor at completion.' });
+  }
 });
 export type DatabaseFreshInitializationProgress = z.infer<typeof databaseFreshInitializationProgressSchema>;
 
 export type DatabaseFreshInitializationEligibility =
   | { state: 'eligible'; inspection: DatabaseFreshInitializationInspection }
   | { state: 'unknown' | 'ineligible'; reason: string };
+export const databaseFreshInitializationResultStateSchema = z.enum(['complete', 'pending', 'unknown', 'failed']);
+/** Locally selected codes only. Provider reasons and errors may contain secrets. */
+export const databaseFreshInitializationDiagnosticSchema = z.object({
+  stage: z.literal('activation'),
+  code: z.enum(['deployment-replaced', 'deployment-unverified', 'configuration-changed', 'deployment-failed', 'deployment-pending']),
+}).strict();
 export interface DatabaseFreshInitializationResult {
-  state: 'complete' | 'pending' | 'unknown' | 'failed';
+  state: z.infer<typeof databaseFreshInitializationResultStateSchema>;
   progress: DatabaseFreshInitializationProgress;
   /** Non-secret provider storage coordinates only. Existing bindings cannot be replaced. */
   storageBindings?: Record<string, unknown>;
+  diagnostic?: z.infer<typeof databaseFreshInitializationDiagnosticSchema>;
   reason?: string;
 }
 
@@ -66,7 +84,8 @@ export interface DatabaseFreshInitializationResult {
  * Never replace its service, credentials, references or application workloads.
  * Await saveProgress before EVERY mutation, and immediately after receiving an ID.
  * An attempted write without an acknowledged ID cannot be reissued on retry.
- * Completion requires exact storage and the newly acknowledged deployment.
+ * Completion requires exact storage and either the acknowledged deployment or
+ * a separately proven successor from the same exact storage attachment.
  */
 export interface IDatabaseFreshInitialization {
   inspect(input: { environment: Environment; component: Component }): Promise<DatabaseFreshInitializationEligibility>;
