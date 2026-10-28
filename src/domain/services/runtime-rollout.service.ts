@@ -184,8 +184,8 @@ function baselineDeployment(
     : { state: 'unknown' };
 }
 
-function receiptRolloutBaseline(
-  receipt: ActionReceipt,
+export function receiptRolloutBaseline(
+  receipt: Pick<ActionReceipt, 'data'>,
   serviceName: string
 ): RuntimeRolloutBinding['baselineDeployment'] | undefined {
   const data = asRecord(receipt.data);

@@ -3881,8 +3881,8 @@ export class RailwayAdapter implements
         variables: vars,
         skipDeploys: options.deferDeployment === true,
       });
-      if (options.requireDeferredSecretUpdate && acknowledged.variableCollectionUpsert !== true) {
-        return safeReceipt({ success: false, message: 'Railway did not acknowledge the selected secret update. Re-observe before retrying.' });
+      if (acknowledged.variableCollectionUpsert !== true) {
+        return safeReceipt({ success: false, message: 'Railway did not acknowledge the variable update. Re-observe before retrying.' });
       }
 
       if (options.deferDeployment) {
@@ -6768,13 +6768,20 @@ export class RailwayAdapter implements
       ))) {
       throw new Error('Railway returned a malformed S3 credential set for the bucket');
     }
+    // Railway's native spelling was observed through bucketS3Credentials; the
+    // pinned GraphQL String field does not constrain it. Keep provider spellings
+    // here so workers, S3 transports and runtime projections share one contract.
+    const urlStyle = credential.urlStyle === 'virtual-host' ? 'virtual' : credential.urlStyle;
+    if (urlStyle !== 'path' && urlStyle !== 'virtual') {
+      throw new Error('Railway returned an unsupported S3 URL style.');
+    }
     return {
       bucket: credential.bucketName as string,
       endpoint: credential.endpoint as string,
       accessKeyId: credential.accessKeyId as string,
       secretAccessKey: credential.secretAccessKey as string,
       region: credential.region as string,
-      urlStyle: credential.urlStyle as string,
+      urlStyle,
     };
   }
 
@@ -7976,6 +7983,7 @@ providerRegistry.register({
     displayName: 'Railway',
     category: 'deployment',
     credentialsSchema: RailwayCredentialsSchema,
+    storageRuntimeContract: 'railway-s3-url-style-v1',
     setupHelpUrl: 'https://railway.com/account/tokens',
     credentials: {
       defaultScalarKey: 'apiToken',

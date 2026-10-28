@@ -110,6 +110,24 @@ and object inventories; they report prior restore proof and matching retained re
 not a fresh full-byte audit. Partial executions never certify health or count
 toward the seven complete sets required before retention deletion.
 
+`railway/storage-credentials.observation.json` records a value-free current
+observation of Railway's `virtual-host` credential spelling. The official SDL
+declares an unconstrained string; Railway's bucket documentation and AWS's
+addressing contract supply the virtual-hosted semantics. Reconstructed transport
+tests send that observed spelling through the real Railway client, controller
+handoff and unchanged worker parser in two environments. Canonical `path` and
+`virtual` remain accepted; unknown styles are rejected before worker or object
+transport effects. Actual SDK serialization checks hostname/path addressing.
+S3 already emits canonical `virtual`; GCS and Azure Blob use native object
+transports, and private worker credential admission remains unchanged.
+
+Railway runtime projection retains credential references and uses the verified
+canonical style. Its `railway-s3-url-style-v1` contract requires reviewed rewiring
+of existing consumer bindings and rejects stale pre-contract plans. Ordinary
+acceptance tests cover this migration and convergence. The observation reproduces
+the current parser rejection, not the historical failed task's private inputs;
+these offline checks do not establish a completed live backup or restore.
+
 ### Recovery quality audit after PR #242
 
 The audit compared the changes since `v0.1.35` through `f4ccec4` with the shared

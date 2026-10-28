@@ -27,6 +27,9 @@ export interface ObjectStorageTransferResult {
 }
 
 export function createS3ObjectClient(credentials: StorageCredentials, dependencies: { requestHandler?: S3ClientConfig['requestHandler'] } = {}): StorageObjectClient {
+  if (credentials.urlStyle !== 'path' && credentials.urlStyle !== 'virtual') {
+    throw new Error('Unsupported object storage URL style.');
+  }
   const client = new S3Client({
     region: credentials.region,
     endpoint: credentials.endpoint,
