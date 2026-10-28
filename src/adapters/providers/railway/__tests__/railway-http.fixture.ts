@@ -91,8 +91,12 @@ export async function railwayHttpFixture(options: {
   };
   // Snapshot evidence is deliberately separate from mutable service variables.
   const deployments = new Map<string, { id: string; projectId: string; environmentId: string; serviceId: string; snapshotId: string;
-    status?: string; deploymentStopped?: boolean; instances?: Array<{ id: string; status: string }> }>();
+    status?: string; deploymentStopped?: boolean; instances?: Array<{ id: string; status: string }>;
+    meta?: Record<string, any>; createdAt?: string; updatedAt?: string }>();
   const deploymentSnapshots = new Map<string, { id: string; variables: unknown }>();
+  // Opaque patch contents are independently reconstructed by the individual
+  // contract tests; the SDL checks only the outer GraphQL field types.
+  const environmentPatches = new Map<string, Record<string, any>>();
   const mutations: Array<{ field: string; args: Record<string, any> }> = [];
   const requests: Array<{ query: string; variables: Record<string, any> }> = [];
   const contractErrors: string[] = [];
@@ -280,6 +284,7 @@ export async function railwayHttpFixture(options: {
     deployment: ({ id }) => deployments.get(id) ?? [...services.values()].flatMap(service => [...service.instances.values()]
       .filter(instance => instance.latestDeployment?.id === id).map(instance => ({ id, projectId, environmentId: instance.environmentId, serviceId: service.id, snapshotId: null })))[0],
     deploymentSnapshot: ({ deploymentId }) => deploymentSnapshots.get(deploymentId) ?? null,
+    environmentPatch: ({ id }) => environmentPatches.get(id) ?? null,
     environmentCreate: ({ input }) => {
       expect(input.projectId).toBe(projectId);
       const environment = { id: stagingId, name: input.name, config: {} };
@@ -451,5 +456,6 @@ export async function railwayHttpFixture(options: {
     createdAt: new Date(), updatedAt: new Date(),
   };
   return { adapter, environment, services, environments, buckets, volumes, addService, addVolume,
-    mutations, requests, variables, deployments, deploymentSnapshots, contractErrors, backups, backupWorkflows, backupSchedules };
+    mutations, requests, variables, deployments, deploymentSnapshots, environmentPatches,
+    contractErrors, backups, backupWorkflows, backupSchedules };
 }

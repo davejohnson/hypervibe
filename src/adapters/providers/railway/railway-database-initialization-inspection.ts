@@ -6,7 +6,7 @@ import {
   databaseInitializationImageSchema, type IDatabaseInitializationBootstrap,
 } from '../../../domain/ports/database-initialization-bootstrap.port.js';
 import type { RecoverySourceIdentity } from '../../../domain/ports/recovery-source.port.js';
-import { completedDatabaseInitializationReceiptSchema } from '../../../domain/plan/database-initialization.contract.js';
+import { completedDatabaseInitializationReceiptSchema, completedDatabaseInitializationDeploymentId } from '../../../domain/plan/database-initialization.contract.js';
 import { recoveryIdentityStringSchema, recoverySourceIdentitySchema } from '../../../domain/services/recovery-source.js';
 
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -19,7 +19,7 @@ const variables = z.record(z.string(), z.string());
 const inspectedVariables = z.object({ applicationDefinitions: variables, applicationResolved: variables,
   databaseDefinitions: variables, databaseResolved: variables }).strict();
 const inputSchema = z.object({ completedInitialization: completedDatabaseInitializationReceiptSchema.pick({
-  target: true, storageId: true, storageInstanceId: true, deploymentId: true,
+  target: true, storageId: true, storageInstanceId: true, deploymentId: true, activationReconciliation: true,
 }),
   sourceServiceName: identity, expectedImage: databaseInitializationImageSchema,
   databaseEnvAliases: z.record(envKey, z.enum(['DATABASE_URL', 'DIRECT_URL'])).optional(),
@@ -80,7 +80,7 @@ export function createRailwayDatabaseInitializationInspection(
           providerScope: initialized.target.providerScope,
           resourceIdentity: { volumeId: initialized.storageId, volumeInstanceId: initialized.storageInstanceId },
         });
-        const databaseDeploymentId = initialized.deploymentId;
+        const databaseDeploymentId = completedDatabaseInitializationDeploymentId(initialized);
         const projectId = source.providerScope.projectId, environmentId = source.providerScope.environmentId;
         const bindings = environment.platformBindings;
         const service = record(bindings.services) ? bindings.services[checked.sourceServiceName] : undefined;

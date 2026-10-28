@@ -11,6 +11,7 @@ import { recoveryIdentityStringSchema } from '../../../domain/services/recovery-
 import type { RailwayVolumeResolution, RailwayVolumeTarget } from './railway.adapter.js';
 import { railwayReplicaConfiguration, RailwayReplicaConfigurationError,
   type RailwayReplicaConfiguration } from './railway-replica-configuration.js';
+import { railwayStorageAttachmentActivation } from './railway-database-initialization-activation.js';
 
 export interface RailwayInitializationTarget {
   projectId: string; environmentId: string; serviceId: string; serviceName: string;
@@ -160,8 +161,10 @@ export function createRailwayDatabaseInitialization(client: () => GraphQLClient 
 
   async function apply(target: RailwayInitializationTarget, input: ApplyInput): Promise<DatabaseFreshInitializationResult> {
     let progress = input.progress;
-    const outcome = (state: DatabaseFreshInitializationResult['state'], reason?: string): DatabaseFreshInitializationResult => ({ state,
-      progress, ...(reason ? { reason } : {}), ...(state === 'complete' ? { storageBindings: {
+    const outcome = (state: DatabaseFreshInitializationResult['state'], reason?: string,
+      code?: NonNullable<DatabaseFreshInitializationResult['diagnostic']>['code']): DatabaseFreshInitializationResult => ({ state,
+      progress, ...(reason ? { reason } : {}), ...(code ? { diagnostic: { stage: 'activation', code } } : {}),
+      ...(state === 'complete' ? { storageBindings: {
         volumeId: progress.storageId, volumeInstanceId: progress.storageInstanceId, volumeTarget: volumeTarget(target),
       } } : {}) });
     const save = async (next: DatabaseFreshInitializationProgress) => { progress = next; await input.saveProgress(next); };
@@ -258,28 +261,49 @@ export function createRailwayDatabaseInitialization(client: () => GraphQLClient 
           if (!record(response) || !record(response.deployment) || !record(response.serviceInstance)
             || response.deployment.id !== progress.deploymentId || response.deployment.projectId !== target.projectId
             || response.deployment.environmentId !== target.environmentId || response.deployment.serviceId !== target.serviceId
-            || response.serviceInstance.id !== original.instanceId || !record(response.serviceInstance.latestDeployment)
-            || response.serviceInstance.latestDeployment.id !== progress.deploymentId
-            || response.deployment.deploymentStopped !== false) return outcome('unknown', 'The exact acknowledged database deployment could not be verified.');
+            || response.serviceInstance.id !== original.instanceId) return outcome('unknown', 'The exact acknowledged database deployment could not be verified.', 'deployment-unverified');
           const status = response.deployment.status;
+          const latest = response.serviceInstance.latestDeployment;
+          if (status === 'REMOVED' && response.deployment.deploymentStopped === true
+            && record(latest) && identity(latest.id) && latest.id !== progress.deploymentId) {
+            const activation = { acknowledgedId: progress.deploymentId!, deploymentId: latest.id,
+              storageId: progress.storageId!, instanceId: original.instanceId, mountPath,
+              rawVariables: desiredRaw, image: original.image,
+              ...(original.version === 2 ? { replicaConfiguration: original.replicaConfiguration } : {}) };
+            const reconciled = await railwayStorageAttachmentActivation(client()!, target, activation);
+            if (!reconciled || progress.activationReconciliation
+              && !isDeepStrictEqual(progress.activationReconciliation, reconciled.reconciliation)) {
+              return outcome('unknown', 'The acknowledged database deployment was replaced, but its exact storage attachment activation could not be verified.', 'deployment-replaced');
+            }
+            const after = await storage();
+            if (!after.success || after.state !== 'present' || after.pendingDeletion
+              || after.instanceId !== progress.storageInstanceId || !await unchanged(true)
+              || !isDeepStrictEqual(await railwayStorageAttachmentActivation(client()!, target, activation), reconciled)) {
+              return outcome('unknown', 'The storage attachment activation or preserved configuration changed during verification.', 'configuration-changed');
+            }
+            if (progress.phase !== 'complete') await save({ ...progress, phase: 'complete', activationReconciliation: reconciled.reconciliation });
+            return outcome('complete');
+          }
+          if (stoppedDeploymentStatuses.includes(String(status))) {
+            return outcome('failed', 'The acknowledged database deployment is not running successfully; retain its storage and identity.', 'deployment-failed');
+          }
+          if (!record(latest) || latest.id !== progress.deploymentId || response.deployment.deploymentStopped !== false
+            || progress.activationReconciliation) return outcome('unknown', 'The exact acknowledged database deployment could not be verified.', 'deployment-unverified');
           if (status === 'SUCCESS') {
             const after = await storage();
             if (!after.success || after.state !== 'present' || after.pendingDeletion
               || after.instanceId !== progress.storageInstanceId || !await unchanged(true)) {
-              return outcome('unknown', 'Database storage or preserved configuration changed after deployment.');
+              return outcome('unknown', 'Database storage or preserved configuration changed after deployment.', 'configuration-changed');
             }
             if (progress.phase !== 'complete') await save({ ...progress, phase: 'complete' });
             return outcome('complete');
           }
-          if (stoppedDeploymentStatuses.includes(String(status))) {
-            return outcome('failed', 'The acknowledged database deployment is not running successfully; retain its storage and identity.');
-          }
           if (!pendingDeploymentStatuses.includes(String(status))) {
-            return outcome('unknown', 'The database deployment status is not recognized.');
+            return outcome('unknown', 'The database deployment status is not recognized.', 'deployment-unverified');
           }
           if (attempt + 1 < attempts) await wait();
         }
-        return outcome('pending', 'The acknowledged database deployment is still pending.');
+        return outcome('pending', 'The acknowledged database deployment is still pending.', 'deployment-pending');
       }
       return outcome('unknown', 'Database initialization progress could not be verified.');
     } catch {

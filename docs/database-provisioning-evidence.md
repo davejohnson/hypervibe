@@ -164,6 +164,46 @@ must retain uncertainty instead of authorizing a second create/deploy or guessin
 cleanup ownership. Once initialization may have started, automatic volume
 deletion is not compensation.
 
+### Provider activation replacing the acknowledged deployment
+
+The assumption that the explicitly acknowledged deployment must remain current
+was falsified by read-only observations on 2026-10-28: that deployment was removed
+and stopped, while the sole active deployment referenced a committed environment
+patch that only created and mounted the exact acknowledged volume. The complete
+manifest and raw variable snapshots matched between deployments. This identifies
+the verification blocker; it does not establish SQL readiness or the cause of
+the earlier data loss. The provider does not document a request-to-patch lineage
+guarantee, so timing and matching manifests alone remain insufficient.
+
+The [reconstructed observation and official contract pins](../test/provider-contracts/railway/database-initialization/successor-source.json)
+support a narrow read-only reconciliation. It requires the exact service,
+environment, project, volume and volume instance; the stopped original deployment;
+one successful current successor; and its exact committed patch containing only
+the reviewed volume creation and mount. Both immutable variable snapshots must
+match the frozen reviewed raw definitions plus the reviewed PGDATA. The source
+image, default startup, replica topology, image digest, manifest and mount evidence
+must agree, and mutable storage/configuration plus candidate identity are checked
+again before completion. Raw references are compared without copying or rendering
+them into persisted evidence. These checks do not prove process environment or
+SQL authentication.
+
+The shared completed receipt keeps `deploymentId` as the original acknowledgment
+and adds optional strict version-one `activationReconciliation` evidence with the
+verified deployment and provider operation IDs. Progress and receipt must agree.
+Legacy receipts and their seed fingerprints remain unchanged. Bootstrap observes
+the separately verified activation when present; seed generation includes the
+same validated receipt. A retry issues no additional volume, variable, deployment
+or cleanup mutation. Supabase, Neon, Cloud SQL, RDS, Azure PostgreSQL, Fly MPG and
+DigitalOcean remain explicitly unsupported for fresh initialization: this receipt
+extension does not admit any of their reset or restore APIs.
+
+Regression checks first failed through the real Railway client and serialized
+GraphQL transport, then through the completed-receipt and bootstrap boundaries.
+They cover malformed/extra patch changes, reference and credential drift, different
+snapshots, wrong scopes or mounts, multiple active deployments, replacement during
+verification, and local receipt failures. These reconstructed offline fixtures
+remain distinct from live provider compatibility and durable database recovery.
+
 Exact mount/configuration readback and a successful provider deployment remain
 separate from authenticated SQL, application migrations, seed completion, running
 application health, and a restart durability experiment. Those checks and future
