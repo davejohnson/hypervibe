@@ -67,8 +67,8 @@ export function createRailwayStorageAdapter(railway: RailwayAdapter): IStorageAd
       const provider = typeof environment.platformBindings.provider === 'string'
         ? environment.platformBindings.provider
         : undefined;
-      if (provider === 'railway') return railwayStorageRuntimeEnv(name);
       const credentials = await railway.getStorageCredentials(virtualEnvironment(environment, context), externalId);
+      if (provider === 'railway') return railwayStorageRuntimeEnv(name, credentials.urlStyle);
       return s3StorageRuntimeEnv(credentials);
     },
     getCredentials: (environment, context, externalId) => railway.getStorageCredentials(virtualEnvironment(environment, context), externalId),

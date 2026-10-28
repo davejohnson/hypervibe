@@ -1,5 +1,5 @@
 import { Readable } from 'node:stream';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createS3ObjectClient } from '../object-storage-transfer.service.js';
 
 // Official wire contracts: API_GetObject.html (If-Match/versionId),
@@ -8,6 +8,37 @@ import { createS3ObjectClient } from '../object-storage-transfer.service.js';
 // https://docs.railway.com/storage-buckets; this is synthetic wire evidence,
 // not certification that a Railway account supports every conditional header.
 describe('S3-compatible recovery stream wire boundary', () => {
+  // AWS's independent addressing contract, also linked by Railway's bucket
+  // documentation: https://docs.aws.amazon.com/AmazonS3/latest/userguide/VirtualHosting.html
+  it.each([
+    { urlStyle: 'path', hostname: 'object-contract.invalid', path: '/archive-bucket/' },
+    { urlStyle: 'virtual', hostname: 'archive-bucket.object-contract.invalid', path: '/' },
+  ])('serializes $urlStyle addressing through the real SDK', async ({ urlStyle, hostname, path }) => {
+    const handle = vi.fn(async () => ({ response: { statusCode: 200,
+      headers: { 'content-type': 'application/xml' },
+      body: Readable.from(['<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>']) } }));
+    const client = createS3ObjectClient({ bucket: 'archive-bucket', endpoint: 'https://object-contract.invalid',
+      region: 'us-east-1', accessKeyId: 'contract-id', secretAccessKey: 'contract-secret', urlStyle },
+    { requestHandler: { handle } as never });
+    try {
+      await expect(client.list()).resolves.toEqual([]);
+      expect(handle).toHaveBeenCalledWith(expect.objectContaining({ method: 'GET', hostname, path }), expect.anything());
+    } finally { client.destroy(); }
+  });
+
+  it('rejects an unknown addressing style before creating an object transport, without echoing it', () => {
+    const handle = vi.fn();
+    let client: ReturnType<typeof createS3ObjectClient> | undefined;
+    try {
+      expect(() => {
+        client = createS3ObjectClient({ bucket: 'archive-bucket', endpoint: 'https://object-contract.invalid',
+          region: 'us-east-1', accessKeyId: 'contract-id', secretAccessKey: 'contract-secret',
+          urlStyle: 'unknown-private-style-sentinel' }, { requestHandler: { handle } as never });
+      }).toThrow(/^Unsupported object storage URL style\.$/);
+      expect(handle).not.toHaveBeenCalled();
+    } finally { client?.destroy(); }
+  });
+
   async function fixture(provider: string) {
     const requests: Array<{ method: string; url: string; headers: Record<string, unknown> }> = [];
     const handler = { async handle(request: { method: string; path: string; query: Record<string, string>; headers: Record<string, string>; body?: unknown }) {
