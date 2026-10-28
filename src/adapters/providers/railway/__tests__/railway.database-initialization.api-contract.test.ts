@@ -81,6 +81,31 @@ describe('Railway existing database fresh initialization through serialized Grap
       expect(createHash('sha256').update(bytes).digest('hex')).toBe(entry.sha256);
     }
   });
+
+  it('keeps reviewed replica source revisions, URLs and exact excerpt hashes in the normal acceptance gate', () => {
+    const evidence = JSON.parse(readFileSync('test/provider-contracts/railway/replica-configuration-source.json', 'utf8'));
+    const cliRevision = 'f60f3a77b980c47f1136909fbd9a443e29a2b95f';
+    const docsRevision = '4bc46bc0ba1b27d50c5ef0393132753982b31112';
+    const expectedSources = [
+      { repository: 'cli', revision: cliRevision, path: 'src/gql/schema.json' },
+      { repository: 'cli', revision: cliRevision, path: 'src/controllers/config/environment.rs' },
+      { repository: 'cli', revision: cliRevision, path: 'src/controllers/regions.rs' },
+      { repository: 'cli', revision: cliRevision, path: 'src/commands/scale.rs' },
+      { repository: 'docs', revision: docsRevision, path: 'content/docs/config-as-code/reference.md' },
+    ];
+    expect(evidence.evidenceKind).toBe('official-source-excerpts');
+    expect(evidence.sources).toHaveLength(expectedSources.length);
+    for (const [index, expected] of expectedSources.entries()) {
+      const source = evidence.sources[index];
+      expect(source.path).toBe(expected.path);
+      expect(source.revision).toBe(expected.revision);
+      expect(source.url).toBe(`https://github.com/railwayapp/${expected.repository}/blob/${expected.revision}/${expected.path}`);
+      expect(source.excerpts.length).toBeGreaterThan(0);
+      for (const excerpt of source.excerpts) {
+        expect(createHash('sha256').update(excerpt.text, 'utf8').digest('hex')).toBe(excerpt.sha256);
+      }
+    }
+  });
   it.each([productionId, stagingId])('keeps exact existing service and references in %s while attaching fresh storage', async nativeEnvironmentId => {
     const f = await fixture({}, nativeEnvironmentId);
     const untouched = JSON.stringify([...f.environments].filter(([id]) => id !== nativeEnvironmentId));
@@ -108,6 +133,157 @@ describe('Railway existing database fresh initialization through serialized Grap
     const count = f.mutations.length;
     expect((await run.apply()).state).toBe('complete');
     expect(f.mutations).toHaveLength(count);
+  });
+
+  // Railway CLI f60f3a77, controllers/config/environment.rs and
+  // controllers/regions.rs, defines explicit regional replica counts separately
+  // from the nullable ServiceInstance scalar. This reconstructed configured
+  // topology is not a claim about live running replicas or a null-to-one default.
+  it('initializes from explicit single-region proof when the scalar replica count is null, without rewriting replicas or repeating writes', async () => {
+    const f = await fixture();
+    f.service.instances.get(productionId)!.numReplicas = null;
+    const deploy = { multiRegionConfig: { 'us-west2': { numReplicas: 1 } } };
+    f.environments.get(productionId)!.config.services![f.serviceId].deploy = structuredClone(deploy);
+    const run = await start(f);
+    const result = await run.apply();
+    expect(result.state).toBe('complete');
+    expect(result.progress).toMatchObject({ phase: 'complete', storageId: expect.any(String),
+      storageInstanceId: expect.any(String), deploymentId: expect.any(String) });
+    expect(f.mutations.map(mutation => mutation.field)).toEqual(['variableCollectionUpsert', 'volumeCreate', 'serviceInstanceDeployV2']);
+    expect(f.mutations[0].args.input.variables).toEqual({ PGDATA: dataPath });
+    expect(f.service.instances.get(productionId)!.numReplicas).toBeNull();
+    expect(f.environments.get(productionId)!.config.services![f.serviceId].deploy).toEqual(deploy);
+    const count = f.mutations.length;
+    expect(await run.apply()).toMatchObject({ state: 'complete', progress: result.progress });
+    expect(f.mutations).toHaveLength(count);
+    expect(f.contractErrors).toEqual([]);
+  });
+
+  it.each([undefined, '1', -1, 0.5])('keeps omitted or malformed scalar replica evidence unknown despite a valid regional map: %j', async scalar => {
+    const f = await fixture();
+    f.environments.get(productionId)!.config.services![f.serviceId].deploy = {
+      multiRegionConfig: { 'us-west2': { numReplicas: 1 } },
+    };
+    // Deliberately corrupt the serialized response after schema execution so
+    // missing selected fields are distinguishable from contract-permitted null.
+    alterResponse('query DatabaseInitializationTarget', body => {
+      if (scalar === undefined) delete body.data.serviceInstance.numReplicas;
+      else body.data.serviceInstance.numReplicas = scalar;
+    });
+    expect((await f.database.freshInitialization!.inspect(f)).state).toBe('unknown');
+    expect(f.mutations).toEqual([]);
+  });
+
+  it.each([
+    undefined, null, {}, { multiRegionConfig: undefined }, { multiRegionConfig: null }, { multiRegionConfig: {} },
+    { multiRegionConfig: { 'us-west2': null } },
+    { multiRegionConfig: { 'us-west2': {} } },
+    { multiRegionConfig: { 'us-west2': { numReplicas: null } } },
+    { multiRegionConfig: { 'us-west2': { numReplicas: '1' } } },
+    { multiRegionConfig: { 'us-west2': { numReplicas: -1 } } },
+    { multiRegionConfig: { 'us-west2': { numReplicas: 0.5 } } },
+  ])('does not invent a replica count from null plus incomplete regional proof: %j', async deploy => {
+    const f = await fixture();
+    f.service.instances.get(productionId)!.numReplicas = null;
+    f.environments.get(productionId)!.config.services![f.serviceId].deploy = deploy;
+    expect((await f.database.freshInitialization!.inspect(f)).state).toBe('unknown');
+    expect(f.mutations).toEqual([]);
+    expect(f.contractErrors).toEqual([]);
+  });
+
+  it.each([
+    { scalar: null, regional: 0 }, { scalar: null, regional: 2 },
+    { scalar: 0, regional: 1 }, { scalar: 1, regional: 0 }, { scalar: 2, regional: 1 },
+  ])('rejects non-single or contradictory configured replica counts: %j', async ({ scalar, regional }) => {
+    const f = await fixture();
+    f.service.instances.get(productionId)!.numReplicas = scalar;
+    f.environments.get(productionId)!.config.services![f.serviceId].deploy = {
+      multiRegionConfig: { 'us-west2': { numReplicas: regional } },
+    };
+    expect((await f.database.freshInitialization!.inspect(f)).state).not.toBe('eligible');
+    expect(f.mutations).toEqual([]);
+    expect(f.contractErrors).toEqual([]);
+  });
+
+  it('rejects a reviewed single replica moving to another region before any writes', async () => {
+    const f = await fixture();
+    f.environments.get(productionId)!.config.services![f.serviceId].deploy = {
+      multiRegionConfig: { 'us-west2': { numReplicas: 1 } },
+    };
+    const run = await start(f);
+    f.environments.get(productionId)!.config.services![f.serviceId].deploy = {
+      multiRegionConfig: { 'us-east4': { numReplicas: 1 } },
+    };
+    expect((await run.apply()).state).not.toBe('complete');
+    expect(f.mutations).toEqual([]);
+    expect((await run.apply()).state).not.toBe('complete');
+    expect(f.mutations).toEqual([]);
+  });
+
+  it.each([1, null].flatMap(scalar => ['moved', 'missing', 'null', 'empty'].map(change => ({ scalar, change }))))
+  ('retains the acknowledged volume without repeating writes when scalar $scalar regional proof becomes $change', async ({ scalar, change }) => {
+    const f = await fixture();
+    f.service.instances.get(productionId)!.numReplicas = scalar;
+    f.environments.get(productionId)!.config.services![f.serviceId].deploy = {
+      multiRegionConfig: { 'us-west2': { numReplicas: 1 } },
+    };
+    const run = await start(f);
+    alterResponse('mutation InitializationVolumeCreate', () => {
+      f.environments.get(productionId)!.config.services![f.serviceId].deploy = change === 'missing' ? {}
+        : { multiRegionConfig: change === 'moved' ? { 'us-east4': { numReplicas: 1 } }
+          : change === 'null' ? null : {} };
+    });
+    const result = await run.apply();
+    expect(result.state).toBe('unknown');
+    expect(result.progress.storageId).toEqual(expect.any(String));
+    expect(result.progress.deploymentId).toBeUndefined();
+    expect(f.mutations.map(mutation => mutation.field)).toEqual(['variableCollectionUpsert', 'volumeCreate']);
+    expect(await run.apply()).toMatchObject({ state: 'unknown', progress: { storageId: result.progress.storageId } });
+    expect(f.mutations).toHaveLength(2);
+    expect(f.volumes.has(result.progress.storageId!)).toBe(true);
+    expect(f.contractErrors).toEqual([]);
+  });
+
+  it.each(['preserved', 'replaced-with-null'] as const)('preserves version-one retry authorization when its scalar proof is %s', async scalarState => {
+    const f = await fixture({ dropVariableResponse: true });
+    // Reconstructed persisted format from the c11923ac producer and this
+    // synthetic provider fixture. Its fixed old fingerprint is deliberately
+    // independent of the new inspection producer and contains no regional proof.
+    const url = `postgresql://postgres:${password}@postgres-db.railway.internal:5432/railway`;
+    const reviewed = {
+      target: { provider: 'railway', externalId: 'production-postgres-db',
+        providerScope: { projectId, environmentId: productionId } },
+      configurationFingerprint: 'c8880600b4aab95883f6d385d271774dea73f209e8816f9dd442738359469728',
+      privateConfiguration: {
+        version: 1, instanceId: 'instance-production-postgres-db-environment-production',
+        image: 'postgres:16', serviceName: 'postgres-db', startCommand: null, preDeployCommand: null,
+        rawVariables: { ...rawVariables }, issuerVariables: {
+          POSTGRES_PASSWORD: password, POSTGRES_USER: 'postgres', POSTGRES_DB: 'railway',
+          PGPASSWORD: password, PGUSER: 'postgres', PGDATABASE: 'railway',
+          PGHOST: 'postgres-db.railway.internal', PGPORT: '5432', DATABASE_URL: url, DIRECT_URL: url,
+        },
+        dataPath, desiredPGDATA: dataPath,
+      },
+    };
+    let progress: DatabaseFreshInitializationProgress = { phase: 'prepared' };
+    const apply = () => f.database.freshInitialization!.apply({ environment: f.environment, component: f.component,
+      reviewed, progress, saveProgress: async next => { progress = structuredClone(next); } });
+    expect(await apply()).toMatchObject({ state: 'unknown', progress: { phase: 'configuration-attempted' } });
+    expect(f.mutations.map(mutation => mutation.field)).toEqual(['variableCollectionUpsert']);
+    if (scalarState === 'replaced-with-null') {
+      f.service.instances.get(productionId)!.numReplicas = null;
+      f.environments.get(productionId)!.config.services![f.serviceId].deploy = {
+        multiRegionConfig: { 'us-west2': { numReplicas: 1 } },
+      };
+    }
+    const result = await apply();
+    expect(result.state).toBe(scalarState === 'preserved' ? 'complete' : 'unknown');
+    const expectedWrites = scalarState === 'preserved'
+      ? ['variableCollectionUpsert', 'volumeCreate', 'serviceInstanceDeployV2'] : ['variableCollectionUpsert'];
+    expect(f.mutations.map(mutation => mutation.field)).toEqual(expectedWrites);
+    expect((await apply()).state).toBe(result.state);
+    expect(f.mutations.map(mutation => mutation.field)).toEqual(expectedWrites);
+    expect(f.contractErrors).toEqual([]);
   });
 
   it.each(['volume', 'deployment'] as const)('retains an uncertain %s write without adopting or repeating it', async operation => {
