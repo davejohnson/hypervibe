@@ -26,6 +26,7 @@ import { railwayDeployedConfiguration } from './railway-runtime-configuration.js
 import { createRailwayRuntimeEvidence } from './railway-runtime-evidence.js';
 import { createRailwayDatabaseRotationConfiguration } from './railway-database-rotation.js';
 import { createRailwayDatabaseInitialization } from './railway-database-initialization.js';
+import { railwayReplicaConfiguration } from './railway-replica-configuration.js';
 import {
   createHostingServiceCreateRecovery,
   parseHostingBindings,
@@ -383,26 +384,11 @@ export class RailwayAdapter implements
         || result.serviceInstance.deletedAt !== null) {
         return { state: 'unknown', reason: 'Railway volume target does not have a verified active service in the exact project and environment.' };
       }
-      const replicas = result.serviceInstance.numReplicas;
-      if (typeof replicas !== 'number' || !Number.isInteger(replicas) || replicas < 0 || replicas > 1) {
+      const replicas = railwayReplicaConfiguration(
+        result.serviceInstance.numReplicas, result.environment.config, target.serviceId,
+      );
+      if (replicas.count > 1) {
         return { state: 'unknown', reason: 'Railway volumes require a verified service replica count of at most one.' };
-      }
-      const config = result.environment.config;
-      const serviceConfig = isRecord(config) && isRecord(config.services) ? config.services[target.serviceId] : undefined;
-      if (!isRecord(serviceConfig) || !isRecord(serviceConfig.deploy)) {
-        return { state: 'unknown', reason: 'Railway volume target has no complete deployment configuration for replica observation.' };
-      }
-      // EnvironmentConfig is an opaque GraphQL scalar. These nested shapes come
-      // from the pinned official CLI DeployConfig/RegionConfig, not the SDL.
-      const regions = serviceConfig.deploy.multiRegionConfig;
-      if (regions !== undefined) {
-        if (!isRecord(regions) || Object.entries(regions).some(([region, value]) => !region.trim()
-          || !isRecord(value) || typeof value.numReplicas !== 'number'
-          || !Number.isInteger(value.numReplicas) || value.numReplicas < 0)) {
-          return { state: 'unknown', reason: 'Railway multi-region replica configuration is incomplete or malformed.' };
-        }
-        const total = Object.values(regions).reduce((sum: number, value) => sum + (value as { numReplicas: number }).numReplicas, 0);
-        if (total > 1) return { state: 'unknown', reason: 'Railway volumes cannot be used with multiple replicas across regions.' };
       }
       const resolved = await this.resolveServiceVolume(target, externalId, { singleServiceVolume: true });
       if (!resolved.success) return { state: 'unknown', reason: resolved.error };

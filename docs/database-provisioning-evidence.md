@@ -188,6 +188,33 @@ native scope coordinates, and lifecycle admission still requires every scope
 key declared by the actual provider registry. This does not add initialization
 support to either provider.
 
+## Railway replica configuration
+
+Railway's legacy `ServiceInstance.numReplicas` field is nullable. A null value
+does not mean one replica. The shared Railway configuration check can establish
+the configured total from a nonempty `multiRegionConfig` map only when every
+region and replica count is valid and explicit. Fresh database initialization
+requires exactly one; the retained-volume boundary permits at most one.
+Missing, null, empty or malformed regional evidence cannot replace an unknown
+legacy count. Neither path changes replica settings to make admission succeed.
+
+The [pinned source excerpts](../test/provider-contracts/railway/replica-configuration-source.json)
+cover the schema, environment configuration model and official CLI inspection.
+The CLI reads a deployment's manifest, while code configuration can override
+dashboard settings for that deployment. Configured replica evidence therefore
+does not prove the number or health of running containers. The CLI's legacy
+manifest fallback and permissive display counts are not null-to-one defaults
+for Hypervibe authorization.
+
+New initialization snapshots include normalized replica topology in their
+reviewed fingerprints, so a region change cannot retain approval merely because
+the total remains one. Previously persisted pending snapshots retain their
+original legacy validation and fingerprint semantics; new regional evidence
+does not retroactively widen their authorization. The shared contract and the
+eight-provider admission matrix above are unchanged: this is a Railway parser
+correction. These source contracts and reconstructed boundary tests do not
+establish BillForge's observed regional map or live initialization compatibility.
+
 ## Executable enforcement and evidence limits
 
 `database-provisioning-provider-contracts.test.ts` compares the named matrix with

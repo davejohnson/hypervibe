@@ -112,11 +112,13 @@ See the [volume reference](https://docs.railway.com/volumes/reference) and
 [API guide](https://docs.railway.com/integrations/api/manage-volumes).
 
 Observation requires a known single-instance configuration (including explicit
-regional replica counts) and complete, paginated environment inventory. Nullable
-or incomplete provider settings block rather than imply defaults. Whether a
-fresh live Railway service exposes enough configuration for this check remains
-unverified; the schema permits nullable replica counts. This implementation
-does not silently change replica settings to make the check pass.
+regional replica counts) and complete, paginated environment inventory. A null
+legacy replica count needs a nonempty regional map with every count validated;
+it never implies one. Missing or incomplete proof remains unknown. This proves
+configured capacity, not a running deployment's manifest or container population.
+The [replica evidence record](../test/provider-contracts/railway/replica-configuration-source.json)
+pins the nullable schema and independent configuration model. This implementation
+does not change replica settings to make the check pass or claim live compatibility.
 
 Tests execute serialized GraphQL against the pinned official Railway schema and
 synthetic provider state, plus real local SQLite persistence. The opaque JSON
