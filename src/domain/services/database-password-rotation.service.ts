@@ -13,7 +13,7 @@ import { ConvergeExecutor, type PlanRunDocument, type ActionResult } from '../pl
 import { PlanService, type EnvironmentPlan } from '../plan/plan.service.js';
 import { scopedSecretObservation } from '../plan/scoped-secrets.js';
 import { databasePasswordActionId, databasePasswordMetadataSchema, DATABASE_PASSWORD_OPERATIONS, isDatabasePasswordPlan } from '../plan/database-password-plan.contract.js';
-import { databaseCredentialLifecycle, databaseCredentialConfigurationSchema, databaseCredentialTargetSchema,
+import { DatabaseCredentialReviewError, databaseCredentialLifecycle, databaseCredentialConfigurationSchema, databaseCredentialTargetSchema,
   type DatabaseCredentialTarget, type DatabaseCredentialConfiguration } from '../ports/database-credential.port.js';
 import { parseHostingBindings } from '../ports/hosting.port.js';
 import { hashEnvValue, type ObservedState } from '../ports/observe.port.js';
@@ -37,6 +37,7 @@ const progressSchema = z.object({
 type Progress = z.infer<typeof progressSchema>;
 type Frozen = { kind: 'database-password'; value: string; descriptor: CredentialTracking; target: DatabaseCredentialTarget;
   configuration: DatabaseCredentialConfiguration; actions: PlanRunDocument['actions']; lockEnvironmentIds: string[]; hostingProvider: string; beforeBindings: Record<string, unknown>; intendedBindings: Record<string, unknown>;
+  applicationValidation?: { at: string; tested: string };
   intent?: 'adopt' | 'rotate'; previousPassword?: string; replacementRecovered?: boolean;
   validation?: { result: 'passed'; at: string; tested: string; applicationOperation: 'unknown'; evidenceId: string } };
 class RotationError extends Error {}
@@ -96,13 +97,16 @@ function current(project: Project, spec: ProjectSpec, descriptor: CredentialTrac
   }
   return { environment, component, envSpec };
 }
-async function capability(project: Project, provider: string, persist?: () => void, desired?: ProjectSpec['environments'][string], retryUncertain = false) {
+async function capability(project: Project, provider: string, persist?: () => void, desired?: ProjectSpec['environments'][string], retryUncertain = false, applicationDriver?: 'node-postgres') {
   const result = await adapterFactory.getDatabaseAdapter(provider, project);
   const native = result.success ? databaseCredentialLifecycle(result.adapter) : undefined;
   if (!native || !native.configuration && (!native.finalize || !native.inspectIssuer)) {
     throw new RotationError(`Native database-password rotation is unsupported for ${provider}: a complete SQL, issuer, reference and consumer recovery capability is required.`);
   }
-  return { ...native, configuration: native.configuration ?? composeDatabaseCredentialConfiguration(project, native, persist, desired, retryUncertain) };
+  if (applicationDriver && (!native.runtimeConfiguration || typeof native.runtimeConfiguration.verifyAuthentication !== 'function')) {
+    throw new RotationError(`Deployed application authentication is unsupported for ${provider}; omit applicationDriver to retain the existing native rotation boundary.`);
+  }
+  return { ...native, configuration: (applicationDriver ? native.runtimeConfiguration : native.configuration) ?? composeDatabaseCredentialConfiguration(project, native, persist, desired, retryUncertain) };
 }
 function requiredKeys(spec: ProjectSpec['environments'][string]): Record<string, string[]> {
   return Object.fromEntries(Object.entries(spec.services).map(([name, service]) => [name, [...new Set(['DATABASE_URL', ...Object.keys(service.databaseEnvAliases ?? {})])].sort()]));
@@ -148,6 +152,7 @@ export async function planDatabasePasswordRotation(params: { project: Project; s
   descriptor: CredentialTracking; intent: 'adopt' | 'rotate' }): Promise<EnvironmentPlan | { error: string }> {
   try {
     const { descriptor, project, spec } = params;
+    if (descriptor.database?.applicationDriver && params.intent !== 'rotate') throw new RotationError('Deployed application authentication is an optional rotation stage; native adoption retains its existing two-action review.');
     const slots = Object.values(spec.secrets).filter(slot => slot.credential?.role === descriptor.role);
     if (slots.some(slot => slot.environments.length || slot.ownership === 'delegated' && slot.githubActions) || descriptor.containerPull?.length || descriptor.runtimeConsumers?.length) {
       throw new RotationError('The native database rotation declares its database destination only; do not declare password inputs as application or GitHub variables.');
@@ -159,7 +164,16 @@ export async function planDatabasePasswordRotation(params: { project: Project; s
     if (pending) throw new RotationError(`Recover native database rotation with hv_apply planId="${pending}" before another plan.`);
     const { environment, component, envSpec } = current(project, spec, descriptor);
     if (environment.name !== params.environmentName) throw new RotationError('The selected native database must belong to the plan environment.');
-    const port = await capability(project, envSpec.database!.provider, undefined, envSpec);
+    const port = await capability(project, envSpec.database!.provider, undefined, envSpec, false, descriptor.database?.applicationDriver);
+    const previous = progress(component);
+    if (previous?.phase === 'installed') {
+      const prior = runs.findById(previous.planId);
+      const encrypted = record(record(prior?.plan).overrides).delegatedSecretVarsEncrypted;
+      if (typeof encrypted !== 'string') throw new RotationError('The preceding database rotation review is unavailable; preserve recovery.');
+      const retained = getSecretStore().decryptObject<Frozen>(encrypted);
+      if (retained.descriptor.database?.applicationDriver && !retained.applicationValidation) throw new RotationError(`Finish managed deployment and reapply native database rotation ${previous.planId} before another rotation.`);
+      if (descriptor.rotationGeneration && retained.descriptor.rotationGeneration && descriptor.rotationGeneration <= retained.descriptor.rotationGeneration) throw new RotationError('Increase rotationGeneration above the last accepted generation before a new rotation.');
+    }
     const target = databaseCredentialTargetSchema.parse(await port.inspect(environment, component, descriptor.database!));
     if (target.componentId !== component.id || target.environmentId !== environment.id || target.externalId !== component.externalId
       || target.provider !== envSpec.database!.provider || Object.entries(record(component.bindings.providerScope)).some(([key, value]) => target.providerScope[key] !== value)
@@ -167,7 +181,13 @@ export async function planDatabasePasswordRotation(params: { project: Project; s
     const previousPassword = target.inputMode === 'provider-generated' ? await port.readCurrent(environment, component, target) : undefined;
     if (target.inputMode === 'provider-generated' && !previousPassword) throw new RotationError('The exact current generated database credential cannot be recovered before rotation.');
     const first = Object.entries(spec.secrets).find(([, slot]) => slot.credential?.role === descriptor.role)!;
-    const value = previousPassword ?? (first[1].ownership === 'hypervibe' ? deriveHypervibeSecretValue(project.name, environment.name, first[0], first[1])
+    if (descriptor.rotationGeneration && (descriptor.source || params.intent !== 'rotate' || target.inputMode !== 'supplied' || first[1].ownership !== 'delegated')) throw new RotationError('rotationGeneration requires a supplied-mode delegated database rotation without a private source.');
+    let generated: string | undefined;
+    if (descriptor.rotationGeneration) {
+      const material = getSecretStore().deriveSecret('hypervibe.database-password.v1', { project: project.id, environment: environment.id, component: component.id, role: descriptor.role, generation: String(descriptor.rotationGeneration) });
+      try { generated = material.toString('base64url'); } finally { material.fill(0); }
+    }
+    const value = previousPassword ?? generated ?? (first[1].ownership === 'hypervibe' ? deriveHypervibeSecretValue(project.name, environment.name, first[0], first[1])
       : descriptor.source ? await resolveSecretValueRef(descriptor.source, { projectId: project.id, environmentName: environment.name }) : undefined);
     if (!value || value.includes('\0')) throw new RotationError('The private replacement is empty or invalid.');
     new AuditRepository().create({ action: 'credential.source.read', resourceType: 'credential-role', resourceId: `${project.id}/${descriptor.role}`, details: {
@@ -185,10 +205,11 @@ export async function planDatabasePasswordRotation(params: { project: Project; s
       if (currentConfiguration.issuer !== 'match' || currentConfiguration.references !== 'match') throw new RotationError('Adoption preserves existing database and consumer values; a differing value requires a separate rotation.');
     }
     const consumers = configuration.consumers.map(c => ({ service: c.service, externalId: c.externalId, keys: Object.keys(c.envVarHashes).sort() }));
-    const actions = DATABASE_PASSWORD_OPERATIONS.map(operation => ({ id: databasePasswordActionId(component.id, operation), type: 'update' as const,
-      resource: { kind: 'database' as const, name: 'postgres', provider: target.provider }, verified: true, requiresConfirm: true, dataBearing: true,
-      reason: operation === 'databasePasswordRotate' ? params.intent === 'adopt' ? 'Validate and adopt the existing database credential without changing authentication.' : 'Change the actual database password; old passwords can immediately stop authenticating new sessions.' : params.intent === 'adopt' ? 'Record existing issuer and consumer configuration without replacing values.' : 'Synchronize the exact authoritative issuer and references after fresh database authentication; affected workload rollout remains required.',
-      ...(operation === 'databasePasswordSynchronize' ? { dependsOn: [databasePasswordActionId(component.id, 'databasePasswordRotate')] } : {}),
+    const operations = descriptor.database?.applicationDriver ? DATABASE_PASSWORD_OPERATIONS : DATABASE_PASSWORD_OPERATIONS.slice(0, 2);
+    const actions = operations.map(operation => ({ id: databasePasswordActionId(component.id, operation), type: 'update' as const,
+      resource: { kind: 'database' as const, name: 'postgres', provider: target.provider }, verified: true, requiresConfirm: operation !== 'databasePasswordVerify', dataBearing: operation !== 'databasePasswordVerify',
+      reason: operation === 'databasePasswordVerify' ? 'Verify exact consumer activation, old deployment drainage and fresh authentication using the declared application driver. No deployment is performed.' : operation === 'databasePasswordRotate' ? params.intent === 'adopt' ? 'Validate and adopt the existing database credential without changing authentication.' : 'Change the actual database password; old passwords can immediately stop authenticating new sessions.' : params.intent === 'adopt' ? 'Record existing issuer and consumer configuration without replacing values.' : 'Synchronize the exact authoritative issuer and references after fresh database authentication; affected workload rollout remains required.',
+      ...(operation !== 'databasePasswordRotate' ? { dependsOn: [databasePasswordActionId(component.id, operation === 'databasePasswordSynchronize' ? 'databasePasswordRotate' : 'databasePasswordSynchronize')] } : {}),
       metadata: { operation, role: descriptor.role, target, issuerNames: configuration.issuerNames, consumers },
     }));
     const lockEnvironmentIds = [environment.id];
@@ -203,14 +224,20 @@ export async function planDatabasePasswordRotation(params: { project: Project; s
     runs.updateStatus(run.id, 'succeeded');
     return { scope: 'credentials', planRunId: run.id, environmentName: environment.name, specRevision: params.revision,
       verified: true, observed: null, actions, warnings, unmanaged: [], inputRequired: [], blocked: [] };
-  } catch (error) { return { error: error instanceof RotationError ? error.message : 'Native database rotation review failed; no replacement or provider diagnostics were exposed.' }; }
+  } catch (error) { return { error: error instanceof RotationError || error instanceof DatabaseCredentialReviewError ? error.message : 'Native database rotation review failed; no replacement or provider diagnostics were exposed.' }; }
 }
 
 export async function applyDatabasePasswordRotation(params: { project: Project; spec: ProjectSpec; specRevision: number; planId: string; confirmActions?: string[] }) {
   const executor = new ConvergeExecutor(); const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) throw new Error(loaded.error);
   if (loaded.run.projectId !== params.project.id || !isDatabasePasswordPlan(loaded.document.actions)) throw new RotationError('The exact native database plan authority is invalid.');
-  const frozen = getSecretStore().decryptObject<Frozen>(loaded.document.overrides!.delegatedSecretVarsEncrypted!);
+  let frozen: Frozen;
+  try { frozen = getSecretStore().decryptObject<Frozen>(loaded.document.overrides!.delegatedSecretVarsEncrypted!); }
+  catch {
+    // JSON decoding errors can quote decrypted input before the action handler
+    // starts. Keep that private material behind the same authored error boundary.
+    throw new RotationError('Native database rotation could not read its retained encrypted authority. Recovery is preserved; no private input or diagnostic was returned.');
+  }
   const persistFrozen = () => {
     const currentRun = runs.findById(params.planId)!;
     runs.updatePlan(params.planId, { ...currentRun.plan, overrides: { ...record(record(currentRun.plan).overrides), delegatedSecretVarsEncrypted: getSecretStore().encryptObject(frozen) } });
@@ -229,7 +256,7 @@ export async function applyDatabasePasswordRotation(params: { project: Project; 
       try {
         const m = databasePasswordMetadataSchema.parse(action.metadata);
         const { environment, component, envSpec } = current(params.project, params.spec, frozen.descriptor);
-        const port = await capability(params.project, frozen.target.provider, persistFrozen, envSpec, params.confirmActions?.includes(`${action.id}:retry-uncertain`) === true);
+        const port = await capability(params.project, frozen.target.provider, persistFrozen, envSpec, params.confirmActions?.includes(`${action.id}:retry-uncertain`) === true, frozen.descriptor.database?.applicationDriver);
         if (!isDeepStrictEqual(await port.inspect(environment, component, frozen.descriptor.database!), frozen.target)) throw new RotationError('Native database identity changed; no write is authorized.');
         for (const key of new Set([...Object.keys(frozen.beforeBindings), ...Object.keys(frozen.intendedBindings)])) {
           if (component.bindings[key] !== frozen.beforeBindings[key] && component.bindings[key] !== frozen.intendedBindings[key]) throw new RotationError('Private bound credential configuration changed after review. Preserve recovery before replacing it.');
@@ -237,9 +264,24 @@ export async function applyDatabasePasswordRotation(params: { project: Project; 
         let state = progress(component);
         if (state && state.planId !== params.planId && state.phase !== 'installed') throw new RotationError(`Recover native database rotation ${state.planId} first.`);
         const { observed } = await new PlanService().observeEnvironment(params.project, environment, envSpec, { hostingOnly: true });
-        const review = validateReview(await port.configuration.inspect(environment, component, frozen.target, frozen.value, requiredKeys(envSpec)), environment, envSpec, observed);
-        if (!sameDatabaseConfigurationAuthority(review, frozen.configuration)) throw new RotationError('The exact issuer/reference/consumer review changed; no write is authorized.');
+        const review = validateReview(await port.configuration.inspect(environment, component, frozen.target, frozen.value, requiredKeys(envSpec), frozen.configuration), environment, envSpec, observed);
+        if (frozen.descriptor.database?.applicationDriver ? !isDeepStrictEqual(review, frozen.configuration) : !sameDatabaseConfigurationAuthority(review, frozen.configuration)) throw new RotationError('The exact issuer/reference/consumer review changed; no write is authorized.');
         if (!state || state.planId !== params.planId) state = { planId: params.planId, phase: 'database-attempted', baselineEncrypted: getSecretStore().encryptObject(observed) };
+        if (m.operation === 'databasePasswordVerify') {
+          if (state.phase !== 'installed') return { success: false, status: 'pending', message: 'Install the intended database credential and issuer configuration before consumer verification.' };
+          const latest = environments.findById(environment.id);
+          if (!latest) throw new RotationError('The exact consumer environment is no longer retained.');
+          const pending = runtimeRolloutRequirements({ environment: latest, provider: frozen.hostingProvider, observed });
+          if (pending.length) return { success: false, status: 'pending', message: `Complete the managed deployment for ${pending.map(item => item.service).join(', ')}, then reapply this same rotation plan. Exact activation and old deployment drainage remain pending.`, data: evidence };
+          const references = await port.configuration.observe(environment, component, frozen.target, frozen.value, frozen.configuration);
+          if (references.issuer !== 'match' || references.references !== 'match') return { success: false, status: 'pending', message: 'Issuer and reference readback changed; verification remains pending.' };
+          const driver = frozen.descriptor.database?.applicationDriver;
+          if (!driver || !port.runtimeConfiguration) throw new RotationError('The retained plan has no supported application authentication authority.');
+          const auth = await port.runtimeConfiguration.verifyAuthentication(environment, component, frozen.target, frozen.configuration, driver);
+          if (auth.state !== 'authenticated') return { success: false, status: 'pending', message: 'The deployed connection configuration has not passed fresh application authentication. Deployment success alone cannot complete this rotation.', data: { ...evidence, deployment: 'verified', applicationAuthentication: auth.state } };
+          frozen.applicationValidation = { at: new Date().toISOString(), tested: auth.tested }; persistFrozen();
+          return { success: true, message: 'Exact consumer activation, old deployment drainage and fresh configured-driver authentication are verified. Application operations and other pre-existing SQL sessions remain unchecked.', data: { ...evidence, deployment: 'verified', applicationAuthentication: 'verified' } };
+        }
         let proof = await port.probe(environment, component, frozen.target, frozen.value);
         if (m.operation === 'databasePasswordRotate') {
           const generated = frozen.target.inputMode === 'provider-generated' && frozen.intent !== 'adopt';
@@ -312,7 +354,7 @@ export async function applyDatabasePasswordRotation(params: { project: Project; 
         const hostingHashes: Record<string, Record<string, string>> = {};
         for (const consumer of frozen.configuration.consumers) for (const [key, hash] of Object.entries(consumer.envVarHashes)) (hostingHashes[key] ??= {})[consumer.service] = hash;
         const accepted = { planId: params.planId, state: 'accepted', acceptedAt: new Date().toISOString(), acceptedInputHash: hashEnvValue(frozen.value),
-          descriptor: frozen.descriptor, validation: frozen.validation, completed: frozen.actions.map(action => action.id), attempted: frozen.actions.map(action => action.id), hostingHashes,
+          descriptor: frozen.descriptor, validation: frozen.validation, completed: frozen.actions.filter(action => action.metadata?.operation !== 'databasePasswordVerify').map(action => action.id), attempted: frozen.actions.filter(action => action.metadata?.operation !== 'databasePasswordVerify').map(action => action.id), hostingHashes,
           sourceDescriptor: frozen.target.inputMode === 'provider-generated' ? { kind: 'provider-generated', provider: frozen.target.provider, componentId: component.id, externalId: frozen.target.externalId, username: frozen.target.username, providerScope: frozen.target.providerScope } : undefined,
           nativeDatabase: { target: frozen.target, issuerNames: frozen.configuration.issuerNames, consumers: frozen.configuration.consumers.map(consumer => ({ service: consumer.service, externalId: consumer.externalId, keys: Object.keys(consumer.envVarHashes),
             valueEvidence: Array.isArray(record(frozen.configuration.privateState?.writeOnlyKeys)[consumer.service]) && (record(frozen.configuration.privateState?.writeOnlyKeys)[consumer.service] as unknown[]).length ? 'acknowledgement' : 'readback' })) } };

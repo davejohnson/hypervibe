@@ -79,9 +79,9 @@ describe('build-only credential environment rendering', () => {
     expect(githubActionsWorkflowInputHash(input)).toBe(canonicalJsonSha256(serverContract));
     expect(githubActionsWorkflowInputHash({ ...input, ios: config })).toBe(canonicalJsonSha256({
       ...serverContract,
-      ios: { rendererRevision: 6, buildContractFingerprint: iosBuildContractFingerprint(config), bundleId: config.bundleId, release: config.release },
+      ios: { rendererRevision: 7, buildContractFingerprint: iosBuildContractFingerprint(config), bundleId: config.bundleId, release: config.release },
     }));
-    for (const rendererRevision of [4, 5]) {
+    for (const rendererRevision of [4, 5, 6]) {
       expect(githubActionsWorkflowInputHash({ ...input, ios: config })).not.toBe(canonicalJsonSha256({
         ...serverContract,
         ios: { rendererRevision, buildContractFingerprint: iosBuildContractFingerprint(config), bundleId: config.bundleId, release: config.release },

@@ -90,6 +90,16 @@ fell through to ordinary deployment planning, discovery was absent, confirmation
 review omitted destination identities, and pre-create checks accepted changed
 local scope/source. The corrected tests run in normal `npm test`; no live
 provider call or credential value is involved.
+
+The [fresh database bootstrap review](../../docs/database-initialization-bootstrap.md)
+and `database-initialization-bootstrap-provider-matrix.json` cover all registered
+hosting and PostgreSQL providers. Only the Railway/Railway private task pair is
+implemented. Normal tests include the registry roster, pinned GraphQL inspection
+and task transport, executable shell wrapper, durable retry and exact cleanup
+boundaries, plus disposable PostgreSQL authentication and migration programs.
+Configuration, SQL authentication, command exit, cleanup and application operation
+remain separate evidence; these tests do not establish live provider readiness.
+
 The [database credential rotation review](../../docs/database-credential-rotation.md)
 covers all eight registered PostgreSQL providers. Normal `npm test` checks port
 coverage, native REST and AWS Query serialization, PostgreSQL wire authentication,
@@ -106,6 +116,17 @@ Railway's separate pinned GraphQL/public-template fixtures establish database
 template configuration and volume requirements; RDS retains its existing
 SDK-command lifecycle coverage. These checks do not certify live persistence,
 backup points or restore success.
+
+The same named matrix reviews explicit fresh initialization of an exact existing
+database before adapter implementation. Railway implements the reviewed operation
+with offline contracts; all seven managed-database adapters are unsupported. This is not
+a generic database reset contract. Completion must distinguish attached storage,
+exact deployment, SQL/application readiness and future backup evidence. Registry
+conformance checks actual adapter admission against the reviewed matrix and
+executes shared planning/apply with each unsupported concrete adapter, requiring
+zero provider mutations and unchanged local bindings. Pinned source contracts are
+under `railway/database-initialization`; synthetic transport outcomes and local
+lifecycle checks do not establish a successful live initialization.
 
 `src/application/__tests__/seed-registry-scope.api-contract.test.ts` exercises
 database seed dispatch through real encrypted connection selection and Railway

@@ -1,3 +1,8 @@
+import { readFileSync } from 'node:fs';
+import { normalizeCredentialActivation } from '../../../templates/managed-ci/credential-activation.mjs';
+
+export { normalizeCredentialActivation };
+
 export const MANAGED_CI_RELEASE_EVIDENCE_VERSION = 4;
 export const MANAGED_CI_RELEASE_EVIDENCE_FILE = 'hypervibe-server-release.json';
 
@@ -52,3 +57,12 @@ export function managedCiReleaseArtifactPrefix(environmentName: string): string 
 export function managedCiReleaseArtifactName(environmentName: string, sha: string): string {
   return `${managedCiReleaseArtifactPrefix(environmentName)}${sha}`;
 }
+
+// One owner for the producer, generated gates, standalone mobile runtime, and
+// App Store submission. The producer keeps its original emitted function bytes.
+const credentialActivationModule = readFileSync(new URL(
+  '../../../templates/managed-ci/credential-activation.mjs', import.meta.url
+), 'utf8');
+export const MANAGED_CI_CREDENTIAL_ACTIVATION_RUNTIME_SOURCE = normalizeCredentialActivation.toString();
+export const MANAGED_CI_CREDENTIAL_ACTIVATION_VALIDATOR_SOURCE = credentialActivationModule
+  .replace('export { normalizeCredentialActivation };', '');

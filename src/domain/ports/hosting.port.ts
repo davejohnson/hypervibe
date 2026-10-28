@@ -85,6 +85,51 @@ export interface ManagedRecoveryTaskOptions {
   registryCredentials?: { username: string; token: string };
 }
 
+/** Closed, value-free evidence emitted by the reviewed database task program. */
+export const databaseTaskReceiptSchema = z.object({
+  version: z.literal(1), executionId: z.string().min(1).max(500), mode: z.enum(['authenticate', 'migrate']),
+  commandHash: z.string().regex(/^[a-f0-9]{64}$/), authentication: z.enum(['authenticated', 'rejected', 'unknown']),
+  migration: z.enum(['unchecked', 'completed', 'failed', 'unknown']), exitCode: z.number().int().min(0).max(255).optional(),
+}).strict();
+export type DatabaseTaskReceipt = z.infer<typeof databaseTaskReceiptSchema>;
+
+/** The caller stores this beside its encrypted, immutable private review. */
+export const databaseTaskCheckpointSchema = z.object({
+  version: z.literal(1),
+  /** Binds public identity/command/reference authority only, never secret hashes. */
+  authorityHash: z.string().regex(/^[a-f0-9]{64}$/),
+  phase: z.enum(['create-attempted', 'created', 'configure-attempted', 'configured',
+    'deploy-attempted', 'deployed', 'terminal', 'cleanup-attempted', 'complete']),
+  taskServiceId: z.string().min(1).max(500).optional(),
+  taskInstanceId: z.string().min(1).max(500).optional(),
+  deploymentId: z.string().min(1).max(500).optional(),
+  terminal: z.object({ status: z.enum(['succeeded', 'failed']), exitCode: z.number().int().min(0).max(255),
+    result: databaseTaskReceiptSchema.optional() }).strict().optional(),
+}).strict().superRefine((state, ctx) => {
+  if (state.phase !== 'create-attempted' && !state.taskServiceId
+    || !['create-attempted', 'created'].includes(state.phase) && !state.taskInstanceId
+    || ['deployed', 'terminal', 'cleanup-attempted', 'complete'].includes(state.phase) !== Boolean(state.deploymentId)
+    || ['terminal', 'cleanup-attempted', 'complete'].includes(state.phase) !== Boolean(state.terminal)
+    || state.phase === 'create-attempted' && (state.taskServiceId || state.taskInstanceId)) {
+    ctx.addIssue({ code: 'custom', message: 'Incomplete private task progress.' });
+  }
+});
+export type DatabaseTaskCheckpoint = z.infer<typeof databaseTaskCheckpointSchema>;
+
+export interface DatabaseTaskOptions {
+  mode: 'authenticate' | 'migrate';
+  source: import('./recovery-source.port.js').RecoverySourceIdentity;
+  variableReferences: Array<{ sourceServiceId: string; variableName: string; targetName: string }>;
+  commandHash: string;
+  /** Explicit non-secret application mode; other application variables are excluded. */
+  approvedVariables?: { NODE_ENV?: 'production' | 'development' | 'test' };
+  /** Passed only to the private task's native variables; encrypted by the caller. */
+  privateConfiguration: string;
+  state?: DatabaseTaskCheckpoint;
+  /** Save atomically, then independently reload. A missing/different readback blocks. */
+  persist: (next: DatabaseTaskCheckpoint) => Promise<DatabaseTaskCheckpoint>;
+}
+
 /** A reviewed named CI task; its application layer owns execution authority. */
 export interface EnvironmentTaskOptions {
   /** Authoritative project repository context for image credential selection. */
@@ -97,6 +142,7 @@ export interface EnvironmentTaskOptions {
     expectedImage: string;
     registryCredentials?: { username: string; token: string };
     executionId: string;
+    databaseTask?: DatabaseTaskOptions;
   };
   /** Hypervibe's reviewed immutable backup helper; never an application image. */
   managedRecoveryTask?: ManagedRecoveryTaskOptions;
@@ -370,6 +416,8 @@ export interface IHostingAdapter {
    * spec or binding bytes alone. Credentials remain the existing connection. */
   configureLocalPreparedHosting?(load: import('./hosting-prepared.port.js').LocalPreparedHostingLoader): void;
   readonly runtimeIdentities?: import('./runtime-identity.port.js').IRuntimeIdentities;
+  /** Read-only admission for an explicitly reviewed private database task. */
+  readonly databaseInitialization?: import('./database-initialization-bootstrap.port.js').IDatabaseInitializationBootstrap;
   readonly serviceVolumes?: import('./service-volume.port.js').IServiceVolumes;
   readonly name: string;
 

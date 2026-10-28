@@ -1,0 +1,83 @@
+{
+  "retrievedAt": "2026-10-26",
+  "evidenceKind": "Pinned official documentation and source, not a recorded live initialization.",
+  "sources": [
+    {
+      "file": "manage-volumes.md",
+      "sourceUrl": "https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/integrations/api/manage-volumes.md",
+      "sourceRevision": "4bc46bc0ba1b27d50c5ef0393132753982b31112",
+      "sourceGitBlobSha": "6f97472deeabbc6b5f26f618448c23857487b4ac",
+      "extraction": "Complete upstream file, unchanged.",
+      "sha256": "f7460a6e05f248eb52db124a638e7bf5ef44ff0fe9f5b6b922abb9f5f9fc7301"
+    },
+    {
+      "file": "manage-services.md",
+      "sourceUrl": "https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/integrations/api/manage-services.md",
+      "sourceRevision": "4bc46bc0ba1b27d50c5ef0393132753982b31112",
+      "sourceGitBlobSha": "46eae731ea5c149fc6f9b78ec335f20a0bc4cb0a",
+      "extraction": "Complete upstream file, unchanged.",
+      "sha256": "d4301e6acb951d2b85b8e76f7e732392310958b183738e02e9b742b327e84d56"
+    },
+    {
+      "file": "manage-variables.md",
+      "sourceUrl": "https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/integrations/api/manage-variables.md",
+      "sourceRevision": "4bc46bc0ba1b27d50c5ef0393132753982b31112",
+      "sourceGitBlobSha": "113f46bbf5ac6d20dca6eaa123f97d583f96dbd8",
+      "extraction": "Complete upstream file, unchanged.",
+      "sha256": "c26cb01fc25a4099912c3b7f1a3c9a66f37f0c3d53ac38abdc080856a7128e41"
+    },
+    {
+      "file": "manage-deployments.md",
+      "sourceUrl": "https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/integrations/api/manage-deployments.md",
+      "sourceRevision": "4bc46bc0ba1b27d50c5ef0393132753982b31112",
+      "sourceGitBlobSha": "87a4dc4d40291578e155e3002d0b4fee56c13198",
+      "extraction": "Complete upstream file, unchanged.",
+      "sha256": "297b0d0300a3f416acfa2b1fa095807a19ce7af08ba3d65b97d60dbccfa133e8"
+    },
+    {
+      "file": "volumes.md",
+      "sourceUrl": "https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/volumes.md",
+      "sourceRevision": "4bc46bc0ba1b27d50c5ef0393132753982b31112",
+      "sourceGitBlobSha": "af3efce641645c82ec02d73d144f12059cfc1431",
+      "extraction": "Complete upstream file, unchanged.",
+      "sha256": "ac9094cbd519599f592cda937c152fb92d045c734717c113dc58661429b0920f"
+    },
+    {
+      "file": "volumes-reference.md",
+      "sourceUrl": "https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/volumes/reference.md",
+      "sourceRevision": "4bc46bc0ba1b27d50c5ef0393132753982b31112",
+      "sourceGitBlobSha": "52b39687c7bf0d089c32e69789db2a64701566c0",
+      "extraction": "Complete upstream file, unchanged.",
+      "sha256": "f0383bf4b68370401a73d9fd793980c4638731bcbb829da6189a20b28ed23a8f"
+    },
+    {
+      "file": "postgres16.Dockerfile",
+      "sourceUrl": "https://github.com/docker-library/postgres/blob/dfc76bb299b057785026eb2eea39556b6fe52983/16/bookworm/Dockerfile",
+      "sourceRevision": "dfc76bb299b057785026eb2eea39556b6fe52983",
+      "sourceGitBlobSha": "e24075b6c69f7434384cc9f0f96935b892a7bb72",
+      "extraction": "Complete upstream file, unchanged.",
+      "sha256": "cf0f3f542a886f5f3562940174564f3e4d95e7240450aaa1458e663b0a59e7ec"
+    },
+    {
+      "file": "docker-entrypoint.sh",
+      "sourceUrl": "https://github.com/docker-library/postgres/blob/dfc76bb299b057785026eb2eea39556b6fe52983/docker-entrypoint.sh",
+      "sourceRevision": "dfc76bb299b057785026eb2eea39556b6fe52983",
+      "sourceGitBlobSha": "8d507bc40798732dc89a1849ce5d80c451af4a1f",
+      "extraction": "Complete upstream file, unchanged.",
+      "sha256": "9c440299ae04a0a79d55b8bf03307036d890a40979d2fb698073c9050d4b20a5"
+    },
+    {
+      "file": "postgres-initdb-mount.c",
+      "sourceUrl": "https://github.com/postgres/postgres/blob/61aec3f3bc91c42cd08d1947794ddcc258020869/src/bin/initdb/initdb.c",
+      "sourceRevision": "61aec3f3bc91c42cd08d1947794ddcc258020869",
+      "sourceGitBlobSha": "f2ee1d999b41cc15bb2ea24c913719fe62cbe2a7",
+      "extraction": "Exact upstream lines 2987\u20132998; warn_on_mount_point.",
+      "sha256": "bbd8cb7dc75355dcd361904e88d4da9598c0cb791a5cd6e2b3521f0840a0b6f6"
+    }
+  ],
+  "limitations": [
+    "Railway volumeCreate automatic deployment behavior is undocumented; the adapter stages PGDATA first and explicitly deploys after exact storage readback.",
+    "GraphQL SDL validates fields and types, not the contents of opaque JSON variables or DeploymentMeta.",
+    "Deployment SUCCESS and scoped storage/configuration readback do not prove SQL authentication, application migrations, backups, or durability."
+  ]
+}

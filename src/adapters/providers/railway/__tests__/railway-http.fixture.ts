@@ -15,6 +15,7 @@ type Instance = {
   numReplicas: number | null;
   activeDeployments?: Array<{ id: string }>;
   latestDeployment?: { id: string; status: string };
+  startCommand?: string | null; preDeployCommand?: unknown;
   source: { image?: string }; domains: { serviceDomains: Array<{ domain: string }>; customDomains: [] };
 };
 type ProviderService = { id: string; name: string; instances: Map<string, Instance>; templateId?: string; templateServiceId?: string };
@@ -46,6 +47,9 @@ export async function railwayHttpFixture(options: {
   dropBackupCreateResponse?: boolean; backupWorkflowId?: string | null;
   dropScheduleUpdateResponse?: boolean; ignoreScheduleUpdate?: boolean;
   dropVariableResponse?: boolean;
+  dropDeploymentResponse?: boolean;
+  deploymentStatus?: string;
+  mutationEnvironments?: string[];
   variableMutationEnvironments?: string[];
   dropTemplateDeployResponse?: boolean;
   templateWithoutVolume?: boolean;
@@ -72,8 +76,22 @@ export async function railwayHttpFixture(options: {
   const backupSchedules = new Map<string, Array<Record<string, unknown>>>();
   let nextVolumeId = 0;
   const variables = new Map<string, Record<string, string>>();
+  // Official documented `${{ Service.KEY }}` references. Synthetic values are
+  // resolved from independently held service/environment state, never requests.
+  const resolvedVariables = (serviceId: string, environmentId: string, seen = new Set<string>()): Record<string, string> => {
+    const identity = `${serviceId}/${environmentId}`;
+    if (seen.has(identity)) throw new Error('Synthetic reference cycle');
+    const raw = variables.get(identity) ?? {};
+    const cross = Object.fromEntries(Object.entries(raw).map(([key, value]) => [key,
+      value.replace(/\$\{\{\s*([^{}.]+)\.([A-Z_][A-Z0-9_]*)\s*\}\}/g, (token, name: string, source: string) => {
+        const matches = [...services.values()].filter(service => service.name === name.trim() && service.instances.has(environmentId));
+        return matches.length === 1 ? resolvedVariables(matches[0].id, environmentId, new Set([...seen, identity]))[source] ?? token : token;
+      })]));
+    return renderVariables(cross);
+  };
   // Snapshot evidence is deliberately separate from mutable service variables.
-  const deployments = new Map<string, { id: string; projectId: string; environmentId: string; serviceId: string; snapshotId: string }>();
+  const deployments = new Map<string, { id: string; projectId: string; environmentId: string; serviceId: string; snapshotId: string;
+    status?: string; deploymentStopped?: boolean; instances?: Array<{ id: string; status: string }> }>();
   const deploymentSnapshots = new Map<string, { id: string; variables: unknown }>();
   const mutations: Array<{ field: string; args: Record<string, any> }> = [];
   const requests: Array<{ query: string; variables: Record<string, any> }> = [];
@@ -225,6 +243,12 @@ export async function railwayHttpFixture(options: {
     },
     environment: ({ id }) => ({
       ...environments.get(id), projectId: options.environmentProjectId ?? projectId, deletedAt: null,
+      serviceInstances: ({ first, after }: { first?: number; after?: string }) => {
+        const nodes = [...services.values()].flatMap(service => [...service.instances.values()]
+          .filter(instance => instance.environmentId === id).map(instance => ({ ...instance, service: serviceNode(service) })));
+        const start = after ? Number(after) : 0, end = start + Math.min(first ?? 100, options.pageSize ?? 100);
+        return connection(nodes.slice(start, end), end < nodes.length, end < nodes.length ? String(end) : null);
+      },
       volumeInstances: ({ after }: { after?: string }) => {
         const visible = [...volumes.entries()]
           .filter(([volumeId, volume]) => volume.environmentId === id
@@ -248,10 +272,11 @@ export async function railwayHttpFixture(options: {
     },
     variables: ({ serviceId, environmentId, unrendered }) => {
       const raw = variables.get(`${serviceId}/${environmentId}`) ?? {};
-      return options.renderVariableReferences && !unrendered ? renderVariables(raw) : raw;
+      return options.renderVariableReferences && !unrendered ? resolvedVariables(serviceId, environmentId) : raw;
     },
     variablesForServiceDeployment: ({ serviceId, environmentId }) =>
-      renderVariables(variables.get(`${serviceId}/${environmentId}`) ?? {}),
+      options.renderVariableReferences ? resolvedVariables(serviceId, environmentId)
+        : renderVariables(variables.get(`${serviceId}/${environmentId}`) ?? {}),
     deployment: ({ id }) => deployments.get(id) ?? [...services.values()].flatMap(service => [...service.instances.values()]
       .filter(instance => instance.latestDeployment?.id === id).map(instance => ({ id, projectId, environmentId: instance.environmentId, serviceId: service.id, snapshotId: null })))[0],
     deploymentSnapshot: ({ deploymentId }) => deploymentSnapshots.get(deploymentId) ?? null,
@@ -304,6 +329,22 @@ export async function railwayHttpFixture(options: {
       expect(services.get(serviceId)?.instances.has(environmentId)).toBe(true);
       return true;
     },
+    // Official manage-services.md: serviceInstanceDeployV2 returns the new
+    // deployment ID. Deployment state is independently observed, not inferred
+    // from that acknowledgement. This synthetic model is not a live recording.
+    serviceInstanceDeployV2: ({ serviceId, environmentId }) => {
+      const instance = services.get(serviceId)?.instances.get(environmentId);
+      expect(instance).toBeDefined();
+      const id = `deployment-${deployments.size + 1}`;
+      const snapshotId = `snapshot-${id}`;
+      const deployment = { id, projectId, environmentId, serviceId, snapshotId,
+        status: options.deploymentStatus ?? 'SUCCESS', deploymentStopped: false };
+      deployments.set(id, deployment);
+      deploymentSnapshots.set(id, { id: snapshotId, variables: resolvedVariables(serviceId, environmentId) });
+      instance!.latestDeployment = deployment;
+      instance!.activeDeployments = [deployment];
+      return id;
+    },
     serviceDelete: ({ id, environmentId }) => {
       services.get(id)!.instances.get(environmentId)!.deletedAt = '2026-09-12T00:00:00Z';
       return true;
@@ -341,12 +382,12 @@ export async function railwayHttpFixture(options: {
       return 'bucket-deployment';
     },
   };
-  for (const field of ['projectCreate', 'environmentCreate', 'templateDeployV2', 'serviceCreate', 'variableCollectionUpsert', 'serviceInstanceUpdate', 'volumeCreate', 'volumeDelete', 'serviceInstanceRedeploy', 'serviceDelete', 'serviceDomainCreate', 'bucketCreate', 'environmentPatchCommit']) {
+  for (const field of ['projectCreate', 'environmentCreate', 'templateDeployV2', 'serviceCreate', 'variableCollectionUpsert', 'serviceInstanceUpdate', 'volumeCreate', 'volumeDelete', 'serviceInstanceRedeploy', 'serviceInstanceDeployV2', 'serviceDelete', 'serviceDomainCreate', 'bucketCreate', 'environmentPatchCommit']) {
     const resolve = root[field];
     root[field] = (args) => {
       if (!['projectCreate', 'environmentCreate', 'bucketCreate', 'volumeDelete'].includes(field)) {
         if (field === 'variableCollectionUpsert' && options.variableMutationEnvironments) expect(options.variableMutationEnvironments).toContain(args.input?.environmentId);
-        else expect(args.input?.environmentId ?? args.environmentId).toBe(stagingId);
+        else expect(options.mutationEnvironments ?? [stagingId]).toContain(args.input?.environmentId ?? args.environmentId);
       }
       mutations.push({ field, args });
       return resolve(args);
@@ -385,7 +426,7 @@ export async function railwayHttpFixture(options: {
     if (options.dropTemplateDeployResponse && request.query.includes('templateDeployV2')) {
       throw new TypeError('Synthetic connection reset after templateDeployV2 committed');
     }
-    if (options.dropVolumeCreateResponse && request.query.includes('mutation VolumeCreate')) {
+    if (options.dropVolumeCreateResponse && /mutation\s+\w*[Vv]olumeCreate/.test(request.query)) {
       throw new TypeError('Synthetic connection reset after volumeCreate committed');
     }
     if (options.dropBackupCreateResponse && request.query.includes('mutation DatabaseCheckpointCreate')) {
@@ -394,8 +435,11 @@ export async function railwayHttpFixture(options: {
     if (options.dropScheduleUpdateResponse && request.query.includes('mutation DailyBackupScheduleUpdate')) {
       throw new TypeError('Synthetic connection reset after schedule update committed');
     }
-    if (options.dropVariableResponse && request.query.includes('mutation UpsertVariables')) {
+    if (options.dropVariableResponse && (request.query.includes('mutation UpsertVariables') || request.query.includes('mutation SynchronizeDatabaseRotationIssuer') || request.query.includes('mutation InitializeDatabaseVariables'))) {
       throw new TypeError('Synthetic connection reset after variable update committed');
+    }
+    if (options.dropDeploymentResponse && /mutation[\s\S]*serviceInstanceDeployV2/.test(request.query)) {
+      throw new TypeError('Synthetic connection reset after database deployment committed');
     }
     return Response.json(result);
   }));

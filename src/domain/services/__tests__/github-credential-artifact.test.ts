@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 import '../../../adapters/providers/railway/railway.adapter.js';
 import { buildBranchDeployWorkflow, releaseEvidenceValidationRuntime } from '../github-ops.service.js';
 import { managedCiReleaseTarget } from '../managed-ci-targets.js';
@@ -10,6 +11,12 @@ import { extractGitHubScript, installReleaseEvidenceValidator, releaseEvidenceVa
 const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach(dir => rmSync(dir, { recursive: true, force: true })));
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+it('preserves the accepted server validator bytes when sharing credential activation validation', () => {
+  // Captured at 0c74fd26, before extracting the validator for mobile consumers.
+  // This migration must not silently change locked server-only workflows.
+  expect(createHash('sha256').update(releaseEvidenceValidationRuntime().trim() + '\n').digest('hex'))
+    .toBe('09cd0133c555baff8384ddc759c0de94671a0d0c3397d04a2a85afff8272cba9');
+});
 it('joins accepted credential operations only to exact native deployment output in the executed producer', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'hv-credential-artifact-')); dirs.push(dir);
   const target = { kind: 'production' as const, environmentName: 'production', branch: 'main', providerProjectId: 'project', providerEnvironmentId: 'environment', providerServiceIds: ['service-a'], serviceNames: ['web'], autoDeployOnPush: false,

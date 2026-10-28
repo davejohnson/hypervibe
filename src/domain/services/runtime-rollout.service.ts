@@ -126,6 +126,30 @@ export function parseRuntimeRolloutBindings(
   });
 }
 
+/** Selected names from retained encrypted expectations include provider-discovered
+ * aliases. Exact scope is checked before any provider sees those names. */
+export function runtimeRolloutConfigurationKeys(environment: Pick<Environment, 'platformBindings'>, provider: string): Record<string, string[]> {
+  const names = new Map<string, Set<string>>();
+  for (const binding of parseRuntimeRolloutBindings(environment)) {
+    if (binding.provider !== provider || !binding.operationId) continue;
+    const malformed = () => new Error('Retained runtime configuration expectations or consumer identity cannot be verified.');
+    const services = asRecord(environment.platformBindings.services);
+    const service = asRecord(services?.[binding.service]);
+    if (environment.platformBindings.provider !== provider
+      || !binding.serviceExternalId || (service?.serviceId ?? service?.jobName) !== binding.serviceExternalId
+      || !binding.providerProjectId || environment.platformBindings.projectId !== binding.providerProjectId
+      || environment.platformBindings.environmentId !== binding.providerEnvironmentId) throw malformed();
+    let hashes: Record<string, unknown> | null;
+    try { hashes = asRecord(getSecretStore().decryptObject(binding.configurationExpectationEncrypted!)); }
+    catch { throw malformed(); }
+    if (!hashes || !Object.keys(hashes).length || Object.entries(hashes).some(([key, value]) =>
+      !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value))) throw malformed();
+    const selected = names.get(binding.service) ?? new Set<string>();
+    Object.keys(hashes).forEach(key => selected.add(key)); names.set(binding.service, selected);
+  }
+  return Object.fromEntries([...names.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([name, keys]) => [name, [...keys].sort()]));
+}
+
 function rolloutServices(action: PlanAction, receipt: ActionReceipt): string[] {
   const data = asRecord(receipt.data);
   const metadata = asRecord(action.metadata);
@@ -373,6 +397,7 @@ function strictConfigurationReason(binding: RuntimeRolloutBinding, service: Obse
     || separateEnvironment && !binding.providerEnvironmentId
     || binding.providerEnvironmentId && observed.environmentId !== binding.providerEnvironmentId) return 'The exact provider scope of the credential consumer could not be verified.';
   const deployment = service?.deployment;
+  if (deployment?.activeDeploymentCoverage === 'traffic') return 'Traffic retirement does not establish that older credential consumers have stopped; complete instance retirement evidence is required.';
   const expectedActiveIds = binding.expectedDeploymentIds ?? (deployment?.id ? [deployment.id] : []);
   const completedExecution = service?.workloadKind === 'cron' && deployment?.status === 'completed'
     && deployment.activeDeploymentCoverage === 'instances' && deployment.activeDeploymentIds?.length === 0;

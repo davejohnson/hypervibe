@@ -7,6 +7,7 @@ export const databaseCredentialSelectionSchema = z.object({
   component: z.string().min(1),
   username: z.string().min(1),
   database: z.string().min(1),
+  applicationDriver: z.literal('node-postgres').optional(),
 }).strict();
 export type DatabaseCredentialSelection = z.infer<typeof databaseCredentialSelectionSchema>;
 export const databaseCredentialTargetSchema = z.object({
@@ -22,6 +23,10 @@ export const databaseCredentialTargetSchema = z.object({
 }).strict();
 export type DatabaseCredentialTarget = z.infer<typeof databaseCredentialTargetSchema>;
 export type DatabaseCredentialProbe = { state: 'authenticated' | 'rejected' | 'unknown'; tested: string };
+/** Value-free prerequisite failure that may be exposed by reviewed planning. */
+export class DatabaseCredentialReviewError extends Error {
+  constructor() { super('Existing authorized runtime access and the exact application connection configuration could not be verified for every affected consumer. No database mutation is authorized.'); }
+}
 export type DatabaseCredentialUpdate = {
   /** blocked proves no authentication mutation was attempted; unknown does not. */
   state: 'acknowledged' | 'unknown' | 'blocked';
@@ -49,17 +54,25 @@ export type DatabaseCredentialConfiguration = z.infer<typeof databaseCredentialC
  * references remain references. All private templates stay encrypted. */
 export interface DatabaseCredentialConfigurationLifecycle {
   inspect(environment: Environment, component: Component, target: DatabaseCredentialTarget, replacement: string,
-    requiredConsumerKeys: Record<string, string[]>): Promise<DatabaseCredentialConfiguration>;
+    requiredConsumerKeys: Record<string, string[]>, priorReview?: DatabaseCredentialConfiguration): Promise<DatabaseCredentialConfiguration>;
   observe(environment: Environment, component: Component, target: DatabaseCredentialTarget, replacement: string,
     review: DatabaseCredentialConfiguration): Promise<{ issuer: 'match' | 'different' | 'unknown'; references: 'match' | 'different' | 'unknown' }>;
   synchronize(environment: Environment, component: Component, target: DatabaseCredentialTarget, replacement: string,
     review: DatabaseCredentialConfiguration): Promise<{ state: 'acknowledged' | 'unknown' | 'blocked' }>;
 }
 
+/** Optional complete configuration capability for explicit deployed-driver proof.
+ * Native password/issuer support alone does not imply this runtime boundary. */
+export interface DatabaseCredentialRuntimeConfiguration extends DatabaseCredentialConfigurationLifecycle {
+  verifyAuthentication(environment: Environment, component: Component, target: DatabaseCredentialTarget,
+    review: DatabaseCredentialConfiguration, driver: 'node-postgres'): Promise<DatabaseCredentialProbe>;
+}
+
 /** Actual database authentication, distinct from application environment wiring.
  * Mutations can invalidate the old password for new sessions immediately. */
 export interface DatabaseCredentialLifecycle {
   readonly configuration?: DatabaseCredentialConfigurationLifecycle;
+  readonly runtimeConfiguration?: DatabaseCredentialRuntimeConfiguration;
   inspect(environment: Environment, component: Component, selection: DatabaseCredentialSelection): Promise<DatabaseCredentialTarget>;
   /** Exact provider-owned user read. Private value; null means not retrievable. */
   readCurrent(environment: Environment, component: Component, target: DatabaseCredentialTarget): Promise<string | null>;

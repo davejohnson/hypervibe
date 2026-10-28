@@ -1,4 +1,6 @@
 import { createRailwayRegistryCredentialLifecycle } from './railway-registry-credential.js';
+import { runRailwayDatabaseTask } from './railway-database-task.js';
+import { createRailwayDatabaseInitializationInspection } from './railway-database-initialization-inspection.js';
 import { GraphQLClient, gql } from 'graphql-request';
 import { randomBytes } from 'crypto';
 import { z } from 'zod';
@@ -21,6 +23,9 @@ import type { Environment } from '../../../domain/entities/environment.entity.js
 import type { Service } from '../../../domain/entities/service.entity.js';
 import type { IServiceVolumes, ServiceVolumeTarget, ServiceVolumeObservation } from '../../../domain/ports/service-volume.port.js';
 import { railwayDeployedConfiguration } from './railway-runtime-configuration.js';
+import { createRailwayRuntimeEvidence } from './railway-runtime-evidence.js';
+import { createRailwayDatabaseRotationConfiguration } from './railway-database-rotation.js';
+import { createRailwayDatabaseInitialization } from './railway-database-initialization.js';
 import {
   createHostingServiceCreateRecovery,
   parseHostingBindings,
@@ -92,6 +97,8 @@ export const RailwayCredentialsSchema = z.object({
   apiToken: z.string().min(1, 'API token is required'),
   workspaceId: z.string().optional(),
   teamId: z.string().optional(),
+  sshIdentityFile: z.string().startsWith('/').optional().describe('Existing registered SSH identity; Hypervibe never creates or registers a key.'),
+  sshKnownHostsFile: z.string().startsWith('/').optional().describe('Existing independently trusted SSH host file; no host key is accepted automatically.'),
 });
 
 export type RailwayCredentials = z.infer<typeof RailwayCredentialsSchema>;
@@ -138,7 +145,7 @@ export interface RailwayVolumeTarget {
 
 export type RailwayVolumeResolution =
   | { success: true; state: 'absent' }
-  | { success: true; state: 'present'; volumeId: string; pendingDeletion: boolean }
+  | { success: true; state: 'present'; volumeId: string; instanceId?: string; pendingDeletion: boolean }
   | { success: false; error: string; volumeId?: string };
 
 export type RailwayServiceInstanceInspection =
@@ -254,6 +261,21 @@ export class RailwayAdapter implements
   readonly name = 'railway';
   readonly registryCredentialLifecycle = createRailwayRegistryCredentialLifecycle(() => this.client);
   readonly railwayCredentialAliases = createRailwayCredentialAliases(() => this.client);
+  readonly railwayRuntimeEvidence = createRailwayRuntimeEvidence(() => this.client, () => this.credentials);
+  readonly railwayDatabaseRotationConfiguration = createRailwayDatabaseRotationConfiguration(() => this.client, this.railwayRuntimeEvidence);
+  readonly databaseInitialization = createRailwayDatabaseInitializationInspection(() => this.client, async source => {
+    const volume = await this.resolveBackupVolume({ projectId: source.providerScope.projectId!,
+      environmentId: source.providerScope.environmentId!, serviceId: source.primaryExternalId }, source.resourceIdentity.volumeId);
+    if (volume.instanceId !== source.resourceIdentity.volumeInstanceId) throw new Error('Database volume identity changed.');
+  });
+  readonly railwayDatabaseInitialization = createRailwayDatabaseInitialization(() => this.client,
+    async (target, expectedVolumeId, options) => {
+      // Reuse the existing exact target and multi-region replica checks for
+      // every volume admission; scalar numReplicas alone is insufficient.
+      const eligible = await this.observeWebServiceVolume(target, expectedVolumeId);
+      if (eligible.state === 'unknown') return { success: false, error: eligible.reason };
+      return this.resolveServiceVolume(target, expectedVolumeId, options);
+    });
 
   readonly capabilities: ProviderCapabilities = {
     supportedBuilders: ['nixpacks', 'dockerfile'],
@@ -1871,6 +1893,7 @@ export class RailwayAdapter implements
         success: true,
         state: 'present',
         volumeId: match.volumeId,
+        instanceId: match.instanceId,
         pendingDeletion: match.isPendingDeletion,
       };
     } catch (error) {
@@ -4214,6 +4237,39 @@ export class RailwayAdapter implements
   ): Promise<JobResult> {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
+    }
+    if (options?.declaredTask?.databaseTask) {
+      const source = options.declaredTask.databaseTask.source;
+      const phase = options.declaredTask.databaseTask.state?.phase;
+      const observeOrCleanupOnly = phase && ['deployed', 'terminal', 'cleanup-attempted', 'complete'].includes(phase);
+      let registryCredentials = options.declaredTask.registryCredentials;
+      const githubRepo = parseGitHubRepoFromRemote(options.gitRemoteUrl);
+      if (!observeOrCleanupOnly && !registryCredentials && options.declaredTask.expectedImage.startsWith('ghcr.io/')) {
+        try {
+          registryCredentials = (await import('../github/package-pull.js')).githubPackagePullCredentials({ githubRepo: githubRepo ?? undefined }) ?? undefined;
+        } catch { /* A credential selection failure remains a closed private task preflight. */ }
+      }
+      options = { ...options, declaredTask: { ...options.declaredTask, registryCredentials } };
+      return runRailwayDatabaseTask({ client: this.client, environment, service, command, options,
+        verifyVolume: async () => {
+          const volume = await this.resolveBackupVolume({ projectId: source.providerScope.projectId!,
+            environmentId: source.providerScope.environmentId!, serviceId: source.primaryExternalId }, source.resourceIdentity.volumeId);
+          if (volume.instanceId !== source.resourceIdentity.volumeInstanceId) throw new Error('Database volume identity changed.');
+        },
+        cleanup: async (id, instanceId, taskName) => {
+          const target = { scope: 'environment' as const, projectId: source.providerScope.projectId!, environmentId: source.providerScope.environmentId! };
+          const instance = await this.inspectServiceInstance(id, target.environmentId);
+          if (instance.state === 'absent') return { success: true };
+          if (instance.state !== 'present' || instance.instanceId !== instanceId) return { success: false };
+          const result = await this.client!.request<unknown>(gql`
+            query DatabaseTaskCleanupOwnership($id: String!) { service(id: $id) { id name projectId deletedAt } }
+          `, { id });
+          if (!isRecord(result) || !isRecord(result.service) || result.service.id !== id
+            || result.service.name !== taskName || result.service.projectId !== target.projectId || result.service.deletedAt !== null) return { success: false };
+          return this.deleteService(id, target, { allowMutation: true });
+        },
+        logs: id => this.getDeploymentLogs(id, 500),
+      });
     }
     const client = this.client;
     const startedAt = Date.now();
@@ -7479,7 +7535,9 @@ export class RailwayAdapter implements
       if (!service.deployment || !environmentId || bindings.services?.[service.name]?.serviceId !== service.externalId) continue;
       Object.assign(service.deployment, await railwayDeployedConfiguration(this.client!, {
         projectId, environmentId, serviceId: service.externalId, deploymentId: service.deployment.id,
-      }));
+      }, { keys: [...new Set([...(Object.keys(options?.databaseEnvAliases?.[service.name] ?? {}).length ? ['DATABASE_URL'] : []), ...Object.keys(options?.databaseEnvAliases?.[service.name] ?? {}),
+        ...(options?.runtimeConfigurationKeys?.[service.name] ?? [])])].sort(),
+      read: (target, request) => this.railwayRuntimeEvidence.read(target, request) }));
     }
 
     const serviceObservationComplete = !partial;
@@ -7959,6 +8017,7 @@ providerRegistry.register({
       hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'managed', maintenance: 'managed', teardownBoundary: 'environment',
         environmentTasks: { variableMode: 'references', execution: 'temporary-workload', status: 'ready-for-live' },
         recoveryTasks: { variableMode: 'references', execution: 'temporary-workload', status: 'ready-for-live', databaseProviders: ['railway'] },
+        databaseInitializationTasks: { variableMode: 'references', execution: 'temporary-workload', status: 'ready-for-live', databaseProviders: ['railway'] },
         serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only' } },
       databaseEngines: ['postgres'],
       databaseConnectivity: { compatibleHostingProviders: ['railway'] },

@@ -79,12 +79,13 @@ Keep each affected workload pending until its intended deployment configuration
 is active and older deployments have drained. Unknown provider evidence is not
 proof of completion.
 
-Use `hv_db_verify_auth` with a private `credentialsRef`, the supported application
-driver and intended username/database to test a fresh connection without creating
-access paths. Preserve application connection/TLS settings; administrative access
-does not validate them. Its configured/deployed source label is caller-declared,
-and a successful result does not prove deployment provenance or application use.
-Database names and schemas are distinct. Do not rename either as a credential fix.
+Database authentication belongs to the reviewed credential lifecycle. Its native
+probe verifies the selected replacement, role and database; administrative access
+does not establish application connection settings, runtime provenance or use.
+Separately authorized `hv_db_query` diagnostics can check session identity, but
+its managed connection path may require temporary access authorization. Report
+that evidence separately from application authentication. Database names and
+schemas are distinct. Do not rename either as a credential fix.
 
 Railway database operations do not create public TCP proxies. Existing reachable
 endpoints and cleanup of access recorded by earlier operations remain supported.
@@ -132,6 +133,22 @@ or application tasks. Do not temporarily change a release command to run a data
 operation. Preserve the exact environment, provider target, and deployment lock;
 an uncertain previous execution must be reconciled before any repeat that might
 duplicate effects.
+
+For an explicitly discarded database with completed `freshInitialization`, the
+optional `database.freshInitialization.bootstrap: { service, image }` selects a
+declared application service and an exact immutable configured image. The image
+must be independently observed; this review does not claim a successful release
+or a source commit. Preserve the application's existing canonical migration
+release command. Run `hv_plan` and confirm its private authentication action,
+then plan and confirm the separate schema-bootstrap action. Each action creates
+and removes one private temporary task through the supported provider capability.
+No public database access or standalone migration command is needed.
+
+Resume retained attempts through their reviewed plans; never clear recovery
+markers or rerun an uncertain migration manually. Report authentication,
+command exit, task cleanup and application operation separately. A successful
+bootstrap leaves ordinary backup/restore and application-deployment gates in
+place. Providers without the exact private task capability remain unsupported.
 
 For rollback or restore, inspect existing evidence through the supported
 Hypervibe workflow before proposing the action. Keep source identity, retained

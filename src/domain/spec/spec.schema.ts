@@ -1,4 +1,5 @@
 import { credentialTrackingSchema } from './credential.schema.js';
+import { databaseFreshInitializationIntentSchema } from '../ports/database-fresh-initialization.port.js';
 import { z } from 'zod';
 import { operatorArtifactDeclarationSchema } from '../ports/operator-artifact.port.js';
 import { operatorApplicationDeclarationSchema } from '../ports/operator-application.port.js';
@@ -240,6 +241,8 @@ export const databaseSpecSchema = z.object({
   resilience: databaseResilienceSchema.optional(),
   /** Keep provider-managed connection aliases tied to its existing issuer password. */
   credentialAliases: z.object({ mode: z.literal('issuer-references') }).strict().optional(),
+  /** One-use destructive initialization of empty persistence on an exact existing database. */
+  freshInitialization: databaseFreshInitializationIntentSchema.optional(),
 }).strict();
 
 export const cacheSpecSchema = z.object({
@@ -1697,6 +1700,11 @@ export const environmentSpecSchema = z.object({
   /** Kept only to produce an actionable migration error for old specs. */
   autofix: z.unknown().optional(),
 }).strict().superRefine((environment, ctx) => {
+  const databaseBootstrap = environment.database?.freshInitialization?.bootstrap;
+  if (databaseBootstrap && !Object.hasOwn(environment.services, databaseBootstrap.service)) {
+    ctx.addIssue({ code: 'custom', path: ['database', 'freshInitialization', 'bootstrap', 'service'],
+      message: 'Database bootstrap requires an explicitly declared application service.' });
+  }
   if (environment.backups?.mode === 'daily') {
     const destination = environment.backups.destination;
     if (destination && environment.storage?.[destination]?.purpose !== 'backup') ctx.addIssue({ code: z.ZodIssueCode.custom,

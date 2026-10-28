@@ -101,6 +101,8 @@ export interface ObservedService {
     envVarHashes?: Record<string, string>;
     /** Unresolved references, omitted reads, and unsupported snapshot semantics stay unknown. */
     configurationState?: 'resolved' | 'unknown';
+    configurationEvidence?: 'deployment-snapshot' | 'runtime-instances';
+    configurationInstanceIds?: string[];
   };
   /** Provider-confirmed execution state used by environment maintenance. */
   maintenance?: {
@@ -303,6 +305,8 @@ export interface IObservableHosting {
 /** Value-free declared consumer names; these do not prove live configuration. */
 export interface HostingObservationContext {
   databaseEnvAliases?: Record<string, Record<string, 'DATABASE_URL' | 'DIRECT_URL'>>;
+  /** Names only, extracted from retained encrypted rollout expectations. */
+  runtimeConfigurationKeys?: Record<string, string[]>;
 }
 
 export interface IObservableDatabase {

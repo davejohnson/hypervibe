@@ -18,7 +18,6 @@ import type { ObservedState } from '../ports/observe.port.js';
 import type { PlanAction } from '../plan/plan.types.js';
 import {
   EMAIL_MANAGED_ENV_KEYS,
-  type EmailInboundSpec,
   type EnvironmentSpec,
 } from '../spec/spec.schema.js';
 import { findCloudflareZone, getCloudflareAdapterFromHints } from './cloudflare-ops.service.js';
@@ -31,6 +30,7 @@ import {
   routingRuleForAddress,
 } from './email-routing.service.js';
 import { serviceBindingFor } from './spec.service.js';
+import { resolveInboundCallback } from './email-inbound-url.service.js';
 import { inspectEmailSenderReadiness, type EmailSenderReadiness } from './email-sender-readiness.service.js';
 
 export const EMAIL_OPERATIONS = {
@@ -414,12 +414,6 @@ function serviceUrl(environment: Environment | null, serviceName: string): strin
   } catch {
     return undefined;
   }
-}
-
-export function inboundParseUrl(environment: Environment | null, inbound: EmailInboundSpec): string | undefined {
-  const base = serviceUrl(environment, inbound.service);
-  if (!base) return undefined;
-  return new URL(inbound.path, base).toString();
 }
 
 export function emailRuntimeKeysForService(environmentSpec: EnvironmentSpec, serviceName: string): string[] {
@@ -1172,7 +1166,8 @@ export async function planEmail(params: {
   if (environmentSpec.email.inbound) {
     const inbound = environmentSpec.email.inbound;
     const hostname = inbound.hostname.toLowerCase();
-    const expectedUrl = inboundParseUrl(environment, inbound);
+    const callback = resolveInboundCallback({ environment, spec: environmentSpec, observed });
+    const expectedUrl = callback.url;
     const inboundBinding = asRecord(bindings.inbound);
     const configHash = emailInboundConfigHash(environmentSpec)!;
     let type: PlanAction['type'] = 'update';
@@ -1223,7 +1218,7 @@ export async function planEmail(params: {
       }
     }
 
-    blockedReason = inboundSigningTargetBlock(environment, environmentSpec) ?? blockedReason;
+    blockedReason = inboundSigningTargetBlock(environment, environmentSpec) ?? callback.blockedReason ?? blockedReason;
     const policyId = state.inboundRoutes.status === 'known' ? state.inboundRoutes.items.find(route => route.hostname.toLowerCase() === hostname)?.security_policy : undefined;
     inboundAction = {
       id: `email:sendgrid:inbound:${hostname}`,

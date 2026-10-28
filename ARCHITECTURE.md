@@ -959,6 +959,16 @@ remain distinct. See
 [credential lifecycle](docs/credential-lifecycle.md) for schemas, provider limits,
 review, recovery, validation evidence and regression coverage.
 
+A native database rotation can explicitly request deployed `node-postgres`
+authentication through an optional provider capability. This adds a read-only
+third action to the exact encrypted plan; it never rewrites older two-action
+recovery plans. Railway can use already registered SSH identity and independently
+trusted hosts to inspect every exact running replica. No key registration, host
+trust change, CLI fallback, public access creation or workload deployment is implied.
+Native SQL proof still requires its own existing route. Runtime password challenges,
+configuration activation, instance retirement and application operations remain
+separate evidence. See [database password rotation](docs/database-password-rotation.md).
+
 
 `hv_secrets view="inventory"` is a read-only application-layer projection of
 declared roles/references, local candidates, accepted bindings, action receipts,
@@ -1452,6 +1462,15 @@ per environment. The inbound route names a public web service and relative path;
 its provider URL is derived from that service's durable hosting binding. Alias
 local parts are application routing intent because SendGrid delivers all mail
 for one parse hostname to one endpoint.
+
+An already accepted Inbound Parse callback on the declared custom domain is
+preserved when its hostname, service and path are unchanged and complete hosting
+observation verifies that domain on the same scoped service. Refreshing the
+provider-issued service URL is not a request to move that callback. The shared
+`email-inbound-url.service.ts` decision is used by planning, apply, signing and
+readiness; missing or conflicting attachment evidence blocks changes. Existing
+signing identity hashes are not migrated by callback preservation. Transport and
+deliberately invalid identity/URL regressions run in ordinary `npm test`.
 
 The SendGrid connection is a management credential, conventionally supplied as
 `HYPERVIBE_SENDGRID_API_KEY`. Supply the application's separate `SENDGRID_API_KEY`
@@ -2156,6 +2175,25 @@ a replacement disk. This verifies provider configuration, not database contents,
 restart durability or a successful restore. Existing databases are never replaced,
 restarted or given a new empty volume as an implicit repair.
 
+Explicit fresh initialization is a separate optional capability, never ordinary
+persistence reconciliation. Reviewed desired state
+`database.freshInitialization = { id, discardExistingData: true, target: {
+externalId, providerScope } }` names one exact existing database and isolates its
+data-bearing work in `database-initialization`. The optional database adapter
+capability `freshInitialization` owns native eligibility, completion and durable
+uncertain-write recovery; generic lifecycle code does not branch on providers.
+Railway's implementation admits only a supported existing PostgreSQL 16 service
+with no volume, preserves its identity/private credentials and references, stages
+an additive deferred `PGDATA` change, then verifies the newly attached volume and
+exact deployment. Existing storage and unknown evidence block. Supabase, Neon,
+Cloud SQL, RDS, Azure PostgreSQL, Fly MPG and DigitalOcean are unsupported for
+this operation; their managed reset/restore APIs must not be used as fallbacks.
+Discard permission covers only the reviewed old data. Future backups, SQL
+authentication, migrations, seed work and application readiness remain separate.
+The provider matrix records implemented versus unsupported admission. Ordinary
+CI checks the complete registry and mutation-free rejection by all seven other
+providers; offline contracts do not establish a successful live initialization.
+
 Railway runtime wiring preserves provider variable references. New template-backed
 bindings record which existing issuer URL key supplies `DIRECT_URL`, since native
 templates need not define `DATABASE_PRIVATE_URL`. Provisioning and subsequent
@@ -2454,14 +2492,35 @@ appropriate.
 
 Fresh-environment seed/bootstrap data belongs in desired state as `database.seedCommand`. It should plan a visible one-shot seed action, run through the provider-neutral environment task runner during `hv_apply`, and record completion on the database component only after terminal success. In a managed-CI environment, a non-noop seed has an explicit dependency on a verified exact-SHA release of the desired commit. If that release remains in progress, apply stops pending before the seed; it never runs the older image or races newly issued integration credentials.
 
+An explicitly discarded and newly initialized database may separately declare
+`database.freshInitialization.bootstrap: { service, image }`. This selects a
+declared service and an immutable configured application image, then uses the
+existing canonical release-command configuration for first schema initialization.
+It does not reinterpret `seedCommand` or certify an application release. Only the
+exact completed fresh-storage receipt admits the isolated `database-bootstrap`
+stage before old-source backup readiness. A private authentication task and the
+schema command require separate reviewed actions. Both use selected native
+database references, the application's PostgreSQL client and value-free results.
+Authentication proves the task connection; command completion is not an independent
+schema audit or proof of running application operation.
+
+Each attempt retains its immutable scope and acknowledged task identities before
+continuing. Unknown writes block replay; terminal execution is persisted before
+exact cleanup. A consumed generation cannot rerun its command, and unrelated
+deployment, backup and restore gates resume afterward. Historical seed receipts
+are valid only for their recorded database generation. See the
+[bootstrap contract and provider review](docs/database-initialization-bootstrap.md).
+
 `runEnvironmentTask` carries the authoritative `Project.gitRemoteUrl` through the shared `EnvironmentTaskOptions` port. Railway uses the existing GitHub remote parser and package-credential selector for private GHCR task images: exact repository, matching organization wildcard, then verified global fallback. Missing or non-GitHub repository context permits only global credentials, never an unrelated scoped connection or a guess from the image name or current directory. Named CI tasks and managed recovery retain their explicitly supplied registry credentials. The seed transport regression covers these choices and a failed task followed by reapply; completion is still recorded only after terminal success.
 
 `hv_db_migrate` must not exist in the command registry, MCP surface, or CLI.
 Provider-to-provider data moves are lifecycle operations modeled as explicit
 `dataMigration` spec/plan/apply actions with dependency edges, data-bearing
 confirmation, isolated copy and cutover stages, and verification receipts.
-Database resets likewise belong to desired-state destruction, not an
-imperative shortcut. Re-running or repairing seed or migrated data requires a
+Database resets likewise require reviewed desired state, never an imperative
+shortcut. The narrow `database.freshInitialization` capability above initializes
+empty storage only on its explicitly named eligible existing database; it is not
+a generic reset or replacement path. Re-running or repairing seed or migrated data requires a
 new reviewable desired-state id; Hypervibe does not expose a generic seed or
 copy command runner.
 

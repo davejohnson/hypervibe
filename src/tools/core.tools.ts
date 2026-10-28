@@ -800,16 +800,21 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const currentSpecResult = specStore.get(project);
       const currentSpec = currentSpecResult?.spec;
       const plannedEnvironment = currentSpec ? commandEnvironment(currentSpec, env) : env?.trim() || 'staging';
-      const cloudScopeOnly = await localCloudScopeRequired(project, plannedEnvironment, currentSpec);
-      const retainedArtifactOnly = await operatorArtifactWorkRequired(project, plannedEnvironment);
-      const holdingOnly = await localHoldingWorkRequired(project, plannedEnvironment, currentSpec);
-      const operatorOnly = await operatorApplicationWorkRequired(project, plannedEnvironment, currentSpec);
-      if (currentSpec && !cloudScopeOnly && !retainedArtifactOnly && !holdingOnly && !operatorOnly) validateInstalledProviders(currentSpec);
+      const retainedDatabase = planService.retainedDatabaseWork(project, plannedEnvironment, scope);
+      const databaseOnly = retainedDatabase.pendingBootstrap || retainedDatabase.pendingInitialization;
+      // Retained database work owns the next stage. PlanService decides whether
+      // its exact state permits observation/cleanup or requires current provider
+      // validation; unrelated setup and dotenv inputs cannot preempt that choice.
+      const cloudScopeOnly = !databaseOnly && await localCloudScopeRequired(project, plannedEnvironment, currentSpec);
+      const retainedArtifactOnly = !databaseOnly && await operatorArtifactWorkRequired(project, plannedEnvironment);
+      const holdingOnly = !databaseOnly && await localHoldingWorkRequired(project, plannedEnvironment, currentSpec);
+      const operatorOnly = !databaseOnly && await operatorApplicationWorkRequired(project, plannedEnvironment, currentSpec);
+      if (currentSpec && !databaseOnly && !cloudScopeOnly && !retainedArtifactOnly && !holdingOnly && !operatorOnly) validateInstalledProviders(currentSpec);
       // Local dotenv preparation is part of the hv_plan contract. Establish
       // its git-safety and filesystem boundary before PlanService persists an
       // executable plan, so an unsafe tracked .env cannot leave an undisclosed
       // authorization record behind.
-      const preparedLocalEnv = currentSpec && !cloudScopeOnly && !retainedArtifactOnly && !holdingOnly && !operatorOnly && scope !== 'credentials' && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'secret-destinations'
+      const preparedLocalEnv = currentSpec && !databaseOnly && !cloudScopeOnly && !retainedArtifactOnly && !holdingOnly && !operatorOnly && scope !== 'credentials' && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'secret-destinations'
         ? ensureProjectLocalEnv({
           source: currentSpecResult?.source,
           projectName: project.name,
@@ -854,7 +859,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         : undefined;
       let localEnv: RepoEnvFileWrite | undefined;
       try {
-        localEnv = result.scope === 'cloud-scope' || result.scope === 'operator-artifacts' || result.scope === 'operator-applications' || result.scope === 'hosting-preparation' || scope === 'credentials' || scope === 'secrets' || scope === 'secret-destinations' ? undefined : mergeLocalEnvWrites(
+        localEnv = databaseOnly || result.scope === 'cloud-scope' || result.scope === 'operator-artifacts' || result.scope === 'operator-applications' || result.scope === 'hosting-preparation' || scope === 'credentials' || scope === 'secrets' || scope === 'secret-destinations' ? undefined : mergeLocalEnvWrites(
           preparedLocalEnv,
           ensureProjectLocalEnv({
             source: currentSpecResult?.source,
@@ -1500,11 +1505,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       if (!specResult) {
         return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { hint: 'hv_spec, then hv_plan.' });
       }
-      // The application revalidates this exact persisted plan before execution.
-      // Historical scoped recovery must not depend on today's hosting selection.
-      // The application validates the saved stage, identities and action proof.
-      if (!['cloud-scope', 'operator-artifacts', 'operator-applications', 'hosting-preparation'].includes(String(asRecord(ctx.repos.runs.findById(planId)?.plan)?.scope))) validateInstalledProviders(specResult.spec);
-
+      // The application validates current providers and the exact saved stage,
+      // identities and action proof. Historical recovery may intentionally use
+      // retained authority after today's desired hosting selection has changed.
       const outcome = await executePlanApply(ctx, {
         project,
         spec: specResult.spec,

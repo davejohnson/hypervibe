@@ -14,6 +14,7 @@ import { pendingCredentialUpdate } from '../../domain/services/credential-lifecy
 import '../providers.js';
 import * as hostingEnv from '../../domain/services/hosting-env.service.js';
 import { credentialInventory } from '../credential-inventory.js';
+import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 
 // Synthetic capability conformance, not native-provider or SQL compatibility.
 // Independent requirement: a lost SQL acknowledgement cannot cause a second
@@ -77,6 +78,21 @@ async function composedFixture(provider = 'railway') {
   const synchronize = vi.spyOn(hostingEnv, 'syncHostingEnvVars').mockImplementation(async ({ service, vars }) => { Object.assign(values.get(service.name)!, vars); return { success: true, message: 'Synthetic selected-key acknowledgment' }; });
   return { ...f, values, synchronize };
 }
+
+it('does not expose decrypted malformed intent before the apply executor starts', async () => {
+  const f = await fixture(); const plan = await f.plan();
+  if ('error' in plan) throw new Error(plan.error);
+  const document = structuredClone(f.ctx.repos.runs.findById(plan.planRunId)!.plan) as Record<string, unknown>;
+  document.overrides = { ...(document.overrides as Record<string, unknown>),
+    delegatedSecretVarsEncrypted: getSecretStore().encrypt('raw-secret') };
+  f.ctx.repos.runs.updatePlan(plan.planRunId, document);
+  const result = await f.apply(plan.planRunId, plan.actions.map(action => action.id))
+    .then(value => JSON.stringify(value), error => String(error?.message ?? error));
+  expect(result).not.toContain('raw-secret');
+  expect(result).toContain('could not read its retained encrypted authority');
+  expect(f.lifecycle.rotate).not.toHaveBeenCalled();
+  expect(f.configuration.synchronize).not.toHaveBeenCalled();
+});
 
 it.each(['railway', 'supabase', 'neon', 'cloudsql', 'rds', 'azure-postgres', 'fly', 'digitalocean'])('composes %s native authentication with complete exact hosting consumers', async provider => {
   const f = await composedFixture(provider);
