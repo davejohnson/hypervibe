@@ -8,6 +8,14 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+The [repository-variable contract](github/repository-variables/README.md) pins
+GitHub's numeric repository identity and Actions variable endpoints. The named
+CI-provider comparison explicitly leaves GitLab unsupported for this facet.
+Normal acceptance exercises complete bounded inventory, serialized create/update
+acknowledgements, exact stale checks, explicit zero-write adoption, durable
+uncertain-outcome reconciliation, inspection and value-free command responses.
+These offline checks establish neither live permissions nor workflow execution.
+
 The [fresh database bootstrap review](../../docs/database-initialization-bootstrap.md)
 and `database-initialization-bootstrap-provider-matrix.json` cover all registered
 hosting and PostgreSQL providers. Only the Railway/Railway private task pair is

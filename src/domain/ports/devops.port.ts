@@ -1,5 +1,15 @@
 import type { Observation } from './provider-observation.js';
 
+/** A provider boundary proved this attempted configuration write had no effect. */
+export class RepositoryConfigurationWriteError extends Error {
+  readonly outcome = 'rejected' as const;
+
+  constructor() {
+    super('Repository variable write was rejected before any provider change; re-plan after correcting access or configuration.');
+    this.name = 'RepositoryConfigurationWriteError';
+  }
+}
+
 export interface CodeRepositoryIdentity {
   provider: string;
   nativeId: string;
@@ -10,6 +20,20 @@ export interface CodeRepositoryIdentity {
   visibility?: 'private' | 'internal' | 'public';
   webUrl: string;
   cloneUrls: string[];
+}
+
+/** Ordinary non-secret repository configuration, separate from deploy secrets. */
+export interface RepositoryVariableInventory {
+  repository: CodeRepositoryIdentity;
+  observedAt: string;
+  variables: Array<{ name: string; valueHash: string; createdAt: string; updatedAt: string }>;
+}
+
+export interface RepositoryConfigurationPort {
+  normalizeName(name: string): string;
+  observe(scope: string): Promise<Observation<RepositoryVariableInventory>>;
+  create(identity: CodeRepositoryIdentity, name: string, value: string): Promise<void>;
+  update(identity: CodeRepositoryIdentity, name: string, value: string): Promise<void>;
 }
 
 export interface CodeRepositoryFile {

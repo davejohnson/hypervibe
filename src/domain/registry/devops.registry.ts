@@ -1,7 +1,7 @@
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
 import type { PlanAction } from '../plan/plan.types.js';
-import type { CodeHostIdentityPort, CodeRepositoryLifecyclePort, CiOperationsPort } from '../ports/devops.port.js';
+import type { CodeHostIdentityPort, CodeRepositoryLifecyclePort, CiOperationsPort, RepositoryConfigurationPort } from '../ports/devops.port.js';
 import type { EnvironmentSpec, ProjectSpec } from '../spec/spec.schema.js';
 import type { CiRollbackFailure, CiRollbackResult } from '../services/ci-rollback.service.js';
 
@@ -71,6 +71,8 @@ export interface CiProviderRegistration {
   connectionProvider: string;
   compatibleCodeProviders: readonly string[];
   create(credentials: unknown): CiOperationsPort;
+  /** Optional repository configuration facet; does not grant deployment-secret authority. */
+  repositoryConfiguration?: (credentials: unknown) => RepositoryConfigurationPort;
   lifecycle: CiLifecyclePort;
   rollback?: (params: {
     project: Project;

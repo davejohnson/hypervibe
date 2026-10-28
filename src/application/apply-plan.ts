@@ -1,4 +1,5 @@
 import { applyCredentialLifecycle, pendingCredentialUpdate } from '../domain/services/credential-lifecycle.service.js';
+import { applyRepositoryVariable, isRepositoryVariableAction, pendingRepositoryVariableEnvironment, repositoryVariablesEnvironment } from '../domain/services/repository-variables.service.js';
 import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from '../domain/services/database-credential-aliases.service.js';
 import { applyDatabaseFreshInitialization } from '../domain/services/database-fresh-initialization.service.js';
 import { hasPendingDatabaseInitialization } from '../domain/plan/database-initialization.contract.js';
@@ -846,6 +847,16 @@ export async function executePlanApply(ctx: CommandContext, params: {
     ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
     : project;
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  try {
+    const pendingVariables = pendingRepositoryVariableEnvironment(project.id);
+    if (pendingVariables && (planScope !== 'full' || envName !== pendingVariables
+      || !loaded.document.actions.some(action => action.type !== 'noop')
+      || !loaded.document.actions.every(isRepositoryVariableAction))) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'Reconcile the pending repository-variable write in its canonical full plan before other mutations.' }] };
+    }
+  } catch { return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+    reason: 'Retained repository-variable ownership is malformed or ambiguous; no new mutation is authorized.' }] }; }
   const bootstrapAction = loaded.document.actions[0];
   const observationOrCleanup = planScope === 'database-bootstrap' && environment
     && loaded.run.projectId === project.id && loaded.run.environmentId === environment.id
@@ -883,6 +894,20 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const pendingCredential = pendingCredentialUpdate(project.id);
   if (pendingCredential) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: `Recover credential plan ${pendingCredential} before other lifecycle mutations.` }] };
 
+  const repositoryVariablesOnly = planScope === 'full'
+    && loaded.document.actions.every(isRepositoryVariableAction)
+    && (loaded.document.actions.length > 0 || spec.devops?.ci?.repositoryVariables !== undefined)
+    && envName === repositoryVariablesEnvironment(spec);
+  if (repositoryVariablesOnly) {
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'Repository variables require the exact isolated plan and cannot bootstrap a deployment.' }] };
+    }
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision,
+      confirmActions: params.confirmActions, handler: action => applyRepositoryVariable({ project: projectForPreflight,
+        spec, environmentName: envName, action }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Repository-variable readback does not prove a workflow ran.'] };
+  }
   const rawEnvironmentSpec = spec.environments[envName];
   const envSpec = rawEnvironmentSpec ? withBackupStorageDefaults(rawEnvironmentSpec) : undefined;
   if (!envSpec) {

@@ -128,6 +128,23 @@ new access paths, session termination or data changes.
 
 ## Operational tasks and recovery
 
+For ordinary repository configuration flags, use
+`devops.ci.repositoryVariables` in the existing canonical DevOps selection.
+GitHub Actions supports selected non-secret values on an existing external
+repository; GitLab CI is not yet supported for this facet. Follow the current
+spec schema, plan the canonical environment, and apply only that persisted plan.
+Existing variables require explicit `adoptExisting: true`; adoption performs no
+provider write, and a different desired value needs another reviewed plan.
+Omission preserves values and local ownership. Never put credentials in these
+plain spec values. Ownership is local, so another workspace needs explicit
+adoption rather than importing a binding as authority.
+
+Inspect a flag through `hv_inspect provider="github" resource="repository-variable"`
+with the exact project or scope and optional name. Readback proves configuration,
+not workflow execution. A retained uncertain write gets a readback-only recovery
+plan; do not clear its journal or repeat the mutation through another tool.
+Verify subsequent scheduled or authorized workflow execution separately.
+
 Use supported Hypervibe commands and current action schemas for one-off database
 or application tasks. Do not temporarily change a release command to run a data
 operation. Preserve the exact environment, provider target, and deployment lock;

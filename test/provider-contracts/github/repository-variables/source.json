@@ -1,0 +1,14 @@
+{
+  "sourceUrl": "https://raw.githubusercontent.com/github/rest-api-description/755ee33b4a81d51f6f07a902cce26cbec3b822f2/descriptions/api.github.com/api.github.com.json",
+  "revision": "755ee33b4a81d51f6f07a902cce26cbec3b822f2",
+  "sourceSha256": "3177ad6a86ca04c57a9bef3fc24e28a339efb8eb040c6f950af3d3ed2fee7fa3",
+  "schemaSha256": "2df18f669953acd320b069d5cbf768bbf851fafe1dded3410233beb947cb5ebd",
+  "apiVersion": "2026-03-10",
+  "extraction": "Exact repository GET and repository-variable collection GET/POST and item GET/PATCH operations with transitive component references; no schema modifications. DELETE is intentionally outside this capability.",
+  "schemaFile": "repository-variables.openapi.json",
+  "retrievedAt": "2026-10-28",
+  "documentation": [
+    "https://docs.github.com/en/rest/actions/variables",
+    "https://docs.github.com/en/actions/reference/workflows-and-actions/variables"
+  ]
+}
