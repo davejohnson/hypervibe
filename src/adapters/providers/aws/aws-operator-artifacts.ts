@@ -153,7 +153,13 @@ export function createAwsOperatorArtifactDriver(options: { requestHandler?: STSC
     for (const client of [sts, control, cfn, s3]) boundAwsSdkResponses(client);
     try {
       const identity = await sts.send(new GetCallerIdentityCommand({}), { abortSignal: budget.signal });
-      if (identity.Account !== n.accountId || !identity.Arn?.startsWith(`arn:aws:sts::${n.accountId}:`) || !identity.UserId) fail('identity_mismatch');
+      // Console login issues temporary credentials for IAM users and root too.
+      // Session token/expiry above establish the temporary boundary; the caller
+      // ARN identifies the principal, not whether its credentials are long-lived.
+      const caller = identity.Arn?.match(/^arn:aws:(iam|sts)::(\d{12}):([^\s]+)$/);
+      const principal = caller?.[1] === 'iam' ? /^(?:root|user\/.+)$/.test(caller[3])
+        : caller?.[1] === 'sts' && /^(?:assumed-role\/[^/]+\/[^/]+|federated-user\/[^/]+)$/.test(caller[3]);
+      if (identity.Account !== n.accountId || caller?.[2] !== n.accountId || !principal || !identity.UserId) fail('identity_mismatch');
       try {
         const result = await control.send(new GetAccountPublicAccessBlockCommand({ AccountId: n.accountId }), { abortSignal: budget.signal });
         if (!result.PublicAccessBlockConfiguration || result.PublicAccessBlockConfiguration.BlockPublicPolicy !== false

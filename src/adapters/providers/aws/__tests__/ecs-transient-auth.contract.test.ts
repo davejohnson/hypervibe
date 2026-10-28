@@ -10,6 +10,17 @@ import { AwsSecretsAdapter } from '../../secretmanagers/aws-secrets.adapter.js';
 import { ecsTransientFixture as fixture, accountId, region, connection } from './ecs-transient.fixture.js';
 
 describe('ECS transient access real SDK boundary', () => {
+  it.each(['root', 'user/Alice'])('does not accept an operator %s session as the installed deployment role', async principal => {
+    const f = fixture(); let identityReads = 0;
+    const handler = { handle: async (request: any) => {
+      expect(new URLSearchParams(request.body).get('Action')).toBe('GetCallerIdentity'); identityReads++;
+      return { response: { statusCode: 200, headers: { 'content-type': 'text/xml' }, body: Buffer.from(
+        `<GetCallerIdentityResponse><GetCallerIdentityResult><Account>${accountId}</Account><Arn>arn:aws:iam::${accountId}:${principal}</Arn><UserId>${principal === 'root' ? accountId : 'AIDACKCEVSQ6C2EXAMPLE'}</UserId></GetCallerIdentityResult></GetCallerIdentityResponse>`) } };
+    } };
+    const provider = createAwsDeploymentCredentialProvider(f.input, { requestHandler: handler });
+    await expect(provider(AbortSignal.timeout(1000))).rejects.toMatchObject({ code: 'scope_mismatch' });
+    expect(identityReads).toBe(1); expect(f.requests).toEqual([]);
+  });
   it('never falls back to machine credentials for registry rotation through hosted deployment authority', async () => {
     const f = fixture(false, true), adapter = new EcsExpressAdapter();
     await adapter.connectTransient(f.input, { requestHandler: f.handler });

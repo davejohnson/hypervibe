@@ -15,6 +15,15 @@ requires a temporary session token and expiry. Each native phase verifies the
 actual caller account. Credentials remain in memory and never enter plans,
 receipts, browser links or environment bindings.
 
+The local session can identify an IAM user, root, an assumed role or a federated
+user. An `arn:aws:iam` caller ARN does not imply a long-lived access key:
+[`aws login`](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sign-in.html)
+explicitly issues temporary credentials for console root and IAM-user sessions.
+The publisher checks the session token and future expiry separately from the
+same-account caller ARN and nonempty native user ID. This permission is only for
+reviewed operator publication; hosted collection and deployment still require
+their exact installed roles, and runtime identities remain separate.
+
 A first publication has one CloudFormation target action, one conditional upload
 per selected template, and a separate public-read action. The target is a new
 owned stack containing a dedicated versioned bucket with SSE-S3 and bucket-owner
@@ -74,3 +83,19 @@ then passed. The final focused suite additionally includes two replacement
 cases. These are ordinary `npm test` regressions, not live AWS compatibility
 claims. CloudFormation convergence, S3 account policy, public reachability and
 charges still require the approved disposable-account walkthrough.
+
+On 2026-10-28 the packaged AWS SDK resolved an existing browser-login profile to
+expiring credentials with a session token. Its read-only STS response identified
+the expected account with an IAM root ARN. The publisher incorrectly required an
+STS ARN, disproving the assumption that every temporary session represents an
+assumed or federated role. The official
+[GetCallerIdentity contract](https://docs.aws.amazon.com/STS/latest/APIReference/API_GetCallerIdentity.html)
+and console-login documentation independently establish these principal forms.
+Three reconstructed real-client regressions failed before the fix: root login,
+IAM-user login and the initial plan used by an account-change check. They pass
+after correction, together with lost-acknowledgment recovery, account isolation,
+missing/expired-session denial and explicit hosted-deployment rejection of root
+and IAM-user principals. The focused five-file suite passes 55 tests. These tests
+run in ordinary `npm test`; the native observation proves profile resolution and
+STS identity only, not publication authority or the cause of the earlier browser
+HTTP 400 error.

@@ -8,7 +8,8 @@ import { createAwsOperatorArtifactCapability, createAwsOperatorArtifactDriver } 
 // PutObject If-None-Match:* / 412; nonnull S3 VersionId; version-only bucket policy.
 export const AWS_OPERATOR_ARTIFACT_KINDS = ['aws-collection-template-v1', 'aws-deployment-template-v1'];
 const artifacts = AWS_OPERATOR_ARTIFACT_KINDS;
-export function awsOperatorArtifactBoundary(options: { lost?: 'stack' | 'object' | 'policy'; blockedPublic?: boolean; wrongAccount?: boolean; conflict?: boolean } = {}) {
+type Caller = { account?: string; arn?: string; userId?: string };
+export function awsOperatorArtifactBoundary(options: { lost?: 'stack' | 'object' | 'policy'; blockedPublic?: boolean; wrongAccount?: boolean; conflict?: boolean; caller?: Caller } = {}) {
   const capability = createAwsOperatorArtifactCapability();
   const scope = capability.parseDeclaration({ scopeKind: 's3-cloudformation-publication-v1', accountId: '123456789012', region: 'us-west-2' }, artifacts, {});
   const intent: OperatorArtifactIntent = { schemaVersion: 1, installationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', customerId: 'customer', appId: 'app', environment: 'staging',
@@ -22,13 +23,16 @@ export function awsOperatorArtifactBoundary(options: { lost?: 'stack' | 'object'
   const query = (name: string, body: string) => xml(`<${name}Response><${name}Result>${body}</${name}Result><ResponseMetadata><RequestId>synthetic</RequestId></ResponseMetadata></${name}Response>`);
   const error = (code: string, status = 404, message = 'synthetic') => xml(`<ErrorResponse><Error><Code>${code}</Code><Message>${message}</Message></Error></ErrorResponse>`, status);
   const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  let caller: Caller = options.caller ?? { account: options.wrongAccount ? '999999999999' : '123456789012',
+    arn: 'arn:aws:sts::123456789012:assumed-role/operator/synthetic', userId: 'AROASYNTHETIC123456789:synthetic' };
   const handler = { handle: async (request: any) => {
     requests.push(request);
     expect(request.headers.authorization).toContain('ASIASYNTHETICPUBLISHER');
     expect(request.headers['x-amz-security-token']).toBe('synthetic-session-token');
     const raw = request.body ? String(request.body) : '', body = raw.startsWith('{') ? JSON.parse(raw) : Object.fromEntries(new URLSearchParams(raw));
     const operation = body.Action ?? request.headers['x-amz-target']?.split('.').at(-1);
-    if (operation === 'GetCallerIdentity') return query(operation, `<Account>${options.wrongAccount ? '999999999999' : '123456789012'}</Account><Arn>arn:aws:sts::123456789012:assumed-role/operator/synthetic</Arn><UserId>AROASYNTHETIC123456789:synthetic</UserId>`);
+    if (operation === 'GetCallerIdentity') return query(operation, Object.entries({ Account: caller.account, Arn: caller.arn, UserId: caller.userId })
+      .filter((entry): entry is [string, string] => entry[1] !== undefined).map(([key, value]) => `<${key}>${escape(value)}</${key}>`).join(''));
     if (request.hostname.includes('s3-control')) return options.blockedPublic
       ? xml('<PublicAccessBlockConfiguration><BlockPublicAcls>true</BlockPublicAcls><IgnorePublicAcls>true</IgnorePublicAcls><BlockPublicPolicy>true</BlockPublicPolicy><RestrictPublicBuckets>true</RestrictPublicBuckets></PublicAccessBlockConfiguration>')
       : error('NoSuchPublicAccessBlockConfiguration');
@@ -98,6 +102,6 @@ export function awsOperatorArtifactBoundary(options: { lost?: 'stack' | 'object'
       }
       saved = structuredClone(next); return true;
     } } };
-  return { intent, input, setReadsDenied: (value: boolean) => { readsDenied = value; }, writes, objects, requests, capability, policy: () => policy, setPolicy: (value: any) => { policy = value; }, resetRecord: () => { saved = null; }, stack: () => stack };
+  return { intent, input, setCaller: (value: Caller) => { caller = value; }, setReadsDenied: (value: boolean) => { readsDenied = value; }, writes, objects, requests, capability, policy: () => policy, setPolicy: (value: any) => { policy = value; }, resetRecord: () => { saved = null; }, stack: () => stack };
 }
 
