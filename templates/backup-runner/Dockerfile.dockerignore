@@ -8,6 +8,8 @@
 !tsconfig.build.json
 !src
 !src/**
+!templates
+!templates/**
 src/**/__tests__
 src/**/*.test.ts
 src/test

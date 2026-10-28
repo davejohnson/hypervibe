@@ -8,6 +8,7 @@ COPY vendor ./vendor
 RUN npm ci --ignore-scripts
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
+COPY templates ./templates
 RUN ./node_modules/.bin/tsc -p tsconfig.build.json \
     && npm prune --omit=dev --ignore-scripts
 
@@ -17,5 +18,6 @@ WORKDIR /opt/hypervibe
 COPY --from=build /opt/hypervibe/package.json ./package.json
 COPY --from=build /opt/hypervibe/dist ./dist
 COPY --from=build /opt/hypervibe/node_modules ./node_modules
+COPY --from=build /opt/hypervibe/templates ./templates
 USER postgres
 ENTRYPOINT ["node", "/opt/hypervibe/dist/ci/backup-runner.js"]

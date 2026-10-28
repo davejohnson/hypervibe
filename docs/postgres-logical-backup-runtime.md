@@ -62,6 +62,17 @@ The Dockerfile alone is not a published image or live compatibility proof.
 The tools must support the source server's major version; this image is not a
 database upgrade and does not support dumping a newer server.
 
+The ordinary `npm test` acceptance suite builds this actual Dockerfile and runs
+the packaged PostgreSQL/files restore smoke. Local development therefore requires
+a running Docker daemon with `linux/amd64` support; the check fails rather than
+skipping when Docker is unavailable. The first build needs access to the public
+base images and npm registry and can take several minutes; later builds reuse
+Docker's cache. Runtime checks use the exact built image, its default `postgres`
+user, no network and a read-only root filesystem. They clean their own container
+IDs and image tag. The image includes the same `templates/` assets as the npm
+package for build-time imports and packaged runtime consumers. These checks do
+not establish registry publication or live provider compatibility.
+
 ## Release publication
 
 The tag-triggered [release workflow](../.github/workflows/release.yml) publishes
