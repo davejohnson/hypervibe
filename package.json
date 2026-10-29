@@ -91,7 +91,7 @@
     "graphql-request": "^7.0.0",
     "jsonc-parser": "3.3.1",
     "pg": "^8.17.2",
-    "sodium-native": "^4.0.0",
+    "sodium-native": "^5.1.0",
     "tldts": "^7.4.6",
     "toml-eslint-parser": "0.10.0",
     "tweetnacl": "^1.0.3",
