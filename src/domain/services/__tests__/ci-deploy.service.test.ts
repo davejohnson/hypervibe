@@ -17,6 +17,7 @@ import { ConnectionRepository } from '../../../adapters/db/repositories/connecti
 import { ComponentRepository } from '../../../adapters/db/repositories/component.repository.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { GitHubAdapter } from '../../../adapters/providers/github/github.adapter.js';
+import { AdapterFactory } from '../adapter.factory.js';
 import { SpecStore } from '../../spec/spec.store.js';
 import { providerRegistry } from '../../registry/provider.registry.js';
 import { environmentSpecSchema } from '../../spec/spec.schema.js';
@@ -51,6 +52,16 @@ import { credentialActionId, type CredentialTarget } from '../../plan/credential
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
+
+// Captured from the named historical Git revisions, not the current renderer.
+// The accepted workflow envelope below is reconstructed; the gate artifacts and
+// input-contract revisions stay frozen so removing the gate cannot erase RED.
+const historicalBackupGates = JSON.parse(fs.readFileSync(
+  new URL('./fixtures/historical-backup-deploy-gates.json', import.meta.url), 'utf8'
+)) as {
+  backupPolicy: { mode: 'daily'; runnerImage: string; credentialNames: string[] };
+  fixtures: Array<{ rendererRevision: number; sourceCommit: string; step: { name: string; run: string } }>;
+};
 
 const CI_ENVIRONMENT_SPEC = {
   hosting: { provider: 'railway' },
@@ -951,13 +962,14 @@ describe('ci-deploy.service', () => {
       expect(reviewed['run-name']).toContain("format('[hv:{0}]', inputs.hypervibe_release_id)");
     });
 
-    it('requires publication when a reviewed revision-5 workflow still gates on v1 backup receipts', async () => {
+    it.each(historicalBackupGates.fixtures)(
+      'requires reviewed gate removal from a revision-$rendererRevision workflow', async ({ rendererRevision, step }) => {
       const { project, envRepo, environmentId } = seedProjectWithSpec();
       seedVerifiedConnections();
       const protectedSpec = environmentSpecSchema.parse({
         ...CI_ENVIRONMENT_SPEC,
         database: { provider: 'railway', engine: 'postgres' },
-        backups: { mode: 'daily', runnerImage: `ghcr.io/example/backup@sha256:${'b'.repeat(64)}` },
+        backups: { mode: 'daily', runnerImage: historicalBackupGates.backupPolicy.runnerImage },
       });
       new SpecStore().replace(project, {
         version: 1, project: project.name, environments: { production: protectedSpec },
@@ -967,45 +979,97 @@ describe('ci-deploy.service', () => {
       delete target.providerImageUris;
       delete target.programFingerprint;
       delete target.deploymentContractFingerprint;
-      // Freeze the published revision-5 input contract independently of the
-      // current renderer constant. Its accepted bytes must require migration.
+      // Historical resolver 4bde0d2:managed-ci-targets.ts353-365 serialized
+      // this policy into target, and therefore into the accepted input hash.
+      // Removing that input requires review even without a global revision bump.
       const oldInputHash = canonicalJsonSha256({
-        version: 1, rendererRevision: 5, provider: 'railway', target,
+        version: 1, rendererRevision, provider: 'railway',
+        target: { ...target, backupPolicy: historicalBackupGates.backupPolicy },
         migration: { includeStep: migration.includeStep,
           ...(migration.includeStep && migration.command ? { command: migration.command } : {}) },
       });
       const workflow = expectedWorkflow(project);
       const accepted = parse(workflow.content);
-      const gate = accepted.jobs.deploy.steps.find((step: { name?: string }) => step.name === 'Verify retained backup health');
-      expect(gate).toBeDefined();
-      // Reconstructed accepted workflow: retain the published v1-only success
-      // predicate, rather than asking today's generator to supply old behavior.
-      gate.run = [
-        "node <<'NODE'",
-        "const fs = require('node:fs');",
-        "const receipt = JSON.parse(fs.readFileSync(process.env.HYPERVIBE_BACKUP_RECEIPT, 'utf8'));",
-        "if (receipt.version !== 1 || receipt.environment !== process.env.HYPERVIBE_BACKUP_ENVIRONMENT || receipt.status !== 'healthy' || !Array.isArray(receipt.reasonCodes) || receipt.reasonCodes.length !== 0) throw new Error('Backup health is unverified.');",
-        'NODE',
-      ].join('\n');
+      const contractIndex = accepted.jobs.deploy.steps.findIndex((step: { id?: string }) => step.id === 'deployment_contract');
+      expect(contractIndex).toBeGreaterThan(-1);
+      accepted.jobs.deploy.steps.splice(contractIndex + 1, 0, structuredClone(step));
       const acceptedContent = stringify(accepted);
+      expect(acceptedContent).toContain('Verify retained backup health');
       acceptWorkflow(project, envRepo, environmentId, workflow, {
         acceptedContent,
         binding: { ...syncedBinding(project, acceptedContent), inputHash: oldInputHash },
       });
+      const database = vi.spyOn(AdapterFactory.prototype, 'getDatabaseAdapter');
       const listEnvironmentSecrets = vi.mocked(GitHubAdapter.prototype.listEnvironmentSecrets);
-
       const result = await planGitHubActionsDeploy({
         project, environmentName: 'production', environmentSpec: protectedSpec,
         environment: envRepo.findById(environmentId),
       });
-
       expect(result.action).toMatchObject({
         type: 'update', verified: true,
         reason: `GitHub Actions deploy workflow inputs changed for ${workflow.path}`,
         metadata: { workflowPublicationRequired: true },
       });
       expect((result.action?.metadata?.workflow as { inputHash: string }).inputHash).not.toBe(oldInputHash);
+      expect(parse(workflow.content).jobs.deploy.steps.some((step: { name?: string }) => step.name === 'Verify retained backup health')).toBe(false);
       expect(listEnvironmentSecrets).not.toHaveBeenCalled();
+      expect(database).not.toHaveBeenCalled();
+      mockVerifiedGitHub();
+      mockFreshManagedWorkflowPullRequest(72);
+      vi.spyOn(GitHubAdapter.prototype, 'getFile').mockImplementation(async (_owner, _repo, filePath) =>
+        filePath === workflow.path ? { sha: 'accepted-file', content: acceptedContent } : null);
+      const write = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({ created: false, updated: true });
+      const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret');
+      const publication = await applyGitHubActionsDeploy({ project, environmentName: 'production',
+        environmentSpec: protectedSpec, action: result.action!, authority: 'publication-only' });
+      expect(publication).toMatchObject({ success: false, status: 'pending' });
+      expect(write).toHaveBeenCalledOnce();
+      expect(write.mock.calls[0][2]).toBe(workflow.path);
+      expect(write.mock.calls[0][3]).toBe(workflow.content);
+      expect(write.mock.calls[0][3]).not.toContain('Verify retained backup health');
+      expect(write.mock.calls[0][5]).toBe(MANAGED_WORKFLOW_BRANCH);
+      expect(setSecret).not.toHaveBeenCalled();
+      expect(database).not.toHaveBeenCalled();
+      // Model the reviewed publication being accepted, then use the normal
+      // planner again: the migrated contract converges without another PR.
+      acceptWorkflow(project, envRepo, environmentId, workflow);
+      const retry = await planGitHubActionsDeploy({
+        project, environmentName: 'production', environmentSpec: protectedSpec,
+        environment: envRepo.findById(environmentId),
+      });
+      expect(retry.action).toMatchObject({ type: 'noop' });
+      expect(retry.action?.metadata?.workflowPublicationRequired).toBeUndefined();
+      expect(database).not.toHaveBeenCalled();
+    });
+
+    it('adopts obsolete disabled-policy metadata without replacing accepted workflow bytes', async () => {
+      const { project, envRepo, environmentId } = seedProjectWithSpec();
+      seedVerifiedConnections();
+      const disabled = environmentSpecSchema.parse({ ...CI_ENVIRONMENT_SPEC,
+        database: { provider: 'railway', engine: 'postgres' },
+        backups: { mode: 'disabled', reason: 'Disposable data with no managed backup program.' },
+      });
+      new SpecStore().replace(project, { version: 1, project: project.name, environments: { production: disabled } });
+      const { targets, migration } = resolveBranchDeployTargets(project);
+      const target = { ...targets[0] };
+      delete target.providerImageUris; delete target.programFingerprint; delete target.deploymentContractFingerprint;
+      // The old resolver recorded this disabled metadata despite emitting no gate.
+      const oldInputHash = canonicalJsonSha256({ version: 1, rendererRevision: 7, provider: 'railway',
+        target: { ...target, backupPolicy: { mode: 'disabled', credentialNames: ['RAILWAY_API_TOKEN'] } },
+        migration: { includeStep: migration.includeStep },
+      });
+      const workflow = expectedWorkflow(project);
+      expect(workflow.content).not.toContain('Verify retained backup health');
+      acceptWorkflow(project, envRepo, environmentId, workflow, {
+        binding: { ...syncedBinding(project, workflow.content), inputHash: oldInputHash },
+      });
+      const database = vi.spyOn(AdapterFactory.prototype, 'getDatabaseAdapter');
+      const result = await planGitHubActionsDeploy({ project, environmentName: 'production', environmentSpec: disabled,
+        environment: envRepo.findById(environmentId) });
+      expect(result.action).toMatchObject({ type: 'update', reason: `Record the reviewed GitHub Actions workflow input contract for ${workflow.path}` });
+      expect(result.action?.metadata?.workflowPublicationRequired).toBeUndefined();
+      expect((result.action?.metadata?.workflow as { inputHash: string }).inputHash).not.toBe(oldInputHash);
+      expect(database).not.toHaveBeenCalled();
     });
 
     it('keeps managed workflow bytes stable when only deploy-time environment values change', async () => {

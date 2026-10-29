@@ -1,5 +1,4 @@
 import { formatConnectionGuidance } from '../../../domain/services/connection-guidance.js';
-import { buildGitLabBackupDeployGate } from '../../../domain/services/backup-deploy-gate.service.js';
 import { prepareGitLabCredentialRollout, observeGitLabCredentialRollout } from './gitlab-credential-activation.js';
 import { createHash } from 'crypto';
 import { ConnectionRepository } from '../../db/repositories/connection.repository.js';
@@ -42,7 +41,7 @@ export const GITLAB_DEPLOYMENT_GATE_PATH = '.gitlab/hypervibe/verify-deployment-
 export const GITLAB_DEPLOYMENT_CONTRACT_PATH = '.gitlab/hypervibe/verify-deployment-contract.cjs';
 export const GITLAB_PROMOTION_GATE_PATH = '.gitlab/hypervibe/verify-promotion-evidence.mjs';
 export const GITLAB_RELEASE_EVIDENCE_PATH = '.gitlab/hypervibe/finalize-release-evidence.mjs';
-const PROGRAM_VERSION = 3;
+const PROGRAM_VERSION = 4;
 const GITLAB_SAAS_RUNNER_TAG = 'saas-linux-small-amd64';
 
 type ManagedFile = { path: string; content: string; hash: string };
@@ -871,7 +870,6 @@ ${rules}
       export HYPERVIBE_APPLIED_SPEC_HASH="$(printenv ${keys.appliedSpecHash} || true)"
       export HYPERVIBE_ROLLBACK="$[[ inputs.rollback ]]"
       node ${GITLAB_DEPLOYMENT_CONTRACT_PATH}
-${buildGitLabBackupDeployGate(target).split('\n').filter(Boolean).map(line => '      ' + line).join('\n')}
   after_script: []
   artifacts:
     expire_in: 1 day
@@ -959,7 +957,6 @@ ${rules}
       export HYPERVIBE_RELEASE_PROVIDER=${gitLabShellLiteral(hostingProvider)}
       export HYPERVIBE_APPLIED_SPEC_HASH="$(printenv ${keys.appliedSpecHash} || true)"
       node ${GITLAB_DEPLOYMENT_CONTRACT_PATH}
-${buildGitLabBackupDeployGate(target).split('\n').filter(Boolean).map(line => '      ' + line).join('\n')}
       export HYPERVIBE_DEPLOYMENT_CONTRACT_FINGERPRINT="$(cat .hypervibe-deployment-contract-fingerprint)"
       export HYPERVIBE_RELEASE_SERVICES=${gitLabShellLiteral(JSON.stringify(releaseEvidence.services))}
       export HYPERVIBE_RELEASE_PROVIDER_IDENTITY=${gitLabShellLiteral(JSON.stringify(releaseEvidence.providerIdentity))}

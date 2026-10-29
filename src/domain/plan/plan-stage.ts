@@ -25,17 +25,3 @@ export function deploymentPrerequisitePhase(plan: { scope?: string; actions: Pla
   if (plan.actions.some(action => String(action.metadata?.operation ?? '').startsWith('dataMigration'))) return 'data-migration';
   return undefined;
 }
-
-/** Provider writes that can release code, restart workloads, or admit traffic. */
-export function actionRequiresBackupReadiness(action: PlanAction): boolean {
-  if (action.type === 'noop') return false;
-  const capability = resolvePlanActionAuthority(action)?.capability;
-  if (capability === 'hosting.runtime-identity.mutate' && (action.metadata?.step as { restartsWorkload?: boolean } | undefined)?.restartsWorkload === true) return true;
-  return Boolean(capability && [
-    'hosting.service.converge', 'hosting.schedule.activate', 'hosting.delegated-secret.sync', 'hosting.secret-reference.sync', 'hosting.env.remove',
-    'stripe.hosting-env.sync', 'cache.env.remove', 'email.runtime.sync', 'messaging.runtime.sync',
-    'database.seed', 'database.migrate', 'database.bootstrap', 'github.ci.release',
-    'github.applied-spec-hash.sync', 'ci.applied-spec-hash.sync',
-    'domain.configure', 'load-balancer.mutate', 'load-balancer.pool.mutate',
-  ].includes(capability)) || ['storageWire', 'storageUnwire', 'queueWire', 'queueUnwire'].includes(String(action.metadata?.operation));
-}

@@ -409,10 +409,10 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
   });
 
   const baseSpec = spec;
-  it.each([false, true])('publishes reviewed GitLab configuration with persistent recovery coverage %s', async (persistent) => {
+  it.each([false, true])('publishes reviewed GitLab configuration with optional backup intent %s', async (persistent) => {
     const { project, environment } = seed();
     const spec = persistent ? projectSpecSchema.parse({ ...baseSpec, environments: {
-      ...baseSpec.environments, staging: { ...baseSpec.environments.staging, database: { provider: 'railway', engine: 'postgres' } },
+      ...baseSpec.environments, staging: { ...baseSpec.environments.staging, database: { provider: 'railway', engine: 'postgres' }, backups: { mode: 'daily' } },
     } }) : baseSpec;
     if (persistent) new SpecStore().replace(project, spec);
     const committed = new Map<string, string>();
@@ -630,9 +630,9 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
       const contractScript = jobs['hypervibe:contract:railway:staging'].script.join('\n');
       const deployScript = jobs['hypervibe:deploy:railway:staging'].script.join('\n');
       const diagnostic = 'verified daily recovery is not yet supported';
-      expect(contractScript).toContain(diagnostic);
-      expect(deployScript.indexOf(diagnostic)).toBeGreaterThan(deployScript.indexOf('verify-deployment-contract.cjs'));
-      expect(deployScript.indexOf(diagnostic)).toBeLessThan(deployScript.indexOf('railway-deploy.mjs'));
+      expect(contractScript).not.toContain(diagnostic);
+      expect(deployScript).not.toContain(diagnostic);
+      expect(deployScript).toContain('railway-deploy.mjs');
       const bin = path.join(dataDir, 'bin'); mkdirSync(bin);
       writeFileSync(path.join(bin, 'node'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
       for (const rollback of ['false', 'true']) {
@@ -640,7 +640,7 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
         const execution = spawnSync('sh', ['-eu', '-c', generated], {
           cwd: dataDir, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, encoding: 'utf8',
         });
-        expect(execution.status === 0).toBe(rollback === 'true');
+        expect(execution.status).toBe(0);
       }
       return;
     }

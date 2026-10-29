@@ -85,11 +85,12 @@
     {
       "id": "DG-011",
       "sourceLine": 22,
-      "summary": "Default backup intent must cover every persistent database, declared or retained service mount, and object bucket through the shared provider contract",
+      "summary": "Report backup coverage independently from deployment and limit derived archive proposals to explicit backup setup scope",
       "originalSha256": "20c01a76c550cbb20f78b696b8aeb73ce4d019390bf368dcb28cdbd9e46a58e6",
       "destination": "docs/development-guidance-recovery.md#dg-011",
-      "destinationSha256": "20c01a76c550cbb20f78b696b8aeb73ce4d019390bf368dcb28cdbd9e46a58e6",
-      "transformation": "verbatim"
+      "destinationSha256": "d0490a86ad706b8c54db51521fcec8f0149b4a6ef9739949905a3877729e0bf9",
+      "transformation": "policy-change",
+      "reason": "2026-10-29 user correction: optional backup setup and new archive storage must not block ordinary deployment; preserve native protection and explicit checkpoints."
     },
     {
       "id": "DG-012",
@@ -953,8 +954,9 @@
       "summary": "Recurring recovery programs require exact published source/destination identities and a pinned helper artifact",
       "originalSha256": "04ca1ec87184574a4834e19be742229176e83c6d67c9b819b677a07d34749c03",
       "destination": "docs/development-guidance-recovery.md#dg-107",
-      "destinationSha256": "04ca1ec87184574a4834e19be742229176e83c6d67c9b819b677a07d34749c03",
-      "transformation": "verbatim"
+      "destinationSha256": "13fa713479d235b7131596770bfe52505a5cecab4ccd1ad834eceeb2329b8cd0",
+      "transformation": "policy-change",
+      "reason": "2026-10-29 user correction: backup health and program publication are independent of ordinary rollout; preserve accepted programs, constrain explicit publication to its selected environment, and report deferred setup honestly."
     },
     {
       "id": "DG-108",
@@ -986,11 +988,12 @@
     {
       "id": "DG-111",
       "sourceLine": 129,
-      "summary": "Cross-cutting deployment gates must preserve reviewed prerequisite stages without admitting workload or data writes",
+      "summary": "Separate optional backup readiness from ordinary release dependencies while preserving identity and explicit checkpoint safeguards",
       "originalSha256": "ee684f1847870a9047da9902e8e2e9421946eb8cbd0b38b0b3485004c212dfe7",
       "destination": "docs/development-guidance-lifecycle.md#dg-111",
-      "destinationSha256": "ee684f1847870a9047da9902e8e2e9421946eb8cbd0b38b0b3485004c212dfe7",
-      "transformation": "verbatim"
+      "destinationSha256": "f50d0fea2c6ef519a109f58b2ada6dc98da79e804898cd4c4f66144e3dfb7e82",
+      "transformation": "policy-change",
+      "reason": "2026-10-29 user correction: verify ordinary direct/generated deployment without backup evidence instead of preserving a mandatory backup gate."
     },
     {
       "id": "DG-112",
@@ -1062,8 +1065,9 @@
       "summary": "When building or releasing Hypervibe, update the configured local MCP runtime first and verify that it reports the new version",
       "originalSha256": "22e255970630916d35ba11017d099583a698580ecf487d582c66f44dfef7a230",
       "destination": "docs/development-guidance-workflow.md#dg-119",
-      "destinationSha256": "22e255970630916d35ba11017d099583a698580ecf487d582c66f44dfef7a230",
-      "transformation": "verbatim"
+      "destinationSha256": "8a93ab7182c89e84aebbb3013f10e280bf61e8344e74fa1d04b68216c5ef273f",
+      "transformation": "explicit-user-requested-rule-restoration",
+      "policyChange": "Record the prior user agreement on the canonical local Codex Hypervibe MCP runtime in main for the first time, restoring the rule from unmerged commits 3aa2c838dc4f9c3758d99f60e275570f8400c307 and 77c39f6c2c7e11bbd519b16784c4dd7c48ee9963. Both global and project-specific configuration must retain /Users/dave/projects/hypervibe/dist/mcp.js; another checkout or testing does not authorize repointing to a worktree, temporary checkout, alternate output or installed package. Rebuild the main checkout in place and preserve version verification and user-owned Codex restart."
     },
     {
       "id": "DG-120",

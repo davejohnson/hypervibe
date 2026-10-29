@@ -20,6 +20,25 @@ per-service identity; it performs no permission writes. Removal preserves the
 permission binding until the provider confirms it is absent, then clears runtime
 configuration. A successful grant read is not proof of application authentication.
 
+Application identity preparation is independent of backup health. An identity
+attachment that restarts a workload still appears as its own reviewed action
+when no recovery point exists. Backup-worker preparation belongs only to explicit
+`hv_plan scope="backups"`; that scope excludes application identity and queue
+permission stages.
+
+The October 29 integration challenged the former assumption that backup-worker
+setup and healthy backups must precede application identity changes. The accepted
+optional-backup requirement in DG-011/DG-107 supplies the expected behavior.
+Four planner regressions failed on actionable/unknown backup-worker observations,
+a suppressed restarting identity attachment, and an application identity leaking
+into backup-only planning. A fifth saved-plan regression reproduced backup-only
+review returning application prepared-binding authority; it now requires the
+separate full-scope review before saving that action. The corrected planner passes
+those cases and retains
+the existing isolated backup-worker planning check. These exercise actual planning
+and persisted stages with synthetic provider observations; they do not establish
+live identity attachment, backup execution or restore compatibility.
+
 Versioned runtime contracts make legacy consumers plan a reviewed configuration
 update even when their environment variable names already exist. Only verified
 provider environment updates record convergence for that consumer. The GCS contract

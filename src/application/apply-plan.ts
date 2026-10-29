@@ -21,10 +21,7 @@ import { SpecStore } from '../domain/spec/spec.store.js';
 import { preparedReleaseAttempts, createPreparedDirectReleaseControl } from '../domain/services/prepared-direct-release.service.js';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { isScopedSecretAction, scopedSecretObservation } from '../domain/plan/scoped-secrets.js';
-import { actionRequiresBackupReadiness, deploymentPrerequisitePhase, isManagedCiCredentialAction } from '../domain/plan/plan-stage.js';
-import { observeBackupPolicy } from '../domain/services/backup-policy.service.js';
-import { observeBackupHealth } from '../domain/services/backup-health.service.js';
-import { assessBackupReadiness } from '../domain/services/backup-readiness.js';
+import { deploymentPrerequisitePhase, isManagedCiCredentialAction } from '../domain/plan/plan-stage.js';
 import { withBackupStorageDefaults } from '../domain/services/backup-strategy.service.js';
 import { environmentResourceName } from '../domain/services/resource-names.js';
 import {
@@ -975,7 +972,8 @@ export async function executePlanApply(ctx: CommandContext, params: {
     return { kind: 'executed', envName, result, actionScopedWarnings: ['Repository-variable readback does not prove a workflow ran.'] };
   }
   const rawEnvironmentSpec = spec.environments[envName];
-  const envSpec = rawEnvironmentSpec ? withBackupStorageDefaults(rawEnvironmentSpec) : undefined;
+  const envSpec = rawEnvironmentSpec && planScope === 'backup-provisioning'
+    ? withBackupStorageDefaults(rawEnvironmentSpec) : rawEnvironmentSpec;
   if (!envSpec) {
     if (secretsOnly) return { kind: 'env_missing', envName };
     const repositoryLifecycleOnly = loaded.document.actions.length > 0
@@ -1096,6 +1094,11 @@ export async function executePlanApply(ctx: CommandContext, params: {
     return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The reviewed prerequisite plan belongs to another project or environment.' }] };
   }
   if (planScope === 'backup-readiness') {
+    if (asRecord(loaded.document.backupReadiness)?.ready === true) {
+      const result = await executor.execute({ planRunId: planId, confirmActions: [], currentSpecRevision: params.specRevision,
+        handler: async () => ({ success: false, status: 'blocked', message: 'Backup diagnostics authorize no provider mutations.' }) });
+      return { kind: 'executed', envName, result, actionScopedWarnings: ['This diagnostic plan performs no provider mutation or application deployment. Use hv_status for current backup health.'] };
+    }
     // Saved diagnostics are not execution authority and may predate this field.
     const savedGaps = asRecord(loaded.document.backupReadiness)?.gaps;
     const gaps = Array.isArray(savedGaps) ? savedGaps.filter((gap): gap is string => typeof gap === 'string').join(' ') : '';
@@ -1133,17 +1136,8 @@ export async function executePlanApply(ctx: CommandContext, params: {
           && new SpecStore().get(project)?.revision === params.specRevision }) });
     return { kind: 'executed', envName, result, actionScopedWarnings: ['Prepared bindings are metadata only; pending first releases are not application convergence.'] };
   }
-  const freshBackupReadiness = async () => {
-    const currentEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
-    const context = { spec: envSpec, environment: currentEnvironment, project: projectForPreflight,
-      components: currentEnvironment ? ctx.repos.components.findByEnvironmentId(currentEnvironment.id) : [], adapterFactory };
-    const coverage = await observeBackupPolicy(context);
-    const health = await observeBackupHealth(context);
-    return assessBackupReadiness(coverage, health);
-  };
-  // A volume needs a durable service/namespace before protection can be
-  // configured. Only this deferred creation path may precede backup readiness;
-  // its live identity is checked again immediately before the handler runs.
+  // Identity-only prerequisite stages may create a missing workload, but may
+  // never update an existing workload or activate its schedule.
   const serviceIdentityOnly = managedCiBindingsOnly && (planScope === 'hosting-bindings'
     || Boolean(providerRegistry.getMetadata(envSpec.hosting.provider)?.lifecycle?.hosting?.runtimeIdentityTiming)
     || Object.values(envSpec.storage ?? {}).some(storage => storage.injectInto.length > 0 && providerRegistry.getMetadata(storage.provider)?.storageRuntimeAccess?.hostingProviders.includes(envSpec.hosting.provider))
@@ -1152,12 +1146,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const isDeferredIdentityCandidate = (action: PlanAction) => serviceIdentityOnly
     && resolvePlanActionAuthority(action)?.capability === 'hosting.service.converge'
     && (action.type === 'create' || action.type === 'update' && action.metadata?.workloadCreateRequired === true);
-  if (!secretsOnly && (loaded.document.actions.some(action => actionRequiresBackupReadiness(action) && !isDeferredIdentityCandidate(action))
-    || (params.alwaysRunBootstrap && !deploymentPrerequisitePhase(loaded.document)))) {
-    const readiness = await freshBackupReadiness();
-    if (!readiness.ready) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
-      reason: `Backup readiness blocks deployment: ${readiness.gaps.join(' ')} Run hv_plan to review the required protection stages.` }] };
-  }
   if (planScope === 'backup-policy') {
     if (!environment) return { kind: 'env_missing', envName };
     if (loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
@@ -1526,18 +1514,12 @@ export async function executePlanApply(ctx: CommandContext, params: {
         || action.metadata?.workloadCreateRequired === true && typeof boundService?.serviceId === 'string'
           && action.metadata.externalId === boundService.serviceId && observedServiceIds.length === 1
           && observedServiceIds[0].identityOnly === true);
-    let requireNewWorkload = Boolean(deferredIdentityCreation);
     if (isDeferredIdentityCandidate(action) && (!deferredIdentityCreation || action.requiresConfirm !== true
-      || action.billable !== true || !confirmedActionIds.has(action.id))) return { success: false, status: 'blocked',
-      message: 'Preparing a first workload requires exact confirmed creation authority and fresh proof of absence or a bound empty workload.' };
-    if (!secretsOnly && actionRequiresBackupReadiness(action)) {
-      const readiness = await freshBackupReadiness();
-      if (!readiness.ready) {
-        if (!deferredIdentityCreation) return { success: false, status: 'blocked',
-          message: `Backup readiness changed before rollout: ${readiness.gaps.join(' ')}` };
-        requireNewWorkload = true;
-      }
+      || action.billable !== true || !confirmedActionIds.has(action.id))) {
+      return { success: false, status: 'blocked',
+        message: 'Preparing a first workload requires exact confirmed creation authority and fresh proof of absence or a bound empty workload.' };
     }
+    const requireNewWorkload = Boolean(deferredIdentityCreation);
 
     if (capability === 'hosting.recovery-runtime.mutate') {
       return applyRecoveryRuntimeAction({ context: { project: applyProject, environment: volumeEnvironment, spec: envSpec,
@@ -1783,6 +1765,12 @@ export async function executePlanApply(ctx: CommandContext, params: {
       return applyGitHubCollaboration({ project: applyProject, spec, environmentName: envName });
     }
     if (capability === 'github.infrastructure.sync') {
+      if (planScope === 'backup-program-publication') {
+        const publishing = Array.isArray(action.metadata?.desiredFiles) && action.metadata.desiredFiles.length > 0;
+        if (action.metadata?.backupEnvironment !== envName || envSpec.backups?.mode !== (publishing ? 'daily' : 'disabled')) {
+          return { success: false, status: 'blocked', message: 'The selected backup publication no longer matches the explicit environment backup intent. Re-run hv_plan scope="backups".' };
+        }
+      }
       const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
       if (action.resource.name !== expectedRepository) {
         return blockedActionIdentity(
@@ -2573,24 +2561,14 @@ export async function executePlanApply(ctx: CommandContext, params: {
     && result.success
     && result.applyRunId
   ) {
-    const readiness = await freshBackupReadiness();
-    if (!readiness.ready) {
-      const message = `Backup readiness changed before rollout: ${readiness.gaps.join(' ')}`;
-      ctx.repos.runs.updateStatus(result.applyRunId, 'blocked', message);
-      ctx.repos.runs.addReceipt(result.applyRunId, { step: 'backup-readiness', status: 'blocked',
-        result: { message }, timestamp: new Date().toISOString() });
-      result = { ...result, success: false, receipts: [...result.receipts,
-        { actionId: 'backup-readiness', status: 'blocked', message }] };
-    } else {
-      try {
-        const forced = await ensureDeployBootstrap();
-        if (!forced.success) result = { ...result, success: false, error: String(forced.summary.error ?? 'Deploy failed') };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Deployment preflight failed.';
-        ctx.repos.runs.updateStatus(result.applyRunId!, 'blocked', message);
-        ctx.repos.runs.addReceipt(result.applyRunId!, { step: 'deployment-preflight', status: 'blocked', result: { message }, timestamp: new Date().toISOString() });
-        result = { ...result, success: false, error: message, receipts: [...result.receipts, { actionId: 'deployment-preflight', status: 'blocked', message }] };
-      }
+    try {
+      const forced = await ensureDeployBootstrap();
+      if (!forced.success) result = { ...result, success: false, error: String(forced.summary.error ?? 'Deploy failed') };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Deployment preflight failed.';
+      ctx.repos.runs.updateStatus(result.applyRunId!, 'blocked', message);
+      ctx.repos.runs.addReceipt(result.applyRunId!, { step: 'deployment-preflight', status: 'blocked', result: { message }, timestamp: new Date().toISOString() });
+      result = { ...result, success: false, error: message, receipts: [...result.receipts, { actionId: 'deployment-preflight', status: 'blocked', message }] };
     }
   }
 

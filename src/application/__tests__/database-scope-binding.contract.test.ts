@@ -172,20 +172,17 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     const resumed = await f.plan(options);
     if ('error' in resumed) throw new Error(resumed.error);
     const resumedDocument = ctx.repos.runs.findById(resumed.planRunId)!.plan as Record<string, any>;
-    if (backupMode === 'daily') {
-      // Configured schedules without an available recovery point still gate rollout.
-      expect(resumed.scope).toBe('backup-readiness');
-      expect(resumedDocument).not.toHaveProperty('overrides');
+    // Identity/alias repair resumes the same deployment input contract regardless
+    // of optional backup policy; missing recovery proof stays diagnostic.
+    expect(resumed.scope).toBe('full');
+    if (backupMode === 'daily') expect(resumed.backupReadiness?.ready).toBe(false);
+    expect(getSecretStore().decryptObject(resumedDocument.overrides.envVarsEncrypted)).toEqual({ FEATURE_FLAG: 'reviewed' });
+    if (input === 'missing') {
+      expect(resumed.inputRequired).toContainEqual(expect.objectContaining({ key: 'ANTHROPIC_API_KEY' }));
     } else {
-      expect(resumed.scope).toBe('full');
-      expect(getSecretStore().decryptObject(resumedDocument.overrides.envVarsEncrypted)).toEqual({ FEATURE_FLAG: 'reviewed' });
-      if (input === 'missing') {
-        expect(resumed.inputRequired).toContainEqual(expect.objectContaining({ key: 'ANTHROPIC_API_KEY' }));
-      } else {
-        expect(resumed.inputRequired).toEqual([]);
-        expect(getSecretStore().decryptObject(resumedDocument.overrides.delegatedSecretVarsEncrypted))
-          .toEqual({ ANTHROPIC_API_KEY: 'synthetic-delegated-secret' });
-      }
+      expect(resumed.inputRequired).toEqual([]);
+      expect(getSecretStore().decryptObject(resumedDocument.overrides.delegatedSecretVarsEncrypted))
+        .toEqual({ ANTHROPIC_API_KEY: 'synthetic-delegated-secret' });
     }
     expect(f.http.mutations).toHaveLength(1);
     expect(f.http.contractErrors).toEqual([]);

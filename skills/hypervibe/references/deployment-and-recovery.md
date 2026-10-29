@@ -32,6 +32,20 @@ and `hv_ci_status` to monitor the result. Verify service health after a successf
 release. Do not dispatch or inspect managed CI through a code-host connector,
 provider CLI, browser, or direct API to work around a Hypervibe blocker.
 
+Ordinary deployment does not require backup setup, an archive bucket or fresh
+recovery evidence. Keep backup gaps visible without presenting them as release
+prerequisites. Requested backup work uses `hv_plan scope="backups"` and its exact
+confirmations; preserving native snapshots and accepted backup programs does not
+authorize new resources. Explicit destructive-operation checkpoints retain their
+separate prerequisite and confirmation rules.
+
+Ordinary repository changes preserve existing backup programs and never publish
+a new one. Plan backup publication for the environment whose backups are
+requested, even when the canonical GitHub environment differs or has backups
+disabled. That scoped proposal changes only its selected backup program. To
+retire a managed program, declare backups disabled and review a backup-scoped
+removal; retained data and native snapshots remain untouched.
+
 The existing environment policy and reviewed deployment bindings determine the
 release path. Portable managed CI is the normal push-deploy path where
 implemented. Do not change deploy-source settings or workflow content outside
@@ -164,8 +178,10 @@ No public database access or standalone migration command is needed.
 Resume retained attempts through their reviewed plans; never clear recovery
 markers or rerun an uncertain migration manually. Report authentication,
 command exit, task cleanup and application operation separately. A successful
-bootstrap leaves ordinary backup/restore and application-deployment gates in
-place. Providers without the exact private task capability remain unsupported.
+bootstrap preserves application-deployment requirements and any explicit
+destructive-operation checkpoint. It does not require ordinary rollout to wait
+for backup health. Providers without the exact private task capability remain
+unsupported.
 
 For rollback or restore, inspect existing evidence through the supported
 Hypervibe workflow before proposing the action. Keep source identity, retained

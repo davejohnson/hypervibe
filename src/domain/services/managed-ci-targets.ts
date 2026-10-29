@@ -1,5 +1,4 @@
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
-import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
@@ -14,9 +13,6 @@ import { parseHostingBindings } from '../ports/hosting.port.js';
 import { withMigrationReleaseCommand } from '../spec/spec-bootstrap.js';
 import { effectiveBranchCiAutoDeploy, type ProjectSpec } from '../spec/spec.schema.js';
 import { environmentDeploymentContractHashForApply } from './deployment-contract.service.js';
-import { resolveBackupPolicies } from './backup-policy.service.js';
-import { managedBackupCredentialKeys, managedBackupProvidersForSpec } from './managed-backup-target.service.js';
-import { resolveBackupStrategy } from './backup-strategy.service.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { selectedDeploymentAccess } from '../../adapters/cloud/deployment-access.client.js';
 import { preparedHostingMarkerSchema } from '../ports/hosting-prepared.port.js';
@@ -392,18 +388,6 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
         throw new Error('CI preparation does not match the installed cloud connection.');
       }
       target.preparedRuntime = { envVars: { ...environment.envVars }, preparation };
-    }
-    const components = boundEnvironment ? new ComponentRepository().findByEnvironmentId(boundEnvironment.id) : [];
-    const backupPolicy = resolveBackupPolicies(spec, boundEnvironment ? [boundEnvironment] : [], components)[environmentName];
-    if (backupPolicy.resources.length > 0) {
-      const strategy = resolveBackupStrategy(environment);
-      const credentials = [...new Set(managedBackupProvidersForSpec(environment)
-        .flatMap(provider => Object.keys(managedBackupCredentialKeys(provider) ?? {})))].sort();
-      target.backupPolicy = { mode: backupPolicy.mode,
-        ...(strategy.runnerImage ? { runnerImage: strategy.runnerImage } : {}), credentialNames: credentials,
-        ...(backupPolicy.resources.some(resource => resource.retained)
-          ? { blockedReason: 'Retained persistent resources require explicit recovery coverage before rollout.' } : {}),
-      };
     }
     target.releaseTarget = managedCiReleaseTarget({
       provider: environment.hosting.provider,

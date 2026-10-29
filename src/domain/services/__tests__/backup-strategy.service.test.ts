@@ -2,8 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { environmentSpecSchema } from '../../spec/spec.schema.js';
 import { resolveBackupStrategy, withBackupStorageDefaults } from '../backup-strategy.service.js';
 
-const raw = { hosting: { provider: 'railway' }, services: {}, storage: { documents: { provider: 'railway', type: 'bucket', region: 'sjc', injectInto: [] } } };
-describe('shared backup defaults', () => {
+const raw = { backups: { mode: 'daily' }, hosting: { provider: 'railway' }, services: {}, storage: { documents: { provider: 'railway', type: 'bucket', region: 'sjc', injectInto: [] } } };
+describe('explicit backup setup defaults', () => {
+  it('does not infer a backup bucket or daily intent when backup configuration is omitted', () => {
+    const { backups: _backup, ...omitted } = raw;
+    const spec = environmentSpecSchema.parse(omitted);
+    expect(withBackupStorageDefaults(spec)).toEqual(spec);
+    expect(resolveBackupStrategy(spec)).toMatchObject({ mode: 'disabled', issues: [] });
+  });
   it('derives a separately reviewed vault without changing source intent or injecting app credentials', () => {
     const original = environmentSpecSchema.parse(raw), before = JSON.stringify(original);
     const effective = withBackupStorageDefaults(original);

@@ -14,7 +14,6 @@ import { deriveHypervibeSecretValues } from '../../services/hypervibe-secret-val
 import type { ObservedState } from '../../ports/observe.port.js';
 import { fingerprintObservedState } from '../converge.executor.js';
 import { resolvePlanActionAuthority } from '../action-authority.js';
-import { actionRequiresBackupReadiness } from '../plan-stage.js';
 import { PlanService } from '../plan.service.js';
 
 const destination = { provider: 'gcp-secret-manager', projectId: 'synthetic-project',
@@ -74,14 +73,13 @@ describe('native secret plan persistence and mutation admission', () => {
     expect(fingerprintObservedState(observed('7'))).not.toBe(fingerprintObservedState(observed('8')));
   });
 
-  it('admits only a verified reference action and applies the workload backup gate', () => {
+  it('admits only a verified immutable reference action', () => {
     const action = { id: 'secret:SESSION_SECRET', type: 'update' as const,
       resource: { kind: 'secret' as const, name: 'SESSION_SECRET', provider: 'cloudrun' }, verified: true,
       reason: 'Install native reference', metadata: { operation: 'secretReferenceSync', ownership: 'hypervibe',
         principal: 'hypervibe', services: ['web'], reference, generator: 'random-base64url-32-v1', generation: 1,
         replacementPolicy: 'confirm', conflictsWith: [] } };
     expect(resolvePlanActionAuthority(action)?.capability).toBe('hosting.secret-reference.sync');
-    expect(actionRequiresBackupReadiness(action)).toBe(true);
     expect(resolvePlanActionAuthority({ ...action, verified: false })).toBeNull();
     expect(resolvePlanActionAuthority({ ...action, resource: { ...action.resource, kind: 'service' } })).toBeNull();
     expect(resolvePlanActionAuthority({ ...action, metadata: { ...action.metadata, reference: { ...reference, version: 'latest' } } })).toBeNull();

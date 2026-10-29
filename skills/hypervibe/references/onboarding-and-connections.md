@@ -28,11 +28,16 @@ checks. Mandatory approval by another person is opt-in: enable it only when
 the user explicitly requests it and explain that it prevents merging without
 another person's approval. Preserve existing owner-chosen review policies.
 
-Backup intent should cover persistent databases, retained service mounts, and
-object buckets. Preserve stronger existing protection and explicit exclusions;
-exclusion does not authorize deleting protection. Report policy configuration,
-available recovery points, and tested restores separately. Unsupported or
-unknown coverage remains explicit.
+Report backup coverage for persistent databases, retained service mounts, and
+object buckets separately from deployment readiness. Ordinary deployment does
+not require backup setup or a new archive bucket. When backup setup is requested,
+use the separate `hv_plan scope="backups"` workflow. A chosen destination or its
+derived proposal requires the exact billable-action confirmation. Omitted backup
+intent means unmanaged; it does not mean existing provider snapshots are disabled. Preserve
+stronger existing protection and explicit exclusions; exclusion does not authorize
+deleting provider protection. Report policy configuration, available recovery
+points, and tested restores separately. Unsupported or unknown coverage remains
+explicit.
 
 Use `hv_spec` and `hv_plan` to discover current prerequisites. A missing
 capability is a Hypervibe product gap, not an instruction to construct resources

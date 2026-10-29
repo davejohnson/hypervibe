@@ -1650,7 +1650,7 @@ export const environmentSpecSchema = z.object({
   }).strict(),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),
-  /** Omission resolves to daily protection without changing legacy spec hashes. */
+  /** Optional backup intent. Ordinary deployments never require this policy or recovery evidence. */
   backups: z.discriminatedUnion('mode', [
     z.object({ mode: z.literal('daily'),
       destination: z.string().regex(/^[a-z][a-z0-9-]{0,60}$/).optional(),

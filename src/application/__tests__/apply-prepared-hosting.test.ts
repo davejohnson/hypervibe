@@ -67,6 +67,18 @@ function fixture() {
   return { ctx, project, state, proof, inspect, nativeWrite, hosting, plan, apply, bound, bootstrap };
 }
 describe('installer-prepared hosting metadata frontier', () => {
+  it('does not expand backup-only review into application prepared-binding authority', async () => {
+    const f = fixture(); await f.bootstrap();
+    const stored = new SpecStore().get(f.project)!;
+    new SpecStore().replace(f.project, { ...stored.spec, environments: { ...stored.spec.environments,
+      staging: { ...stored.spec.environments.staging, backups: { mode: 'daily' } },
+    } });
+    const before = f.bound().platformBindings;
+    await expect(f.plan({ scope: 'backups' })).rejects.toThrow(/scope="full".*prepared hosting/i);
+    expect(f.bound().platformBindings).toEqual(before);
+    expect(f.nativeWrite).not.toHaveBeenCalled();
+  });
+
   it('discovers an unmarked installed receipt through the read-only adapter without requiring hosting mutation access', async () => {
     const f = fixture(); await f.bootstrap();
     expect(f.bound().platformBindings).not.toHaveProperty('preparedHosting');

@@ -125,7 +125,8 @@ function policyFor(spec: EnvironmentSpec | undefined, environment?: Environment 
   if (recovery !== undefined && (!record(recovery) || Object.keys(record(recovery)!).length)) resources.push({ kind: 'storage', name: '__create-recovery__', provider: 'unknown', retained: true, bindingState: 'unknown', reason: 'Unresolved object-storage creation may have left additional data-bearing resources.' });
   const migrationCandidates = environment?.platformBindings.dataMigrationCandidates;
   if (migrationCandidates !== undefined && (!record(migrationCandidates) || Object.keys(record(migrationCandidates)!).length)) resources.push({ kind: 'storage', name: '__migration-candidates__', provider: 'unknown', retained: true, bindingState: 'unknown', reason: 'Retained object-storage migration candidates have unverified backup coverage.' });
-  return { mode: spec?.backups?.mode ?? 'daily', source: spec?.backups ? 'explicit' : 'default',
+  return { mode: spec?.backups?.mode ?? 'disabled', source: spec?.backups ? 'explicit' : 'default',
+    ...(!spec?.backups ? { reason: 'No backup policy is requested; existing provider schedules are unchanged.' } : {}),
     ...(spec?.backups?.mode === 'disabled' ? { reason: spec.backups.reason } : {}), resources };
 }
 
