@@ -328,6 +328,13 @@ expiry guard. Observation, retry review and capture now report
 An expired pending browser handoff is not reopened. The original completed
 browser evidence, attempt IDs and encrypted custody remain unchanged.
 
+Two additional actual PlanService/SQLite cases, with and without restart,
+reproduced fresh capture plans after reconciliation had already recorded
+`authorization_expired` (RED). Planning now returns that closed, value-free
+reason instead of saving another mutation plan. The original native plan,
+completed browser evidence, attempt identities and private staged code remain
+retained. This check does not infer permission to replace an expired registration.
+
 Normal acceptance exercises staged-code expiry through apply, read-only
 recovery and a SQLite restart; expiry during the final authorization check;
 and the unchanged no-replay rule after an uncertain conversion. Already captured

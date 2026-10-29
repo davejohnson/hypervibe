@@ -1,4 +1,5 @@
 import { operatorApplicationWorkRequired, planOperatorApplications, operatorApplicationUnavailable, operatorOutputPrerequisiteKeys } from '../services/operator-application.service.js';
+import { CloudInstallationError } from '../services/cloud-installation-runtime.js';
 import { observeRecoveryRuntime, planRecoveryRuntime } from '../services/recovery-runtime.service.js';
 import { observeRuntimeAccess, planRuntimeAccess, projectRuntimeAccessInput } from '../services/runtime-access.service.js';
 import { hasPendingDatabaseInitialization } from './database-initialization.contract.js';
@@ -1853,7 +1854,11 @@ export class PlanService {
           verified: true, observed: null, actions: registration.actions, cloudScopeReview: registration.review,
           unmanaged: [], warnings: registration.warnings, inputRequired: [], blocked: [] };
       }
-    } catch { return { error: operatorApplicationUnavailable().message }; }
+    } catch (error) {
+      return { error: error instanceof CloudInstallationError && error.code === 'authorization_expired'
+        ? 'Operator application authorization_expired. Preserve the registration and request a fresh reviewed authorization before continuing.'
+        : operatorApplicationUnavailable().message };
+    }
     const providerValidation = observationOrCleanup ? undefined : firstProviderSpecValidationFailure(specResult.spec);
     if (providerValidation) return { error: providerValidation.message };
     if (scope === 'credentials') return planCredentialLifecycle(projectWithSpecGitRemoteUrl(project, specResult.spec), specResult.spec, specResult.revision, environmentName, options!);

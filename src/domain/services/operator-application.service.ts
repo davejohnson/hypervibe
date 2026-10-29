@@ -15,7 +15,7 @@ import type { PlanAction } from '../plan/plan.types.js';
 import type { ActionResult } from '../plan/converge.executor.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { SpecStore, type SpecResult } from '../spec/spec.store.js';
-import { applyCloudInstallationV1, planCloudInstallationV1, reconcileCloudInstallationV1, reviewCloudInstallationRetryV1 } from './cloud-installation-runtime.js';
+import { CloudInstallationError, applyCloudInstallationV1, planCloudInstallationV1, reconcileCloudInstallationV1, reviewCloudInstallationRetryV1 } from './cloud-installation-runtime.js';
 import { verifiedLocalHoldingReceipt } from './local-holding-preparation.service.js';
 import { assertReadySecretContainers } from './secret-container-setup.js';
 import { operatorOutputSelectionSchema } from '../ports/operator-output.port.js';
@@ -127,6 +127,7 @@ export async function planOperatorApplications(input: { project: Project; enviro
   for (const name of [...histories.keys()].sort((a, b) => priority(a) - priority(b) || a.localeCompare(b))) {
     const history = histories.get(name)!; let record = acceptedJournalLeaf(history);
     if (record) record = await reconcileCloudInstallationV1({ ...await context(input.project, environment, name, record.intent, true), installationId: record.installationId, planDigest: record.plan.digest });
+    if (record?.reason === 'authorization_expired') throw new CloudInstallationError('authorization_expired');
     let selected: Awaited<ReturnType<typeof selection>> | undefined;
     try { if (declaration[name]) selected = await selection(input.project, environment, name, input.specResult); }
     catch { if (!record || record.status === 'scope-ready') throw operatorApplicationUnavailable(); }
