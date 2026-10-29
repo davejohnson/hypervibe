@@ -5011,7 +5011,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
-  it('stashes the abandoned provider bindings as previousHosting when the hosting provider switches', async () => {
+  it.each([false, true])('retains previousHosting through a provider switch and namespace retry=%s', async (retryNamespace) => {
     const t = await makeClient();
     await t.call('hv_spec', {
       spec: {
@@ -5026,6 +5026,11 @@ describe('hv_plan / hv_status / hv_apply', () => {
     });
     verifyRailwayConnection();
     const project = new ProjectRepository().findByName('provider-switch-stash-app')!;
+    const previousConnection = new ConnectionRepository().create({
+      provider: 'cloudrun',
+      credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
+    });
+    new ConnectionRepository().updateStatus(previousConnection.id, 'verified');
     const environment = new EnvironmentRepository().create({
       projectId: project.id,
       name: 'production',
@@ -5035,12 +5040,14 @@ describe('hv_plan / hv_status / hv_apply', () => {
         services: { web: { serviceId: 'gcp-project-web' } },
       },
     });
-    // Provider-confirmed target absence lets the plan emit the provider-switch
-    // replace actions without guessing about an existing Railway service.
-    mockObserved({
+    // Confirmed target absence authorizes only the new namespace. Workload
+    // authority requires a fresh observation after its durable IDs are bound.
+    let namespaceExists = false;
+    const observe = vi.fn(async () => ({
       provider: 'railway',
       observedAt: new Date().toISOString(),
-      projectExists: false,
+      projectExists: namespaceExists,
+      ...(namespaceExists ? { projectId: 'rail-project', environmentId: 'rail-env' } : {}),
       services: [],
       databases: [],
       completeness: {
@@ -5052,7 +5059,28 @@ describe('hv_plan / hv_status / hv_apply', () => {
       },
       partial: false,
       warnings: [],
+    }));
+    let namespaceAttempts = 0;
+    const ensureProject = vi.fn(async () => {
+      if (retryNamespace && namespaceAttempts++ === 0) {
+        return { success: false, message: 'Namespace creation rejected', error: 'No namespace was created' };
+      }
+      namespaceExists = true;
+      return { success: true, message: 'ok', data: { projectId: 'rail-project', environmentId: 'rail-env' } };
     });
+    const deploy = vi.fn(async (_service: unknown, target: { platformBindings: Record<string, unknown> }) => {
+      expect(target.platformBindings).toMatchObject({
+        provider: 'railway', projectId: 'rail-project', environmentId: 'rail-env', services: {},
+      });
+      return {
+        serviceId: 'web',
+        externalId: 'rail-web',
+        url: 'https://web-production.up.railway.app',
+        status: 'deployed',
+        receipt: { success: true, message: 'deployed' },
+      };
+    });
+    const setEnvVars = vi.fn(async () => ({ success: true, message: 'ok' }));
     const fakeRailway = {
       name: 'railway',
       capabilities: {
@@ -5063,38 +5091,83 @@ describe('hv_plan / hv_status / hv_apply', () => {
       },
       connect: async () => {},
       verify: async () => ({ success: true }),
-      ensureProject: async () => ({ success: true, message: 'ok', data: { projectId: 'rail-project', environmentId: 'rail-env' } }),
-      deploy: async () => ({
-        serviceId: 'web',
-        externalId: 'rail-web',
-        url: 'https://web-production.up.railway.app',
-        status: 'deployed',
-        receipt: { success: true, message: 'deployed' },
-      }),
-      setEnvVars: async () => ({ success: true, message: 'ok' }),
+      ensureProject,
+      deploy,
+      setEnvVars,
+      observe,
       getDeployStatus: async () => ({ status: 'deployed', url: 'https://web-production.up.railway.app' }),
     };
     vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: fakeRailway } as any);
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockImplementation(async provider => {
+      expect(provider).toBe('railway');
+      return { success: true, adapter: fakeRailway } as any;
+    });
 
     const plan = await t.call('hv_plan', { project: 'provider-switch-stash-app', env: 'production' });
     expect(plan.ok).toBe(true);
-    expect(plan.data.actions).toContainEqual(expect.objectContaining({
-      id: 'service:web',
-      type: 'replace',
-    }));
+    expect(plan.data.scope).toBe('hosting-bindings');
+    expect(plan.data.actions).toEqual([expect.objectContaining({ id: 'project:railway', type: 'create' })]);
 
-    const apply = await t.call('hv_apply', { project: 'provider-switch-stash-app', planId: plan.data.planId });
+    let apply = await t.call('hv_apply', { project: 'provider-switch-stash-app', planId: plan.data.planId });
     expect(apply.ok).toBe(true);
-
-    // The stash is written before the converge pass, so it must hold
-    // regardless of how the bootstrap converge itself turned out (here the
-    // bootstrap pass fails on the Cloud Run prepare gate, which is fine —
-    // the contract under test is the pre-converge stash, not the converge).
-    const updated = new EnvironmentRepository().findById(environment.id)!;
-    expect((updated.platformBindings as Record<string, unknown>).previousHosting).toMatchObject({
+    const previousHosting = {
       provider: 'cloudrun',
       projectId: 'gcp-project',
       services: { web: { serviceId: 'gcp-project-web' } },
+    };
+    if (retryNamespace) {
+      expect(apply.data.receipts).toContainEqual(expect.objectContaining({ actionId: 'project:railway', status: 'failed' }));
+      expect(new EnvironmentRepository().findById(environment.id)!.platformBindings).toEqual({
+        provider: 'railway', services: {}, previousHosting,
+      });
+      expect(deploy).not.toHaveBeenCalled();
+      expect(setEnvVars).not.toHaveBeenCalled();
+      const retryPlan = await t.call('hv_plan', { project: 'provider-switch-stash-app', env: 'production' });
+      expect(retryPlan.ok).toBe(true);
+      expect(retryPlan.data.scope).toBe('hosting-bindings');
+      expect(retryPlan.data.actions).toEqual([expect.objectContaining({ id: 'project:railway', type: 'create' })]);
+      apply = await t.call('hv_apply', { project: 'provider-switch-stash-app', planId: retryPlan.data.planId });
+      expect(apply.ok).toBe(true);
+    }
+    expect(apply.data.receipts).toContainEqual(expect.objectContaining({ actionId: 'project:railway', status: 'succeeded' }));
+    expect(ensureProject).toHaveBeenCalledTimes(retryNamespace ? 2 : 1);
+    expect(deploy).not.toHaveBeenCalled();
+    expect(setEnvVars).not.toHaveBeenCalled();
+    const updated = new EnvironmentRepository().findById(environment.id)!;
+    expect(updated.platformBindings).toMatchObject({
+      provider: 'railway', projectId: 'rail-project', environmentId: 'rail-env',
+      services: {}, previousHosting,
+    });
+
+    const observationsBeforeReplan = observe.mock.calls.length;
+    const servicePlan = await t.call('hv_plan', { project: 'provider-switch-stash-app', env: 'production' });
+    expect(servicePlan.ok).toBe(true);
+    expect(observe.mock.calls.length).toBeGreaterThan(observationsBeforeReplan);
+    expect(servicePlan.data.scope).toBe('full');
+    // The old service remains in its cleanup scope. This is a new Railway
+    // workload, not an attempt to reuse the Cloud Run service ID.
+    expect(servicePlan.data.actions).toContainEqual(expect.objectContaining({ id: 'service:web', type: 'create' }));
+    expect(servicePlan.data.actions).toContainEqual(expect.objectContaining({
+      id: 'service:web:previous-destroy', type: 'destroy', requiresConfirm: true,
+      resource: { kind: 'service', name: 'web', provider: 'cloudrun' },
+    }));
+    const persistedServicePlan = new RunRepository().findById(servicePlan.data.planId)!.plan as { actions: PlanAction[] };
+    expect(persistedServicePlan.actions.find(action => action.id === 'service:web:previous-destroy')?.metadata)
+      .toMatchObject({ serviceId: 'gcp-project-web', previousProvider: 'cloudrun' });
+    const serviceApply = await t.call('hv_apply', { project: 'provider-switch-stash-app', planId: servicePlan.data.planId });
+    expect(serviceApply.error).toBeUndefined();
+    expect(serviceApply).toMatchObject({ ok: true });
+    // Whole-plan confirmation still applies: until the separately retained
+    // cleanup is authorized, neither it nor the new workload may mutate.
+    expect(serviceApply.data.receipts).toContainEqual(expect.objectContaining({ actionId: 'service:web', status: 'aborted' }));
+    expect(serviceApply.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'service:web:previous-destroy', status: 'skipped_requires_confirm',
+    }));
+    expect(deploy).not.toHaveBeenCalled();
+    expect(setEnvVars).not.toHaveBeenCalled();
+    expect(new EnvironmentRepository().findById(environment.id)!.platformBindings).toMatchObject({
+      provider: 'railway', projectId: 'rail-project', environmentId: 'rail-env',
+      services: {}, previousHosting,
     });
     await t.close();
   });

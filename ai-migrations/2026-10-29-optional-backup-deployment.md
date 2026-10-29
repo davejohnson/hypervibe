@@ -72,6 +72,18 @@ metadata can be reconciled without publishing a workflow when its accepted bytes
 already match. These migration checks and the existing iOS/promotion contract
 checks pass together; their historical expected hashes were not rewritten.
 
+The staged provider-switch regression also exposed a shared binding-transition
+defect. After retaining the old provider, the empty target-provider slot rejected
+its first returned project/environment IDs as a second scope replacement. The
+initial and retry cases failed before the repair. The shared transition owner now
+recognizes only same-provider initialization with no active IDs, scope, services,
+recovery, maintenance, rollout or volume state. It leaves the existing cleanup
+record untouched; partial or ambiguous state still rejects the transition.
+Regressions cover first binding, retry, fresh planning, and confirmation-denied
+cleanup with zero subsequent writes. They do not establish a complete live
+provider migration. Generated-secret tests separately execute namespace creation,
+fresh observation, service creation and encrypted secret installation in order.
+
 These tests run actual planning/application/compiler boundaries with synthetic
 provider observations and test transports. They do not certify live provider
 compatibility, a successful application release, a completed backup, or a tested
