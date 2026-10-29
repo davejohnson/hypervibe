@@ -115,9 +115,64 @@ describe('GitHub operator manifest transport and custody', () => {
     expect(JSON.stringify(completed)).not.toMatch(/synthetic-client-secret|synthetic-webhook-secret|BEGIN RSA PRIVATE KEY/);
     await applyCloudInstallationV1(f.target); expect(f.conversions()).toBe(1);
   });
-  it('does not replay a conversion whose acknowledgement was lost after restart', async () => {
+  // GitHub's manifest contract requires all three steps within one hour:
+  // https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest
+  // The clock transition is synthetic; callback HTTP, encrypted SQLite custody,
+  // provider transport and shared apply/recovery are the actual boundaries.
+  it.each(['apply', 'recover', 'restart-recover'] as const)('reports a staged code that expired before %s without adding a conversion attempt', async operation => {
+    const f = await fixture(), received = await f.callback(), staged = f.custody.read()!;
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse(staged.state.browser!.expiresAt) + 1);
+    if (operation === 'restart-recover') { SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(path.join(directory, 'test.db')).migrate(); }
+    const result = await (operation === 'apply' ? applyCloudInstallationV1 : reconcileCloudInstallationV1)(f.target);
+    expect.soft(result.status).toBe('blocked'); expect.soft(result.reason).toBe('authorization_expired');
+    expect.soft(result.attempts.map(item => ({ id: item.id, actionId: item.actionId, status: item.status })))
+      .toEqual(received.attempts.map(item => ({ id: item.id, actionId: item.actionId, status: item.status })));
+    expect.soft(result.completed).toEqual(received.completed);
+    expect.soft(f.custody.read()!.cipher).toBe(staged.cipher); expect.soft(f.conversions()).toBe(0);
+    expect.soft(JSON.stringify(result)).not.toContain('synthetic-code');
+  });
+  it('refuses a provider retry proposal for an expired staged code while preserving custody', async () => {
+    const f = await fixture(), record = await f.callback(), staged = f.custody.read()!;
+    const beforeMutation = vi.fn(async () => { throw new Error('Planning must not authorize a mutation'); });
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse(staged.state.browser!.expiresAt) + 1);
+    await expect(f.context.driver.plan({ intent: record.intent, authentication: f.context.authentication, completed: record.completed,
+      attempts: record.attempts, signal: new AbortController().signal, beforeMutation })).rejects.toMatchObject({ reason: 'authorization_expired' });
+    expect(beforeMutation).not.toHaveBeenCalled();
+    expect(f.custody.read()!.cipher).toBe(staged.cipher); expect(f.conversions()).toBe(0);
+  });
+  it('reports an expired pending browser handoff without reopening or replacing it', async () => {
+    const f = await fixture(), pending = await applyCloudInstallationV1(f.target), saved = f.custody.read()!;
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse(saved.state.browser!.expiresAt) + 1);
+    const recovered = await reconcileCloudInstallationV1(f.target);
+    expect.soft(recovered.reason).toBe('authorization_expired');
+    expect.soft(recovered.attempts.map(item => item.id)).toEqual(pending.attempts.map(item => item.id));
+    await expect(f.context.driver.operatorApplication!.pendingBrowser!(recovered)).resolves.toBeUndefined();
+    expect(f.custody.read()!.cipher).toBe(saved.cipher); expect(f.conversions()).toBe(0);
+  });
+  it.each(['before-mutation', 'during-authorization'] as const)('preserves an expired code at the %s capture boundary', async timing => {
+    const f = await fixture(), record = await f.callback(), staged = f.custody.read()!;
+    const expired = () => vi.spyOn(Date, 'now').mockReturnValue(Date.parse(staged.state.browser!.expiresAt) + 1);
+    if (timing === 'before-mutation') expired();
+    const beforeMutation = vi.fn(async () => { if (timing === 'during-authorization') expired(); });
+    const action = record.plan.actions.find(item => item.id.endsWith(':capture'))!;
+    const result = await f.context.driver.mutate({ intent: record.intent, authentication: f.context.authentication,
+      completed: record.completed, attempts: record.attempts, signal: new AbortController().signal, action,
+      attempt: { id: randomUUID(), actionId: action.id, status: 'attempted', startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, beforeMutation });
+    expect.soft(result).toEqual({ state: 'rejected', reason: 'authorization_expired' });
+    expect.soft(beforeMutation).toHaveBeenCalledTimes(timing === 'before-mutation' ? 0 : 1);
+    expect.soft(f.custody.read()!.cipher).toBe(staged.cipher); expect.soft(f.conversions()).toBe(0);
+  });
+  it('keeps verified credentials usable after the completed manifest handoff expires', async () => {
+    const f = await fixture(); await f.callback(); await applyCloudInstallationV1(f.target);
+    const saved = f.custody.read()!;
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse(saved.state.browser!.expiresAt) + 1);
+    expect((await reconcileCloudInstallationV1(f.target)).status).toBe('scope-ready');
+    expect(f.custody.read()!.cipher).toBe(saved.cipher); expect(f.conversions()).toBe(1);
+  });
+  it('does not replay a conversion whose acknowledgement was lost after restart and handoff expiry', async () => {
     const f = await fixture({ lost: true }); await f.callback(); await applyCloudInstallationV1(f.target);
     SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(path.join(directory, 'test.db')).migrate();
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse(f.custody.read()!.state.browser!.expiresAt) + 1);
     await applyCloudInstallationV1(f.target); expect(f.conversions()).toBe(1); expect(f.custody.read()!.state.phase).toBe('conversion-started');
   });
   it('retains private recovery custody but refuses a native application owned by another account', async () => {

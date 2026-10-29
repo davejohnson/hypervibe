@@ -17,6 +17,10 @@ const scopeSchema = z.object({ name: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
 const permissions = { actions: 'read', administration: 'read', checks: 'read', contents: 'read', metadata: 'read' }, events = ['check_run', 'check_suite', 'workflow_run'];
 type Intent = OperatorApplicationIntent; type Context = CloudInstallationProviderContext<Intent>;
 function fail(reason: ConstructorParameters<typeof CloudInstallationBoundaryError>[0] = 'identity_mismatch'): never { throw new CloudInstallationBoundaryError(reason); }
+function browserExpired(saved: ReturnType<OperatorCredentialCustody['read']>): boolean {
+  const browser = saved?.state.browser;
+  return !!browser && Date.parse(browser.expiresAt) <= Date.now();
+}
 function settings(intent: Intent) {
   if (intent.applicationProvider !== 'github-app' || intent.provider !== 'github-app') fail();
   const n = scopeSchema.parse(intent.nativeScope), owner = canonicalJsonSha256([intent.customerId, intent.appId, intent.environment, intent.installationId]);
@@ -124,6 +128,7 @@ export function createGithubOperatorApplicationDriver(options: { fetch?: typeof 
       if (context.action.id === n.browserAction) {
         if (!saved) return { state: 'action-required' as const };
         if (saved.state.phase === 'awaiting-browser') {
+          if (browserExpired(saved)) return { state: 'unknown' as const, reason: 'authorization_expired' as const };
           return { state: 'pending' as const, reason: 'not_converged' as const };
         }
         const browser = saved.state.browser, retained = context.completed[n.browserAction];
@@ -134,14 +139,15 @@ export function createGithubOperatorApplicationDriver(options: { fetch?: typeof 
           native: { operation: 'browser', installationId: context.intent.installationId, attemptId: browser.attemptId } }, context.intent) };
       }
       if (context.action.id !== n.captureAction) fail();
-      if (saved?.state.phase === 'code-staged') return { state: 'action-required' as const };
+      if (saved?.state.phase === 'code-staged') return browserExpired(saved)
+        ? { state: 'unknown' as const, reason: 'authorization_expired' as const } : { state: 'action-required' as const };
       if (saved?.state.phase === 'credentials-stored' || saved?.state.phase === 'delivered') return { state: 'satisfied' as const, evidence: await verifyApp(context) };
       return { state: 'unknown' as const, reason: 'not_converged' as const };
     } catch (error) { return { state: 'unknown' as const, reason: error instanceof CloudInstallationBoundaryError ? error.reason : 'provider_error' as const }; }
   }
   const native: CloudInstallationDriver<Intent> = { provider: 'github-app', operatorApplication: { providerName: 'github-app', parseBrowserHandoff: value => handoff(value),
     async pendingBrowser(record) {
-      const saved = store(record.intent).read(); if (saved?.state.phase !== 'awaiting-browser' || !saved.state.browser) return undefined;
+      const saved = store(record.intent).read(); if (saved?.state.phase !== 'awaiting-browser' || !saved.state.browser || browserExpired(saved)) return undefined;
       const listener = await openOperatorAppCallback(store(record.intent), callback => manifest(record.intent, callback), options.local?.authorizeCurrent ?? (async () => false));
       return { url: handoff(listener.url), expiresAt: saved.state.browser.expiresAt,
         description: 'Keep this Hypervibe process running, open this private local link, and approve the exact GitHub App under its reviewed owner. Return for the separate code-conversion action. Finish an existing submitted registration instead of creating another.' };
@@ -150,6 +156,8 @@ export function createGithubOperatorApplicationDriver(options: { fetch?: typeof 
     parseAction(value, intent) { const selected = actions(intent).find(item => isDeepStrictEqual(item, value)); if (!selected) fail(); return selected; },
     scopePreparation: { resolvedScope: record => record.intent.nativeScope, reviewResources: () => [] },
     async plan(context) {
+      const saved = store(context.intent).read();
+      if (saved && ['awaiting-browser', 'code-staged'].includes(saved.state.phase) && browserExpired(saved)) fail('authorization_expired');
       const n = settings(context.intent); await verifyOwner(request, n, context.signal);
       return { actions: actions(context.intent), review: { resources: [{ kind: 'GitHub App', name: n.appName, scope: `${n.ownerType}:${n.ownerLogin}:${n.ownerId}` }],
         permissions: [{ principal: 'owner-approved GitHub App installation', scope: 'separately selected repositories', actions: Object.entries(permissions).map(([key, value]) => `${key}:${value}`), purpose: 'installation-verification' }], costs: [],
@@ -172,7 +180,9 @@ export function createGithubOperatorApplicationDriver(options: { fetch?: typeof 
         }
         if (context.action.id !== n.captureAction || !context.completed[n.browserAction]) fail();
         const saved = custody.read(); if (!saved || saved.state.phase !== 'code-staged' || !saved.state.browser?.formDigest) fail();
-        await context.beforeMutation(); const code = custody.consumeCode(saved); if (!code) fail(); consumed = true;
+        if (browserExpired(saved)) fail('authorization_expired');
+        await context.beforeMutation(); const code = custody.consumeCode(saved);
+        if (!code) fail(browserExpired(saved) ? 'authorization_expired' : 'identity_mismatch'); consumed = true;
         const result = await json(request, `/app-manifests/${encodeURIComponent(code.code)}/conversions`, context.signal, undefined, true);
         const credentials = z.object({ pem: z.string().min(1).max(65_536), client_secret: z.string().min(1).max(65_536), webhook_secret: z.string().min(1).max(65_536) }).parse(result);
         const clientId = text.parse(result.client_id); jwt(credentials.pem, clientId);

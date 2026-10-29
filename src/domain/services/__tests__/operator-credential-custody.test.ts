@@ -45,6 +45,14 @@ describe('private operator credential custody', () => {
     expect(() => new OperatorCredentialCustody({ ...f.context, intentDigest: 'b'.repeat(64) }).read()).toThrow(/custody/i);
     expect(f.store.read()!.state.phase).toBe('awaiting-browser');
   });
+  it('does not consume a previously staged code after its original expiry', () => {
+    const f = fixture(), expiresAt = new Date(Date.now() + 60_000).toISOString();
+    const started = f.store.createBrowser({ attemptId: randomUUID(), expiresAt, state: 's'.repeat(43), launch: 'l'.repeat(43) });
+    expect(f.store.stageCode(f.store.issueForm(started)!, 's'.repeat(43), 'synthetic-staged-code')).toBe(true);
+    const staged = f.store.read()!, clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse(expiresAt));
+    try { expect(f.store.consumeCode(staged)).toBeNull(); expect(f.store.read()!.cipher).toBe(staged.cipher); }
+    finally { clock.mockRestore(); }
+  });
   it('keeps native outputs encrypted until every immutable delivery receipt is durable', () => {
     const f = fixture(), store = new OperatorCredentialCustody({ ...f.context, provider: 'google-recaptcha' });
     let saved = store.storeCredentials(null, { 'secret-key': 'synthetic-private-provider-secret' }, { siteKey: 'public-site-key' })!;

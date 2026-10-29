@@ -316,6 +316,34 @@ retains private recovery custody and blocks output delivery. No App deletion
 or private-key revocation API is invented. An expired or uncertain one-time
 conversion can require explicit owner cleanup in GitHub.
 
+GitHub's [manifest contract](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest)
+requires all three steps within one hour. Receiving a callback does not extend
+that deadline. The previous provider observation treated any staged code as
+ready for conversion. A real local HTTP callback followed by a synthetic clock
+advance reproduced incorrect status and a new rejected capture attempt (RED).
+The existing custody consumption check already prevented an expired conversion
+POST; this was a planning and lifecycle-reporting defect, not a missing dispatch
+expiry guard. Observation, retry review and capture now report
+`authorization_expired` before adding an attempt when expiry is already known.
+An expired pending browser handoff is not reopened. The original completed
+browser evidence, attempt IDs and encrypted custody remain unchanged.
+
+Normal acceptance exercises staged-code expiry through apply, read-only
+recovery and a SQLite restart; expiry during the final authorization check;
+and the unchanged no-replay rule after an uncertain conversion. Already captured
+credentials remain verifiable after browser expiry. These tests use actual
+callback HTTP, SQLite custody and shared lifecycle with synthetic provider
+transport and clock transitions; they do not establish native expired-code
+behavior. No expired code is sent to GitHub by this verification.
+
+The published [manifest conversion API](https://docs.github.com/en/rest/apps/apps#create-a-github-app-from-a-manifest)
+does not promise renewal, cancellation or a safe replay of an expired code.
+The public REST and GraphQL contracts do not expose a pending-manifest inventory.
+Whether an unconverted App or name reservation persists, and whether expiry
+cleans it up, remain unknown. An expected-slug 404 is not proof of absence: the
+owner can change the name during registration. Expiry alone never authorizes
+discarding custody, inventing native cleanup or registering another App.
+
 The fixed profile requires these exact outputs:
 
 | Private role | Hypercloud runtime key | Stored bytes |
