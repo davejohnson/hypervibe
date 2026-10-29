@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -51,7 +52,7 @@ async function fixture() {
     runtime: { kind: 'node', version: '24', installCommand: 'npm ci --omit=dev' },
     secrets: { UNRELATED_SECRET: { principal: 'github:alice', environments: ['production'] } },
     environments: { production: {
-      hosting: { provider: 'railway' }, services: { web: { startCommand: 'npm start', public: true } },
+      backups: { mode: 'daily' }, hosting: { provider: 'railway' }, services: { web: { startCommand: 'npm start', public: true } },
       database: { provider: 'railway', engine: 'postgres' },
       storage: { documents: { provider: 'railway', type: 'bucket', region: 'iad', injectInto: ['web'] } },
       email: { enabled: false }, envVars: { UNRELATED_SETTING: 'new-value' },
@@ -106,10 +107,10 @@ async function fixture() {
   return { project, environment, component, observation, planResilience, planner: new PlanService() };
 }
 
-describe('default backup policy in real PlanService orchestration', () => {
-  it('defaults omitted policy to daily and persists isolated work plus the unsupported bucket gap', async () => {
+describe('explicit backup setup in real PlanService orchestration', () => {
+  it('persists explicitly requested isolated backup work plus the unsupported bucket gap', async () => {
     const f = await fixture();
-    const result = await f.planner.plan(f.project, 'production', { includeEnvFile: false });
+    const result = await f.planner.plan(f.project, 'production', { includeEnvFile: false, scope: 'backups' });
     expect(result).not.toHaveProperty('error');
     if ('error' in result) throw new Error(result.error);
     expect(result.scope).toBe('backup-policy');
@@ -117,10 +118,10 @@ describe('default backup policy in real PlanService orchestration', () => {
     expect(result.actions[0]).toMatchObject({ id: 'backup-policy:database:railway:postgres',
       resource: { kind: 'database', provider: 'railway', name: 'postgres' },
       metadata: { operation: 'dailyBackupConfigure' } });
-    expect(result.backupCoverage).toMatchObject({ policy: { mode: 'daily', source: 'default' },
+    expect(result.backupCoverage).toMatchObject({ policy: { mode: 'daily', source: 'explicit' },
       complete: false, backupObserved: 'unverified', restoreTested: 'unverified',
       resources: [ { state: 'needs-configuration' }, { state: 'unsupported', resource: { name: 'documents' } } ] });
-    expect(f.observation.mock.calls[0][0].spec).not.toHaveProperty('backups');
+    expect(f.observation.mock.calls[0][0].spec).toHaveProperty('backups', { mode: 'daily' });
     const document = new RunRepository().findById(result.planRunId)!.plan;
     expect(document).toHaveProperty('backupCoverage', result.backupCoverage);
     expect(document).toMatchObject({ scope: 'backup-policy', observedFingerprint: null, actions: result.actions });
@@ -150,7 +151,7 @@ describe('default backup policy in real PlanService orchestration', () => {
       if (database.observation?.state === 'known') database.observation.daily = true;
       return coverage;
     });
-    const result = await f.planner.plan(f.project, 'production', { includeEnvFile: false });
+    const result = await f.planner.plan(f.project, 'production', { includeEnvFile: false, scope: 'backups' });
     expect(result).not.toHaveProperty('error');
     if ('error' in result) throw new Error(result.error);
     expect(result.scope).toBe('managed-ci-publication');
@@ -160,15 +161,15 @@ describe('default backup policy in real PlanService orchestration', () => {
     expect(result.warnings.join(' ')).toContain('documents');
   });
 
-  it('does not let a service filter bypass pending daily backup policy', async () => {
+  it('rejects deployment inputs in explicitly requested backup setup', async () => {
     const f = await fixture();
-    const result = await f.planner.plan(f.project, 'production', { includeEnvFile: false, serviceFilter: ['web'] });
+    const result = await f.planner.plan(f.project, 'production', { includeEnvFile: false, scope: 'backups', serviceFilter: ['web'] });
     expect(result).toHaveProperty('error');
     if (!('error' in result)) throw new Error('A filtered plan bypassed pending backup policy.');
     expect(result.error).toMatch(/backup/i);
   });
 
-  it('blocks an ordinary rollout with unsupported data protection after workflow publication', async () => {
+  it('keeps explicit backup setup incomplete after workflow publication when protection is unsupported', async () => {
     const f = await fixture();
     new EnvironmentRepository().updatePlatformBindings(f.environment.id, { storage: {
       ...f.environment.platformBindings.storage as Record<string, unknown>,
@@ -190,7 +191,7 @@ describe('default backup policy in real PlanService orchestration', () => {
       if (coverage.resources[0].observation?.state === 'known') coverage.resources[0].observation.daily = true;
       return coverage;
     });
-    const result = await f.planner.plan(f.project, 'production', { includeEnvFile: false });
+    const result = await f.planner.plan(f.project, 'production', { includeEnvFile: false, scope: 'backups' });
     expect(result).not.toHaveProperty('error');
     if ('error' in result) throw new Error(result.error);
     expect(result.scope).toBe('backup-readiness');
@@ -225,16 +226,16 @@ describe('default backup policy in real PlanService orchestration', () => {
       resource: { kind: 'repo', provider: 'github', name: 'acme/daily-before-release' },
       verified: true, requiresConfirm: true, billable: true, reason: 'Publish reviewed managed backup schedule',
       metadata: { operation: 'githubInfrastructurePullRequest', repository: 'acme/daily-before-release',
-        backupWorkflowPublicationRequired: true, desiredFiles: [
-          { path: '.github/workflows/hypervibe-backup-production.yml', hash: 'a'.repeat(64) },
-          { path: '.github/hypervibe/backups-production.json', hash: 'b'.repeat(64) },
+        backupEnvironment: 'production', backupWorkflowPublicationRequired: true, desiredFiles: [
+          { path: '.github/workflows/hypervibe-backup-production.yml', content: 'workflow', hash: createHash('sha256').update('workflow').digest('hex') },
+          { path: '.github/hypervibe/backups-production.json', content: '{}', hash: createHash('sha256').update('{}').digest('hex') },
         ] } };
     vi.spyOn(githubInfrastructure, 'planGitHubInfrastructure').mockResolvedValue({ actions: [publication], warnings: [], blocked: [], inputRequired: [] });
-    const result = await f.planner.plan(f.project, 'production', { includeEnvFile: false });
+    const result = await f.planner.plan(f.project, 'production', { includeEnvFile: false, scope: 'backups' });
     if ('error' in result) throw new Error(result.error);
     expect(result.scope).toBe('backup-program-publication');
     expect(result.actions).toEqual([{ ...publication, dependsOn: undefined }]);
-    expect(result.backupReadiness?.ready).toBe(false);
+    expect(result.backupReadiness).toBeUndefined();
     const document = new RunRepository().findById(result.planRunId)!.plan;
     expect(planRunDocumentSchema.safeParse(document).success).toBe(true);
     expect(document).toHaveProperty('observedFingerprint', null);
@@ -252,7 +253,7 @@ describe('default backup policy in real PlanService orchestration', () => {
       if (coverage.resources[0].observation?.state === 'known') coverage.resources[0].observation.daily = true;
       return coverage;
     });
-    const result = await f.planner.plan(f.project, 'production', { includeEnvFile: false });
+    const result = await f.planner.plan(f.project, 'production', { includeEnvFile: false, scope: 'backups' });
     if ('error' in result) throw new Error(result.error);
     expect(result.scope).toBe('backup-provisioning');
     expect(result.actions).toHaveLength(1);
@@ -278,7 +279,7 @@ describe('default backup policy in real PlanService orchestration', () => {
     const target = targets.find(candidate => candidate.environmentName === 'production')!;
     const workflow = buildBranchDeployWorkflow('railway', target, migration);
     const files = workflowFiles(workflow);
-    const publication = await f.planner.plan(f.project, 'production', { includeEnvFile: false });
+    const publication = await f.planner.plan(f.project, 'production', { includeEnvFile: false, scope: 'backups' });
     expect(publication).toMatchObject({ scope: 'managed-ci-publication', actions: [expect.objectContaining({
       metadata: expect.objectContaining({ workflowPublicationRequired: true }),
     })] });
@@ -301,7 +302,7 @@ describe('default backup policy in real PlanService orchestration', () => {
     // A retry before apply keeps the same isolated authority. Neither pending
     // CI work nor ordinary service/env changes may enter storage provisioning.
     for (let attempt = 0; attempt < 2; attempt++) {
-      const result = await f.planner.plan(f.project, 'production', { includeEnvFile: false });
+      const result = await f.planner.plan(f.project, 'production', { includeEnvFile: false, scope: 'backups' });
       if ('error' in result) throw new Error(result.error);
       expect(result.scope).toBe('backup-provisioning');
       expect(result.actions).toEqual([expect.objectContaining({ id: 'storage:hypervibe-backups',
@@ -327,7 +328,7 @@ describe('default backup policy in real PlanService orchestration', () => {
         instanceScope: { projectId: 'project-1', environmentId: 'production-1' } }];
       return result;
     });
-    const afterBinding = await f.planner.plan(f.project, 'production', { includeEnvFile: false });
+    const afterBinding = await f.planner.plan(f.project, 'production', { includeEnvFile: false, scope: 'backups' });
     // Accepted CI credentials are themselves needed to run the first backup.
     // Exposing that prerequisite must still leave every workload update gated.
     expect(afterBinding).toMatchObject({ scope: 'managed-ci-credentials', actions: [expect.objectContaining({
@@ -339,7 +340,7 @@ describe('default backup policy in real PlanService orchestration', () => {
       contentHash: workflowFilesContentHash(files), syncedEnvironmentSecretHashes: hashes,
     } } } });
     vi.mocked(GitHubAdapter.prototype.listEnvironmentSecrets).mockResolvedValue(Object.keys(hashes));
-    const afterCredentials = await f.planner.plan(f.project, 'production', { includeEnvFile: false });
+    const afterCredentials = await f.planner.plan(f.project, 'production', { includeEnvFile: false, scope: 'backups' });
     expect(afterCredentials).toMatchObject({ scope: 'backup-readiness', actions: [], blocked: [expect.objectContaining({
       category: 'prerequisite', provider: 'hypervibe', reason: expect.stringMatching(/backup/i),
     })] });
@@ -384,7 +385,7 @@ describe('default backup policy in real PlanService orchestration', () => {
     expect(order.indexOf(ci.id)).toBeLessThan(order.indexOf(web.id));
   });
 
-  it('cannot bypass an unsupported backup gap with a service filter', async () => {
+  it('rejects service filters even when explicit backup coverage remains unsupported', async () => {
     const f = await fixture();
     vi.spyOn(managedCi, 'planManagedCiDeploy').mockResolvedValue({ actions: [], warnings: [] });
     const observe = f.observation.getMockImplementation()!;
@@ -394,7 +395,7 @@ describe('default backup policy in real PlanService orchestration', () => {
       if (coverage.resources[0].observation?.state === 'known') coverage.resources[0].observation.daily = true;
       return coverage;
     });
-    const result = await f.planner.plan(f.project, 'production', { includeEnvFile: false, serviceFilter: ['web'] });
+    const result = await f.planner.plan(f.project, 'production', { includeEnvFile: false, scope: 'backups', serviceFilter: ['web'] });
     expect(result).toHaveProperty('error', expect.stringMatching(/backup/i));
   });
 });

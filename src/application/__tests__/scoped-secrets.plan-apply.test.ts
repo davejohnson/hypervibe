@@ -192,11 +192,12 @@ describe('explicit secret-only plans', () => {
     expect(f.wire.requests).toEqual([]);
   });
 
-  it('keeps full planning and its backup prerequisite separate', async () => {
+  it('keeps full release workflow planning separate from secret-only updates without requiring backups', async () => {
     const f = await fixture();
     const plan = await f.plan({ scope: 'full' });
-    expect(plan.scope).toBe('backup-policy');
+    expect(plan.scope).toBe('managed-ci-publication');
     expect(plan.actions.some(action => action.resource.kind === 'secret')).toBe(false);
+    expect(plan.actions.some(action => action.metadata?.operation === 'dailyBackupConfigure')).toBe(false);
     expect(f.wire.mutations).toEqual([]);
     const selected = await f.plan();
     const forced = await executePlanApply(ctx, { project: f.project, spec: f.spec.spec, specRevision: f.spec.revision,

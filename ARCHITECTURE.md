@@ -1041,7 +1041,7 @@ Delegated secrets are lifecycle-managed slots, not ordinary environment variable
 
 - `ProjectSpec.secrets` declares the name, responsible principal, runtime environments and/or GitHub Actions destinations, required/optional behavior, and preserve-only drift policy. It never contains a value.
 - `hv_plan secretRefs={...}` is the only write input. References are resolved locally, values are encrypted into that specific plan, and the plan action/preview contains only key names and non-secret metadata.
-- `hv_plan scope="secrets" secretRefs={...}` limits maintenance to those delegated runtime keys in one existing managed-CI environment. Exact provider bindings, readable selected-key state and `supportsDeferredSecretUpdates` are required. Apply cannot bootstrap, restart workloads, update other keys or advance the applied deployment contract. It verifies the selected values before recording acceptance; the subsequent managed CI rollout retains its existing backup and deployment gates. This is distinct from ordinary `supportsDeferredDeploy`, which may still roll configuration on the current image. See [scoped secret updates](docs/scoped-secret-updates.md) for the provider review and verification limits.
+- `hv_plan scope="secrets" secretRefs={...}` limits maintenance to those delegated runtime keys in one existing managed-CI environment. Exact provider bindings, readable selected-key state and `supportsDeferredSecretUpdates` are required. Apply cannot bootstrap, restart workloads, update other keys or advance the applied deployment contract. It verifies the selected values before recording acceptance; the subsequent managed CI rollout retains its deployment-contract gates. Backup setup and health are independent of ordinary rollout admission. This is distinct from ordinary `supportsDeferredDeploy`, which may still roll configuration on the current image. See [scoped secret updates](docs/scoped-secret-updates.md) for the provider review and verification limits.
 - Declared keys are excluded from deploy env files and rejected from ordinary `envVars` overrides. An owner's local `.env` must never silently become the desired value for a delegated slot.
 - Missing, unaccepted, drifted, or newly reassigned required slots produce `inputRequired`. The plan remains inspectable but `hv_apply` must reject it before connection checks or provider mutations.
 - A successful provider receipt records binding metadata (`delegatedEnvBindings` for hosting and `delegatedActionsBindings` for GitHub) in authoritative local SQLite: key name, destination, principal, SHA-256 value hash, timestamp, and action id. The value itself is never stored in bindings or receipts. The complete binding collections are omitted from `.hypervibe/bindings.json`; a hash must not become a repository-visible offline verifier for a low-entropy delegated value.
@@ -2195,16 +2195,43 @@ delete, schedule, or PITR mutations. Native snapshots remain dependent on their
 provider volume and are not independent off-provider copies. See
 [database checkpoints](docs/database-checkpoints.md) for the evidence boundary.
 
+Ordinary deployment is independent of backup setup and health. `PlanService`
+owns the explicit `hv_plan scope="backups"` stages for schedules, provisioning,
+publication and recovery evidence; omitted/full scope must not select them or
+infer billable archive storage. `executePlanApply`, direct deployment and the
+GitHub/GitLab workflow renderers do not impose backup-readiness gates, including
+all-noop bootstrap and retry paths. Status reports backup gaps separately from
+deployment configuration drift. Explicit destructive-operation checkpoints keep
+their isolated planning and exact action confirmation rules above. Native
+snapshots, stronger protection and accepted backup programs remain preserved;
+skipped optional setup is never reported as completed protection.
+
+Ordinary repository publication preserves every accepted managed backup program;
+it never creates, updates or retires one, even if compilation succeeds. Backup
+publication requires explicit `scope="backups"` for its selected environment and
+works independently of the canonical repository environment. Only that exact
+program pair may change; unrelated repository policy, another environment's
+program and provider recovery data remain outside its authority. The persisted
+plan validator enforces the selected environment, program paths and isolated
+scope. Retirement requires explicitly disabled backup intent and a separate
+backup-scoped review. Omission cannot delete accepted files or provider data.
+
+`optional-backup-architecture.test.ts` enforces the policy ownership boundary and
+rejects deliberately reintroduced admission imports. The optional-backup plan,
+apply and emitted-workflow regressions, plus
+`staging-repository-backup-isolation.test.ts`, exercise the real lifecycle
+boundaries in ordinary `npm test`. They use synthetic provider observations;
+passing them does not establish a live deployment or tested provider recovery.
+
 Recurring managed backup diagnostics use the shared recovery diagnostic port:
 closed stage/category codes cross worker, provider, application and controller
 boundaries without raw errors. An execution-bound worker marker supplies failure
 detail only; provider observations remain authoritative for task completion,
-mutation attempts and cleanup. The controller, generated GitHub alert and
-deployment health gate share one operational receipt validator, accepting legacy
-version 1 and current version 2. Deployment still requires a successful health
-command and a healthy receipt for the exact environment, without failure reasons
-or diagnostics. Generated gate tests consume actual health-producer receipts in
-staging and production. Failed CI jobs preserve existing reason codes and cannot
+mutation attempts and cleanup. The controller and generated GitHub alert share
+one operational receipt validator, accepting legacy version 1 and current version
+2. Healthy backup reporting requires a successful health command and a healthy
+receipt for the exact environment, without failure reasons or diagnostics.
+Failed backup CI jobs preserve existing reason codes and cannot
 close an alert. These receipts do not replace retained recovery
 manifests or establish a successful restore. Compiler and helper changes must
 ship together as a reviewed workflow and pinned image update; see
@@ -2380,7 +2407,7 @@ declared service and an immutable configured application image, then uses the
 existing canonical release-command configuration for first schema initialization.
 It does not reinterpret `seedCommand` or certify an application release. Only the
 exact completed fresh-storage receipt admits the isolated `database-bootstrap`
-stage before old-source backup readiness. A private authentication task and the
+stage independently of old-source backup readiness. A private authentication task and the
 schema command require separate reviewed actions. Both use selected native
 database references, the application's PostgreSQL client and value-free results.
 Authentication proves the task connection; command completion is not an independent
@@ -2389,7 +2416,7 @@ schema audit or proof of running application operation.
 Each attempt retains its immutable scope and acknowledged task identities before
 continuing. Unknown writes block replay; terminal execution is persisted before
 exact cleanup. A consumed generation cannot rerun its command, and unrelated
-deployment, backup and restore gates resume afterward. Historical seed receipts
+deployment requirements and explicit recovery safeguards remain afterward. Historical seed receipts
 are valid only for their recorded database generation. See the
 [bootstrap contract and provider review](docs/database-initialization-bootstrap.md).
 

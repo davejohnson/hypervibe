@@ -116,6 +116,19 @@ export function prepareHostingBindingTransition(params: {
     ...(environmentId ? { environmentId } : {}),
   };
 
+  // A provider switch first retains the old scope and leaves only the new
+  // provider name. Binding its first returned IDs is initialization, not a
+  // second scope replacement; any retained cleanup identity stays untouched.
+  const initializingEmptyScope = current.provider === target.provider
+    && !current.projectId && !current.environmentId && !current.providerScope
+    && Object.keys(current.services ?? {}).length === 0
+    && Object.keys(current.serviceCreateRecovery ?? {}).length === 0
+    && current.maintenance === undefined
+    && (current.runtimeRollouts === undefined
+      || Array.isArray(current.runtimeRollouts) && current.runtimeRollouts.length === 0)
+    && !hasRetainedServiceVolumes({ platformBindings: params.current });
+  if (initializingEmptyScope) return { ok: true, changed: false, patch };
+
   if (!resetActiveScope) return { ok: true, changed: false, patch };
 
   if (current.maintenance !== undefined) {
