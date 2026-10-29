@@ -22,7 +22,7 @@ export function s3StorageRuntimeEnv(credentials: StorageCredentials): Record<str
   };
 }
 
-export function railwayStorageRuntimeEnv(name: string): Record<string, string> {
+export function railwayStorageRuntimeEnv(name: string, urlStyle: StorageCredentials['urlStyle']): Record<string, string> {
   const ref = (key: string) => `\${{${name}.${key}}}`;
   return {
     AWS_ENDPOINT_URL: ref('ENDPOINT'),
@@ -30,6 +30,6 @@ export function railwayStorageRuntimeEnv(name: string): Record<string, string> {
     AWS_SECRET_ACCESS_KEY: ref('SECRET_ACCESS_KEY'),
     AWS_S3_BUCKET_NAME: ref('BUCKET'),
     AWS_DEFAULT_REGION: ref('REGION'),
-    AWS_S3_URL_STYLE: 'virtual',
+    AWS_S3_URL_STYLE: urlStyle,
   };
 }

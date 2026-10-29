@@ -76,6 +76,72 @@ describe('Railway retain-only web volumes through serialized GraphQL', () => {
     expect(fixture.contractErrors).toEqual([]);
   });
 
+  // Configured regional counts come from Railway CLI f60f3a77's independent
+  // environment model, not a default inferred from the nullable scalar.
+  it.each([0, 1])('admits a null scalar with explicit regional count %s and leaves that configuration unchanged', async replicas => {
+    const fixture = await railwayHttpFixture();
+    const instance = fixture.addService(target.serviceId, 'web', stagingId).instances.get(stagingId)!;
+    instance.numReplicas = null;
+    const deploy = { multiRegionConfig: { 'us-west2': { numReplicas: replicas } } };
+    fixture.environments.get(stagingId)!.config.services![target.serviceId].deploy = structuredClone(deploy);
+    expect(await fixture.adapter.serviceVolumes.observe(target)).toEqual({ state: 'absent' });
+    const created = await fixture.adapter.serviceVolumes.create(target);
+    expect(created).toMatchObject({ success: true, mutationAttempted: true, externalId: expect.any(String) });
+    expect(await fixture.adapter.serviceVolumes.observe(target, created.externalId)).toMatchObject({
+      state: 'present', externalId: created.externalId,
+    });
+    expect(fixture.mutations.map(mutation => mutation.field)).toEqual(['volumeCreate']);
+    expect(instance.numReplicas).toBeNull();
+    expect(fixture.environments.get(stagingId)!.config.services![target.serviceId].deploy).toEqual(deploy);
+    expect(fixture.contractErrors).toEqual([]);
+  });
+
+  it.each([null, {}, { 'us-west2': {} }, { 'us-west2': { numReplicas: null } }])
+  ('keeps a null scalar unknown when its regional proof is incomplete: %j', async multiRegionConfig => {
+    const fixture = await railwayHttpFixture();
+    fixture.addService(target.serviceId, 'web', stagingId).instances.get(stagingId)!.numReplicas = null;
+    fixture.environments.get(stagingId)!.config.services![target.serviceId].deploy = { multiRegionConfig };
+    expect(await fixture.adapter.serviceVolumes.observe(target)).toMatchObject({ state: 'unknown' });
+    expect(await fixture.adapter.serviceVolumes.create(target)).toMatchObject({ success: false, mutationAttempted: false });
+    expect(fixture.mutations).toEqual([]);
+    expect(fixture.contractErrors).toEqual([]);
+  });
+
+  it.each([undefined, '1', -1, 0.5])('rejects omitted or malformed scalar evidence even with a complete regional map: %j', async scalar => {
+    const fixture = await railwayHttpFixture();
+    fixture.addService(target.serviceId, 'web', stagingId);
+    fixture.environments.get(stagingId)!.config.services![target.serviceId].deploy = {
+      multiRegionConfig: { 'us-west2': { numReplicas: 1 } },
+    };
+    const transport = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const response = await transport(url, init);
+      if (!JSON.parse(String(init?.body)).query.includes('query WebVolumeServiceTarget')) return response;
+      const body = await response.json() as { data: { serviceInstance: Record<string, unknown> } };
+      if (scalar === undefined) delete body.data.serviceInstance.numReplicas;
+      else body.data.serviceInstance.numReplicas = scalar;
+      return Response.json(body, { status: response.status });
+    }));
+    expect(await fixture.adapter.serviceVolumes.observe(target)).toMatchObject({ state: 'unknown' });
+    expect(await fixture.adapter.serviceVolumes.create(target)).toMatchObject({ success: false, mutationAttempted: false });
+    expect(fixture.mutations).toEqual([]);
+  });
+
+  it.each([
+    { scalar: null, regional: 2 }, { scalar: 0, regional: 1 },
+    { scalar: 1, regional: 0 }, { scalar: 2, regional: 1 },
+  ])('rejects unsupported or contradictory regional and scalar counts: %j', async ({ scalar, regional }) => {
+    const fixture = await railwayHttpFixture();
+    fixture.addService(target.serviceId, 'web', stagingId).instances.get(stagingId)!.numReplicas = scalar;
+    fixture.environments.get(stagingId)!.config.services![target.serviceId].deploy = {
+      multiRegionConfig: { 'us-west2': { numReplicas: regional } },
+    };
+    expect(await fixture.adapter.serviceVolumes.observe(target)).toMatchObject({ state: 'unknown' });
+    expect(await fixture.adapter.serviceVolumes.create(target)).toMatchObject({ success: false, mutationAttempted: false });
+    expect(fixture.mutations).toEqual([]);
+    expect(fixture.contractErrors).toEqual([]);
+  });
+
   it('rejects multi-region total two even when the scalar replica count says one', async () => {
     const fixture = await railwayHttpFixture();
     fixture.addService(target.serviceId, 'web', stagingId);
@@ -95,6 +161,7 @@ describe('Railway retain-only web volumes through serialized GraphQL', () => {
     undefined,
     null,
     { multiRegionConfig: null },
+    { multiRegionConfig: {} },
     { multiRegionConfig: { 'us-west2': null } },
     { multiRegionConfig: { 'us-west2': {} } },
     { multiRegionConfig: { 'us-west2': { numReplicas: '1' } } },

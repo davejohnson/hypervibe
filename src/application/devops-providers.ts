@@ -1,4 +1,5 @@
 import { prepareGitHubCredentialRollout, observeGitHubCredentialRollout } from '../adapters/providers/github/github-credential-activation.js';
+import { GitHubRepositoryVariablesAdapter } from '../adapters/providers/github/github-repository-variables.adapter.js';
 import {
   GitHubAdapter,
   type GitHubCredentials,
@@ -36,6 +37,7 @@ devOpsProviderRegistry.registerCiProvider({
   id: 'github-actions',
   connectionProvider: 'github',
   compatibleCodeProviders: ['github'],
+  repositoryConfiguration: credentials => new GitHubRepositoryVariablesAdapter(credentials as GitHubCredentials),
   create(credentials: unknown) {
     const adapter = new GitHubAdapter();
     adapter.connect(credentials as GitHubCredentials);

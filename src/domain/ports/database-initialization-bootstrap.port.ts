@@ -51,7 +51,7 @@ export type DatabaseInitializationBootstrapInspection = z.infer<typeof databaseI
 
 export interface DatabaseInitializationBootstrapInput {
   environment: Environment;
-  completedInitialization: Pick<CompletedDatabaseInitializationReceipt, 'target' | 'storageId' | 'storageInstanceId' | 'deploymentId'>;
+  completedInitialization: Pick<CompletedDatabaseInitializationReceipt, 'target' | 'storageId' | 'storageInstanceId' | 'deploymentId' | 'activationReconciliation'>;
   sourceServiceName: string;
   expectedImage: string;
   databaseEnvAliases?: Record<string, 'DATABASE_URL' | 'DIRECT_URL'>;

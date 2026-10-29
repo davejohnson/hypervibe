@@ -10,7 +10,8 @@ import type { ProjectSpec, EnvironmentSpec } from '../spec/spec.schema.js';
 import type { EnvironmentPlan, PlanOptions } from '../plan/plan.service.js';
 import type { PlanAction } from '../plan/plan.types.js';
 import type { ActionResult } from '../plan/converge.executor.js';
-import { databaseFreshInitializationInspectionSchema, databaseFreshInitializationProgressSchema,
+import { databaseFreshInitializationDiagnosticSchema, databaseFreshInitializationInspectionSchema, databaseFreshInitializationProgressSchema,
+  databaseFreshInitializationResultStateSchema,
   type DatabaseFreshInitializationInspection } from '../ports/database-fresh-initialization.port.js';
 import { databaseInitializationActionId, databaseInitializationAttemptSchema, databaseInitializationMetadataSchema,
   DATABASE_FRESH_INITIALIZATION_OPERATION, isDatabaseInitializationAction,
@@ -242,9 +243,17 @@ export async function applyDatabaseFreshInitialization(params: { project: Projec
         && (!prior!.progress.storageId || prior!.progress.storageId === progress.storageId)
         && (!prior!.progress.storageInstanceId || prior!.progress.storageInstanceId === progress.storageInstanceId)
         && (!prior!.progress.deploymentId || prior!.progress.deploymentId === progress.deploymentId);
+      // Only bounded provider classifications cross the result boundary. Never
+      // project the arbitrary reason or a diagnostic with unknown fields.
+      const outcome = databaseFreshInitializationResultStateSchema.safeParse(result.state);
+      const providerState = outcome.success && outcome.data !== 'complete' ? outcome.data : undefined;
+      const diagnostic = databaseFreshInitializationDiagnosticSchema.safeParse(result.diagnostic);
+      const data = { ...(providerState ? { providerState,
+        ...(diagnostic.success ? { diagnostic: diagnostic.data } : {}) } : {}),
+      ...(correlated && progress.storageId ? { intentId: metadata.intentId, target: metadata.target,
+        acknowledgedProgress: progress, recoveryRequired: true } : {}) };
       return { ...stop('Database initialization is not verified. Preserve the attempt and its apply receipt; uncertain writes will not be repeated.'),
-        ...(correlated && progress.storageId ? { data: { intentId: metadata.intentId, target: metadata.target,
-          acknowledgedProgress: progress, recoveryRequired: true } } : {}) };
+        ...(Object.keys(data).length ? { data } : {}) };
     }
     const progress = databaseFreshInitializationProgressSchema.parse(result.progress);
     current = load(params.project, params.environmentName, params.spec);
@@ -260,6 +269,7 @@ export async function applyDatabaseFreshInitialization(params: { project: Projec
     }
     const completed = { intentId: metadata.intentId, target: metadata.target, storageId: progress.storageId,
       storageInstanceId: progress.storageInstanceId, deploymentId: progress.deploymentId,
+      ...(progress.activationReconciliation ? { activationReconciliation: progress.activationReconciliation } : {}),
       configurationFingerprint: metadata.configurationFingerprint, verifiedAt: new Date().toISOString() };
     const complete = databaseInitializationAttemptSchema.parse({ ...prior, progress, storageBindings: result.storageBindings, completed });
     components.updateBindings(current.component.id, { ...result.storageBindings, freshInitialization: complete });

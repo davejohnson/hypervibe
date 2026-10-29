@@ -19,6 +19,7 @@ import type { PlanAction } from '../plan/plan.types.js';
 import type { EnvironmentSpec } from '../spec/spec.schema.js';
 import { adapterFactory } from './adapter.factory.js';
 import { providerRegistry } from '../registry/provider.registry.js';
+import { receiptRolloutBaseline } from './runtime-rollout.service.js';
 
 export const STORAGE_OPERATIONS = {
   ensure: 'storageEnsure',
@@ -203,6 +204,20 @@ function requireAppliedStorageEnvUpdate(receipt: Receipt): Receipt {
   return receipt.data?.skipped === true
     ? { ...receipt, success: false, message: `Storage environment update was skipped: ${receipt.message}` }
     : receipt;
+}
+
+/** Preserve pending rollout evidence for the exact storage consumer without
+ * forwarding arbitrary provider receipt data or claiming runtime activation. */
+function storageRuntimeRolloutData(receipt: Receipt, serviceName: string): Record<string, unknown> {
+  if (receipt.data?.runtimeRolloutRequired !== true) return {};
+  const baseline = receiptRolloutBaseline(receipt, serviceName) ?? { state: 'unknown' as const };
+  return {
+    services: [serviceName], runtimeRolloutRequired: true,
+    rolloutBaseline: { state: baseline.state,
+      ...(baseline.id ? { deploymentId: baseline.id } : {}),
+      ...(baseline.activeDeploymentIds ? { activeDeploymentIds: baseline.activeDeploymentIds } : {}) },
+    ...(receipt.data.deploymentDeferred === true ? { deploymentDeferred: true } : {}),
+  };
 }
 
 function boundServiceId(environment: Environment | null, serviceName: string): string | undefined {
@@ -1332,7 +1347,7 @@ export async function applyStorageAction(params: {
       persist(environment, { ...bindings, [name]: { ...binding, services: binding.services.filter((item) => item !== serviceName) } }, contexts);
     }
     return { success: receipt.success, message: receipt.success ? `Cleared storage "${name}" runtime configuration from "${serviceName}"` : receipt.message, error: receipt.error,
-      ...(receipt.data ? { data: receipt.data } : {}) };
+      data: receipt.success ? { serviceName, envKeys: Object.keys(cleared).sort(), ...storageRuntimeRolloutData(receipt, serviceName) } : receipt.data };
   }
 
   const runtimeTarget = await storageRuntimeTarget({ project: params.project, environmentSpec: params.environmentSpec,
@@ -1351,6 +1366,6 @@ export async function applyStorageAction(params: {
     success: receipt.success,
     message: receipt.success ? `Wired storage "${name}" to service "${serviceName}"` : receipt.message,
     error: receipt.error,
-    data: receipt.success ? { serviceName, envKeys: runtimeEnvKeys } : receipt.data,
+    data: receipt.success ? { serviceName, envKeys: runtimeEnvKeys, ...storageRuntimeRolloutData(receipt, serviceName) } : receipt.data,
   };
 }

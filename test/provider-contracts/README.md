@@ -91,6 +91,15 @@ review omitted destination identities, and pre-create checks accepted changed
 local scope/source. The corrected tests run in normal `npm test`; no live
 provider call or credential value is involved.
 
+The [repository-variable contract](github/repository-variables/README.md) pins
+GitHub's numeric repository identity and Actions variable endpoints. The named
+CI-provider comparison explicitly leaves GitLab unsupported for this facet.
+Normal acceptance exercises complete bounded inventory, serialized create/update
+acknowledgements, exact stale checks, explicit zero-write adoption, durable
+uncertain-outcome reconciliation, inspection and value-free command responses.
+These offline checks establish neither live permissions nor workflow execution.
+
+
 The [fresh database bootstrap review](../../docs/database-initialization-bootstrap.md)
 and `database-initialization-bootstrap-provider-matrix.json` cover all registered
 hosting and PostgreSQL providers. Only the Railway/Railway private task pair is
@@ -127,6 +136,14 @@ executes shared planning/apply with each unsupported concrete adapter, requiring
 zero provider mutations and unchanged local bindings. Pinned source contracts are
 under `railway/database-initialization`; synthetic transport outcomes and local
 lifecycle checks do not establish a successful live initialization.
+
+Railway initialization also pins a sanitized observation of a volume-attachment
+activation replacing the explicitly acknowledged deployment. Its opaque patch,
+manifest and raw snapshot fields have narrow reconstructed transport coverage;
+the official SDL alone does not validate those nested semantics. Completion keeps
+the original acknowledgment alongside a separately verified activation/operation,
+with shared receipt, retry, bootstrap and seed-generation checks. No SQL or live
+durability claim follows from these fixtures.
 
 `src/application/__tests__/seed-registry-scope.api-contract.test.ts` exercises
 database seed dispatch through real encrypted connection selection and Railway
@@ -184,6 +201,24 @@ and retention of exact owned keys. Hourly health checks read committed manifests
 and object inventories; they report prior restore proof and matching retained revisions,
 not a fresh full-byte audit. Partial executions never certify health or count
 toward the seven complete sets required before retention deletion.
+
+`railway/storage-credentials.observation.json` records a value-free current
+observation of Railway's `virtual-host` credential spelling. The official SDL
+declares an unconstrained string; Railway's bucket documentation and AWS's
+addressing contract supply the virtual-hosted semantics. Reconstructed transport
+tests send that observed spelling through the real Railway client, controller
+handoff and unchanged worker parser in two environments. Canonical `path` and
+`virtual` remain accepted; unknown styles are rejected before worker or object
+transport effects. Actual SDK serialization checks hostname/path addressing.
+S3 already emits canonical `virtual`; GCS and Azure Blob use native object
+transports, and private worker credential admission remains unchanged.
+
+Railway runtime projection retains credential references and uses the verified
+canonical style. Its `railway-s3-url-style-v1` contract requires reviewed rewiring
+of existing consumer bindings and rejects stale pre-contract plans. Ordinary
+acceptance tests cover this migration and convergence. The observation reproduces
+the current parser rejection, not the historical failed task's private inputs;
+these offline checks do not establish a completed live backup or restore.
 
 ### Recovery quality audit after PR #242
 

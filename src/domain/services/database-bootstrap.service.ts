@@ -18,7 +18,7 @@ import { databaseBootstrapActionId, databaseBootstrapActionSchema, databaseBoots
   databaseBootstrapMetadataSchema, databaseBootstrapRecoverySchema,
   DATABASE_BOOTSTRAP_AUTHENTICATE_OPERATION, DATABASE_BOOTSTRAP_MIGRATE_OPERATION,
   type DatabaseBootstrapBase, type DatabaseBootstrapMetadata, type DatabaseBootstrapRecovery } from '../plan/database-bootstrap.contract.js';
-import { getCompletedDatabaseInitializationReceipt } from '../plan/database-initialization.contract.js';
+import { completedDatabaseInitializationDeploymentId, getCompletedDatabaseInitializationReceipt } from '../plan/database-initialization.contract.js';
 import { databaseTaskCheckpointSchema, type DatabaseTaskCheckpoint, type IHostingAdapter } from '../ports/hosting.port.js';
 import { databaseInitializationBootstrapInspectionSchema, type DatabaseInitializationBootstrapInspection } from '../ports/database-initialization-bootstrap.port.js';
 import type { EnvironmentSpec, ProjectSpec } from '../spec/spec.schema.js';
@@ -112,11 +112,13 @@ async function inspect(adapter: IHostingAdapter, current: ReturnType<typeof loca
     environment: current.environment, completedInitialization: {
       target: g.completed.target, storageId: g.completed.storageId,
       storageInstanceId: g.completed.storageInstanceId, deploymentId: g.completed.deploymentId,
+      ...(g.completed.activationReconciliation ? { activationReconciliation: g.completed.activationReconciliation } : {}),
     },
     sourceServiceName: desired.service, expectedImage: desired.image, databaseEnvAliases: desired.aliases, approvedVariables: desired.approvedVariables,
   }));
   if (observed.source.provider !== g.completed.target.provider || observed.source.primaryExternalId !== g.completed.target.externalId
-    || !isDeepStrictEqual(observed.source.providerScope, g.completed.target.providerScope) || observed.databaseDeploymentId !== g.completed.deploymentId
+    || !isDeepStrictEqual(observed.source.providerScope, g.completed.target.providerScope)
+    || observed.databaseDeploymentId !== completedDatabaseInitializationDeploymentId(g.completed)
     || observed.image !== desired.image || observed.sourceServiceId !== record(record(current.environment.platformBindings.services)[desired.service]).serviceId
     || !isDeepStrictEqual(observed.approvedVariables, desired.approvedVariables)) throw new BootstrapBlocked('Private bootstrap observation changed the reviewed target.');
   return observed;

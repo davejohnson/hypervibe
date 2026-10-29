@@ -825,6 +825,11 @@ export const devopsSpecSchema = z.object({
   }).strict(),
   ci: z.object({
     provider: providerIdSchema,
+    /** Ordinary non-secret flags only. Omission preserves provider values and ownership. */
+    repositoryVariables: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,255}$/), z.object({
+      value: z.string().min(1).refine(value => Buffer.byteLength(value, 'utf8') <= 48 * 1024, 'Variable exceeds 48 KiB'),
+      adoptExisting: z.boolean().default(false),
+    }).strict()).refine(values => Object.keys(values).length <= 500, 'Too many repository variables').optional(),
     runner: z.discriminatedUnion('mode', [
       z.object({
         mode: z.literal('provider-hosted'),

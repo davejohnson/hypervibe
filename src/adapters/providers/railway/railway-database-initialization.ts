@@ -9,6 +9,9 @@ import {
 } from '../../../domain/ports/database-fresh-initialization.port.js';
 import { recoveryIdentityStringSchema } from '../../../domain/services/recovery-source.js';
 import type { RailwayVolumeResolution, RailwayVolumeTarget } from './railway.adapter.js';
+import { railwayReplicaConfiguration, RailwayReplicaConfigurationError,
+  type RailwayReplicaConfiguration } from './railway-replica-configuration.js';
+import { railwayStorageAttachmentActivation } from './railway-database-initialization-activation.js';
 
 export interface RailwayInitializationTarget {
   projectId: string; environmentId: string; serviceId: string; serviceName: string;
@@ -17,10 +20,10 @@ type ApplyInput = Parameters<IDatabaseFreshInitialization['apply']>[0];
 type VolumeReader = (target: RailwayVolumeTarget, expectedVolumeId?: string,
   options?: { singleServiceVolume?: boolean }) => Promise<RailwayVolumeResolution>;
 type Snapshot = {
-  version: 1; instanceId: string; image: string; serviceName: string;
+  instanceId: string; image: string; serviceName: string;
   startCommand: null | ''; preDeployCommand: null | unknown[];
   rawVariables: Record<string, string>; issuerVariables: Record<string, string>; dataPath: string; desiredPGDATA: string;
-};
+} & ({ version: 1 } | { version: 2; replicaConfiguration: RailwayReplicaConfiguration });
 const mountPath = '/var/lib/postgresql/data';
 const defaultDataPath = `${mountPath}/pgdata`;
 const issuerKeys = ['POSTGRES_PASSWORD', 'POSTGRES_USER', 'POSTGRES_DB', 'PGPASSWORD', 'PGUSER', 'PGDATABASE',
@@ -43,7 +46,8 @@ const validPath = (value: string) => value.startsWith(`${mountPath}/`) && value.
 const fingerprint = (target: RailwayInitializationTarget, snapshot: Snapshot) => createHash('sha256')
   .update(JSON.stringify({ ...scope(target), name: snapshot.serviceName, instanceId: snapshot.instanceId,
     image: snapshot.image, startCommand: snapshot.startCommand, preDeployCommand: snapshot.preDeployCommand,
-    mountPath, dataPath: snapshot.dataPath, variableNames: Object.keys(snapshot.rawVariables).sort() })).digest('hex');
+    mountPath, dataPath: snapshot.dataPath, variableNames: Object.keys(snapshot.rawVariables).sort(),
+    ...(snapshot.version === 2 ? { replicaConfiguration: snapshot.replicaConfiguration } : {}) })).digest('hex');
 
 class Ineligible extends Error {}
 function checkIssuer(raw: Record<string, string>, rendered: Record<string, string>): Record<string, string> {
@@ -84,12 +88,12 @@ function checkIssuer(raw: Record<string, string>, rendered: Record<string, strin
  * Official source contracts are pinned under test/provider-contracts/railway/
  * database-initialization; an acknowledgement alone never establishes success. */
 export function createRailwayDatabaseInitialization(client: () => GraphQLClient | null, readVolume: VolumeReader) {
-  async function read(target: RailwayInitializationTarget): Promise<Snapshot> {
+  async function read(target: RailwayInitializationTarget, version: Snapshot['version'] = 2): Promise<Snapshot> {
     if (!client() || !Object.values(target).every(identity)) throw new Error('Unavailable target');
     const response = await client()!.request<unknown>(gql`
       query DatabaseInitializationTarget($projectId: String!, $environmentId: String!, $serviceId: String!) {
         service(id: $serviceId) { id name projectId deletedAt }
-        environment(id: $environmentId, projectId: $projectId) { id projectId deletedAt }
+        environment(id: $environmentId, projectId: $projectId) { id projectId deletedAt config(decryptVariables: false) }
         serviceInstance(serviceId: $serviceId, environmentId: $environmentId) {
           id serviceId environmentId deletedAt startCommand preDeployCommand numReplicas source { image repo }
           latestDeployment { id status }
@@ -107,10 +111,15 @@ export function createRailwayDatabaseInitialization(client: () => GraphQLClient 
     if (!record(instance.source) || typeof instance.source.image !== 'string' || instance.source.repo !== null
       || !/^(?:(?:docker\.io\/)?library\/|docker\.io\/)?postgres:16(?:\.\d+)*(?:-[\w.-]+)?(?:@sha256:[a-f\d]{64})?$/i.test(instance.source.image)
       || (instance.startCommand !== null && instance.startCommand !== '')
-      || !(instance.preDeployCommand === null || Array.isArray(instance.preDeployCommand) && instance.preDeployCommand.length === 0)
-      || instance.numReplicas !== 1) {
-      throw new Ineligible('Fresh initialization requires the reviewed official PostgreSQL 16 image, default startup, and one replica.');
+      || !(instance.preDeployCommand === null || Array.isArray(instance.preDeployCommand) && instance.preDeployCommand.length === 0)) {
+      throw new Ineligible('Fresh initialization requires the reviewed official PostgreSQL 16 image and default startup.');
     }
+    const replicaConfiguration = railwayReplicaConfiguration(instance.numReplicas, environment.config, target.serviceId);
+    // Existing attempts retain the original scalar-one admission and fingerprint.
+    // Never manufacture a previously reviewed regional topology for their retry.
+    if (version === 1 && instance.numReplicas !== 1) throw new RailwayReplicaConfigurationError(
+      'The previously reviewed initialization requires its original explicit single-replica configuration.');
+    if (replicaConfiguration.count !== 1) throw new Ineligible('Fresh initialization requires exactly one configured replica.');
     if (instance.latestDeployment !== null && (!record(instance.latestDeployment) || !identity(instance.latestDeployment.id)
       || typeof instance.latestDeployment.status !== 'string')) throw new Error();
     if (record(instance.latestDeployment)) {
@@ -128,7 +137,8 @@ export function createRailwayDatabaseInitialization(client: () => GraphQLClient 
       if (rendered.PGDATA !== mountPath && !validPath(rendered.PGDATA ?? '')) throw new Ineligible('The existing PostgreSQL data directory is outside the reviewed initialization layout.');
       if (rendered.PGDATA !== mountPath) dataPath = rendered.PGDATA;
     }
-    return { version: 1, instanceId: instance.id, image: instance.source.image, serviceName: service.name as string,
+    return { ...(version === 1 ? { version: 1 as const } : { version: 2 as const, replicaConfiguration }),
+      instanceId: instance.id, image: instance.source.image, serviceName: service.name as string,
       startCommand: instance.startCommand, preDeployCommand: instance.preDeployCommand as null | unknown[],
       rawVariables: raw, issuerVariables: checkIssuer(raw, rendered), dataPath,
       desiredPGDATA: !Object.hasOwn(raw, 'PGDATA') || rendered.PGDATA === mountPath ? dataPath : raw.PGDATA };
@@ -144,14 +154,17 @@ export function createRailwayDatabaseInitialization(client: () => GraphQLClient 
         privateConfiguration: snapshot } };
     } catch (error) {
       return { state: error instanceof Ineligible ? 'ineligible' : 'unknown',
-        reason: error instanceof Ineligible ? error.message : 'The exact database identity and initialization configuration could not be verified.' };
+        reason: error instanceof Ineligible || error instanceof RailwayReplicaConfigurationError ? error.message
+          : 'The exact database identity and initialization configuration could not be verified.' };
     }
   }
 
   async function apply(target: RailwayInitializationTarget, input: ApplyInput): Promise<DatabaseFreshInitializationResult> {
     let progress = input.progress;
-    const outcome = (state: DatabaseFreshInitializationResult['state'], reason?: string): DatabaseFreshInitializationResult => ({ state,
-      progress, ...(reason ? { reason } : {}), ...(state === 'complete' ? { storageBindings: {
+    const outcome = (state: DatabaseFreshInitializationResult['state'], reason?: string,
+      code?: NonNullable<DatabaseFreshInitializationResult['diagnostic']>['code']): DatabaseFreshInitializationResult => ({ state,
+      progress, ...(reason ? { reason } : {}), ...(code ? { diagnostic: { stage: 'activation', code } } : {}),
+      ...(state === 'complete' ? { storageBindings: {
         volumeId: progress.storageId, volumeInstanceId: progress.storageInstanceId, volumeTarget: volumeTarget(target),
       } } : {}) });
     const save = async (next: DatabaseFreshInitializationProgress) => { progress = next; await input.saveProgress(next); };
@@ -162,11 +175,11 @@ export function createRailwayDatabaseInitialization(client: () => GraphQLClient 
       if (!isDeepStrictEqual(reviewed.target, scope(target)) || !client()
         || index < 4 && progress.storageId !== undefined || index < 7 && progress.deploymentId !== undefined) throw new Error();
       const original = reviewed.privateConfiguration as unknown as Snapshot;
-      if (original.version !== 1 || !identity(original.instanceId) || !variables(original.rawVariables) || !variables(original.issuerVariables)
+      if (![1, 2].includes(original.version) || !identity(original.instanceId) || !variables(original.rawVariables) || !variables(original.issuerVariables)
         || !validPath(original.dataPath) || reviewed.configurationFingerprint !== fingerprint(target, original)) throw new Error();
       const desiredRaw = { ...original.rawVariables, PGDATA: original.desiredPGDATA };
       const unchanged = async (configured: boolean) => {
-        const current = await read(target);
+        const current = await read(target, original.version);
         return isDeepStrictEqual({ ...current, rawVariables: undefined }, { ...original, rawVariables: undefined })
           && isDeepStrictEqual(current.rawVariables, configured ? desiredRaw : original.rawVariables);
       };
@@ -248,28 +261,49 @@ export function createRailwayDatabaseInitialization(client: () => GraphQLClient 
           if (!record(response) || !record(response.deployment) || !record(response.serviceInstance)
             || response.deployment.id !== progress.deploymentId || response.deployment.projectId !== target.projectId
             || response.deployment.environmentId !== target.environmentId || response.deployment.serviceId !== target.serviceId
-            || response.serviceInstance.id !== original.instanceId || !record(response.serviceInstance.latestDeployment)
-            || response.serviceInstance.latestDeployment.id !== progress.deploymentId
-            || response.deployment.deploymentStopped !== false) return outcome('unknown', 'The exact acknowledged database deployment could not be verified.');
+            || response.serviceInstance.id !== original.instanceId) return outcome('unknown', 'The exact acknowledged database deployment could not be verified.', 'deployment-unverified');
           const status = response.deployment.status;
+          const latest = response.serviceInstance.latestDeployment;
+          if (status === 'REMOVED' && response.deployment.deploymentStopped === true
+            && record(latest) && identity(latest.id) && latest.id !== progress.deploymentId) {
+            const activation = { acknowledgedId: progress.deploymentId!, deploymentId: latest.id,
+              storageId: progress.storageId!, instanceId: original.instanceId, mountPath,
+              rawVariables: desiredRaw, image: original.image,
+              ...(original.version === 2 ? { replicaConfiguration: original.replicaConfiguration } : {}) };
+            const reconciled = await railwayStorageAttachmentActivation(client()!, target, activation);
+            if (!reconciled || progress.activationReconciliation
+              && !isDeepStrictEqual(progress.activationReconciliation, reconciled.reconciliation)) {
+              return outcome('unknown', 'The acknowledged database deployment was replaced, but its exact storage attachment activation could not be verified.', 'deployment-replaced');
+            }
+            const after = await storage();
+            if (!after.success || after.state !== 'present' || after.pendingDeletion
+              || after.instanceId !== progress.storageInstanceId || !await unchanged(true)
+              || !isDeepStrictEqual(await railwayStorageAttachmentActivation(client()!, target, activation), reconciled)) {
+              return outcome('unknown', 'The storage attachment activation or preserved configuration changed during verification.', 'configuration-changed');
+            }
+            if (progress.phase !== 'complete') await save({ ...progress, phase: 'complete', activationReconciliation: reconciled.reconciliation });
+            return outcome('complete');
+          }
+          if (stoppedDeploymentStatuses.includes(String(status))) {
+            return outcome('failed', 'The acknowledged database deployment is not running successfully; retain its storage and identity.', 'deployment-failed');
+          }
+          if (!record(latest) || latest.id !== progress.deploymentId || response.deployment.deploymentStopped !== false
+            || progress.activationReconciliation) return outcome('unknown', 'The exact acknowledged database deployment could not be verified.', 'deployment-unverified');
           if (status === 'SUCCESS') {
             const after = await storage();
             if (!after.success || after.state !== 'present' || after.pendingDeletion
               || after.instanceId !== progress.storageInstanceId || !await unchanged(true)) {
-              return outcome('unknown', 'Database storage or preserved configuration changed after deployment.');
+              return outcome('unknown', 'Database storage or preserved configuration changed after deployment.', 'configuration-changed');
             }
             if (progress.phase !== 'complete') await save({ ...progress, phase: 'complete' });
             return outcome('complete');
           }
-          if (stoppedDeploymentStatuses.includes(String(status))) {
-            return outcome('failed', 'The acknowledged database deployment is not running successfully; retain its storage and identity.');
-          }
           if (!pendingDeploymentStatuses.includes(String(status))) {
-            return outcome('unknown', 'The database deployment status is not recognized.');
+            return outcome('unknown', 'The database deployment status is not recognized.', 'deployment-unverified');
           }
           if (attempt + 1 < attempts) await wait();
         }
-        return outcome('pending', 'The acknowledged database deployment is still pending.');
+        return outcome('pending', 'The acknowledged database deployment is still pending.', 'deployment-pending');
       }
       return outcome('unknown', 'Database initialization progress could not be verified.');
     } catch {

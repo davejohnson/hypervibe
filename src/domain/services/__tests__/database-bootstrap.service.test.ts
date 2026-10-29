@@ -108,6 +108,33 @@ async function apply(planned: NonNullable<Awaited<ReturnType<typeof plan>>>, con
 const recovery = () => databaseBootstrapRecoverySchema.parse(ctx.repos.components.findById(component.id)!.bindings.databaseBootstrap);
 
 describe('isolated database bootstrap lifecycle', () => {
+  it('uses the verified storage-attachment successor while preserving the original deployment acknowledgment', async () => {
+    const original = structuredClone(ctx.repos.components.findById(component.id)!.bindings.freshInitialization) as any;
+    const activationReconciliation = { version: 1, kind: 'storage-attachment', deploymentId: 'verified-db-successor', operationId: 'owned-storage-operation' };
+    original.progress.activationReconciliation = activationReconciliation;
+    original.completed.activationReconciliation = activationReconciliation;
+    ctx.repos.components.updateBindings(component.id, { freshInitialization: original });
+    inspect.mockResolvedValue({ ...evidence(), databaseDeploymentId: activationReconciliation.deploymentId });
+    const authentication = (await plan())!;
+    expect(authentication.blocked).toEqual([]); expect(authentication.actions).toHaveLength(1);
+    expect(inspect.mock.calls[0][0].completedInitialization).toMatchObject({ deploymentId: 'new-db-deployment', activationReconciliation });
+    expect(await apply(authentication)).toMatchObject({ success: true });
+    expect(recovery().base.databaseDeploymentId).toBe(activationReconciliation.deploymentId);
+    const migration = (await plan())!;
+    expect(await apply(migration)).toMatchObject({ success: true });
+    expect(recovery().consumedAt).toBeDefined(); expect(await plan()).toBeNull(); expect(starts).toBe(2);
+    expect(ctx.repos.components.findById(component.id)!.bindings.freshInitialization).toEqual(original);
+  });
+  it('blocks bootstrap when a reconciled receipt observes only the original acknowledgment', async () => {
+    const original = structuredClone(ctx.repos.components.findById(component.id)!.bindings.freshInitialization) as any;
+    const activationReconciliation = { version: 1, kind: 'storage-attachment', deploymentId: 'verified-db-successor', operationId: 'owned-storage-operation' };
+    original.progress.activationReconciliation = activationReconciliation; original.completed.activationReconciliation = activationReconciliation;
+    ctx.repos.components.updateBindings(component.id, { freshInitialization: original });
+    const planned = (await plan())!;
+    expect(planned.actions).toEqual([]); expect(planned.blocked).toHaveLength(1);
+    expect(inspect).toHaveBeenCalledOnce(); expect(runJob).not.toHaveBeenCalled();
+    expect(ctx.repos.components.findById(component.id)!.bindings.freshInitialization).toEqual(original);
+  });
   it('freezes encrypted private expectations, authenticates separately, then consumes the exact migration once', async () => {
     const authentication = (await plan())!;
     expect(authentication.actions).toHaveLength(1); expect(authentication.actions[0]).toMatchObject({ billable: true, requiresConfirm: true, dataBearing: false,

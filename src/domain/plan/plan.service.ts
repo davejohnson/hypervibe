@@ -3,6 +3,7 @@ import { CloudInstallationError } from '../services/cloud-installation-runtime.j
 import { observeRecoveryRuntime, planRecoveryRuntime } from '../services/recovery-runtime.service.js';
 import { observeRuntimeAccess, planRuntimeAccess, projectRuntimeAccessInput } from '../services/runtime-access.service.js';
 import { hasPendingDatabaseInitialization } from './database-initialization.contract.js';
+import { pendingRepositoryVariableEnvironment, planRepositoryVariables } from '../services/repository-variables.service.js';
 import { hasDatabaseBootstrapObservationOrCleanup, hasPendingDatabaseBootstrap } from './database-bootstrap.contract.js';
 import { planDatabaseBootstrap } from '../services/database-bootstrap.service.js';
 import { credentialSourceInputKeys } from '../services/accepted-credential-inputs.js';
@@ -1105,6 +1106,29 @@ export class PlanService {
     return [];
   }
 
+  private async planRepositoryVariableStage(project: Project, environmentName: string, specResult: SpecResult,
+    options?: PlanOptions): Promise<EnvironmentPlan | { error: string } | null> {
+    const variables = await planRepositoryVariables({ project, spec: specResult.spec, environmentName });
+    if (variables.error) return { error: variables.error };
+    if (!variables.stageRequired) return null;
+    if (options?.serviceFilter?.length || Object.keys(options?.envVarOverrides ?? {}).length
+      || options?.envFile || Object.keys(options?.secretRefs ?? {}).length) {
+      return { error: 'Repository variables are an isolated plan stage; remove deployment inputs.' };
+    }
+    const actions = variables.actions;
+    const warnings = ['Repository variables are non-secret configuration. Readback proves configuration, not workflow execution. Omitted variables are preserved.'];
+    const document: PlanRunDocument = { kind: 'hv_plan', scope: 'full', environmentName,
+      specRevision: specResult.revision, observedFingerprint: null, actions, unmanaged: [], warnings };
+    const environment = this.envRepo.findByProjectAndName(project.id, environmentName)
+      ?? this.envRepo.create({ projectId: project.id, name: environmentName });
+    const run = this.runRepo.create({ projectId: project.id, environmentId: environment.id, type: 'plan',
+      plan: document as unknown as Record<string, unknown> });
+    this.runRepo.updateStatus(run.id, 'succeeded');
+    return { planRunId: run.id, scope: 'full', specRevision: specResult.revision,
+      specSource: specResult.source ?? { kind: 'local' }, environmentName, verified: true, observed: null,
+      actions, unmanaged: [], warnings, inputRequired: [], blocked: [] };
+  }
+
   private async planRepositoryInfrastructure(
     project: Project,
     environmentName: string,
@@ -1754,6 +1778,14 @@ export class PlanService {
       return { error: `Project "${project.name}" has no spec. Set one with hv_spec.` };
     }
     const scope = options?.scope ?? 'full';
+    try {
+      const pendingVariables = pendingRepositoryVariableEnvironment(project.id);
+      if (pendingVariables) {
+        if (scope !== 'full' || environmentName !== pendingVariables) return { error: 'Reconcile the pending repository-variable write in its canonical full plan before other work.' };
+        return await this.planRepositoryVariableStage(projectWithSpecGitRemoteUrl(project, specResult.spec), environmentName, specResult, options)
+          ?? { error: 'The pending repository-variable write could not be reconciled.' };
+      }
+    } catch { return { error: 'Retained repository-variable ownership is malformed or ambiguous; no new plan is authorized.' }; }
     const { pendingBootstrap, pendingInitialization, observationOrCleanup } = this.retainedDatabaseWork(project, environmentName, scope);
     if (scope !== 'full' && pendingBootstrap) {
       return { error: 'Recover the pending private database bootstrap through its isolated plan before other lifecycle changes.' };
@@ -1959,6 +1991,10 @@ export class PlanService {
           blocked: [],
         };
       }
+    }
+    if (scope === 'full') {
+      const variables = await this.planRepositoryVariableStage(projectForPlan, environmentName, specResult, options);
+      if (variables) return variables;
     }
     const declaredEnvironmentSpec = specResult.spec.environments[environmentName];
     const environmentSpec = declaredEnvironmentSpec ? withBackupStorageDefaults(declaredEnvironmentSpec) : undefined;

@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "evidenceKind": "reconstructed-observation-and-existing-official-source-pins",
+  "observation": {
+    "file": "successor-observation.json",
+    "sha256": "72725963a6e59af6b4fd5270f8e1f129dbc8c3297e34807e265901f926fe1562",
+    "source": "Five sanitized read-only operator observations of deployment metadata, exact environment patch structure, private snapshot comparisons and deployment image/mount field shapes. No provider request was executed while constructing this fixture.",
+    "reconstruction": "Synthetic identities replace every live identity; values are withheld. The comparison booleans are retained from the read-only evidence, not inferred from Hypervibe requests or mocks.",
+    "sourceCount": 5
+  },
+  "sources": [
+    {
+      "file": "../source.json",
+      "sha256": "76d32ea44653c11eedb624f2c71fec1a0bee42b30d579f158be9dfdd5cb84933",
+      "kind": "existing-official-schema-source-descriptor"
+    },
+    {
+      "file": "../schema.graphql",
+      "sha256": "b92b23bc007616d49d3141dd26a1ffc74630dc6fd1e8edace13a43de2afaf76a",
+      "kind": "rendered-official-schema",
+      "sourceUrl": "https://raw.githubusercontent.com/railwayapp/cli/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/gql/schema.json",
+      "sourceRevision": "f60f3a77b980c47f1136909fbd9a443e29a2b95f",
+      "upstreamSha256": "7fa2a58556676103cd6c64f68e0388d6d4561bf770b87d314a4df6d8f5289213",
+      "transformation": "Full official schema rendered as lexicographically sorted SDL with descriptions omitted; fields, arguments, types, defaults and deprecations retained.",
+      "serverRevisionPinned": false
+    },
+    {
+      "file": "source.json",
+      "sha256": "e7d69d71d56c4c92a189ae977bc9c6a42ba5b1a84fd731adb316950a9f947e4e",
+      "kind": "existing-official-documentation-source-descriptor"
+    },
+    {
+      "file": "manage-volumes.md",
+      "sourceUrl": "https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/integrations/api/manage-volumes.md",
+      "sourceRevision": "4bc46bc0ba1b27d50c5ef0393132753982b31112",
+      "sourceGitBlobSha": "6f97472deeabbc6b5f26f618448c23857487b4ac",
+      "extraction": "Complete upstream file, unchanged.",
+      "sha256": "f7460a6e05f248eb52db124a638e7bf5ef44ff0fe9f5b6b922abb9f5f9fc7301",
+      "kind": "pinned-official-documentation"
+    },
+    {
+      "file": "manage-services.md",
+      "sourceUrl": "https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/integrations/api/manage-services.md",
+      "sourceRevision": "4bc46bc0ba1b27d50c5ef0393132753982b31112",
+      "sourceGitBlobSha": "46eae731ea5c149fc6f9b78ec335f20a0bc4cb0a",
+      "extraction": "Complete upstream file, unchanged.",
+      "sha256": "d4301e6acb951d2b85b8e76f7e732392310958b183738e02e9b742b327e84d56",
+      "kind": "pinned-official-documentation"
+    },
+    {
+      "file": "manage-deployments.md",
+      "sourceUrl": "https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/integrations/api/manage-deployments.md",
+      "sourceRevision": "4bc46bc0ba1b27d50c5ef0393132753982b31112",
+      "sourceGitBlobSha": "87a4dc4d40291578e155e3002d0b4fee56c13198",
+      "extraction": "Complete upstream file, unchanged.",
+      "sha256": "297b0d0300a3f416acfa2b1fa095807a19ce7af08ba3d65b97d60dbccfa133e8",
+      "kind": "pinned-official-documentation"
+    },
+    {
+      "file": "manage-variables.md",
+      "sourceUrl": "https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/integrations/api/manage-variables.md",
+      "sourceRevision": "4bc46bc0ba1b27d50c5ef0393132753982b31112",
+      "sourceGitBlobSha": "113f46bbf5ac6d20dca6eaa123f97d583f96dbd8",
+      "extraction": "Complete upstream file, unchanged.",
+      "sha256": "c26cb01fc25a4099912c3b7f1a3c9a66f37f0c3d53ac38abdc080856a7128e41",
+      "kind": "pinned-official-documentation"
+    }
+  ],
+  "officialContractCoverage": [
+    "Deployment and EnvironmentPatch field names, nullability and operation signatures.",
+    "serviceInstanceDeployV2 acknowledges a deployment ID; volumeCreate acknowledges a volume ID.",
+    "Scoped deployment and raw/unrendered variable observation interfaces."
+  ],
+  "hypervibeAcceptanceRule": {
+    "providerDocumentedLineage": false,
+    "causalAttribution": "unknown",
+    "scope": "A separately reviewed initialization reconciliation may accept a current deployment only after exact scoped storage-attachment patch, current deployment, preserved storage/configuration and raw snapshot checks. Do not infer actor ownership or causal lineage from timing or matching configuration.",
+    "immutableAcknowledgment": "Preserve the original acknowledged deploymentId in progress and completion history.",
+    "separateReceiptExample": {
+      "activationReconciliation": {
+        "version": 1,
+        "kind": "storage-attachment",
+        "deploymentId": "deployment-observed",
+        "operationId": "patch-storage-attachment"
+      }
+    },
+    "effects": "The reconciliation records separate verified identity; it does not authorize another volume creation, deployment, credential write, cleanup or SQL execution."
+  },
+  "limitations": [
+    "Existing schema/documentation pins are reused unchanged; no claim is made that the live server ran the pinned CLI revision.",
+    "Opaque nested fields are supported by this narrow redacted observation, not by GraphQL type validation.",
+    "Provider-documented request-to-patch or predecessor-to-successor lineage remains unavailable.",
+    "The separate receipt example describes Hypervibe policy, not a Railway API payload.",
+    "Tests consuming this evidence must label additional values and negative scenarios as synthetic and retain ordinary acceptance coverage."
+  ]
+}

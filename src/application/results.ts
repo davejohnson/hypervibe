@@ -136,6 +136,17 @@ function redactForResponse(value: unknown, keyHint?: string, seen = new WeakSet<
     return output;
   }
 
+  // Ordinary repository configuration is stored in desired state, but values
+  // are unnecessary in command responses; show only names and adoption intent.
+  if (keyHint === 'repositoryVariables') {
+    const output = Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([name, entry]) => [name,
+      entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? { ...redactForResponse(entry, undefined, seen) as Record<string, unknown>, value: REDACTED }
+        : REDACTED]));
+    seen.delete(value);
+    return output;
+  }
+
   const output: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
     output[key] = isSensitiveKey(key) && entry && typeof entry === 'object'

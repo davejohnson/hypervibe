@@ -46,6 +46,7 @@ const LOCAL_ONLY_BINDING_KEYS = new Set([
   'preparedDirectReleaseEvidence',
   'managedReleaseDispatch',
   'localPreparedHosting',
+  'repositoryVariableOwnership',
 ]);
 
 function bindingsPath(root: string): string {
@@ -110,6 +111,7 @@ export function mergeRepoPlatformBindings(
   }
   if (Object.hasOwn(repoBindings, 'managedReleaseDispatch')) throw new Error('Managed release dispatch recovery is local authority and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'recoveryRuntimeSecretInputs')) throw new Error('Private recovery inputs are local only and cannot be imported.');
+  if (Object.hasOwn(repoBindings, 'repositoryVariableOwnership')) throw new Error('Repository-variable ownership and recovery state are local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'credentialUpdates')) throw new Error('Credential acceptance and recovery state are local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'runtimeRollouts')) throw new Error('Runtime configuration expectations and activation requirements are local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'preparedDirectReleaseAttempts') || Object.hasOwn(repoBindings, 'preparedDirectReleaseEvidence'))

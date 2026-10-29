@@ -1,5 +1,10 @@
 # GitHub infrastructure for beginners
 
+To manage only ordinary repository flags on an externally managed repository,
+use [selected repository configuration variables](repository-variables.md)
+under `devops.ci.repositoryVariables`. That isolated capability does not require
+ownership of the generated infrastructure described below.
+
 Hypervibe can manage repository collaboration, checks, autofix, pull-request
 review, code audit, dependency maintenance, and security settings as desired
 state. GitHub and OpenAI connections are optional: without them you can still
