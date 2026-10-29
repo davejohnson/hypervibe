@@ -24,10 +24,10 @@ export function backupEvidenceSummary(readiness: BackupReadiness) {
   return { backupObserved: state(readiness.recoveryPointReady), restoreTested: state(readiness.restoreReady) };
 }
 
-/** Live protection evidence gates releases; desired schedules and cached markers do not. */
+/** Report backup health separately from release eligibility; schedules are not recovery evidence. */
 export function assessBackupReadiness(coverage: BackupPolicyObservation, health: BackupHealthObservation,
   now = Date.now()): BackupReadiness {
-  if (coverage.policy.mode === 'disabled' && coverage.policy.source === 'explicit' && coverage.policy.reason?.trim()) {
+  if (coverage.policy.mode === 'disabled' && (coverage.policy.source === 'default' || coverage.policy.reason?.trim())) {
     return { ready: true, policyReady: true, recoveryPointReady: true, restoreReady: true, resources: [], gaps: [] };
   }
   let policyReady = true;

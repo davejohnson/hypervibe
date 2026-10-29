@@ -526,7 +526,7 @@ describe('PlanService delegated secret inputs', () => {
     expect(new RunRepository().findByEnvironmentId(environment.id)).toHaveLength(runsBefore);
   });
 
-  it('plans generated secrets after creating services in a provider-confirmed absent environment', async () => {
+  it('defers generated secrets through namespace creation and plans them after service creation on fresh observation', async () => {
     new SpecStore().replace(project, {
       version: 1,
       project: project.name,
@@ -549,29 +549,47 @@ describe('PlanService delegated secret inputs', () => {
         },
       },
     });
+    const observe = vi.fn().mockResolvedValue({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rail-project',
+      services: [],
+      databases: [],
+      completeness: {
+        project: 'complete',
+        environment: 'complete',
+        services: 'unknown',
+        databases: 'unknown',
+      },
+      partial: true,
+      warnings: ['Could not resolve Railway environment for "staging"'],
+    });
     vi.mocked(adapterFactory.getProviderAdapter).mockResolvedValue({
       success: true,
       adapter: {
         name: 'railway',
         capabilities: { supportsObserve: true },
-        observe: vi.fn().mockResolvedValue({
-          provider: 'railway',
-          observedAt: new Date().toISOString(),
-          projectExists: true,
-          projectId: 'rail-project',
-          services: [],
-          databases: [],
-          completeness: {
-            project: 'complete',
-            environment: 'complete',
-            services: 'unknown',
-            databases: 'unknown',
-          },
-          partial: true,
-          warnings: ['Could not resolve Railway environment for "staging"'],
-        }),
+        observe,
       } as never,
     });
+    const ensureEnvironment = vi.fn(async () => ({
+      success: true,
+      message: 'Created staging',
+      data: { projectId: 'rail-project', environmentId: 'rail-staging', created: true },
+    }));
+    const setEnvVars = vi.fn();
+    const deploy = vi.fn();
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({
+      success: true,
+      adapter: { name: 'railway', capabilities: { supportsObserve: true }, observe,
+        ensureEnvironment, setEnvVars, deploy } as never,
+    });
+    const connection = new ConnectionRepository().create({
+      provider: 'railway',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'railway-account-token' }),
+    });
+    new ConnectionRepository().updateStatus(connection.id, 'verified');
 
     const result = await new PlanService().plan(project, 'staging', {
       includeEnvFile: false,
@@ -579,27 +597,59 @@ describe('PlanService delegated secret inputs', () => {
 
     expect(result).not.toHaveProperty('error');
     const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.scope).toBe('hosting-bindings');
+    expect(plan.actions.map(action => action.id)).toEqual(['environment:staging']);
     expect(plan.inputRequired).toEqual([]);
     expect(plan.actions.find((action) => action.id === 'environment:staging')).toMatchObject({
       type: 'create',
       metadata: { operation: 'hostingEnvironmentEnsure' },
     });
-    expect(plan.actions.find((action) => action.id === 'service:web')).toMatchObject({
-      dependsOn: expect.arrayContaining(['environment:staging']),
+    expect(new RunRepository().findById(plan.planRunId)!.plan).not.toHaveProperty('overrides');
+    const currentSpec = new SpecStore().get(project)!;
+    expect(await executePlanApply(createToolContext(), {
+      project, spec: currentSpec.spec, specRevision: currentSpec.revision,
+      planId: plan.planRunId, confirmActions: [], alwaysRunBootstrap: true,
+    })).toMatchObject({
+      kind: 'executed', result: { success: false, receipts: [
+        expect.objectContaining({ actionId: 'environment:staging', status: 'pending' }),
+      ] },
     });
-    expect(plan.actions.find((action) => action.id === 'service:web')?.type).not.toBe('noop');
-    expect(plan.actions.find((action) => action.id === 'secret:SESSION_SECRET')).toMatchObject({
+    expect(ensureEnvironment).toHaveBeenCalledOnce();
+    expect(deploy).not.toHaveBeenCalled();
+    expect(setEnvVars).not.toHaveBeenCalled();
+    const staging = new EnvironmentRepository().findByProjectAndName(project.id, 'staging')!;
+    expect(staging.platformBindings).toMatchObject({ projectId: 'rail-project', environmentId: 'rail-staging' });
+    expect(parseDelegatedSecretBindings(staging)).toEqual([]);
+
+    // Fresh provider evidence now confirms the exact namespace and absent services.
+    observe.mockResolvedValue({
+      provider: 'railway', observedAt: new Date().toISOString(), projectExists: true,
+      projectId: 'rail-project', environmentId: 'rail-staging', services: [], databases: [],
+      completeness: { project: 'complete', environment: 'complete', services: 'complete', databases: 'complete' },
+      partial: false, warnings: [],
+    });
+    const resumed = await new PlanService().plan(project, 'staging', { includeEnvFile: false });
+    if ('error' in resumed) throw new Error(resumed.error);
+    expect(observe).toHaveBeenLastCalledWith(expect.objectContaining({
+      platformBindings: expect.objectContaining({ environmentId: 'rail-staging' }),
+    }), expect.any(Object));
+    expect(resumed.scope).toBe('full');
+    expect(resumed.inputRequired).toEqual([]);
+    expect(resumed.actions.find(action => action.id === 'environment:staging')).toBeUndefined();
+    expect(resumed.actions.find(action => action.id === 'service:web')).toMatchObject({ type: 'create' });
+    expect(resumed.actions.find((action) => action.id === 'secret:SESSION_SECRET')).toMatchObject({
       type: 'update',
       verified: true,
       dependsOn: expect.arrayContaining(['service:web']),
     });
 
-    const document = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
+    const document = new RunRepository().findById(resumed.planRunId)!.plan as Record<string, unknown>;
     const overrides = document.overrides as Record<string, unknown>;
     expect(overrides.delegatedSecretKeys).toEqual(['SESSION_SECRET']);
     const encrypted = overrides.delegatedSecretVarsEncrypted as string;
     const generatedValue = getSecretStore().decryptObject<Record<string, string>>(encrypted).SESSION_SECRET;
     expect(generatedValue).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(JSON.stringify(document)).not.toContain(generatedValue);
+    expect(setEnvVars).not.toHaveBeenCalled();
   });
 });

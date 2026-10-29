@@ -159,7 +159,7 @@ Do not use temporary release-command changes for one-off data operations. Use de
 
 ## DG-111
 
-Cross-cutting deployment gates must preserve reviewed prerequisite stages without admitting workload or data writes. Test namespace creation, empty service identity, storage preparation, source disconnection and workflow publication alongside blocked ordinary deployments. Carry creation-only authority through provider execution and reject an existing workload before environment or configuration mutation; an earlier observation cannot authorize a later update. Existing protected-resource fixtures must supply scoped prerequisite evidence at the adapter boundary; do not disable the policy or mock its gate to keep unrelated assertions passing. No infrastructure drift does not imply recovery readiness.
+Deployment gates must enforce actual release dependencies without making optional backup setup or health a prerequisite for ordinary deployments. Test normal and all-noop direct deployment, generated GitHub and GitLab release paths, and cross-environment repository publication with missing backup evidence. Separately reviewed backup stages must not admit workload or data writes. Carry creation-only authority through provider execution and reject an existing workload before environment or configuration mutation; an earlier observation cannot authorize a later update. Preserve explicit destructive-operation checkpoint safeguards and their exact confirmation boundary. Deployment convergence does not imply recovery readiness; report backup evidence independently.
 
 ## DG-112
 

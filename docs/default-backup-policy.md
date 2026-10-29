@@ -1,11 +1,13 @@
-# Daily backup defaults
+# Optional daily backup protection
 
-Hypervibe's default is daily backup protection for an environment's databases,
-persistent service volumes and object buckets. This is desired state, not a
-claim that every provider adapter has implemented it or that a backup has run.
-Plan and status report coverage for each resource, including explicit gaps.
+Hypervibe reports requested daily backup coverage for an environment's databases,
+persistent service volumes and object buckets independently from deployment.
+Ordinary planning, direct apply and generated GitHub/GitLab releases do not
+require backup setup, an archive bucket, a recovery point or a tested restore.
+Missing or unknown coverage remains visible; it is not deployment drift or proof
+that a backup has run.
 
-An environment may state the default explicitly:
+An environment may declare daily backup intent:
 
 ```json
 {
@@ -13,9 +15,13 @@ An environment may state the default explicitly:
 }
 ```
 
-Omitting `backups` has the same policy meaning. The default is resolved at the
-backup boundary; it does not insert fields into older specs or change their
-existing deployment-contract hashes merely by being read.
+Omitting `backups` means backup management was not requested. Its effective
+`mode: "disabled", source: "default"` describes Hypervibe intent, not observed
+provider protection; existing snapshots remain untouched. It does not authorize
+backup mutations or infer an archive bucket. To configure protection,
+request the separate `hv_plan scope="backups"` workflow and review its exact
+actions. Coverage reads do not insert fields into older specs or change their
+existing deployment-contract hashes.
 
 A disposable environment may opt out with a reason:
 
@@ -28,26 +34,29 @@ A disposable environment may opt out with a reason:
 }
 ```
 
-This excludes the environment from Hypervibe's daily-policy enforcement. It
+This excludes the environment from Hypervibe's daily coverage intent. It
 does not disable a provider's existing backups, delete recovery points, remove
 PITR, or shorten retention. The exclusion remains visible in coverage output.
+To retire an existing managed backup workflow after declaring this exclusion,
+run `hv_plan scope="backups"` for that environment and review its exact removal.
+An ordinary deployment plan preserves the existing program.
 
-## What the default does
+## Separate backup setup from deployment
 
-The shared policy follows the existing `hv_spec` → `hv_plan` → `hv_apply` →
-`hv_status` lifecycle. It covers declared resources and retained database,
+Backup setup follows `hv_spec` → `hv_plan scope="backups"` → `hv_apply` →
+`hv_status`. Coverage includes declared resources and retained database,
 mount and object-bucket bindings. Previous or unresolved targets remain visible
 as unknown coverage until their exact sources are reconciled. A provider
 capability must establish the exact source identity and observe its current policy before a policy change
 can be planned. Unknown observation is a gap, never proof that protection is
 absent or that it is already sufficient.
 
-A new resource first receives a durable binding in an isolated provisioning
-plan. Subsequent plans configure protection, publish the reviewed backup program,
-and require the first completed recovery set before ordinary deployment. The
-tool reports these prerequisite stages as pending. An unsupported source,
-unknown read, missing point or expired restore proof blocks rollout; it is not
-silently waived by a service-only plan or a previously applied spec hash.
+A requested backup resource first receives a durable binding in an isolated
+provisioning plan. Subsequent backup-scoped plans configure protection and
+publish the reviewed backup program. The tool reports incomplete backup stages
+as pending. An unsupported source, unknown read, missing point or expired
+restore proof prevents a claim of healthy recovery coverage; it does not block
+ordinary deployment. Skipping optional backup setup never marks it complete.
 
 Accepted deployment workflows can still need credential or binding
 synchronization. That downstream work must not prevent an independent backup
@@ -62,10 +71,15 @@ does not exist. It does not deploy the application, update the applied deploymen
 contract or count as backup evidence. Missing access and unknown credential
 observations remain blocking.
 
-A recovery-readiness blocker is a prerequisite failure. Tool output preserves
-the protection gaps and directs the operator to resolve them before re-planning;
-it does not request a new provider credential unless a separate connection
-failure was observed.
+A recovery-readiness blocker applies only to explicit backup work. Tool output
+preserves the protection gaps without requiring another environment to repair
+them before deploying. It does not request a new provider credential unless a
+separate connection failure was observed. Ordinary repository publication
+preserves every accepted backup program and never publishes a new one, even
+when it is ready. Backup program changes require explicit backup-scoped review
+for the selected environment. This does not authorize unrelated repository
+policy updates or another environment's program. Explicit program removal does
+not delete provider snapshots, backup storage or retained recovery sets.
 
 Supported adapters add daily protection while preserving existing weekly or
 monthly schedules, longer retention and PITR. Native retention is reported as
@@ -128,13 +142,15 @@ the weekly minimum. It uses a published, immutable Hypervibe helper image;
 no application deployment or public database URL is required by the admitted
 Railway private-task path.
 
-When application object storage already declares a provider and region, the
-effective plan derives a separate `hypervibe-backups` bucket in that placement.
-It is a normal reviewed, billable storage action with no application credential
-injection. Existing names are never repurposed. Projects without an established
-storage placement declare a separate bucket with `purpose: "backup"` and name
-it in `backups.destination`. Multiple possible destinations require an explicit
-selection. Removing the policy retains its backup bucket and historical sets.
+Ordinary deployment never derives a backup bucket from application storage.
+For requested backup setup, declare a separate bucket with `purpose: "backup"`
+and select it in `backups.destination` when ambiguous. This supports a chosen
+application-specific name. With explicit daily intent and `scope="backups"`,
+the planner may instead propose `hypervibe-backups` using an existing application
+storage provider and region. That proposal is a separately reviewed, billable
+action requiring exact confirmation, with no application credential injection.
+Existing names are never repurposed. Removing the policy retains its backup
+bucket and historical sets.
 
 Activation requires `backups.mode: "daily"`, `backups.runnerImage` set to the
 actual published helper digest, and complete source/destination bindings. A
@@ -159,22 +175,22 @@ The managed program currently covers at most one bound PostgreSQL database and
 declared application buckets. Retained databases or buckets outside that target
 remain visible coverage gaps; they do not inherit the current target's healthy
 receipt. This program does not implement restore verification for those retained
-sources, so they keep readiness blocked.
+sources, so their recovery readiness remains incomplete without blocking
+ordinary application deployment.
 
 For initial setup, follow the plan's stages in order:
 
-1. Declare the published helper digest, backup destination where needed and any
-   database file-reference queries through `hv_spec`. Run `hv_plan`, review and
+1. Declare the published helper digest, backup destination and any database
+   file-reference queries through `hv_spec`. Run `hv_plan scope="backups"`, review and
    confirm its prerequisite actions, then apply them with `hv_apply`. Re-plan
    after each prerequisite stage so resource bindings and native policies can
    be observed before dependent work.
-2. Publish the backup program through the declared canonical GitHub environment.
-   When it is the application environment, the plan reports
-   `backup-program-publication`. If `github.canonicalEnvironment` is different,
-   run `hv_plan` for that environment after resource binding and CI credential
-   prerequisites complete, even if the application plan still reports
-   `backup-readiness`. The reserved `repository` environment uses a repository-only
-   `full` plan and may include other repository changes; review every action.
+2. Continue `hv_plan scope="backups"` for the environment whose backups are
+   requested. Once resource binding and CI credentials are ready, the plan
+   reports `backup-program-publication`. This works when the canonical GitHub
+   environment is different or has backups disabled. The proposal contains only
+   the selected environment's backup program; unrelated repository policies and
+   other environments' programs remain separate.
    Confirm and apply the repository action to open the infrastructure pull
    request. This proposes the program; it does not merge, dispatch a backup or
    deploy the application. Review and merge the program, current spec and latest
@@ -185,10 +201,12 @@ For initial setup, follow the plan's stages in order:
    `inputs: { "operation": "backup" }`, then inspect the run with `hv_ci_status`.
    An uncertain backup execution is inspected with `operation: "health"`;
    rerunning its backup attempt is rejected.
-4. After a completed recovery set and cleanup are verified, run `hv_plan` again.
-   The `backup-readiness` stage blocks ordinary deployment while point or restore
-   evidence is missing, stale or unknown. A prerequisite-only apply is still
-   pending deployment; it is not an application release.
+4. After a completed recovery set and cleanup are verified, inspect `hv_status`
+   and re-plan with `scope="backups"` if backup work remains. `backup-readiness`
+   reports missing, stale or unknown recovery evidence only in that explicit
+   workflow. Ordinary application deployment remains independent. A successful
+   backup prerequisite apply is neither an application release nor proof of a
+   completed backup or restore.
 
 The runtime holds a read-only SQL snapshot, archives it, reads the stored bytes
 back and restores them into an owned local PostgreSQL instance. Object streams
@@ -255,10 +273,10 @@ helper digest and a reviewed regeneration of the backup workflow together.
 Updating the local MCP runtime alone does not update the scheduled controller
 or worker. Exact workflow-authority checks reject mixed compiler/helper output.
 
-Generated GitHub deployment checks use fresh backup health before migrations or
-rollout. GitLab daily recovery execution is not implemented and therefore blocks
-ordinary deployment for a required daily policy. Verified immutable code rollback
-keeps its existing separate evidence path.
+Generated GitHub and GitLab deployment workflows do not run backup health gates
+or require backup helper credentials before migrations or rollout. GitLab daily
+recovery execution remains unsupported and is reported as a backup coverage gap.
+Verified immutable code rollback keeps its existing separate evidence path.
 
 The helper image must be built and published before setup. Merging the managed
 workflow enables its schedule; a successful first provider execution is required

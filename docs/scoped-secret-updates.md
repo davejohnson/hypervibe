@@ -4,7 +4,8 @@
 delegated runtime slots in one existing, managed-CI environment. It never loads
 bulk dotenv input, generates application secrets, repairs bindings, publishes
 workflows, changes backups, advances the applied deployment contract, or deploys.
-An omitted scope retains full planning and its backup prerequisites.
+An omitted scope retains full deployment planning. Backup setup is a separate
+explicit scope and is not a release prerequisite.
 
 ```js
 hv_plan({
@@ -34,8 +35,9 @@ authorization boundary: a declared principal is attribution, not a login ACL.
 
 Secret installation and runtime rollout are separate results. Dispatch the
 already accepted workflow with `hv_ci_trigger`, inspect it with `hv_ci_status`,
-and verify health afterward. Existing deployment-contract and backup gates
-remain in force; a secret-only apply cannot make those prerequisites pass.
+and verify health afterward. Existing deployment-contract gates remain in
+force; a secret-only apply cannot make those prerequisites pass. Backup coverage
+and recovery evidence are reported independently from ordinary rollout admission.
 
 ## Provider review
 

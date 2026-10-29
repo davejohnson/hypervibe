@@ -40,7 +40,7 @@ describe('apply bootstrap database authority', () => {
   it.each([
     { label: 'a reviewed service action', actionType: 'create' as const, alwaysRunBootstrap: false },
     { label: 'an all-noop forced deploy', actionType: 'noop' as const, alwaysRunBootstrap: true },
-  ])('observes protection without authorizing database mutations during $label', async ({ actionType, alwaysRunBootstrap }) => {
+  ])('does not access or mutate the database during $label', async ({ actionType, alwaysRunBootstrap }) => {
     const project = ctx.repos.projects.create({
       name: `bootstrap-database-authority-${actionType}`,
       defaultPlatform: 'railway',
@@ -149,8 +149,8 @@ describe('apply bootstrap database authority', () => {
         },
       } as IHostingAdapter,
     });
-    // Default protection adds read-only database observation to deployment.
-    // The existing authority invariant remains: a service action cannot write it.
+    // A reviewed service action cannot acquire database mutation authority or
+    // require optional recovery observations as a deployment prerequisite.
     const databaseMutation = vi.fn(async () => { throw new Error('No database mutation is authorized.'); });
     const source = { provider: 'railway', primaryExternalId: 'rail-database',
       providerScope: { projectId: 'rail-project', environmentId: 'rail-environment' },
@@ -184,8 +184,8 @@ describe('apply bootstrap database authority', () => {
       result: { success: true },
     });
     expect(deploy).toHaveBeenCalledOnce();
-    expect(databaseAdapterSpy).toHaveBeenCalled();
-    expect(observeRecovery).toHaveBeenCalledTimes(2);
+    expect(databaseAdapterSpy).not.toHaveBeenCalled();
+    expect(observeRecovery).not.toHaveBeenCalled();
     expect(databaseMutation).not.toHaveBeenCalled();
   });
 });

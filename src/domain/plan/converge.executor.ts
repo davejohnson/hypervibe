@@ -17,6 +17,8 @@ import { resolvePlanActionAuthority } from './action-authority.js';
 import type { PlanAction } from './plan.types.js';
 import { isManagedCiCredentialAction } from './plan-stage.js';
 import { isScopedSecretAction } from './scoped-secrets.js';
+import { managedBackupTargetSchema } from '../services/managed-backup-target.service.js';
+import { managedBackupFilePaths } from '../services/backup-workflow.service.js';
 
 /**
  * Converge executor: applies a previously persisted plan (terraform
@@ -208,10 +210,19 @@ export function isBackupProvisioningAction(action: PlanAction): boolean {
 
 /** A reviewed repository proposal may publish the initial backup program before a point exists. */
 export function isBackupProgramPublicationAction(action: PlanAction): boolean {
+  const environment = action.metadata?.backupEnvironment;
+  if (typeof environment !== 'string' || !managedBackupTargetSchema.shape.environment.safeParse(environment).success) return false;
+  const files = action.metadata?.desiredFiles;
+  if (!Array.isArray(files)) return false;
+  if (files.some(file => !file || typeof file !== 'object' || typeof file.content !== 'string'
+    || typeof file.hash !== 'string' || file.hash !== createHash('sha256').update(file.content, 'utf8').digest('hex'))) return false;
+  const paths = files.map(file => file && typeof file === 'object' ? (file as { path?: unknown }).path : undefined);
+  const expected = managedBackupFilePaths(environment);
+  if (paths.length !== 0 && (paths.length !== 2 || new Set(paths).size !== 2 || paths.some(path => !expected.includes(String(path))))) return false;
   return action.type === 'update' && action.resource.kind === 'repo' && action.resource.provider === 'github'
     && action.metadata?.operation === 'githubInfrastructurePullRequest'
     && action.metadata?.backupWorkflowPublicationRequired === true && !action.metadata?.blockedReason
-    && action.verified && action.requiresConfirm === true && action.billable === true
+    && action.verified && action.requiresConfirm === true && (files.length === 0 || action.billable === true)
     && resolvePlanActionAuthority(action)?.capability === 'github.infrastructure.sync';
 }
 
@@ -356,8 +367,13 @@ export const planRunDocumentSchema = z.object({
     }
     return;
   }
+  if (document.scope !== 'backup-program-publication' && document.actions.some(action => action.metadata?.backupWorkflowPublicationRequired === true
+    || action.metadata?.backupEnvironment !== undefined)) {
+    ctx.addIssue({ code: 'custom', message: 'Backup program publication requires its isolated selected-environment stage.' });
+  }
   if (document.scope === 'backup-program-publication') {
-    if (document.actions.length !== 1 || document.actions.some(action => !isBackupProgramPublicationAction(action) || action.dependsOn?.length)
+    if (document.actions.length !== 1 || document.actions.some(action => !isBackupProgramPublicationAction(action)
+      || action.metadata?.backupEnvironment !== document.environmentName || action.dependsOn?.length)
       || document.observedFingerprint !== null || document.overrides || document.integrationFingerprints
       || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
       ctx.addIssue({ code: 'custom', message: 'Backup program publication contains only its confirmed reviewed repository proposal and no provider or rollout inputs.' });

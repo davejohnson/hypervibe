@@ -26,7 +26,6 @@ import { applyScheduleActivation } from '../schedule-activation.service.js';
 import { managedCiReleaseArtifactName, MANAGED_CI_RELEASE_EVIDENCE_FILE } from '../managed-ci-evidence.js';
 import type { PlanAction } from '../../plan/plan.types.js';
 import { resolvePlanActionAuthority } from '../../plan/action-authority.js';
-import { actionRequiresBackupReadiness } from '../../plan/plan-stage.js';
 
 const SHA = 'a'.repeat(40);
 const IMAGE = `us-central1-docker.pkg.dev/gcp-test/app/image@sha256:${'b'.repeat(64)}`;
@@ -116,7 +115,6 @@ describe('post-release schedule activation contract', () => {
   it('admits actual emitted release evidence, calls the narrow capability, and preserves the other environment', async () => {
     const state = setup();
     expect(resolvePlanActionAuthority(state.action)?.capability).toBe('hosting.schedule.activate');
-    expect(actionRequiresBackupReadiness(state.action)).toBe(true);
     const result = await state.apply(); expect(result).toMatchObject({ success: true, data: { applied: 1, skipped: 0, sourceWorkflowRunId: 101 } });
     expect(state.activateSchedule).toHaveBeenCalledWith(expect.objectContaining({ name: 'cron', buildConfig: expect.objectContaining({ cronSchedule: '0 * * * *', startCommand: 'npm run cron' }) }),
       expect.objectContaining({ id: state.environment.id }), { expectedImage: IMAGE, expectedJobUid: pending.jobUid, sourceCommitSha: SHA });
