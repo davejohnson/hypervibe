@@ -25,9 +25,10 @@ describe('GitHub manifest expiry through actual planning and SQLite', () => {
 
   // GitHub requires the manifest flow to complete within one hour. Native
   // responses are reconstructed; real planner, executor, encrypted custody,
-  // SQLite journal and clients run here without cloud requests. Callback HTTP
-  // has separate tests; stageCode represents its already validated transition.
+  // SQLite journal and clients run here without cloud requests. The issued form
+  // and accepted callback pass through the real private loopback HTTP listener.
   it.each([false, true])('blocks a new capture plan after staged-code expiry, restart=%s', async restart => {
+    const localFetch = fetch;
     const f = await localHoldingApplicationFixture();
     for (let step = 0; step < 2; step++) {
       const planned = await f.plan(); if ('error' in planned) throw new Error(planned.error);
@@ -38,6 +39,7 @@ describe('GitHub manifest expiry through actual planning and SQLite', () => {
     const containers = new Map<string, Record<string, unknown>>();
     const request: typeof fetch = async (input, init = {}) => {
       const url = new URL(String(input)), method = init.method ?? 'GET';
+      if (url.hostname === '127.0.0.1') return localFetch(input, init);
       if (url.hostname === 'api.github.com') {
         if (url.pathname === '/users/operator-test' && method === 'GET') return Response.json({ id: 1234, login: 'operator-test', type: 'User' });
         if (method === 'POST') conversions++;
@@ -81,10 +83,16 @@ describe('GitHub manifest expiry through actual planning and SQLite', () => {
     const record = readRecord();
     const custody = new OperatorCredentialCustody({ projectId: f.project.id, environmentId: f.environment.id,
       installationId: record.installationId, intentDigest: canonicalJsonSha256(record.intent), provider: 'github-app' });
-    const configured = custody.configureForm(custody.read()!, 'e'.repeat(64))!;
-    const issued = custody.issueForm(configured)!;
+    const handoff = record.attempts[0].externalUrl;
+    expect(handoff).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/begin\//);
+    const response = await fetch(handoff); expect(response.status).toBe(200);
+    const html = await response.text(), encoded = html.match(/name="manifest" value="([^"]+)"/)![1];
+    const manifest = JSON.parse(encoded.replaceAll('&quot;', '"').replaceAll('&#39;', "'").replaceAll('&amp;', '&').replaceAll('&lt;', '<').replaceAll('&gt;', '>'));
+    const state = html.match(/name="state" value="([^"]+)"/)![1], callback = new URL(manifest.redirect_url);
     const code = 'synthetic-private-expired-manifest-code';
-    expect(custody.stageCode(issued, issued.state.browser!.state, code)).toBe(true);
+    callback.search = new URLSearchParams({ state, code }).toString();
+    expect((await fetch(callback, { redirect: 'manual' })).status).toBe(303);
+    expect(custody.read()!.state.phase).toBe('code-staged');
     const validPlan = await f.plan(); if ('error' in validPlan) throw new Error(validPlan.error);
     expect(validPlan.actions.map(a => a.type)).toEqual(['noop', 'create', 'create', 'create', 'create']);
     const before = structuredClone(readRecord()), staged = custody.read()!;
