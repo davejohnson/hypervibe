@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
-import { CloudScopePreparationRepository, acceptedJournalLeaf, operatorApplicationJournalNames } from '../../adapters/db/repositories/cloud-scope-preparation.repository.js';
+import { CloudScopePreparationRepository, acceptedJournalLeaf, operatorApplicationJournalNames, CLOUD_SCOPE_PREPARATION_LINEAGE_LIMIT } from '../../adapters/db/repositories/cloud-scope-preparation.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { normalizeGitRemoteIdentity } from '../../lib/git-remote.js';
@@ -22,13 +22,45 @@ import { operatorOutputSelectionSchema } from '../ports/operator-output.port.js'
 import { secretContainerBindings } from '../ports/secret-destination-lifecycle.port.js';
 type Registration = CloudInstallationRecord<OperatorApplicationIntent>;
 const route = z.object({ intent: z.object({ applicationProvider: z.string() }).passthrough() }).passthrough();
-export const operatorApplicationUnavailable = () => new Error('Operator application registration requires its verified native origin, exact owner/source and retained operation. Preserve uncertain attempts; no replacement registration or credential replay is authorized.');
+export const operatorApplicationUnavailable = () => new Error('Operator application registration requires its verified native origin, exact owner/source and retained operation. Preserve uncertain attempts and inspect status for any supported, separately reviewed restart. No credential replay is authorized.');
 const active = (record: Registration) => record.attempts.length > 0 || Object.keys(record.completed).length > 0;
 function journal(project: Project, environment: Environment, name: string) {
   return new CloudScopePreparationRepository<Registration>({ projectId: project.id, environmentId: environment.id, environmentName: environment.name }, value => {
     const capability = providerRegistry.getOperatorApplication(route.parse(value).intent.applicationProvider);
     if (!capability) throw operatorApplicationUnavailable(); return capability.parseRecord(value);
-  }, { recordType: `operator-applications:${name}` });
+  }, { recordType: `operator-applications:${name}`,
+    allowHistoricalPredecessor: (parent, next) => restartEligible(parent, next.intent, environment) });
+}
+function localContext(intent: OperatorApplicationIntent, environment: Environment) {
+  return { projectId: intent.appId, environmentId: environment.id, installationId: intent.installationId, intentDigest: canonicalJsonSha256(intent) };
+}
+function restartEligible(parent: Registration, next: OperatorApplicationIntent, environment: Environment): boolean {
+  if (!isDeepStrictEqual(next.predecessor, { installationId: parent.installationId, planDigest: parent.plan.digest })
+    || parent.installationId === next.installationId || parent.intent.customerId !== next.customerId || parent.intent.appId !== next.appId
+    || parent.intent.environment !== next.environment || parent.intent.applicationProvider !== next.applicationProvider
+    || parent.intent.source.repository !== next.source.repository || !isDeepStrictEqual(parent.intent.nativeScope, next.nativeScope)
+    || !isDeepStrictEqual(parent.intent.outputs, next.outputs) || !parent.intent.selection?.originDigest
+    || parent.intent.selection.originDigest !== next.selection?.originDigest
+    || !parent.intent.selection.nativeScopeDigest || parent.intent.selection.nativeScopeDigest !== next.selection?.nativeScopeDigest) return false;
+  return providerRegistry.getOperatorApplication(parent.intent.applicationProvider)?.restart?.eligible(parent, localContext(parent.intent, environment)) === true;
+}
+function restartGuidance(record: Registration, environment: Environment, history: Registration[]) {
+  const capability = providerRegistry.getOperatorApplication(record.intent.applicationProvider)?.restart;
+  if (!capability?.eligible(record, localContext(record.intent, environment))
+    || historicalRegistrations(record, history).length + 1 >= CLOUD_SCOPE_PREPARATION_LINEAGE_LIMIT) return undefined;
+  return { restartFrom: { installationId: record.installationId, planDigest: record.plan.digest }, requiresNewApproval: true,
+    nativeState: 'unknown', cleanupVerified: false, description: capability.description };
+}
+function historicalRegistrations(record: Registration, history: Registration[]) {
+  const retained: Array<Record<string, unknown>> = []; let cursor = record;
+  while (cursor.intent.predecessor) {
+    const prior = history.find(item => item.installationId === cursor.intent.predecessor!.installationId);
+    if (!prior || prior.plan.digest !== cursor.intent.predecessor.planDigest || retained.length >= CLOUD_SCOPE_PREPARATION_LINEAGE_LIMIT) throw operatorApplicationUnavailable();
+    retained.push({ installationId: prior.installationId, planDigest: prior.plan.digest, provider: prior.intent.applicationProvider,
+      reviewedResources: prior.plan.review.resources ?? [], nativeState: 'unknown', cleanupVerified: false });
+    cursor = prior;
+  }
+  return retained;
 }
 function source(project: Project, result: SpecResult): OperatorApplicationIntent['source'] {
   const repository = normalizeGitRemoteIdentity(result.spec.gitRemoteUrl ?? project.gitRemoteUrl ?? undefined);
@@ -65,8 +97,16 @@ async function current(project: Project, environment: Environment, name: string,
     const result = freshProject && new SpecStore().getForInspection(freshProject);
     if (!freshProject || !fresh || fresh.projectId !== project.id || fresh.name !== intent.environment || !result) return false;
     const selected = await selection(freshProject, fresh, name, result);
-    return selected.declaration.provider === intent.applicationProvider && selected.source.repository === intent.source.repository
-      && isDeepStrictEqual(selected.proof, intent.selection) && isDeepStrictEqual(selected.nativeScope, intent.nativeScope);
+    if (selected.declaration.provider !== intent.applicationProvider || selected.source.repository !== intent.source.repository
+      || !isDeepStrictEqual(selected.proof, intent.selection) || !isDeepStrictEqual(selected.nativeScope, intent.nativeScope)
+      || !isDeepStrictEqual(selected.declaration.restartFrom, intent.predecessor)) return false;
+    const history = await journal(freshProject, fresh, name).findByScope(), leaf = acceptedJournalLeaf(history);
+    if (leaf && leaf.installationId !== intent.installationId
+      && (leaf.installationId !== intent.predecessor?.installationId || history.some(item => item.installationId === intent.installationId && active(item)))) return false;
+    if (!intent.predecessor) return !leaf || leaf.installationId === intent.installationId;
+    const parent = history.find(item => item.installationId === intent.predecessor!.installationId);
+    return !!parent && historicalRegistrations(parent, history).length + 1 < CLOUD_SCOPE_PREPARATION_LINEAGE_LIMIT
+      && restartEligible(parent, intent, fresh);
   } catch { return false; }
 }
 async function context(project: Project, environment: Environment, name: string, intent: OperatorApplicationIntent, readOnly: boolean,
@@ -113,6 +153,8 @@ export async function operatorApplicationWorkRequired(project: Project, environm
   const environment = new EnvironmentRepository().findByProjectAndName(project.id, environmentName); if (!environment) return !!declared.length;
   for (const name of new Set([...names(project, environment), ...declared])) {
     const record = acceptedJournalLeaf(await journal(project, environment, name).findByScope());
+    const restartFrom = spec?.environments[environmentName]?.operatorApplications?.[name]?.restartFrom;
+    if (restartFrom && !isDeepStrictEqual(record?.intent.predecessor, restartFrom)) return true;
     if (record ? record.status !== 'scope-ready' : declared.includes(name)) return true;
   }
   return false;
@@ -127,12 +169,26 @@ export async function planOperatorApplications(input: { project: Project; enviro
   for (const name of [...histories.keys()].sort((a, b) => priority(a) - priority(b) || a.localeCompare(b))) {
     const history = histories.get(name)!; let record = acceptedJournalLeaf(history);
     if (record) record = await reconcileCloudInstallationV1({ ...await context(input.project, environment, name, record.intent, true), installationId: record.installationId, planDigest: record.plan.digest });
-    if (record?.reason === 'authorization_expired') throw new CloudInstallationError('authorization_expired');
     let selected: Awaited<ReturnType<typeof selection>> | undefined;
     try { if (declaration[name]) selected = await selection(input.project, environment, name, input.specResult); }
     catch { if (!record || record.status === 'scope-ready') throw operatorApplicationUnavailable(); }
     const matches = selected && record?.intent.applicationProvider === selected.declaration.provider && record.intent.source.repository === selected.source.repository
       && isDeepStrictEqual(record.intent.selection, selected.proof);
+    const makeIntent = (predecessor?: OperatorApplicationIntent['predecessor']): OperatorApplicationIntent => {
+      if (!selected) throw operatorApplicationUnavailable();
+      return { schemaVersion: 1, installationId: randomUUID(), customerId: input.project.id, appId: input.project.id,
+        environment: input.environmentName, source: selected.source, provider: selected.declaration.provider, applicationProvider: selected.declaration.provider,
+        mode: 'connect', stage: 'scope-preparation', keys: [], execution: { kind: 'operator-application', authentication: 'local-operator' },
+        selection: selected.proof, nativeScope: selected.nativeScope, ...(selected.outputs ? { outputs: selected.outputs } : {}), ...(predecessor ? { predecessor } : {}) };
+    };
+    let successor: OperatorApplicationIntent | undefined;
+    if (selected?.declaration.restartFrom && !(matches && isDeepStrictEqual(record?.intent.predecessor, selected.declaration.restartFrom))) {
+      successor = makeIntent(selected.declaration.restartFrom);
+      if (!record || historicalRegistrations(record, history).length + 1 >= CLOUD_SCOPE_PREPARATION_LINEAGE_LIMIT
+        || !restartEligible(record, successor, environment)) throw operatorApplicationUnavailable();
+      record = undefined;
+    }
+    if (record?.reason === 'authorization_expired') throw new CloudInstallationError('authorization_expired');
     if (record && !matches) {
       if (record.status !== 'scope-ready') return projected(record, name, 'recover', environment);
       // A completed identity cannot be silently replaced or adopted on changed declarations.
@@ -143,13 +199,10 @@ export async function planOperatorApplications(input: { project: Project; enviro
     if (record?.status === 'scope-ready') continue;
     if (input.options && ['serviceFilter', 'envVarOverrides', 'envFile', 'includeEnvFile', 'secretRefs'].some(key => Object.hasOwn(input.options!, key))) throw operatorApplicationUnavailable();
     if (!record) {
-      record = history.find(candidate => !active(candidate) && isDeepStrictEqual(candidate.intent.source, selected!.source) && isDeepStrictEqual(candidate.intent.selection, selected!.proof));
+      record = history.find(candidate => !active(candidate) && isDeepStrictEqual(candidate.intent.source, selected!.source) && isDeepStrictEqual(candidate.intent.selection, selected!.proof)
+        && isDeepStrictEqual(candidate.intent.predecessor, successor?.predecessor));
       if (!record) {
-        const intent: OperatorApplicationIntent = { schemaVersion: 1, installationId: randomUUID(), customerId: input.project.id, appId: input.project.id,
-          environment: input.environmentName, source: selected.source, provider: selected.declaration.provider, applicationProvider: selected.declaration.provider,
-          mode: 'connect', stage: 'scope-preparation', keys: [], execution: { kind: 'operator-application', authentication: 'local-operator' },
-          selection: selected.proof, nativeScope: selected.nativeScope };
-        if (selected.outputs) intent.outputs = selected.outputs;
+        const intent = successor ?? makeIntent();
         record = await planCloudInstallationV1({ ...await context(input.project, environment, name, intent, false), intent });
       }
     }
@@ -196,9 +249,11 @@ export async function applyOperatorApplications(input: { project: Project; envir
     const browserHandoff = target.driver.operatorApplication?.pendingBrowser && await current(input.project, input.environment, proof.name, updated.intent)
       ? await target.driver.operatorApplication.pendingBrowser(updated) : undefined;
     const success = updated.status === 'scope-ready' || updated.status === 'pending' && !updated.reason && !!updated.completed[input.action.id];
+    const historical = updated.intent.predecessor ? historicalRegistrations(updated, await store.findByScope()) : [];
     return { success, ...(success ? {} : { status: updated.status === 'pending' ? 'pending' as const : 'blocked' as const }),
       message: success ? 'Verified the exact operator registration action; customer access and deployment remain separate.' : operatorApplicationUnavailable().message,
       data: { installationId: updated.installationId, status: updated.status, ...(updated.reason ? { reason: updated.reason } : {}),
+        ...(historical.length ? { historicalRegistrations: historical } : {}),
         ...(browserHandoff ? { browserHandoff } : {}),
         ...(updated.status === 'scope-ready' ? { receipts: providerRegistry.getOperatorApplication(proof.provider)!.receipts(updated) } : {}) } };
   } catch { return { success: false, status: 'blocked', message: operatorApplicationUnavailable().message }; }
@@ -217,7 +272,10 @@ export async function inspectOperatorApplications(project: Project, environmentN
     const verified = record.status === 'scope-ready' && (!declared.includes(name) || await current(project, environment, name, record.intent));
     const browserHandoff = target?.driver.operatorApplication?.pendingBrowser && await current(project, environment, name, record.intent)
       ? await target.driver.operatorApplication.pendingBrowser(record) : undefined;
+    const restart = restartGuidance(record, environment, history);
     registrations.push({ name, installationId: record.installationId, status: record.status, verified,
+      ...(record.intent.predecessor ? { historicalRegistrations: historicalRegistrations(record, history) } : {}),
+      ...(restart ? { restart } : {}),
       ...(browserHandoff ? { browserHandoff } : {}),
       ...(record.reason ? { reason: record.reason } : {}), ...(verified ? { receipts: providerRegistry.getOperatorApplication(record.intent.applicationProvider)!.receipts(record) } : {}) });
   }

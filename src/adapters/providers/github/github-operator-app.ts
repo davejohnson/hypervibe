@@ -162,6 +162,7 @@ export function createGithubOperatorApplicationDriver(options: { fetch?: typeof 
       return { actions: actions(context.intent), review: { resources: [{ kind: 'GitHub App', name: n.appName, scope: `${n.ownerType}:${n.ownerLogin}:${n.ownerId}` }],
         permissions: [{ principal: 'owner-approved GitHub App installation', scope: 'separately selected repositories', actions: Object.entries(permissions).map(([key, value]) => `${key}:${value}`), purpose: 'installation-verification' }], costs: [],
         warnings: [`Homepage and callback origin: ${n.origin}. The public App is installable by other accounts; repository installation remains separate.`,
+          ...(context.intent.predecessor ? [`Create a new App with the reviewed new name. Previous registration ${context.intent.predecessor.installationId} remains native-state unknown; cleanup is unverified. Its history and expired private code are preserved, not retried or cancelled.`] : []),
           'Owner approval in GitHub establishes App creation authority; public account lookup alone does not.',
           'GitHub may let the owner edit the App name. Preserve the exact reviewed name; changed ownership, permissions or identity cannot be adopted.',
           'Private key, OAuth client secret and webhook secret are transiently handled and encrypted locally, then delivered to the reviewed native secret targets.',
@@ -198,6 +199,22 @@ export function createGithubOperatorApplicationDriver(options: { fetch?: typeof 
 }
 export function createGithubOperatorApplicationCapability(): OperatorApplicationCapability {
   return { schemaVersion: 1, privateOutputRoles: ['private-key', 'client-secret', 'webhook-secret'],
+    restart: {
+      description: 'If the user requests a new registration, set this exact restartFrom on the same operatorApplications declaration using hv_spec, then run hv_plan and obtain approval for its new App name and actions. The previous registration remains native-state unknown with unverified cleanup; this does not cancel it or reuse its expired code.',
+      eligible(record, local) {
+        try {
+          const n = settings(record.intent);
+          if (local.projectId !== record.intent.appId || local.installationId !== record.installationId
+            || local.intentDigest !== canonicalJsonSha256(record.intent) || record.status === 'scope-ready'
+            || record.attempts.length !== 1 || record.attempts[0].actionId !== n.browserAction
+            || Object.keys(record.completed).some(id => id !== n.browserAction)) return false;
+          const saved = new OperatorCredentialCustody({ ...local, provider: 'github-app' }).read();
+          return !!saved && ['awaiting-browser', 'code-staged'].includes(saved.state.phase) && browserExpired(saved)
+            && saved.state.browser?.attemptId === record.attempts[0].id
+            && !saved.state.credentials && !saved.state.identity && !saved.state.deliveries;
+        } catch { return false; }
+      },
+    },
     privateVerificationRoles: { 'private-key': 'github-app-signing-key' },
     privateOutputEncodings: { 'private-key': 'base64' },
     async parseDeclaration({ name, declaration, origin }) {

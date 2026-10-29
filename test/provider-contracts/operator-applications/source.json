@@ -179,6 +179,25 @@
       ],
       "contract": "App names are globally unique and at most 34 characters. Manifest conversion returns 201 and a complete credential bundle. Authenticated App and webhook reads use App JWTs. The native App response does not expose OAuth callback URLs.",
       "limit": "Real serialized transport and RSA signatures with reconstructed responses; loopback manifest acceptance and actual user installation remain live gates."
+    },
+    {
+      "provider": "github-app",
+      "reviewedAt": "2026-10-28",
+      "documentation": [
+        "https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest",
+        "https://docs.github.com/en/rest/apps/apps#create-a-github-app-from-a-manifest",
+        "https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app",
+        "https://docs.github.com/en/apps/maintaining-github-apps/modifying-a-github-app-registration",
+        "https://docs.github.com/en/graphql/overview/public-schema"
+      ],
+      "contract": "Manifest completion has a one-hour bound; conversion consumes the private code. Names are globally unique but editable. The documented API exposes no pending-manifest inventory, renewal or cancellation; intermediate native existence and automatic expiry cleanup are unspecified.",
+      "coverage": "Explicit user-requested new registration preserves the expired unconsumed predecessor as native-state unknown. Real PlanService/SQLite, private HTTP callback and reconstructed native conversion/output transports exercise predecessor CAS and unchanged scoped authority.",
+      "limits": [
+        "Owner-view not-listed observations and unauthenticated slug404 are not provider-confirmed absence.",
+        "No restart after any conversion or output attempt, no code replay and no old registration deletion.",
+        "Microsoft Entra, Google OAuth, Google reCAPTCHA and SendGrid do not expose this restart capability.",
+        "Offline tests do not establish native registration or cleanup."
+      ]
     }
   ],
   "supportingSources": [

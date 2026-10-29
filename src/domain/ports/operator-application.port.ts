@@ -10,6 +10,7 @@ export const operatorApplicationDeclarationSchema = z.object({
   originService: name, runtimeService: name,
   nativeScope: z.record(z.string().min(1).max(100), z.string().min(1).max(2048)),
   outputs: operatorOutputRolesSchema.optional(),
+  restartFrom: z.object({ installationId: z.string().guid(), planDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
 }).strict();
 export type OperatorApplicationDeclaration = z.infer<typeof operatorApplicationDeclarationSchema>;
 export interface OperatorApplicationLocalContext {
@@ -22,6 +23,11 @@ export interface OperatorApplicationCapability {
   privateOutputRoles?: readonly string[];
   privateVerificationRoles?: Readonly<Record<string, 'github-app-signing-key'>>;
   privateOutputEncodings?: Readonly<Record<string, 'base64'>>;
+  /** Explicit fresh registration only; never infers native absence or erases its predecessor. */
+  restart?: {
+    description: string;
+    eligible(record: CloudInstallationRecord<OperatorApplicationIntent>, context: OperatorApplicationLocalContext): boolean;
+  };
   parseDeclaration(input: { name: string; declaration: OperatorApplicationDeclaration; origin: string;
     runtimeIdentity: CloudDeploymentRuntimeIdentityV1['principal'] }): Record<string, string> | Promise<Record<string, string>>;
   parseRecord(value: unknown): CloudInstallationRecord<OperatorApplicationIntent>;

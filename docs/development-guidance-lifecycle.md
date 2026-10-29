@@ -176,3 +176,18 @@ Distinguish failed execution from work that was never attempted. When confirmati
 ## Connect Cloud project allocation exception
 
 Owner-approved exception (2026-10-25): a new, separately reviewed GCP project allocation may retain an unknown availability observation and authorize one native create-only request through the versioned `create-exclusive-v1` contract. Never interpret permission denial or an empty search as absence. Existing plans remain blocked; known existing targets conflict; no update, adoption, automatic rename or repeated create is authorized. Persist the attempt before sending, and require the terminal native creation operation plus a fresh matching project lifetime and attempt proof before dependent setup. A lost acknowledgment without that evidence remains unresolved. This exception does not authorize cloud execution, billing, publication or deployment without their exact approvals, and does not apply to Azure upserts or other resource operations.
+
+## Explicit operator registration restart
+
+For the requested partial-installation/restart lifecycle, a registered provider may
+admit an explicitly selected predecessor into a separately reviewed new registration.
+The initial capability is limited to an expired GitHub browser handoff with no
+conversion, credential or delivery attempt. Bind the predecessor installation ID
+and plan digest, preserve its journal and encrypted custody, and require unchanged
+customer, app/environment, repository, native owner, verified origin/runtime and
+output destinations. A fresh App name requires new exact approval. The old native
+registration remains unknown with unverified cleanup; this does not establish
+absence, cancel it, or authorize a retry. Retain that limitation after successor
+readiness. Existing CAS lineage must reject concurrent siblings and prevent stale
+plans or a reverted declaration from reactivating an ancestor. Other providers and
+uncertain conversions remain blocked until they have their own reviewed capability.

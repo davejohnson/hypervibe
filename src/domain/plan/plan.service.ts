@@ -1888,7 +1888,7 @@ export class PlanService {
       }
     } catch (error) {
       return { error: error instanceof CloudInstallationError && error.code === 'authorization_expired'
-        ? 'Operator application authorization_expired. Preserve the registration and request a fresh reviewed authorization before continuing.'
+        ? 'Operator application authorization_expired. Preserve the registration and inspect hv_status for a supported restart selector. A new registration requires its own reviewed approval; never retry the expired code.'
         : operatorApplicationUnavailable().message };
     }
     const providerValidation = observationOrCleanup ? undefined : firstProviderSpecValidationFailure(specResult.spec);

@@ -1320,6 +1320,12 @@
       "destination": "docs/development-guidance-product.md#dg-081",
       "destinationSha256": "2d56d1d0fd6ad12862b7fc3611cccbbd7ef4ebe615c4184a47faf6a50835c8b9",
       "reason": "User-requested autonomous setup: an explicit bounded read-only continuation may recover pending identities without renewed approval. Dependent mutations, unknown-write replay, changed consequential actions and blocked/failed results retain their existing boundaries."
+    },
+    {
+      "sourcePath": "docs/operator-applications.md",
+      "destination": "docs/development-guidance-lifecycle.md#explicit-operator-registration-restart",
+      "destinationSha256": "af289c9cbe752a105a072b546a8a3e27620169e924a02212acafc840cb8c1b0d",
+      "reason": "Requested partial-installation/restart support: explicitly reviewed new GitHub registration after expired browser-only state; preserve unknown predecessor effects, exact source/owner/destination scope, custody, lineage and fresh action approval. No native absence, cancellation or replay inference."
     }
   ]
 }

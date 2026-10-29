@@ -66,6 +66,54 @@ has succeeded.
 
 ## Authority and private handoff
 
+An expired GitHub browser-only attempt can be followed by an explicitly reviewed
+new registration. `hv_status` supplies a nonsecret `restart` result only when the
+registered capability verifies expiry and the absence of local conversion,
+credential and delivery attempts. After the user requests a restart, keep the
+same declaration and set its `restartFrom` to the returned `installationId` and
+`planDigest` through `hv_spec`; run `hv_plan` and obtain approval for the new App
+name and exact actions. This is a new registration, not renewal of the old code.
+
+The predecessor journal, acknowledgments, code expiry and encrypted custody remain
+intact. Its native state remains unknown and cleanup remains unverified, including
+in successful successor apply/status results. An owner's observation that an App
+is not listed is separate evidence, not provider-confirmed absence. GitHub does
+not document cancellation, renewal, pending-manifest inventory or automatic
+deletion after expiry. Global name uniqueness cannot resolve this uncertainty:
+GitHub permits name changes in the browser and after registration. The fresh
+review therefore discloses the possibility of an unresolved earlier registration.
+Only one successor can acquire execution authority; removing the selector cannot
+reactivate a historical plan or form.
+
+| Provider | Explicit restart capability |
+| --- | --- |
+| GitHub App | Expired browser-only attempt, with no conversion, credential or delivery attempt; unchanged owner/source/origin/output scope. |
+| Microsoft Entra | Not offered; retain exact native application/FIC recovery. |
+| Google OAuth | Not offered; retain selected owner-import recovery. |
+| Google reCAPTCHA | Not offered; retain acknowledged native key and private capture/delivery recovery. |
+| SendGrid | Not offered; retain one-time key capture and exact-ID cleanup/recovery. |
+
+The challenged assumption was that preserving an expired attempt requires
+permanently blocking a separately reviewed registration. The counterexample is
+an expired staged manifest code that was never converted: keeping that code
+unusable is compatible with explicitly approving a new App while retaining the
+unknown earlier effects. The first actual PlanService/SQLite regressions failed
+because the declaration rejected `restartFrom` and status supplied no contextual
+selector. Tests use real private HTTP callbacks and reconstructed provider
+transport, preserve original custody, and cover scope drift, uncertain conversion,
+concurrent successors, source reversal, successful immutable delivery and retained
+cleanup warnings. They run under ordinary Vitest discovery; they do not certify
+native App creation, customer onboarding or cleanup. The committed acceptance
+workflow and desired required check both invoke ordinary `npm test`; live branch
+protection has not been independently verified by this change.
+
+The normal-gate check passed 174 tests across 18 affected provider/lifecycle suites
+and TypeScript checking. Independent review also identified the existing
+twenty-generation journal bound: the new regression first admitted an unsafe
+twenty-first proposal, then passed with planning/current-authority checks at the
+shared limit. All twenty retained records remain readable; no native operation is
+used to test this limit.
+
 Entra registration requests a transient Graph token for the selected tenant using
 the supported local credential reader. ARM sign-in is not sufficient. The current
 Graph contracts distinguish application creation from FIC management. Verify

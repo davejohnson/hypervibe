@@ -16,6 +16,7 @@ interface Scope { projectId: string; environmentId: string; environmentName: str
 interface Row { id: string; plan: string }
 const TYPE = 'cloud-scope-preparation';
 const HISTORY_LIMIT = 100;
+export const CLOUD_SCOPE_PREPARATION_LINEAGE_LIMIT = 20;
 const invalid = () => new Error('Cloud scope preparation journal is invalid; preserve the retained state.');
 const historyFull = () => new Error('Cloud scope preparation history exceeds the safe inspection limit; preserve it for explicit review.');
 
@@ -43,7 +44,7 @@ export function acceptedJournalLeaf<T extends JournalRecord>(history: T[]): T | 
     if (children.length !== 1 || visited.has(children[0].installationId) || children[0].intent.predecessor!.planDigest !== current.plan.digest) throw invalid();
     current = children[0]; visited.add(current.installationId);
   }
-  if (visited.size !== accepted.length || visited.size > 20) throw invalid(); return current;
+  if (visited.size !== accepted.length || visited.size > CLOUD_SCOPE_PREPARATION_LINEAGE_LIMIT) throw invalid(); return current;
 }
 
 /** Discover durable publication namespaces independently of the mutable spec. */
@@ -144,7 +145,7 @@ export class CloudScopePreparationRepository<T extends JournalRecord> {
         const found = new Set<string>(); let cursor = record;
         while (cursor.intent.predecessor) {
           const predecessor = cursor.intent.predecessor;
-          if (found.has(predecessor.installationId) || found.size >= 20) throw invalid();
+          if (found.has(predecessor.installationId) || found.size >= CLOUD_SCOPE_PREPARATION_LINEAGE_LIMIT) throw invalid();
           const parent = history.find(item => item.installationId === predecessor.installationId);
           if (!parent || parent.plan.digest !== predecessor.planDigest) throw invalid();
           found.add(parent.installationId); cursor = parent;

@@ -5,12 +5,18 @@ import { planCloudInstallationV1 } from '../../src/domain/services/cloud-install
 import { createAwsCloudInstallationDriver } from '../../src/adapters/providers/aws/aws-cloud-installation.js';
 import { createAzureCloudInstallationDriver } from '../../src/adapters/providers/azure/azure-cloud-installation.js';
 import { createGcpCloudInstallationDriver } from '../../src/adapters/providers/gcp/gcp-cloud-installation.js';
+import '../../src/application/providers.js';
+import { providerRegistry } from '../../src/domain/registry/provider.registry.js';
 
 describe('operator registration provider review boundary', () => {
   it('requires official-source review for every executable registration provider without expanding hosted clouds', () => {
     const sources = JSON.parse(readFileSync(new URL('./operator-applications/source.json', import.meta.url), 'utf8')).sources;
     expect([...new Set(sources.map((row: { provider: string }) => row.provider))].sort()).toEqual([...OPERATOR_APPLICATION_PROVIDERS].sort());
     expect(CLOUD_INSTALLATION_PROVIDERS).toEqual(['aws', 'azure', 'gcp']);
+  });
+  it('limits separately reviewed registration restarts to the named provider capability', () => {
+    expect(Object.fromEntries(OPERATOR_APPLICATION_PROVIDERS.map(provider => [provider, !!providerRegistry.getOperatorApplication(provider)?.restart])))
+      .toEqual({ 'github-app': true, 'microsoft-entra': false, 'google-oauth': false, 'google-recaptcha': false, sendgrid: false });
   });
   for (const provider of OPERATOR_APPLICATION_PROVIDERS) it.each([createAwsCloudInstallationDriver, createAzureCloudInstallationDriver, createGcpCloudInstallationDriver])(
     `rejects ${provider} through every real hosted cloud factory before any authority or journal access`, async factory => {
