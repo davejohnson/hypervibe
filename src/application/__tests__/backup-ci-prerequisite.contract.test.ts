@@ -35,14 +35,15 @@ describe('backup activation through CI credentials and canonical repository publ
     SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true });
   });
 
-  async function fixture(objectOnlyGcs = false) {
+  async function fixture(objectOnlyGcs = false, canonicalCi = false) {
     const storageProvider = objectOnlyGcs ? 'gcs' : 'railway';
     const storageRegion = objectOnlyGcs ? 'us-central1' : 'iad';
     const project = ctx.repos.projects.create({ name: 'backup-ci', defaultPlatform: 'railway',
       gitRemoteUrl: 'https://github.com/acme/backup-ci' });
     const stored = new SpecStore().replace(project, { version: 1, project: project.name,
       runtime: { kind: 'node', version: '24', installCommand: 'npm ci --omit=dev' },
-      github: { enabled: true, repository: 'acme/backup-ci', canonicalEnvironment: 'staging',
+      ...(canonicalCi ? { devops: { code: { provider: 'github', scope: 'acme/backup-ci' }, ci: { provider: 'github-actions' }, canonicalEnvironment: 'staging' } } : {}),
+      github: canonicalCi ? undefined : { enabled: true, repository: 'acme/backup-ci', canonicalEnvironment: 'staging',
         collaboration: { issues: { enabled: false, templates: false }, pullRequests: { requirePr: false } },
         dependencies: { alerts: false, securityUpdates: false }, actions: {},
         security: { codeScanning: false, secretScanning: false, pushProtection: false } },
@@ -135,9 +136,9 @@ describe('backup activation through CI credentials and canonical repository publ
       setUnknown: (value: boolean) => { secretsUnknown = value; } };
   }
 
-  it('synchronizes the exact GCS backup credential before publishing an object-only recovery program on another host', async () => {
-    const f = await fixture(true);
-    expect(f.refreshWorkflow().requiredSecrets).toContain('GCP_SERVICE_ACCOUNT_JSON');
+  it.each([false, true])('synchronizes the exact GCS backup credential only in backup review (canonical CI=%s)', async canonicalCi => {
+    const f = await fixture(true, canonicalCi);
+    expect(f.refreshWorkflow().requiredSecrets).not.toContain('GCP_SERVICE_ACCOUNT_JSON');
     const planned = await f.plan();
     if ('error' in planned) throw new Error(planned.error);
     expect(planned.scope).toBe('managed-ci-credentials');
@@ -148,11 +149,50 @@ describe('backup activation through CI credentials and canonical repository publ
       .toEqual(['GCP_SERVICE_ACCOUNT_JSON', 'IMAGE_REGISTRY_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'RAILWAY_API_TOKEN']);
     expect(f.writes.every(write => write.pathname.includes('/environments/production/secrets/'))).toBe(true);
     expect(JSON.stringify(result)).not.toContain('synthetic-private-key');
-    const publication = await f.plan('repository');
+    const publication = await f.plan();
     if ('error' in publication) throw new Error(publication.error);
     const action = publication.actions.find(action => action.metadata?.backupWorkflowPublicationRequired === true)!;
     expect(action.metadata?.blockedReason).toBeUndefined();
     expect(f.unexpected).toEqual([]);
+  });
+
+  it('preserves backup credential acknowledgment across an ordinary deployment credential refresh without copying it again', async () => {
+    const f = await fixture(true);
+    const planned = await f.plan();
+    if ('error' in planned) throw new Error(planned.error);
+    expect(await executePlanApply(ctx, { project: f.project, spec: f.stored.spec, specRevision: f.stored.revision,
+      planId: planned.planRunId, confirmActions: [] })).toMatchObject({ kind: 'executed', result: { success: true } });
+    const current = ctx.repos.environments.findById(f.environment.id)!;
+    const workflowPath = f.refreshWorkflow().path;
+    const ci = current.platformBindings.ci as any;
+    const backupHash = ci.deployBranch[workflowPath].syncedEnvironmentSecretHashes.GCP_SERVICE_ACCOUNT_JSON;
+    expect(backupHash).toMatch(/^[a-f0-9]{64}$/);
+    ci.deployBranch[workflowPath].syncedEnvironmentSecretHashes.RAILWAY_API_TOKEN = '0'.repeat(64);
+    ctx.repos.environments.updatePlatformBindings(current.id, { ci });
+    f.writes.length = 0;
+    const { planGitHubActionsDeploy, applyGitHubActionsDeploy } = await import('../../domain/services/ci-deploy.service.js');
+    const inputs = { project: f.project, environmentName: 'production', environmentSpec: f.stored.spec.environments.production };
+    const deployment = await planGitHubActionsDeploy({ ...inputs, environment: ctx.repos.environments.findById(current.id) });
+    expect(deployment.action?.metadata).not.toHaveProperty('includeBackupCredentials');
+    expect(await applyGitHubActionsDeploy({ ...inputs, action: deployment.action! })).toMatchObject({ success: true });
+    expect(f.writes.map(write => write.pathname.split('/').at(-1)).sort())
+      .toEqual(['IMAGE_REGISTRY_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'RAILWAY_API_TOKEN']);
+    const after = ctx.repos.environments.findById(current.id)!.platformBindings.ci as any;
+    expect(after.deployBranch[workflowPath].syncedEnvironmentSecretHashes.GCP_SERVICE_ACCOUNT_JSON).toBe(backupHash);
+  });
+
+  it.each(['removed', 'false'] as const)('rejects %s backup credential authority before any environment secret write', async change => {
+    const f = await fixture(true);
+    const planned = await f.plan();
+    if ('error' in planned) throw new Error(planned.error);
+    const action = structuredClone(planned.actions[0]);
+    if (change === 'removed') delete action.metadata!.includeBackupCredentials;
+    else action.metadata!.includeBackupCredentials = false;
+    const { applyGitHubActionsDeploy } = await import('../../domain/services/ci-deploy.service.js');
+    const applied = await applyGitHubActionsDeploy({ project: f.project, environmentName: 'production',
+      environmentSpec: f.stored.spec.environments.production, action });
+    expect(applied).toMatchObject({ success: false, status: 'blocked' });
+    expect(f.writes).toEqual([]);
   });
 
   it('sets only environment CI credentials before publishing the exact production backup contract', async () => {

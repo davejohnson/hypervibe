@@ -49,6 +49,9 @@ devOpsProviderRegistry.registerCiProvider({
     async planDeploy(params) {
       return planGitHubActionsDeploy(params);
     },
+    async planBackupCredentials(params) {
+      return planGitHubActionsDeploy({ ...params, includeBackupCredentials: true });
+    },
     async applyDeploy(params) {
       return applyGitHubActionsDeploy(params);
     },

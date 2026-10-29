@@ -543,6 +543,7 @@ async function resolveManagedWorkflowSecrets(params: {
   environmentSpec: EnvironmentSpec;
   workflow: BranchDeployWorkflow;
   repository: string;
+  includeBackupCredentials?: boolean;
 }): Promise<{
   requiredProviderSecrets: string[];
   requiredDatabaseSecrets: string[];
@@ -553,19 +554,21 @@ async function resolveManagedWorkflowSecrets(params: {
   providerError?: string;
   appStoreError?: string;
 }> {
-  const backupProviders = managedBackupProvidersForSpec(params.environmentSpec);
+  const backupProviders = params.includeBackupCredentials ? managedBackupProvidersForSpec(params.environmentSpec) : [];
+  const requiredSecrets = [...new Set([...params.workflow.requiredSecrets,
+    ...backupProviders.flatMap(provider => Object.keys(managedBackupCredentialKeys(provider) ?? {}))])];
   const requiredProviderSecrets = [...new Set([...requiredProviderSecretNamesForGitHubActions(
     params.environmentSpec.hosting.provider
   ), ...backupProviders.flatMap(provider => Object.keys(managedBackupCredentialKeys(provider) ?? {}))])]
-    .filter((name) => params.workflow.requiredSecrets.includes(name));
-  const requiredDatabaseSecrets = params.workflow.requiredSecrets.includes('DATABASE_URL')
+    .filter((name) => requiredSecrets.includes(name));
+  const requiredDatabaseSecrets = requiredSecrets.includes('DATABASE_URL')
     ? ['DATABASE_URL']
     : [];
   let availableSecrets: ProviderSecret[] = [];
   let providerError: string | undefined;
   try {
     availableSecrets = providerSecretsForGitHubActions(params.environmentSpec.hosting.provider,
-      { githubRepo: params.repository, backupProviders }).filter(secret => params.workflow.requiredSecrets.includes(secret.name));
+      { githubRepo: params.repository, backupProviders }).filter(secret => requiredSecrets.includes(secret.name));
   } catch {
     providerError = 'The selected deployment and backup connections cannot share their required GitHub environment secret names. Reconcile the exact scoped connections before synchronizing credentials.';
   }
@@ -579,7 +582,7 @@ async function resolveManagedWorkflowSecrets(params: {
   // An explicit accepted role owns these exact destinations. Future CI sync
   // must not restore an older connection value or pick up a local file edit.
   for (const tracked of acceptedCredentialCiInputs(params.project, params.repository, params.environmentName)) {
-    if (!params.workflow.requiredSecrets.includes(tracked.name)) continue;
+    if (!requiredSecrets.includes(tracked.name)) continue;
     availableSecrets = availableSecrets.filter(secret => secret.name !== tracked.name);
     if (tracked.value !== undefined) availableSecrets.push({ name: tracked.name, value: tracked.value });
     else providerError = 'A declared credential role has not completed reviewed synchronization. Recover its credential plan before CI synchronization.';
@@ -617,6 +620,7 @@ function buildAction(params: {
   staleEnvironmentSecrets?: string[];
   retiredPaths?: string[];
   workflowPublicationRequired?: boolean;
+  includeBackupCredentials?: boolean;
   iosBuildCredentialsSource?: IosBuildCredentialsSource;
   dependsOn?: string[];
 }): PlanAction {
@@ -631,6 +635,7 @@ function buildAction(params: {
     ...(params.dependsOn?.length ? { dependsOn: params.dependsOn } : {}),
     metadata: {
       operation: OPERATION,
+      ...(params.includeBackupCredentials ? { includeBackupCredentials: true } : {}),
       ...(params.iosBuildCredentialsSource ? { iosBuildCredentialsSource: params.iosBuildCredentialsSource } : {}),
       ...(params.workflowPublicationRequired ? { workflowPublicationRequired: true } : {}),
       repository: params.repo,
@@ -744,6 +749,7 @@ export async function planGitHubActionsDeploy(params: {
   environmentSpec: EnvironmentSpec;
   environment: Environment | null;
   dependsOn?: string[];
+  includeBackupCredentials?: boolean;
 }): Promise<{ action?: PlanAction; warnings: string[]; error?: string }> {
   const { project, environmentName, environmentSpec } = params;
   const warnings: string[] = [];
@@ -872,6 +878,7 @@ export async function planGitHubActionsDeploy(params: {
     environmentSpec,
     workflow,
     repository: repo,
+    includeBackupCredentials: params.includeBackupCredentials,
   });
   if (missingProviderSecrets.length > 0) {
     warnings.push(
@@ -947,6 +954,7 @@ export async function planGitHubActionsDeploy(params: {
       staleProviderSecrets,
       missingDatabaseSecrets,
       staleDatabaseSecrets,
+      includeBackupCredentials: params.includeBackupCredentials,
       desiredEnvironmentSecretHashes: availableSecretHashes,
       reviewedEnvironmentSecrets: environmentSecretsObserved
         ? presentManagedSecretNames(
@@ -973,6 +981,8 @@ export async function applyGitHubActionsDeploy(params: {
     return { success: true, message: 'No GitHub Actions workflow or secret changes were requested.', data: { skipped: true, reason: 'noop' } };
   }
   const { project, environmentName, environmentSpec } = params;
+  if (params.action.metadata?.includeBackupCredentials === true && environmentSpec.backups?.mode !== 'daily')
+    return { success: false, status: 'blocked', message: 'Explicit daily backup intent changed; re-plan before copying backup credentials.' };
   const authority = params.authority ?? (
     params.action.metadata?.workflowPublicationRequired === true
       ? 'publication-only'
@@ -1124,6 +1134,7 @@ export async function applyGitHubActionsDeploy(params: {
     environmentSpec,
     workflow,
     repository: repo,
+    includeBackupCredentials: params.action.metadata?.includeBackupCredentials === true,
   });
 
   const reviewedEnvironmentSecrets = reviewedSecretNames(params.action.metadata?.reviewedEnvironmentSecrets);
@@ -1211,8 +1222,8 @@ export async function applyGitHubActionsDeploy(params: {
         contentHash: observation.liveContentHash!,
         inputHash,
         managedPaths: workflowFiles(workflow).map((file) => file.path),
-        syncedEnvironmentSecrets: syncedSecretNames,
-        syncedEnvironmentSecretHashes: secretHashes(syncedSecrets),
+        syncedEnvironmentSecrets: [...new Set([...(contract.binding?.syncedEnvironmentSecrets ?? []), ...syncedSecretNames])],
+        syncedEnvironmentSecretHashes: { ...contract.binding?.syncedEnvironmentSecretHashes, ...secretHashes(syncedSecrets) },
         updatedAt: new Date().toISOString(),
       },
     },

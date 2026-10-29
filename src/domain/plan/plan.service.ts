@@ -3065,6 +3065,7 @@ export class PlanService {
         environmentSpec,
         environment,
         dependsOn: possibleCiSecretPrerequisites.map((action) => action.id),
+        ...(scope === 'backups' ? { includeBackupCredentials: true } : {}),
       });
     if (ciDeploy.error) return { error: ciDeploy.error };
     const ciWorkflowPublicationActions = ciDeploy.actions.filter((action) =>

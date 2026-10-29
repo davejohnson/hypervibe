@@ -32,6 +32,7 @@ export async function planManagedCiDeploy(params: {
   environmentSpec: EnvironmentSpec;
   environment: Environment | null;
   dependsOn?: string[];
+  includeBackupCredentials?: boolean;
 }): Promise<{ actions: PlanAction[]; warnings: string[]; error?: string }> {
   const selection = resolveDevOpsSelection(params.spec);
   if (!selection?.ci) {
@@ -66,7 +67,10 @@ export async function planManagedCiDeploy(params: {
       error: `CI provider "${selection.ci.provider}" is not compatible with code host "${selection.code.provider}"`,
     };
   }
-  const result = await registration.lifecycle.planDeploy(params);
+  const backupPlanner = params.includeBackupCredentials ? registration.lifecycle.planBackupCredentials : undefined;
+  const result = await (backupPlanner ?? registration.lifecycle.planDeploy)(params);
+  if (params.includeBackupCredentials && !backupPlanner) result.warnings.push(
+    'The selected CI provider has no separate backup credential preparation capability. Application credential preparation does not establish backup access.');
   return {
     actions: actions(result),
     warnings: result.warnings,
