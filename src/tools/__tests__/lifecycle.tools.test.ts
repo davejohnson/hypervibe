@@ -2604,16 +2604,15 @@ describe('hv_inspect / hv_import', () => {
       action.type === 'create' || action.type === 'destroy'
     )).toEqual([]);
     expect(status.data.drift).toEqual([]);
-    // Import matching resources without claiming they have completed backups.
-    // The default protection requirement keeps status unconverged until policy,
-    // a completed point and an isolated restore are independently verified.
+    // Import does not opt resources into managed backups or certify recovery.
+    // Remaining deployment convergence is independent of that optional policy.
     expect(status.data.inSync).toBe(false);
-    expect(status.data.backupCoverage).toMatchObject({ policy: { mode: 'daily', source: 'default' }, complete: false });
-    expect(status.data.backupReadiness).toMatchObject({ ready: false, policyReady: false,
-      recoveryPointReady: false, restoreReady: false });
-    expect(status.data.backupReadiness.resources).toEqual(expect.arrayContaining([
-      expect.objectContaining({ resource: expect.objectContaining({ kind: 'database', provider: 'railway' }), ready: false }),
-      expect.objectContaining({ resource: expect.objectContaining({ kind: 'storage', name: 'uploads' }), ready: false }),
+    expect(status.data.backupCoverage).toMatchObject({ policy: { mode: 'disabled', source: 'default' }, complete: true,
+      backupObserved: 'not-applicable', restoreTested: 'not-applicable' });
+    expect(status.data.backupReadiness).toMatchObject({ ready: true, resources: [] });
+    expect(status.data.backupCoverage.resources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resource: expect.objectContaining({ kind: 'database', provider: 'railway' }), state: 'disabled' }),
+      expect.objectContaining({ resource: expect.objectContaining({ kind: 'storage', name: 'uploads' }), state: 'disabled' }),
     ]));
 
     observe.mockResolvedValue({ ...observed, caches: [] });

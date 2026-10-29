@@ -35,7 +35,6 @@ import { SpecStore } from '../../domain/spec/spec.store.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import type { PlanAction } from '../../domain/plan/plan.types.js';
 import { deriveHypervibeSecretValues } from '../../domain/services/hypervibe-secret-value.js';
-import { dailyBackupEvidence } from '../../test/backup-fixtures.js';
 
 let tempDir: string;
 
@@ -4145,7 +4144,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
-  it('runs a declarative database seedCommand once through hv_apply and records completion', async () => {
+  it('plans a declarative seedCommand without backup setup and records one seed action completion', async () => {
     const t = await makeClient();
     const command = 'true';
     await t.call('hv_spec', {
@@ -4218,32 +4217,12 @@ describe('hv_plan / hv_status / hv_apply', () => {
     };
     mockObserved(observedState);
 
-    const unprotectedPlan = await t.call('hv_plan', { project: 'seed-apply-app', env: 'production' });
-    expect(unprotectedPlan.ok).toBe(true);
-    expect(unprotectedPlan.data.backupReadiness.ready).toBe(false);
-    expect(unprotectedPlan.data.actions).not.toContainEqual(expect.objectContaining({ id: 'database:railway:seed' }));
-
-    // A seedable existing database now needs independently scoped policy,
-    // point and restore evidence. Keep the real readiness gate and the ordinary
-    // Railway database adapter; replace only its normalized backup evidence.
-    const dailyBackups = dailyBackupEvidence({ provider: 'railway', primaryExternalId: 'db-1',
-      providerScope: { projectId: 'rp-1', environmentId: 're-1' },
-      resourceIdentity: { volumeId: 'db-volume', volumeInstanceId: 'db-volume-instance' } });
-    const observePolicy = vi.spyOn(dailyBackups, 'observe');
-    const observeRecovery = vi.spyOn(dailyBackups, 'observeRecovery');
-    const getDatabaseAdapter = adapterFactory.getDatabaseAdapter.bind(adapterFactory);
-    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockImplementation(async (...args) => {
-      const result = await getDatabaseAdapter(...args);
-      return result.success && result.adapter ? { ...result, adapter: { ...result.adapter, dailyBackups } } : result;
-    });
-
+    // Explicit seed intent remains actionable without optional backup setup;
+    // omitting backup intent makes no claim that a provider backup was verified.
     const plan = await t.call('hv_plan', { project: 'seed-apply-app', env: 'production' });
     expect(plan.ok).toBe(true);
-    expect(plan.data.backupReadiness.ready).toBe(true);
-    expect(observePolicy).toHaveBeenCalledWith(expect.objectContaining({
-      component: expect.objectContaining({ externalId: 'db-1', environmentId: environment.id }),
-    }));
-    expect(observeRecovery).toHaveBeenCalled();
+    expect(plan.data.backupCoverage).toMatchObject({ policy: { mode: 'disabled', source: 'default' },
+      backupObserved: 'not-applicable', restoreTested: 'not-applicable' });
     expect(plan.data.actions).toContainEqual(expect.objectContaining({
       id: 'database:railway:seed',
       type: 'update',

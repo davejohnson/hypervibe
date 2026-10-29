@@ -225,7 +225,7 @@ describe('fresh schema bootstrap in the normal plan/apply loop', () => {
     expect(runJob).not.toHaveBeenCalled();
   });
 
-  it('separates confirmed authentication and migration, then keeps ordinary deployment backup-gated', async () => {
+  it('separates confirmed authentication and migration, then preserves ordinary deployment connection checks', async () => {
     const before = structuredClone(environment.platformBindings);
     const staging = ctx.repos.environments.create({ projectId: project.id, name: 'staging',
       platformBindings: { provider: 'railway', projectId: 'native-project', environmentId: 'native-staging' } });
@@ -253,13 +253,15 @@ describe('fresh schema bootstrap in the normal plan/apply loop', () => {
     const ordinary = ctx.repos.runs.create({ projectId: project.id, environmentId: environment.id, type: 'plan', plan: {
       kind: 'hv_plan', scope: 'full', environmentName: 'production', specRevision: revision, observedFingerprint: null,
       actions: [{ id: 'service:web', type: 'update', resource: { kind: 'service', provider: 'railway', name: 'web' },
-        verified: true, reason: 'Ordinary release still requires backups' }],
+        verified: true, reason: 'Ordinary release still requires verified provider access' }],
     } });
-    vi.spyOn(backups, 'observeBackupPolicy').mockResolvedValue({ policy: { mode: 'daily', source: 'default', resources: [] },
+    const backupObservation = vi.spyOn(backups, 'observeBackupPolicy').mockResolvedValue({ policy: { mode: 'daily', source: 'default', resources: [] },
       resources: [{ resource: { kind: 'database', name: 'postgres', provider: 'railway', retained: false, bindingState: 'bound' },
         state: 'unknown', reason: 'No verified recovery point for this new generation.' }] });
     const result = await executePlanApply(ctx, { project, spec, specRevision: revision, planId: ordinary.id, confirmActions: [] });
-    expect(result).toMatchObject({ kind: 'blocked', applyBlocked: [expect.objectContaining({ reason: expect.stringMatching(/Backup readiness/) })] });
+    expect(result).toMatchObject({ kind: 'blocked', applyBlocked: [expect.objectContaining({ provider: 'railway',
+      reason: expect.stringMatching(/No verified railway connection/) })] });
+    expect(backupObservation).not.toHaveBeenCalled();
     expect(runJob).toHaveBeenCalledTimes(2);
   });
 });

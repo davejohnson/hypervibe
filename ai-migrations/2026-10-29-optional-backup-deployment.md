@@ -55,6 +55,23 @@ architecture suite passes all 11, including deliberately unscoped backup
 compilation. The canonical-environment integration regression uses production
 backups with backup-disabled staging owning ordinary GitHub policy.
 
+Full acceptance exposed an identity-ordering dependency previously hidden in
+the backup provisioning stage. For providers with separate native environments,
+ordinary plans now use the existing binding stages to establish the namespace
+before reviewing child resources. Five namespace cases failed before this repair;
+the planner suite passes 75 cases and related binding/deployment suites pass 50.
+This enforces Hypervibe's scoped action authority, not a claim that every provider
+API requires an environment identifier. Secret inputs and runtime overrides stay
+deferred until the namespace has converged.
+
+Historical renderer-5 and renderer-7 gate artifacts verify that normal workflow
+publication removes the old deployment gate. The removed backup-policy input
+already changes affected workflow contracts, so no global renderer revision bump
+is needed. Unaffected workflow hashes remain stable. Previously disabled backup
+metadata can be reconciled without publishing a workflow when its accepted bytes
+already match. These migration checks and the existing iOS/promotion contract
+checks pass together; their historical expected hashes were not rewritten.
+
 These tests run actual planning/application/compiler boundaries with synthetic
 provider observations and test transports. They do not certify live provider
 compatibility, a successful application release, a completed backup, or a tested

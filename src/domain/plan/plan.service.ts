@@ -2799,7 +2799,16 @@ export class PlanService {
       && projectAction?.type === 'create'
       && !projectAction.metadata?.blockedReason
       && delegatedSecrets.blockers.length > 0;
-    const ciBindingPrerequisites = managedCiEnabled || volumeIdentityStage
+    // A separately scoped provider environment must have its durable identity
+    // before a later plan can review child resources in that exact scope.
+    // This namespace prerequisite is independent of CI and backup intent.
+    const namespacePrerequisites = providerHasSeparateEnvironment
+      ? projectAction?.verified && !projectAction.metadata?.blockedReason ? [projectAction]
+        : actions.filter(action => action.id === environmentActionId && isManagedCiBindingRoot(action)
+          && action.verified && !action.metadata?.blockedReason)
+      : [];
+    const namespaceBindingStage = namespacePrerequisites.length > 0;
+    const ciBindingPrerequisites = namespaceBindingStage ? namespacePrerequisites : managedCiEnabled || volumeIdentityStage
       ? ciProjectBootstrapStage ? [projectAction!] : actions.filter(action => isManagedCiBindingRoot(action)
         && !(pendingVolumes && action.metadata?.workloadCreateRequired === true))
       : [];
@@ -2826,7 +2835,9 @@ export class PlanService {
       ? {
           actions: [],
           warnings: [
-            volumeIdentityStage && !managedCiEnabled
+            namespaceBindingStage && !managedCiEnabled
+              ? 'Child infrastructure and application deployment are deferred until the provider namespace identity converges. Apply this identity-only stage, then re-run hv_plan.'
+              : volumeIdentityStage && !managedCiEnabled
               ? 'Volume creation and application deployment are deferred until provider identities converge. Apply this identity-only stage, then re-run hv_plan.'
               : 'Managed CI reconciliation is deferred until provider identity changes converge. Apply this binding stage, then re-run hv_plan.',
           ],
@@ -2848,7 +2859,7 @@ export class PlanService {
       action.type !== 'noop' && action.metadata?.workflowPublicationRequired !== true
     );
     const ciWorkflowPublicationStage = !ciBindingStage && ciWorkflowPublicationActions.length > 0;
-    if (delegatedSecrets.blockers.length > 0 && !ciWorkflowPublicationStage && !ciProjectBootstrapStage) {
+    if (delegatedSecrets.blockers.length > 0 && !ciWorkflowPublicationStage && !ciProjectBootstrapStage && !namespaceBindingStage) {
       const detail = delegatedSecrets.blockers
         .map((blocker) => `${blocker.key}: ${blocker.reason}`)
         .join('; ');
@@ -3352,10 +3363,10 @@ export class PlanService {
       : ciBindingStageActive
         ? ciBindingInputRequired
         : secretInputRequired;
-    const planOverrides = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive || ciProjectBootstrapStage || volumeStageActive ? undefined : overrides;
+    const planOverrides = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive || ciProjectBootstrapStage || namespaceBindingStage || volumeStageActive ? undefined : overrides;
     const persistedScope = databaseBindingStageActive ? 'database-bindings' as const : backupProgramPublicationStageActive ? 'backup-program-publication' as const : checkpointStageActive ? 'database-checkpoint' as const : backupPolicyStageActive ? 'backup-policy' as const
       : backupProvisioningStageActive ? 'backup-provisioning' as const : ciCredentialsStageActive ? 'managed-ci-credentials' as const : backupReadinessStageActive ? 'backup-readiness' as const : ciBindingStageActive
-      ? (volumeIdentityStage && !managedCiEnabled ? 'hosting-bindings' as const : 'managed-ci-bindings' as const)
+      ? ((volumeIdentityStage || namespaceBindingStage) && !managedCiEnabled ? 'hosting-bindings' as const : 'managed-ci-bindings' as const)
       : ciWorkflowPublicationStageActive
         ? 'managed-ci-publication' as const
         : volumeStageActive ? 'service-volumes' as const : 'full' as const;

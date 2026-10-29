@@ -1414,8 +1414,8 @@ describe('PlanService.plan', () => {
     expect(plan.actions.find((a) => a.id === 'project:railway')).toBeUndefined();
     expect(plan.actions.find((a) => a.id === 'environment:staging')?.type).toBe('create');
     // Provision the namespace first; its durable identity is required to review
-    // data-bearing resources and their backup policy in the next plan.
-    expect(plan.scope).toBe('backup-provisioning');
+    // data-bearing resources in the next plan, independently of backup intent.
+    expect(plan.scope).toBe('hosting-bindings');
     expect(plan.actions.map(action => action.id)).toEqual(['environment:staging']);
     expect(observedBindings[0]).toMatchObject({
       provider: 'railway',
@@ -1448,6 +1448,7 @@ describe('PlanService.plan', () => {
       platformBindings: {
         provider: 'railway',
         projectId: 'tea-owner-1',
+        environmentId: 'tea-staging-1',
         services: {},
       },
     });
@@ -1488,6 +1489,7 @@ describe('PlanService.plan', () => {
           observedAt: new Date().toISOString(),
           projectExists: true,
           projectId: 'tea-owner-1',
+          environmentId: 'tea-staging-1',
           services: [],
           databases: [{
             provider: 'railway',
@@ -1741,14 +1743,15 @@ describe('PlanService.plan', () => {
       metadata: { operation: 'hostingEnvironmentEnsure' },
     });
     expect(plan.actions.find((action) => action.id === 'project:railway')).toBeUndefined();
-    expect(plan.scope).toBe('backup-provisioning');
+    expect(plan.scope).toBe('hosting-bindings');
     expect(plan.actions.map(action => action.id)).toEqual(['environment:staging']);
   });
 
-  it('creates and binds the Railway environment before returning pending for a fresh plan', async () => {
+  it.each(['omitted', 'daily', 'disabled'] as const)('creates and binds the Railway environment before storage with backup intent %s', async backupIntent => {
     new SpecStore().replace(project, {
       version: 1,
       project: project.name,
+      secrets: { APP_TOKEN: { principal: 'github:alice', environments: ['staging'] } },
       environments: {
         production: {
           hosting: { provider: 'railway' },
@@ -1757,6 +1760,8 @@ describe('PlanService.plan', () => {
         staging: {
           hosting: { provider: 'railway' },
           services: { web: {} },
+          ...(backupIntent === 'daily' ? { backups: { mode: 'daily' as const } }
+            : backupIntent === 'disabled' ? { backups: { mode: 'disabled' as const, reason: 'No backup setup requested' } } : {}),
           storage: {
             documents: {
               provider: 'railway',
@@ -1816,10 +1821,13 @@ describe('PlanService.plan', () => {
     } as never);
     const storageAdapter = vi.spyOn(adapterFactory, 'getStorageAdapter');
 
-    const planned = await new PlanService().plan(project, 'staging');
+    const planned = await new PlanService().plan(project, 'staging', { includeEnvFile: false, envVarOverrides: { DEFERRED_RUNTIME_VALUE: 'later' } });
     expect(planned).not.toHaveProperty('error');
     const plan = planned as Exclude<typeof planned, { error: string }>;
     expect(plan.actions.map(action => action.id)).toEqual(['environment:staging']);
+    expect(plan.scope).toBe('hosting-bindings');
+    expect(plan.inputRequired).toEqual([]);
+    expect(new RunRepository().findById(plan.planRunId)?.plan).not.toHaveProperty('overrides');
     const currentSpec = new SpecStore().get(project)!;
 
     const outcome = await executePlanApply(createToolContext(), {
@@ -1828,6 +1836,7 @@ describe('PlanService.plan', () => {
       specRevision: currentSpec.revision,
       planId: plan.planRunId,
       confirmActions: [],
+      alwaysRunBootstrap: true,
     });
 
     expect(outcome).toMatchObject({

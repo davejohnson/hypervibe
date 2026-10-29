@@ -60,7 +60,8 @@ export type {
   BranchDeployWorkflow,
 };
 
-export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 8;
+// Removing target.backupPolicy already migrates affected inputs; preserve unrelated reviewed locks.
+export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 7;
 const GITHUB_ACTIONS_PROMOTION_RENDERER_REVISION = 2;
 export const GITHUB_ACTIONS_SERVER_PROGRAM_REVISION = 1;
 
