@@ -48,7 +48,7 @@ function journal(project: Project, environment: Environment) {
   return new CloudScopePreparationRepository<Record>({ projectId: project.id, environmentId: environment.id, environmentName: environment.name }, parseRecord, {
     allowHistoricalPredecessor(parent, next) {
       const continuation = providerRegistry.getLocalScopePreparation(next.intent.hostingProvider)?.continuation;
-      return Boolean(continuation?.permitsBoundCleanup?.(next.intent.nativeScope) && next.intent.selection
+      return Boolean(continuation?.boundContinuationKind?.(next.intent.nativeScope) === 'cleanup' && next.intent.selection
         && parent.intent.hostingProvider === next.intent.hostingProvider
         && isDeepStrictEqual(continuation.nextScope(parent, next.intent.selection), next.intent.nativeScope));
     },
@@ -83,7 +83,7 @@ async function context(project: Project, environment: Environment, intent: Local
   const execution = prepared ?? await capability.create(intent.nativeScope);
   return { ...execution, store: journal(project, environment), authorize: async input => {
     if (!exactEnvironment(project, environment) || !isDeepStrictEqual(input.intent, intent) || authorize && !authorize()) return false;
-    if (input.phase === 'mutate' && (mode !== 'allocate' || !emptyLocalScope(environment) && !capability.continuation?.permitsBoundCleanup?.(intent.nativeScope))) return false;
+    if (input.phase === 'mutate' && (mode !== 'allocate' || !emptyLocalScope(environment) && !capability.continuation?.boundContinuationKind?.(intent.nativeScope))) return false;
     if (!(mode === 'recover' ? input.phase !== 'mutate' : sameCurrentSource(project, environment, intent))) return false;
     if (intent.predecessor) {
       const previous = await journal(project, environment).read(intent.predecessor.installationId);
@@ -92,10 +92,12 @@ async function context(project: Project, environment: Environment, intent: Local
       // Revoking trust must not require that the same trust remain installed.
       // The cleanup driver independently re-observes all native identity lifetimes;
       // only immutable predecessor receipts authorize its exact removal targets.
-      const cleanup = capability.continuation.permitsBoundCleanup?.(intent.nativeScope) === true;
-      const verified = cleanup ? previous : await reconcileCloudInstallationV1({
+      const kind = capability.continuation.boundContinuationKind?.(intent.nativeScope);
+      const history = await journal(project, environment).findByScope();
+      if (kind === 'prerequisite' && !retainedBindingMatches(project, environment, previous, history)) return false;
+      const verified = kind ? previous : await reconcileCloudInstallationV1({
         ...await context(project, environment, previous.intent, 'recover', authorize), installationId: previous.installationId, planDigest: previous.plan.digest });
-      if (!cleanup && verified.status !== 'scope-ready' || !isDeepStrictEqual(capability.continuation.nextScope(verified, intent.selection), intent.nativeScope)) return false;
+      if (!kind && verified.status !== 'scope-ready' || !isDeepStrictEqual(capability.continuation.nextScope(verified, intent.selection, history), intent.nativeScope)) return false;
     }
     return true;
   } };
@@ -163,6 +165,18 @@ function connectionsMatch(selected: NonNullable<Awaited<ReturnType<typeof accept
     const existing = new ConnectionRepository().findByProviderAndScope(item.provider, selected.scope);
     return existing?.status === 'verified' && isDeepStrictEqual(getSecretStore().decryptObject(existing.credentialsEncrypted), item.config);
   });
+}
+/** A bootstrap prerequisite may not borrow a same-named or partially repaired binding. */
+function retainedBindingMatches(project: Project, environment: Environment, record: Record, history: Record[]): boolean {
+  try {
+    const current = new EnvironmentRepository().findById(environment.id);
+    const continuation = providerRegistry.getLocalScopePreparation(record.intent.hostingProvider)?.continuation;
+    if (!current || current.projectId !== project.id || current.name !== environment.name || record.status !== 'scope-ready' || !continuation) return false;
+    const expected = continuation.binding(record, { region: typeof current.platformBindings.environmentId === 'string' ? current.platformBindings.environmentId : undefined }, history);
+    const selected = { expected, actual: current.platformBindings, scope: environmentConnectionScope(record.intent.source.repository, environment.name), repairable: [] };
+    return Object.entries(expected.platformBindings).every(([key, value]) => isDeepStrictEqual(current.platformBindings[key], value))
+      && (expected.removeBindings ?? []).every(item => !Object.hasOwn(current.platformBindings, item.key)) && connectionsMatch(selected);
+  } catch { return false; }
 }
 async function isBound(project: Project, environment: Environment, record: Record): Promise<boolean> {
   try {
@@ -257,15 +271,19 @@ export async function planLocalCloudScope(input: { project: Project; environment
   const capability = providerRegistry.getLocalScopePreparation(record?.intent.hostingProvider ?? desired!.provider);
   if (!capability) throw unavailable();
   if (record) {
-    let cleanupScope: { scope: { [key: string]: string }; selection: { [key: string]: string } } | undefined;
+    let boundScope: { scope: { [key: string]: string }; selection: { [key: string]: string }; kind: 'cleanup' | 'prerequisite' } | undefined;
     if (desired?.scopePreparation?.continuation && capability.continuation) {
       const selection = capability.continuation.parseSelection(desired.scopePreparation.continuation.nativeScope, desired);
-      try {
-        const scope = capability.continuation.nextScope(record, selection);
-        if (scope && capability.continuation.permitsBoundCleanup?.(scope)) cleanupScope = { scope, selection };
-      } catch { /* Ordinary recovery remains authoritative until the prerequisite is ready. */ }
+      let scope: { [key: string]: string } | null | undefined;
+      try { scope = capability.continuation.nextScope(record, selection, history); }
+      catch { /* Ordinary recovery remains authoritative until a provider admits the continuation. */ }
+      const kind = scope && capability.continuation.boundContinuationKind?.(scope);
+      if (scope && kind) {
+        if (kind === 'prerequisite' && !retainedBindingMatches(project, environment, record, history)) throw unavailable();
+        boundScope = { scope, selection, kind };
+      }
     }
-    if (!cleanupScope) {
+    if (!boundScope) {
       const execution = await context(project, environment, record.intent, 'recover');
       record = await reconcileCloudInstallationV1({ ...execution, installationId: record.installationId, planDigest: record.plan.digest });
     }
@@ -274,7 +292,9 @@ export async function planLocalCloudScope(input: { project: Project; environment
     if (record.status === 'scope-ready' && desired?.scopePreparation && (!allocation || desired.provider !== record.intent.hostingProvider
       || !isDeepStrictEqual(capability.parseScope(desired.scopePreparation.nativeScope), allocation.intent.nativeScope)))
       throw new Error('This environment already allocated a cloud project. Its accepted identity is retained; editing desired names does not authorize a replacement.');
-    if (record.status === 'scope-ready') await verifyBindingPrerequisites(project, environment, record);
+    // An admitted cleanup verifies its own exact native targets; removed trust
+    // cannot be required to authorize removing the remaining grants.
+    if (record.status === 'scope-ready' && !boundScope) await verifyBindingPrerequisites(project, environment, record);
     if (deploymentInputs) {
       // A completed binding is an ordinary deployment prerequisite. Verify it
       // before passing input handling back to full planning; unfinished or
@@ -282,19 +302,19 @@ export async function planLocalCloudScope(input: { project: Project; environment
       if (await isBound(project, environment, record)) return undefined;
       throw isolatedInputs();
     }
-    if (record.status === 'scope-ready' && await bindingNormalization(project, environment, record)) {
+    if (record.status === 'scope-ready' && boundScope?.kind !== 'prerequisite' && await bindingNormalization(project, environment, record)) {
       return { ...projection(record, 'normalize'), environment, review: {
         resources: [{ kind: 'local-environment-binding', name: environment.name, scope: record.intent.nativeScope.projectId }],
         permissions: [], costs: [], warnings: ['Restore only missing nonsecret ownership metadata after verifying the original native creation. Cloud resources, saved credentials and existing metadata remain unchanged.'],
       }, warnings: ['This isolated metadata repair requires confirmation and performs no cloud writes.'] };
     }
     if (record.status === 'scope-ready' && !desired?.scopePreparation && !emptyLocalScope(environment)) return undefined;
-    if ((record.status === 'scope-ready' || cleanupScope) && desired?.scopePreparation?.continuation) {
+    if ((record.status === 'scope-ready' || boundScope) && desired?.scopePreparation?.continuation) {
       if (!capability.continuation) throw unavailable();
       const selection = capability.continuation.parseSelection(desired.scopePreparation.continuation.nativeScope, desired);
-      const nextScope = cleanupScope?.scope ?? capability.continuation.nextScope(record, selection);
+      const nextScope = boundScope?.scope ?? capability.continuation.nextScope(record, selection, history);
       if (nextScope) {
-        if (!emptyLocalScope(environment) && !capability.continuation.permitsBoundCleanup?.(nextScope)) throw unavailable();
+        if (!emptyLocalScope(environment) && !capability.continuation.boundContinuationKind?.(nextScope)) throw unavailable();
         const currentSource = source(project, specResult); const predecessor = { installationId: record.installationId, planDigest: record.plan.digest };
         const proposed = history.find(item => !active(item) && isDeepStrictEqual(item.intent.source, currentSource)
           && isDeepStrictEqual(item.intent.predecessor, predecessor) && isDeepStrictEqual(item.intent.nativeScope, nextScope) && isDeepStrictEqual(item.intent.selection, selection)

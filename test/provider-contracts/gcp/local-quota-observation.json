@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "classification": "sanitized projections of native read-only observations; not complete HTTP response captures",
+  "observedAt": "2026-10-29T17:53:41.023Z",
+  "sourceRevision": "3eecfa0545e86d945affeee878c6ffa99e91ab9a",
+  "packageSha256": "b36e9ab280674e0cc7aea412ad45a36243c1ffc1ec2bea521e7c5c15bdb28e8c",
+  "sanitization": [
+    "Customer project ID and number are replaced with example-quota-project and 222333444555.",
+    "Google's documented shared Cloud SDK project number is retained.",
+    "Only allowlisted status, quota metadata, permission outcomes, service identity and state were retained.",
+    "Authorization headers, tokens, provider error messages and credential files were neither output nor persisted."
+  ],
+  "withoutQuotaProject": {
+    "method": "GET",
+    "service": "cloudbilling.googleapis.com",
+    "path": "/v1/projects/example-quota-project/billingInfo",
+    "requestQuotaProject": null,
+    "status": 429,
+    "error": {
+      "code": 429,
+      "status": "RESOURCE_EXHAUSTED",
+      "details": [
+        {
+          "type": "google.rpc.ErrorInfo",
+          "reason": "RATE_LIMIT_EXCEEDED",
+          "domain": "googleapis.com",
+          "metadata": {
+            "service": "cloudbilling.googleapis.com",
+            "consumer": "projects/764086051850",
+            "quota_metric": "cloudbilling.googleapis.com/standard_quota",
+            "quota_limit": "StandardQuotaPerMinutePerProject",
+            "quota_limit_value": "400",
+            "quota_location": "global"
+          }
+        }
+      ]
+    }
+  },
+  "withExplicitSdkQuotaProject": {
+    "observedAt": "2026-10-29T17:56:50.929Z",
+    "configuration": "GOOGLE_CLOUD_QUOTA_PROJECT in an owned process only",
+    "requestQuotaProject": "example-quota-project",
+    "permissionRead": {
+      "method": "POST",
+      "status": 200,
+      "permission": "serviceusage.services.use",
+      "permissionVerified": true
+    },
+    "serviceRead": {
+      "method": "GET",
+      "status": 200,
+      "name": "projects/222333444555/services/cloudbilling.googleapis.com",
+      "state": "DISABLED"
+    },
+    "billingReadAttempted": false,
+    "reasonStopped": "The selected quota project did not have the required Cloud Billing API enabled."
+  },
+  "effects": {
+    "nativeMutationAttempts": 0,
+    "imagePushes": 0,
+    "credentialFileChanges": 0,
+    "profileOrDesiredStateChanges": 0
+  },
+  "officialSources": [
+    {
+      "url": "https://docs.cloud.google.com/docs/authentication/troubleshoot-adc#unknown_project_764086051850_used_for_request",
+      "reviewedAt": "2026-10-29",
+      "supports": "764086051850 is the shared gcloud project; client-based APIs require explicit quota attribution and the called API enabled in that quota project."
+    },
+    {
+      "url": "https://docs.cloud.google.com/docs/quotas/set-quota-project",
+      "reviewedAt": "2026-10-29",
+      "supports": "Node supports GOOGLE_CLOUD_QUOTA_PROJECT; quota use requires serviceusage.services.use. A quota project is distinct from resource placement and billing-account attachment."
+    },
+    {
+      "url": "https://docs.cloud.google.com/service-usage/docs/reference/rest/v1/services/get",
+      "reviewedAt": "2026-10-29",
+      "supports": "GET returns the exact project's service configuration and enabled state and requires serviceusage.services.get."
+    },
+    {
+      "url": "https://docs.cloud.google.com/service-usage/docs/reference/rest/v1/services/enable",
+      "reviewedAt": "2026-10-29",
+      "supports": "A single service is enabled by POST to its exact service resource with an empty request body; serviceusage.services.enable is required and the response is an Operation."
+    }
+  ],
+  "limits": [
+    "No enablement, successful quota-attributed billing read, upload or deployment was observed in these diagnostics.",
+    "These projections establish the observed failure and missing prerequisite; reconstructed test responses must remain labelled synthetic.",
+    "No conclusion about customer spend or the separate billing-account project-count quota follows from this API request-rate failure."
+  ]
+}

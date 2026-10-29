@@ -143,8 +143,13 @@ export async function planOperatorArtifacts(input: { project: Project; environme
     } else if (!record) nextScope = selected.nativeScope;
     if (input.options && ['serviceFilter', 'envVarOverrides', 'envFile', 'includeEnvFile', 'secretRefs'].some(key => Object.hasOwn(input.options!, key))) throw unavailable();
     if (!record) {
-      record = history.find(candidate => !active(candidate) && isDeepStrictEqual(candidate.intent.source, selected!.source)
+      // An unrelated spec revision does not replace already prepared content.
+      // Current declaration/native scope and the fresh outer plan still govern
+      // authority; retain the original immutable intent and reject ambiguity.
+      const proposals = history.filter(candidate => !active(candidate) && candidate.intent.source.repository === selected!.source.repository
         && isDeepStrictEqual(candidate.intent.selection, selected!.proof) && isDeepStrictEqual(candidate.intent.predecessor, predecessor));
+      if (proposals.length > 1) throw unavailable();
+      record = proposals[0];
       if (!record) {
         if (!nextScope) throw unavailable();
         const nativeScope = selected.capability.prepare ? await selected.capability.prepare(nextScope, selected.declaration.artifacts, selected.source) : nextScope;

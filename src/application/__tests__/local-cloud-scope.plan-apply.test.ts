@@ -17,6 +17,7 @@ import { CommandRegistry } from '../commands.js';
 import { registerCoreTools } from '../../tools/core.tools.js';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { randomUUID } from 'node:crypto';
+import quotaObservation from '../../../test/provider-contracts/gcp/local-quota-observation.json' with { type: 'json' };
 import { createGcpLocalServicesDriver } from '../../adapters/providers/gcp/gcp-local-services-installation.js';
 
 // Reconstructed Google OAuth and Resource Manager v3 serialized responses.
@@ -531,7 +532,7 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       expect(JSON.stringify({ reviewed, applied })).not.toContain(token);
     });
 
-  it.each(['normal', 'private-operation-missing-time', 'public-operation-missing-time', 'legacy-binding-repair', 'legacy-binding-source-edit', 'legacy-binding-declaration-removed', 'legacy-binding-stale', 'legacy-binding-conflict', 'legacy-binding-unknown', 'legacy-binding-replaced', 'legacy-api-review', 'legacy-api-pending', 'legacy-api-rejected', 'legacy-api-satisfied', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-disconnected-metadata', 'github-ci-disconnected-metadata-foreign-owner', 'github-ci-legacy-binding-repair', 'github-ci-lost-ack', 'github-ci-rejected-first', 'github-ci-rejected-middle', 'public-registry', 'public-grant-lost-ack', 'public-grant-rejected', 'github-ci-public-registry', 'github-ci-public-registry-prerequisite-drift'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
+  it.each(['quota-public-api-parent-drift', 'quota-public-api', 'quota-public-api-lost-ack', 'quota-public-api-binding-conflict', 'quota-public-api-lifetime', 'quota-public-api-denied', 'github-ci-quota-api-partial-revoke', 'github-ci-quota-api', 'normal', 'private-operation-missing-time', 'public-operation-missing-time', 'legacy-binding-repair', 'legacy-binding-source-edit', 'legacy-binding-declaration-removed', 'legacy-binding-stale', 'legacy-binding-conflict', 'legacy-binding-unknown', 'legacy-binding-replaced', 'legacy-api-review', 'legacy-api-pending', 'legacy-api-rejected', 'legacy-api-satisfied', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-disconnected-metadata', 'github-ci-disconnected-metadata-foreign-owner', 'github-ci-legacy-binding-repair', 'github-ci-lost-ack', 'github-ci-rejected-first', 'github-ci-rejected-middle', 'public-registry', 'public-grant-lost-ack', 'public-grant-rejected', 'github-ci-public-registry', 'github-ci-public-registry-prerequisite-drift'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
     const f = fixture(); const allocated = await f.plan(); if ('error' in allocated) throw new Error(allocated.error);
     expect(await f.apply(allocated.planRunId)).toMatchObject({ kind: 'executed', result: { success: true } });
     const desired = structuredClone(f.desired) as any;
@@ -546,6 +547,8 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
         githubWorkflow: '.github/workflows/deploy-cloudrun-staging.yml', githubBackupWorkflow: '.github/workflows/hypervibe-backup-staging.yml' });
       f.store.replace(f.project, desired);
     }
+    let quotaPreparationStarted = false, quotaApiEnabled = false, quotaBillingReads = 0;
+    const quotaScenario = scenario.includes('quota-');
     const native = new Map<string, any>(), operations = new Map<string, any>(); let lostCiAck = false; let rejectedCi = false;
     let registryOperationComplete = !scenario.endsWith('operation-missing-time');
     const unrelated = { role: 'roles/viewer', members: ['user:unrelated@example.invalid'], condition: { title: 'retained', expression: 'true' } };
@@ -560,6 +563,7 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       if (url.pathname.endsWith(':testIamPermissions')) return Response.json({ permissions: ['billing.accounts.get', 'billing.resourceAssociations.create',
         'resourcemanager.projects.get', 'resourcemanager.projects.createBillingAssignment', 'serviceusage.services.list',
         'serviceusage.effectivepolicy.get', 'serviceusage.services.get', 'serviceusage.services.enable',
+        ...(quotaPreparationStarted && scenario === 'quota-public-api-denied' ? [] : ['serviceusage.services.use']),
         'artifactregistry.repositories.get', 'artifactregistry.repositories.create', 'artifactregistry.repositories.setIamPolicy', 'artifactregistry.repositories.getIamPolicy',
         'iam.workloadIdentityPools.create', 'iam.workloadIdentityPoolProviders.create', 'iam.serviceAccounts.create', 'iam.serviceAccounts.setIamPolicy',
         'iam.roles.create', 'resourcemanager.projects.setIamPolicy'] });
@@ -599,11 +603,22 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
         throw new Error('Unexpected reconstructed CI identity mutation');
       }
       if (url.host === 'cloudbilling.googleapis.com') {
+        if (quotaPreparationStarted && !quotaApiEnabled) { quotaBillingReads++; return Response.json({}, { status: quotaObservation.withoutQuotaProject.status }); }
         if (url.pathname === '/v1/billingAccounts/ABCDEF-123456-789ABC') return Response.json({ name: 'billingAccounts/ABCDEF-123456-789ABC', open: true });
         if (method === 'PUT') { expect(JSON.parse(String(init?.body))).toEqual({ billingAccountName: 'billingAccounts/ABCDEF-123456-789ABC' }); billing = true; writes.push('billing'); }
         return Response.json({ name: `projects/${nativeId}/billingInfo`, projectId: nativeId, billingAccountName: billing ? 'billingAccounts/ABCDEF-123456-789ABC' : '', billingEnabled: billing });
       }
       if (url.host === 'serviceusage.googleapis.com') {
+        if (quotaPreparationStarted && url.pathname.includes('/services/cloudbilling.googleapis.com')) {
+          expect(new Headers(init?.headers).get('x-goog-user-project')).toBe(nativeId);
+          if (method === 'POST') {
+            expect(url.pathname).toBe(`/v1/projects/${number}/services/cloudbilling.googleapis.com:enable`);
+            expect(JSON.parse(String(init?.body))).toEqual({}); quotaApiEnabled = true; writes.push('quota-api');
+            if (scenario === 'quota-public-api-lost-ack') throw new Error('Synthetic lost API acknowledgment');
+            return Response.json({ name: 'operations/acf.quota-api' });
+          }
+          return Response.json({ name: `projects/${number}/services/cloudbilling.googleapis.com`, state: quotaApiEnabled ? 'ENABLED' : quotaObservation.withExplicitSdkQuotaProject.serviceRead.state });
+        }
         if (method === 'POST') { expect(url.pathname).toBe(`/v1/projects/${number}/services:batchEnable`); apis = true; writes.push('apis'); if (scenario === 'lost-api-ack') throw new Error(`Lost acknowledgment ${token}`); return Response.json({ name: 'operations/acf.synthetic' }); }
         if (scenario === 'unknown-api-state') return Response.json({}, { status: 403 });
         return Response.json({ name: url.pathname.replace('/v1/', ''), state: apis ? 'ENABLED' : 'DISABLED' });
@@ -782,6 +797,73 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       ...(!scenario.includes('legacy-binding-') ? { artifactInstallationId: expect.stringMatching(/^[a-f0-9-]{36}$/), artifactAttemptId: expect.stringMatching(/^[a-f0-9-]{36}$/) } : {}) });
     expect(f.ctx.repos.connections.findByProviderAndScope('cloudrun', 'github.com/acme/operator-host#environment=staging')?.status).toBe('verified');
     expect(f.ctx.repos.connections.findByProviderAndScope('cloudsql', 'github.com/acme/operator-host#environment=staging')?.status).toBe('verified');
+    if (quotaScenario) {
+      // Independent observation: the explicit quota project has services.use,
+      // but Cloud Billing is disabled. Existing billing-dependent histories
+      // cannot be prerequisites for enabling that same API.
+      const environment = f.ctx.repos.environments.findByProjectAndName(f.project.id, 'staging')!;
+      const acceptedBindings = structuredClone(environment.platformBindings);
+      acceptedBindings.holdingService = { providerId: 'retained-runtime', image: 'immutable-retained-image' };
+      f.ctx.repos.environments.update(environment.id, { platformBindings: acceptedBindings });
+      const connections = ['cloudrun', 'cloudsql', 'gcs'].map(provider => f.ctx.repos.connections.findByProviderAndScope(provider, 'github.com/acme/operator-host#environment=staging'));
+      const histories = f.ctx.repos.runs.findByProjectId(f.project.id).filter(run => run.type === 'cloud-scope-preparation')
+        .map(run => ({ id: run.id, plan: structuredClone(run.plan) }));
+      const beforeWrites = [...writes]; quotaPreparationStarted = true;
+      vi.stubEnv('GOOGLE_CLOUD_QUOTA_PROJECT', nativeId);
+      desired.environments.staging.hosting.scopePreparation.continuation.nativeScope.quotaProjectId = nativeId;
+      f.store.replace(f.project, desired);
+      if (scenario === 'quota-public-api-binding-conflict') {
+        const changed = structuredClone(acceptedBindings); (changed.providerScope as Record<string, unknown>).projectNumber = '111111111111';
+        f.ctx.repos.environments.update(environment.id, { platformBindings: changed });
+      }
+      if (scenario === 'quota-public-api-lifetime') {
+        const original = f.request.getMockImplementation()!;
+        f.request.mockImplementation(async (input, init) => {
+          const response = await original(input, init); const url = new URL(String(input));
+          return url.host === 'cloudresourcemanager.googleapis.com' && !url.pathname.includes(':')
+            ? Response.json({ ...await response.json() as Record<string, unknown>, createTime: '2026-10-29T00:00:00Z' }) : response;
+        });
+      }
+      const quotaPlan = await f.plan();
+      if (['quota-public-api-binding-conflict', 'quota-public-api-lifetime', 'quota-public-api-denied'].includes(scenario)) {
+        expect('error' in quotaPlan || quotaPlan.blocked.length > 0).toBe(true);
+        expect(writes).toEqual(beforeWrites); expect(quotaBillingReads).toBe(0); return;
+      }
+      expect(quotaPlan).toMatchObject({ scope: 'cloud-scope', actions: [{ id: 'gcp:local-scope:quota-api:cloudbilling.googleapis.com', requiresConfirm: true }] });
+      if ('error' in quotaPlan) throw new Error(quotaPlan.error);
+      expect(quotaPlan.actions).toHaveLength(1); expect(quotaBillingReads).toBe(0);
+      expect(await f.apply(quotaPlan.planRunId, [])).toMatchObject({ kind: 'executed', result: { success: false } });
+      expect(writes).toEqual(beforeWrites);
+      const reviewed = await f.plan(); if ('error' in reviewed) throw new Error(reviewed.error);
+      expect(await f.apply(reviewed.planRunId, ['gcp:local-scope:quota-api:cloudbilling.googleapis.com']))
+        .toMatchObject({ kind: 'executed', result: { success: scenario !== 'quota-public-api-lost-ack' } });
+      // Re-entry must reconcile the same attempt and reach ordinary planning,
+      // preserving runtime identities and original immutable approvals.
+      f.adapters.mockResolvedValue({ success: false, error: 'Synthetic ordinary observation boundary' } as any);
+      if (scenario === 'quota-public-api-parent-drift') {
+        const name = `projects/${nativeId}/locations/us-central1/repositories/operator-public`;
+        registries.set(name, { ...registries.get(name), createTime: '2026-10-29T00:00:00Z' });
+      }
+      const resumed = await f.plan();
+      if (scenario === 'quota-public-api-parent-drift') {
+        expect(resumed).toMatchObject({ error: expect.stringMatching(/Cloud project preparation/) });
+        expect(f.adapters).not.toHaveBeenCalled(); expect(writes).toEqual([...beforeWrites, 'quota-api']);
+        expect(f.ctx.repos.environments.findById(environment.id)!.platformBindings).toEqual(acceptedBindings);
+        return;
+      }
+      expect('error' in resumed ? resumed.error : resumed.scope).not.toMatch(/Cloud project preparation|cloud-scope/);
+      expect(f.adapters).toHaveBeenCalled(); f.adapters.mockRestore();
+      expect(writes).toEqual([...beforeWrites, 'quota-api']); expect(quotaBillingReads).toBe(0);
+      expect(f.ctx.repos.environments.findById(environment.id)!.platformBindings).toEqual(acceptedBindings);
+      expect(['cloudrun', 'cloudsql', 'gcs'].map(provider => f.ctx.repos.connections.findByProviderAndScope(provider, 'github.com/acme/operator-host#environment=staging'))).toEqual(connections);
+      for (const historical of histories) {
+        const current = f.ctx.repos.runs.findById(historical.id)!.plan as any;
+        expect(current.intent).toEqual((historical.plan as any).intent); expect(current.plan).toEqual((historical.plan as any).plan);
+        expect(current.completed).toEqual((historical.plan as any).completed);
+      }
+      expect(JSON.stringify(quotaPlan)).not.toContain(token);
+      if (!github) return;
+    }
     if (scenario.includes('legacy-binding-')) {
       // Reconstruct the previously accepted binding format. The old immutable
       // installation journal is preserved; only its final projection omitted
@@ -864,6 +946,9 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       const priorBindings = structuredClone(bound.platformBindings);
       const connections = ['cloudrun', 'cloudsql', 'gcs'].map(provider => f.ctx.repos.connections.findByProviderAndScope(provider, 'github.com/acme/operator-host#environment=staging'));
       const identities = structuredClone([...native]); const before = writes.length;
+      // A separately removed grant must not veto explicit cleanup of the rest.
+      if (scenario === 'github-ci-quota-api-partial-revoke') accountPolicy.bindings = [];
+      const expectedRevocations = scenario === 'github-ci-quota-api-partial-revoke' ? 2 : 3;
       desired.environments.staging.hosting.scopePreparation.continuation.nativeScope.githubAccess = 'disconnect';
       f.store.replace(f.project, desired);
       for (let step = 0; step < 8; step++) {
@@ -879,7 +964,7 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       const { gcpGithubWorkloadIdentity: _removed, ...preserved } = priorBindings;
       expect(after.platformBindings).toEqual(preserved);
       expect(['cloudrun', 'cloudsql', 'gcs'].map(provider => f.ctx.repos.connections.findByProviderAndScope(provider, 'github.com/acme/operator-host#environment=staging'))).toEqual(connections);
-      expect(writes).toHaveLength(before + 3); expect(accountPolicy.bindings).toEqual([]);
+      expect(writes).toHaveLength(before + expectedRevocations); expect(accountPolicy.bindings).toEqual([]);
       expect(projectPolicy.bindings).toEqual([unrelated]); expect(registryPolicy.bindings).toEqual([unrelated]);
       expect([...native]).toEqual(identities);
       if (scenario === 'github-ci-public-registry-prerequisite-drift') {
@@ -892,7 +977,7 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
         // A previous prerequisite failure cannot disappear merely because the
         // local final binding still has complete cached creation identifiers.
         expect(await localCloudScopeRequired(f.project, 'staging', f.store.get(f.project)!.spec)).toBe(true);
-        expect(writes).toHaveLength(before + 3); return;
+        expect(writes).toHaveLength(before + expectedRevocations); return;
       }
       if (scenario.startsWith('github-ci-disconnected-metadata')) {
         const legacy = structuredClone(after.platformBindings), oldScope = legacy.providerScope as Record<string, unknown>;
@@ -904,14 +989,14 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
           const blocked = await f.plan();
           expect('error' in blocked || blocked.blocked.length > 0 || !blocked.actions.some(action => action.id === 'cloud-scope:normalize')).toBe(true);
           expect(f.ctx.repos.environments.findById(after.id)!.platformBindings).toEqual(legacy);
-          expect(writes).toHaveLength(before + 3); expect(accountPolicy.bindings).toEqual([]);
+          expect(writes).toHaveLength(before + expectedRevocations); expect(accountPolicy.bindings).toEqual([]);
           return;
         }
         const repair = await f.plan(); if ('error' in repair) throw new Error(repair.error);
         expect(repair.actions.map(action => action.id)).toEqual(['cloud-scope:normalize']);
         expect(await f.apply(repair.planRunId, ['cloud-scope:normalize'])).toMatchObject({ kind: 'executed', result: { success: true } });
         expect(f.ctx.repos.environments.findById(after.id)!.platformBindings).toEqual(preserved);
-        expect(writes).toHaveLength(before + 3); expect(accountPolicy.bindings).toEqual([]);
+        expect(writes).toHaveLength(before + expectedRevocations); expect(accountPolicy.bindings).toEqual([]);
         expect(projectPolicy.bindings).toEqual([unrelated]); expect(registryPolicy.bindings).toEqual([unrelated]);
         expect([...native]).toEqual(identities);
       }

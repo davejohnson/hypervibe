@@ -88,7 +88,10 @@ The allocation remains restricted to its original single create/noop action.
 Only explicit continuation drivers accept identity/trust actions, and the local
 adapter supplies `onlyActionId` so confirmation of one outer action cannot execute
 another native action. All prerequisite records are freshly reconciled before
-provider writes. The journal permits only one accepted lineage, preserves original
+ordinary provider writes. Explicit bound cleanup and quota prerequisites verify
+their own exact native targets independently, so unavailable billing or already
+revoked trust cannot prevent that reviewed operation. Ordinary planning resumes
+fresh ancestor verification after the prerequisite. The journal permits only one accepted lineage, preserves original
 attempt evidence, and refuses competing branches. The hosting-provider roster
 requires each named provider's capability decision in ordinary CI.
 
@@ -291,3 +294,105 @@ tests in nine suites. The ordinary `npm run typecheck` passed against a clean
 snapshot containing only this change, isolating concurrent publication work.
 These regressions remain in the normal `npm test` acceptance path; both the
 committed acceptance workflow and desired required-check configuration invoke it.
+
+## Cloud Billing quota prerequisite (2026-10-29)
+
+The challenged assumption is that a verified hosting project and linked billing
+account also make local Cloud Billing reads usable. A native helper publication
+stopped before any mutation attempt: its billing metadata GET returned HTTP 429
+with `StandardQuotaPerMinutePerProject`, limit `400`, and consumer
+`projects/764086051850`. The request had no quota-project header. Google
+[identifies that number as the shared gcloud project](https://docs.cloud.google.com/docs/authentication/troubleshoot-adc#unknown_project_764086051850_used_for_request).
+This observed failure concerns API request accounting, not the owner's spending
+notification or the separate limit on projects attached to a billing account.
+
+A second read-only diagnostic used the actual packaged Google authentication
+client with the documented `GOOGLE_CLOUD_QUOTA_PROJECT` setting in one owned
+process. Its serialized requests carried the selected project, and native
+permission testing verified `serviceusage.services.use`. The exact project's
+Cloud Billing service was nevertheless `DISABLED`, so the diagnostic stopped
+before another billing request. The sanitized observations are retained in
+[`local-quota-observation.json`](../test/provider-contracts/gcp/local-quota-observation.json).
+They are allowlisted projections of native observations, not complete captured
+HTTP bodies. No credential file, desired state, cloud resource or image changed.
+
+Google's [quota-project contract](https://docs.cloud.google.com/docs/quotas/set-quota-project)
+supports that Node SDK setting and requires permission to use the selected
+project. The [ADC troubleshooting contract](https://docs.cloud.google.com/docs/authentication/troubleshoot-adc)
+also requires the called API to be enabled there. The existing 14-service
+installation excludes Cloud Billing and verifies billing before enabling its
+batch. Merely extending that historical batch would both alter its immutable
+contract and leave a prerequisite cycle.
+
+The scoped correction adds a separate `project-quota-api-v1` local continuation.
+An already bound operator project opts in with its exact project ID in
+`hosting.scopePreparation.continuation.nativeScope.quotaProjectId`.
+It reviews only the exact Cloud Billing API enablement, checks the allocated
+project's native lifetime and ownership plus Service Usage get/enable/use
+permissions, and does not depend on `billingInfo`. Google's
+[single-service enable contract](https://docs.cloud.google.com/service-usage/docs/reference/rest/v1/services/enable)
+requires an empty request body and returns an operation. Native service state
+readback must establish completion; a lost acknowledgment cannot authorize a
+second enable request. Existing billing, registries, runtime resources, secrets,
+connections and the original 14-service receipts remain independent.
+
+This provider-owned extension has the same named registry matrix above: Cloud
+Run local operator preparation is the implemented target; ECS, Azure Container
+Apps, Railway, Fly, DigitalOcean and Vercel do not implement this GCP-specific
+quota stage. It changes no hosted customer authentication contract and does not
+establish equivalent AWS or Azure live onboarding evidence.
+
+Quota selection is explicit and separate from billing-account attachment. The
+coding agent can use the reviewed nonsecret SDK setting for its owned invocation;
+the user should not be asked to edit credentials or run a command. A different
+existing SDK or ADC quota selection must not be silently overwritten. This
+correction does not implement automatic quota routing for a shared MCP process
+that serves multiple projects, and it does not persist administrator credentials.
+It also leaves initial allocation/billing bootstrap and the pre-existing
+restriction on adding new CI identities to an already bound registry unchanged.
+Removing existing CI trust after quota preparation remains reachable: the original
+CI installation identifies the removal targets, while the quota predecessor
+separately identifies the accepted continuation lineage.
+
+The full planner/application/SQLite regression first failed its normal and
+lost-acknowledgment cases because the prerequisite was unreachable. Later
+regressions independently failed on stranded CI disconnection, missing parent
+identity verification after quota completion, and partially revoked trust
+preventing its own cleanup. The quota application cases cover exact confirmation,
+bound-project preservation, denied access,
+changed project lifetime, interrupted enablement and parent drift. Fourteen native
+driver cases pass as well. These reconstructed transports are normal-CI checks;
+the native diagnostics above do not establish a successful enablement,
+quota-attributed billing read, helper publication or backup/restore.
+
+Final integration verification passed 150 focused tests across ten files,
+`npm run typecheck` and `git diff --check`. This includes all eight quota
+application cases, the original continuation/provider-roster contracts and the
+artifact-preservation cases below. The tests remain in ordinary `npm test`;
+normal remote acceptance and fresh packaged execution are separate gates.
+
+### Preserve prepared content across an unrelated spec revision
+
+The quota declaration also exposed a second assumption: an unattempted artifact
+proposal was reusable only while the complete spec revision and digest matched.
+The actual packaged planner and SQLite reproduced a second helper preparation
+after only unrelated quota selection metadata changed. The artifact declaration,
+scope proof, predecessor and original image were unchanged. The user requirement
+to preserve unrelated work and the exact saved publication boundary establish the
+expected behavior: a fresh outer plan should retain that prepared content.
+
+The planner now matches a single unattempted proposal by repository, complete
+artifact selection proofs and predecessor. Multiple matching proposals block
+instead of selecting an image arbitrarily. Original native intent and plan bytes
+remain immutable; a changed repository or artifact declaration does not reuse
+them. The old outer plan still fails its spec-revision check, and a fresh plan
+still needs every exact consequential action confirmation and current native
+authority before its first write.
+
+Three normal-CI application regressions failed before the runtime correction:
+two rebuilt an image after an unrelated edit, including a quota-blocked operation
+with zero attempts, and one selected between ambiguous historical proposals.
+All four tests then passed, as did the combined 30-test group covering existing
+AWS application publication and GCP native artifact behavior. The fixtures run
+the real SQLite, planner, executor and provider driver with synthetic package,
+Docker and HTTP boundaries; this is not a real image upload or release gate.

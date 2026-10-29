@@ -42,7 +42,12 @@ export const gcpGithubCiDisconnectionScopeSchema = z.object({ ...gcpGithubCiPrep
   scopeKind: z.literal('github-ci-disconnection'), ciInstallationId: z.string().guid(), ciPlanDigest: z.string().regex(/^[a-f0-9]{64}$/),
   ciAccountUniqueId: z.string().regex(/^[1-9]\d{5,29}$/), ciAccountAttemptId: z.string().guid(), ciPoolAttemptId: z.string().guid(),
   ciProviderAttemptId: z.string().guid(), ciRoleAttemptId: z.string().guid(),
-}).strict().superRefine(registryScope);
+  quotaPrerequisiteInstallationId: z.string().guid().optional(), quotaPrerequisitePlanDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+}).strict().superRefine((scope, context) => {
+  registryScope(scope, context);
+  if (Boolean(scope.quotaPrerequisiteInstallationId) !== Boolean(scope.quotaPrerequisitePlanDigest))
+    context.addIssue({ code: 'custom', message: 'The retained quota prerequisite identity must be complete.' });
+});
 function parseScope(value: unknown) { return z.union([gcpGithubCiPreparationScopeSchema, gcpGithubCiDisconnectionScopeSchema]).parse(value); }
 type Intent = LocalCloudScopePreparationIntent;
 type Context = CloudInstallationProviderContext<Intent>;
@@ -72,8 +77,8 @@ function names(intent: Intent) {
   const scope = parseScope(intent.nativeScope);
   if (intent.provider !== 'gcp' || intent.hostingProvider !== 'cloudrun' || intent.stage !== 'scope-preparation' || !intent.predecessor
     || intent.source.repository.replace(/^https:\/\//, '').replace(/\.git$/, '') !== `github.com/${scope.githubRepository}`) fail();
-  if (scope.scopeKind === 'github-ci-disconnection' && (intent.predecessor.installationId !== scope.ciInstallationId
-    || intent.predecessor.planDigest !== scope.ciPlanDigest || intent.installationId === scope.ciInstallationId)) fail('identity_mismatch');
+  if (scope.scopeKind === 'github-ci-disconnection' && (intent.predecessor.installationId !== (scope.quotaPrerequisiteInstallationId ?? scope.ciInstallationId)
+    || intent.predecessor.planDigest !== (scope.quotaPrerequisitePlanDigest ?? scope.ciPlanDigest) || intent.installationId === scope.ciInstallationId)) fail('identity_mismatch');
   const parts = [intent.customerId, intent.appId, intent.environment, scope.scopeKind === 'github-ci-disconnection' ? scope.ciInstallationId : intent.installationId];
   const owner = createHash('sha256').update(JSON.stringify(parts)).digest('hex');
   const poolId = resourceName('ci', { minLength: 4, maxLength: 32, scope: parts });

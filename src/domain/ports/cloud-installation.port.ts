@@ -116,11 +116,11 @@ export interface LocalCloudScopePreparationCapability {
   parseRecord(value: unknown): CloudInstallationRecord<LocalCloudScopePreparationIntent>;
   continuation?: {
     parseSelection(value: unknown, placement?: { region?: string }): Record<string, string>;
-    /** Explicit trust removal may preserve an existing hosting binding. */
-    permitsBoundCleanup?(nativeScope: Record<string, string>): boolean;
+    /** Provider-owned cleanup and independently verified prerequisites may preserve a binding. */
+    boundContinuationKind?(nativeScope: Record<string, string>): 'cleanup' | 'prerequisite' | undefined;
     /** Historical reviews remain readable; false requires a new review before any fresh write. */
     isReviewCurrent?(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>): boolean;
-    nextScope(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>, selection: Record<string, string>): Record<string, string> | null;
+    nextScope(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>, selection: Record<string, string>, history?: CloudInstallationRecord<LocalCloudScopePreparationIntent>[]): Record<string, string> | null;
     /** Only these absent nonsecret fields may be restored from verified history. */
     repairableProviderScopeFields?: readonly string[];
     /** Exact historical ancestors that must be freshly observed for binding, including after trust removal. */

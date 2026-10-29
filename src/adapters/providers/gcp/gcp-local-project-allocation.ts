@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isDeepStrictEqual } from 'node:util';
 import type { CloudInstallationRecord, LocalCloudScopePreparationCapability, LocalCloudScopePreparationIntent } from '../../../domain/ports/cloud-installation.port.js';
 import { CloudInstallationBoundaryError } from '../../../domain/ports/cloud-installation.port.js';
 import { parseCloudInstallationRecordV1 } from '../../../domain/services/cloud-installation-runtime.js';
@@ -8,17 +9,20 @@ import { createGcpLocalProjectAllocationDriver, gcpLocalProjectAllocationScopeSc
 import { createGcpBillingPreparationDriver, gcpBillingPreparationScopeSchema } from './gcp-billing-installation.js';
 import { createGcpLocalArtifactRegistryDriver, deriveGcpLocalArtifactRegistryScope, gcpLocalArtifactRegistryBinding, gcpLocalArtifactRegistryScopeSchema,
   gcpLocalPublicArtifactRegistryScopeSchema, deriveGcpLocalPublicArtifactRegistryScope, gcpLocalPublicArtifactBinding, gcpLocalPublicArtifactProofShape, gcpLocalPrivateArtifactProof } from './gcp-local-artifact-registry.js';
+import { createGcpLocalQuotaApiDriver, gcpLocalQuotaApiScopeSchema } from './gcp-local-quota-api.js';
 import { createGcpLocalServicesDriver, gcpLocalServicesScopeSchema, isGcpLocalServicesReviewCurrent } from './gcp-local-services-installation.js';
 import { createGcpGithubCiPreparationDriver, deriveGcpGithubCiPreparationScope, gcpGithubCiPreparationBinding,
   gcpGithubCiPreparationScopeSchema, gcpGithubCiPreparationSelectionSchema, gcpGithubCiDisconnectionScopeSchema,
   deriveGcpGithubCiDisconnectionScope, gcpGithubCiDisconnectionReady, gcpGithubCiDisconnectionBinding } from './gcp-github-ci-preparation.js';
 
 const baseSelection = z.object({ scopeKind: z.literal('operator-hosting-v1'), billingAccountName: gcpBillingPreparationScopeSchema.shape.billingAccountName,
-  publicArtifactRepository: z.literal('operator-public').optional() }).strict();
+  publicArtifactRepository: z.literal('operator-public').optional(),
+  quotaProjectId: gcpBillingPreparationScopeSchema.shape.projectId.optional() }).strict();
 const selectionInputSchema = z.union([baseSelection, baseSelection.extend({ ...gcpGithubCiPreparationSelectionSchema.shape, githubAccess: z.literal('disconnect').optional() }).strict()]);
 const placementShape = { hostingRegion: z.string().regex(/^[a-z]+(?:-[a-z0-9]+)+$/) };
 const selectionSchema = z.union([baseSelection.extend(placementShape).strict(), baseSelection.extend({ ...gcpGithubCiPreparationSelectionSchema.shape, githubAccess: z.literal('disconnect').optional(), ...placementShape }).strict()]);
 function driver(nativeScope: Record<string, string>, request?: typeof fetch) {
+  if (nativeScope.scopeKind === 'project-quota-api-v1') return createGcpLocalQuotaApiDriver({ fetch: request });
   if (nativeScope.scopeKind === 'project-billing') return createGcpBillingPreparationDriver({ local: true, fetch: request });
   if (nativeScope.scopeKind === 'operator-public-artifact-registry-v1') return createGcpLocalArtifactRegistryDriver({ public: true, fetch: request });
   if (nativeScope.scopeKind === 'operator-artifact-registry-v1') return createGcpLocalArtifactRegistryDriver({ fetch: request });
@@ -65,9 +69,22 @@ function registryProviderScope(scope: Record<string, string>, privateProof?: Rec
   return { ...Object.fromEntries(keys.map(key => [key, scope[key]])), ...(privateProof ?? {}), ...(publicProof ?? {}) };
 }
 
+function quotaParent(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>, history?: CloudInstallationRecord<LocalCloudScopePreparationIntent>[]) {
+  const scope = gcpLocalQuotaApiScopeSchema.parse(record.intent.nativeScope), predecessor = record.intent.predecessor;
+  const parents = history?.filter(item => item.installationId === predecessor?.installationId) ?? [];
+  if (parents.length !== 1 || parents[0].plan.digest !== predecessor?.planDigest) throw new CloudInstallationBoundaryError('ownership_mismatch');
+  const parent = parents[0];
+  if (parent.intent.nativeScope.scopeKind === 'project-quota-api-v1' || parent.intent.appId !== record.intent.appId
+    || parent.intent.customerId !== record.intent.customerId || parent.intent.environment !== record.intent.environment
+    || parent.intent.source.repository !== record.intent.source.repository || parent.intent.hostingProvider !== record.intent.hostingProvider
+    || Object.entries(scope).some(([key, value]) => key !== 'scopeKind' && parent.intent.nativeScope[key] !== value))
+    throw new CloudInstallationBoundaryError('ownership_mismatch');
+  return parent;
+}
+
 /** Local operator bootstrap only; no hosting identity exists or is invented here. */
 export function createGcpLocalProjectAllocationCapability(): LocalCloudScopePreparationCapability {
-  return {
+  const capability: LocalCloudScopePreparationCapability = {
     schemaVersion: 1,
     parseScope: value => gcpLocalProjectAllocationScopeSchema.parse(value),
     parseRecord: value => {
@@ -76,13 +93,37 @@ export function createGcpLocalProjectAllocationCapability(): LocalCloudScopePrep
     },
     continuation: {
       repairableProviderScopeFields: ['artifactInstallationId', 'artifactAttemptId', 'billingAccountName'],
-      bindingPrerequisiteIds: (record, history) => record.intent.nativeScope.scopeKind === 'github-ci-disconnection'
-        ? [privateRegistryAncestor(record, history).installationId] : [],
+      bindingPrerequisiteIds: (record, history) => {
+        const quota = record.intent.nativeScope.scopeKind === 'project-quota-api-v1';
+        const retained = quota ? quotaParent(record, history) : record;
+        return [...(quota ? [retained.installationId] : []),
+          ...(retained.intent.nativeScope.scopeKind === 'github-ci-disconnection' ? [privateRegistryAncestor(retained, history).installationId] : [])];
+      },
       parseSelection: (value, placement) => selectionSchema.parse({ ...selectionInputSchema.parse(value), hostingRegion: placement?.region ?? 'us-central1' }),
-      permitsBoundCleanup: scope => gcpGithubCiDisconnectionScopeSchema.safeParse(scope).success,
+      boundContinuationKind: scope => gcpLocalQuotaApiScopeSchema.safeParse(scope).success ? 'prerequisite'
+        : gcpGithubCiDisconnectionScopeSchema.safeParse(scope).success ? 'cleanup' : undefined,
       isReviewCurrent: record => record.intent.nativeScope.scopeKind !== 'project-services' || isGcpLocalServicesReviewCurrent(record),
-      nextScope(record, selection) {
+      nextScope(record, selection, history) {
         const selected = selectionSchema.parse(selection);
+        if (selected.quotaProjectId && selected.quotaProjectId !== record.intent.nativeScope.projectId) throw new CloudInstallationBoundaryError('ownership_mismatch');
+        if (record.intent.nativeScope.scopeKind === 'project-quota-api-v1') {
+          if (record.status !== 'scope-ready') throw new CloudInstallationBoundaryError('not_converged');
+          const parent = quotaParent(record, history);
+          if (selected.quotaProjectId && selected.quotaProjectId !== parent.intent.nativeScope.projectId) throw new CloudInstallationBoundaryError('ownership_mismatch');
+          const { quotaProjectId: _quota, ...continued } = selected;
+          const next = capability.continuation!.nextScope(parent, continued, history);
+          return next?.scopeKind === 'github-ci-disconnection' ? gcpGithubCiDisconnectionScopeSchema.parse({ ...next,
+            quotaPrerequisiteInstallationId: record.installationId, quotaPrerequisitePlanDigest: record.plan.digest }) : next;
+        }
+        if (selected.quotaProjectId && !record.intent.nativeScope.quotaPrerequisiteInstallationId) {
+          if (selected.quotaProjectId !== record.intent.nativeScope.projectId || record.status !== 'scope-ready'
+            || !['operator-artifact-registry-v1', 'operator-public-artifact-registry-v1', 'github-ci-identity', 'github-ci-disconnection'].includes(record.intent.nativeScope.scopeKind))
+            throw new CloudInstallationBoundaryError('ownership_mismatch');
+          const { quotaProjectId: _quota, ...unchanged } = selected;
+          if (!isDeepStrictEqual(unchanged, record.intent.selection)) throw new CloudInstallationBoundaryError('ownership_mismatch');
+          return gcpLocalQuotaApiScopeSchema.parse({ scopeKind: 'project-quota-api-v1',
+            ...Object.fromEntries(Object.keys(gcpLocalQuotaApiScopeSchema.shape).filter(key => key !== 'scopeKind').map(key => [key, record.intent.nativeScope[key]])) });
+        }
         if ('githubAccess' in selected && selected.githubAccess === 'disconnect') {
           if (record.intent.nativeScope.billingAccountName !== selected.billingAccountName
             || Object.entries(selected).some(([key, value]) => key.startsWith('github') && key !== 'githubAccess' && record.intent.nativeScope[key] !== value))
@@ -121,6 +162,10 @@ export function createGcpLocalProjectAllocationCapability(): LocalCloudScopePrep
         return null;
       },
       binding(record, placement, history) {
+        if (record.intent.nativeScope.scopeKind === 'project-quota-api-v1') {
+          if (record.status !== 'scope-ready') throw new CloudInstallationBoundaryError('not_converged');
+          return capability.continuation!.binding(quotaParent(record, history), placement, history);
+        }
         if (record.intent.nativeScope.scopeKind === 'github-ci-disconnection') {
           const identity = gcpGithubCiDisconnectionBinding(record);
           const scope = gcpGithubCiDisconnectionScopeSchema.parse(record.intent.nativeScope);
@@ -171,4 +216,5 @@ export function createGcpLocalProjectAllocationCapability(): LocalCloudScopePrep
       };
     },
   };
+  return capability;
 }
