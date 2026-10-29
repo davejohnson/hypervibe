@@ -1065,8 +1065,9 @@
       "summary": "When building or releasing Hypervibe, update the configured local MCP runtime first and verify that it reports the new version",
       "originalSha256": "22e255970630916d35ba11017d099583a698580ecf487d582c66f44dfef7a230",
       "destination": "docs/development-guidance-workflow.md#dg-119",
-      "destinationSha256": "22e255970630916d35ba11017d099583a698580ecf487d582c66f44dfef7a230",
-      "transformation": "verbatim"
+      "destinationSha256": "8a93ab7182c89e84aebbb3013f10e280bf61e8344e74fa1d04b68216c5ef273f",
+      "transformation": "explicit-user-requested-rule-restoration",
+      "policyChange": "Record the prior user agreement on the canonical local Codex Hypervibe MCP runtime in main for the first time, restoring the rule from unmerged commits 3aa2c838dc4f9c3758d99f60e275570f8400c307 and 77c39f6c2c7e11bbd519b16784c4dd7c48ee9963. Both global and project-specific configuration must retain /Users/dave/projects/hypervibe/dist/mcp.js; another checkout or testing does not authorize repointing to a worktree, temporary checkout, alternate output or installed package. Rebuild the main checkout in place and preserve version verification and user-owned Codex restart."
     },
     {
       "id": "DG-120",
