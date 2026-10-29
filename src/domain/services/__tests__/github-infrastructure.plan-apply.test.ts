@@ -151,7 +151,9 @@ describe('GitHub infrastructure plan/apply', () => {
     vi.spyOn(managedBackups, 'compileManagedBackupFiles').mockResolvedValue({ files: [{
       path: '.github/workflows/hypervibe-backup-production.yml', content: 'name: managed backup\n', hash: 'a'.repeat(64),
     }], issues: [], requiredSecrets: [] });
-    const result = await planGitHubInfrastructure({ project, spec: spec(), environmentName: 'production' });
+    const desired = spec();
+    desired.environments.production.backups = { mode: 'daily' };
+    const result = await planGitHubInfrastructure({ project, spec: desired, environmentName: 'production', backupEnvironment: 'production' });
     const action = result.actions.find(action => action.metadata?.operation === 'githubInfrastructurePullRequest');
     expect(action).toMatchObject({ type: 'update', billable: true, requiresConfirm: true,
       metadata: { backupWorkflowPublicationRequired: true } });

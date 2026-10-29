@@ -798,7 +798,8 @@ export function resolvePlanActionAuthority(
   }
   if (
     isGitHubInfrastructureAction(action)
-    && (action.metadata?.backupWorkflowPublicationRequired !== true || action.billable === true && action.requiresConfirm === true)
+    && (action.metadata?.backupWorkflowPublicationRequired !== true || action.requiresConfirm === true
+      && (action.billable === true || Array.isArray(action.metadata?.desiredFiles) && action.metadata.desiredFiles.length === 0))
     && exactResource(action, 'repo', 'github')
     && action.type === 'update'
     && action.resource.name === metadataString(action, 'repository')

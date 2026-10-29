@@ -33,7 +33,7 @@ describe('reviewed daily backup policy application', () => {
         serviceVolumes: { web: { provider: 'railway', state: 'bound', target, externalId: 'volume' } },
       } : {}) } });
     const component = kind === 'database' ? ctx.repos.components.create({ environmentId: environment.id, type: 'postgres', externalId: 'db', bindings: { provider: 'railway' } }) : undefined;
-    const environmentSpec = environmentSpecSchema.parse({ hosting: { provider: 'railway' },
+    const environmentSpec = environmentSpecSchema.parse({ backups: { mode: 'daily' }, hosting: { provider: 'railway' },
       services: kind === 'volume' ? { web: { volume: { mountPath: '/data' } } } : {},
       ...(kind === 'database' ? { database: { provider: 'railway' } } : {}) });
     const source = { provider: 'railway', primaryExternalId: kind === 'database' ? 'db' : 'web',

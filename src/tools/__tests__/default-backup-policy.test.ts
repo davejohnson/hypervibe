@@ -20,9 +20,9 @@ beforeEach(() => {
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true }); vi.unstubAllEnvs(); });
 
-describe('daily backup intent through the public command boundary', () => {
-  // Product requirement: declaring durable resources is enough to require daily
-  // protection. Absence of a policy must not be interpreted as opting out.
+describe('optional backup intent through the public command boundary', () => {
+  // User requirement: ordinary deployments do not require backup setup.
+  // Omission leaves backup intent unconfigured and never rewrites the spec.
   it('reports the default for an existing spec without rewriting that spec or revision', async () => {
     const ctx = createCommandContext();
     const project = ctx.repos.projects.create({ name: 'daily-default-test', defaultPlatform: 'railway' });
@@ -35,7 +35,7 @@ describe('daily backup intent through the public command boundary', () => {
     const before = store.get(project)!;
     const result = await createCommandRegistry(ctx).execute('hv_spec', { project: project.name });
     expect(result).toMatchObject({ ok: true, data: { backupPolicies: { production: {
-      mode: 'daily', source: 'default', resources: [
+      mode: 'disabled', source: 'default', resources: [
         { kind: 'database', name: 'postgres', provider: 'railway' },
         { kind: 'volume', name: 'web', provider: 'railway' },
         { kind: 'storage', name: 'documents', provider: 'railway' },
@@ -61,7 +61,7 @@ describe('daily backup intent through the public command boundary', () => {
       bindings: { provider: 'railway', providerScope: { projectId: 'native-project', environmentId: 'native-environment' } } });
     const store = new SpecStore();
     store.replace(project, { version: 1, project: project.name, environments: { production: {
-      hosting: { provider: 'railway' }, services: {}, database: { provider: 'railway', engine: 'postgres' },
+      hosting: { provider: 'railway' }, services: {}, database: { provider: 'railway', engine: 'postgres' }, backups: { mode: 'daily' },
     } } });
     const before = store.get(project);
     vi.spyOn(PlanService.prototype, 'observeEnvironment').mockResolvedValue({ warnings: [], observed: {
@@ -79,7 +79,7 @@ describe('daily backup intent through the public command boundary', () => {
         state: 'known' as const, daily: state === 'scheduled', mechanism: 'snapshot' as const, policyFingerprint: 'a'.repeat(64), preservationFingerprint: 'b'.repeat(64),
         source: { provider: 'railway', primaryExternalId: 'primary', providerScope: { projectId: 'native-project', environmentId: 'native-environment' }, resourceIdentity: { volumeId: 'volume', volumeInstanceId: 'volume-instance' } },
       } } : { reason: state === 'unsupported' ? 'Daily policy adapter unavailable.' : 'Daily policy observation unavailable.' }) };
-    vi.spyOn(backupPolicies, 'observeBackupPolicy').mockResolvedValue({ policy: { mode: 'daily', source: 'default', resources: [resource] }, resources: [item] });
+    vi.spyOn(backupPolicies, 'observeBackupPolicy').mockResolvedValue({ policy: { mode: 'daily', source: 'explicit', resources: [resource] }, resources: [item] });
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('Unexpected network call in status contract test'); }));
     const result = await createCommandRegistry(ctx).execute('hv_status', { project: project.name, env: 'production' });
     expect(store.get(project)).toEqual(before);
@@ -87,18 +87,17 @@ describe('daily backup intent through the public command boundary', () => {
     return result;
   }
 
-  it.each(['unsupported', 'unknown', 'needs-configuration'] as const)('hv_status does not claim convergence while daily backup coverage is %s', async state => {
-    // Infrastructure itself is in sync. Only the independently supplied backup
-    // coverage gap must prevent the public command from claiming convergence.
+  it.each(['unsupported', 'unknown', 'needs-configuration'] as const)('hv_status reports optional backup coverage %s separately from deployment convergence', async state => {
+    // Deployment is in sync while the independent backup status remains incomplete.
     expect(await statusFor(state)).toMatchObject({ ok: true, data: {
-      inSync: false, backupCoverage: { complete: false, backupObserved: 'unverified', restoreTested: 'unverified',
-        policy: { mode: 'daily', source: 'default' }, resources: [{ state }] },
+      inSync: true, backupCoverage: { complete: false, backupObserved: 'unverified', restoreTested: 'unverified',
+        policy: { mode: 'daily', source: 'explicit' }, resources: [{ state }] },
     } });
   });
 
   it('hv_status reports an observed schedule separately from backup availability and tested restoration', async () => {
     expect(await statusFor('scheduled')).toMatchObject({ ok: true, data: {
-      inSync: false, backupCoverage: { complete: true, backupObserved: 'unverified', restoreTested: 'unverified',
+      inSync: true, backupCoverage: { complete: true, backupObserved: 'unverified', restoreTested: 'unverified',
         resources: [{ state: 'scheduled', observation: { daily: true } }] },
       backupReadiness: { ready: false, recoveryPointReady: false, restoreReady: false },
     } });

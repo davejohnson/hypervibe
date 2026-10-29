@@ -6,7 +6,7 @@ import { environmentSpecSchema, projectSpecSchema, type EnvironmentSpec } from '
 import type { AdapterFactory } from '../adapter.factory.js';
 
 const now = new Date();
-const spec = environmentSpecSchema.parse({ hosting: { provider: 'example-host' }, services: { web: { volume: { mountPath: '/data' } } }, database: { provider: 'example-db', engine: 'postgres' }, storage: { documents: { provider: 'example-storage', type: 'bucket', region: 'west', injectInto: ['web'] } } });
+const spec = environmentSpecSchema.parse({ backups: { mode: 'daily' }, hosting: { provider: 'example-host' }, services: { web: { volume: { mountPath: '/data' } } }, database: { provider: 'example-db', engine: 'postgres' }, storage: { documents: { provider: 'example-storage', type: 'bucket', region: 'west', injectInto: ['web'] } } });
 const environment: Environment = { id: 'env', projectId: 'project', name: 'production', createdAt: now, updatedAt: now,
   platformBindings: {
     serviceVolumes: { web: { provider: 'example-host', state: 'bound', externalId: 'volume-1', target: { projectId: 'native', environmentId: 'prod', serviceId: 'web-id', mountPath: '/data' } } },
@@ -37,11 +37,12 @@ describe('default backup discovery and observation', () => {
         destination: 'hypervibe-backups', issues: ['The managed private backup runner requires a published immutable Hypervibe helper image.'] } });
   });
 
-  it('defaults every declared data store to daily without mutating the spec', () => {
+  it('reports omitted backup intent as disabled without mutating the spec', () => {
     const input = projectSpec();
+    delete input.environments.production.backups;
     const before = JSON.stringify(input);
     const policy = resolveBackupPolicies(input).production;
-    expect(policy).toMatchObject({ mode: 'daily', source: 'default' });
+    expect(policy).toMatchObject({ mode: 'disabled', source: 'default' });
     expect(policy.resources).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: 'database', name: 'postgres', provider: 'example-db' }),
       expect.objectContaining({ kind: 'volume', name: 'web', provider: 'example-host' }),

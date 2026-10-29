@@ -50,7 +50,7 @@ function fixture(actions: PlanAction[] = [variable('RAILWAY_API_TOKEN')]) {
   const stored = new SpecStore().replace(project, { version: 1, project: project.name, gitRemoteUrl: project.gitRemoteUrl,
     runtime: { kind: 'node', version: '24', installCommand: 'npm ci --omit=dev' },
     devops: { code: { provider: 'gitlab', scope: remote }, ci: { provider: 'gitlab-ci' }, canonicalEnvironment: 'production' },
-    environments: { production: { hosting: { provider: 'railway' }, services: { web: { startCommand: 'npm start' } },
+    environments: { production: { backups: { mode: 'daily' }, hosting: { provider: 'railway' }, services: { web: { startCommand: 'npm start' } },
       database: { provider: 'railway', engine: 'postgres' }, email: { enabled: false },
       envVars: { PENDING_APPLICATION_CHANGE: 'new-value' },
       deploy: { strategy: 'branch', trigger: 'ci', branch: 'main', autoDeploy: false } } } });
@@ -77,7 +77,7 @@ function fixture(actions: PlanAction[] = [variable('RAILWAY_API_TOKEN')]) {
   } });
   const resource = { kind: 'database' as const, provider: 'railway', name: 'postgres', bindingState: 'bound' as const,
     retained: false, componentId: component.id };
-  vi.spyOn(backupPolicy, 'observeBackupPolicy').mockResolvedValue({ policy: { mode: 'daily', source: 'default', resources: [resource] },
+  vi.spyOn(backupPolicy, 'observeBackupPolicy').mockResolvedValue({ policy: { mode: 'daily', source: 'explicit', resources: [resource] },
     resources: [{ resource, state: 'unknown', reason: 'Synthetic missing recovery evidence.' }] });
   vi.spyOn(gitLabCiLifecycle, 'planDeploy').mockResolvedValue({ actions, warnings: [] });
   vi.spyOn(gitLabCiLifecycle, 'planAppliedSpecHash').mockResolvedValue({ actions: [], warnings: [] });
@@ -90,7 +90,7 @@ function fixture(actions: PlanAction[] = [variable('RAILWAY_API_TOKEN')]) {
 describe('GitLab credentials through the shared prerequisite stage', () => {
   it('plans against the registered GitLab connection without requesting gitlab-ci credentials', async () => {
     const f = fixture();
-    const result = await new PlanService().plan(f.project, 'production', { includeEnvFile: false });
+    const result = await new PlanService().plan(f.project, 'production', { includeEnvFile: false, scope: 'backups' });
     expect(result).toMatchObject({ scope: 'managed-ci-credentials', blocked: [], actions: f.actions });
     if ('error' in result) throw new Error(result.error);
     expect(planRunDocumentSchema.safeParse(f.ctx.repos.runs.findById(result.planRunId)?.plan).success).toBe(true);
@@ -140,7 +140,7 @@ describe('GitLab credentials through the shared prerequisite stage', () => {
   it('retains the CI lifecycle dependency graph while selecting the isolated stage', async () => {
     const first = variable('FIRST'), second = { ...variable('SECOND'), dependsOn: [first.id] };
     const f = fixture([second, first]);
-    const result = await new PlanService().plan(f.project, 'production', { includeEnvFile: false });
+    const result = await new PlanService().plan(f.project, 'production', { includeEnvFile: false, scope: 'backups' });
     if ('error' in result) throw new Error(result.error);
     expect(result.scope).toBe('managed-ci-credentials');
     expect(result.actions.find(action => action.id === second.id)?.dependsOn).toEqual([first.id]);
@@ -150,7 +150,7 @@ describe('GitLab credentials through the shared prerequisite stage', () => {
   it.each(['service:web', 'service:missing'])('does not discard prerequisite %s to admit CI credential work', async dependency => {
     const action = { ...variable('RAILWAY_API_TOKEN'), dependsOn: [dependency] };
     const f = fixture([action]);
-    const result = await new PlanService().plan(f.project, 'production', { includeEnvFile: false });
+    const result = await new PlanService().plan(f.project, 'production', { includeEnvFile: false, scope: 'backups' });
     expect(result).toMatchObject({ scope: 'backup-readiness', actions: [] });
     expect(f.sync).not.toHaveBeenCalled();
     expect(f.deploy).not.toHaveBeenCalled();

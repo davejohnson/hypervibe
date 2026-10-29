@@ -5,7 +5,7 @@ export const BACKUP_DEFAULTS = { retainSets: 7, maxDataAgeHours: 24, restoreEver
 
 /** Derived desired resources use the normal confirmed storage lifecycle; no writes or source hash changes here. */
 export function withBackupStorageDefaults(spec: EnvironmentSpec): EnvironmentSpec {
-  if (spec.backups?.mode === 'disabled' || spec.backups?.destination
+  if (spec.backups?.mode !== 'daily' || spec.backups.destination
     || Object.values(spec.storage ?? {}).some(storage => storage.purpose === 'backup')
     || spec.storage?.[DEFAULT_BACKUP_STORAGE]) return spec;
   // Reuse a reviewed provider/placement, never guess an account, region or billing destination.
@@ -21,7 +21,7 @@ export function resolveBackupStrategy(input: EnvironmentSpec): {
   retainSets: 7; maxDataAgeHours: 24; restoreEveryDays: 7;
 } {
   const spec = withBackupStorageDefaults(input);
-  if (spec.backups?.mode === 'disabled') return { mode: 'disabled', ...BACKUP_DEFAULTS, issues: [] };
+  if (spec.backups?.mode !== 'daily') return { mode: 'disabled', ...BACKUP_DEFAULTS, issues: [] };
   const candidates = Object.entries(spec.storage ?? {}).filter(([, value]) => value.purpose === 'backup');
   const destination = spec.backups?.destination ?? (candidates.length === 1 ? candidates[0][0] : undefined);
   const issues: string[] = [];
