@@ -43,6 +43,8 @@ When a release requires a separately deployed helper artifact, gate package publ
 
 ## DG-119
 
+Keep the user's local Codex Hypervibe MCP configuration pointed at the main checkout's `/Users/dave/projects/hypervibe/dist/mcp.js` (`~/projects/hypervibe/dist/mcp.js`). Never repoint it to a worktree, temporary checkout, alternate build output, or installed package, including for testing. Refresh that runtime by rebuilding the main checkout in place; working in another checkout does not authorize changing the local Codex MCP configuration. This rule applies to both global and project-specific Codex MCP configuration.
+
 When building or releasing Hypervibe, update the configured local MCP runtime first and verify that it reports the new version. Never kill or restart Hypervibe MCP or Codex processes to activate a build; tell the user to restart Codex themselves.
 
 ## DG-120
