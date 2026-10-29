@@ -412,6 +412,12 @@ function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
   };
 
   const devops = resolveDevOpsSelection(spec);
+  if (devops?.ci && Object.keys(spec.devops?.ci?.repositoryVariables ?? {}).length > 0) {
+    const registration = devOpsProviderRegistry.ciProvider(devops.ci.provider);
+    add(registration?.connectionProvider ?? devops.ci.provider,
+      spec.devops?.canonicalEnvironment ?? (spec.environments.production ? 'production' : Object.keys(spec.environments).sort()[0] ?? 'repository'),
+      'Repository configuration variables', [devops.code.scope]);
+  }
   for (const [envName, envSpec] of Object.entries(spec.environments)) {
     add(envSpec.hosting.provider, envName, 'hosting');
     if (envSpec.database) add(envSpec.database.provider, envName, 'database');

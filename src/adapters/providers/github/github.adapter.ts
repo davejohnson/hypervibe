@@ -159,11 +159,30 @@ export class GitHubAdapter {
     this.credentials = credentials as GitHubCredentials;
   }
 
+  async inspectRepositoryVariables(scope: string, name: string | undefined, limit: number): Promise<Record<string, unknown>> {
+    const resource = 'repository-variable';
+    try {
+      if (!this.credentials) throw new Error('Unconnected');
+      const { GitHubRepositoryVariablesAdapter } = await import('./github-repository-variables.adapter.js');
+      const variables = new GitHubRepositoryVariablesAdapter(this.credentials);
+      const selected = name === undefined ? undefined : variables.normalizeName(name);
+      const observed = await variables.observe(scope);
+      if (observed.state !== 'present') return { resource, observation: 'unknown', variables: [], truncated: false, partial: true,
+        reason: 'Complete repository-variable inventory could not be verified.' };
+      const matches = selected ? observed.value.variables.filter(variable => variable.name === selected) : observed.value.variables;
+      return { resource, observation: matches.length ? 'present' : 'absent',
+        repositoryId: observed.value.repository.nativeId, repository: observed.value.repository.path,
+        observedAt: observed.value.observedAt, variables: matches.slice(0, limit).map(variable => ({ id: variable.name, ...variable })),
+        truncated: matches.length > limit, partial: false };
+    } catch { return { resource, observation: 'unknown', variables: [], truncated: false, partial: true,
+      reason: 'Repository-variable inspection could not be verified.' }; }
+  }
+
   private async request<T>(
     method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
     endpoint: string,
     body?: Record<string, unknown>,
-    responseOptions?: { acceptEmpty202?: boolean }
+    responseOptions?: { acceptEmpty202?: boolean; acceptEmpty201?: boolean; expectedStatus?: number }
   ): Promise<T> {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
@@ -205,7 +224,11 @@ export class GitHubAdapter {
       throw new GitHubApiError(errorMessage, response.status, documentationUrl);
     }
 
-    if (response.status === 204 || (response.status === 202 && responseOptions?.acceptEmpty202)) {
+    if (responseOptions?.expectedStatus !== undefined && response.status !== responseOptions.expectedStatus) {
+      throw new GitHubApiError('GitHub returned an unexpected acknowledgment', response.status);
+    }
+    if (response.status === 204 || (response.status === 202 && responseOptions?.acceptEmpty202)
+      || (response.status === 201 && responseOptions?.acceptEmpty201)) {
       return {} as T;
     }
 
@@ -363,6 +386,21 @@ export class GitHubAdapter {
     };
   }> {
     return this.request('GET', `/repos/${owner}/${repo}`);
+  }
+
+  async listRepositoryVariablePage(owner: string, repo: string, page: number): Promise<unknown> {
+    return this.request('GET', `/repos/${owner}/${repo}/actions/variables?per_page=30&page=${page}`,
+      undefined, { expectedStatus: 200 });
+  }
+
+  async createRepositoryVariable(owner: string, repo: string, name: string, value: string): Promise<void> {
+    await this.request('POST', `/repos/${owner}/${repo}/actions/variables`, { name, value },
+      { expectedStatus: 201, acceptEmpty201: true });
+  }
+
+  async updateRepositoryVariable(owner: string, repo: string, name: string, value: string): Promise<void> {
+    await this.request('PATCH', `/repos/${owner}/${repo}/actions/variables/${encodeURIComponent(name)}`,
+      { name, value }, { expectedStatus: 204 });
   }
 
   async getRef(owner: string, repo: string, ref: string): Promise<{ ref: string; object: { sha: string } } | null> {
@@ -1326,6 +1364,9 @@ async function inspectGitHubResources(
 ): Promise<Record<string, unknown>> {
   const { owner, repo } = repositoryFromInspectionScope(request.scope);
   const resource = request.resource ?? 'repository';
+  if (resource === 'repository-variable') {
+    return adapter.inspectRepositoryVariables(`${owner}/${repo}`, request.name, request.limit);
+  }
   if (resource === 'repository') {
     return {
       observation: 'present',
@@ -1430,10 +1471,11 @@ providerRegistry.register({
     return adapter;
   },
   inspection: {
-    resources: ['repository', 'ref', 'branch', 'pages', 'pull-request', 'branch-protection'],
+    resources: ['repository', 'ref', 'branch', 'pages', 'pull-request', 'branch-protection', 'repository-variable'],
     defaultResource: 'repository',
     selectors: {
       repository: { mode: 'provider-resource', oneOf: [['scope', 'project']], optional: ['scope', 'project'] },
+      'repository-variable': { mode: 'provider-resource', oneOf: [['scope', 'project']], optional: ['scope', 'project', 'name', 'limit'], list: true, collectionKey: 'variables' },
       ref: { mode: 'provider-resource', oneOf: [['scope', 'project'], ['id', 'name']], optional: ['scope', 'project', 'id', 'name'], mutuallyExclusive: [['id', 'name']] },
       branch: { mode: 'provider-resource', oneOf: [['scope', 'project'], ['id', 'name']], optional: ['scope', 'project', 'id', 'name'], mutuallyExclusive: [['id', 'name']] },
       pages: { mode: 'provider-resource', oneOf: [['scope', 'project']], optional: ['scope', 'project'] },

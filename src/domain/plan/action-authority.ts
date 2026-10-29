@@ -1,4 +1,5 @@
 import { isDatabasePasswordAction, DATABASE_PASSWORD_OPERATIONS } from './database-password-plan.contract.js';
+import { isRepositoryVariableAction } from '../services/repository-variables.service.js';
 import { isDatabaseBootstrapAction } from './database-bootstrap.contract.js';
 import { DATABASE_FRESH_INITIALIZATION_OPERATION, isDatabaseInitializationAction } from './database-initialization.contract.js';
 import { isCredentialAction, CREDENTIAL_OPERATION } from './credential-plan.contract.js';
@@ -113,6 +114,7 @@ export type PlanMutationCapability =
   | 'github.applied-spec-hash.sync'
   | 'ci.configuration.sync'
   | 'ci.variable.sync'
+  | 'ci.repository-variable.sync'
   | 'ci.variable.delete'
   | 'ci.binding.remove'
   | 'ci.applied-spec-hash.sync'
@@ -491,6 +493,7 @@ export function resolvePlanActionAuthority(
   action: PlanAction
 ): PlanActionAuthority | null {
   if (action.type === 'noop') return null;
+  if (isRepositoryVariableAction(action)) return authority(action, 'ci.repository-variable.sync');
   if (isDatabaseBootstrapAction(action)) return authority(action, 'database.bootstrap');
   if (DATABASE_PASSWORD_OPERATIONS.includes(action.metadata?.operation as typeof DATABASE_PASSWORD_OPERATIONS[number])) return isDatabasePasswordAction(action) ? authority(action, 'credential.lifecycle.update') : null;
   if (action.metadata?.operation === CREDENTIAL_OPERATION) return isCredentialAction(action) ? authority(action, 'credential.lifecycle.update') : null;
