@@ -132,7 +132,10 @@ async function withHoldingClient<T>(context: Context, request: typeof fetch, wor
     } finally { budget.close(); }
   }
 
-export function createGcpLocalHoldingDriver(options: { fetch?: typeof fetch } = {}): CloudInstallationDriver<Intent> {
+type GcpLocalHoldingDriver = CloudInstallationDriver<Intent> & {
+  readPrepared(receipt: LocalPreparedHostingReceiptV1, token: string, signal: AbortSignal): ReturnType<typeof readGcpLocalPreparedResources>;
+};
+export function createGcpLocalHoldingDriver(options: { fetch?: typeof fetch } = {}): GcpLocalHoldingDriver {
   const request = options.fetch ?? fetch;
   async function read(client: GcpSecretWriterClient, context: ActionContext) {
     const key = String(context.action.metadata.native.key), s = settings(context.intent);
@@ -194,7 +197,8 @@ export function createGcpLocalHoldingDriver(options: { fetch?: typeof fetch } = 
       return { state: 'satisfied' as const, evidence: proof(context, attemptId, resource, operationName) };
     }); } catch (error) { return { state: 'unknown' as const, reason: reason(error) }; }
   }
-  const driver: CloudInstallationDriver<Intent> = {
+  const driver: GcpLocalHoldingDriver = {
+    readPrepared: (receipt, token, signal) => readGcpLocalPreparedResources(receipt, token, signal, request),
     provider: 'gcp', localScopePreparation: { hostingProvider: 'cloudrun', preparation: 'holding-v1' },
     parseScope: value => gcpLocalHoldingScopeSchema.parse(value),
     parseAction(value, intent) { const action = actions(intent).find(item => isDeepStrictEqual(item, value)); if (!action) fail('identity_mismatch'); return action; },
@@ -340,9 +344,12 @@ export function createGcpLocalHoldingCapability(): LocalHoldingPreparationCapabi
         || !receipt.deployment.workloads.some(item => item.name === selection.runtimeService)) fail('identity_mismatch');
       const url = new URL(origin);
       if (url.protocol !== 'https:' || url.origin !== origin || url.username || url.password) fail('identity_mismatch');
-      const { authentication } = await this.create(receipt.nativeScope);
+      const { authentication, driver } = await this.create(receipt.nativeScope);
       const signal = AbortSignal.timeout(30_000);
-      await readGcpLocalPreparedResources(receipt, await authentication.administrator.getAccessToken('https://www.googleapis.com/auth/cloud-platform', signal), signal);
+      // Keep the same authenticated transport used for preparation/recovery:
+      // a raw bearer-token fetch drops the user's selected quota project.
+      await (driver as GcpLocalHoldingDriver).readPrepared(receipt,
+        await authentication.administrator.getAccessToken('https://www.googleapis.com/auth/cloud-platform', signal), signal);
       return { origin, runtimeIdentity: identity };
     },
   };

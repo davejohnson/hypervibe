@@ -225,7 +225,7 @@ export function createGcpOperatorRecaptchaCapability(): OperatorApplicationCapab
       if (!context) fail('not_installed');
       const n = scopeSchema.parse(value), custody = new OperatorCredentialCustody({ ...context, provider: PROVIDER });
       const auth = new GcpLocalDefaultAuthentication(n.projectId); await auth.initialize();
-      return { driver: withOperatorOutputDelivery(createGcpOperatorRecaptchaDriver({ custody }), context, dependencies),
+      return { driver: withOperatorOutputDelivery(createGcpOperatorRecaptchaDriver({ custody, fetch: auth.request.bind(auth) }), context, dependencies),
         authentication: { kind: 'operator-application', administrator: { async getAccessToken(scope, signal) {
           if (scope !== 'https://www.googleapis.com/auth/cloud-platform' || signal.aborted) fail('authorization_expired'); return auth.token();
         } } } };

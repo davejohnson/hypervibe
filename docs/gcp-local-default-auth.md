@@ -89,3 +89,36 @@ validation passed. The new transport
 tests use synthetic user ADC and never access the user's login.
 Offline evidence does not establish a live deployment, database connection, or IAM
 propagation result.
+
+## Operator origin and CAPTCHA quota propagation
+
+A 2026-10-29 diagnostic challenged the assumption that obtaining a token from
+`GcpLocalDefaultAuthentication` also preserves its request configuration. The
+actual packaged origin verifier used raw `fetch` after token acquisition. Its
+first Resource Manager GET omitted `x-goog-user-project` despite an explicitly
+selected SDK quota project; the diagnostic guard stopped that read before
+network dispatch. This explains that guarded prerequisite failure, not a new
+native quota rejection. The earlier helper-publication HTTP 429 remains separate
+observed evidence.
+
+Google's [quota selection contract](https://docs.cloud.google.com/docs/quotas/set-quota-project)
+requires the REST header and distinguishes Node SDK environment selection from
+bearer-token authorization. Two real-GoogleAuth transport regressions failed
+before correction, covering ADC-file selection and an explicit environment
+override. The holding driver's existing authenticated transport now also performs
+operator-origin verification. Prepared runtime/first-release readers already
+receive the adapter's authenticated request function and retain that behavior.
+
+Review of the other local-authentication callers found the same missing transport
+in CAPTCHA's capability. Two additional regressions failed before correction;
+planning, inspection and recovery now share its authenticated request function,
+including the explicitly allowed reCAPTCHA Enterprise endpoint. All four new
+regressions pass. They use isolated synthetic ADC, reconstructed HTTP responses
+and real clients; they verify resource/quota separation, mutation-free reads,
+permission denial, no fallback and value-free failure. No hosted credentials,
+AWS/Azure mechanisms, public capability flags or shared lifecycle contracts
+change. The named provider review above still applies.
+
+The combined focused group passed 75 tests across six files. Native operator
+readback and the complete customer walkthroughs remain separate acceptance gates;
+these tests do not establish successful live registration, deployment or recovery.

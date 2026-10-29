@@ -507,3 +507,8 @@ providers. The native AWS/GCP/Azure transport suites and shared SQLite storage/q
 lifecycle suites run in ordinary `npm test`; see [storage access evidence](../../docs/storage-runtime-access-evidence.md).
 These checks establish exact configured grant and recovery boundaries, not live
 application authorization or atomic exclusion of external IAM writers.
+
+`gcp-operator-origin-auth.test.ts` exercises the real GoogleAuth ADC loader and
+serialized origin/CAPTCHA transports. Four regressions preserve ADC and explicit
+SDK quota selection in reads and recovery; the diagnostic counterexample and
+coverage limits are recorded in [local authentication evidence](../../docs/gcp-local-default-auth.md#operator-origin-and-captcha-quota-propagation).
