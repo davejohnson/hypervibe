@@ -3,14 +3,14 @@ import { z } from 'zod';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
-import { CloudInstallationBoundaryError, type CloudInstallationAction, type CloudInstallationDriver, type CloudInstallationEvidence,
+import { CloudInstallationBoundaryError, type CloudInstallationAction, type CloudInstallationAttempt, type CloudInstallationDriver, type CloudInstallationEvidence,
   type CloudInstallationProviderContext, type OperatorApplicationIntent } from '../ports/cloud-installation.port.js';
 import type { OperatorApplicationLocalContext } from '../ports/operator-application.port.js';
 import { operatorOutputSelectionSchema } from '../ports/operator-output.port.js';
 import { runtimeSecretReferenceSchema } from '../ports/secret-destination.port.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { SpecStore } from '../spec/spec.store.js';
-import { OperatorCredentialCustody } from './operator-credential-custody.js';
+import { OperatorCredentialCustody, type PrivateOperatorSnapshot } from './operator-credential-custody.js';
 import { assertReadySecretContainers } from './secret-container-setup.js';
 type Intent = OperatorApplicationIntent;
 type Context = CloudInstallationProviderContext<Intent>;
@@ -88,7 +88,7 @@ export function withOperatorOutputDelivery(native: CloudInstallationDriver<Inten
     if (!capability || Object.values(desired.destinations).some(item => !capability.providers.includes(item.binding.destination.provider))) fail();
     return { desired, capability };
   }
-  async function inspect(context: Context & { action: CloudInstallationAction }, retryInspection = false) {
+  async function inspect(context: Context & { action: CloudInstallationAction; attempt?: CloudInstallationAttempt }, retryInspection = false, recoverPending = false) {
     try {
       const action = actions(context.intent, dependencies(context.intent)).find(item => isDeepStrictEqual(item, context.action)); if (!action) fail();
       const role = String(action.metadata.native.role), { desired, capability } = await selection(context.intent), target = desired.destinations.find(item => item.role === role)!;
@@ -109,6 +109,13 @@ export function withOperatorOutputDelivery(native: CloudInstallationDriver<Inten
         return { state: 'satisfied' as const, evidence };
       }
       if (delivery) {
+        // Retire only a durable prewrite claim for this exact attempt. The CAS
+        // also prevents a suspended writer from subsequently crossing the gate.
+        if (recoverPending && snapshot && delivery.dispatchState === 'pending' && delivery.status !== 'rejected'
+          && context.attempt?.id === delivery.attemptId && context.attempt.actionId === action.id) {
+          const retired = store.updateDelivery(snapshot, target.key, { ...delivery, status: 'rejected' });
+          return { state: retired ? 'rejected' as const : 'unknown' as const, reason: 'not_converged' as const };
+        }
         if (retryInspection && delivery.status === 'rejected' && context.attempts?.some(item => item.id === delivery.attemptId && item.actionId === action.id && item.status === 'rejected'))
           return { state: 'action-required' as const };
         return { state: delivery.status === 'rejected' ? 'rejected' as const : 'unknown' as const, reason: 'not_converged' as const };
@@ -139,10 +146,18 @@ export function withOperatorOutputDelivery(native: CloudInstallationDriver<Inten
       } };
     },
     inspect: context => context.action.metadata.operation === operation ? inspect(context, true) : native.inspect(context),
-    recover: context => context.action.metadata.operation === operation ? inspect(context) : native.recover(context),
+    recover: context => context.action.metadata.operation === operation ? inspect(context, false, true) : native.recover(context),
     async mutate(context) {
       if (context.action.metadata.operation !== operation) return native.mutate(context);
-      let claimed = false;
+      let claim: { store: OperatorCredentialCustody; snapshot: PrivateOperatorSnapshot; key: string } | undefined;
+      function retirePending(): boolean {
+        if (!claim) return false;
+        const delivery = claim.snapshot.state.deliveries?.[claim.key];
+        if (delivery?.dispatchState !== 'pending') return false;
+        const retained = claim.store.updateDelivery(claim.snapshot, claim.key, { ...delivery, status: 'rejected' }) ?? claim.store.read();
+        const current = retained?.state.deliveries?.[claim.key];
+        return current?.attemptId === context.attempt.id && current.dispatchState === 'pending' && current.status === 'rejected';
+      }
       try {
         const action = actions(context.intent, dependencies(context.intent)).find(item => isDeepStrictEqual(item, context.action));
         if (!action || dependencies(context.intent).some(id => !context.completed[id])) fail();
@@ -155,18 +170,30 @@ export function withOperatorOutputDelivery(native: CloudInstallationDriver<Inten
         const raw = snapshot.state.credentials[role], value = target.encoding === 'base64' ? Buffer.from(raw, 'utf8').toString('base64') : raw,
           client = await capability.create(target.binding);
         await context.beforeMutation();
-        snapshot = store.updateDelivery(snapshot, target.key, { attemptId: context.attempt.id, status: 'attempted' }); if (!snapshot) fail(); claimed = true;
+        snapshot = store.updateDelivery(snapshot, target.key, { attemptId: context.attempt.id, status: 'attempted', dispatchState: 'pending' }); if (!snapshot) fail();
+        claim = { store, snapshot, key: target.key };
         const result = await client.driver.deliver({ attemptId: context.attempt.id, destination: target.binding.destination,
           context: { accountId: context.intent.customerId, repository: context.intent.source.repository.split('/').slice(-2).join('/'), environment: context.intent.environment,
             key: target.key, sourceRevision: context.intent.source.specDigest, sourceDigest: canonicalJsonSha256(context.intent) } }, value,
-          { signal: context.signal, beforeWrite: async () => { await selection(context.intent); await context.beforeMutation(); } });
-        const retained = store.updateDelivery(snapshot, target.key, { attemptId: context.attempt.id,
+          { signal: context.signal, deadlineMs: 30_000, beforeWrite: async signal => {
+            await selection(context.intent); await context.beforeMutation();
+            if (signal.aborted || context.signal.aborted) fail();
+            const started = store.updateDelivery(claim!.snapshot, target.key, { attemptId: context.attempt.id, status: 'attempted', dispatchState: 'started' });
+            if (!started) fail();
+            claim!.snapshot = started;
+          } });
+        if (result.status !== 'delivered' && retirePending()) return { state: 'rejected', reason: 'not_converged' };
+        if (claim.snapshot.state.deliveries?.[target.key]?.dispatchState !== 'started') fail();
+        const retained = store.updateDelivery(claim.snapshot, target.key, { attemptId: context.attempt.id, dispatchState: 'started',
           status: result.status === 'delivered' ? 'delivered' : result.status === 'rejected' ? 'rejected' : 'uncertain',
           ...(result.status === 'delivered' ? { reference: result.reference } : {}) });
         if (!retained || result.status !== 'delivered') return { state: retained && result.status === 'rejected' ? 'rejected' : 'uncertain', reason: 'not_converged' };
         const verified = await inspect(context);
         return verified.state === 'satisfied' ? { state: 'acknowledged', evidence: verified.evidence } : { state: 'uncertain', reason: 'not_converged' };
-      } catch { return { state: claimed ? 'uncertain' : 'rejected', reason: 'identity_mismatch' }; }
+      } catch {
+        try { if (retirePending()) return { state: 'rejected', reason: 'not_converged' }; } catch { /* Preserve uncertainty when durable retirement cannot be verified. */ }
+        return { state: claim ? 'uncertain' : 'rejected', reason: 'identity_mismatch' };
+      }
     },
   };
 }

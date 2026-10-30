@@ -69,4 +69,20 @@ describe('private operator credential custody', () => {
     expect(completed.state).not.toHaveProperty('credentials');
     expect(store.storeCredentials(null, { 'secret-key': 'synthetic-replacement' }, { siteKey: 'replacement' })).toBeNull();
   });
+  it('preserves historical uncertainty and makes dispatch and rejection checkpoints irreversible', () => {
+    const f = fixture(), attemptId = randomUUID();
+    let saved = f.store.storeCredentials(null, { 'private-key': 'synthetic-private-key' }, { appId: '123' })!;
+    saved = f.store.updateDelivery(saved, 'LEGACY_KEY', { attemptId, status: 'uncertain' })!;
+    expect(f.store.updateDelivery(saved, 'LEGACY_KEY', { attemptId, status: 'rejected', dispatchState: 'pending' })).toBeNull();
+    saved = f.store.updateDelivery(saved, 'CURRENT_KEY', { attemptId, status: 'attempted', dispatchState: 'pending' })!;
+    const pending = saved;
+    saved = f.store.updateDelivery(saved, 'CURRENT_KEY', { attemptId, status: 'attempted', dispatchState: 'started' })!;
+    expect(f.store.updateDelivery(pending, 'CURRENT_KEY', { attemptId, status: 'rejected', dispatchState: 'pending' })).toBeNull();
+    expect(f.store.updateDelivery(saved, 'CURRENT_KEY', { attemptId, status: 'rejected', dispatchState: 'pending' })).toBeNull();
+    expect(f.store.updateDelivery(saved, 'CURRENT_KEY', { attemptId, status: 'uncertain' })).toBeNull();
+    saved = f.store.updateDelivery(saved, 'RETIRED_KEY', { attemptId, status: 'attempted', dispatchState: 'pending' })!;
+    saved = f.store.updateDelivery(saved, 'RETIRED_KEY', { attemptId, status: 'rejected', dispatchState: 'pending' })!;
+    expect(f.store.updateDelivery(saved, 'RETIRED_KEY', { attemptId, status: 'attempted', dispatchState: 'started' })).toBeNull();
+    expect(f.store.updateDelivery(saved, 'RETIRED_KEY', { attemptId: randomUUID(), status: 'attempted', dispatchState: 'pending' })).not.toBeNull();
+  });
 });

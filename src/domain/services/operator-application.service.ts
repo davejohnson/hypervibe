@@ -115,6 +115,9 @@ async function context(project: Project, environment: Environment, name: string,
   if (!capability || intent.customerId !== project.id || intent.appId !== project.id || intent.environment !== environment.name) throw operatorApplicationUnavailable();
   return { ...await capability.create(intent.nativeScope, { projectId: project.id, environmentId: environment.id,
     installationId: intent.installationId, intentDigest: canonicalJsonSha256(intent), authorizeCurrent: () => current(project, environment, name, intent) }), store: journal(project, environment, name),
+    // Registration verifies multiple native identities and every selected output
+    // before dispatch. Keep a bounded outer budget above each 30s provider call.
+    timeoutMs: 60_000,
     authorize: async input => {
       const fresh = new EnvironmentRepository().findById(environment.id);
       return !!fresh && fresh.projectId === project.id && fresh.name === environment.name && authorize() && isDeepStrictEqual(input.intent, intent)

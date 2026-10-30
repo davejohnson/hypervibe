@@ -327,6 +327,35 @@ until every native version receipt verifies, then local erasure can finish after
 a crash without another provider write. The local source revision field carries
 the accepted spec digest, not an asserted Git commit identity.
 
+Operator deliveries now retain a private, atomic prewrite checkpoint. A new
+attempt starts as `pending`; only the final authority check can change it to
+`started`, immediately before native dispatch. Recovery can retire a still-pending
+attempt and require the existing exact retry review. That same compare-and-swap
+prevents a suspended worker from dispatching after recovery. A started write, or
+an older record without this checkpoint, still remains uncertain after a lost
+acknowledgement. Absence of a checkpoint or an empty version listing is never
+proof that an older write did not run. Rejection and dispatch checkpoints cannot
+be reversed for the same attempt; existing captured credentials and attempt
+history survive recovery.
+
+The challenged assumption was that passing an initial authorization check meant
+the secret write had started. In the disposable GitHub registration walkthrough,
+the 15-second action deadline expired during pre-delivery verification: credential
+capture succeeded, but the independently guarded transport recorded zero
+addVersion dispatches before its process closed. Two regressions first failed:
+prewrite cancellation returned uncertain, and recovery could not retire a pending
+worker without allowing its later dispatch. They now pass through real SQLite
+custody and the serialized GCP delivery client. Additional checks cover restart,
+exact retry history, late workers, legacy records and post-dispatch lost replies.
+
+Two further RED/GREEN checks exercise a synthetic 20-second verification and
+Entra response through the actual application plan/apply boundary. Operator
+authorization phases now allow at most 60 seconds each and private delivery allows at most
+30 seconds, including final authorization. A 40-second prewrite check is still
+cancelled without dispatch. These are bounded clock/transport fixtures, not new
+live compatibility evidence. The legacy live record cannot be retroactively
+assigned a pending checkpoint; its recovery remains a separate reviewed task.
+
 Observed RED/GREEN cases: the ordinary planner initially blocked registration
 before preparing its selected output container; the shared actor initially
 rejected its exact secret-output action; unsupported roles initially requested

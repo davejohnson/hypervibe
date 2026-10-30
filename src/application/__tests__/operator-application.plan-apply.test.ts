@@ -116,7 +116,7 @@ describe('operator application desired-state admission', () => {
     if ('error' in plan) throw new Error(plan.error);
     expect(plan.actions).toHaveLength(1); expect(f.native.writes).toHaveLength(before); expect(provider).toHaveBeenCalled();
   });
-  it.each([undefined, 'application', 'federation'] as const)('creates or recovers %s through actual SQLite plan/apply without replay', async lost => {
+  it.each([undefined, 'application', 'federation', 'slow'] as const)('creates or recovers %s through actual SQLite plan/apply without replay', async lost => {
     const f = await localHoldingApplicationFixture();
     for (let step = 0; step < 2; step++) {
       const plan = await f.plan(); if ('error' in plan) throw new Error(plan.error);
@@ -126,12 +126,19 @@ describe('operator application desired-state admission', () => {
     const receipt = await verifiedLocalHoldingReceipt(f.project, f.ctx.repos.environments.findById(f.environment.id)!);
     const identity = receipt!.runtimeIdentities.find(item => item.workload === 'web')!.principal;
     if (identity.kind !== 'gcp-service-account') throw new Error('Unexpected fixture identity');
-    const native = entraNativeFixture({ lost, origin: receipt!.origins.web, subject: identity.serviceAccountUniqueId });
+    const native = entraNativeFixture({ lost: lost === 'slow' ? undefined : lost, origin: receipt!.origins.web, subject: identity.serviceAccountUniqueId });
     vi.spyOn(DefaultAzureCredential.prototype, 'getToken').mockImplementation(async scope => {
       expect(scope).toBe('https://graph.microsoft.com/.default');
       return { token: 'synthetic-transient-graph-token', expiresOnTimestamp: Date.now() + 3_600_000 };
     });
-    vi.stubGlobal('fetch', (input: any, init: any) => new URL(String(input)).hostname === 'graph.microsoft.com' ? native.request(input, init) : f.native.request(input, init));
+    let delayed = false;
+    vi.stubGlobal('fetch', async (input: any, init: any) => {
+      if (new URL(String(input)).hostname !== 'graph.microsoft.com') return f.native.request(input, init);
+      if (lost === 'slow' && !delayed && init?.method === 'POST') {
+        delayed = true; await new Promise(resolve => setTimeout(resolve, 20_000));
+      }
+      return native.request(input, init);
+    });
     const desired: any = structuredClone(f.desired);
     desired.environments.staging.operatorApplications = { azure: { provider: 'microsoft-entra', originService: 'web', runtimeService: 'web',
       profile: 'hypercloud-connect-v1', nativeScope: { tenantId: native.tenantId } } };
@@ -143,6 +150,16 @@ describe('operator application desired-state admission', () => {
     expect(status).toMatchObject({ ok: true, data: { scope: 'operator-applications', verified: false, hostingReady: false } });
     expect(ordinary).not.toHaveBeenCalled(); expect(native.writes).toEqual([]);
     await f.apply(first.planRunId, []); expect(native.writes).toEqual([]);
+    if (lost === 'slow') {
+      vi.useFakeTimers();
+      vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms => {
+        const controller = new AbortController(); setTimeout(() => controller.abort(), ms); return controller.signal;
+      });
+      const pending = f.apply(first.planRunId, first.actions.filter(action => action.requiresConfirm).map(action => action.id));
+      await vi.advanceTimersByTimeAsync(20_001);
+      expect(await pending).toMatchObject({ kind: 'executed', result: { success: true } });
+      expect(delayed).toBe(true);
+    }
     for (let step = 0; step < 5; step++) {
       const planned = await f.plan(); if ('error' in planned || planned.scope !== 'operator-applications') break;
       await f.apply(planned.planRunId, planned.actions.filter(action => action.requiresConfirm).map(action => action.id));

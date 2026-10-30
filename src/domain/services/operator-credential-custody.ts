@@ -18,7 +18,8 @@ const stateSchema = z.object({ schemaVersion: z.literal(1), context: contextSche
   credentials: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,40}$/), privateText).optional(),
   identity: z.record(z.string().regex(/^[a-zA-Z][a-zA-Z0-9]{0,40}$/), z.string().max(2048)).optional(),
   deliveries: z.record(z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/), z.object({ attemptId: z.string().guid(), status: z.enum(['attempted', 'delivered', 'uncertain', 'rejected']),
-    reference: runtimeSecretReferenceSchema.optional() }).strict()).optional(),
+    // Omission is historical uncertainty, never evidence that dispatch is pending.
+    dispatchState: z.enum(['pending', 'started']).optional(), reference: runtimeSecretReferenceSchema.optional() }).strict()).optional(),
 }).strict().superRefine((value, ctx) => {
   if (value.phase === 'awaiting-browser' && (!value.browser || value.code || value.credentials)
     || value.phase === 'code-staged' && (!value.browser || !value.code || value.credentials)
@@ -109,6 +110,12 @@ export class OperatorCredentialCustody {
     const retained = previous.state.deliveries?.[key];
     if (retained && (retained.attemptId !== value.attemptId && !(retained.status === 'rejected' && value.status === 'attempted')
       || retained.status === 'delivered' && !isDeepStrictEqual(retained, value))) return null;
+    if (value.dispatchState === 'pending' && value.status === 'delivered') return null;
+    if (retained?.attemptId === value.attemptId && (
+      retained.status === 'rejected' && !isDeepStrictEqual(retained, value)
+      || retained.dispatchState !== value.dispatchState
+        && !(retained.dispatchState === 'pending' && value.dispatchState === 'started'
+          && retained.status === 'attempted' && value.status === 'attempted'))) return null;
     return this.save(previous, { ...previous.state, deliveries: { ...previous.state.deliveries, [key]: value } });
   }
   eraseDeliveredCredentials(previous: PrivateOperatorSnapshot, keys: string[]): PrivateOperatorSnapshot | null {

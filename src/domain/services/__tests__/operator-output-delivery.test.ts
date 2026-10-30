@@ -21,7 +21,7 @@ describe('operator output delivery custody', () => {
   let directory: string;
   beforeEach(() => { directory = mkdtempSync(path.join(tmpdir(), 'hv-operator-output-')); vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', 'true');
     SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(path.join(directory, 'test.db')).migrate(); });
-  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true }); });
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllEnvs(); SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true }); });
   async function fixture(outcome: 'delivered' | 'unknown' | 'forbidden-once') {
     const ctx = createCommandContext(), project = ctx.repos.projects.create({ name: 'operator', defaultPlatform: 'cloudrun', gitRemoteUrl: 'https://github.com/acme/operator' });
     const environment = ctx.repos.environments.create({ projectId: project.id, name: 'test', platformBindings: { provider: 'cloudrun' } });
@@ -95,6 +95,79 @@ describe('operator output delivery custody', () => {
     expect((await f.driver.recover({ ...f.context, action: f.action, attempt: f.attempt })).state).toBe('unknown');
     await f.driver.mutate({ ...f.context, action: f.action, attempt: { ...f.attempt, id: randomUUID() } });
     expect(f.deliver).toHaveBeenCalledTimes(1); expect(f.store.read()!.state).toMatchObject({ phase: 'credentials-stored', deliveries: { APP_PRIVATE_KEY: { status: 'uncertain' } } });
+  });
+  it('retains definite non-dispatch when cancellation arrives at the final prewrite check', async () => {
+    const f = await fixture('delivered'), controller = new AbortController();
+    let authorizations = 0;
+    const result = await f.driver.mutate({ ...f.context, signal: controller.signal, action: f.action, attempt: f.attempt,
+      beforeMutation: async () => { if (++authorizations === 2) controller.abort(); } });
+    expect(authorizations).toBe(2);
+    expect(f.deliver).not.toHaveBeenCalled();
+    expect(result.state).toBe('rejected');
+    expect(f.store.read()!.state.deliveries?.APP_PRIVATE_KEY).toMatchObject({
+      attemptId: f.attempt.id, status: 'rejected', dispatchState: 'pending',
+    });
+  });
+  it('allows bounded multi-resource prewrite verification longer than fifteen seconds', async () => {
+    const f = await fixture('delivered'); let authorizations = 0;
+    vi.useFakeTimers();
+    const mutation = f.driver.mutate({ ...f.context, signal: new AbortController().signal, action: f.action, attempt: f.attempt,
+      beforeMutation: async () => { if (++authorizations === 2) await new Promise(resolve => setTimeout(resolve, 20_000)); } });
+    await vi.advanceTimersByTimeAsync(20_001);
+    expect((await mutation).state).toBe('acknowledged');
+    expect(f.deliver).toHaveBeenCalledTimes(1);
+  });
+  it('still stops an over-budget prewrite verification and prevents its late dispatch', async () => {
+    const f = await fixture('delivered'); let authorizations = 0;
+    vi.useFakeTimers();
+    const mutation = f.driver.mutate({ ...f.context, signal: new AbortController().signal, action: f.action, attempt: f.attempt,
+      beforeMutation: async () => { if (++authorizations === 2) await new Promise(resolve => setTimeout(resolve, 40_000)); } });
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect((await mutation).state).toBe('rejected');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(f.deliver).not.toHaveBeenCalled();
+    expect(f.store.read()!.state.deliveries?.APP_PRIVATE_KEY).toMatchObject({ status: 'rejected', dispatchState: 'pending' });
+  });
+  it.each(['attempted', 'uncertain'] as const)('never infers non-dispatch from an older %s record without a checkpoint', async status => {
+    const f = await fixture('delivered');
+    f.store.updateDelivery(f.store.read()!, 'APP_PRIVATE_KEY', { attemptId: f.attempt.id, status });
+    SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(path.join(directory, 'test.db')).migrate();
+    expect((await f.driver.recover({ ...f.context, action: f.action, attempt: f.attempt })).state).toBe('unknown');
+    expect((await f.driver.mutate({ ...f.context, action: f.action, attempt: { ...f.attempt, id: randomUUID() } })).state).toBe('rejected');
+    expect(f.deliver).not.toHaveBeenCalled();
+    expect(f.store.read()!.state.deliveries?.APP_PRIVATE_KEY).toEqual({ attemptId: f.attempt.id, status });
+  });
+  it('recovers a durable pending checkpoint after restart and requires an exact retry review', async () => {
+    const f = await fixture('delivered'), target = { driver: f.driver, store: f.journal, authentication: f.context.authentication, authorize: async () => true };
+    const plan = await planCloudInstallationV1({ ...target, intent: f.context.intent });
+    const snapshot = f.store.read()!;
+    f.store.updateDelivery(snapshot, 'APP_PRIVATE_KEY', { attemptId: f.attempt.id, status: 'attempted', dispatchState: 'pending' });
+    expect(await f.journal.compareAndSwap(plan.installationId, plan.revision, { ...plan, revision: plan.revision + 1, status: 'pending', attempts: [f.attempt] })).toBe(true);
+    SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(path.join(directory, 'test.db')).migrate();
+    const request = { ...target, installationId: plan.installationId, planDigest: plan.plan.digest, confirmActions: [f.action.id] };
+    const recovered = await applyCloudInstallationV1(request);
+    expect(recovered.attempts.map(item => item.status)).toEqual(['rejected']);
+    await applyCloudInstallationV1(request); expect(f.deliver).not.toHaveBeenCalled();
+    const review = await reviewCloudInstallationRetryV1(request);
+    const completed = await applyCloudInstallationV1({ ...request, retryActions: review.retryActions });
+    expect(completed.status).toBe('scope-ready');
+    expect(completed.attempts.map(item => item.status)).toEqual(['rejected', 'succeeded']);
+    expect(f.deliver).toHaveBeenCalledTimes(1);
+  });
+  it('can retire a durable prewrite claim without allowing its suspended writer to dispatch later', async () => {
+    const f = await fixture('delivered');
+    let release!: () => void, entered!: () => void, authorizations = 0;
+    const suspended = new Promise<void>(resolve => { release = resolve; });
+    const atBoundary = new Promise<void>(resolve => { entered = resolve; });
+    const mutation = f.driver.mutate({ ...f.context, action: f.action, attempt: f.attempt,
+      beforeMutation: async () => { if (++authorizations === 2) { entered(); await suspended; } } });
+    await atBoundary;
+    try {
+      const recovered = await f.driver.recover({ ...f.context, action: f.action, attempt: f.attempt, attempts: [f.attempt] });
+      expect(recovered.state).toBe('rejected');
+    } finally { release(); await mutation; }
+    expect(f.deliver).not.toHaveBeenCalled();
+    expect(f.store.read()!.state.deliveries?.APP_PRIVATE_KEY).toMatchObject({ status: 'rejected', dispatchState: 'pending' });
   });
   it('finishes private erasure after a lost local acknowledgement without another native write', async () => {
     const f = await fixture('delivered');
