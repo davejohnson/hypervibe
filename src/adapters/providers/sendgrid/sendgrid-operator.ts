@@ -24,6 +24,15 @@ const scopeSchema = selectionSchema.extend({ name: z.string().regex(/^[a-z][a-z0
 type Intent = OperatorApplicationIntent;
 type Context = CloudInstallationProviderContext<Intent>;
 const permissions = ['api_keys.create', 'api_keys.read', 'api_keys.delete', 'user.username.read'];
+// The pinned API-key response includes these provider requirement flags;
+// Twilio documents automatic sender verification / 2FA requirements. They
+// are not additional application permissions. Never request them or accept
+// arbitrary extra scopes (including exemptions) as a send-only credential.
+const requirementFlags = new Set(['sender_verification_eligible', 'sender_verification_legacy', '2fa_required']);
+function sendOnlyScopes(value: unknown): boolean {
+  return Array.isArray(value) && new Set(value).size === value.length && value.includes('mail.send')
+    && value.every(scope => scope === 'mail.send' || typeof scope === 'string' && requirementFlags.has(scope));
+}
 function fail(reason: ConstructorParameters<typeof CloudInstallationBoundaryError>[0] = 'identity_mismatch'): never { throw new CloudInstallationBoundaryError(reason); }
 function settings(intent: Intent) {
   if (intent.provider !== PROVIDER || intent.applicationProvider !== PROVIDER) fail();
@@ -106,7 +115,7 @@ export function createSendGridOperatorDriver(options: { fetch?: typeof fetch; cu
     // redacted native GET 2026-10-27 independently established the direct object.
     const value = Array.isArray(response.result) ? response.result.length === 1 ? response.result[0] : null : response;
     const key = z.object({ api_key_id: nativeId, name: z.string(), scopes: z.array(z.string()) }).passthrough().parse(value);
-    if (key.api_key_id !== id || key.name !== expectedName || !isDeepStrictEqual(key.scopes, ['mail.send'])) fail('ownership_mismatch');
+    if (key.api_key_id !== id || key.name !== expectedName || !sendOnlyScopes(key.scopes)) fail('ownership_mismatch');
     return key;
   }
   function evidence(intent: Intent, identity: z.infer<typeof identitySchema>, phase: z.infer<typeof evidenceSchema>['native']['phase'] = 'captured') {
@@ -170,7 +179,7 @@ export function createSendGridOperatorDriver(options: { fetch?: typeof fetch; cu
         const identity = identitySchema.parse({ accountId: n.accountId, apiKeyId: id, name: n.keyName, attemptId: context.attempt.id,
           origin: n.origin, sender: n.sender, senderVerification, sandbox: 'unverified' });
         try {
-          if (!isDeepStrictEqual(response.scopes, ['mail.send'])) fail('ownership_mismatch');
+          if (!sendOnlyScopes(response.scopes)) fail('ownership_mismatch');
           const value = z.string().min(1).max(65_536).refine(v => !/[\r\n\0]/.test(v)).parse(response.api_key);
           if (value === managementToken) fail('ownership_mismatch');
           await readKey(call, id, n.keyName); await context.beforeMutation();

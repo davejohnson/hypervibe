@@ -53,6 +53,26 @@ describe('SendGrid one-time send-only runtime key lifecycle', () => {
     await reconcileCloudInstallationV1(target); expect(f.native.writes).toHaveLength(2);
     expect(() => createSendGridOperatorCapability().receipts(f.record())).toThrow(); // capture is not delivered
   });
+  // Independent evidence: pinned ApiKeyScopesResponse example plus Twilio's
+  // automatic requirement flags. Synthetic transport, not a recorded native body.
+  it.each(['read', 'create-and-read'] as const)('accepts documented automatic requirement flags across create, readback and recovery: %s', async automaticFlags => {
+    const f = fixture({ automaticFlags }), target = await f.target();
+    await applyCloudInstallationV1({ ...target, confirmActions: f.record().plan.actions.map(a => a.id) });
+    expect(f.record().status).toBe('scope-ready');
+    expect(f.native.writes.map(w => w.method + ' ' + w.path)).toEqual(['POST /v3/api_keys', 'POST /v3/mail/send']);
+    expect(f.native.writes[0].body.scopes).toEqual(['mail.send']);
+    expect(f.custody.read()?.state.phase).toBe('credentials-stored');
+    await reconcileCloudInstallationV1(target);
+    expect(f.record().status).toBe('scope-ready'); expect(f.native.writes).toHaveLength(2);
+  });
+  it.each(['alerts.read', 'api_keys.create', 'mail.batch.create', '2fa_exempt', 'undocumented.flag', 'mail.send'])('rejects unapproved or duplicate scopes alongside automatic flags: %s', async extra => {
+    const f = fixture({ automaticFlags: 'read' }), target = await f.target();
+    await applyCloudInstallationV1({ ...target, confirmActions: f.record().plan.actions.map(a => a.id) });
+    expect(f.record().status).toBe('scope-ready');
+    f.native.keys.get('new-test-key-1').scopes.push(extra);
+    await reconcileCloudInstallationV1(target);
+    expect(f.record().status).not.toBe('scope-ready'); expect(f.native.writes).toHaveLength(2);
+  });
   it.each([{ wrongAccount: true }, { senderUnknown: true }, { deniedRead: true }])('blocks changed account, sender or permissions before effects: %o', async options => {
     const f = fixture(options); await expect(f.target()).rejects.toThrow(); expect(f.native.writes).toEqual([]);
   });

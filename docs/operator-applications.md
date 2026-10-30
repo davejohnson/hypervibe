@@ -465,3 +465,45 @@ REST App metadata does not expose OAuth callback URLs. Receipts keep callback
 verification explicitly unverified until the actual browser exchange. Native
 GitHub acceptance of the loopback manifest redirect, real owner approval,
 repository installation and webhook delivery are still required walkthroughs.
+
+## Local GitHub review page
+
+The loopback GitHub manifest page uses Hypervibe’s ink/green wordmark and a
+responsive layout. It shows the app name, address and owner selection, explains
+the GitHub review and return steps, and distinguishes credential capture from
+installation or deployment. The received and unavailable pages use the same
+presentation. No extension, remote asset, script or browser storage is needed;
+only the exact stylesheet hash is permitted by CSP.
+
+The return page previously assumed that reaching `/done` proved callback
+receipt. A direct request before authorization falsified that assumption: it
+returned HTTP 200 and claimed receipt. The boundary regression failed with
+200 instead of 403 before the fix. It now requires the same retained attempt,
+listener, expiry and staged callback before showing receipt, and explicitly
+states that setup is still in progress. The required behavior comes from the
+user’s clear-setup requirement and Plan Honesty, not a provider API assumption.
+Real loopback HTTP tests cover the rendered instructions, escaping, CSP and
+callback/restart rejection paths in normal `npm test`. These checks do not
+establish GitHub registration, cloud deployment or live browser sign-in.
+
+## SendGrid requirement flags
+
+The prior send-only verifier assumed the native `scopes` array must equal
+`[mail.send]` exactly. The pinned `ApiKeyScopesResponse` example includes
+`sender_verification_eligible`, `sender_verification_legacy` and `2fa_required`.
+Twilio’s [requirement flag explanation](https://www.twilio.com/docs/sendgrid/ui/account-and-settings/teammate-permissions#user-settings)
+identifies automatic sender verification and two-factor requirements. Creation
+still requests only `mail.send`. Creation responses, readback and recovery
+now accept those three known requirement flags alongside exactly one
+`mail.send`; duplicate, unknown, exemption, batch, read and management scopes
+still block. This does not add permissions to an existing key.
+
+Synthetic real-client regressions first failed on documented flag-bearing
+responses (8 failed, 25 passed), including readback after an otherwise accepted
+create. The shared verifier covers initial capture, inspection and recovery.
+Native test observations on 2026-10-30 independently showed one scope in the
+create acknowledgement and three on readback, with exact matching ID/name.
+The two extra names were not captured, so the documented counterexample alone
+does not prove which flags caused that live failure. Both newly created test
+keys were removed and native absence confirmed; no sandbox request or secret
+delivery was sent in those attempts. A fixed native walkthrough is still needed.

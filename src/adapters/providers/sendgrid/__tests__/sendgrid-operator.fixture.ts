@@ -5,7 +5,7 @@ export const SENDGRID_RUNTIME_TOKEN = 'synthetic-private-send-only-token';
  * The service echoes the opaque requested name; scopes and native identity are
  * independent fixed responses. No live account or credential is used. */
 export function sendGridOperatorFixture(options: { wrongAccount?: boolean; senderUnknown?: boolean; deniedRead?: boolean; deniedCreate?: boolean;
-  lostCreate?: boolean; sandboxStatus?: number; broadCreated?: boolean; badResponse?: boolean; returnExisting?: boolean; deniedDelete?: boolean; senderPath?: 'domain' | 'single'; echoedPrivateId?: boolean; getEnvelope?: boolean } = {}) {
+  lostCreate?: boolean; sandboxStatus?: number; broadCreated?: boolean; badResponse?: boolean; returnExisting?: boolean; deniedDelete?: boolean; senderPath?: 'domain' | 'single'; echoedPrivateId?: boolean; getEnvelope?: boolean; automaticFlags?: 'read' | 'create-and-read' } = {}) {
   const accountId = '12345', writes: Array<{ method: string; path: string; body?: any }> = [], reads: string[] = [];
   const prior = { api_key_id: 'existing-production-key', name: 'Existing production key', scopes: ['mail.send', 'alerts.read'] };
   const keys = new Map<string, any>([[prior.api_key_id, structuredClone(prior)]]); let sequence = 0;
@@ -21,7 +21,7 @@ export function sendGridOperatorFixture(options: { wrongAccount?: boolean; sende
       if (url.pathname === '/v3/whitelabel/domains') return options.senderPath === 'single' ? new Response(null, { status: 403 }) : Response.json([{ id: 77, domain: 'example.test', valid: !options.senderUnknown, automatic_security: true }]);
       if (url.pathname === '/v3/verified_senders') return options.senderPath === 'domain' ? new Response(null, { status: 403 }) : Response.json({ results: options.senderPath === 'single' ? [{ id: 88, from_email: 'operator@example.test', verified: !options.senderUnknown }] : [] });
       if (url.pathname === '/v3/api_keys') { expect(url.searchParams.get('limit')).toBe('100'); return Response.json({ result: [...keys.values()].map(k => ({ api_key_id: k.api_key_id, name: k.name })) }); }
-      if (url.pathname.startsWith('/v3/api_keys/')) { const key = keys.get(url.pathname.split('/').at(-1)!); return key ? Response.json(options.getEnvelope ? { result: [key] } : key) : new Response(null, { status: 404 }); }
+      if (url.pathname.startsWith('/v3/api_keys/')) { const stored = keys.get(url.pathname.split('/').at(-1)!); const key = stored && options.automaticFlags ? { ...stored, scopes: ['sender_verification_eligible', ...stored.scopes, '2fa_required'] } : stored; return key ? Response.json(options.getEnvelope ? { result: [key] } : key) : new Response(null, { status: 404 }); }
     }
     if (method === 'POST' && url.pathname === '/v3/api_keys') {
       if (options.deniedCreate) return new Response(SENDGRID_TEST_TOKEN, { status: 403 });
@@ -29,6 +29,7 @@ export function sendGridOperatorFixture(options: { wrongAccount?: boolean; sende
       writes.push({ method, path: url.pathname, body }); const id = options.returnExisting ? prior.api_key_id : `new-test-key-${++sequence}`;
       const key = { api_key_id: id, name: body.name, scopes: options.broadCreated ? ['mail.send', 'alerts.read'] : ['mail.send'] }; if (!options.returnExisting) keys.set(id, key);
       if (options.lostCreate) throw new Error('Synthetic lost one-time response');
+      if (options.automaticFlags === 'create-and-read') key.scopes = [...key.scopes, 'sender_verification_legacy'];
       return Response.json(options.badResponse ? { name: body.name } : { ...key, ...(options.echoedPrivateId ? { api_key_id: SENDGRID_RUNTIME_TOKEN } : {}), api_key: SENDGRID_RUNTIME_TOKEN }, { status: 201 });
     }
     if (method === 'POST' && url.pathname === '/v3/mail/send') {

@@ -17,6 +17,10 @@
     {
       "sourceUrl": "https://www.twilio.com/docs/sendgrid/api-reference/api-key-permissions",
       "coverage": "Documented whitelabel.read, user.email.read and user.username.read names; GET /scopes returns the authenticating key\u2019s scopes. Native sender-route success establishes actual read authority; alternate denied routes do not invalidate an independently verified exact sender."
+    },
+    {
+      "sourceUrl": "https://www.twilio.com/docs/sendgrid/ui/account-and-settings/teammate-permissions#user-settings",
+      "coverage": "Automatic sender verification and two-factor requirement flags; paired with pinned ApiKeyScopesResponse example for API-key readback. Only sender_verification_eligible, sender_verification_legacy and 2fa_required are accepted in addition to mail.send; no exemptions or other permissions."
     }
   ],
   "nativeObservation": {
