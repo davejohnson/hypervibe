@@ -25,16 +25,35 @@ import type { Service } from '../../domain/entities/service.entity.js';
 let directory:string;
 beforeEach(()=>{directory=mkdtempSync(join(tmpdir(),'hv-prepared-sql-'));vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC','true');SqliteAdapter.resetInstance();SqliteAdapter.getInstance(join(directory,'state.db')).migrate();});
 afterEach(()=>{vi.restoreAllMocks();vi.unstubAllEnvs();vi.unstubAllGlobals();SqliteAdapter.resetInstance();rmSync(directory,{recursive:true,force:true});});
-async function fixture(envVars:Record<string,string>={}){
+async function fixture(envVars:Record<string,string>={},secretReference=false){
   const f=await localHoldingApplicationFixture();
   for(let phase=0;phase<2;phase++){const p=await f.plan();if('error'in p)throw new Error(p.error);expect(await f.apply(p.planRunId,p.actions.map(a=>a.id))).toMatchObject({result:{success:true}});}
   const load=()=>f.ctx.repos.environments.findById(f.environment.id)!;
   const receipt=load().platformBindings.localPreparedHosting as LocalPreparedHostingReceiptV1;
   const account=receipt.runtimeIdentities.find(i=>i.workload==='web')!.principal;if(account.kind!=='gcp-service-account')throw new Error();
-  const environmentSpec=environmentSpecSchema.parse({...f.store.get(f.project)!.spec.environments.staging,envVars,database:{provider:'cloudsql',engine:'postgres'}});
+  const secretResource=`projects/${f.native.scope.projectNumber}/secrets/operator-token`;
+  const environmentSpec=environmentSpecSchema.parse({...f.store.get(f.project)!.spec.environments.staging,envVars,database:{provider:'cloudsql',engine:'postgres'},
+    ...(secretReference?{secretDestinations:{API_TOKEN:{destination:{provider:'gcp-secret-manager',projectId:'operator-project',projectNumber:f.native.scope.projectNumber,secretId:'operator-token'},version:'1'}}}:{})});
   const state={denied:false,denyAfterWrite:false,lost:false,absentAfterWrite:false,writes:0,policy:{etag:'original-etag',version:3,bindings:[{role:'roles/viewer',members:['user:unrelated@example.test']}]}};
+  const secret={writes:0,lost:false,absentAfterWrite:false,denied:false,denyAfterWrite:false,replaced:false,
+    policy:{etag:'secret-original',version:3,bindings:[{role:'roles/secretmanager.viewer',members:['user:unrelated@example.test']}]}};
   const request:typeof fetch=async(input,init={})=>{
     const url=String(input);
+    if(url===`https://secretmanager.googleapis.com/v1/${secretResource}`)return Response.json({name:secretResource,createTime:secret.replaced?'2026-10-02T00:00:00Z':'2026-10-01T00:00:00Z'});
+    if(url===`https://secretmanager.googleapis.com/v1/${secretResource}/versions/1`)return Response.json({name:`${secretResource}/versions/1`,state:'ENABLED'});
+    if(url===`https://secretmanager.googleapis.com/v1/${secretResource}:getIamPolicy?options.requestedPolicyVersion=3`)return secret.denied?Response.json({}, {status:403}):Response.json(secret.policy);
+    if(url===`https://secretmanager.googleapis.com/v1/${secretResource}:setIamPolicy`){
+      expect((load().platformBindings.runtimeIdentities as any).web.pending).toBeDefined();secret.writes++;
+      const body=JSON.parse(String(init.body));expect(body.policy.etag).toBe('secret-original');
+      expect(body.policy.bindings).toEqual([{role:'roles/secretmanager.viewer',members:['user:unrelated@example.test']},
+        {role:'roles/secretmanager.secretAccessor',members:[`serviceAccount:${account.serviceAccountEmail}`]}]);
+      if(!secret.absentAfterWrite)secret.policy={etag:'secret-updated',version:3,bindings:[
+        {role:'roles/secretmanager.viewer',members:['user:unrelated@example.test']},
+        {role:'roles/secretmanager.secretAccessor',members:[`serviceAccount:${account.serviceAccountEmail}`]},
+      ]};
+      if(secret.denyAfterWrite)secret.denied=true;
+      if(secret.lost)throw new Error('Synthetic lost secret IAM acknowledgement');return Response.json(secret.policy);
+    }
     if(url.endsWith(':testIamPermissions')&&url.includes('iam.googleapis.com'))return Response.json({permissions:['iam.serviceAccounts.actAs']});
     if(url===`https://cloudresourcemanager.googleapis.com/v1/projects/operator-project:getIamPolicy`
       ||url===`https://cloudresourcemanager.googleapis.com/v3/projects/${f.native.scope.projectNumber}:getIamPolicy`)return state.denied?Response.json({}, {status:403}):Response.json(state.policy);
@@ -48,9 +67,9 @@ async function fixture(envVars:Record<string,string>={}){
     }
     return f.native.request(input,init);
   };
-  const runtime=new CloudRunLocalPreparedRuntime(async()=>receipt,async()=>'synthetic-local-holding-token',request);
+  let runtime=new CloudRunLocalPreparedRuntime(async()=>receipt,async()=>'synthetic-local-holding-token',request);
   const preparedHosting=new CloudRunPreparedHosting(()=>{throw new Error('No hosted authority');},async()=>'synthetic-local-holding-token',request,()=>undefined,()=>async()=>receipt);
-  const hosting={name:'cloudrun',runtimeIdentities:runtime,preparedHosting} as unknown as IHostingAdapter & IProviderAdapter;
+  const hosting={name:'cloudrun',get runtimeIdentities(){return runtime;},preparedHosting} as unknown as IHostingAdapter & IProviderAdapter;
   const metadata=await planPreparedHosting({environment:load(),environmentSpec,hosting});expect(metadata).not.toBeNull();
   vi.spyOn(f.ctx.adapterFactory,'getHostingAdapter').mockResolvedValue({success:true,adapter:hosting});
   expect(await applyPreparedHosting({ctx:f.ctx,project:f.project,environmentName:'staging',environmentSpec,action:metadata!,confirmedActionIds:new Set([metadata!.id]),authorize:()=>true})).toMatchObject({success:true});
@@ -58,9 +77,53 @@ async function fixture(envVars:Record<string,string>={}){
   const plan=async()=>planRuntimeAccess(await observeRuntimeAccess(input())).filter(action=>action.resource.name==='web');
   const apply=(action:any,confirm=true)=>applyRuntimeAccessAction({...input(),action,confirmedActionIds:new Set(confirm?[action.id]:[]),
     save:bindings=>{f.ctx.repos.environments.updatePlatformBindings(f.environment.id,bindings);}});
-  return {...f,load,account,receipt,state,plan,apply,request,environmentSpec};
+  return {...f,load,account,receipt,state,secret,secretResource,plan,apply,request,environmentSpec,
+    restart:()=>{runtime=new CloudRunLocalPreparedRuntime(async()=>receipt,async()=>'synthetic-local-holding-token',request);}};
 }
 describe('local prepared Cloud SQL runtime prerequisite',()=>{
+  // Cloud Run requires the final service account to read referenced secrets:
+  // https://docs.cloud.google.com/run/docs/configuring/services/secrets
+  // IAM is on Secret (all versions), not SecretVersion. Reconstructed serialized
+  // native observations exercise the real shared SQLite plan/apply boundary.
+  it('reviews missing secret reader access before the separate SQL grant without manual IAM setup',async()=>{
+    const f=await fixture({},true),[action]=await f.plan();
+    expect(action).toMatchObject({verified:true,requiresConfirm:true,metadata:{step:{target:{phase:'local-prepared-secret-access',readerResource:f.secretResource}}}});
+    expect((await f.apply(action,false)).success).toBe(false);expect(f.secret.writes).toBe(0);
+    expect((await f.apply(action)).success).toBe(true);expect(f.secret.writes).toBe(1);expect(f.state.writes).toBe(0);
+    const [sql]=await f.plan();expect(sql.metadata?.step).toMatchObject({target:{phase:'local-prepared-cloudsql-access'}});
+    expect((await f.apply(sql)).success).toBe(true);expect(await f.plan()).toEqual([]);
+    for(const workload of f.receipt.preparedResources.workloads)expect(f.native.services.get(workload.id).template.serviceAccount).toBe(workload.holding.principal.kind==='gcp-service-account'?workload.holding.principal.serviceAccountEmail:undefined);
+  });
+  it.each([false,true])('reconciles an uncertain secret reader grant without resubmission, absent=%s',async absent=>{
+    const f=await fixture({},true),[action]=await f.plan();
+    expect(action).toMatchObject({verified:true,requiresConfirm:true});
+    f.secret.lost=true;f.secret.absentAfterWrite=absent;expect((await f.apply(action)).success).toBe(false);
+    f.restart();
+    const [recovery]=await f.plan();expect(recovery.requiresConfirm).not.toBe(true);
+    expect((await f.apply(recovery,false)).success).toBe(!absent);expect(f.secret.writes).toBe(1);expect(f.state.writes).toBe(0);
+  });
+  it('retains acknowledged secret reader access through denied readback and recovers read-only',async()=>{
+    const f=await fixture({},true),[action]=await f.plan();expect(action).toMatchObject({verified:true});
+    f.secret.denyAfterWrite=true;expect((await f.apply(action)).success).toBe(false);f.secret.denied=false;
+    const [recovery]=await f.plan();expect((await f.apply(recovery,false)).success).toBe(true);expect(f.secret.writes).toBe(1);
+  });
+  it('rejects changed secret lifetime before applying a reviewed reader grant',async()=>{
+    const f=await fixture({},true),[action]=await f.plan();expect(action).toMatchObject({verified:true});
+    f.secret.replaced=true;expect((await f.apply(action)).success).toBe(false);expect(f.secret.writes).toBe(0);
+  });
+  it('keeps unknown secret policy blocked without implying absence',async()=>{
+    const f=await fixture({},true);f.secret.denied=true;expect((await f.plan()).some(a=>a.verified)).toBe(false);expect(f.secret.writes).toBe(0);
+  });
+  it('preserves already authorized reader access and skips its write',async()=>{
+    const f=await fixture({},true);f.secret.policy.bindings.push({role:'roles/secretmanager.secretAccessor',members:[`serviceAccount:${f.account.serviceAccountEmail}`]});
+    const [action]=await f.plan();expect(action.metadata?.step).toMatchObject({target:{phase:'local-prepared-cloudsql-access'}});
+    expect((await f.apply(action)).success).toBe(true);expect(f.secret.writes).toBe(0);
+  });
+  it('rejects an out-of-project reference without changing either identity',async()=>{
+    const f=await fixture({},true);
+    (f.environmentSpec.secretDestinations!.API_TOKEN.destination as {projectId:string}).projectId='another-project';
+    expect((await f.plan()).some(a=>a.verified)).toBe(false);expect(f.secret.writes).toBe(0);expect(f.state.writes).toBe(0);
+  });
   it('reviews one exact client grant to the final identity and requires confirmation before IAM mutation',async()=>{
     const f=await fixture(),[action]=await f.plan();expect(action).toMatchObject({verified:true,requiresConfirm:true,metadata:{step:{target:{phase:'local-prepared-cloudsql-access'}}}});
     expect((await f.apply(action,false)).success).toBe(false);expect(f.state.writes).toBe(0);

@@ -161,6 +161,36 @@ resolve the product failure.
 
 ### Cloud SQL first release
 
+Local first deployment also prepares missing Secret Manager reader permissions
+through the existing runtime-access stage. Previously it assumed those grants
+were already installed and could only report unknown. A fresh operator with six
+delivered versions and unprivileged final service accounts contradicted that
+assumption; five SQLite/serialized-client regressions failed before the fix.
+Google's [Cloud Run secret contract](https://docs.cloud.google.com/run/docs/configuring/services/secrets)
+requires the runtime service identity to read referenced secrets, and its
+[IAM setter](https://docs.cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/setIamPolicy)
+sets policy on the secret container, covering all its versions.
+
+Each action reviews one exact container and journal-verified final account.
+It merges `roles/secretmanager.secretAccessor` using the current policy etag,
+preserves unrelated permissions, verifies the immutable enabled version and
+container creation time, and leaves holding identities and secret values alone.
+Acknowledged or uncertain writes retain their attempt; recovery reads its result
+without resubmission, including after recreating the client. SQL permission and
+workload rollout remain separate actions. Existing grants require no new write;
+unknown policies and changed project/container identities remain blocked.
+Runtime access is ready only after every required grant converges. Local
+disconnection retains these independently authorized runtime grants.
+
+The six-suite runtime regression group passes 102 checks, including existing AWS
+ECS secret access, Azure identity and the seven-provider runtime capability
+roster; typechecking passes. The subsequent local fixture restart correction
+preserves all 14 local checks. This changes the GCP local prepared path only:
+AWS role policies, Azure vault permissions and the other providers retain their
+existing contracts. These synthetic provider responses exercise actual shared
+planning, SQLite recovery and serialized policies; live grants and application
+secret consumption remain unchecked until their separate approved apply.
+
 The local operator path reuses Cloud Run's existing `cloudsql` volume and
 `/cloudsql` mount for the resolved `CLOUD_SQL_CONNECTION_NAME` (or existing
 `INSTANCE_CONNECTION_NAME` fallback). Prepared configuration, direct apply,

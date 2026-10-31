@@ -9,8 +9,8 @@ import { gcpPreparedHoldingTransition } from './gcp-prepared-release.js';
 import { gcpRuntimeRequest, hasGcpRuntimeRole, parseGcpRuntimePolicy, withGcpRuntimeRole, GcpRuntimeError } from './gcp-runtime-client.js';
 import { desiredRuntimeSecrets, readRuntimeSecretPolicies, serializeRuntimeSecrets } from './gcp-runtime-secrets.js';
 
-/** Local journal/native account proof. Only an explicit runtime-access action
- * may grant Cloud SQL client to the final identity; holding code remains isolated. */
+/** Local journal/native account proof. Explicit runtime-access actions grant
+ * exact secret readers or Cloud SQL client to the final identity only. */
 export class CloudRunLocalPreparedRuntime implements IRuntimeIdentities {
   constructor(private readonly load: LocalPreparedHostingLoader, private readonly token: () => Promise<string>, private readonly request: typeof fetch) {}
   private async proof(input: RuntimeIdentityRequest) {
@@ -28,7 +28,7 @@ export class CloudRunLocalPreparedRuntime implements IRuntimeIdentities {
       { method: 'POST', body: JSON.stringify({ permissions: ['iam.serviceAccounts.actAs'] }) }, this.request) as { permissions?: string[] } | null;
     if (!actAs?.permissions?.includes('iam.serviceAccounts.actAs')) throw new Error();
     const desired = desiredRuntimeSecrets(input, principal.projectId), readers = await readRuntimeSecretPolicies(principal.projectId, desired, token, desired, this.request);
-    if (readers.some(item => !item.policy || !hasGcpRuntimeRole(item.policy, 'roles/secretmanager.secretAccessor', `serviceAccount:${principal.serviceAccountEmail}`))) throw new Error();
+    const missingReader = readers.find(item => !item.policy || !hasGcpRuntimeRole(item.policy, 'roles/secretmanager.secretAccessor', `serviceAccount:${principal.serviceAccountEmail}`));
     const cloudsql=input.environmentSpec?.database?.provider==='cloudsql'||input.binding?.evidence.cloudsqlClient==='required'||input.binding?.pending?.step.target.cloudsqlClient==='required';
     const policyUrl=`https://cloudresourcemanager.googleapis.com/v1/projects/${principal.projectId}`;
     const policy=cloudsql?parseGcpRuntimePolicy(await gcpRuntimeRequest(`${policyUrl}:getIamPolicy`,token,
@@ -42,7 +42,15 @@ export class CloudRunLocalPreparedRuntime implements IRuntimeIdentities {
     const identity: ProviderRuntimeIdentity = { provider: 'gcp', principal: principal.serviceAccountEmail, source: holding ? 'configured' : 'observed',
       scope: { projectId: principal.projectId, region: descriptor.deployment.region, environmentId: input.environment.id, serviceName: input.service.name,
         workloadResource: native.name, workloadUid: native.uid, serviceAccountUniqueId: principal.serviceAccountUniqueId } };
-    return { target, identity, policy,policyUrl,token,sqlReady };
+    return { target, identity, policy,policyUrl,token,sqlReady,readers,missingReader };
+  }
+  private reviewedTarget(proof: Awaited<ReturnType<CloudRunLocalPreparedRuntime['proof']>>, target: Record<string,string>) {
+    if(target.phase==='local-prepared-cloudsql-access')return {...proof.target,phase:target.phase};
+    if(target.phase==='local-prepared-secret-access'){
+      if(!proof.readers.some(item=>item.target.resource===target.readerResource))throw new Error();
+      return {...proof.target,phase:target.phase,readerResource:target.readerResource};
+    }
+    return proof.target;
   }
   async inspect(input: RuntimeIdentityRequest): ReturnType<IRuntimeIdentities['inspect']> {
     try {
@@ -50,7 +58,7 @@ export class CloudRunLocalPreparedRuntime implements IRuntimeIdentities {
       if (input.mode === 'destroy') return { state: 'ready', warnings: ['Local administrator-prepared identities and grants are retained.'] };
       if (input.binding?.pending) {
         const target = { ...input.binding.pending.step.target }; delete target.recoverAttemptId;
-        const expected=target.phase==='local-prepared-cloudsql-access'?{...proof.target,phase:'local-prepared-cloudsql-access'}:proof.target;
+        const expected=this.reviewedTarget(proof,target);
         if (!isDeepStrictEqual(target, expected)) throw new Error();
         return { state: 'action', step: { operation: 'recover', target: { ...expected, recoverAttemptId: input.binding.pending.attemptId }, requiresConfirm: false,
           description: 'Recover the exact local prepared identity binding without changing Google IAM.' } };
@@ -59,6 +67,8 @@ export class CloudRunLocalPreparedRuntime implements IRuntimeIdentities {
         const previous={...input.binding.evidence},current={...proof.target};delete previous.cloudsqlClient;delete current.cloudsqlClient;
         if(input.binding.provider!=='cloudrun'||!isDeepStrictEqual(previous,current))throw new Error();
       }
+      if(proof.missingReader)return {state:'action',step:{operation:'attach',target:{...proof.target,phase:'local-prepared-secret-access',readerResource:proof.missingReader.target.resource},requiresConfirm:true,
+        description:`Grant roles/secretmanager.secretAccessor on ${proof.missingReader.target.resource} only to ${proof.identity.principal}. This covers all versions of that secret; deployment remains pinned to its reviewed version. Preserve unrelated IAM and the holding identity.`}};
       if(!proof.sqlReady)return {state:'action',step:{operation:'attach',target:{...proof.target,phase:'local-prepared-cloudsql-access'},requiresConfirm:true,
         description:'Grant roles/cloudsql.client on this project only to the journal-verified final runtime identity; preserve unrelated IAM and keep the holding identity unchanged.'}};
       if (input.binding) {
@@ -73,18 +83,32 @@ export class CloudRunLocalPreparedRuntime implements IRuntimeIdentities {
     try {
       const proof = await this.proof(input);
       const target = { ...input.step.target }; delete target.recoverAttemptId;
-      const grant=target.phase==='local-prepared-cloudsql-access';
-      if (input.mode !== 'ensure' || !['attach', 'recover'].includes(input.step.operation) || !isDeepStrictEqual(target,grant?{...proof.target,phase:'local-prepared-cloudsql-access'}:proof.target)
+      const grant=target.phase==='local-prepared-cloudsql-access',secretGrant=target.phase==='local-prepared-secret-access';
+      if (input.mode !== 'ensure' || !['attach', 'recover'].includes(input.step.operation) || !isDeepStrictEqual(target,this.reviewedTarget(proof,target))
         || input.binding?.pending && input.binding.pending.attemptId !== (input.step.target.recoverAttemptId ?? input.attemptId)) throw new Error();
-      if(grant&&!proof.sqlReady){
+      if(secretGrant){
+        const reader=proof.readers.find(item=>item.target.resource===target.readerResource);
+        if(!reader?.policy)throw new Error();
+        if(!hasGcpRuntimeRole(reader.policy,'roles/secretmanager.secretAccessor',`serviceAccount:${proof.identity.principal}`)){
+          if(input.step.operation==='recover')throw new Error();
+          mutationAttempted=true;
+          parseGcpRuntimePolicy(await gcpRuntimeRequest(`${reader.url}:setIamPolicy`,proof.token,{method:'POST',body:JSON.stringify({
+            policy:withGcpRuntimeRole(reader.policy,'roles/secretmanager.secretAccessor',`serviceAccount:${proof.identity.principal}`),
+          })},this.request));
+          mutationAcknowledged=true;
+          const after=await this.proof(input),observed=after.readers.find(item=>item.target.resource===target.readerResource);
+          if(!isDeepStrictEqual(after.target,proof.target)||!observed?.policy||!hasGcpRuntimeRole(observed.policy,'roles/secretmanager.secretAccessor',`serviceAccount:${proof.identity.principal}`))throw new Error();
+        }
+      }else if(proof.missingReader)throw new Error();
+      else if(grant&&!proof.sqlReady){
         if(input.step.operation==='recover'||!proof.policy)throw new Error();
         mutationAttempted=true;
         parseGcpRuntimePolicy(await gcpRuntimeRequest(`${proof.policyUrl}:setIamPolicy`,proof.token,{method:'POST',body:JSON.stringify({policy:withGcpRuntimeRole(proof.policy,'roles/cloudsql.client',`serviceAccount:${proof.identity.principal}`)})},this.request));
         mutationAcknowledged=true;
         if(!(await this.proof(input)).sqlReady)throw new Error();
       }else if(!proof.sqlReady)throw new Error();
-      return { receipt: { success: true, message: mutationAttempted?'Verified the separately reviewed Cloud SQL client grant on the final runtime identity.':'Verified the local prepared identity; no cloud permissions changed.' }, binding: { provider: 'cloudrun', evidence: proof.target } };
-    } catch(error) { return { receipt: { success: false, message: 'Exact local prepared runtime identity or Cloud SQL grant is unresolved; retain this attempt for read-only recovery.',data:{mutationAttempted,
+      return { receipt: { success: true, message: mutationAttempted?secretGrant?'Verified the separately reviewed secret reader grant on the final runtime identity.':'Verified the separately reviewed Cloud SQL client grant on the final runtime identity.':'Verified the exact local prepared identity action; no cloud permissions changed.' }, binding: { provider: 'cloudrun', evidence: proof.target } };
+    } catch(error) { return { receipt: { success: false, message: 'Exact local prepared runtime identity, secret reader or Cloud SQL grant is unresolved; retain this attempt for read-only recovery.',data:{mutationAttempted,
       ...(mutationAttempted&&!mutationAcknowledged&&error instanceof GcpRuntimeError&&[400,401,403,409,412].includes(error.status??0)?{mutationRejected:true}:{})} } }; }
   }
 }
