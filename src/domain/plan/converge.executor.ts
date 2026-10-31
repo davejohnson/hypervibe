@@ -260,6 +260,7 @@ export const planRunDocumentSchema = z.object({
     'database-credential-aliases',
     'database-bindings',
     'database-initialization',
+    'database-provisioning-recovery',
     'database-bootstrap',
     'backup-policy',
     'backup-provisioning',
@@ -295,11 +296,27 @@ export const planRunDocumentSchema = z.object({
     envVarsEncrypted: z.string().optional(),
     databaseCredentialAliasesEncrypted: z.string().min(1).optional(),
     databaseInitializationEncrypted: z.string().min(1).optional(),
+    databaseProvisioningEncrypted: z.string().min(1).optional(),
     databaseBootstrapEncrypted: z.string().min(1).optional(),
     delegatedSecretKeys: z.array(z.string()).optional(),
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'database-provisioning-recovery') {
+    if (document.actions.length > 1 || document.actions.some(action => !isDatabaseProvisioningRecoveryAction(action))
+      || (document.actions.length === 1) !== Boolean(document.overrides?.databaseProvisioningEncrypted)
+      || document.overrides && Object.keys(document.overrides).some(key => key !== 'databaseProvisioningEncrypted')
+      || document.observedFingerprint !== null || document.integrationFingerprints || document.sourceCommitSha
+      || document.inputRequired?.length || document.lockEnvironmentIds?.length
+      || document.cloudScope || document.artifactPublication || document.applicationRegistration || document.holdingPreparation) {
+      ctx.addIssue({ code: 'custom', message: 'Database completion requires one exact confirmed action and encrypted private evidence, without rollout inputs.' });
+    }
+    return;
+  }
+  if (document.overrides?.databaseProvisioningEncrypted
+    || document.actions.some(action => action.metadata?.operation === DATABASE_PROVISIONING_RECOVERY_OPERATION)) {
+    ctx.addIssue({ code: 'custom', message: 'Database completion requires its isolated stage.' });
+  }
   if (document.scope === 'operator-applications') {
     const proof = document.applicationRegistration;
     if (!proof || !document.actions.length || document.actions.length > 100
@@ -1002,3 +1019,4 @@ export class ConvergeExecutor {
     };
   }
 }
+import { DATABASE_PROVISIONING_RECOVERY_OPERATION, isDatabaseProvisioningRecoveryAction } from './database-provisioning-recovery.contract.js';

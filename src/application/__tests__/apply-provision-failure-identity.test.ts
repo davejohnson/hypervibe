@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
-import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
+import { getDb, SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import { CACHE_OPERATIONS } from '../../domain/services/cache-plan.service.js';
 import { PlanService } from '../../domain/plan/plan.service.js';
@@ -98,6 +98,36 @@ describe('failed datastore provisioning identity retention', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     SqliteAdapter.resetInstance();
+  });
+
+  it.each([
+    ['cloudsql', 'cloudrun', { projectId: 'native-project', region: 'us-central1' }],
+    ['rds', 'ecs', { accountId: '123456789012', region: 'us-east-1' }],
+    ['supabase', 'railway', { organizationId: 'native-organization', region: 'us-east-1' }],
+    ['railway', 'railway', { projectId: 'native-project', environmentId: 'native-environment' }],
+  ] as const)('preserves a provider-declared pending %s creation without exposing its credential', async (provider, hosting, providerScope) => {
+    const password = 'synthetic-pending-database-password';
+    const component = failedComponent({ environment, type: 'postgres', provider, externalId: 'native-database', providerScope });
+    component.bindings.password = password;
+    component.bindings.provisioningRecovery = { schemaVersion: 1, operationId: 'native-operation' };
+    const provision = vi.fn(async () => ({ component, receipt: { success: false, status: 'pending', message: 'Native creation is still running' } }));
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter: { configureTarget: vi.fn(), provision } as never });
+    const spec = projectSpecSchema.parse({ version: 1, project: project.name, environments: {
+      staging: { hosting: { provider: hosting }, services: {}, database: { provider } },
+    } });
+    const action: PlanAction = { id: `database:${provider}`, type: 'create', resource: { kind: 'database', name: 'postgres', provider },
+      verified: true, billable: true, dataBearing: true, requiresConfirm: true, reason: 'Create the reviewed database' };
+    const outcome = await applyAction({ ctx, project, environment, spec, action });
+    expect(outcome.kind, JSON.stringify(outcome)).toBe('executed');
+    expect(outcome).toMatchObject({ kind: 'executed', result: { success: false, receipts: [{ actionId: action.id, status: 'pending' }] } });
+    expect(ctx.repos.components.findByEnvironmentAndType(environment.id, 'postgres')?.bindings).toMatchObject({
+      password, provisioningIncomplete: true, provisioningRecovery: { operationId: 'native-operation' },
+    });
+    expect(JSON.stringify(outcome)).not.toContain(password);
+    const raw = getDb().prepare('SELECT bindings FROM components WHERE environment_id = ? AND type = ?').get(environment.id, 'postgres') as { bindings: string };
+    expect(raw.bindings).not.toContain(password);
+    expect(JSON.parse(raw.bindings)).toHaveProperty('__encrypted');
+    expect(provision).toHaveBeenCalledOnce();
   });
 
   it('keeps a failed database receipt failed while retaining its exact identity and previous provider', async () => {

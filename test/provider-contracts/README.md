@@ -8,6 +8,15 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+Incomplete database creation uses the optional capability reviewed in
+`database-provisioning-provider-matrix.json`. Normal acceptance checks the entire
+database registry, reconstructed Cloud SQL operation transport, and real SQLite
+plan/apply recovery, including missing confirmation, encrypted persistence,
+native lifetime drift, lost acknowledgments and existing database preservation.
+See [the observed counterexample and RED/GREEN record](../../docs/database-provisioning-recovery.md).
+Only Cloud SQL implements completion; synthetic SQL proof in the lifecycle suite
+and separate PostgreSQL wire tests do not establish live GCP recovery.
+
 `service-instance-bounds.test.ts` pins all seven hosting providers against the
 [service capacity contract](../../docs/service-instance-bounds.md). Cloud Run
 uses native service-level automatic limits; six other adapters explicitly reject

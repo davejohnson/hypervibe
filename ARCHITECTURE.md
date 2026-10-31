@@ -2167,6 +2167,17 @@ environment, image, attached-volume and credential-reference readback. Uncertain
 or incomplete creation retains recovery state and cannot authorize another create.
 See the [eight-provider evidence review](docs/database-provisioning-evidence.md).
 
+An accepted native create still running after a local observation deadline is
+`pending`, not a completed or definitively failed resource. Incomplete bindings
+retain private generated credentials encrypted and never supply application
+runtime inputs. A database adapter's optional `provisioningRecovery` capability
+may complete the same retained instance through the isolated, confirmed
+`database-provisioning-recovery` stage. Native scope/lifetime, private credential
+consistency and durable per-write progress are checked independently. Historical
+missing credentials require explicit password replacement approval; no second
+instance create, implicit adoption or deletion is authorized. See the
+[completion contract and evidence limits](docs/database-provisioning-recovery.md).
+
 Service-backed database observation carries explicit `persistence` configuration
 evidence. Railway verifies the exact instance, volume identity, mount and effective
 `PGDATA`; missing, ambiguous or unknown evidence blocks database and dependent

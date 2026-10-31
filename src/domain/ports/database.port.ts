@@ -56,7 +56,7 @@ export interface ProvisionResult {
   component: Component;
 
   /** Standard receipt with success/failure info */
-  receipt: Receipt;
+  receipt: Receipt & { /** Accepted native operation still running; never a completed create. */ status?: 'pending' };
 
   /** Connection URL ready for injection into hosting environment */
   connectionUrl?: string;
@@ -210,6 +210,7 @@ export interface IDatabaseAdapter {
   readonly credentialAliases?: import('./database-credential-aliases.port.js').IDatabaseCredentialAliases;
   readonly dailyBackups?: import('./daily-backup.port.js').IDailyBackupPolicy<import('./daily-backup.port.js').DatabaseBackupTarget>;
   readonly freshInitialization?: import('./database-fresh-initialization.port.js').IDatabaseFreshInitialization;
+  readonly provisioningRecovery?: import('./database-provisioning-recovery.port.js').IDatabaseProvisioningRecovery;
 
   /** Optional read-only metadata normalization; absence means unsupported. */
   observeRuntimeReferenceBinding?(

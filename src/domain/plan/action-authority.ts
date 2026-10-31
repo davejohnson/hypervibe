@@ -111,6 +111,7 @@ export type PlanMutationCapability =
   | 'hosting.holding.prepare'
   | 'database.bootstrap'
   | 'database.fresh-initialization'
+  | 'database.provisioning-recovery'
   | 'credential.lifecycle.update'
   | 'database.credential-aliases.repair'
   | 'database.scope.bind'
@@ -543,6 +544,9 @@ export function resolvePlanActionAuthority(
   }
   if (action.metadata?.operation === DATABASE_FRESH_INITIALIZATION_OPERATION) {
     return isDatabaseInitializationAction(action) ? authority(action, 'database.fresh-initialization') : null;
+  }
+  if (action.metadata?.operation === DATABASE_PROVISIONING_RECOVERY_OPERATION) {
+    return isDatabaseProvisioningRecoveryAction(action) ? authority(action, 'database.provisioning-recovery') : null;
   }
 
   if (action.metadata?.operation === DAILY_BACKUP_OPERATION) {
@@ -1523,3 +1527,4 @@ export function resolvePlanActionAuthority(
     return authority(action, 'hosting.volume.mutate');
   return null;
 }
+import { DATABASE_PROVISIONING_RECOVERY_OPERATION, isDatabaseProvisioningRecoveryAction } from './database-provisioning-recovery.contract.js';

@@ -38,6 +38,10 @@
           "https://docs.railway.com/volumes",
           "https://docs.railway.com/volumes/reference"
         ]
+      },
+      "provisioningRecovery": {
+        "implementation": "unsupported",
+        "evidence": "No incomplete-provision completion capability is implemented for this provider. Preserve existing identities and recovery blockers; another provider\u2019s contract does not authorize native reset, adoption or creation."
       }
     },
     {
@@ -67,6 +71,10 @@
         ],
         "completion": "No completion can be claimed for this unsupported capability. Native create/restore completion and SQL/application readiness belong to their separately reviewed lifecycle contracts.",
         "recovery": "Reject this intent before provider mutations and preserve the existing bound resource. Do not fall back to generic hosting, native reset/restore, deletion or replacement; existing backup policy and recovery points remain unchanged."
+      },
+      "provisioningRecovery": {
+        "implementation": "unsupported",
+        "evidence": "No incomplete-provision completion capability is implemented for this provider. Preserve existing identities and recovery blockers; another provider\u2019s contract does not authorize native reset, adoption or creation."
       }
     },
     {
@@ -97,6 +105,10 @@
         ],
         "completion": "No completion can be claimed for this unsupported capability. Native create/restore completion and SQL/application readiness belong to their separately reviewed lifecycle contracts.",
         "recovery": "Reject this intent before provider mutations and preserve the existing bound resource. Do not fall back to generic hosting, native reset/restore, deletion or replacement; existing backup policy and recovery points remain unchanged."
+      },
+      "provisioningRecovery": {
+        "implementation": "unsupported",
+        "evidence": "No incomplete-provision completion capability is implemented for this provider. Preserve existing identities and recovery blockers; another provider\u2019s contract does not authorize native reset, adoption or creation."
       }
     },
     {
@@ -126,6 +138,10 @@
         ],
         "completion": "No completion can be claimed for this unsupported capability. Native create/restore completion and SQL/application readiness belong to their separately reviewed lifecycle contracts.",
         "recovery": "Reject this intent before provider mutations and preserve the existing bound resource. Do not fall back to generic hosting, native reset/restore, deletion or replacement; existing backup policy and recovery points remain unchanged."
+      },
+      "provisioningRecovery": {
+        "implementation": "implemented",
+        "evidence": "Isolated reviewed completion of the retained exact instance, native creation lifetime, encrypted credentials and per-write progress. Password reset requires separate confirmation; native operation and SQL authentication verify completion. Reconstructed transport and SQLite evidence only; live recovery not yet verified."
       }
     },
     {
@@ -155,6 +171,10 @@
         ],
         "completion": "No completion can be claimed for this unsupported capability. Native create/restore completion and SQL/application readiness belong to their separately reviewed lifecycle contracts.",
         "recovery": "Reject this intent before provider mutations and preserve the existing bound resource. Do not fall back to generic hosting, native reset/restore, deletion or replacement; existing backup policy and recovery points remain unchanged."
+      },
+      "provisioningRecovery": {
+        "implementation": "unsupported",
+        "evidence": "No incomplete-provision completion capability is implemented for this provider. Preserve existing identities and recovery blockers; another provider\u2019s contract does not authorize native reset, adoption or creation."
       }
     },
     {
@@ -184,6 +204,10 @@
         ],
         "completion": "No completion can be claimed for this unsupported capability. Native create/restore completion and SQL/application readiness belong to their separately reviewed lifecycle contracts.",
         "recovery": "Reject this intent before provider mutations and preserve the existing bound resource. Do not fall back to generic hosting, native reset/restore, deletion or replacement; existing backup policy and recovery points remain unchanged."
+      },
+      "provisioningRecovery": {
+        "implementation": "unsupported",
+        "evidence": "No incomplete-provision completion capability is implemented for this provider. Preserve existing identities and recovery blockers; another provider\u2019s contract does not authorize native reset, adoption or creation."
       }
     },
     {
@@ -213,6 +237,10 @@
         ],
         "completion": "No completion can be claimed for this unsupported capability. Native create/restore completion and SQL/application readiness belong to their separately reviewed lifecycle contracts.",
         "recovery": "Reject this intent before provider mutations and preserve the existing bound resource. Do not fall back to generic hosting, native reset/restore, deletion or replacement; existing backup policy and recovery points remain unchanged."
+      },
+      "provisioningRecovery": {
+        "implementation": "unsupported",
+        "evidence": "No incomplete-provision completion capability is implemented for this provider. Preserve existing identities and recovery blockers; another provider\u2019s contract does not authorize native reset, adoption or creation."
       }
     },
     {
@@ -242,6 +270,10 @@
         ],
         "completion": "No completion can be claimed for this unsupported capability. Native create/restore completion and SQL/application readiness belong to their separately reviewed lifecycle contracts.",
         "recovery": "Reject this intent before provider mutations and preserve the existing bound resource. Do not fall back to generic hosting, native reset/restore, deletion or replacement; existing backup policy and recovery points remain unchanged."
+      },
+      "provisioningRecovery": {
+        "implementation": "unsupported",
+        "evidence": "No incomplete-provision completion capability is implemented for this provider. Preserve existing identities and recovery blockers; another provider\u2019s contract does not authorize native reset, adoption or creation."
       }
     }
   ]

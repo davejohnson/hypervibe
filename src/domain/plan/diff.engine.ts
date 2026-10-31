@@ -1047,7 +1047,7 @@ export function diffEnvironment(input: {
           providerScope: localDbDestroyScope,
         },
       });
-      warnings.push(`Database ${localDbExternalId} is retained for recovery and will not be treated as active. Inspect it with hv_inspect; to recreate safely, remove the database from desired state, confirm its exact cleanup, then add it again.`);
+      warnings.push(`Database ${localDbExternalId} is retained for recovery and will not be treated as active. Inspect it with hv_inspect and run hv_plan to review any provider-supported completion. Deletion or replacement requires a separate explicit desired-state change and exact confirmation.`);
     } else {
       actions.push({
         id: `${retainedId}:destroy`,

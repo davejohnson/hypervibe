@@ -7,6 +7,7 @@ import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from 
 import { applySecretContainer, assertReadySecretContainers } from '../domain/services/secret-container-setup.js';
 import { applySecretReference, assertDeploymentSecretReferences } from './apply-secret-references.js';
 import { applyDatabaseFreshInitialization } from '../domain/services/database-fresh-initialization.service.js';
+import { applyDatabaseProvisioningRecovery } from '../domain/services/database-provisioning-recovery.service.js';
 import { hasPendingDatabaseInitialization } from '../domain/plan/database-initialization.contract.js';
 import { databaseSeedGeneration } from '../domain/services/database-seed-generation.js';
 import { databaseBootstrapActionSchema, hasDatabaseBootstrapObservationOrCleanup, hasPendingDatabaseBootstrap, matchesDatabaseBootstrapObservationOrCleanup } from '../domain/plan/database-bootstrap.contract.js';
@@ -1020,6 +1021,23 @@ export async function executePlanApply(ctx: CommandContext, params: {
           : Promise.resolve({ success: false, status: 'blocked' as const, message: 'Only the exact reviewed database bootstrap action is authorized.' }) });
     return { kind: 'executed', envName, result, actionScopedWarnings: [
       'Private task authentication and schema bootstrap do not prove running application readiness. Future backups, restore verification and managed deployment remain separate.' ] };
+  }
+  if (planScope === 'database-provisioning-recovery') {
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
+      || loaded.document.actions.length !== 1 || params.alwaysRunBootstrap) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'Database completion requires its exact reviewed plan and existing environment; it cannot deploy applications.' }] };
+    }
+    const blocked = planService.providerPreflight([envSpec.database?.provider ?? 'unconfigured']);
+    if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision,
+      confirmActions: params.confirmActions, handler: action =>
+        resolvePlanActionAuthority(action)?.capability === 'database.provisioning-recovery'
+          ? applyDatabaseProvisioningRecovery({ project: projectForPreflight, spec: envSpec, environmentName: envName,
+            action, confirmed: new Set(params.confirmActions), encrypted: loaded.document.overrides?.databaseProvisioningEncrypted })
+          : Promise.resolve({ success: false, status: 'blocked' as const, message: 'Only exact database completion is authorized.' }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [
+      'Database completion does not establish application rollout, migrations, backups or restoration.' ] };
   }
   if (planScope === 'database-initialization') {
     if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
@@ -4662,6 +4680,7 @@ async function createDatabase(
     });
     return {
       success: false,
+      ...(provisioned.receipt.status === 'pending' ? { status: recoverableComponentRetained ? 'pending' as const : 'blocked' as const } : {}),
       message: provisioned.receipt.message,
       error: provisioned.receipt.error,
       data: {

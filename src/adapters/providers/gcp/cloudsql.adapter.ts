@@ -1,5 +1,6 @@
 import { gcpGithubRecoveryAuthentication } from './gcp-github-automation.js';
 import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
+import { createCloudSqlProvisioningRecovery } from './cloudsql-provisioning-recovery.js';
 import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { z } from 'zod';
 import { randomInt, randomUUID } from 'crypto';
@@ -42,6 +43,7 @@ import { buildCloudSqlRestoreDrillWorkflow, resolveCloudSqlRestoreDrillSource } 
 import type { DatabaseBackupTarget, DailyBackupObservation, DailyBackupReview, IDailyBackupPolicy } from '../../../domain/ports/daily-backup.port.js';
 import { recoverySourceIdentityMatches, recoverySourceIdentitySchema } from '../../../domain/services/recovery-source.js';
 import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
+import { redactExactValues } from '../../../utils/redact-exact-values.js';
 
 // Credentials schema for self-registration
 export const CloudSqlCredentialsSchema = z.object({
@@ -68,6 +70,7 @@ export type CloudSqlCredentials = z.infer<typeof CloudSqlCredentialsSchema>;
 
 interface CloudSqlInstance {
   name: string;
+  createTime?: string;
   project?: string;
   state: string;
   databaseVersion: string;
@@ -129,6 +132,10 @@ interface CloudSqlOperation {
   error?: {
     errors?: Array<{ code?: string; message?: string }>;
   };
+}
+
+class CloudSqlOperationPending extends Error {
+  constructor() { super('Cloud SQL creation is still running; retain its operation and private credential for recovery.'); }
 }
 
 interface CloudSqlInstanceList {
@@ -271,6 +278,18 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     configureDaily: (target, reviewed) => this.configureDailyBackupPolicy(target, reviewed),
   };
 
+  readonly provisioningRecovery = createCloudSqlProvisioningRecovery({
+    scope: () => this.credentials ? { projectId: this.credentials.projectId, region: this.credentials.region } : null,
+    request: async (url, init) => this.request(url, { ...init, headers: {
+      ...init?.headers, Authorization: `Bearer ${await this.getAccessToken()}`,
+    } }),
+    authenticate: async (environment, component) => {
+      const target = await this.credentialLifecycle.inspect(environment, component, { environment: environment.name,
+        component: component.id, username: String(component.bindings.username), database: String(component.bindings.database) });
+      return (await this.credentialLifecycle.probe(environment, component, target, String(component.bindings.password))).state === 'authenticated';
+    },
+  });
+
   readonly capabilities: DatabaseCapabilities = {
     supportedDatabases: ['postgres'],
     supportsPooling: false, // Cloud SQL Auth Proxy recommended
@@ -410,6 +429,9 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     let createAcknowledged = false;
     let createMutationAttempted = false;
     let createMayHaveCommitted = false;
+    let generatedRootPassword: string | undefined;
+    let acknowledgedOperation: string | undefined;
+    const dbName = options?.databaseName?.trim() || 'app';
     try {
       const token = await this.getAccessToken();
       const { projectId, region } = this.credentials;
@@ -425,7 +447,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
         );
       }
       const rootPassword = this.generatePassword();
-      const dbName = options?.databaseName?.trim() || 'app';
+      generatedRootPassword = rootPassword;
 
       // Map type to Cloud SQL database version
       const versionMap: Record<string, string> = {
@@ -478,9 +500,11 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
 
       // Wait for operation to start (instance creation is async)
       const operation = (await response.json()) as CloudSqlOperation;
-      if (operation.name) {
-        await this.waitForOperation(token, operation.name, 'instance create');
+      if (!operation.name || !/^[A-Za-z0-9_-]+$/.test(operation.name) || operation.targetProject !== projectId || operation.targetId !== instanceName) {
+        throw new Error('Cloud SQL create operation does not match the reviewed database.');
       }
+      acknowledgedOperation = operation.name;
+      await this.waitForOperation(token, operation.name, 'instance create', { targetProject: projectId, targetId: instanceName });
 
       const instance = await this.getInstance(instanceName);
       if (
@@ -587,6 +611,11 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
                 region: retainedRegion,
               },
               cleanupRequired: true,
+              ...(generatedRootPassword ? { username: 'postgres', password: generatedRootPassword, database: dbName } : {}),
+              ...(acknowledgedOperation ? { provisioningRecovery: { schemaVersion: 1,
+                operationId: acknowledgedOperation, phase: 'instance-operation', targetProject: this.credentials.projectId,
+                targetId: requestedInstanceName, region: requestedRegion, databaseVersion: 'POSTGRES_15',
+                ...(recovered?.createTime ? { instanceCreateTime: recovered.createTime } : {}) } } : {}),
             }
           : {},
         externalId: retainIdentity ? requestedInstanceName ?? null : null,
@@ -596,9 +625,10 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
 
       return {
         component: emptyComponent,
-        receipt: {
+        receipt: redactExactValues({
           success: false,
-          message: 'Failed to provision Cloud SQL instance',
+          ...(error instanceof CloudSqlOperationPending ? { status: 'pending' as const } : {}),
+          message: error instanceof CloudSqlOperationPending ? 'Cloud SQL instance creation is still running' : 'Failed to provision Cloud SQL instance',
           error: `${String(error)}${recoveryError
             ? ` Exact-id recovery also failed: ${recoveryError}`
             : ''}`,
@@ -613,7 +643,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
               ...(recoveryError ? { recoveryError } : {}),
             },
           } : {}),
-        },
+        }, generatedRootPassword ? [generatedRootPassword] : []),
       };
     }
   }
@@ -1946,6 +1976,9 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
         throw new Error('Cloud SQL operation completion did not match the reviewed database.');
       }
       const status = (operation.status ?? '').toUpperCase();
+      if (expected && !['PENDING', 'RUNNING', 'DONE'].includes(status)) {
+        throw new Error('Cloud SQL operation readiness is unknown. Preserve its exact identity before further work.');
+      }
       if (status === 'DONE') {
         if (operation.error?.errors?.length) {
           throw new Error(`Cloud SQL ${description} operation failed: ${operation.error.errors.map((entry) => entry.message ?? entry.code ?? 'unknown').join('; ')}`);
@@ -1956,6 +1989,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
       await new Promise((resolve) => setTimeout(resolve, 5000));
     }
 
+    if (expected && description === 'instance create') throw new CloudSqlOperationPending();
     throw new Error(`Cloud SQL ${description} operation did not finish before timeout`);
   }
 

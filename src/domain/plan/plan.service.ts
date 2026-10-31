@@ -16,6 +16,7 @@ import { localCloudScopeRequired, planLocalCloudScope } from '../services/local-
 import { localHoldingWorkRequired, planLocalHolding } from '../services/local-holding-preparation.service.js';
 import type { CloudInstallationReview } from '../ports/cloud-installation.port.js';
 import { planDatabaseFreshInitialization } from '../services/database-fresh-initialization.service.js';
+import { planDatabaseProvisioningRecovery } from '../services/database-provisioning-recovery.service.js';
 import { planScheduleActivations, SCHEDULE_ACTIVATION_OPERATION } from '../services/schedule-activation.service.js';
 import { scopedSecretObservation } from './scoped-secrets.js';
 import { planApiPolicy } from '../services/api-policy.js';
@@ -188,7 +189,7 @@ export interface EnvironmentPlan {
   webhookReadiness?: WebhookReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
-  scope: 'full' | 'credentials' | 'secrets' | 'database-credential-aliases' | 'secret-destinations' | 'cloud-scope' | 'operator-artifacts' | 'operator-applications' | 'hosting-preparation' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'hosting-prepared-bindings' | 'service-volumes' | 'runtime-access' | 'backup-runtime' | 'database-checkpoint' | 'database-bindings' | 'database-initialization' | 'database-bootstrap' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
+  scope: 'full' | 'credentials' | 'secrets' | 'database-credential-aliases' | 'secret-destinations' | 'cloud-scope' | 'operator-artifacts' | 'operator-applications' | 'hosting-preparation' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'hosting-prepared-bindings' | 'service-volumes' | 'runtime-access' | 'backup-runtime' | 'database-checkpoint' | 'database-bindings' | 'database-initialization' | 'database-provisioning-recovery' | 'database-bootstrap' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
   backupReadiness?: BackupReadiness;
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
@@ -1907,6 +1908,11 @@ export class PlanService {
     const pendingCredential = pendingCredentialUpdate(project.id);
     if (pendingCredential && scope !== 'database-credential-aliases' && scope !== 'full') return { error: `Credential synchronization is incomplete. Recover hv_apply planId="${pendingCredential}" before planning deployment.` };
     if (scope === 'secret-destinations') return this.planSecretDestinations(projectWithSpecGitRemoteUrl(project, specResult.spec), environmentName, specResult, options!);
+    if ((scope === 'full' || scope === 'backups') && !pendingCredential) {
+      const recovery = await planDatabaseProvisioningRecovery({ project: projectWithSpecGitRemoteUrl(project, specResult.spec),
+        spec: specResult.spec, revision: specResult.revision, environmentName, options });
+      if (recovery) return recovery;
+    }
     if (scope === 'full' && !pendingCredential) {
       const initialization = await planDatabaseFreshInitialization({ project: projectWithSpecGitRemoteUrl(project, specResult.spec),
         spec: specResult.spec, revision: specResult.revision, environmentName, options });
