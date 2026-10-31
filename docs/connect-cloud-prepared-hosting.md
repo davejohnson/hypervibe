@@ -105,6 +105,17 @@ can be recovered only with the original successful execution and matching native
 application configuration. Normal tests exercise the actual SQLite planner,
 apply, bootstrap, export and read-only recovery paths.
 
+The following seed task reuses the recorded migration Job only while its original
+workload and Job lifetimes still match. The independent
+[Job contract](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs)
+defines the native UID and update fingerprint; the Run API also accepts an `etag`.
+A reconstructed replacement with the same name first caused an unauthorized
+PATCH in the regression. A second regression showed the seed run omitted its
+execution precondition. Both now pass: the update checks the retained UID and
+current fingerprint, and execution uses the freshly verified fingerprint. The
+successful migration-to-seed boundary runs through the real adapter and serialized
+transport. This is offline evidence; native migration and seed remain pending.
+
 The generated Cloud Run execution reader uses the same completion interpretation.
 Provider renderer revision 3 requires a new workflow-publication review; historical
 revision-2 fingerprints remain in compatibility tests, while AWS/Azure legacy

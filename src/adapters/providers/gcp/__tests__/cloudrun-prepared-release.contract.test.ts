@@ -8,7 +8,7 @@ import { environmentSpecSchema } from '../../../../domain/spec/spec.schema.js';
 import { observeRuntimeAccess, planRuntimeAccess } from '../../../../domain/services/runtime-access.service.js';
 import { resourceName } from '../../../../domain/services/resource-names.js';
 import { canonicalJsonSha256 } from '../../../../lib/canonical-json.js';
-import { createPreparedDirectReleaseControl, reviewPreparedDirectReleaseActions } from '../../../../domain/services/prepared-direct-release.service.js';
+import { completePreparedDirectRelease, createPreparedDirectReleaseControl, reviewPreparedDirectReleaseActions } from '../../../../domain/services/prepared-direct-release.service.js';
 import { parse } from 'yaml';
 import { createRequire } from 'node:module';
 import { buildCloudRunGitHubActionsSteps } from '../cloudrun-ci.workflow.js';
@@ -105,7 +105,7 @@ function fixture(options: { revokeBeforeJobCreate?: boolean; releaseCommand?: bo
     env: structuredClone(applicationConfiguration.template.containers[0].env), resources: { limits: { cpu: '1', memory: '512Mi' } } }],
     serviceAccount: runtime.serviceAccountEmail, maxRetries: 0, timeout: '3600s' };
   const job = { name: taskResource, uid: 'native-migration-job-uid', etag: 'job-etag', generation: '1', observedGeneration: '1',
-    terminalCondition: { state: 'CONDITION_SUCCEEDED' }, template: { template: taskTemplate } };
+    terminalCondition: { state: 'CONDITION_SUCCEEDED' }, template: { template: structuredClone(taskTemplate) } };
   const execution = { name: `${taskResource}/executions/exact-migration`, uid: 'native-execution-uid', job: taskResource,
     template: taskTemplate, taskCount: 1, succeededCount: options.jobOutcome === 'failed' ? 0 : 1,
     failedCount: options.jobOutcome === 'failed' ? 1 : 0, completionTime: '2026-10-31T12:02:00Z',
@@ -137,6 +137,12 @@ function fixture(options: { revokeBeforeJobCreate?: boolean; releaseCommand?: bo
       return Response.json({ name: `projects/${projectId}/locations/${region}/operations/migration-run`, done: true, response: execution });
     }
     if (options.releaseCommand && url.includes('/jobs')) {
+      if (method === 'PATCH' && url === `https://run.googleapis.com/v2/${taskResource}`) {
+        job.template.template = { ...structuredClone(taskTemplate), maxRetries: 1,
+          containers: [{ ...structuredClone(taskTemplate.containers[0]!), args: ['-lc', 'npm run db:seed:production'] }] };
+        job.etag = 'seed-job-etag';
+        return Response.json({ name: `projects/${projectId}/locations/${region}/operations/seed-update`, done: true, response: job });
+      }
       if (method === 'GET' && url.endsWith('/executions/exact-migration')) return Response.json(execution);
       if (method === 'GET' && url === `https://run.googleapis.com/v2/${taskResource}`) {
         if (options.revokeBeforeJobCreate) authorized = false;
@@ -145,6 +151,8 @@ function fixture(options: { revokeBeforeJobCreate?: boolean; releaseCommand?: bo
       if (method === 'POST') {
         taskWrites.push({ url, body: JSON.parse(String(init.body)) });
         if (url.endsWith(':run')) {
+          if (job.etag === 'seed-job-etag') return Response.json({ name: `projects/${projectId}/locations/${region}/operations/seed-run`, done: true,
+            response: { ...execution, name: `${taskResource}/executions/exact-seed`, uid: 'native-seed-execution-uid', template: structuredClone(job.template.template) } });
           if (options.jobOutcome === 'lost-run') throw new Error('Synthetic lost run acknowledgment');
           if (options.jobOutcome === 'pending-ack') return Response.json({ name: `projects/${projectId}/locations/${region}/operations/migration-run`, done: false });
           return Response.json({ name: `projects/${projectId}/locations/${region}/operations/migration-run`, done: true, response: execution });
@@ -185,10 +193,35 @@ function fixture(options: { revokeBeforeJobCreate?: boolean; releaseCommand?: bo
       ...(options.releaseCommand ? { diff: [{ field: 'releaseCommand', to: 'npm run db:migrate:production' }] } : {}) }], environment, { web: candidateImage })[0]!,
     load: () => environment, save: (before, next) => { if (before.platformBindings !== environment.platformBindings) return false; environment.platformBindings = next; return true; }, authorize: () => authorized });
   const control = makeControl();
-  return { create, connection, environment, service, environmentSpec, request, writes, taskWrites, taskTemplate, control, makeControl, execution, current: () => current };
+  return { create, connection, environment, service, environmentSpec, request, writes, taskWrites, taskTemplate, control, makeControl, execution, job, current: () => current };
 }
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 describe('prepared Cloud Run first application release', () => {
+  it('seeds through the retained migration job using its current update and execution preconditions', async () => {
+    const f = fixture({ releaseCommand: true }), adapter = await f.create();
+    const deployed = await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control });
+    expect(deployed.receipt.success).toBe(true);
+    f.environment.platformBindings = completePreparedDirectRelease(f.environment, deployed.receipt.data!.preparedRelease);
+    f.request.mockClear();
+    const result = await adapter.runJob(f.environment, f.service, 'npm run db:seed:production');
+    expect(result.receipt.success).toBe(true);
+    const update = f.request.mock.calls.find(([, init]) => init?.method === 'PATCH');
+    expect(JSON.parse(String(update?.[1]?.body)).etag).toBe('job-etag');
+    const run = f.request.mock.calls.find(([url, init]) => String(url).endsWith(':run') && init?.method === 'POST');
+    expect(JSON.parse(String(run?.[1]?.body))).toEqual({ etag: 'seed-job-etag' });
+    expect(result.jobId).toMatch(/\/executions\/exact-seed$/);
+  });
+  it('does not let a later seed task update a replacement migration job with the same name', async () => {
+    const f = fixture({ releaseCommand: true }), adapter = await f.create();
+    const deployed = await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control });
+    expect(deployed.receipt.success).toBe(true);
+    f.environment.platformBindings = completePreparedDirectRelease(f.environment, deployed.receipt.data!.preparedRelease);
+    f.job.uid = 'replacement-job-uid'; f.request.mockClear();
+    expect((await adapter.runJob(f.environment, f.service, 'npm run db:seed:production')).receipt.success).toBe(false);
+    expect(f.request.mock.calls.filter(([url, init]) => String(url).includes('/jobs') && ['PATCH', 'POST'].includes(init?.method ?? 'GET'))).toEqual([]);
+  });
   it('stops before job creation if authorization changes during native absence observation', async () => {
     const f = fixture({ releaseCommand: true, revokeBeforeJobCreate: true }), adapter = await f.create();
     expect((await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },

@@ -43,6 +43,7 @@ import { CloudRunInstalledRuntimeIdentities } from './cloudrun-installed-runtime
 import { CloudRunPreparedHosting, gcpPreparedRuntimeEnvVars } from './cloudrun-prepared-hosting.js';
 import { CloudRunLocalPreparedRuntime } from './cloudrun-local-prepared-runtime.js';
 import { describePreparedHosting } from '../../../domain/services/hosting-prepared.service.js';
+import { preparedReleaseAttempts } from '../../../domain/services/prepared-direct-release.service.js';
 import { preparedHostingMarkerSchema, type LocalPreparedHostingLoader, type PreparedDirectReleaseTarget, type PreparedDirectReleaseControl, type PreparedDirectReleaseAttempt, type PreparedReleaseTask } from '../../../domain/ports/hosting-prepared.port.js';
 import { parseGcpPreparedResources } from './gcp-cloud-deployment.js';
 import { cloudRunCloudSqlVolumeConfig, gcpPreparedApplicationConfiguration, gcpPreparedApplicationDigest, gcpObservedPreparedApplicationConfiguration, gcpPreparedHoldingTransition } from './gcp-prepared-release.js';
@@ -2796,6 +2797,15 @@ export class CloudRunAdapter implements
         token
       );
       const jobName = this.migrationJobName(serviceName);
+      const preparedAttempt = preparedReleaseAttempts(environment)[service.name];
+      const preparedTask = preparedAttempt?.releaseTask;
+      if (preparedTask && (preparedAttempt.status !== 'completed' || preparedTask.phase !== 'completed'
+        || preparedAttempt.target.projectId !== this.credentials.projectId
+        || preparedAttempt.target.environmentId !== this.credentials.region
+        || preparedAttempt.target.resourceId !== serviceName || preparedAttempt.target.resourceUid !== sourceService?.uid
+        || preparedTask.jobName !== `projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs/${jobName}`)) {
+        throw new Error('The completed first-release task does not match this workload; no environment task update is authorized.');
+      }
       const jobSpec = this.cloudRunJobSpec({
         imageUri,
         command,
@@ -2815,6 +2825,7 @@ export class CloudRunAdapter implements
         jobName,
         jobSpec,
         description: 'environment task',
+        ...(preparedTask ? { bindingAuthority: 'bound' as const, expectedUid: preparedTask.jobUid } : {}),
       });
       this.assertReleaseJobConfiguration(readyJob, jobName, jobSpec);
       this.assertVpcAccess(
@@ -2823,7 +2834,8 @@ export class CloudRunAdapter implements
         `Cloud Run job ${jobName}`
       );
 
-      const run = await this.executeCloudRunJob(jobName, token);
+      if (preparedTask && !readyJob.etag) throw new Error('The retained environment task has no current execution precondition.');
+      const run = await this.executeCloudRunJob(jobName, token, preparedTask ? readyJob.etag : undefined);
       const { operation, execution } = run;
       const status = execution ? this.executionStatus(execution) : 'failed';
       const jobId = execution?.name ?? operation.name ?? jobName;
@@ -4684,7 +4696,8 @@ export class CloudRunAdapter implements
 
   private async executeCloudRunJob(
     jobName: string,
-    token: string
+    token: string,
+    etag?: string
   ): Promise<{ operation: CloudRunOperation; execution: CloudRunExecution | null }> {
     if (!this.credentials) throw new Error('Not connected. Call connect() first.');
     const { projectId, region } = this.credentials;
@@ -4696,7 +4709,7 @@ export class CloudRunAdapter implements
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({}),
+        body: JSON.stringify(etag ? { etag } : {}),
       }
     );
     if (!response.ok) {
