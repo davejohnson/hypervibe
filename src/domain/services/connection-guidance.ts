@@ -49,7 +49,7 @@ const AWS_LOCAL_AUTHENTICATION: LocalAuthenticationRecipe = {
   credentialMode: 'default',
   macosInstall: { command: 'brew', args: ['install', 'awscli'], documentationUrl: 'https://formulae.brew.sh/formula/awscli' },
   signIn: { command: 'aws', args: ['login'], documentationUrl: 'https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sign-in.html' },
-  agentInstruction: LOCAL_AUTHENTICATION_INSTRUCTION + ' AWS login requires CLI 2.32.0 or newer and existing SignInLocalDevelopmentAccess authority. Use an existing IAM Identity Center profile with aws sso login when applicable; do not create access keys or attach policies as a login workaround.',
+  agentInstruction: LOCAL_AUTHENTICATION_INSTRUCTION + ' AWS login requires CLI 2.32.0 or newer and existing SignInLocalDevelopmentAccess authority. Use an existing IAM Identity Center profile with aws sso login when applicable; do not create access keys or attach policies as a login workaround. If the AWS browser shows 400 Bad Request, open the active CLI session\'s original authorization URL in a private browser window. If that session expired, initiate a fresh scoped login first; never reuse an old error-page URL or alter its state, callback or challenge. Stale browser cookies are a possible cause, not a diagnosis. Do not automatically clear browser cookies, delete profiles or request credentials in chat. If the error persists, check the selected region and existing SignInLocalDevelopmentAccess authority using AWS troubleshooting guidance; verify the exact account after login succeeds.',
 };
 const AZURE_LOCAL_AUTHENTICATION: LocalAuthenticationRecipe = {
   credentialMode: 'default',

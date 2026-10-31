@@ -44,6 +44,18 @@ function urls(setup: { setupUrls: string[] }): URL[] {
 // in docs/connection-form-links.md, not request-derived API response fixtures.
 // No credential creation or authenticated provider browser is exercised here.
 describe('contextual credential forms through MCP', () => {
+  it.each(['ecs','s3'])('explains AWS browser 400 recovery without reusing an expired authorization for %s', async provider => {
+    await withClient(async client => {
+      const response=await client.callTool({name:'hv_connections',arguments:{provider,action:'describe',scope:'operator-test'}});
+      const guidance=(parseToolEnvelope(response).data as any).connectionSetup.localAuthentication.agentInstruction;
+      expect(guidance).toMatch(/400.*private browser window/i);
+      expect(guidance).toMatch(/active CLI.*authorization URL/);
+      expect(guidance).toMatch(/expired.*fresh.*login/i);
+      expect(guidance).toMatch(/possible cause.*not a diagnosis/i);
+      expect(guidance).toMatch(/do not.*clear.*cookies/i);
+      expect(guidance).toMatch(/region.*existing.*SignInLocalDevelopmentAccess/);
+    });
+  });
   it.each([
     { provider: 'ecs', executable: 'aws', install: ['install', 'awscli'], login: ['login'] },
     { provider: 'azure-container-apps', executable: 'az', install: ['install', 'azure-cli'], login: ['login'] },

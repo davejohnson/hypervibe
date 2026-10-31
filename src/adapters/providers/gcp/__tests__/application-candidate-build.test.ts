@@ -11,7 +11,7 @@ const temporary: string[] = [];
 afterEach(() => { vi.restoreAllMocks(); temporary.splice(0).forEach(p => rmSync(p,{recursive:true,force:true})); });
 const token = 'synthetic-private-package-read-token';
 const sha = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
-async function candidate(options: { dirty?: boolean; wrongOrigin?: boolean; leak?: 'layer'|'filesystem'|'output'; lostBuildAck?: boolean; cleanupFailure?: boolean; runtimeUser?: string; imageSize?: number; compression?: 'zstd'|'zstd-skippable' } = {}) {
+async function candidate(options: { dirty?: boolean; wrongOrigin?: boolean; leak?: 'layer'|'filesystem'|'output'; lostBuildAck?: boolean; cleanupFailure?: boolean; cleanupAckLost?: boolean; cleanupRemaining?: 'builder'|'container'|'volume'|'malformed-list'; runtimeUser?: string; imageSize?: number; compression?: 'zstd'|'zstd-skippable' } = {}) {
   const root = mkdtempSync(path.join(tmpdir(),'hv-candidate-source-')); temporary.push(root);
   writeFileSync(path.join(root,'Dockerfile'),`FROM node:24\nRUN --mount=type=secret,id=npm_token ${options.leak==='layer'?'cp /run/secrets/npm_token /tmp/package-token':'test -s /run/secrets/npm_token'}\nUSER node\n`);
   writeFileSync(path.join(root,'package-lock.json'),'{"lockfileVersion":3}\n');
@@ -32,8 +32,14 @@ async function candidate(options: { dirty?: boolean; wrongOrigin?: boolean; leak
     if(program !== 'docker') return runOperatorCommand(program,args,opts);
     commands.push(args); expect(JSON.stringify({args,env:opts?.env})).not.toContain(token);
     if(args[0] === 'buildx' && args[1] === 'create') return args[args.indexOf('--name')+1];
-    if(args[0] === 'buildx' && args[1] === 'rm') {if(options.cleanupFailure)throw new Error('synthetic cleanup failure');return '';}
-    if(args[0] === 'container' || args[0] === 'volume')return '';
+    if(args[0] === 'buildx' && args[1] === 'rm') {if(options.cleanupFailure||options.cleanupAckLost)throw new Error('synthetic lost cleanup acknowledgment');return '';}
+    if(args[0] === 'buildx' && args[1] === 'ls') {
+      if(options.cleanupFailure)throw new Error('synthetic unavailable builder inventory');
+      if(options.cleanupRemaining==='malformed-list')return '';
+      const created=commands.find(a=>a[0]==='buildx'&&a[1]==='create')!;
+      return 'default\n'+(options.cleanupRemaining==='builder'?created[created.indexOf('--name')+1]+'\n':'');
+    }
+    if(args[0] === 'container' || args[0] === 'volume')return options.cleanupRemaining===args[0]?'retained-owned-resource\n':'';
     if(args[0] === 'image' && args[1] === 'rm')return '';
     if(args[0] === 'buildx' && args[1] === 'build') {
       context = args.at(-1)!; secretFile = args[args.indexOf('--secret')+1].split(',src=')[1];
@@ -88,9 +94,15 @@ describe('private application candidate build boundary',()=>{
     expect(f.commands.some(args=>['login','push','pull'].includes(args[0]))).toBe(false);
   });
   it.runIf(process.env.HYPERVIBE_RUN_CANDIDATE_DOCKER_SMOKE === '1')('executes actual BuildKit and image/archive/filesystem custody checks with a synthetic credential',async()=>{
-    const f=await candidate();const result=await prepareOperatorImages(f.scope,['application-candidate-v1'],async(program,args,options)=>{try{return await runOperatorCommand(program,args,options);}catch{console.error(`Synthetic Docker smoke command failed: ${program} ${args[0]}`);throw new Error("Synthetic Docker smoke command failed.");}},f.root);
+    const f=await candidate();const result=await prepareOperatorImages(f.scope,['application-candidate-v1'],async(program,args,options)=>{
+      const output=await runOperatorCommand(program,args,options);
+      // Inject only acknowledgment loss after real native cleanup. The next
+      // independent Docker inventories must establish actual absence.
+      if(program==='docker'&&args[0]==='buildx'&&args[1]==='rm')throw new Error('Synthetic lost cleanup acknowledgment after native deletion.');
+      return output;
+    },f.root);
     expect(result).toMatchObject({sourceCommit:f.scope.sourceCommit,credentialScan:'verified'});expect(result.candidateImageId).toMatch(/^sha256:[a-f0-9]{64}$/);
-    if(process.env.HYPERVIBE_CANDIDATE_SMOKE_RECEIPT)writeFileSync(process.env.HYPERVIBE_CANDIDATE_SMOKE_RECEIPT,JSON.stringify({status:'passed',source:'synthetic locally committed fixture',...result,publication:'not-performed',credential:'synthetic package-read token',providerCalls:0},null,2)+'\n',{mode:0o600});
+    if(process.env.HYPERVIBE_CANDIDATE_SMOKE_RECEIPT)writeFileSync(process.env.HYPERVIBE_CANDIDATE_SMOKE_RECEIPT,JSON.stringify({status:'passed',source:'synthetic locally committed fixture',...result,cleanupAcknowledgment:'synthetic loss after actual deletion; native absence verified',publication:'not-performed',credential:'synthetic package-read token',providerCalls:0},null,2)+'\n',{mode:0o600});
   },240000);
   it.runIf(process.env.HYPERVIBE_RUN_CANDIDATE_DOCKER_SMOKE === '1')('removes actual rejected image and isolated BuildKit cache after detecting a copied synthetic credential',async()=>{
     const f=await candidate({leak:'layer'});let builder='',tag='';
@@ -132,6 +144,30 @@ describe('private application candidate build boundary',()=>{
     const receiptPath=String(error).match(/at (.+\/cleanup\.json);/)![1];temporary.push(path.dirname(receiptPath));
     const receipt=JSON.parse(readFileSync(receiptPath,'utf8'));expect(receipt).toMatchObject({status:'incomplete',buildAttempted:true,succeeded:true});
     expect(JSON.stringify(receipt)).not.toContain(token);expect(statSync(receiptPath).mode&0o777).toBe(0o600);
+    expect(existsSync(f.secretFile())).toBe(false);expect(existsSync(f.context())).toBe(false);
+  });
+
+  // Docker rm has separate daemon/cache retention options. Native events on
+  // 2026-10-30 proved both resources deleted although the command failed locally.
+  // These reconstructed CLI responses model that lost acknowledgment, not live
+  // compatibility: successful independent inventory reads establish absence.
+  it('verifies native absence after a lost builder-removal acknowledgment without repeating deletion',async()=>{
+    const f=await candidate({cleanupAckLost:true});
+    const result=await prepareOperatorImages(f.scope,['application-candidate-v1'],f.command,f.root);
+    expect(result.builderCleanup).toBe('verified');
+    expect(f.commands.filter(a=>a[0]==='buildx'&&a[1]==='rm')).toHaveLength(1);
+    expect(f.commands.some(a=>a[0]==='buildx'&&a[1]==='ls')).toBe(true);
+    expect(f.commands.some(a=>a[0]==='container')).toBe(true);
+    expect(f.commands.some(a=>a[0]==='volume')).toBe(true);
+    expect(existsSync(f.secretFile())).toBe(false);expect(existsSync(f.context())).toBe(false);
+  });
+
+  it.each(['builder','container','volume','malformed-list'] as const)('keeps cleanup blocked when the %s observation does not prove absence',async cleanupRemaining=>{
+    const f=await candidate({cleanupRemaining});let error:unknown;
+    try{await prepareOperatorImages(f.scope,['application-candidate-v1'],f.command,f.root);}catch(value){error=value;}
+    expect(String(error)).toContain('cleanup is incomplete');
+    const receiptPath=String(error).match(/at (.+\/cleanup\.json);/)![1];temporary.push(path.dirname(receiptPath));
+    expect(JSON.parse(readFileSync(receiptPath,'utf8'))).toMatchObject({status:'incomplete',succeeded:true});
     expect(existsSync(f.secretFile())).toBe(false);expect(existsSync(f.context())).toBe(false);
   });
 

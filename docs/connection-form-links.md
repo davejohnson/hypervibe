@@ -90,6 +90,21 @@ uses its own SSO login. No new policy, cloud resource, key, or CI/runtime export
 part of these recipes. Passing tests validates emitted guidance, not browser
 consent, native account authority, or every package-manager installation.
 
+AWS browser HTTP 400 recovery is now included in both existing AWS local-login
+recipes (ECS and S3). The assumption that reopening the same failed link is a
+sufficient login instruction was contradicted by repeated real browser errors.
+The active authorization completed in a private window and STS verified the
+intended account. AWS's [sign-in service issue](https://github.com/aws/aws-cli/issues/10186)
+independently documents this error pattern; stale cookies remain a hypothesis
+for this incident. Its [troubleshooting guide](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sign-in-troubleshoot.html)
+also identifies region and access restrictions.
+
+Guidance preserves the active CLI URL or starts a fresh scoped login after
+expiry, never edits OAuth state/callback/challenge, and does not clear cookies or
+profiles automatically. Two real MCP describe regressions failed before the
+guidance change. This checks delivery of recovery instructions, not automatic
+detection of AWS browser errors or proof that a language model follows them.
+
 ## macOS companion setup
 
 The companion now requests `hv_connections action="describe"` before presenting

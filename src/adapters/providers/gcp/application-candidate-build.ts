@@ -142,11 +142,21 @@ export async function prepareApplicationCandidate(nativeScope: Record<string,str
     }catch{ // Missing or unknown local image identity cannot authorize deleting any other image.
       cleanupComplete=false;
     }
-    if(builderAttempted)try {
-      await command('docker',['buildx','rm','--force','--timeout','30s',builder],cleanupOptions);
-      if((await command('docker',['container','ls','--all','--filter',`name=^buildx_buildkit_${builder}0$`,'--format','{{.ID}}'],cleanupOptions)).trim()
-        ||(await command('docker',['volume','ls','--filter',`name=^buildx_buildkit_${builder}0_state$`,'--format','{{.Name}}'],cleanupOptions)).trim())cleanupComplete=false;
-    }catch{cleanupComplete=false;}
+    if(builderAttempted) {
+      // A lost removal acknowledgment is not proof that the builder remains.
+      // Reserve time for independent reads; never repeat the removal request.
+      try {
+        await command('docker',['buildx','rm','--force','--timeout','30s',builder],{
+          ...cleanupOptions,signal:AbortSignal.any([cleanupOptions.signal,AbortSignal.timeout(60_000)]),
+        });
+      }catch{ /* Only the native observations below can establish cleanup. */ }
+      try {
+        const names=(await command('docker',['buildx','ls','--format','{{.Builder.Name}}'],cleanupOptions)).trim().split('\n');
+        if(names.some(name=>!name||!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)||name===builder)
+          ||(await command('docker',['container','ls','--all','--filter',`name=^buildx_buildkit_${builder}0$`,'--format','{{.ID}}'],cleanupOptions)).trim()
+          ||(await command('docker',['volume','ls','--filter',`name=^buildx_buildkit_${builder}0_state$`,'--format','{{.Name}}'],cleanupOptions)).trim())cleanupComplete=false;
+      }catch{cleanupComplete=false;}
+    }
     token='';
     if(!cleanupComplete) {
       for(const file of ['context','source.tar','image.tar','filesystem.tar'])rmSync(path.join(directory,file),{recursive:true,force:true});

@@ -251,6 +251,29 @@ removed. These checks do not claim protection against malicious source making
 network requests or transforming a token: selecting the source commit is code
 execution authority.
 
+Builder removal acknowledgment and observed cleanup are separate facts. A local
+2026-10-30 application build completed its credential scans, then reported
+incomplete cleanup; Docker's independent event history recorded deletion of its
+exact container and cache volume, and fresh inventories confirmed absence. This
+falsified the assumption that a failed cleanup command proves resources remain;
+the original command failure's cause is still unproven.
+
+Cleanup now issues removal once, reserves time for independent reads, and checks
+the isolated builder inventory as well as the exact container and volume. Failed
+or malformed reads and retained resources still block publication and preserve
+the recovery record. This follows Docker's documented
+[separate daemon/state removal options](https://docs.docker.com/reference/cli/docker/buildx/rm/)
+and [builder inventory format](https://docs.docker.com/reference/cli/docker/buildx/ls/).
+Three new normal-CI regressions failed before the fix: lost acknowledgment,
+retained builder metadata, and an empty inventory incorrectly accepted as proof.
+All 33 focused build/publication/application checks and typechecking pass. Both
+actual Docker cases also pass: the clean fixture loses its acknowledgment after
+native removal and verifies absence independently; the leaking fixture rejects
+the synthetic credential and verifies removal of its image, builder and cache.
+All 19 build cases pass with those local smokes enabled. This establishes local
+Docker behavior, not native cloud publication. Existing uncertain
+preparation records are preserved and are not converted into publication receipts.
+
 A single confirmed push targets a new per-attempt tag in the existing private
 repository. It creates no registry, IAM binding or workload. Recovery performs
 readback only, including after restart or removal of the declaration. The final
