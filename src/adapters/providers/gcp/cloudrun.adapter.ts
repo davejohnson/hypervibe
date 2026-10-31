@@ -4127,17 +4127,28 @@ export class CloudRunAdapter implements
         throw new Error(`Cloud Run domain-mapping list failed with HTTP ${response.status}.`);
       }
       const body = await response.json() as {
+        kind?: string;
+        apiVersion?: string;
         items?: CloudRunDomainMapping[];
         metadata?: { continue?: string };
         unreachable?: string[];
       };
-      if (!Array.isArray(body.items)) {
+      // Native empty v1 lists omit items. Require their list identity before
+      // interpreting that omission; an arbitrary empty response is unknown.
+      const items = body.items === undefined && body.kind === 'DomainMappingList'
+        && body.apiVersion === 'domains.cloudrun.com/v1' ? [] : body.items;
+      if (!Array.isArray(items)) {
         throw new Error('Cloud Run domain-mapping list returned an invalid items collection.');
+      }
+      if (body.metadata !== undefined && (!body.metadata || typeof body.metadata !== 'object' || Array.isArray(body.metadata)
+        || body.metadata.continue !== undefined && typeof body.metadata.continue !== 'string')
+        || body.unreachable !== undefined && (!Array.isArray(body.unreachable) || body.unreachable.some(value => typeof value !== 'string'))) {
+        throw new Error('Cloud Run domain-mapping list returned invalid continuation or reachability metadata.');
       }
       if ((body.unreachable?.length ?? 0) > 0) {
         throw new Error(`Cloud Run domain-mapping observation was incomplete for: ${body.unreachable!.join(', ')}.`);
       }
-      for (const mapping of body.items) {
+      for (const mapping of items) {
         this.assertDomainMappingIdentity(mapping);
         const name = mapping.metadata!.name!.toLowerCase();
         if (seenNames.has(name)) {

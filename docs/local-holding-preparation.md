@@ -139,6 +139,26 @@ They run through ordinary `npm test`, which both committed acceptance CI and
 desired required-check configuration select; this alone does not verify live
 branch-protection enforcement.
 
+### Empty native domain inventories during first deployment
+
+A native 2026-10-31 read returned HTTP 200 with `kind: DomainMappingList`,
+`apiVersion: domains.cloudrun.com/v1` and `metadata.selfLink`, omitting `items`.
+The assumption that every successful list includes an explicit array marked the
+entire hosting observation partial and blocked unrelated immutable references and
+generated application secrets. Google's [domain-list contract](https://docs.cloud.google.com/run/docs/reference/rest/v1/namespaces.domainmappings/list)
+and the redacted native field projection establish the counterexample. One actual
+Cloud Run adapter/serialized-HTTP regression failed before correction; 41 focused
+observation, first-release and reference checks plus typechecking pass afterward.
+
+The shared domain inventory reader now accepts omitted items only with the exact
+list kind and API version. Missing/wrong envelopes, explicit malformed items,
+unreachable locations and malformed pagination metadata remain unknown. It changes
+no other provider's observation contract or mutation authority. The read-only live
+diagnosis establishes this parser failure; deployment, runtime reader grants and
+native backup/restore remain separate acceptance requirements. A prior local test
+guard also omitted this namespace-style GET; correcting that guard alone did not
+resolve the product failure.
+
 ### Cloud SQL first release
 
 The local operator path reuses Cloud Run's existing `cloudsql` volume and
