@@ -151,10 +151,13 @@ export async function prepareApplicationCandidate(nativeScope: Record<string,str
         });
       }catch{ /* Only the native observations below can establish cleanup. */ }
       try {
-        const names=(await command('docker',['buildx','ls','--format','{{.Builder.Name}}'],cleanupOptions)).trim().split('\n');
+        // Suspension may expire all existing timers simultaneously. Readback
+        // gets its own bounded phase and cannot authorize another deletion.
+        const observationOptions={env,signal:AbortSignal.timeout(30_000)};
+        const names=(await command('docker',['buildx','ls','--format','{{.Builder.Name}}'],observationOptions)).trim().split('\n');
         if(names.some(name=>!name||!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)||name===builder)
-          ||(await command('docker',['container','ls','--all','--filter',`name=^buildx_buildkit_${builder}0$`,'--format','{{.ID}}'],cleanupOptions)).trim()
-          ||(await command('docker',['volume','ls','--filter',`name=^buildx_buildkit_${builder}0_state$`,'--format','{{.Name}}'],cleanupOptions)).trim())cleanupComplete=false;
+          ||(await command('docker',['container','ls','--all','--filter',`name=^buildx_buildkit_${builder}0$`,'--format','{{.ID}}'],observationOptions)).trim()
+          ||(await command('docker',['volume','ls','--filter',`name=^buildx_buildkit_${builder}0_state$`,'--format','{{.Name}}'],observationOptions)).trim())cleanupComplete=false;
       }catch{cleanupComplete=false;}
     }
     token='';

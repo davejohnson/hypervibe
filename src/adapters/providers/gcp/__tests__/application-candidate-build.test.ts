@@ -162,6 +162,24 @@ describe('private application candidate build boundary',()=>{
     expect(existsSync(f.secretFile())).toBe(false);expect(existsSync(f.context())).toBe(false);
   });
 
+  it('uses a fresh observation deadline when suspension expires both removal timers together',async()=>{
+    const f=await candidate(),timers:AbortController[]=[];
+    vi.spyOn(AbortSignal,'timeout').mockImplementation(()=>{const controller=new AbortController();timers.push(controller);return controller.signal;});
+    let removalAttempted=false;
+    const result=await prepareOperatorImages(f.scope,['application-candidate-v1'],async(program,args,options)=>{
+      if(options?.signal?.aborted)throw new Error('Synthetic command cancelled before dispatch.');
+      const output=await f.command(program,args,options);
+      if(program==='docker'&&args[0]==='buildx'&&args[1]==='rm'){
+        removalAttempted=true;timers.forEach(controller=>controller.abort());
+        throw new Error('Synthetic suspension expired all existing deadlines after deletion.');
+      }
+      return output;
+    },f.root);
+    expect(removalAttempted).toBe(true);expect(result.builderCleanup).toBe('verified');
+    expect(f.commands.filter(a=>a[0]==='buildx'&&a[1]==='rm')).toHaveLength(1);
+    expect(existsSync(f.secretFile())).toBe(false);expect(existsSync(f.context())).toBe(false);
+  });
+
   it.each(['builder','container','volume','malformed-list'] as const)('keeps cleanup blocked when the %s observation does not prove absence',async cleanupRemaining=>{
     const f=await candidate({cleanupRemaining});let error:unknown;
     try{await prepareOperatorImages(f.scope,['application-candidate-v1'],f.command,f.root);}catch(value){error=value;}

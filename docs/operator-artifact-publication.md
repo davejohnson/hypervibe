@@ -274,6 +274,16 @@ All 19 build cases pass with those local smokes enabled. This establishes local
 Docker behavior, not native cloud publication. Existing uncertain
 preparation records are preserved and are not converted into publication receipts.
 
+A subsequent command trace showed removal and observation timers expiring
+together after a long pause, while macOS recorded sleep/wake activity. The
+readback command was cancelled before observation. A regression that expires all
+existing deadlines after deletion failed before readback received its own
+30-second phase. That phase permits only native inventory reads, never a second
+removal. All 34 focused checks and typechecking pass after that correction. A
+separate local run timed out in an unchanged fixture; the bounded rerun with idle
+sleep inhibited passed. No test deadline was enlarged. This does not extend
+provider installation or publication authority.
+
 A single confirmed push targets a new per-attempt tag in the existing private
 repository. It creates no registry, IAM binding or workload. Recovery performs
 readback only, including after restart or removal of the declaration. The final
