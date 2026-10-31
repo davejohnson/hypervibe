@@ -1,3 +1,4 @@
+import { recoveryAutomationSchema, recoveryRuntimeBindingSchema } from '../domain/ports/recovery-runtime.port.js';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { GitHubAdapter } from '../adapters/providers/github/github.adapter.js';
@@ -22,7 +23,7 @@ import { recoverySourceIdentityMatches, recoverySourceIdentitySchema } from '../
 import { RecoveryDiagnosticError, recoveryDiagnosticSchema, recoveryFailure, type RecoveryDiagnostic } from '../domain/ports/recovery-diagnostics.port.js';
 import type { BackupOperationReceipt } from '../domain/services/backup-operation-receipt.js';
 
-export const backupReceiptSchema = z.object({ setId: z.string().uuid(), manifestKey: z.string().min(1), manifestSha256: z.string().regex(/^[a-f0-9]{64}$/),
+export const backupReceiptSchema = z.object({ setId: z.string().guid(), manifestKey: z.string().min(1), manifestSha256: z.string().regex(/^[a-f0-9]{64}$/),
   completedAt: z.string().datetime(), applied: z.literal(1), skipped: z.literal(0), databaseCount: z.number().int().min(0).max(1),
   objectCount: z.number().int().nonnegative(), restoreVerified: z.literal(true), cleanupVerified: z.literal(true) }).strict();
 
@@ -34,6 +35,7 @@ export function managedRecoveryExecutionId(repository: string, runId: string): s
 function selectedCredentialNames(target: ManagedBackupTarget) {
   const names = new Set<string>();
   for (const provider of managedBackupProviderNames(target)) {
+    if (target.automation?.[provider]) continue;
     const mapping = managedBackupCredentialKeys(provider);
     if (!mapping || !Object.keys(mapping).length) throw new Error('Recovery provider credential contract is unavailable.');
     Object.keys(mapping).forEach(name => names.add(name));
@@ -69,8 +71,11 @@ export async function verifyManagedBackupAuthority(params: {
   if (!bound || bound.provider !== target.hosting.provider || desired.hosting.provider !== target.hosting.provider
     || canonicalJsonSha256(raw.backups.fileReferenceQueries ?? []) !== canonicalJsonSha256(target.fileReferenceQueries)) throw new Error('Backup scope or reference projections changed.');
   const now = new Date();
-  const environment: Environment = { id: target.environment, name: target.environment, projectId: target.project,
+  const environment: Environment = { id: target.environmentId ?? target.environment, name: target.environment, projectId: target.project,
     platformBindings: bound, createdAt: now, updatedAt: now };
+  verifyRecoveryRuntimeBinding(target, environment);
+  verifyRecoveryAutomation(target, environment);
+  if (target.executionTarget && desired.hosting.region !== undefined && desired.hosting.region !== target.hosting.region) throw new Error('The reviewed backup hosting region changed.');
   const hostingScope = managedBackupTargetSchema.shape.hosting.shape.providerScope
     .safeParse(managedBackupHostingScope(environment, Boolean(desired.database)));
   if (!hostingScope.success || canonicalJsonSha256(hostingScope.data) !== canonicalJsonSha256(target.hosting.providerScope)) {
@@ -117,20 +122,28 @@ export async function executeManagedBackup(params: {
   let taskFacts: RecoveryDiagnostic['task'];
   try {
     const { target, environment } = params;
+    verifyRecoveryRuntimeBinding(target, environment);
     if (target.database && !supportsManagedRecoveryDatabase(target.hosting.provider, target.database.source.provider)) {
       throw recoveryFailure(stage, 'unsupported', undefined, undefined, 'Private recovery execution is unsupported for the selected database provider.');
     }
+    verifyRecoveryAutomation(target, environment);
     const adapters = new Map<string, unknown>();
     async function adapter(provider: string) {
       try {
         if (adapters.has(provider)) return adapters.get(provider);
+        const identity = target.automation?.[provider];
         const keys = managedBackupCredentialKeys(provider);
-        if (!keys) throw new Error('Recovery credential mapping is absent.');
-        const credentials = Object.fromEntries(Object.entries(keys).map(([key, property]) => {
+        if (!identity && !keys) throw new Error('Recovery credential mapping is absent.');
+        const credentials: Record<string, unknown> = identity ? JSON.parse(identity.credentials) : Object.fromEntries(Object.entries(keys!).map(([key, property]) => {
           if (!params.credentials[key]) throw new Error('Recovery provider credential is absent.');
           return [property, params.credentials[key]];
         }));
-        const result = await providerRegistry.createAdapter(provider, credentials); adapters.set(provider, result); return result;
+        if (providerRegistry.getMetadata(provider)?.credentials?.canUseForAutomation?.(credentials) === false) {
+          throw new Error('Recovery requires durable credentials for automation.');
+        }
+        const result = await providerRegistry.createAdapter(provider, credentials);
+        if (provider === target.hosting.provider) await (result as IHostingAdapter).configureTarget?.({ region: target.hosting.region });
+        adapters.set(provider, result); return result;
       } catch (error) { throw recoveryFailure('credentials', 'unknown', error); }
     }
     async function storageAdapter(provider: string): Promise<IStorageAdapter> {
@@ -177,22 +190,34 @@ export async function executeManagedBackup(params: {
           if (!providerRegistry.getMetadata(target.hosting.provider)?.lifecycle?.hosting?.recoveryTasks) throw recoveryFailure(stage, 'unsupported');
           const hosting = await adapter(target.hosting.provider) as IHostingAdapter;
           stage = 'credential-handoff';
-          if (!hosting.runJob || destinationAdapter.capabilities?.recoveryCredentialScope !== 'bucket' || !destinationAdapter.getCredentials) throw recoveryFailure(stage, 'unsupported', undefined, undefined, 'Private recovery credential handoff is unsupported.');
-          const archiveCredentials = await destinationAdapter.getCredentials(environment, target.destination.identity.instanceScope, target.destination.identity.externalId);
+          if (!hosting.runJob) throw recoveryFailure(stage, 'unsupported');
+          const native = target.executionTarget;
+          const nativeCapability = providerRegistry.getMetadata(target.hosting.provider)?.lifecycle?.hosting?.recoveryRuntime;
+          if (native && (native.provider !== target.hosting.provider || !nativeCapability?.databaseProviders.includes(target.database.source.provider)
+            || [target.destination, ...target.objects].some(item => !nativeCapability.storageProviders.includes(item.identity.provider)))) throw recoveryFailure(stage, 'unsupported');
           const objectCredentials: Record<string, unknown> = {}, objects = [];
+          let archiveCredentials: Awaited<ReturnType<NonNullable<IStorageAdapter['getCredentials']>>> | undefined;
+          if (!native) {
+            if (destinationAdapter.capabilities?.recoveryCredentialScope !== 'bucket' || !destinationAdapter.getCredentials) throw recoveryFailure(stage, 'unsupported', undefined, undefined, 'Private recovery credential handoff is unsupported.');
+            archiveCredentials = await destinationAdapter.getCredentials(environment, target.destination.identity.instanceScope, target.destination.identity.externalId);
+          }
           for (const item of target.objects) {
             stage = 'credential-handoff';
             const storage = await storageAdapter(item.identity.provider);
-            if (storage.capabilities?.recoveryCredentialScope !== 'bucket' || !storage.getCredentials) throw recoveryFailure(stage, 'unsupported', undefined, undefined, 'Private recovery storage handoff is unsupported.');
+            if (!native && (storage.capabilities?.recoveryCredentialScope !== 'bucket' || !storage.getCredentials)) throw recoveryFailure(stage, 'unsupported', undefined, undefined, 'Private recovery storage handoff is unsupported.');
             stage = 'source-open';
             const client = await openRecoveryStorage(storage, environment, item.identity); client.destroy();
             stage = 'credential-handoff';
-            const credentials = await storage.getCredentials(environment, item.identity.instanceScope, item.identity.externalId);
-            objectCredentials[item.name] = credentials; objects.push({ name: item.name, identity: item.identity, bucket: credentials.bucket });
+            if (native) objects.push({ name: item.name, identity: item.identity, bucket: item.identity.externalId });
+            else {
+              const credentials = await storage.getCredentials!(environment, item.identity.instanceScope, item.identity.externalId);
+              objectCredentials[item.name] = credentials; objects.push({ name: item.name, identity: item.identity, bucket: credentials.bucket });
+            }
           }
           const config = { version: 1, operation: 'recovery-set', runId: setId, project: target.project, environment: target.environment,
             contractHash: managedBackupTargetHash(target), database: { source: target.database.source }, destination: target.destination.identity,
-            archiveBucket: archiveCredentials.bucket, objects, fileReferenceQueries: target.fileReferenceQueries };
+            archiveBucket: native ? target.destination.identity.externalId : archiveCredentials!.bucket, objects, fileReferenceQueries: target.fileReferenceQueries,
+            ...(native ? { nativeAccess: native.worker } : {}) };
           const now = new Date();
           stage = 'task-execution';
           // A thrown/lost provider result cannot establish that no task was created.
@@ -202,9 +227,10 @@ export async function executeManagedBackup(params: {
           'node /opt/hypervibe/dist/ci/backup-runner.js', { timeoutMs: 45 * 60_000, managedRecoveryTask: {
             variableMode: 'references', sweep: false, expectedImage: target.runnerImage, executionId: setId,
             databaseSource: target.database.source,
-            variableReferences: [{ sourceServiceId: target.database.source.primaryExternalId, variableName: 'DATABASE_URL', targetName: 'HYPERVIBE_BACKUP_DATABASE_URL' }],
+            ...(native ? { executionTarget: native } : {}),
+            variableReferences: native ? [] : [{ sourceServiceId: target.database.source.primaryExternalId, variableName: 'DATABASE_URL', targetName: 'HYPERVIBE_BACKUP_DATABASE_URL' }],
             variables: { HYPERVIBE_BACKUP_CONFIG: JSON.stringify(config) },
-            selectedSecretValues: { HYPERVIBE_BACKUP_STORAGE_CREDENTIALS_JSON: JSON.stringify(archiveCredentials), HYPERVIBE_BACKUP_OBJECTS_CREDENTIALS_JSON: JSON.stringify(objectCredentials) },
+            selectedSecretValues: native ? {} : { HYPERVIBE_BACKUP_STORAGE_CREDENTIALS_JSON: JSON.stringify(archiveCredentials), HYPERVIBE_BACKUP_OBJECTS_CREDENTIALS_JSON: JSON.stringify(objectCredentials) },
             ...(params.credentials.IMAGE_REGISTRY_USERNAME && params.credentials.IMAGE_REGISTRY_TOKEN
               ? { registryCredentials: { username: params.credentials.IMAGE_REGISTRY_USERNAME, token: params.credentials.IMAGE_REGISTRY_TOKEN } } : {}),
           } });
@@ -282,4 +308,23 @@ export async function executeManagedBackup(params: {
       taskFacts ?? (mutationAttempted ? undefined : { mutationAttempted: false }),
       error instanceof RecoveryDiagnosticError ? error.message : undefined);
   }
+}
+
+function verifyRecoveryRuntimeBinding(target: ManagedBackupTarget, environment: Environment): void {
+  if (!target.executionTarget && !target.runtimeBindingHash && !target.environmentId) return;
+  if (!target.database || !target.executionTarget || !target.runtimeBindingHash || !target.environmentId
+    || target.executionTarget.environmentId !== target.environmentId || environment.id !== target.environmentId
+    || target.executionTarget.region !== target.hosting.region || target.executionTarget.provider !== target.hosting.provider) throw new Error('The native recovery runtime authority is incomplete.');
+  const binding = recoveryRuntimeBindingSchema.parse(environment.platformBindings.recoveryRuntime);
+  if (binding.pending || binding.provider !== target.hosting.provider || canonicalJsonSha256(binding) !== target.runtimeBindingHash) throw new Error('The reviewed backup runtime binding changed. Re-plan before execution.');
+}
+
+function verifyRecoveryAutomation(target: ManagedBackupTarget, environment: Environment): void {
+  const expected: NonNullable<ManagedBackupTarget['automation']> = {};
+  for (const provider of managedBackupProviderNames(target)) {
+    const selected = providerRegistry.getMetadata(provider)?.credentials?.automationAuthentication?.(environment);
+    if (selected) expected[provider] = recoveryAutomationSchema.parse({ [provider]: { ...selected, credentials: JSON.stringify(selected.credentials) } })[provider];
+  }
+  recoveryAutomationSchema.parse(expected);
+  if (canonicalJsonSha256(expected) !== canonicalJsonSha256(target.automation ?? {})) throw new Error('The reviewed recovery automation identity changed. Re-plan before execution.');
 }

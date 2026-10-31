@@ -17,7 +17,7 @@ import {
 } from '../../../domain/registry/provider.registry.js';
 import {
   AzureManagedRedisCredentialsSchema,
-  type AzureManagedRedisCredentials,
+  azureConnectionIdentity, canUseAzureCredentialsForAutomation, resolveAzureAuthentication, type ResolvedAzureAuthentication,
 } from './azure-datastore.credentials.js';
 import {
   AzureManagedRedisClient,
@@ -54,13 +54,13 @@ export class AzureManagedRedisAdapter implements ICacheAdapter {
     serverlessOptimized: false,
   };
 
-  private credentials: AzureManagedRedisCredentials | null = null;
+  private credentials: ResolvedAzureAuthentication | null = null;
   private arm: AzureResourceManagerClient | null = null;
   private client: AzureManagedRedisClient | null = null;
   private target: CacheTargetOptions | null = null;
 
   async connect(credentials: unknown): Promise<void> {
-    this.credentials = AzureManagedRedisCredentialsSchema.parse(credentials);
+    this.credentials = await resolveAzureAuthentication(AzureManagedRedisCredentialsSchema.parse(credentials));
     this.arm = new AzureResourceManagerClient(this.credentials);
     this.client = new AzureManagedRedisClient(this.arm);
   }
@@ -91,6 +91,8 @@ export class AzureManagedRedisAdapter implements ICacheAdapter {
       ...(target.size ? { size: target.size } : {}),
     };
   }
+
+  getConnectionIdentity(): Record<string, string> { return azureConnectionIdentity(this.credentials); }
 
   async verify(): Promise<VerifyResult> {
     if (!this.client) {
@@ -941,6 +943,9 @@ providerRegistry.register({
     setupHelpUrl:
       'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
     credentials: {
+      canUseForAutomation: canUseAzureCredentialsForAutomation,
+      supportsNativeCliAuth: true,
+      verifiedIdentityKeys: ['authMode', 'subscriptionId', 'tenantId'],
       environmentVariableAliases: [
         ['AZURE_TENANT_ID', 'HYPERVIBE_AZURE_TENANT_ID'],
         ['AZURE_SUBSCRIPTION_ID', 'HYPERVIBE_AZURE_SUBSCRIPTION_ID'],

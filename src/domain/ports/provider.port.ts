@@ -11,6 +11,9 @@ export interface Receipt {
 }
 
 export interface DeploymentMutationOptions {
+  preparedRelease?: import('./hosting-prepared.port.js').PreparedDirectReleaseControl;
+  /** Immutable provider references only; never resolved into local secret values. */
+  secretVersionRefs?: Record<string, import('./secret-destination.port.js').RuntimeSecretReference>;
   /**
    * Apply service configuration and environment changes without independently
    * sourcing or building new application code. A later exact-SHA CI deploy is
@@ -66,6 +69,8 @@ export interface ProviderRuntimeIdentity {
   principal: string;
   scope: Record<string, string>;
   source: 'observed' | 'configured';
+  /** Transient activation preconditions; excluded from stable principal identity. */
+  activation?: Record<string, string>;
 }
 
 export interface ScheduleActivationOptions {
@@ -84,6 +89,8 @@ export interface HostingTargetOptions {
  * Used to determine what features are available and how to configure deployments.
  */
 export interface ProviderCapabilities {
+  /** Native, immutable runtime references supported without payload resolution. */
+  runtimeSecretReferenceProviders?: Array<import('./secret-destination.port.js').SecretDestination['provider']>;
   /** Build methods the platform supports */
   supportedBuilders: Array<'nixpacks' | 'dockerfile' | 'buildpack' | 'static'>;
 
@@ -199,6 +206,11 @@ export interface VerifyResult {
 }
 
 export interface IProviderAdapter {
+  readonly recoveryRuntime?: import('./recovery-runtime.port.js').IRecoveryRuntime;
+  /** Read-only discovery of exact administrator-prepared hosting resources. */
+  readonly preparedHosting?: import('./hosting-prepared.port.js').IPreparedHosting;
+  readonly runtimeIdentities?: import('./runtime-identity.port.js').IRuntimeIdentities;
+  readonly secretDestinationSetup?: import('./secret-destination-lifecycle.port.js').SecretDestinationSetup;
   readonly serviceVolumes?: import('./service-volume.port.js').IServiceVolumes;
   readonly name: string;
 
@@ -207,6 +219,8 @@ export interface IProviderAdapter {
 
   connect(credentials: unknown): Promise<void>;
   verify(): Promise<VerifyResult>;
+  /** Non-secret authenticated selectors, read only after successful verification. */
+  getConnectionIdentity?(): Record<string, string>;
   disconnect?(): Promise<void>;
 
   /** Configure non-secret desired placement before observation or mutation. */

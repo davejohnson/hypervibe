@@ -1,3 +1,4 @@
+import { gcpGithubRecoveryAuthentication } from './gcp-github-automation.js';
 import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
 import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { z } from 'zod';
@@ -7,6 +8,8 @@ import { tmpdir } from 'os';
 import path from 'path';
 import { Connector, IpAddressTypes } from '@google-cloud/cloud-sql-connector';
 import { GoogleAuth } from 'google-auth-library';
+import { GcpLocalDefaultAuthentication } from './gcp-local-default-authentication.js';
+import { GcpGithubWorkloadAuthentication, gcpGithubWorkloadIdentitySchema } from './gcp-github-workload-identity.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { Component } from '../../../domain/entities/component.entity.js';
 import type { Receipt, TemporaryDatabaseAccess, VerifyResult } from '../../../domain/ports/provider.port.js';
@@ -43,8 +46,22 @@ import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
 // Credentials schema for self-registration
 export const CloudSqlCredentialsSchema = z.object({
   projectId: z.string().min(1, 'GCP Project ID is required'),
-  credentials: z.string().min(1, 'Service account JSON is required'),
+  authMode: z.enum(['default', 'serviceAccount', 'github-workload-identity']).optional(),
+  workloadIdentity: gcpGithubWorkloadIdentitySchema.optional(),
+  credentials: z.string().min(1, 'Service account JSON is required').optional(),
   region: z.string().default('us-central1'),
+}).superRefine((value, context) => {
+  if (value.authMode === 'github-workload-identity') {
+    if (!value.workloadIdentity || value.workloadIdentity.projectId !== value.projectId || value.credentials !== undefined)
+      context.addIssue({ code: 'custom', path: ['workloadIdentity'], message: 'GitHub federation requires the exact nonsecret project identity and no private key.' });
+  } else if (value.workloadIdentity !== undefined) context.addIssue({ code: 'custom', path: ['workloadIdentity'], message: 'A workload identity requires its explicit authentication mode.' });
+  if (value.authMode !== 'github-workload-identity' && (value.authMode === 'default' ? value.credentials !== undefined : !value.credentials)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['credentials'], message: value.authMode === 'default'
+      ? 'Default authentication uses local ADC and cannot also contain a service account key.' : 'Service account JSON is required.' });
+  }
+  if (value.authMode === 'default' && !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(value.projectId)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['projectId'], message: 'Select an exact valid GCP project ID for local authentication.' });
+  }
 });
 
 export type CloudSqlCredentials = z.infer<typeof CloudSqlCredentialsSchema>;
@@ -266,21 +283,37 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
 
   private credentials: CloudSqlCredentials | null = null;
   private serviceAccountCreds: ServiceAccountCredentials | null = null;
+  private localDefaultAuthentication: GcpLocalDefaultAuthentication | null = null;
+  private githubWorkloadAuthentication: GcpGithubWorkloadAuthentication | null = null;
   private accessToken: string | null = null;
   private tokenExpiry: Date | null = null;
   private temporaryConnectors = new Map<string, { connector: Connector; directory: string }>();
 
   async connect(credentials: unknown): Promise<void> {
-    this.credentials = credentials as CloudSqlCredentials;
+    const parsed = CloudSqlCredentialsSchema.parse(credentials);
+    await this.disconnect();
+    this.credentials = parsed;
+    if (parsed.authMode === 'github-workload-identity') {
+      const auth = new GcpGithubWorkloadAuthentication(parsed.workloadIdentity!);
+      try { await auth.initialize(); this.githubWorkloadAuthentication = auth; }
+      catch (error) { await this.disconnect(); throw error; }
+      return;
+    }
+    if (parsed.authMode === 'default') {
+      const auth = new GcpLocalDefaultAuthentication(parsed.projectId);
+      try { await auth.initialize(); this.localDefaultAuthentication = auth; }
+      catch (error) { await this.disconnect(); throw error; }
+      return;
+    }
     try {
-      this.serviceAccountCreds = JSON.parse(this.credentials.credentials);
+      this.serviceAccountCreds = JSON.parse(this.credentials.credentials!);
     } catch {
       throw new Error('Invalid service account JSON');
     }
   }
 
   async verify(): Promise<VerifyResult> {
-    if (!this.credentials || !this.serviceAccountCreds) {
+    if (!this.credentials) {
       return { success: false, error: 'Not connected. Call connect() first.' };
     }
 
@@ -290,7 +323,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
 
       // A token exchange succeeds even for a service account with zero roles;
       // probe the SQL Admin API so verification proves real access.
-      const response = await fetch(
+      const response = await this.request(
         `https://sqladmin.googleapis.com/v1/projects/${projectId}/instances?maxResults=1`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -302,7 +335,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
             success: false,
             error: [
               'Cloud SQL Admin API probe failed with 403.',
-              `Grant roles/cloudsql.viewer and roles/cloudsql.client to serviceAccount:${this.serviceAccountCreds.client_email} on project ${projectId};`,
+              `Grant roles/cloudsql.viewer and roles/cloudsql.client to ${this.serviceAccountCreds ? `serviceAccount:${this.serviceAccountCreds.client_email}` : 'the selected local Google caller'} on project ${projectId};`,
               'also grant roles/cloudsql.admin if Hypervibe should provision or delete databases,',
               'and make sure the sqladmin.googleapis.com API is enabled (hv_connections provider="cloudrun" action="prepare" enables it).',
               `Original error: ${text}`,
@@ -317,7 +350,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
 
       return {
         success: true,
-        email: this.serviceAccountCreds.client_email,
+        ...(this.serviceAccountCreds ? { email: this.serviceAccountCreds.client_email } : {}),
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -333,6 +366,8 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     this.temporaryConnectors.clear();
     this.credentials = null;
     this.serviceAccountCreds = null;
+    this.localDefaultAuthentication = null;
+    this.githubWorkloadAuthentication = null;
     this.accessToken = null;
     this.tokenExpiry = null;
   }
@@ -403,7 +438,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
       // Create Cloud SQL instance
       createMutationAttempted = true;
       createMayHaveCommitted = true;
-      const response = await fetch(
+      const response = await this.request(
         `https://sqladmin.googleapis.com/v1/projects/${projectId}/instances`,
         {
           method: 'POST',
@@ -689,7 +724,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     component: Component,
     applicationPort: number
   ): Promise<TemporaryDatabaseAccess> {
-    if (!this.credentials || !this.serviceAccountCreds) {
+    if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }
     if (applicationPort !== 5432) {
@@ -732,14 +767,22 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
       throw new Error('Cloud SQL bindings are missing the database username, password, or database name.');
     }
 
-    const auth = new GoogleAuth({
-      credentials: this.serviceAccountCreds,
+    const auth = this.githubWorkloadAuthentication?.auth ?? this.localDefaultAuthentication?.auth ?? new GoogleAuth({
+      credentials: this.serviceAccountCreds!,
       scopes: ['https://www.googleapis.com/auth/sqlservice.admin'],
     });
     const connector = new Connector({ auth });
     const directory = await mkdtemp(path.join(tmpdir(), 'hv-cloudsql-'));
     const socketPath = path.join(directory, '.s.PGSQL.5432');
+    let connectorInitialized = false;
     try {
+      if (this.localDefaultAuthentication || this.githubWorkloadAuthentication) {
+        // Connector 1.10.0 close() attaches an uncaught continuation to a failed
+        // initial refresh. No socket/refresh timer exists before getOptions
+        // succeeds for this exact connection name (domain discovery is unused).
+        await connector.getOptions({ instanceConnectionName: connectionName, ipType: IpAddressTypes.PUBLIC });
+        connectorInitialized = true;
+      }
       await connector.startLocalProxy({
         instanceConnectionName: connectionName,
         ipType: IpAddressTypes.PUBLIC,
@@ -755,8 +798,9 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
         releaseToken,
       };
     } catch (error) {
-      connector.close();
+      if (!(this.localDefaultAuthentication || this.githubWorkloadAuthentication) || connectorInitialized) connector.close();
       await rm(directory, { recursive: true, force: true }).catch(() => {});
+      if (this.localDefaultAuthentication || this.githubWorkloadAuthentication) throw new Error('Temporary Cloud SQL access is unavailable; the exact instance authorization and connection remain unverified.');
       throw error;
     }
   }
@@ -799,7 +843,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
       }
       this.assertComponentScope(component, current);
 
-      const response = await fetch(
+      const response = await this.request(
         `https://sqladmin.googleapis.com/v1/projects/${projectId}/instances/${component.externalId}`,
         {
           method: 'DELETE',
@@ -952,7 +996,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     }
 
     const token = await this.getAccessToken();
-    const response = await fetch(
+    const response = await this.request(
       `https://sqladmin.googleapis.com/v1/projects/${encodeURIComponent(this.credentials.projectId)}/instances?maxResults=${request.limit}`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
@@ -993,7 +1037,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     }
 
     const token = await this.getAccessToken();
-    const response = await fetch(
+    const response = await this.request(
       `https://sqladmin.googleapis.com/v1/projects/${encodeURIComponent(this.credentials.projectId)}/backups?pageSize=${request.limit}`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
@@ -1053,7 +1097,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
         };
       }
       const token = await this.getAccessToken();
-      const response = await fetch(`https://sqladmin.googleapis.com/v1/${target.id}`, {
+      const response = await this.request(`https://sqladmin.googleapis.com/v1/${target.id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -1303,7 +1347,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
       } else {
         const region = config.region ?? primary.region ?? this.credentials.region;
         const tier = config.tier ?? primary.settings?.tier ?? 'db-f1-micro';
-        const response = await fetch(
+        const response = await this.request(
           `https://sqladmin.googleapis.com/v1/projects/${this.credentials.projectId}/instances`,
           {
             method: 'POST',
@@ -1381,7 +1425,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
       if (replicaBinding.region && replica.region !== replicaBinding.region) {
         throw new Error(`Refusing to delete ${replicaBinding.externalId}: it is in region ${replica.region ?? 'unknown'}, not bound region ${replicaBinding.region}.`);
       }
-      const response = await fetch(
+      const response = await this.request(
         `https://sqladmin.googleapis.com/v1/projects/${this.credentials.projectId}/instances/${encodeURIComponent(replicaBinding.externalId)}`,
         { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
       );
@@ -1562,7 +1606,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     description: string;
   }): Promise<void> {
     if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-    const response = await fetch(
+    const response = await this.request(
       `https://sqladmin.googleapis.com/v1/projects/${this.credentials.projectId}/instances/${encodeURIComponent(params.instanceName)}`,
       {
         method: 'PATCH',
@@ -1614,7 +1658,14 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     };
   }
 
+  private request(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+    return this.githubWorkloadAuthentication ? this.githubWorkloadAuthentication.request(input, init)
+      : this.localDefaultAuthentication ? this.localDefaultAuthentication.request(input, init) : fetch(input, init);
+  }
+
   private async getAccessToken(): Promise<string> {
+    if (this.localDefaultAuthentication) return this.localDefaultAuthentication.token();
+    if (this.githubWorkloadAuthentication) return this.githubWorkloadAuthentication.token();
     if (this.accessToken && this.tokenExpiry && new Date() < this.tokenExpiry) {
       return this.accessToken;
     }
@@ -1636,7 +1687,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
 
     const jwt = await this.createJwt(header, payload, this.serviceAccountCreds.private_key);
 
-    const response = await fetch('https://oauth2.googleapis.com/token', {
+    const response = await this.request('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -1710,7 +1761,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     const token = await this.getAccessToken();
     const { projectId } = this.credentials;
 
-    const response = await fetch(
+    const response = await this.request(
       `https://sqladmin.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/instances/${encodeURIComponent(instanceName)}`,
       {
         headers: { Authorization: `Bearer ${token}` },
@@ -1765,7 +1816,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
       throw new Error(`Cloud SQL backup id must be scoped as projects/${this.credentials.projectId}/backups/{backup}.`);
     }
     const token = await this.getAccessToken();
-    const response = await fetch(`https://sqladmin.googleapis.com/v1/${name}`, {
+    const response = await this.request(`https://sqladmin.googleapis.com/v1/${name}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (response.status === 404) return null;
@@ -1826,7 +1877,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     const { projectId } = this.credentials;
     const encodedInstance = encodeURIComponent(params.instanceName);
     const encodedDatabase = encodeURIComponent(params.databaseName);
-    const existing = await fetch(
+    const existing = await this.request(
       `https://sqladmin.googleapis.com/v1/projects/${projectId}/instances/${encodedInstance}/databases/${encodedDatabase}`,
       {
         headers: { Authorization: `Bearer ${params.token}` },
@@ -1841,7 +1892,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
       throw new Error(`Cloud SQL database lookup failed: ${existing.status} ${text}`);
     }
 
-    const created = await fetch(
+    const created = await this.request(
       `https://sqladmin.googleapis.com/v1/projects/${projectId}/instances/${encodedInstance}/databases`,
       {
         method: 'POST',
@@ -1878,7 +1929,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
       ? `https://sqladmin.googleapis.com/v1/${operationName}`
       : `https://sqladmin.googleapis.com/v1/projects/${projectId}/operations/${encodeURIComponent(operationName)}`;
     for (let attempt = 0; attempt < 120; attempt++) {
-      const response = await fetch(
+      const response = await this.request(
         operationUrl,
         {
           headers: { Authorization: `Bearer ${token}` },
@@ -1935,6 +1986,22 @@ providerRegistry.register({
     category: 'database',
     credentialsSchema: CloudSqlCredentialsSchema,
     setupHelpUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
+    credentials: {
+      automationAuthentication: gcpGithubRecoveryAuthentication,
+      agentManagedKeys: ['workloadIdentity'],
+      agentManagedChoices: { authMode: ['github-workload-identity'] },
+      automationSecretKeys: { GCP_SERVICE_ACCOUNT_JSON: 'credentials', GCP_PROJECT_ID: 'projectId' },
+      canUseForAutomation: credentials => {
+        if (credentials.authMode === 'github-workload-identity') return CloudSqlCredentialsSchema.safeParse(credentials).success;
+        if (credentials.authMode === 'default' || typeof credentials.credentials !== 'string' || typeof credentials.projectId !== 'string') return false;
+        try {
+          const value = JSON.parse(credentials.credentials) as Record<string, unknown>;
+          return value.type === 'service_account' && value.project_id === credentials.projectId
+            && typeof value.client_email === 'string' && value.client_email.endsWith(`@${credentials.projectId}.iam.gserviceaccount.com`)
+            && typeof value.private_key === 'string' && value.private_key.trim().length > 0;
+        } catch { return false; }
+      },
+    },
     maturity: {
       lifecycle: {
         database: { status: 'ready-for-live' },

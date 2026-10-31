@@ -64,10 +64,10 @@ function request(overrides = {}) {
     verification: 'presence_only', deployment: 'not_authorized', ...overrides,
   };
 }
-function setup(options: { requests?: unknown[]; source?: unknown; mutation?: unknown } = {}) {
+function setup(options: { requests?: unknown[]; source?: unknown; mutation?: unknown; discovery?: Record<string, unknown> } = {}) {
   const transport = vi.fn<typeof fetch>().mockImplementation(async (url, init) => {
     const target = new URL(String(url));
-    if (target.pathname.endsWith('/credential-request-fields')) return Response.json({ availableFields: fields, sourceError: null, source: options.source ?? { revision, digest }, selectedEnvironmentId: environmentId, sourceBranch: 'review/credentials', environments: [{ id: environmentId, name: 'Staging', preferred: true }] });
+    if (target.pathname.endsWith('/credential-request-fields')) return Response.json({ availableFields: fields, sourceError: null, source: options.source ?? { revision, digest }, selectedEnvironmentId: environmentId, sourceBranch: 'review/credentials', environments: [{ id: environmentId, name: 'Staging', preferred: true }], ...options.discovery });
     if (init?.method === 'GET' && target.pathname.endsWith('/credential-requests')) return Response.json({ requests: options.requests ?? [], pagination: { page: Number(target.searchParams.get('page') ?? 1), pageSize: 20, total: options.requests?.length ?? 0, pageCount: options.requests?.length ? 1 : 0, hasNext: false, hasPrevious: false } });
     if (init?.method === 'GET') return Response.json({ request: request() });
     if (init?.method === 'DELETE') return Response.json({ applied: 1, skipped: 0, request: request({ status: 'revoked' }) });
@@ -98,6 +98,165 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); SqliteAdapter.resetInstance(); rmSync(root, { recursive: true, force: true }); });
 
 describe('declarative credential collection', () => {
+  const destination = (secretId: string) => ({ provider: 'gcp-secret-manager', projectId: 'synthetic-project', projectNumber: '123456789012', secretId });
+  function directSpec(options: { pinned?: boolean; generated?: boolean; mixed?: boolean } = {}) {
+    const file = path.join(root, '.hypervibe/spec.json');
+    const spec = JSON.parse(readFileSync(file, 'utf8'));
+    const targets = { CLIENT_ID: destination('staging-client-id'), CLIENT_SECRET: destination('staging-client-secret') };
+    spec.environments.staging.secretDestinations = Object.fromEntries(Object.entries(targets)
+      .filter(([key]) => !options.mixed || key !== 'CLIENT_ID')
+      .map(([key, value]) => [key, { destination: value, ...(options.pinned && key === 'CLIENT_ID' ? { version: '7' } : {}) }]));
+    if (options.generated) {
+      spec.secrets.SESSION_KEY = { ownership: 'hypervibe', generator: 'random-base64url-32-v1', environments: ['staging'] };
+      spec.environments.staging.secretDestinations.SESSION_KEY = { destination: destination('staging-session-key') };
+    }
+    writeFileSync(file, JSON.stringify(spec)); git('add', '.hypervibe/spec.json'); git('-c', 'commit.gpgsign=false', 'commit', '-m', 'direct destinations');
+    revision = git('rev-parse', 'HEAD'); digest = createHash('sha256').update(readFileSync(file)).digest('hex');
+    return targets;
+  }
+  function directRecord(targets: ReturnType<typeof directSpec>, overrides = {}) {
+    return request({ deliveryMode: 'secret-manager', destinations: targets, ...overrides });
+  }
+  function discovery(targets: ReturnType<typeof directSpec>) {
+    return { secretDestinations: Object.fromEntries(Object.entries(targets).map(([key, value]) => [key, { destination: value, connections: [] }])) };
+  }
+  it('inventories all environments without granting access or sending invitations, including generated and pinned slots', async () => {
+    directSpec({ pinned: true, generated: true });
+    const { run, transport } = setup();
+    const result = await run({ action: 'environments' });
+    expect(result).toMatchObject({ ok: true, data: { status: 'environment_review_required', environments: [
+      { environment: 'staging', pinnedKeys: ['CLIENT_ID'], generatedKeys: ['SESSION_KEY'], groups: [{ deliveryMode: 'secret-manager', keys: ['CLIENT_SECRET'] }], authorize: { input: { action: 'authorize', env: 'staging' } } },
+      { environment: 'production', groups: [{ deliveryMode: 'local-import', keys: ['PROD_ONLY'] }], authorize: { input: { action: 'authorize', env: 'production' } } },
+    ] } });
+    expect(transport).not.toHaveBeenCalled();
+    expect(context.repos.connections.findByProviderAndScope('hypervibe-cloud-requests', sessionScope)).toBeNull();
+  });
+  it('splits a large owner collection into separately reviewable requests within the hosted field limit', async () => {
+    const file = path.join(root, '.hypervibe/spec.json'); const spec = JSON.parse(readFileSync(file, 'utf8'));
+    for (let i = 0; i < 15; i++) spec.secrets[`EXTRA_${i}`] = { ...spec.secrets.CLIENT_ID };
+    writeFileSync(file, JSON.stringify(spec)); git('add', '.hypervibe/spec.json'); git('-c', 'commit.gpgsign=false', 'commit', '-m', 'large owner collection');
+    const { run, transport } = setup(); const result = await run({ action: 'environments' });
+    expect(result.ok).toBe(true);
+    const groups = (result.data as { environments: { groups: { keys: string[]; review: { input: { fields: unknown[] } } }[] }[] }).environments[0].groups;
+    expect(groups.map(group => group.review.input.fields.length)).toEqual([16, 1]);
+    expect(new Set(groups.flatMap(group => group.keys)).size).toBe(17);
+    expect(transport).not.toHaveBeenCalled();
+  });
+  it('derives the direct mode and targets from source, reviews before sending, and never posts target overrides', async () => {
+    const targets = directSpec(); storeGrant();
+    const { run, writes } = setup({ discovery: discovery(targets), mutation: { applied: 1, skipped: 0, delivery: 'queued', request: directRecord(targets) } });
+    expect(await run()).toMatchObject({ ok: false, error: { code: 'CONFIRM_REQUIRED' } });
+    expect(writes()).toHaveLength(0);
+    expect(await run({ confirm: true })).toMatchObject({ ok: true, data: { request: { deliveryMode: 'secret-manager', destinationTargets: Object.entries(targets).map(([key, destination]) => ({ key, destination })) } } });
+    const body = JSON.parse(String(writes()[0][1]?.body));
+    expect(body.deliveryMode).toBe('secret-manager'); expect(body).not.toHaveProperty('destinations');
+    expect(savedReview()).toBeUndefined();
+  });
+  it('does not silently downgrade mixed direct and local selected keys', async () => {
+    directSpec({ mixed: true }); storeGrant(); const { run, transport } = setup();
+    expect(await run()).toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+    expect(transport).not.toHaveBeenCalled();
+  });
+  it('excludes pinned keys from collection and explicitly rejects their reselection', async () => {
+    const targets = directSpec({ pinned: true }); storeGrant();
+    const { run, writes } = setup({ discovery: discovery(targets) });
+    expect(await run({ fields: [{ key: 'CLIENT_ID' }] })).toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+    expect(await run()).toMatchObject({ ok: false, error: { code: 'CONFIRM_REQUIRED' } });
+    expect(savedReview()).toMatchObject({ proposal: { fields: [{ key: 'CLIENT_SECRET' }], deliveryMode: 'secret-manager' } });
+    expect(writes()).toHaveLength(0);
+  });
+  it.each(['resume', 'create'])('returns immutable references for direct ready requests on %s without offering local import', async action => {
+    const targets = directSpec(); storeGrant();
+    const receipts = Object.entries(targets).map(([key, value]) => ({ key, status: 'delivered', reference: { destination: value, version: '7' } }));
+    const { run, writes } = setup({ requests: [directRecord(targets, { status: 'ready', receipts })], discovery: discovery(targets) });
+    const result = await run({ action });
+    expect(result).toMatchObject({ ok: true });
+    expect(JSON.stringify(result)).toContain('"version":"7"');
+    expect(JSON.stringify(result)).toContain('"secretId":"staging-client-secret"');
+    expect(JSON.stringify(result)).not.toContain('[redacted]');
+    expect(JSON.stringify(result)).not.toContain('hv_cloud_secrets');
+    if (action === 'resume') expect(result).toMatchObject({ data: { status: 'ready_for_plan', requests: [{ readiness: 'delivered' }] } });
+    expect(writes()).toHaveLength(0);
+  });
+  it('rejects malformed or foreign direct receipts, and rejects a legacy creation acknowledgement for a direct review', async () => {
+    const targets = directSpec(); storeGrant();
+    const { run, transport } = setup({ discovery: discovery(targets), requests: [directRecord(targets, { status: 'ready', receipts: [
+      { key: 'CLIENT_ID', status: 'delivered', reference: { destination: destination('foreign-secret'), version: 'latest' } },
+    ] })] });
+    expect(await run({ action: 'resume' })).toMatchObject({ ok: false, error: { code: 'PROVIDER_ERROR' } });
+    const fresh = setup({ discovery: discovery(targets) });
+    expect(await fresh.run()).toMatchObject({ ok: false, error: { code: 'CONFIRM_REQUIRED' } });
+    expect(await fresh.run({ confirm: true })).toMatchObject({ ok: false, error: { code: 'PROVIDER_ERROR' } });
+    expect(transport.mock.calls.some(([url]) => String(url).includes('credential-retrievals'))).toBe(false);
+  });
+  it('never offers a legacy ready retrieval for a now destination-backed slot', async () => {
+    const targets = directSpec(); storeGrant(); const { run } = setup({ requests: [request({ status: 'ready' })], discovery: discovery(targets) });
+    const result = await run({ action: 'resume' });
+    expect(result).toMatchObject({ ok: true, data: { requests: [{ readiness: 'stale_source' }] } });
+    expect(JSON.stringify(result)).not.toContain('hv_cloud_secrets');
+  });
+  it('exposes owner generation review links only from matching scoped discovery', async () => {
+    const targets = directSpec({ generated: true }); storeGrant();
+    const generateUrl = `/apps/${projectId}/secret-generations/new?environmentId=${environmentId}&key=SESSION_KEY&sourceBranch=review%2Fcredentials`;
+    const { run } = setup({ discovery: { ...discovery(targets), generatedSecrets: { SESSION_KEY: { destination: destination('staging-session-key'), generateUrl } } } });
+    expect(await run({ action: 'resume' })).toMatchObject({ ok: true, data: { generatedSecrets: [{ key: 'SESSION_KEY', generateUrl: baseUrl + generateUrl }] } });
+    const foreign = setup({ discovery: { generatedSecrets: { SESSION_KEY: { destination: destination('staging-session-key'), generateUrl: 'https://elsewhere.example/steal' } } } });
+    expect(await foreign.run({ action: 'resume' })).toMatchObject({ ok: false, error: { code: 'PROVIDER_ERROR' } });
+  });
+  it('reconciles direct unknown delivery through metadata only, without a second invitation or local retrieval', async () => {
+    const targets = directSpec(); storeGrant();
+    const { run, transport, writes } = setup({ discovery: discovery(targets) });
+    const api = transport.getMockImplementation()!;
+    transport.mockImplementation(async (url, init) => String(url).endsWith('/delivery-reconciliations')
+      ? Response.json({ request: directRecord(targets, { receipts: [{ key: 'CLIENT_ID', status: 'unknown', failureCode: 'reconciliation_unavailable' }] }) })
+      : String(url).endsWith(`/${requestId}`) ? Response.json({ request: directRecord(targets) }) : api(url, init));
+    expect(await run({ action: 'reconcile', requestId })).toMatchObject({ ok: true, data: { request: { deliveryMode: 'secret-manager' } } });
+    expect(writes()).toHaveLength(1); expect(String(writes()[0][0])).toBe(`${baseUrl}/api/v1/projects/${projectId}/credential-requests/${requestId}/delivery-reconciliations`);
+    expect(writes()[0][1]?.body).toBe('{}');
+  });
+  it('recovers an uncertain direct invitation only from its exact destination receipt without resending', async () => {
+    const targets = directSpec(); storeGrant(); const { run, transport, writes } = setup({ discovery: discovery(targets) });
+    const api = transport.getMockImplementation()!;
+    let committed = false;
+    transport.mockImplementation(async (url, init) => {
+      if (init?.method === 'POST') { committed = true; throw new Error('synthetic response loss'); }
+      if (committed && new URL(String(url)).pathname.endsWith('/credential-requests')) return Response.json({ requests: [directRecord(targets)], pagination: { page: 1, pageSize: 20, total: 1, pageCount: 1, hasNext: false, hasPrevious: false } });
+      return api(url, init);
+    });
+    expect(await run()).toMatchObject({ ok: false, error: { code: 'CONFIRM_REQUIRED' } });
+    expect(await run({ confirm: true })).toMatchObject({ ok: false, error: { code: 'PROVIDER_ERROR' } });
+    expect(await run({ confirm: true })).toMatchObject({ ok: true, data: { recovery: { status: 'reconciled' }, request: { deliveryMode: 'secret-manager' } } });
+    expect(writes()).toHaveLength(1);
+  });
+  it('does not omit a declared generated destination when hosted discovery lacks its review action', async () => {
+    directSpec({ generated: true }); storeGrant(); const { run, writes } = setup();
+    expect(await run({ action: 'resume' })).toMatchObject({ ok: false, error: { code: 'PROVIDER_ERROR' } });
+    expect(writes()).toHaveLength(0);
+  });
+  it('resumes a generated owner request with its explicit authentication label and immutable receipt', async () => {
+    directSpec({ generated: true }); storeGrant();
+    const target = destination('staging-session-key');
+    const generated = request({ authentication: 'generated', recipient: 'Hypervibe', deliveryMode: 'secret-manager', status: 'ready',
+      fields: [{ key: 'SESSION_KEY', label: 'SESSION_KEY', inputType: 'password' }], keys: ['SESSION_KEY'], suppliedKeys: ['SESSION_KEY'],
+      destinations: { SESSION_KEY: target }, receipts: [{ key: 'SESSION_KEY', status: 'delivered', reference: { destination: target, version: '4' } }] });
+    const generateUrl = `/apps/${projectId}/secret-generations/new?environmentId=${environmentId}&key=SESSION_KEY&sourceBranch=review%2Fcredentials`;
+    const { run, writes } = setup({ requests: [generated], discovery: { generatedSecrets: { SESSION_KEY: { destination: target, generateUrl } } } });
+    expect(await run({ action: 'resume' })).toMatchObject({ ok: true, data: { status: 'ready_for_plan', requests: [{ readiness: 'delivered', request: { authentication: 'generated', receipts: [{ reference: { version: '4' } }] } }] } });
+    expect(writes()).toHaveLength(0);
+  });
+  it.each([false, true])('reconciles a web request only against the observed default source (moved=%s)', async moved => {
+    const targets = directSpec(); storeGrant(); const { run, transport, writes } = setup({ discovery: discovery(targets) });
+    const api = transport.getMockImplementation()!;
+    transport.mockImplementation(async (url, init) => {
+      const target = new URL(String(url));
+      if (target.pathname.endsWith(`/${requestId}`) || target.pathname.endsWith('/delivery-reconciliations')) return Response.json({ request: directRecord(targets, { sourceBranch: null }) });
+      if (target.pathname.endsWith('/credential-request-fields') && target.searchParams.get('sourceBranch') === '') return Response.json({ availableFields: fields, ...discovery(targets), sourceError: null, source: { revision: moved ? 'b'.repeat(40) : revision, digest }, selectedEnvironmentId: environmentId, sourceBranch: '', environments: [{ id: environmentId, name: 'Staging', preferred: true }] });
+      return api(url, init);
+    });
+    const result = await run({ action: 'reconcile', requestId });
+    expect(result).toMatchObject(moved ? { ok: false, error: { code: 'VALIDATION' } } : { ok: true, data: { request: { sourceBranch: null } } });
+    expect(writes()).toHaveLength(moved ? 0 : 1);
+  });
   // Synthetic server responses preserve the existing public pairing contract.
   // The owner-approved onboarding contract adds a request-only branch hint,
   // independently of invitation approval or committed-source authorization.

@@ -3,6 +3,7 @@ import type { ProjectRuntime } from '../spec/project-runtime.js';
 export type WorkloadKind = 'web' | 'worker' | 'cron';
 
 export interface BuildConfig {
+  instanceBounds?: { min: number; max: number };
   workloadKind?: WorkloadKind;
   builder?: 'nixpacks' | 'dockerfile' | 'buildpack';
   dockerfilePath?: string;

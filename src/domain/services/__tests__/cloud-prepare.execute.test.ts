@@ -15,6 +15,17 @@ const RUNTIME_SERVICE_ACCOUNT_EMAIL =
 const DEPLOY_SERVICE_ACCOUNT_EMAIL =
   'hypervibe-hls-deploy@hls-property-care.iam.gserviceaccount.com';
 
+// Match native resource paths separately from the documented partial-response
+// selector. Keep all IAM/queue expectations intact and require the exact mask.
+function fixtureRequestUrl(input: string | URL | Request, init?: RequestInit): string {
+  const value = String(input), url = new URL(value);
+  if (url.hostname === 'serviceusage.googleapis.com' && (init?.method ?? 'GET') === 'GET' && url.pathname.includes('/services/')) {
+    expect([...url.searchParams]).toEqual([['fields', 'name,parent,config/name,state']]);
+    return `${url.origin}${url.pathname}`;
+  }
+  return value;
+}
+
 describe('runCloudPrepare', () => {
   let tempDir: string;
 
@@ -197,7 +208,7 @@ describe('runCloudPrepare', () => {
     let projectPolicyRevision = 1;
     let runtimePolicyRevision = 1;
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
+      const url = fixtureRequestUrl(input, init);
       const method = init?.method ?? 'GET';
       if (url.endsWith('/v3/projects/hls-property-care') && method === 'GET') {
         return Response.json({
@@ -331,7 +342,7 @@ describe('runCloudPrepare', () => {
     const runtimePolicyUrl = 'https://iam.googleapis.com/v1/projects/hls-property-care/'
       + 'serviceAccounts/123456789012345678901';
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
+      const url = fixtureRequestUrl(input, init);
       const method = init?.method ?? 'GET';
       if (url.endsWith('/v3/projects/hls-property-care') && method === 'GET') {
         return Response.json({
@@ -407,7 +418,7 @@ describe('runCloudPrepare', () => {
     } = { version: 1, etag: 'queue-policy-etag', bindings: [] };
     let serviceEnabled = false;
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
+      const url = fixtureRequestUrl(input, init);
       if (url.endsWith('/v3/projects/hls-property-care')) {
         return Response.json({
           name: 'projects/123456789012',
@@ -502,7 +513,7 @@ describe('runCloudPrepare', () => {
     const project = seedProject();
     let policy = { version: 1, etag: 'gcs-policy', bindings: [] as Array<{ role: string; members: string[] }> };
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
+      const url = fixtureRequestUrl(input, init);
       if (url.endsWith('/v3/projects/hls-property-care')) return Response.json({
         name: 'projects/123456789012', projectId: 'hls-property-care', state: 'ACTIVE',
       });
@@ -585,7 +596,7 @@ describe('runCloudPrepare', () => {
 
     const enabledServices = new Set<string>();
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
+      const url = fixtureRequestUrl(input, init);
       const method = init?.method ?? 'GET';
 
       if (url.endsWith('/v3/projects/hls-property-care') && method === 'GET') {
@@ -705,7 +716,7 @@ describe('runCloudPrepare', () => {
   it('does not grant IAM or record preparation when API enablement lacks an exact operation', async () => {
     const project = seedProject();
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
+      const url = fixtureRequestUrl(input, init);
       if (url.endsWith('/v3/projects/hls-property-care')) {
         return Response.json({
           name: 'projects/123456789012',
@@ -770,7 +781,7 @@ describe('runCloudPrepare', () => {
     const project = seedProject();
     const setIamPolicy = vi.fn();
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
+      const url = fixtureRequestUrl(input, init);
       const method = init?.method ?? 'GET';
       if (url.endsWith('/v3/projects/hls-property-care') && method === 'GET') {
         return Response.json({
@@ -851,7 +862,7 @@ describe('runCloudPrepare', () => {
       ],
     };
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
+      const url = fixtureRequestUrl(input, init);
       if (url.endsWith(':getIamPolicy')) {
         expect(init?.method).toBe('POST');
         expect(JSON.parse(String(init?.body))).toEqual({

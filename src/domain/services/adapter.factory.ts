@@ -8,8 +8,11 @@ import { supportsDatabaseLifecycle, type IDatabaseAdapter } from '../ports/datab
 import { supportsCacheLifecycle, type ICacheAdapter } from '../ports/cache.port.js';
 import { supportsStorageLifecycle, type IStorageAdapter } from '../ports/storage.port.js';
 import { supportsLoadBalancer, type ILoadBalancerAdapter } from '../ports/load-balancer.port.js';
-import { getProjectScopeHints } from './project-scope.js';
+import { environmentConnectionScope, getProjectScopeHints } from './project-scope.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
+import { resolveDeploymentAdapter } from '../../adapters/cloud/deployment-access.client.js';
+import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
+import { verifiedLocalHoldingReceipt } from './local-holding-preparation.service.js';
 
 /**
  * Result of resolving an adapter
@@ -40,7 +43,7 @@ export class AdapterFactory {
    * Get a hosting adapter for a project based on its defaultPlatform.
    * Looks up the verified connection and instantiates the adapter.
    */
-  async getHostingAdapter(project: Project): Promise<AdapterResult<IHostingAdapter>> {
+  async getHostingAdapter(project: Project, environment?: string): Promise<AdapterResult<IHostingAdapter>> {
     const platform = project.defaultPlatform?.trim();
     if (!platform || platform === UNCONFIGURED_HOSTING_PROVIDER) {
       return {
@@ -48,21 +51,23 @@ export class AdapterFactory {
         error: `Project ${project.name} has no reviewed hosting provider. Initialize desired state with hv_spec first.`,
       };
     }
-    return this.getHostingAdapterByName(platform, project);
+    return this.getHostingAdapterByName(platform, project, environment);
   }
 
   /** Resolve the exact hosting provider named by a reviewed environment/action. */
   async getHostingAdapterByName(
     providerName: string,
-    project?: Project
+    project?: Project,
+    environment?: string
   ): Promise<AdapterResult<IHostingAdapter>> {
     const maturityBlock = this.lifecycleMutationBlock<IHostingAdapter>(providerName, 'hosting');
     if (maturityBlock) return maturityBlock;
-    return this.getAdapter<IHostingAdapter>(
+    return this.withLocalPreparation(await this.getAdapter<IHostingAdapter>(
       providerName,
       'deployment',
-      project ? getProjectScopeHints(project) : undefined
-    );
+      project ? getProjectScopeHints(project) : undefined,
+      environment
+    ), project, environment);
   }
 
   /**
@@ -71,17 +76,18 @@ export class AdapterFactory {
    */
   async getDatabaseAdapter(
     providerName: string,
-    project?: Project
+    project?: Project,
+    environment?: string
   ): Promise<AdapterResult<IDatabaseAdapter>> {
     const maturityBlock = this.lifecycleMutationBlock<IDatabaseAdapter>(providerName, 'database');
     if (maturityBlock) return maturityBlock;
     const provider = providerRegistry.get(providerName);
     const result = provider?.derivedAdapters?.database
-      ? await this.getDerivedAdapter<IDatabaseAdapter>(providerName, 'database', project)
+      ? await this.getDerivedAdapter<IDatabaseAdapter>(providerName, 'database', project, environment)
       : await this.getAdapter<IDatabaseAdapter>(
           providerName,
           'database',
-          project ? getProjectScopeHints(project) : undefined
+          project ? getProjectScopeHints(project) : undefined, environment
         );
     return this.requireLifecyclePort(result, supportsDatabaseLifecycle, providerName, 'database');
   }
@@ -103,13 +109,13 @@ export class AdapterFactory {
     return this.requireLifecyclePort(result, supportsCacheLifecycle, providerName, 'cache');
   }
 
-  async getStorageAdapter(providerName: string, project?: Project): Promise<AdapterResult<IStorageAdapter>> {
+  async getStorageAdapter(providerName: string, project?: Project, environment?: string): Promise<AdapterResult<IStorageAdapter>> {
     const maturityBlock = this.lifecycleMutationBlock<IStorageAdapter>(providerName, 'storage');
     if (maturityBlock) return maturityBlock;
     const provider = providerRegistry.get(providerName);
     const result = provider?.derivedAdapters?.storage
-      ? await this.getDerivedAdapter<IStorageAdapter>(providerName, 'storage', project)
-      : await this.getAdapter<IStorageAdapter>(providerName, 'storage', project ? getProjectScopeHints(project) : undefined);
+      ? await this.getDerivedAdapter<IStorageAdapter>(providerName, 'storage', project, environment)
+      : await this.getAdapter<IStorageAdapter>(providerName, 'storage', project ? getProjectScopeHints(project) : undefined, environment);
     return this.requireLifecyclePort(result, supportsStorageLifecycle, providerName, 'storage');
   }
 
@@ -135,13 +141,33 @@ export class AdapterFactory {
   async getProviderAdapter(
     providerName: string,
     project?: Project,
-    scopeHints?: string[]
+    scopeHints?: string[],
+    environment?: string
   ): Promise<AdapterResult<IProviderAdapter>> {
-    return this.getAdapter<IProviderAdapter>(
+    return this.withLocalPreparation(await this.getAdapter<IProviderAdapter>(
       providerName,
       undefined,
-      scopeHints ?? (project ? getProjectScopeHints(project) : undefined)
-    );
+      scopeHints ?? (project ? getProjectScopeHints(project) : undefined),
+      environment
+    ), project, environment);
+  }
+
+  private async withLocalPreparation<T>(result: AdapterResult<T>, project?: Project, environmentName?: string): Promise<AdapterResult<T>> {
+    if (!result.success || !result.adapter || !project || !environmentName) return result;
+    const environments = new EnvironmentRepository(), environment = environments.findByProjectAndName(project.id, environmentName);
+    if (!environment?.platformBindings.localPreparedHosting) return result;
+    const adapter = result.adapter as T & Pick<IHostingAdapter, 'name'> & Partial<Pick<IHostingAdapter, 'configureLocalPreparedHosting'>>;
+    try {
+      if (!providerRegistry.getHoldingPreparation(adapter.name) || !adapter.configureLocalPreparedHosting) throw new Error();
+      const load = async () => {
+        const fresh = environments.findById(environment.id);
+        if (!fresh || fresh.projectId !== project.id || fresh.name !== environmentName || fresh.platformBindings.provider !== adapter.name) throw new Error();
+        const receipt = await verifiedLocalHoldingReceipt(project, fresh);
+        if (!receipt || receipt.appId !== project.id || receipt.environment !== environmentName || receipt.hostingProvider !== adapter.name) throw new Error();
+        return receipt;
+      };
+      await load(); adapter.configureLocalPreparedHosting(load); return result;
+    } catch { return { success: false, error: 'Exact local prepared hosting journal or native connection is unavailable; no alternate authority was selected.' }; }
   }
 
   /**
@@ -212,7 +238,8 @@ export class AdapterFactory {
   private async getAdapter<T>(
     providerName: string,
     expectedCategory?: string,
-    scopeHints?: string[]
+    scopeHints?: string[],
+    environment?: string
   ): Promise<AdapterResult<T>> {
     // Check if provider is registered
     const provider = providerRegistry.get(providerName);
@@ -231,6 +258,19 @@ export class AdapterFactory {
       };
     }
 
+    if (provider.metadata.category === 'deployment') {
+      try {
+        const resolved = await resolveDeploymentAdapter<T>({ providerName, scopeHints, environment,
+          store: { connections: this.connectionRepo, get secretStore() { return getSecretStore(); } } });
+        if (resolved.selected) return { success: true, adapter: resolved.adapter, connectionProvider: 'hypervibe-deployment-binding' };
+      } catch {
+        return { success: false, error: 'Exact environment deployment access is unavailable. Inspect or renew its browser approval; no other cloud credentials were selected.' };
+      }
+    }
+
+    // Environment-scoped operator metadata is never selected without explicit context.
+    if (environment && scopeHints?.[0] && !scopeHints[0].includes('#environment='))
+      scopeHints = [environmentConnectionScope(scopeHints[0], environment), ...scopeHints];
     // Look up connection
     const connectionCandidates = providerRegistry.connectionProviders(providerName)
       .map((connectionProvider) => this.connectionRepo.findBestMatchFromHints(connectionProvider, scopeHints))
@@ -268,7 +308,8 @@ export class AdapterFactory {
   private async getDerivedAdapter<T>(
     providerName: string,
     capability: 'database' | 'cache' | 'storage',
-    project?: Project
+    project?: Project,
+    environment?: string
   ): Promise<AdapterResult<T>> {
     const provider = providerRegistry.get(providerName);
     const derive = provider?.derivedAdapters?.[capability];
@@ -278,7 +319,7 @@ export class AdapterFactory {
     const base = await this.getAdapter<IProviderAdapter>(
       providerName,
       provider.metadata.category,
-      project ? getProjectScopeHints(project) : undefined
+      project ? getProjectScopeHints(project) : undefined, environment
     );
     if (!base.success || !base.adapter) {
       return { success: false, error: base.error || `No ${providerName} adapter available` };

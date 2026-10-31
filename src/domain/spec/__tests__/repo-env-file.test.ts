@@ -53,6 +53,17 @@ function mode(filePath: string): number {
 }
 
 describe('repo local env file', () => {
+  it('does not scaffold native destination values into local env files', () => {
+    const spec = projectSpecSchema.parse({ version: 1, project: 'native-inputs',
+      secrets: { FLOW_KEY: { principal: 'email:owner@example.test', environments: ['staging', 'production'] } },
+      environments: { staging: { hosting: { provider: 'cloudrun' }, services: { web: {} },
+        secretDestinations: { FLOW_KEY: { destination: { provider: 'gcp-secret-manager', projectId: 'synthetic-project',
+          projectNumber: '123456789012', secretId: 'staging-flow' } } } },
+        production: { hosting: { provider: 'railway' }, services: { web: {} } } } });
+    expect(specLocalEnvRequirements(spec, 'staging').some(item => item.key === 'FLOW_KEY')).toBe(false);
+    expect(specLocalEnvRequirements(spec, 'production').some(item => item.key === 'FLOW_KEY')).toBe(true);
+    expect(specLocalEnvRequirements(spec).find(item => item.key === 'FLOW_KEY')?.comment).not.toContain('staging');
+  });
   it('activates only empty commented placeholders, preserves values, and removes broad file access', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-managed-env-'));
     initRepo(root);

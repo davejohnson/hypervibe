@@ -1,6 +1,7 @@
 import { parseHostingBindings, parseHostingServiceCreateRecovery } from '../ports/hosting.port.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { hasRetainedServiceVolumes } from './service-volume.service.js';
+import { runtimeAccessBindings } from './runtime-access.service.js';
 
 type ProviderScope = Record<string, string>;
 
@@ -26,6 +27,10 @@ const RESERVED_PROVIDER_BINDINGS = new Set([
   'previousHosting',
   'maintenance',
   'runtimeRollouts',
+  'runtimeIdentities',
+  'storageRuntimeAccess',
+  'recoveryRuntime',
+  'recoveryRuntimeSecretInputs',
 ]);
 
 function sameScope(left: ProviderScope | undefined, right: ProviderScope | undefined): boolean {
@@ -105,6 +110,14 @@ export function prepareHostingBindingTransition(params: {
     || !sameScope(current.providerScope, target.providerScope)
   );
   const resetActiveScope = changed || params.target.created === true;
+  if (resetActiveScope || (environmentId !== undefined && current.environmentId !== environmentId)) {
+    const runtime = runtimeAccessBindings({ platformBindings: params.current });
+    if (!runtime || Object.keys(runtime.runtimeIdentities).length
+      || Object.values(runtime.storageRuntimeAccess).some(grants => Object.keys(grants).length)
+      || params.current.recoveryRuntime !== undefined || params.current.recoveryRuntimeSecretInputs !== undefined) {
+      return { ok: false, error: 'Retained workload identity, bucket access or backup recovery authority blocks hosting scope changes. Reconcile that exact authority before replacing its provider scope.' };
+    }
+  }
   if ((resetActiveScope || (environmentId !== undefined && current.environmentId !== environmentId))
     && hasRetainedServiceVolumes({ platformBindings: params.current })) {
     return { ok: false, error: 'Retained service volumes block hosting scope changes; volume migration is not implemented.' };

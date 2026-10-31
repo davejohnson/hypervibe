@@ -1226,12 +1226,21 @@ export class GitHubAdapter {
     repo: string,
     workflowId: string | number,
     ref: string,
-    inputs?: Record<string, string>
-  ): Promise<void> {
-    await this.request<void>('POST', `/repos/${owner}/${repo}/actions/workflows/${workflowRouteId(workflowId)}/dispatches`, {
+    inputs?: Record<string, string>,
+    options?: { returnRunDetails: true }
+  ): Promise<void | { runId: number; url: string }> {
+    const response = await this.request<unknown>('POST', `/repos/${owner}/${repo}/actions/workflows/${workflowRouteId(workflowId)}/dispatches`, {
       ref,
       inputs: inputs ?? {},
+      ...(options?.returnRunDetails ? { return_run_details: true } : {}),
     });
+    if (!options?.returnRunDetails) return;
+    const receipt = z.object({ workflow_run_id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      run_url: z.string(), html_url: z.string() }).parse(response);
+    if (receipt.run_url !== `https://api.github.com/repos/${owner}/${repo}/actions/runs/${receipt.workflow_run_id}`
+      || receipt.html_url !== `https://github.com/${owner}/${repo}/actions/runs/${receipt.workflow_run_id}`)
+      throw new Error('GitHub dispatch acknowledgment does not identify the reviewed repository run.');
+    return { runId: receipt.workflow_run_id, url: receipt.html_url };
   }
 
   // ============= Branch Protection =============

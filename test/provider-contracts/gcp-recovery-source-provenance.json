@@ -1,0 +1,101 @@
+{
+  "sourceBase": "8b491912401ad92edf7cadd5e1cbbd5a84f6f555",
+  "destinationBase": "4e75df6e22821efbddbc23b9a88a448a49611b78",
+  "files": [
+    {
+      "path": "src/domain/ports/recovery-runtime.port.ts",
+      "sha256": "580723e9b2f0d1c1ecc201542507983386f82c84704a6ef84fdc1863b89940a5",
+      "source": "uncommitted working tree"
+    },
+    {
+      "path": "src/domain/ports/recovery-worker.port.ts",
+      "sha256": "8ef009539f6718c30f2152aaf2451ec865024b7700ee941e5faea2972d8bf24e",
+      "source": "uncommitted working tree"
+    },
+    {
+      "path": "src/domain/registry/recovery-worker.registry.ts",
+      "sha256": "38701db1cdd3291111512076d0323c2ff5026869374385d2d47556df7a056a51",
+      "source": "uncommitted working tree"
+    },
+    {
+      "path": "src/domain/services/recovery-runtime.service.ts",
+      "sha256": "5776ed6f763cc18b39386d3f37060b852d4c55ad1e07a9b5dbb4de7c0c86c436",
+      "source": "uncommitted working tree"
+    },
+    {
+      "path": "src/domain/services/runtime-evidence.ts",
+      "sha256": "dfb731834f16d273f7a05478e470bdec9f4df1cf241d513f95bd6b1598975e0e",
+      "source": "uncommitted working tree"
+    },
+    {
+      "path": "src/ci/recovery-workers.ts",
+      "sha256": "98bc1ff3a77a2e5c4e03549e66c88272c8cad45a8ff2021b91255fef5d5142d0",
+      "source": "uncommitted working tree"
+    },
+    {
+      "path": "src/adapters/providers/gcp/cloudrun-recovery-runtime.ts",
+      "sha256": "86cdfd203befe0d850f04af78a95d0b43688c841e1f3c169eb7a7fc868a9aa25",
+      "source": "uncommitted working tree"
+    },
+    {
+      "path": "src/adapters/providers/gcp/cloudrun-recovery-task.ts",
+      "sha256": "91caadde68bd58fa744fda1382c56197fbbf7e031c35cf997fc5683b75fd6fde",
+      "source": "uncommitted working tree"
+    },
+    {
+      "path": "src/adapters/providers/gcp/recovery-worker.ts",
+      "sha256": "ca3c06683fe8f6eddbd23e7e7f44470be70922ffaa2fcafe3d9869ea89e55605",
+      "source": "uncommitted working tree"
+    },
+    {
+      "path": "src/adapters/providers/gcp/__tests__/cloudrun-recovery-runtime.contract.test.ts",
+      "sha256": "002df8267922d60cd21ff1b384f99917898429e63bbe653d9947c4fc190691e3",
+      "source": "uncommitted working tree"
+    },
+    {
+      "path": "src/adapters/providers/gcp/__tests__/recovery-worker.contract.test.ts",
+      "sha256": "47fec61fa08052d2ba3367f43c0b9770ff073baa90f13174bb14dfd0e2b49722",
+      "source": "uncommitted working tree"
+    },
+    {
+      "path": "src/domain/services/__tests__/recovery-runtime.service.test.ts",
+      "sha256": "09409c9c3d7e6b5ac1fdd8f13e5c5612805e2d7d199020dfa228fe81fe2fca53",
+      "source": "uncommitted working tree"
+    },
+    {
+      "path": "src/ci/backup-runner.ts",
+      "sha256": "3b3eacfcae2abd8402dff554bdcdd443f3379e247b07a993c622952e02d9b00f",
+      "source": "uncommitted working tree"
+    },
+    {
+      "path": "src/domain/services/managed-backup-target.service.ts",
+      "sha256": "08e95127f02d7b9f08f71a60c00bb1278fe4ff6fa6dfb677094b543efbfd18bf",
+      "source": "uncommitted working tree"
+    },
+    {
+      "path": "src/application/managed-backup.ts",
+      "sha256": "add60a7d75ecb1dd31790a4c46def9184c0a2391f86a255a72014e9908321307",
+      "source": "uncommitted working tree"
+    },
+    {
+      "path": "src/domain/services/__tests__/managed-backup-target.service.test.ts",
+      "sha256": "b398eb88317894f9fa5503e6d3b015e733ac51c11a944e2e713b17c277e2a033",
+      "source": "uncommitted working tree"
+    },
+    {
+      "path": "src/adapters/providers/gcp/cloudsql-restore-drill.workflow.ts",
+      "sha256": "6a56141cc399a1eaef3e0088ca35be105082b2cce39b7b66fc16f19ab3a4d755",
+      "source": "uncommitted working tree"
+    },
+    {
+      "path": "src/adapters/providers/gcp/__tests__/cloudsql-restore-drill.api-contract.test.ts",
+      "sha256": "a3b0121f9939aa4c8fca5d3a18db15bb3fb7ebb60fb855a1fad6487df6c5667c",
+      "source": "uncommitted working tree"
+    },
+    {
+      "path": "test/provider-contracts/managed-recovery-provider-matrix.json",
+      "sha256": "b4bee72b41247a5d4a225f6a4bc1935794c7ec079e408575fb36d9ed499ac416",
+      "source": "uncommitted working tree"
+    }
+  ]
+}

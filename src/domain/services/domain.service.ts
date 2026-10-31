@@ -133,7 +133,7 @@ export async function setupCustomDomain(params: {
   result.service = serviceName;
 
   let providerDnsRecords: ProviderDnsRecord[] = [];
-  const adapterResult = await adapterFactory.getProviderAdapter(provider, project);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, project, undefined, environment.name);
   const adapter = adapterResult.adapter as DomainAttachCapableAdapter | undefined;
 
   if (!adapterResult.success) {
@@ -360,7 +360,7 @@ export async function teardownCustomDomain(params: {
   }
 
   const provider = hostingProviderForEnvironment(params.project, params.environment);
-  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project, undefined, params.environment.name);
   const adapter = adapterResult.adapter as DomainAttachCapableAdapter | undefined;
   if (!adapterResult.success || !supportsCustomDomainDetach(adapter)) {
     return {

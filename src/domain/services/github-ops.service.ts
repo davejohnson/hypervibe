@@ -8,6 +8,7 @@ import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import type { GitHubCredentials } from '../../adapters/providers/github/github.adapter.js';
 import type { Project } from '../entities/project.entity.js';
+import type { Environment } from '../entities/environment.entity.js';
 import { projectSpecSchema, type IosSpec } from '../spec/spec.schema.js';
 import { effectiveRuntimeInstallCommand, type ProjectRuntime } from '../spec/project-runtime.js';
 import { providerRegistry } from '../registry/provider.registry.js';
@@ -60,8 +61,7 @@ export type {
   BranchDeployWorkflow,
 };
 
-// Removing target.backupPolicy already migrates affected inputs; preserve unrelated reviewed locks.
-export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 7;
+export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 8;
 const GITHUB_ACTIONS_PROMOTION_RENDERER_REVISION = 2;
 export const GITHUB_ACTIONS_SERVER_PROGRAM_REVISION = 1;
 
@@ -121,6 +121,7 @@ export function githubActionsServerProgramFingerprint(params: {
       workloadKind: resource.workloadKind,
       startCommand: resource.startCommand,
       healthCheckPath: resource.healthCheckPath,
+      ...(resource.instanceBounds ? { instanceBounds: resource.instanceBounds } : {}),
     }))
     .sort((left, right) => left.logicalName.localeCompare(right.logicalName));
   const releaseCommands = params.target.releaseCommands
@@ -137,7 +138,7 @@ export function githubActionsServerProgramFingerprint(params: {
   });
 }
 
-export function resolveBranchDeployTargets(project: Project): {
+export function resolveBranchDeployTargets(project: Project, bindingOverride?: Environment): {
   targets: BranchDeployTarget[];
   desiredBranches: Record<string, string | undefined>;
   migration: { includeStep: boolean; command?: string; note?: string };
@@ -146,7 +147,7 @@ export function resolveBranchDeployTargets(project: Project): {
   const specRow = projectSpecRepo.findLatest(project.id);
   const parsedSpec = specRow ? projectSpecSchema.safeParse(specRow.document) : null;
   if (parsedSpec?.success) {
-    const resolved = resolveReviewedBranchDeployTargets(project, parsedSpec.data);
+    const resolved = resolveReviewedBranchDeployTargets(project, parsedSpec.data, bindingOverride);
     const byEnvironment = new Map(resolved.targets.map((target) => [target.environmentName, target]));
     const resolving = new Set<string>();
     const resolveProgram = (target: BranchDeployTarget): string => {
@@ -222,6 +223,10 @@ function buildWorkflowTrigger(target: BranchDeployTarget): string {
     inputs:
       commit_sha:
         description: 'Commit SHA to deploy. Defaults to the selected ref when omitted.'
+        required: false
+        type: string
+      hypervibe_release_id:
+        description: 'Nonsecret release attempt identity supplied by Hypervibe.'
         required: false
         type: string
       credential_operations:
@@ -1090,7 +1095,7 @@ export function buildBranchDeployWorkflow(
 
   const content = `name: Deploy ${providerName} (${target.environmentName})
 
-run-name: Deploy ${target.environmentName} \${{ inputs.commit_sha || github.sha }} \${{ inputs.rollback && '(rollback)' || '' }}
+run-name: Deploy ${target.environmentName} \${{ inputs.commit_sha || github.sha }} \${{ inputs.rollback && '(rollback)' || '' }} \${{ inputs.hypervibe_release_id && format('[hv:{0}]', inputs.hypervibe_release_id) || '' }}
 
 on:
 ${buildWorkflowTrigger(target)}

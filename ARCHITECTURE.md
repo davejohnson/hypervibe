@@ -46,11 +46,59 @@ Desired infrastructure state is repo-backed when Hypervibe runs inside a git wor
 
 Do not treat cached local state as proof of convergence when live observation is available.
 
+Local cloud scope preparation is an isolated `cloud-scope` prerequisite in the
+ordinary plan/apply loop, before deployment connection lookup. A declared provider
+capability may authorize exactly one reviewed empty-project allocation. Optional
+provider-declared continuation creates new, separately reviewed stages with an
+immutable predecessor digest; allocation approval never authorizes billing, API,
+identity or binding work. The shared installation kernel records nonsecret attempts
+in SQLite with transactional revision and sibling-branch protection. Each exact
+current continuation action has separate confirmation and native recovery; uncertain
+writes cannot be resubmitted. Native unknown reads remain unknown. A final reviewed
+local handoff writes only nonsecret connections scoped to the exact repository and
+environment plus its verified project binding. Callers without explicit environment
+context cannot select those connections; legacy scopes retain their existing meaning.
+Hosted factories never admit local ADC or substitute a fictional hosted identity.
+See [local scope preparation](docs/local-cloud-scope-preparation.md) and
+[reviewed continuation](docs/local-cloud-scope-continuation.md) for the explicit
+provider matrix, native proof, historical recovery and live-evidence limits.
+
+Administrator-prepared hosting resources use an explicit metadata handoff before
+runtime convergence. A provider-declared `preparedHosting` capability verifies the
+installation receipt and native lifetimes; the isolated `hosting-prepared-bindings`
+plan records only those exact identities. Its durable per-workload first-release
+journal never authorizes application secrets for the holding image. Expected runtime
+configuration hashes and completed first releases change only through reviewed metadata
+actions backed by fresh native proof; stale repository replay cannot reinstate them.
+See [the prepared hosting contract](docs/connect-cloud-prepared-hosting.md).
+
+Local operator hosting may declare a provider-supported `hosting.preparation`
+prerequisite to obtain inert HTTPS endpoints before application credentials exist.
+The isolated `hosting-preparation` plan uses exact environment-scoped local
+authority, an already published immutable holding image and the existing durable
+installation journal. It creates no application configuration or secret access.
+Every native create/grant and the later nonsecret binding require their exact
+current actions. Its journal-proven local receipt is independent of hosted
+deployment authority; neither receipt permits first release without separate
+native verification. See [local holding preparation](docs/local-holding-preparation.md)
+for the named provider matrix and acceptance limits.
+
 Unreadable local state is not empty state. Non-empty corrupt or schema-invalid
 JSON in bindings, plans, receipts, service configuration, or policies blocks
 the operation; repositories must never replace it with `{}`/`[]` and continue
 reconciliation. Empty legacy columns may still decode to their declared empty
 shape.
+
+Canonical local migrations 1–11 and 13 preserve recognized historical version-11
+and version-12 identities through the shared historical-schema validator. New
+profiles never invent a version-12 marker or login table. The monotonic version-13
+bridge preserves original migration rows, encrypted provider-login sessions and
+active leases, while installing or verifying the shared apply-serialization
+indexes. Exact historical schema fingerprints are checked before missing
+migrations; a version number alone is not compatibility evidence. Preservation
+does not authorize local browser sessions for hosted Connect Cloud or implement
+their older login driver. See [saved-state compatibility](docs/connect-cloud-saved-state.md)
+and [local history reconciliation](docs/local-state-migrations.md).
 
 A local project with no environment/provider decision uses the non-provider
 sentinel `unconfigured`. Project creation, adapter lookup, health/log routing,
@@ -59,6 +107,13 @@ or another real provider. The first reviewed environment spec establishes the
 project's hosting provider before plan/apply can mutate infrastructure.
 
 ## Project Runtime Desired State
+
+Optional `services.<name>.instanceBounds` declares reviewed automatic service-wide
+minimum and maximum capacity. Provider metadata admits only complete implementations;
+Cloud Run carries it through spec, native observation, confirmed apply and emitted
+release verification. Unset values preserve native limits and legacy CI bytes.
+See [service instance bounds](docs/service-instance-bounds.md) for provider differences,
+unknown-read behavior and offline/live evidence limits.
 
 `HYPERVIBE_` is reserved for orchestration inputs. Dotenv loading always skips
 that prefix; explicit application env values, runtime secret destinations,
@@ -728,9 +783,10 @@ database URL password segments. Railway's documented password regeneration
 updates the database and `POSTGRES_PASSWORD`; dependent references then follow
 that value. This bootstrap behavior does not repair existing literal aliases.
 
-`hv_cloud_connections` / `hypervibe cloud connections` is an explicit hosted
-provider-access handoff, not infrastructure deployment. Its separate browser
-purpose issues revocable, expiring project access without expanding reporting
+`hv_cloud_connections` / `hypervibe cloud connections` with the default
+`purpose="provider-connections"` is an explicit hosted monitoring-credential
+handoff, not infrastructure deployment or Connect Cloud installation. Its separate
+browser approval issues revocable, expiring project access without expanding reporting
 tokens. A ten-minute preview binds origin, repository, exact destinations and
 private credential inputs before confirmed upload. Reuse requires the provider's
 declared monitoring credential kind; environment-scoped access never fans out
@@ -815,9 +871,19 @@ caveats, and the complete safe retry call. Do not recommend a third-party
 package-manager wrapper when Google provides a first-party installer or archive;
 package-manager runtime coupling can fail independently of Google credentials.
 
-The opinionated GCP `hv_connections action="bootstrap"` flow is a narrow
-account-and-credential prerequisite exception, not an imperative application
-lifecycle path. It requires an explicit Hypervibe project, exact repository
+New AWS, Azure and GCP secret-manager connections start with
+`hv_cloud_connections purpose="connect-cloud"` for the exact app/environment.
+Device approval, browser administrator installation, collection and deployment
+retain separate authority. This path does not require local cloud credentials or
+a manually prepared writer. An unavailable operator host or provider installation
+must report its concrete prerequisite rather than silently falling back to copied
+credentials or generated keys. See [Connect Cloud](docs/connect-cloud-contract.md).
+
+The legacy GCP `hv_connections action="bootstrap"` flow remains a narrow
+account-and-credential prerequisite exception for explicitly requested legacy
+setup; it is not the default for new Connect Cloud customers. It creates a
+deployment service-account key and is not an imperative application lifecycle
+path. It requires an explicit Hypervibe project, exact repository
 scope, and `adminAuth="default"`. When its GCP project ID is omitted, preview
 reuses verified repository-scoped connections or derives a stable project name;
 unreadable or conflicting scoped connections block that default. Confirmation
@@ -918,8 +984,68 @@ provider evidence and subsequent adoption/rotation work.
 for opaque application values a human should not choose; use delegated
 ownership only for a value issued or controlled outside Hypervibe.
 
+### Direct cloud secret destinations
+
+`environments.<name>.secretDestinations[KEY]` selects an exact cloud
+secret destination and, after delivery, its immutable `version`. The slot
+remains declared in `ProjectSpec.secrets`. AWS Secrets Manager, Google Secret
+Manager and Azure Key Vault use the shared destination port and hosted library;
+their existing value-reading secret-source adapters remain separate.
+Native destination slots cannot also declare `credential` lifecycle authority.
+That lifecycle reads a source and synchronizes reviewed consumers; its rotation
+contract does not cover native references. Schema validation rejects the
+combination, native planning/apply revalidation blocks it, and credential role
+selection refuses it before reading a source. Preserve the native reference
+instead of widening its consumer scope or materializing the value.
+
+Empty container preparation is a separate lifecycle capability. An explicit
+`hv_plan scope="secret-destinations"` admits only reviewed container actions,
+even while required credential values remain undelivered. The ordinary plan
+and deployment gates remain blocked. Cloud Run's setup adapter can discover
+its verified GCP project number and suggest scoped names, then create absent
+Google Secret Manager containers after exact confirmation. It cannot create
+values, grant IAM, deploy workloads, adopt lookalikes or delete secrets. AWS
+and Azure container setup remain explicitly unsupported.
+
+Before creation, persist the canonical repository/environment/key, destination
+and random attempt in local and exportable value-free bindings. Native labels
+correlate that attempt and `createTime` pins the accepted resource lifetime.
+Unknown POST outcomes permit metadata-only reconciliation, never automatic
+replay. Ready ownership is reverified before separate writer preparation;
+deletion, recreation or changed labels cannot silently authorize a new grant.
+The same prerequisite works before any hosting workload exists.
+
+Hosted Hypervibe authorizes the account, repository, environment, source and
+writer connection before claiming a durable delivery intent. Submitted values
+and fresh generated values exist only during that request. It stores native
+version references and outcomes, never values in its credential envelope or
+queues. Generation occurs after the durable claim, using cryptographic random
+bytes; retry reconciles metadata and does not regenerate. Monitoring access is
+not write authorization. Existing writer credentials retain their separate
+credential-vault policy; this feature does not erase those credentials.
+
+Local planning never resolves or derives values for destination-backed slots,
+never scaffolds them as local dotenv inputs, and rejects legacy `secretRefs`.
+Collection, committing a version pin, and runtime rollout remain distinct.
+Reference changes have explicit plan authority and exact replacement
+confirmation. Apply verifies current ownership, lifecycle policy, target
+services and native version metadata before writing and after readback. Native
+reference drift participates in plan fingerprints and missing input/unknown
+reference state cannot report `inSync`. Runtime IAM and actual external-key
+validity remain separate from reference configuration verification.
+
+Only declared provider capabilities admit native runtime references: Cloud Run
+consumes Google references, ECS consumes AWS references, and Azure Container
+Apps consumes Key Vault references. Other hosts block without materializing
+values. Current runtime references survive normal deployment, release and CI
+paths. All-environment collection returns separate reviewed child workflows;
+an environment grant cannot authorize invitations or writes in another.
+See [destination contracts and limitations](docs/secret-destination-delivery.md).
+
+### Legacy local value inputs
+
 Hypervibe-owned secrets declare a versioned generator, generation, and runtime
-environments. Planning derives strong, stable material from SecretStore's
+environments. For slots without a native destination, planning derives strong, stable material from SecretStore's
 private root key with project/environment/key/generator/generation domain
 separation, then stores the provider-ready value only in the existing encrypted
 plan override. The value is excluded from `secretRefs`, ordinary `envVars`,

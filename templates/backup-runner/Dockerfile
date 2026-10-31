@@ -4,6 +4,7 @@
 FROM node:24-bookworm-slim AS build
 WORKDIR /opt/hypervibe
 COPY package.json package-lock.json ./
+COPY vendor ./vendor
 RUN npm ci --ignore-scripts
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src

@@ -1,6 +1,9 @@
 import { credentialTrackingSchema } from './credential.schema.js';
 import { databaseFreshInitializationIntentSchema } from '../ports/database-fresh-initialization.port.js';
 import { z } from 'zod';
+import { operatorArtifactDeclarationSchema } from '../ports/operator-artifact.port.js';
+import { operatorApplicationDeclarationSchema } from '../ports/operator-application.port.js';
+import { secretDestinationSchema, runtimeSecretReferenceSchema, secretDestinationIdentity } from '../ports/secret-destination.port.js';
 import { parse as parseDomain } from 'tldts';
 import { isReservedRuntimeEnvKey, RESERVED_RUNTIME_ENV_ERROR } from '../services/runtime-env-policy.js';
 import { canonicalizeJson } from '../../lib/canonical-json.js';
@@ -59,7 +62,13 @@ const DATABASE_ENV_ALIAS_SOURCES = [
 
 export const databaseEnvAliasSourceSchema = z.enum(DATABASE_ENV_ALIAS_SOURCES);
 
+export const serviceInstanceBoundsSchema = z.object({
+  min: z.number().int().min(0),
+  max: z.number().int().min(1),
+}).strict().refine(bounds => bounds.min <= bounds.max, 'min must not exceed max');
+
 export const serviceSpecSchema = z.object({
+  instanceBounds: serviceInstanceBoundsSchema.optional(),
   /** Retained filesystem storage; not object/bucket storage. */
   volume: z.object({
     mountPath: z.string().regex(/^\/(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*)(?:\/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$/, 'Use a canonical absolute mount path, for example /data'),
@@ -83,6 +92,12 @@ export const serviceSpecSchema = z.object({
     databaseEnvAliasSourceSchema
   ).optional(),
 }).strict().superRefine((service, ctx) => {
+  if (service.instanceBounds && (service.workloadKind === 'cron'
+    || (service.workloadKind === 'worker' && service.instanceBounds.min < 1))) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['instanceBounds'],
+      message: service.workloadKind === 'cron' ? 'Scheduled jobs cannot declare service instance bounds'
+        : 'Workers require at least one running instance' });
+  }
   if (service.workloadKind === 'cron' && !service.cronSchedule) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -1601,12 +1616,37 @@ export const MESSAGING_MANAGED_ENV_KEYS = [
   'TWILIO_PHONE_NUMBER_SID',
 ] as const;
 
+export const secretDestinationBindingSchema = z.object({
+  destination: secretDestinationSchema,
+  /** Omit until direct delivery returns an immutable, value-free receipt. */
+  version: z.string().min(1).max(64).optional(),
+}).strict().superRefine((binding, ctx) => {
+  if (binding.version !== undefined && !runtimeSecretReferenceSchema.safeParse(binding).success) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Pin an immutable native secret version from a verified delivery receipt.', path: ['version'] });
+  }
+});
+
 export const environmentSpecSchema = z.object({
+  /** Operator release assets; target, content and public-read changes are separately reviewed. */
+  operatorArtifacts: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,62}$/), operatorArtifactDeclarationSchema).optional(),
+  operatorApplications: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,62}$/), operatorApplicationDeclarationSchema).optional(),
   hosting: z.object({
     /** Hosting provider name; validated against the adapter registry at spec_set time. */
     provider: z.string().min(1),
     /** Optional desired placement. Omit to use the provider's sensible default. */
     region: z.string().trim().min(1).optional(),
+    /** Secret-free provider origin preparation; application release remains separate. */
+    preparation: z.object({ kind: z.literal('holding-v1'),
+      image: z.string().max(2048).regex(/^[^\s@]+@sha256:[a-f0-9]{64}$/),
+    }).strict().optional(),
+    /** Isolated cloud allocation intent; native fields are validated by the selected provider. */
+    scopePreparation: z.object({
+      schemaVersion: z.literal(1),
+      authentication: z.literal('local-default'),
+      nativeScope: z.record(z.string().min(1).max(100), z.string().min(1).max(1024)),
+      /** Separately reviewed provider-owned stages after this exact allocation. */
+      continuation: z.object({ nativeScope: z.record(z.string().min(1).max(100), z.string().min(1).max(1024)) }).strict().optional(),
+    }).strict().optional(),
   }).strict(),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),
@@ -1632,6 +1672,8 @@ export const environmentSpecSchema = z.object({
   email: emailSpecSchema.default({ enabled: false }),
   messaging: twilioMessagingSpecSchema.optional(),
   envVars: z.record(applicationEnvVarNameSchema, z.string()).default({}),
+  /** Reviewed native destinations and immutable references, never secret values. */
+  secretDestinations: z.record(applicationEnvVarNameSchema, secretDestinationBindingSchema).optional(),
   /** Explicitly documents that a shared runtime key does not apply here. */
   envVarExceptions: z.array(
     z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'exception keys must be valid environment variable names')
@@ -2555,6 +2597,33 @@ export const projectSpecSchema = z.object({
       path: spec.devops ? ['devops', 'ci'] : ['github'],
     });
   }
+  const destinationOwners = new Map<string, string>();
+  for (const [environmentName, environment] of Object.entries(spec.environments)) {
+    for (const [key, binding] of Object.entries(environment.secretDestinations ?? {})) {
+      const slot = spec.secrets[key];
+      if (!slot || !slot.environments.includes(environmentName)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Secret destinations require a declared runtime secret in this environment.',
+          path: ['environments', environmentName, 'secretDestinations', key] });
+      }
+      if (slot?.ownership === 'delegated' && (slot.githubActions?.repository || slot.githubActions?.environments.length)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Native secret references cannot also materialize this slot into CI secrets.',
+          path: ['environments', environmentName, 'secretDestinations', key] });
+      }
+      if (slot?.credential) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom,
+          message: 'Native secret destinations cannot also declare credential lifecycle authority. Keep the native version reference; credential source reads and rotation are unsupported for this slot.',
+          path: ['environments', environmentName, 'secretDestinations', key] });
+      }
+      const identity = JSON.stringify(secretDestinationIdentity(binding.destination));
+      const owner = destinationOwners.get(identity);
+      if (owner) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Each environment and key requires its own native secret destination.',
+          path: ['environments', environmentName, 'secretDestinations', key] });
+      }
+      destinationOwners.set(identity, `${environmentName}/${key}`);
+    }
+  }
+
   for (const [key, secret] of Object.entries(spec.secrets)) {
     const descriptor = secret.credential;
     if (descriptor?.runtimeConsumers) {

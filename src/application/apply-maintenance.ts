@@ -52,10 +52,13 @@ async function hostingAdapter(params: {
   ctx: CommandContext;
   project: Project;
   environmentSpec: EnvironmentSpec;
+  environmentName: string;
 }): Promise<IProviderAdapter | null> {
   const result = await params.ctx.adapterFactory.getProviderAdapter(
     params.environmentSpec.hosting.provider,
-    params.project
+    params.project,
+    undefined,
+    params.environmentName
   );
   if (!result.success || !result.adapter) return null;
   const adapter = result.adapter as IProviderAdapter;

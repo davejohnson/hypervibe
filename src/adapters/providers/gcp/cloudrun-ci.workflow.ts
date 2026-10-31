@@ -9,14 +9,27 @@ import {
   cloudRunContainerBuildStartCommand,
   reviewedCloudRunRuntimeResources,
 } from './cloudrun-ci.release-runtime.js';
+import { buildGitHubDeploymentSessionRuntime, GITHUB_EPHEMERAL_DOCKER_CLEANUP_STEP, GITHUB_EPHEMERAL_DOCKER_LOGIN_RUNTIME } from '../../../domain/services/cloud-deployment-ci.js';
 import {
   CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION,
   cloudRunReleaseCommandHash,
 } from './cloudrun-release-command.js';
+import { buildGcpPreparedReleaseRuntime } from './gcp-prepared-release.js';
+import { buildGcpGithubTokenRuntime, parseGcpGithubWorkloadIdentity } from './gcp-github-workload-identity.js';
 
 export const CLOUDRUN_CI_REQUIRED_SECRETS = ['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID'];
 
 export function buildCloudRunGitHubActionsSteps(target: BranchDeployTarget): BranchDeployStepResult {
+  const broker = Boolean(target.deploymentAccess);
+  const federation = target.nativeAuthentication ? parseGcpGithubWorkloadIdentity(target.nativeAuthentication) : undefined;
+  if (broker && federation) throw new Error('Cloud Run CI requires one exact reviewed authentication authority.');
+  if (federation && (federation.projectId !== target.providerProjectId || federation.environment !== target.environmentName || federation.branch !== target.branch
+    || federation.workflow !== `.github/workflows/deploy-cloudrun-${target.environmentName.toLowerCase().replace(/[^a-z0-9-]+/g, '-')}.yml`))
+    throw new Error('Cloud Run CI federation does not match the reviewed deployment target.');
+  const transient = broker || Boolean(federation);
+  const prepared = Boolean(target.deploymentAccess?.connection.preparedResources);
+  const preparedRuntime = buildGcpPreparedReleaseRuntime(target).split('\n').filter((line, index, lines) => line || index < lines.length - 1)
+    .map(line => `            ${line}\n`).join('');
   const buildCondition = target.promoteFromEnvironment
     ? "steps.deploy.outputs.operation != 'rollback' && !steps.promotion_release.outputs.image_uri"
     : "steps.deploy.outputs.operation != 'rollback'";
@@ -51,6 +64,7 @@ export function buildCloudRunGitHubActionsSteps(target: BranchDeployTarget): Bra
   ];
   const releaseCommands = target.releaseCommands ?? [];
   const runtimeResources = reviewedCloudRunRuntimeResources(target);
+  const instanceBounds = runtimeResources.some(resource => resource.instanceBounds !== undefined);
   const encodedRuntimeResources = JSON.stringify(Buffer.from(JSON.stringify(runtimeResources)).toString('base64'));
   if (releaseCommands.some((release) => (
     !release.providerServiceId
@@ -69,60 +83,43 @@ export function buildCloudRunGitHubActionsSteps(target: BranchDeployTarget): Bra
   }));
   const encodedReleaseCommands = JSON.stringify(Buffer.from(JSON.stringify(reviewedReleaseCommands)).toString('base64'));
   const releaseCommandAnnotation = JSON.stringify(CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION);
-  const releaseRuntime = buildCloudRunReleaseRuntime()
+  const releaseRuntime = buildCloudRunReleaseRuntime({ instanceBounds })
     .trimEnd()
     .split('\n')
     .map((line) => `            ${line}`)
     .join('\n');
-  return {
-    displayName: 'Cloud Run',
-    releaseImageUri: "${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}",
-    permissions: `    permissions:
-      actions: read
-      contents: read
-`,
-    steps: `      - name: Resolve Cloud Run image URI
-        id: image
-        if: ${buildCondition}
-        uses: actions/github-script@v9
-        env:
-          GCP_PROJECT_ID: \${{ secrets.GCP_PROJECT_ID }}
-          GCP_BOUND_PROJECT_ID: ${projectId}
-          GCP_REGION: ${region}
-          GCP_ARTIFACT_REPOSITORY: \${{ vars.GCP_ARTIFACT_REPOSITORY }}
-          DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
-        with:
-          script: |
-            for (const key of ['GCP_PROJECT_ID', 'GCP_BOUND_PROJECT_ID', 'GCP_REGION']) {
-              if (!process.env[key]) throw new Error(key + ' is required');
-            }
-            if (process.env.GCP_PROJECT_ID !== process.env.GCP_BOUND_PROJECT_ID) {
-              throw new Error('The verified GCP connection does not match the exact applied project binding');
-            }
-            if (!process.env.DEPLOY_SHA) throw new Error('DEPLOY_SHA is required');
-            const registry = process.env.GCP_REGION + '-docker.pkg.dev';
-            const repository = process.env.GCP_ARTIFACT_REPOSITORY || 'hypervibe';
-            const imageName = process.env.GITHUB_REPOSITORY.toLowerCase().replace(/[^a-z0-9._/-]/g, '-');
-            core.setOutput('registry', registry);
-            core.setOutput('repository', repository);
-            core.setOutput('uri', registry + '/' + process.env.GCP_PROJECT_ID + '/' + repository + '/' + imageName + ':' + process.env.DEPLOY_SHA);
-      - name: Verify GCP Artifact Registry
-        id: gcp
-        if: ${buildCondition}
-        uses: actions/github-script@v9
-        env:
-          GCP_SERVICE_ACCOUNT_JSON: \${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
-          GCP_PROJECT_ID: \${{ secrets.GCP_PROJECT_ID }}
-          GCP_BOUND_PROJECT_ID: ${projectId}
-          GCP_REGION: ${region}
-          GCP_ARTIFACT_REPOSITORY: \${{ vars.GCP_ARTIFACT_REPOSITORY }}
-        with:
-          script: |
-            const crypto = require('crypto');
+  const artifactRepository = target.providerScope?.artifactRepository;
+  const artifactRepositoryCreateTime = target.providerScope?.artifactRepositoryCreateTime;
+  if (transient && (!artifactRepository || !/^[a-z][a-z0-9-]{0,62}$/.test(artifactRepository) || !artifactRepositoryCreateTime || !Number.isFinite(Date.parse(artifactRepositoryCreateTime)) || !runtimeResources.length || runtimeResources.some(item => !item.providerResourceUid))) {
+    throw new Error('Hosted Cloud Run CI requires exact applied registry and workload lifetime bindings.');
+  }
+  const tokenRuntime = (checkEnvironment = false) => transient ? ((federation ? buildGcpGithubTokenRuntime(federation) : buildGitHubDeploymentSessionRuntime(target) + `
+let hvGoogleSession;
+async function getAccessToken() {
+  if (!hvGoogleSession || Date.parse(hvGoogleSession.expiresAt) <= Date.now() + 60000) hvGoogleSession = await hvDeploymentSession();
+  return hvGoogleSession.token;
+}
+`) + `async function hvGoogleJson(url, options = {}) {
+  const parsed = new URL(url), unavailable = () => new Error('Google Cloud response could not be verified.');
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port || parsed.hash
+    || !['artifactregistry.googleapis.com', 'run.googleapis.com'].includes(parsed.hostname)) throw unavailable();
+  const controller = new AbortController(); let timer;
+  const deadline = new Promise((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(unavailable()); }, 30000); });
+  const bounded = value => Promise.race([value, deadline]);
+  try {
+    const response = await bounded(fetch(url, { ...options, redirect: 'error', signal: controller.signal,
+      headers: { ...options.headers, Authorization: 'Bearer ' + await getAccessToken() } }));
+    if (!response.ok || response.redirected || response.url && response.url !== url || !response.body) { void response.body?.cancel().catch(() => {}); throw unavailable(); }
+    const reader = response.body.getReader(), chunks = []; let size = 0;
+    try { for (;;) { const item = await bounded(reader.read()); if (item.done) break; size += item.value.byteLength; if (size > 1048576) throw unavailable(); chunks.push(item.value); } }
+    catch { void reader.cancel().catch(() => {}); throw unavailable(); } finally { reader.releaseLock(); }
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch { throw unavailable(); } finally { clearTimeout(timer); controller.abort(); }
+}
+`).trimEnd().split('\n').map(line => '            ' + line).join('\n') : `            const crypto = require('crypto');
 
             async function getAccessToken() {
-              if (!process.env.GCP_SERVICE_ACCOUNT_JSON) throw new Error('GCP_SERVICE_ACCOUNT_JSON is required');
-              const credentials = JSON.parse(process.env.GCP_SERVICE_ACCOUNT_JSON);
+${checkEnvironment ? "              if (!process.env.GCP_SERVICE_ACCOUNT_JSON) throw new Error('GCP_SERVICE_ACCOUNT_JSON is required');\n" : ''}              const credentials = JSON.parse(process.env.GCP_SERVICE_ACCOUNT_JSON);
               const now = Math.floor(Date.now() / 1000);
               const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
               const unsigned = encode({ alg: 'RS256', typ: 'JWT' }) + '.' + encode({
@@ -144,8 +141,52 @@ export function buildCloudRunGitHubActionsSteps(target: BranchDeployTarget): Bra
               const body = await response.text();
               if (!response.ok) throw new Error('GCP token exchange failed: ' + response.status + ' ' + body);
               return JSON.parse(body).access_token;
+            }`;
+  return {
+    displayName: 'Cloud Run',
+    releaseImageUri: "${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}",
+    permissions: `    permissions:
+      actions: read
+      contents: read
+${transient ? '      id-token: write\n' : ''}`,
+    steps: `      - name: Resolve Cloud Run image URI
+        id: image
+        if: ${buildCondition}
+        uses: actions/github-script@v9
+        env:
+          GCP_PROJECT_ID: ${transient ? projectId : '${{ secrets.GCP_PROJECT_ID }}'}
+          GCP_BOUND_PROJECT_ID: ${projectId}
+          GCP_REGION: ${region}
+          GCP_ARTIFACT_REPOSITORY: ${transient ? JSON.stringify(artifactRepository) : '${{ vars.GCP_ARTIFACT_REPOSITORY }}'}
+          DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
+        with:
+          script: |
+            for (const key of ['GCP_PROJECT_ID', 'GCP_BOUND_PROJECT_ID', 'GCP_REGION']) {
+              if (!process.env[key]) throw new Error(key + ' is required');
             }
-
+            if (process.env.GCP_PROJECT_ID !== process.env.GCP_BOUND_PROJECT_ID) {
+              throw new Error('The verified GCP connection does not match the exact applied project binding');
+            }
+            if (!process.env.DEPLOY_SHA) throw new Error('DEPLOY_SHA is required');
+            const registry = process.env.GCP_REGION + '-docker.pkg.dev';
+            const repository = ${transient ? 'process.env.GCP_ARTIFACT_REPOSITORY' : "process.env.GCP_ARTIFACT_REPOSITORY || 'hypervibe'"};
+            const imageName = process.env.GITHUB_REPOSITORY.toLowerCase().replace(/[^a-z0-9._/-]/g, '-');
+            core.setOutput('registry', registry);
+            core.setOutput('repository', repository);
+            core.setOutput('uri', registry + '/' + process.env.GCP_PROJECT_ID + '/' + repository + '/' + imageName + ':' + process.env.DEPLOY_SHA);
+      - name: Verify GCP Artifact Registry
+        id: gcp
+        if: ${buildCondition}
+        uses: actions/github-script@v9
+        env:
+${transient ? '' : '          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}\n'}          GCP_PROJECT_ID: ${transient ? projectId : '${{ secrets.GCP_PROJECT_ID }}'}
+          GCP_BOUND_PROJECT_ID: ${projectId}
+          GCP_REGION: ${region}
+          GCP_ARTIFACT_REPOSITORY: ${transient ? JSON.stringify(artifactRepository) : '${{ vars.GCP_ARTIFACT_REPOSITORY }}'}
+        with:
+          script: |
+${tokenRuntime(true)}
+${transient ? '            try {\n' : ''}
             for (const key of ['GCP_PROJECT_ID', 'GCP_BOUND_PROJECT_ID', 'GCP_REGION']) {
               if (!process.env[key]) throw new Error(key + ' is required');
             }
@@ -153,9 +194,10 @@ export function buildCloudRunGitHubActionsSteps(target: BranchDeployTarget): Bra
               throw new Error('The verified GCP connection does not match the exact applied project binding');
             }
             const token = await getAccessToken();
-            const repository = process.env.GCP_ARTIFACT_REPOSITORY || 'hypervibe';
+            const repository = ${transient ? 'process.env.GCP_ARTIFACT_REPOSITORY' : "process.env.GCP_ARTIFACT_REPOSITORY || 'hypervibe'"};
             const base = 'https://artifactregistry.googleapis.com/v1/projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/repositories';
-            const getResponse = await fetch(base + '/' + repository, {
+${transient ? `            const observedRepository = await hvGoogleJson(base + '/' + repository);
+            if (observedRepository.createTime !== ${JSON.stringify(artifactRepositoryCreateTime)}) throw new Error('Artifact Registry lifetime identity changed.');` : `            const getResponse = await fetch(base + '/' + repository, {
               headers: { Authorization: 'Bearer ' + token },
             });
             if (getResponse.status === 404) {
@@ -164,31 +206,86 @@ export function buildCloudRunGitHubActionsSteps(target: BranchDeployTarget): Bra
             if (!getResponse.ok) {
               throw new Error('Artifact Registry lookup failed: ' + getResponse.status + ' ' + await getResponse.text());
             }
-            const observedRepository = await getResponse.json();
+            const observedRepository = await getResponse.json();`}
             const expectedRepositoryName = 'projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/repositories/' + repository;
             if (observedRepository.name !== expectedRepositoryName || observedRepository.format !== 'DOCKER') {
               throw new Error('Artifact Registry lookup returned a different or non-DOCKER repository identity');
             }
-            core.setOutput('access_token', token);
+${transient ? `            const registry = process.env.GCP_REGION + '-docker.pkg.dev', username = 'oauth2accesstoken', password = token;
+${GITHUB_EPHEMERAL_DOCKER_LOGIN_RUNTIME.trimEnd().split('\n').map(line => '            ' + line).join('\n')}
+            } catch { throw new Error('GCP registry access could not be verified.'); }
+` : `            core.setOutput('access_token', token);
       - uses: docker/login-action@v3
         if: ${buildCondition}
         with:
           registry: \${{ steps.image.outputs.registry }}
           username: oauth2accesstoken
           password: \${{ steps.gcp.outputs.access_token }}
-${buildDockerfileStep({ ...target, containerStartCommand: cloudRunContainerBuildStartCommand(target) }, buildCondition)}      - uses: docker/setup-buildx-action@v3
+`}${buildDockerfileStep({ ...target, containerStartCommand: cloudRunContainerBuildStartCommand(target) }, buildCondition)}      - uses: docker/setup-buildx-action@v3
         if: ${buildCondition}
       - uses: docker/build-push-action@v6
-        id: build
+        id: ${transient ? 'build_local' : 'build'}
         if: ${buildCondition}
         with:
           context: .
           file: \${{ steps.dockerfile.outputs.path }}
-          push: true
-          tags: \${{ steps.image.outputs.uri }}
+          push: ${transient ? 'false' : 'true'}
+${transient ? '          load: true\n' : ''}          tags: \${{ steps.image.outputs.uri }}
           secrets: |
             npm_token=\${{ secrets.NODE_AUTH_TOKEN }}
-      - name: Resolve immutable Cloud Run image
+${transient ? `      - name: Publish built Cloud Run image with fresh registry access
+        id: build
+        if: ${buildCondition}
+        uses: actions/github-script@v9
+        env:
+          GCP_PROJECT_ID: ${projectId}
+          GCP_REGION: ${region}
+          GCP_ARTIFACT_REPOSITORY: ${JSON.stringify(artifactRepository)}
+          IMAGE_TAG: \${{ steps.image.outputs.uri }}
+          BUILT_IMAGE_ID: \${{ steps.build_local.outputs.imageid }}
+          DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
+        with:
+          script: |
+${tokenRuntime()}
+            try {
+              const imageTag = process.env.IMAGE_TAG, builtImageId = process.env.BUILT_IMAGE_ID;
+              const source = ${JSON.stringify(federation?.repository ?? target.deploymentAccess?.connection.source.repository.slice('github.com/'.length))};
+              if (process.env.GITHUB_REPOSITORY.toLowerCase() !== source.toLowerCase()
+                || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(process.env.DEPLOY_SHA || '')
+                || !/^sha256:[a-f0-9]{64}$/.test(builtImageId || '')) throw new Error('candidate');
+              const imageRepository = process.env.GCP_REGION + '-docker.pkg.dev/' + process.env.GCP_PROJECT_ID + '/' + process.env.GCP_ARTIFACT_REPOSITORY + '/'
+                + source.toLowerCase().replace(/[^a-z0-9._/-]/g, '-');
+              if (imageTag !== imageRepository + ':' + process.env.DEPLOY_SHA) throw new Error('candidate');
+              const expectedRepositoryName = 'projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/repositories/' + process.env.GCP_ARTIFACT_REPOSITORY;
+              const observedRepository = await hvGoogleJson('https://artifactregistry.googleapis.com/v1/' + expectedRepositoryName);
+              if (observedRepository.name !== expectedRepositoryName || observedRepository.format !== 'DOCKER'
+                || observedRepository.createTime !== ${JSON.stringify(artifactRepositoryCreateTime)}) throw new Error('registry');
+              const oldDockerConfig = process.env.DOCKER_CONFIG;
+              const registry = process.env.GCP_REGION + '-docker.pkg.dev', username = 'oauth2accesstoken', password = await getAccessToken();
+              const credentialExpiry = ${federation ? '(await hvGithubGoogleToken()).expiresAt' : 'Date.parse(hvGoogleSession.expiresAt)'};
+${GITHUB_EPHEMERAL_DOCKER_LOGIN_RUNTIME.trimEnd().split('\n').map(line => '              ' + line).join('\n')}
+              if (oldDockerConfig && oldDockerConfig !== dockerConfig && path.dirname(oldDockerConfig) === process.env.RUNNER_TEMP
+                && path.basename(oldDockerConfig).startsWith('hypervibe-docker-')) fs.rmSync(oldDockerConfig, { recursive: true, force: true });
+              const execFileSync = require('node:child_process').execFileSync;
+              const inspect = () => {
+                const result = JSON.parse(execFileSync('docker', ['--config', dockerConfig, 'image', 'inspect', imageTag],
+                  { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 30000, maxBuffer: 1048576 }));
+                if (!Array.isArray(result) || result.length !== 1 || result[0].Id !== builtImageId
+                  || !Array.isArray(result[0].RepoTags) || !result[0].RepoTags.includes(imageTag)) throw new Error('image identity');
+                return result[0];
+              };
+              inspect();
+              const pushBudget = Math.min(840000, credentialExpiry - Date.now() - 30000);
+              if (!Number.isSafeInteger(pushBudget) || pushBudget < 30000) throw new Error('credential expiry');
+              execFileSync('docker', ['--config', dockerConfig, 'push', imageTag],
+                { stdio: ['ignore', 'ignore', 'ignore'], timeout: pushBudget });
+              const result = inspect();
+              const digests = Array.isArray(result.RepoDigests) ? result.RepoDigests.filter(value => typeof value === 'string'
+                && value.startsWith(imageRepository + '@') && /^sha256:[a-f0-9]{64}$/.test(value.slice(imageRepository.length + 1))) : [];
+              if (digests.length !== 1) throw new Error('immutable digest');
+              core.setOutput('digest', digests[0].slice(imageRepository.length + 1));
+            } catch { throw new Error('The exact built Cloud Run image could not be published with fresh registry access.'); }
+` : ''}      - name: Resolve immutable Cloud Run image
         id: release_image
         if: ${buildCondition}
         uses: actions/github-script@v9
@@ -208,8 +305,7 @@ ${buildDockerfileStep({ ...target, containerStartCommand: cloudRunContainerBuild
         id: runtime_deploy
         uses: actions/github-script@v9
         env:
-          GCP_SERVICE_ACCOUNT_JSON: \${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
-          GCP_PROJECT_ID: \${{ secrets.GCP_PROJECT_ID }}
+${transient ? '' : '          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}\n'}          GCP_PROJECT_ID: ${transient ? projectId : '${{ secrets.GCP_PROJECT_ID }}'}
           GCP_BOUND_PROJECT_ID: ${projectId}
           GCP_REGION: ${region}
           CLOUDRUN_SERVICE_NAMES: ${cloudRunServiceNames}
@@ -221,34 +317,9 @@ ${buildDockerfileStep({ ...target, containerStartCommand: cloudRunContainerBuild
         with:
           script: |
             const credentialDeployments = [];
-            const crypto = require('crypto');
-
-            async function getAccessToken() {
-              const credentials = JSON.parse(process.env.GCP_SERVICE_ACCOUNT_JSON);
-              const now = Math.floor(Date.now() / 1000);
-              const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
-              const unsigned = encode({ alg: 'RS256', typ: 'JWT' }) + '.' + encode({
-                iss: credentials.client_email,
-                scope: 'https://www.googleapis.com/auth/cloud-platform',
-                aud: 'https://oauth2.googleapis.com/token',
-                iat: now,
-                exp: now + 3600,
-              });
-              const signature = crypto.sign('RSA-SHA256', Buffer.from(unsigned), credentials.private_key).toString('base64url');
-              const response = await fetch('https://oauth2.googleapis.com/token', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: new URLSearchParams({
-                  grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-                  assertion: unsigned + '.' + signature,
-                }),
-              });
-              const body = await response.text();
-              if (!response.ok) throw new Error('GCP token exchange failed: ' + response.status + ' ' + body);
-              return JSON.parse(body).access_token;
-            }
-
-            const required = ['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID', 'GCP_BOUND_PROJECT_ID', 'GCP_REGION', 'CLOUDRUN_RELEASE_COMMANDS_B64', 'CLOUDRUN_RUNTIME_RESOURCES_B64', 'IMAGE_URI'];
+${tokenRuntime()}
+${transient ? '            try {\n' : ''}
+            const required = [${transient ? '' : "'GCP_SERVICE_ACCOUNT_JSON', "}'GCP_PROJECT_ID', 'GCP_BOUND_PROJECT_ID', 'GCP_REGION', 'CLOUDRUN_RELEASE_COMMANDS_B64', 'CLOUDRUN_RUNTIME_RESOURCES_B64', 'IMAGE_URI'];
             for (const key of required) {
               if (!process.env[key]) throw new Error(key + ' is required');
             }
@@ -273,7 +344,7 @@ ${buildDockerfileStep({ ...target, containerStartCommand: cloudRunContainerBuild
             }
 
             async function googleJson(url, options, description) {
-              const response = await fetch(url, options);
+${transient ? '              return hvGoogleJson(url, options);' : `              const response = await fetch(url, options);
               const body = await response.text();
               let payload;
               try {
@@ -287,7 +358,7 @@ ${buildDockerfileStep({ ...target, containerStartCommand: cloudRunContainerBuild
               if (!payload) {
                 throw new Error(description + ' returned non-JSON: ' + body);
               }
-              return payload;
+              return payload;`}
             }
 
             function shortJson(value) {
@@ -363,14 +434,14 @@ ${buildDockerfileStep({ ...target, containerStartCommand: cloudRunContainerBuild
               for (let attempt = 0; attempt < 120; attempt++) {
                 last = await googleJson(url, { headers: { Authorization: 'Bearer ' + token } }, 'Cloud Run ' + kind + ' readiness lookup for ' + name);
                 const state = readiness(last, kind);
-                const summary = conditionSummary(last);
+                const summary = ${transient ? "''" : 'conditionSummary(last)'};
                 core.info('Cloud Run ' + kind + ' ' + name + ' readiness: ' + (state.ready ? 'ready' : last.reconciling ? 'reconciling' : 'pending') + (summary ? ' - ' + summary : ''));
                 const container = kind === 'service' ? primaryServiceContainer(last) : primaryJobContainer(last);
                 if (state.ready && (!expectedImage || container.image === expectedImage)) {
                   const expectedName = 'projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/' + (kind === 'service' ? 'services/' : 'jobs/') + name;
                   if (last.name !== expectedName) throw new Error('Cloud Run ' + kind + ' ' + name + ' returned a different resource identity');
                   cloudRunVerifyFilesystem(last, kind, filesystem);
-                  const mismatch = cloudRunRuntimeMismatch(container, runtimeResource);
+${instanceBounds ? '                  assertCloudRunInstanceBounds(last.scaling, runtimeResource.instanceBounds);\n' : ''}${prepared ? `                  if (filesystem.preparedConfigurationDigest && hvPreparedDigest(gcpObservedPreparedApplicationConfiguration(last)) !== filesystem.preparedConfigurationDigest) throw new Error('The first Google application configuration did not converge.');\n` : ''}                  const mismatch = cloudRunRuntimeMismatch(container, runtimeResource);
                   if (mismatch) throw new Error('Cloud Run ' + kind + ' ' + name + ' did not converge to the exact reviewed ' + mismatch);
                   return last;
                 }
@@ -394,14 +465,20 @@ ${buildDockerfileStep({ ...target, containerStartCommand: cloudRunContainerBuild
               return next;
             }
 
-${releaseRuntime}
+${preparedRuntime}${releaseRuntime}
             const runtimeResources = cloudRunRuntimeResourcesFromBase64(
               process.env.CLOUDRUN_RUNTIME_RESOURCES_B64,
               serviceNames,
               jobNames
             );
             if (process.env.DEPLOY_OPERATION !== 'rollback') {
-              await runCloudRunReleaseCommands({
+${instanceBounds ? `              for (const resource of runtimeResources.filter(item => item.instanceBounds)) {
+                const name = 'projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/services/' + resource.providerResourceId;
+                const current = await googleJson('https://run.googleapis.com/v2/' + name, { headers: { Authorization: 'Bearer ' + token } }, 'Cloud Run instance bounds preflight');
+                if (current.name !== name) throw new Error('Cloud Run instance bounds resource identity changed');
+                ${prepared ? 'if (!hvPreparedService(current, resource)) ' : ''}assertCloudRunInstanceBounds(current.scaling, resource.instanceBounds);
+              }
+` : ''}              await runCloudRunReleaseCommands({
                 releases: releaseCommands,
                 imageUri: process.env.IMAGE_URI,
                 projectId: process.env.GCP_PROJECT_ID,
@@ -420,8 +497,9 @@ ${releaseRuntime}
               const expectedName = 'projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/services/' + serviceName;
               if (current.name !== expectedName) throw new Error('Cloud Run service lookup returned a different resource identity');
               const runtimeResource = cloudRunRuntimeResource(runtimeResources, 'service', serviceName);
-              const filesystem = cloudRunFilesystemGuard(current, 'service', runtimeResource.providerResourceUid);
-              const template = current.template || {};
+${prepared ? `              const firstRelease = hvPreparedService(current, runtimeResource);\n` : ''}${instanceBounds ? `              ${prepared ? 'if (!firstRelease) ' : ''}assertCloudRunInstanceBounds(current.scaling, runtimeResource.instanceBounds);\n` : ''}              const filesystem = cloudRunFilesystemGuard(current, 'service', runtimeResource.providerResourceUid);
+${prepared ? `              if (firstRelease) { filesystem.runtimePrincipal = firstRelease.runtimeEmail; filesystem.preparedConfigurationDigest = firstRelease.configurationDigest; }
+              const template = firstRelease ? { ...firstRelease.configuration.template, ...(current.template?.labels ? { labels: current.template.labels } : {}) } : current.template || {};` : '              const template = current.template || {};'}
               const containers = Array.isArray(template.containers) && template.containers.length > 0 ? [...template.containers] : [primaryServiceContainer(current)];
               containers[0] = cloudRunContainerWithRuntime(containers[0], process.env.IMAGE_URI, runtimeResource);
               template.containers = containers;
@@ -429,11 +507,11 @@ ${releaseRuntime}
               const annotations = releaseHash
                 ? { ...(current.annotations || {}), [${releaseCommandAnnotation}]: releaseHash }
                 : current.annotations;
-              const updateMask = releaseHash ? 'annotations,template.containers' : 'template.containers';
+              const updateMask = ${prepared ? (instanceBounds ? "firstRelease ? 'ingress,template,scaling' : " : "firstRelease ? 'ingress,template' : ") : ''}releaseHash ? 'annotations,template.containers' : 'template.containers';
               const operation = await googleJson(url + '?updateMask=' + updateMask, {
                 method: 'PATCH',
                 headers,
-                body: JSON.stringify({ ...(annotations ? { annotations } : {}), ...(filesystem.etag ? { etag: filesystem.etag } : {}), template }),
+                body: JSON.stringify({ ${prepared ? `...(firstRelease ? { ingress: firstRelease.configuration.ingress${instanceBounds ? ', ...(firstRelease.configuration.scaling ? { scaling: firstRelease.configuration.scaling } : {})' : ''} } : {}), ` : ''}...(annotations ? { annotations } : {}), ...(filesystem.etag ? { etag: filesystem.etag } : {}), template }),
               }, 'Cloud Run service deployment for ' + serviceName);
               await waitOperation(operation, 'service ' + serviceName + ' deployment');
               const ready = await waitReady(url, serviceName, 'service', process.env.IMAGE_URI, runtimeResource, filesystem);
@@ -462,8 +540,8 @@ ${releaseRuntime}
               await waitReady(url, jobName, 'job', process.env.IMAGE_URI, runtimeResource, filesystem);
             }
             core.setOutput('credential_deployments', JSON.stringify(credentialDeployments));
-`,
-    requiredSecrets: CLOUDRUN_CI_REQUIRED_SECRETS,
+${transient ? "            } catch { throw new Error('Cloud Run release could not be verified.'); }\n" + GITHUB_EPHEMERAL_DOCKER_CLEANUP_STEP : ''}`,
+    requiredSecrets: transient ? [] : CLOUDRUN_CI_REQUIRED_SECRETS,
     requiredVariables,
   };
 }

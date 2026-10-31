@@ -1,0 +1,13 @@
+{
+  "sourceUrl": "https://raw.githubusercontent.com/twilio/sendgrid-oai/fb95a935c87b79f7f982ac34bd37adab1f697dbc/spec/json/tsg_mail_v3.json",
+  "upstreamRevision": "fb95a935c87b79f7f982ac34bd37adab1f697dbc",
+  "schemaFile": "mail.openapi.json",
+  "schemaSha256": "4ba24d0feb8a6b347f60528161d1cf0e7591987d2b3a64a6533685dc2b39d19f",
+  "extraction": "Exact downloaded bytes; no transformation. Contract validation selects Mail Send POST request body only.",
+  "consultedAt": "2026-10-27",
+  "semanticEvidence": {
+    "sourceUrl": "https://www.twilio.com/docs/sendgrid/for-developers/sending-email/sandbox-mode",
+    "coverage": "Fixed mail_settings.sandbox_mode.enable Boolean true validates without delivery, activity events or credits. Successful sandbox responses are HTTP 200, which is not declared by the generic Mail Send OpenAPI response list. Authentication, real sender authorization, exact effective scopes and real delivery are distinct."
+  },
+  "evidence": "Reconstructed HTTP responses through actual adapter/application/CLI/MCP; not captured traffic or live compatibility."
+}

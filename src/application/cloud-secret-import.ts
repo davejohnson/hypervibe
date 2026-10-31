@@ -34,7 +34,7 @@ const keySchema = z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/);
 const metadataSchema = z
   .object({
     schemaVersion: z.literal(1),
-    requestId: z.string().uuid(),
+    requestId: z.string().guid(),
     repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
     environment: z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/),
     sourceRevision: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/),
@@ -54,7 +54,7 @@ const stateSchema = z
     version: z.literal(1),
     status: z.enum(['pending', 'consuming', 'received', 'imported']),
     root: z.string(),
-    requestId: z.string().uuid(),
+    requestId: z.string().guid(),
     environment: z.string(),
     repository: z.string(),
     sourceRevision: z.string(),
@@ -320,7 +320,7 @@ export function createCloudSecretImport({
 
   async function run(input: SecretImportInput): Promise<Record<string, unknown>> {
     if (
-      !z.string().uuid().safeParse(input.requestId).success ||
+      !z.string().guid().safeParse(input.requestId).success ||
       !/^[a-z0-9][a-z0-9-]{0,79}$/.test(input.env) ||
       input.env === 'example'
     )
@@ -456,12 +456,13 @@ export function createCloudSecretImport({
       new Set(metadata.keys).size !== metadata.keys.length ||
       metadata.keys.some((key) => {
         const slot = scope.spec.secrets?.[key];
-        return !slot || slot.ownership !== 'delegated' || !slot.environments.includes(input.env);
+        return !slot || slot.ownership !== 'delegated' || !slot.environments.includes(input.env)
+          || Boolean(scope.spec.environments[input.env].secretDestinations?.[key]);
       })
     )
       throw new HvError(
         'VALIDATION',
-        'The approved request does not match this committed repository, environment, and delegated key set.'
+        'The approved request does not match this committed repository, environment, and locally imported delegated key set. Secret-manager destinations cannot be imported into env files.'
       );
     // A crash after rename but before the receipt must not cause another fetch
     // or mistake our completed write for an owner-supplied value to overwrite.

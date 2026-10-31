@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { isNonSecretConnectionField } from '../../lib/value-free-coordinates.js';
+import { unwrapCredentialSchema } from '../services/connection-guidance.js';
 import type { ProviderCiDeployMetadata } from '../ports/ci-deploy.port.js';
 import type { ProviderDatabaseRestoreDrillMetadata } from '../ports/database-restore-drill.port.js';
 import type { Project } from '../entities/project.entity.js';
@@ -7,8 +9,11 @@ import type { Component } from '../entities/component.entity.js';
 import type { WorkloadKind } from '../entities/service.entity.js';
 import type { Receipt } from '../ports/provider.port.js';
 import type { HostedObservationCapability } from '../ports/hosted-observation.port.js';
+import type { CloudDeploymentAdapterCapabilityV1, CloudDeploymentAdapterInputV1 } from '../ports/cloud-deployment.port.js';
+import type { LocalCloudScopePreparationCapability, OperatorArtifactCapability } from '../ports/cloud-installation.port.js';
+import { CloudDeploymentAccessError, validateCloudDeploymentAdapterInputV1 } from '../services/cloud-deployment-authentication.js';
 
-export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'messaging' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
+export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'messaging' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai' | 'identity';
 export type ProviderLifecycleCapability =
   | 'hosting'
   | 'database'
@@ -130,25 +135,10 @@ export const standardDatabaseRuntimeProjection: ProviderDatabaseRuntimeProjectio
 };
 
 function credentialSchemaKeys(schema: z.ZodTypeAny): Set<string> | null {
-  let current: z.core.$ZodType = schema;
-  while (true) {
-    if (current instanceof z.ZodPipe) {
-      // Refinements and brands retain their schema in v4; transforms use pipes.
-      current = current.in instanceof z.ZodTransform ? current.out : current.in;
-      continue;
-    }
-    if (
-      current instanceof z.ZodOptional
-      || current instanceof z.ZodNullable
-      || current instanceof z.ZodDefault
-      || current instanceof z.ZodCatch
-      || current instanceof z.ZodPrefault
-      || current instanceof z.ZodReadonly
-    ) {
-      current = current.unwrap();
-      continue;
-    }
-    break;
+  const current = unwrapCredentialSchema(schema);
+  if (current instanceof z.ZodUnion) {
+    const alternatives = current.options.map(option => credentialSchemaKeys(option as z.ZodTypeAny));
+    return alternatives.every(keys => keys !== null) ? new Set(alternatives.flatMap(keys => [...keys!])) : null;
   }
   return current instanceof z.ZodObject
     ? new Set(Object.keys(current.shape))
@@ -156,6 +146,11 @@ function credentialSchemaKeys(schema: z.ZodTypeAny): Set<string> | null {
 }
 
 export interface ProviderMetadata {
+  /** Explicit empty-container setup; delivery and runtime reference support are separate. */
+  secretDestinationSetupProviders?: Array<import('../ports/secret-destination.port.js').SecretDestination['provider']>;
+  runtimeSecretReferenceProviders?: Array<import('../ports/secret-destination.port.js').SecretDestination['provider']>;
+  /** Provider final mutation refuses any already-existing workload. */
+  supportsCreateOnlyDeploy?: boolean;
   name: string;
   displayName: string;
   category: ProviderCategory;
@@ -169,8 +164,18 @@ export interface ProviderMetadata {
     hostedMonitoring?: { credentialKind: string; credentialKey: string; scope: 'project' };
     /** Credential values supplied by an opinionated Hypervibe workflow, not user-facing forms. */
     agentManagedKeys?: string[];
+    /** Enum choices established by a reviewed workflow, excluded from manual forms. */
+    agentManagedChoices?: Record<string, string[]>;
     /** The adapter can authenticate through the provider's native local CLI/default chain. */
     supportsNativeCliAuth?: boolean;
+    /** Non-secret authenticated selectors verification may pin, never silently replace. */
+    verifiedIdentityKeys?: string[];
+    /** Reject local or expiring sessions before unattended CI/backup automation. */
+    canUseForAutomation?: (credentials: Record<string, unknown>) => boolean;
+    /** Reconstruct public federation configuration from the exact reviewed environment. */
+    automationAuthentication?: (environment: Environment) => {
+      credentials: Record<string, unknown>; environmentKeys: readonly string[]; oidc: boolean;
+    } | undefined;
     /**
      * Environment-variable names which may resolve the same credential value.
      * Exact requested names win; aliases are only fallbacks.
@@ -191,6 +196,7 @@ export interface ProviderMetadata {
   connectionAliases?: string[];
   /** Versioned provider-owned runtime projection; changes require reviewed per-consumer rewiring. */
   storageRuntimeContract?: string;
+  storageRuntimeAccess?: { hostingProviders: readonly string[] };
   maturity?: {
     /** Evidence status for each lifecycle slice implemented by this registration. */
     lifecycle?: Partial<Record<ProviderLifecycleCapability, ProviderCapabilityMaturity>>;
@@ -199,8 +205,13 @@ export interface ProviderMetadata {
   lifecycle?: {
     /** Hosting lifecycle exists only when the provider is valid in environments.*.hosting. */
     hosting?: {
+      /** Optional read-only binding of exact administrator-installed resources. No create/deploy authority. */
+      preparedResources?: 'installer-receipt-v1';
       /** Workload kinds this adapter can reconcile through the complete hosting lifecycle. */
       workloadKinds: readonly WorkloadKind[];
+      /** Complete service-wide automatic min/max reconciliation, distinct from revision limits. */
+      instanceBounds?: 'service-wide';
+      runtimeIdentityTiming?: 'before-workload' | 'after-workload';
       /** Explicit, retain-only filesystem mounts; never implicit service provisioning. */
       serviceVolumes?: {
         workloadKinds: readonly WorkloadKind[];
@@ -229,6 +240,12 @@ export interface ProviderMetadata {
         status: 'ready-for-live';
         /** Native database references the private helper can actually resolve. */
         databaseProviders: readonly string[];
+      };
+      /** Explicit staged prerequisite for a native private recovery worker. */
+      recoveryRuntime?: {
+        databaseProviders: readonly string[];
+        storageProviders: readonly string[];
+        status: 'ready-for-live';
       };
       /** Fresh-generation SQL verification and reviewed schema bootstrap only. */
       databaseInitializationTasks?: {
@@ -348,6 +365,14 @@ export interface ProviderOrchestrationMetadata {
 export interface RegisteredProvider {
   metadata: ProviderMetadata;
   factory: (credentials: unknown) => unknown | Promise<unknown>;
+  /** Separate callback-only deployment authority; never falls back to a credential factory. */
+  transientAuthentication?: CloudDeploymentAdapterCapabilityV1;
+  /** Explicit local scope allocation only; independent from hosting credentials or deployment. */
+  localScopePreparation?: LocalCloudScopePreparationCapability;
+  holdingPreparation?: import('../ports/local-holding-preparation.port.js').LocalHoldingPreparationCapability;
+  artifactPublication?: OperatorArtifactCapability;
+  operatorApplication?: import('../ports/operator-application.port.js').OperatorApplicationCapability;
+  operatorOutputDelivery?: import('../ports/operator-output.port.js').OperatorOutputDeliveryCapability;
   /** Optional hook to install CLI tools or other dependencies when a connection is created. */
   ensureDependencies?: () => Promise<{ installed: string[]; errors: string[] }>;
   /** Optional provider-owned raw forensic reads used by hv_inspect. */
@@ -388,15 +413,29 @@ export class ProviderRegistry {
     this.assertCapabilityMaturity(provider);
     this.assertDatabaseRuntimeProjection(provider);
     this.assertInspectionContract(provider);
+    if (provider.transientAuthentication) {
+      const capability = provider.transientAuthentication;
+      if (provider.metadata.category !== 'deployment' || capability.hostingProvider !== provider.metadata.name
+        || !['aws', 'azure', 'gcp'].includes(capability.provider)
+        || typeof capability.parseScope !== 'function' || typeof capability.createAdapter !== 'function') {
+        throw new CloudDeploymentAccessError('invalid_contract');
+      }
+    }
     this.providers.set(provider.metadata.name, provider);
   }
 
   private assertCredentialMetadata(provider: RegisteredProvider): void {
     const inputs = provider.metadata.credentials?.localEnvInputs ?? [];
     const agentManagedKeys = provider.metadata.credentials?.agentManagedKeys ?? [];
-    const schemaKeys = inputs.length > 0 || agentManagedKeys.length > 0
+    const managedChoices = provider.metadata.credentials?.agentManagedChoices ?? {};
+    const identityKeys = provider.metadata.credentials?.verifiedIdentityKeys ?? [];
+    const schemaKeys = inputs.length > 0 || agentManagedKeys.length > 0 || identityKeys.length > 0
       ? credentialSchemaKeys(provider.metadata.credentialsSchema)
       : null;
+    if (!Array.isArray(identityKeys) || new Set(identityKeys).size !== identityKeys.length
+      || identityKeys.some(key => !isNonSecretConnectionField(key) || !schemaKeys?.has(key))) {
+      throw new Error(`Provider "${provider.metadata.name}" has invalid verified connection identity keys.`);
+    }
     const keys = inputs.map((input) => input.envKey);
     if (new Set(keys).size !== keys.length) {
       throw new Error(`Provider "${provider.metadata.name}" local env input keys must be unique.`);
@@ -406,6 +445,17 @@ export class ProviderRegistry {
       || agentManagedKeys.some((key) => !schemaKeys?.has(key))
     ) {
       throw new Error(`Provider "${provider.metadata.name}" has invalid agent-managed credential keys.`);
+    }
+    const object = unwrapCredentialSchema(provider.metadata.credentialsSchema);
+    for (const [key, choices] of Object.entries(managedChoices)) {
+      const field = object instanceof z.ZodObject ? object.shape[key] : undefined;
+      const enumeration = field ? unwrapCredentialSchema(field) : undefined;
+      if (!(enumeration instanceof z.ZodEnum) || !choices.length
+        || new Set(choices).size !== choices.length || choices.some(choice => !enumeration.options.includes(choice))
+        || choices.length === enumeration.options.length || agentManagedKeys.includes(key)
+        || choices.includes(field.safeParse(undefined).data)) {
+        throw new Error(`Provider "${provider.metadata.name}" has invalid agent-managed credential choices.`);
+      }
     }
     const credentialRoleOwners = new Map<string, string>();
     for (const input of inputs) {
@@ -881,11 +931,36 @@ export class ProviderRegistry {
     return await provider.factory(creds) as T;
   }
 
+  /** Explicit short-lived access path. Absence is unsupported, never a legacy-key fallback. */
+  async createTransientAdapter<T = unknown>(name: string, input: CloudDeploymentAdapterInputV1): Promise<T> {
+    const capability = this.providers.get(name)?.transientAuthentication;
+    if (!capability) throw new CloudDeploymentAccessError('unsupported');
+    const validated = validateCloudDeploymentAdapterInputV1(input, capability);
+    return await capability.createAdapter(validated) as T;
+  }
+
   /**
    * Get provider metadata
    */
   getMetadata(name: string): ProviderMetadata | undefined {
     return this.providers.get(name)?.metadata;
+  }
+
+  getArtifactPublication(name: string): OperatorArtifactCapability | undefined {
+    return this.providers.get(name)?.artifactPublication;
+  }
+  getOperatorApplication(name: string): import('../ports/operator-application.port.js').OperatorApplicationCapability | undefined {
+    return this.providers.get(name)?.operatorApplication;
+  }
+  getOperatorOutputDelivery(name: string): import('../ports/operator-output.port.js').OperatorOutputDeliveryCapability | undefined {
+    return this.providers.get(name)?.operatorOutputDelivery;
+  }
+
+  getLocalScopePreparation(name: string): LocalCloudScopePreparationCapability | undefined {
+    return this.providers.get(name)?.localScopePreparation;
+  }
+  getHoldingPreparation(name: string): import('../ports/local-holding-preparation.port.js').LocalHoldingPreparationCapability | undefined {
+    return this.providers.get(name)?.holdingPreparation;
   }
 }
 

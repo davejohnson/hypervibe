@@ -1,5 +1,6 @@
 import type { EnvironmentSpec, ProjectRuntimeSpec } from './spec.schema.js';
 import type { DesiredState } from '../services/spec.service.js';
+import { runtimeSecretReferenceSchema, type RuntimeSecretReference } from '../ports/secret-destination.port.js';
 
 export interface BootstrapParams {
   projectName: string;
@@ -19,6 +20,10 @@ export interface BootstrapParams {
   queueEnvVars?: Record<string, string>;
   /** Managed runtime variables that apply only to one service. */
   envVarsByService?: Record<string, Record<string, string>>;
+  /** Immutable references projected from the reviewed environment spec. */
+  secretVersionRefs?: Record<string, RuntimeSecretReference>;
+  /** Current reviewed apply intent, never inferred from an empty inventory. */
+  creationOnlyServices?: string[];
   /**
    * Service actions depend on an explicit project action, so they must not
    * silently re-run project creation while deploying one workload.
@@ -80,6 +85,9 @@ export function specToBootstrapParams(
   runtime?: ProjectRuntimeSpec
 ): BootstrapParams {
   const env = withMigrationReleaseCommand(envInput);
+  const secretVersionRefs = Object.fromEntries(Object.entries(env.secretDestinations ?? {})
+    .filter(([, binding]) => binding.version !== undefined)
+    .map(([key, binding]) => [key, runtimeSecretReferenceSchema.parse(binding)]));
   const services: string[] = [];
   const crons: NonNullable<DesiredState['crons']> = {};
   const serviceConfig: NonNullable<DesiredState['serviceConfig']> = {};
@@ -97,6 +105,7 @@ export function specToBootstrapParams(
 
     const config: Record<string, unknown> = {};
     config.workloadKind = service.workloadKind;
+    if (service.instanceBounds !== undefined) config.instanceBounds = service.instanceBounds;
     if (service.startCommand !== undefined) config.startCommand = service.startCommand;
     if (service.releaseCommand !== undefined) config.releaseCommand = service.releaseCommand;
     if (service.healthCheckPath !== undefined) config.healthCheckPath = service.healthCheckPath;
@@ -124,6 +133,7 @@ export function specToBootstrapParams(
     ...(Object.keys(crons).length > 0 ? { crons } : {}),
     ...(Object.keys(serviceConfig).length > 0 ? { serviceConfig } : {}),
     ...(Object.keys(env.envVars).length > 0 ? { envVars: env.envVars } : {}),
+    ...(Object.keys(secretVersionRefs).length > 0 ? { secretVersionRefs } : {}),
     ...(deploy ? { deploy } : {}),
     ...(runtime ? { runtime } : {}),
   };

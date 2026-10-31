@@ -45,7 +45,7 @@
     "registry": "https://registry.npmjs.org"
   },
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.build.json && node scripts/build-fly-wireguard.mjs && node scripts/build-agent-packages.mjs",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && node scripts/build-fly-wireguard.mjs && node scripts/build-agent-packages.mjs && node scripts/package-operator-artifact-lock.mjs",
     "build:agents": "node scripts/build-agent-packages.mjs",
     "build:fly-wireguard": "node scripts/build-fly-wireguard.mjs",
     "dev": "tsc --watch",
@@ -69,6 +69,7 @@
   "dependencies": {
     "@1password/sdk": "^0.4.0",
     "@aws-sdk/client-acm": "^3.1106.0",
+    "@aws-sdk/client-cloudformation": "3.1106.0",
     "@aws-sdk/client-ec2": "^3.1092.0",
     "@aws-sdk/client-ecr": "^3.1106.0",
     "@aws-sdk/client-ecs": "^3.1106.0",
@@ -78,9 +79,11 @@
     "@aws-sdk/client-iam": "^3.1106.0",
     "@aws-sdk/client-rds": "^3.1092.0",
     "@aws-sdk/client-s3": "^3.1108.0",
+    "@aws-sdk/client-s3-control": "3.1108.0",
+    "@aws-sdk/client-secrets-manager": "3.1106.0",
     "@aws-sdk/client-sts": "^3.1106.0",
     "@aws-sdk/credential-provider-node": "^3.972.80",
-    "@azure/identity": "4.13.2",
+    "@azure/identity": "4.13.2-hypervibe.1",
     "@azure/storage-blob": "^12.33.0",
     "@bitwarden/sdk-napi": "^1.0.0",
     "@google-cloud/cloud-sql-connector": "1.10.0",
@@ -111,21 +114,21 @@
   "overrides": {
     "googleapis-common": {
       "gaxios": "7.3.0"
-    },
-    "@azure/identity@4.13.2": {
-      "@azure/msal-node": "7.1.1"
     }
   },
+  "bundleDependencies": [
+    "@azure/identity"
+  ],
   "files": [
     "dist/",
     "skills/",
     "data/.gitkeep",
-    "templates/"
+    "templates/",
+    "test/backup-runner-smoke.mjs",
+    "vendor/azure-identity-4.13.2-hypervibe.1.tgz",
+    "vendor/azure-identity.provenance.json"
   ],
   "engines": {
     "node": ">=22.0.0"
-  },
-  "bundleDependencies": [
-    "@azure/identity"
-  ]
+  }
 }

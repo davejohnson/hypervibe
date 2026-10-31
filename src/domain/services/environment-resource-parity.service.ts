@@ -13,6 +13,7 @@ function resources(environment: EnvironmentSpec): Map<string, unknown> {
       timeZone: service.timeZone,
       public: service.public ?? service.workloadKind === 'web',
       healthCheck: service.healthCheckPath,
+      ...(service.instanceBounds ? { instanceBounds: service.instanceBounds } : {}),
     });
   }
   for (const kind of ['database', 'cache'] as const) {

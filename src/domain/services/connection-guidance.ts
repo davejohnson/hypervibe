@@ -38,6 +38,32 @@ export const GITLAB_TOKEN_URLS = {
   deployTokenDocs: 'https://docs.gitlab.com/user/project/deploy_tokens/',
 } as const;
 
+export interface LocalAuthenticationRecipe {
+  credentialMode: 'default';
+  macosInstall: { command: 'brew'; args: string[]; documentationUrl: string };
+  signIn: { command: string; args: string[]; documentationUrl: string };
+  agentInstruction: string;
+}
+const LOCAL_AUTHENTICATION_INSTRUCTION = 'For explicitly chosen local/operator authentication, reuse a valid sign-in first. On the same machine and OS user as the credential reader, install the missing CLI and initiate its browser sign-in yourself; preserve existing profiles and selected accounts. The user completes browser consent and MFA. These commands create no cloud resources and grant no new IAM permissions. Verify the exact account/project/subscription through Hypervibe afterward; do not export the session into CI or runtime. A permission error does not prove that login is missing. New hosted Connect Cloud customers use the separate browser connection flow and need no local CLI.';
+const AWS_LOCAL_AUTHENTICATION: LocalAuthenticationRecipe = {
+  credentialMode: 'default',
+  macosInstall: { command: 'brew', args: ['install', 'awscli'], documentationUrl: 'https://formulae.brew.sh/formula/awscli' },
+  signIn: { command: 'aws', args: ['login'], documentationUrl: 'https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sign-in.html' },
+  agentInstruction: LOCAL_AUTHENTICATION_INSTRUCTION + ' AWS login requires CLI 2.32.0 or newer and existing SignInLocalDevelopmentAccess authority. Use an existing IAM Identity Center profile with aws sso login when applicable; do not create access keys or attach policies as a login workaround. If the AWS browser shows 400 Bad Request, open the active CLI session\'s original authorization URL in a private browser window. If that session expired, initiate a fresh scoped login first; never reuse an old error-page URL or alter its state, callback or challenge. Stale browser cookies are a possible cause, not a diagnosis. Do not automatically clear browser cookies, delete profiles or request credentials in chat. If the error persists, check the selected region and existing SignInLocalDevelopmentAccess authority using AWS troubleshooting guidance; verify the exact account after login succeeds.',
+};
+const AZURE_LOCAL_AUTHENTICATION: LocalAuthenticationRecipe = {
+  credentialMode: 'default',
+  macosInstall: { command: 'brew', args: ['install', 'azure-cli'], documentationUrl: 'https://learn.microsoft.com/en-us/cli/azure/install-azure-cli-macos' },
+  signIn: { command: 'az', args: ['login'], documentationUrl: 'https://learn.microsoft.com/en-us/cli/azure/authenticate-azure-cli-interactively' },
+  agentInstruction: LOCAL_AUTHENTICATION_INSTRUCTION,
+};
+const GOOGLE_LOCAL_AUTHENTICATION: LocalAuthenticationRecipe = {
+  credentialMode: 'default',
+  macosInstall: { command: 'brew', args: ['install', '--cask', 'gcloud-cli'], documentationUrl: 'https://formulae.brew.sh/cask/gcloud-cli' },
+  signIn: { command: 'gcloud', args: ['auth', 'application-default', 'login'], documentationUrl: 'https://docs.cloud.google.com/docs/authentication/set-up-adc-local-dev-environment' },
+  agentInstruction: LOCAL_AUTHENTICATION_INSTRUCTION + ' ADC quota-project selection is separate from the explicitly reviewed hosting project; do not change project or billing configuration as part of login.',
+};
+
 export interface ConnectionGuidance {
   provider: string;
   displayName: string;
@@ -47,6 +73,7 @@ export interface ConnectionGuidance {
   permissions: string[];
   credentialExample: string;
   notes?: string[];
+  localAuthentication?: LocalAuthenticationRecipe;
 }
 
 /** Non-secret context only; repository identity is a label, not an access grant. */
@@ -69,6 +96,7 @@ export interface ConnectionSetupDetails {
   requiredPermissions: string[];
   credentialExample: string;
   notes?: string[];
+  localAuthentication?: LocalAuthenticationRecipe;
 }
 
 export type CredentialInputKind = 'text' | 'secret' | 'multilineSecret' | 'choice';
@@ -87,23 +115,26 @@ export interface CredentialFieldDescriptor {
   description?: string;
 }
 
-function unwrapSchema(schema: z.core.$ZodType): z.core.$ZodType {
+export function unwrapCredentialSchema(schema: z.core.$ZodType): z.core.$ZodType {
   let current = schema;
   while (true) {
     if (current instanceof z.ZodPipe) {
-      // Refinements and brands retain their schema in v4; transforms use pipes.
-      current = current.in instanceof z.ZodTransform ? current.out : current.in;
+      // Preprocessing feeds a transform into the declared input schema; a
+      // post-parse transform instead leaves that schema on the input side.
+      const inner = current.in instanceof z.ZodTransform ? current.out : current.in;
+      current = inner;
       continue;
     }
     if (
       current instanceof z.ZodOptional
       || current instanceof z.ZodNullable
       || current instanceof z.ZodDefault
-      || current instanceof z.ZodCatch
       || current instanceof z.ZodPrefault
+      || current instanceof z.ZodCatch
       || current instanceof z.ZodReadonly
     ) {
-      current = current.unwrap();
+      const inner = current.unwrap();
+      current = inner;
       continue;
     }
     return current;
@@ -139,7 +170,8 @@ function isSensitiveCredentialField(name: string): boolean {
 
 function enumOptions(schema: z.core.$ZodType): string[] | undefined {
   if (schema instanceof z.ZodEnum) {
-    return [...new Set(schema.options.filter((value): value is string => typeof value === 'string'))];
+    const options = schema.options.filter((value): value is string => typeof value === 'string');
+    return [...new Set(options)];
   }
   return undefined;
 }
@@ -151,20 +183,20 @@ function enumOptions(schema: z.core.$ZodType): string[] | undefined {
  */
 export function credentialFieldsFromSchema(
   schema: z.ZodTypeAny,
-  options: { exclude?: readonly string[] } = {}
+  options: { exclude?: readonly string[]; excludeChoices?: Readonly<Record<string, readonly string[]>> } = {}
 ): CredentialFieldDescriptor[] | undefined {
-  const objectSchema = unwrapSchema(schema);
+  const objectSchema = unwrapCredentialSchema(schema);
   if (!(objectSchema instanceof z.ZodObject)) {
     return undefined;
   }
 
   const excluded = new Set(options.exclude ?? []);
   return Object.entries(objectSchema.shape).filter(([name]) => !excluded.has(name)).map(([name, rawField]) => {
-    const field = rawField as z.core.$ZodType;
-    const unwrapped = unwrapSchema(field);
-    const options = enumOptions(unwrapped);
+    const field = rawField as z.ZodTypeAny;
+    const unwrapped = unwrapCredentialSchema(field);
+    const choices = enumOptions(unwrapped)?.filter(choice => !options.excludeChoices?.[name]?.includes(choice));
     const sensitive = isSensitiveCredentialField(name);
-    const inputKind: CredentialInputKind = options
+    const inputKind: CredentialInputKind = choices
       ? 'choice'
       : sensitive && /(credentials|private.*key)/i.test(name)
         ? 'multilineSecret'
@@ -179,7 +211,7 @@ export function credentialFieldsFromSchema(
       required: !z.safeParse(field, undefined).success,
       sensitive,
       inputKind,
-      ...(options ? { options } : {}),
+      ...(choices ? { options: choices } : {}),
       ...(description ? { description } : {}),
     };
   });
@@ -317,6 +349,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   },
   azureblob: {
     provider: 'azureblob',
+    localAuthentication: AZURE_LOCAL_AUTHENTICATION,
     displayName: 'Azure Blob Storage',
     tokenType: 'Azure default credential chain (including Azure CLI login), or a Microsoft Entra service principal for unattended automation',
     setupUrl: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
@@ -350,10 +383,12 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   },
   'azure-container-apps': {
     provider: 'azure-container-apps',
+    localAuthentication: AZURE_LOCAL_AUTHENTICATION,
     displayName: 'Azure Container Apps',
-    tokenType: 'Microsoft Entra service principal using tenantId, subscriptionId, application clientId, and a clientSecret',
-    setupUrl: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
+    tokenType: 'Azure default credential chain (including browser sign-in through Azure CLI), or explicitly supplied existing automation credentials',
+    setupUrl: 'https://learn.microsoft.com/en-us/cli/azure/authenticate-azure-cli-interactively',
     setupUrls: [
+      { label: 'Azure browser sign-in', url: 'https://learn.microsoft.com/en-us/cli/azure/authenticate-azure-cli-interactively' },
       {
         label: 'Create or review the Microsoft Entra application',
         url: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
@@ -373,13 +408,62 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Hypervibe creates the registry in Legacy Registry Permissions mode, assigns AcrPush (8311e382-0749-4cb8-b61a-304f252e45ec) to the service principal, and assigns AcrPull (7f951dda-4ed3-4680-a7ca-43fe172d538d) to each app identity; users do not pre-create any of these resources.',
       'Custom domains require Microsoft.App managed-certificate and Container App update permissions included by Contributor. DNS must point directly to Azure while the free certificate is issued and renewed, so Cloudflare proxying remains disabled.',
     ],
-    credentialExample: 'hv_connections provider="azure-container-apps" credentialsRef="file:/absolute/path/azure-container-apps.json"',
+    credentialExample: 'hv_connections provider="azure-container-apps" credentials={"authMode":"default"}',
     notes: [
-      'The JSON needs only tenantId, subscriptionId, clientId, and clientSecret. Do not include location, a resource group, registry, registry server, managed-environment ID, or Container App ID—those are Hypervibe desired state.',
+      'Local browser sign-in does not require an application client secret. Hypervibe discovers a sole enabled subscription; when several are accessible, select the intended subscription with credentials={"authMode":"default","subscriptionId":"<id>"}. Do not change the Azure CLI default subscription as a workaround.',
+      'Explicit existing automation JSON may contain tenantId, subscriptionId, clientId, and clientSecret. Do not include location, a resource group, registry, registry server, managed-environment ID, or Container App ID—those are Hypervibe desired state.',
       'Hypervibe uses canadacentral when environments.<name>.hosting.region is omitted. An agent may declare another Azure location in the spec when latency, residency, or existing infrastructure requires it.',
-      'Copy the client secret VALUE when it is created; Azure shows it only once. Do not use the secret ID.',
-      'Microsoft does not publish a documented pre-filled credential-template URL for this flow. The links above intentionally open the official app-registration and role documentation without guessed dashboard parameters.',
-      'Client secrets expire. Store the JSON outside the repository, rotate it before expiry, and reconnect from a file, dotenv mapping, or secret-manager reference.',
+      'For explicitly chosen existing service-principal authentication, supply the secret value rather than its ID through a private reference. Client secrets expire; preserve the separate rotation and reconnect process. Hypervibe does not invent pre-filled credential-template URLs.',
+    ],
+  },
+  'microsoft-entra': {
+    provider: 'microsoft-entra', displayName: 'Microsoft Entra operator application',
+    tokenType: 'Transient Microsoft Graph access from the selected tenant; no saved operator client secret',
+    setupUrl: 'https://learn.microsoft.com/en-us/cli/azure/authenticate-azure-cli-interactively',
+    localAuthentication: AZURE_LOCAL_AUTHENTICATION,
+    permissions: [
+      'The operator application lifecycle requests Application.ReadWrite.All and Organization.Read.All for the selected tenant. Native reads verify tenant identity; tenant policy can still deny application creation or federated trust management.',
+      'Azure subscription management access does not establish Microsoft Graph application-management authority. Obtain any required tenant consent separately; never substitute an ARM token.',
+    ],
+    credentialExample: 'hv_connections provider="microsoft-entra" action="describe"',
+    notes: [
+      'This describe action is read-only guidance. Configure operatorApplications through hv_spec, then use hv_plan and hv_apply for separately reviewed application and federation actions; do not create a persistent connection for this provider.',
+      'Select nativeScope.tenantId explicitly. The lifecycle obtains a transient Graph token through the local default credential reader and does not retain the token. This operator setup does not require each hosted customer to install a CLI.',
+    ],
+  },
+  'google-recaptcha': {
+    provider: 'google-recaptcha', displayName: 'Google reCAPTCHA operator application',
+    tokenType: 'Transient local Google authorization for the exact operator project',
+    setupUrl: 'https://docs.cloud.google.com/recaptcha/docs/create-key-website',
+    localAuthentication: GOOGLE_LOCAL_AUTHENTICATION,
+    permissions: ['The separately reviewed operator lifecycle verifies project identity and authority to enable the reCAPTCHA API, create/read an isolated key, and retrieve its legacy credential. Native Secret Manager delivery has its own reviewed permissions.'],
+    credentialExample: 'hv_connections provider="google-recaptcha" action="describe"',
+    notes: [
+      'Configure operatorApplications through hv_spec, then hv_plan and hv_apply. Select projectId and projectNumber matching the verified runtime identity; Hypervibe derives the allowed hostname from its verified origin service.',
+      'Do not create a saved connection, reuse a production key, disable domain checking, or expose the legacy credential. Private capture and native delivery are separate confirmed actions; only the public site key and immutable secret reference appear in receipts.',
+    ],
+  },
+  'google-oauth': {
+    provider: 'google-oauth', displayName: 'Google OAuth operator application',
+    tokenType: 'Owner-selected private web-client JSON; no retained administrator token',
+    setupUrl: 'https://console.cloud.google.com/auth/clients',
+    permissions: ['The owner must be authorized to configure the standard Google OAuth client in the selected project. Importing its private JSON does not prove native ownership, consent, or a working browser callback.'],
+    credentialExample: 'hv_connections provider="google-oauth" action="describe"',
+    notes: [
+      'Google requires manual standard OAuth client creation and terms acknowledgement. The agent prepares the exact selected project and verified HTTPS callback ending /cloud-authorizations/gcp; the owner completes that Console step.',
+      'Use operatorApplications through hv_spec, hv_plan and hv_apply with nativeScope.projectId and a private file: credentialsRef to the downloaded JSON. Never paste the client secret into chat or create a persistent operator connection. Private import and native Secret Manager delivery are separately reviewed; browser exchange remains unverified until tested.',
+    ],
+  },
+  'github-app': {
+    provider: 'github-app', displayName: 'GitHub operator application',
+    tokenType: 'Owner-approved GitHub App manifest; no saved administrator token',
+    setupUrl: 'https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest',
+    permissions: ['The reviewed public App requests read-only actions, administration, checks, contents and metadata for separately selected repositories. The owner approves its creation in GitHub; repository installation is a separate authorization.'],
+    credentialExample: 'hv_connections provider="github-app" action="describe"',
+    notes: [
+      'Use operatorApplications through hv_spec, hv_plan and hv_apply with nativeScope.ownerType (user or organization), ownerLogin, and verified originService/runtimeService. Do not create a persistent connection for this provider.',
+      'The fixed Hypercloud profile delivers private-key to GITHUB_APP_PRIVATE_KEY_BASE64 (base64 encoding), client-secret to GITHUB_APP_CLIENT_SECRET and webhook-secret to GITHUB_APP_WEBHOOK_SECRET. Declare those output destinations before registration; never paste credentials or callback codes into chat.',
+      'Keep the bounded Hypervibe CLI, SDK or MCP process running while opening its private local browser link. Callback capture and one-time code conversion are separate reviewed stages. Uncertain conversions cannot be retried; the owner may need to clean up the registered App in GitHub.',
     ],
   },
   bitwarden: {
@@ -432,8 +516,9 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   },
   cloudrun: {
     provider: 'cloudrun',
+    localAuthentication: GOOGLE_LOCAL_AUTHENTICATION,
     displayName: 'Google Cloud Run',
-    tokenType: 'Google Cloud service account JSON key',
+    tokenType: 'Local Google user Application Default Credentials, or an existing service account JSON key',
     setupUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
     permissions: [
       'Grant roles/run.admin on the target Google Cloud project so Hypervibe can create/update Cloud Run services and jobs.',
@@ -452,10 +537,11 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Grant roles/logging.viewer and roles/logging.viewAccessor for logs.',
       'Native custom domains use the Cloud Run domain-mapping API covered by roles/run.admin. The connected identity must also be authorized for the verified base domain before apply.',
     ],
-    credentialExample: 'hv_connections provider="cloudrun" credentialsRef="file:/absolute/path/cloudrun.json"',
+    credentialExample: 'hv_connections provider="cloudrun" credentials={"authMode":"default","projectId":"<approved-gcp-project-id>"}',
     notes: [
       'Run hv_connections action="prepare" when Hypervibe should enable APIs and grant these roles. After the credential-free preview, prefer confirm=true with adminAuth="default" to use existing Google Application Default Credentials; explicit one-time admin credential references remain available. GCS, Memorystore, and Pub/Sub access are staged independently and never added by another capability.',
-      'The connection JSON contains only projectId and credentials. Hypervibe uses us-central1 when environments.<name>.hosting.region is omitted; an agent may declare another supported region in the spec.',
+      'For an existing approved project, authMode="default" reuses local Google user Application Default Credentials without copying a key or refresh token. Other ADC credential types are currently unsupported by this connection mode. Supply projectId explicitly; the login quota project does not select hosting scope. Hypervibe uses us-central1 when environments.<name>.hosting.region is omitted.',
+      'Local Google sign-in is management access only. Runtime service accounts remain separate, and managed CI requires separately reviewed deployment federation; local ADC is never copied into GitHub or GitLab secrets. The older project bootstrap still generates a deployment key.',
       'Cloud Run native domain mappings are available only in Google-supported regions. Hypervibe blocks before DNS mutation in other regions; use a separately declared external HTTPS load balancer there.',
       'Cloud Run returns a multi-value A/AAAA/CNAME record set for the mapping. Hypervibe keeps those traffic records DNS-only while Google validates ownership and manages TLS.',
       'Google recommends short-lived credentials over long-lived service account JSON keys; if you use a JSON key, rotate it and grant only the roles above.',
@@ -464,16 +550,17 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   cloudsql: {
     provider: 'cloudsql',
     displayName: 'Google Cloud SQL',
-    tokenType: 'Google Cloud service account JSON key',
+    tokenType: 'Local Google user Application Default Credentials, or an existing service account JSON key',
     setupUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
     permissions: [
-      'Grant roles/cloudsql.viewer to the connected service account so connection verification can list and inspect Cloud SQL instances.',
-      'Grant roles/cloudsql.client to the connected service account so hv_db_query can open its operation-scoped authenticated connector.',
+      'Grant roles/cloudsql.viewer to the selected Google caller so connection verification can list and inspect Cloud SQL instances.',
+      'Grant roles/cloudsql.client to the selected Google caller so hv_db_query can open its operation-scoped authenticated connector.',
       'Also grant roles/cloudsql.admin when Hypervibe should create or delete Cloud SQL instances and logical databases through hv_plan/hv_apply.',
       'The Cloud Run runtime service account separately needs roles/cloudsql.client when deployed services connect through /cloudsql.',
       'The sqladmin.googleapis.com API must already be enabled — hv_connections provider="cloudrun" action="prepare" enables it.',
     ],
-    credentialExample: 'hv_connections provider="cloudsql" credentialsRef="file:/absolute/path/cloudsql.json"',
+    credentialExample: 'hv_connections provider="cloudsql" credentials={"authMode":"default","projectId":"<approved-gcp-project-id>"}',
+    notes: ['The local SQL Connector reuses the same user ADC client; it never exports the login into the database or application. Other ADC credential types are currently unsupported by this connection mode. Automated restore drills still require their separately reviewed automation credentials.'],
   },
   memorystore: {
     provider: 'memorystore',
@@ -574,10 +661,12 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   },
   ecs: {
     provider: 'ecs',
+    localAuthentication: AWS_LOCAL_AUTHENTICATION,
     displayName: 'AWS ECS Express Mode',
-    tokenType: 'AWS IAM access key pair containing accessKeyId and secretAccessKey',
-    setupUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
+    tokenType: 'AWS default credential chain (browser login or existing profile), or explicitly supplied existing automation credentials',
+    setupUrl: 'https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sign-in.html',
     setupUrls: [
+      { label: 'AWS browser login with temporary credentials', url: 'https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sign-in.html' },
       {
         label: 'Create or review an IAM user access key',
         url: 'https://console.aws.amazon.com/iam/home#/security_credentials',
@@ -599,9 +688,9 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'For declared custom domains: acm:RequestCertificate, acm:AddTagsToCertificate, acm:DescribeCertificate, acm:ListCertificates, acm:ListTagsForCertificate, acm:DeleteCertificate, elasticloadbalancing:DescribeLoadBalancers, DescribeTargetGroups, DescribeListeners, DescribeListenerCertificates, DescribeRules, AddListenerCertificates, RemoveListenerCertificates, and ModifyRule on Express-managed load balancers.',
       'If the account has never used ECS, allow iam:CreateServiceLinkedRole only for ECS service-linked roles, or have an administrator create the ECS service-linked role first.',
     ],
-    credentialExample: 'hv_connections provider="ecs" credentialsRef="file:/absolute/path/aws-ecs.json"',
+    credentialExample: 'hv_connections provider="ecs" credentials={"authMode":"default"}',
     notes: [
-      'The JSON needs only accessKeyId and secretAccessKey. Do not include region, cluster, repository, VPC, subnet, security-group, IAM-role, load-balancer, listener, or certificate IDs—Hypervibe creates and binds those through plan/apply. The same verified ecs connection is reused by ElastiCache.',
+      'Explicit existing automation JSON may contain accessKeyId, secretAccessKey and sessionToken; it is not required for local browser authentication. Do not include region, cluster, repository, VPC, subnet, security-group, IAM-role, load-balancer, listener, or certificate IDs—Hypervibe creates and binds those through plan/apply. The same verified ecs connection is reused by ElastiCache.',
       'Hypervibe uses us-west-2 when environments.<name>.hosting.region is omitted. An agent may declare another AWS region in the spec when latency, residency, or existing infrastructure requires it.',
       'AWS does not publish a documented pre-filled access-key creation template. The official IAM page cannot safely preselect a user or permissions, so Hypervibe does not invent dashboard query parameters.',
       'ECS Express Mode creates the Fargate service, public HTTPS endpoint, load balancer, security groups, autoscaling, monitoring, and networking components. Hypervibe owns the smaller prerequisite project boundary and exact-digest CI release.',
@@ -625,6 +714,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   },
   gcs: {
     provider: 'gcs',
+    localAuthentication: GOOGLE_LOCAL_AUTHENTICATION,
     displayName: 'Google Cloud Storage',
     tokenType: 'Google Application Default Credentials, or service-account JSON for unattended automation',
     setupUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
@@ -751,6 +841,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   },
   s3: {
     provider: 's3',
+    localAuthentication: AWS_LOCAL_AUTHENTICATION,
     displayName: 'Amazon S3',
     tokenType: 'AWS default credential chain (AWS CLI profile, SSO, environment, or instance identity), or an explicit access-key pair for automation',
     setupUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
@@ -1162,6 +1253,7 @@ export function connectionSetupDetails(
     setupUrls,
     requiredPermissions: guidance.permissions,
     credentialExample: credentialExample(guidance, options),
+    ...(guidance.localAuthentication ? { localAuthentication: guidance.localAuthentication } : {}),
     ...(guidance.notes?.length ? { notes: guidance.notes } : {}),
   };
 }
@@ -1198,6 +1290,7 @@ export function formatConnectionGuidance(
       ? `Create or review it here: ${guidance.setupUrls.map((entry) => `${entry.label}: ${entry.url}`).join('; ')}.`
       : guidance.setupUrl ? `Create or review it here: ${guidance.setupUrl}.` : undefined,
     `Required permissions: ${guidance.permissions.join(' ')}`,
+    guidance.localAuthentication ? `Local operator setup: ${guidance.localAuthentication.agentInstruction} Install on macOS: ${[guidance.localAuthentication.macosInstall.command, ...guidance.localAuthentication.macosInstall.args].join(' ')}. Sign in: ${[guidance.localAuthentication.signIn.command, ...guidance.localAuthentication.signIn.args].join(' ')}.` : undefined,
     guidance.notes?.length ? `Notes: ${guidance.notes.join(' ')}` : undefined,
     `Connect with: ${credentialExample(guidance, { scope: options.scope, project: options.project })}.`,
   ].filter(Boolean);

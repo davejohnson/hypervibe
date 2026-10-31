@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { getDb } from '../sqlite.adapter.js';
 import { parseJsonColumn } from '../json.codec.js';
 import { platformBindingsColumnSchema } from '../column.schemas.js';
@@ -85,6 +86,23 @@ export class EnvironmentRepository {
     `).run(JSON.stringify(merged), now, id);
 
     const updated = this.findById(id);
+    if (updated) this.syncRepoBindings(updated);
+    return updated;
+  }
+
+  /** Exact metadata frontier: preserve concurrent local/repository recovery writes.
+   * Export follows the committed SQLite write so a failed export remains recoverable.
+   */
+  compareAndSwapPlatformBindings(id: string, expected: Record<string, unknown>, bindings: Record<string, unknown>): Environment | null {
+    const next = platformBindingsColumnSchema.parse(bindings), db = getDb();
+    const updated = db.transaction(() => {
+      const existing = this.findById(id);
+      if (!existing || !isDeepStrictEqual(existing.platformBindings, expected)) return null;
+      if (isDeepStrictEqual(existing.platformBindings, next)) return existing;
+      db.prepare('UPDATE environments SET platform_bindings = ?, updated_at = ? WHERE id = ?')
+        .run(JSON.stringify(next), new Date().toISOString(), id);
+      return this.findById(id);
+    }).immediate();
     if (updated) this.syncRepoBindings(updated);
     return updated;
   }

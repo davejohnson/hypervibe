@@ -1,0 +1,63 @@
+{
+  "name": "projects/observed-project/locations/us-central1/services/observed-web",
+  "uid": "b546c81d-f2d2-4c5a-9f54-6befe363c6bf",
+  "etag": "observed-etag",
+  "generation": "1",
+  "observedGeneration": "1",
+  "latestCreatedRevision": "projects/observed-project/locations/us-central1/services/observed-web/revisions/observed-web-00001-9b8",
+  "latestReadyRevision": "projects/observed-project/locations/us-central1/services/observed-web/revisions/observed-web-00001-9b8",
+  "ingress": "INGRESS_TRAFFIC_ALL",
+  "scaling": {
+    "maxInstanceCount": 20
+  },
+  "uri": "https://observed-web-synthetic-uc.a.run.app",
+  "terminalCondition": {
+    "state": "CONDITION_SUCCEEDED",
+    "type": "Ready"
+  },
+  "labels": {
+    "hv-owner": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "hv-attempt": "11111111-1111-4111-8111-111111111111"
+  },
+  "traffic": [
+    {
+      "type": "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST",
+      "percent": 100
+    }
+  ],
+  "template": {
+    "serviceAccount": "observed-holding@observed-project.iam.gserviceaccount.com",
+    "executionEnvironment": "EXECUTION_ENVIRONMENT_GEN2",
+    "scaling": {
+      "maxInstanceCount": 1
+    },
+    "timeout": "300s",
+    "maxInstanceRequestConcurrency": 1,
+    "containers": [
+      {
+        "image": "us-central1-docker.pkg.dev/observed-project/operator-public/holding-v1@sha256:098e5068e7d02eed751fe4b6de2cd76073653f5810af133e5c104391970f73fc",
+        "ports": [
+          {
+            "name": "http1",
+            "containerPort": 8080
+          }
+        ],
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "512Mi"
+          },
+          "cpuIdle": true
+        },
+        "startupProbe": {
+          "timeoutSeconds": 240,
+          "periodSeconds": 240,
+          "failureThreshold": 1,
+          "tcpSocket": {
+            "port": 8080
+          }
+        }
+      }
+    ]
+  }
+}

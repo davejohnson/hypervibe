@@ -1,0 +1,14 @@
+{
+  "evidenceKind": "Sanitized native Graph v1.0 create acknowledgment retained by Hypervibe, followed by independently read native application listing and exact-object GET. IDs and names are replaced in reconstructed transport tests; timestamp strings are unchanged.",
+  "observedAtUtc": "2026-10-28T05:36:52.448759Z",
+  "attemptStartedAt": "2026-10-28T04:04:42.295Z",
+  "createdDateTime": {
+    "acknowledged": "2026-10-28T04:04:50.0704782Z",
+    "observed": "2026-10-28T04:04:50Z"
+  },
+  "unchangedFields": ["id", "appId", "tenantId", "ownerTag", "attemptTag", "displayName", "signInAudience", "redirectUris", "implicitGrantSettings", "passwordCredentials", "keyCredentials", "requiredResourceAccess"],
+  "nativeWritesDuringObservation": 0,
+  "documentation": "https://learn.microsoft.com/en-us/graph/api/resources/application?view=graph-rest-1.0",
+  "documentedContract": "createdDateTime is a read-only DateTimeOffset in UTC ISO 8601 format. The documentation does not promise identical fractional precision across create and read responses.",
+  "limits": "This observation supports the exact same-object fractional-create/whole-second-read case. It does not authorize accepting a different second, conflicting fractional timestamp, changed identity/configuration or repeated creation."
+}

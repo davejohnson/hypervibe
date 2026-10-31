@@ -1,3 +1,4 @@
+import { formatConnectionGuidance } from '../../../domain/services/connection-guidance.js';
 import { prepareGitLabCredentialRollout, observeGitLabCredentialRollout } from './gitlab-credential-activation.js';
 import { createHash } from 'crypto';
 import { ConnectionRepository } from '../../db/repositories/connection.repository.js';
@@ -1774,6 +1775,9 @@ function portableVariables(
           return { error: `No verified ${connectionProvider} connection is available for GitLab CI variable sync` };
         }
         credentials = getSecretStore().decryptObject<Record<string, unknown>>(connection.credentialsEncrypted);
+        if (providerRegistry.getMetadata(connectionProvider)?.credentials?.canUseForAutomation?.(credentials) === false) {
+          return { error: `The verified ${connectionProvider} connection does not contain durable credentials for automation. ${formatConnectionGuidance(connectionProvider, { project: spec.project, scope: spec.devops!.code.scope })}` };
+        }
         credentialCache.set(connectionProvider, credentials);
       }
       const candidate = credentials[definition.source.credentialKey];

@@ -1,6 +1,18 @@
+import { AzureAuthenticationSchema, azureConnectionIdentity, canUseAzureCredentialsForAutomation, resolveAzureAuthentication, type ResolvedAzureAuthentication } from './azure-datastore.credentials.js';
+import { AzureRuntimeIdentities } from './azure-runtime-identities.js';
+import { azurePreparedHostingBinding } from './azure-prepared-binding.js';
+import { azurePreparedHoldingTransition, azurePreparedApplicationConfiguration, azurePreparedApplicationDigest, azureObservedPreparedApplicationConfiguration } from './azure-prepared-release.js';
+import { azurePreparedCoordinates, azurePreparedGrantId, azurePreparedGrantDescription } from './azure-prepared-hosting.js';
+import type { CloudDeploymentAdapterInputV1, CloudDeploymentConnectionV1 } from '../../../domain/ports/cloud-deployment.port.js';
+import { validateCloudDeploymentAdapterInputV1 } from '../../../domain/services/cloud-deployment-authentication.js';
+import { azureDeploymentContract } from './azure-cloud-deployment.js';
+import { runtimeAccessBindings } from '../../../domain/services/runtime-access.service.js';
 import type { ProviderEnvironmentVariablesRequest, ProviderEnvironmentVariablesResult } from '../../../domain/ports/provider-env-vars.port.js';
 import { createAzureRegistryCredentialLifecycle } from './azure-registry-credential.js';
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+import { validateRuntimeSecretReferences, runtimeSecretReferenceIdentity } from '../../../domain/services/runtime-secret-references.js';
+import type { RuntimeSecretReference } from '../../../domain/ports/secret-destination.port.js';
 import { resolve4, resolveCname, resolveTxt } from 'node:dns/promises';
 import { z } from 'zod';
 import type { ComponentType } from '../../../domain/entities/component.entity.js';
@@ -67,31 +79,25 @@ const INTERNAL_ENV_KEYS = new Set([
   IMAGE_DIGEST_KEY,
 ]);
 
-const AzureContainerAppsAuthenticationSchema = z.object({
-  tenantId: z.string().uuid('Azure tenant ID must be a UUID'),
-  subscriptionId: z.string().uuid('Azure subscription ID must be a UUID'),
-  clientId: z.string().uuid('Azure service principal client ID must be a UUID'),
-  clientSecret: z.string().min(8, 'Azure service principal client secret is required'),
-}).strict();
-
 export const AzureContainerAppsCredentialsSchema = z.preprocess((input) => {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
   const { location: _legacyLocation, ...authentication } = input as Record<string, unknown>;
   return authentication;
-}, AzureContainerAppsAuthenticationSchema);
+}, AzureAuthenticationSchema);
 
 export type AzureContainerAppsCredentials = z.infer<typeof AzureContainerAppsCredentialsSchema>;
 const DEFAULT_AZURE_CONTAINER_APPS_LOCATION = 'canadacentral';
 const AzureLocationSchema = z.string().trim().regex(/^[a-z0-9]+$/, 'Azure location must be a region slug');
-type ConnectedAzureContainerAppsCredentials = AzureContainerAppsCredentials & { location: string };
+type ConnectedAzureContainerAppsCredentials = (ResolvedAzureAuthentication | Extract<import('./azure-resource-manager.client.js').AzureResourceManagerCredentials, { authMode: 'federated' }>) & { location: string };
 
 type AzureResource = {
   id: string;
   name: string;
   location?: string;
-  identity?: { principalId?: string; tenantId?: string; type?: string; userAssignedIdentities?: Record<string, unknown> };
+  identity?: { principalId?: string; tenantId?: string; type?: string; userAssignedIdentities?: Record<string, { principalId?: string; clientId?: string }> };
   properties?: Record<string, any>;
   tags?: Record<string, string>;
+  systemData?: { createdAt?: string };
 };
 
 type AzureProject = {
@@ -106,10 +112,14 @@ type AzureProject = {
 
 export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMaintenanceAdapter {
   readonly name = 'azure-container-apps';
+  private readonly installedPreparedHosting = azurePreparedHostingBinding(() => this.deploymentConnection, () => this.connected().client);
+  get preparedHosting() { return this.deploymentConnection?.preparedResources ? this.installedPreparedHosting : undefined; }
+  readonly runtimeIdentities = new AzureRuntimeIdentities(() => { const { client, credentials } = this.connected(); return { client, ...credentials, deployClientId: 'clientId' in credentials ? credentials.clientId : undefined, deployment: this.deploymentConnection }; });
   readonly registryCredentialLifecycle = createAzureRegistryCredentialLifecycle(() => this.connected().client);
   readonly serviceVolumes = new AzureServiceVolumes(() => this.connected().client);
 
   readonly capabilities: ProviderCapabilities = {
+    runtimeSecretReferenceProviders: ['azure-key-vault'],
     supportedBuilders: ['dockerfile'],
     supportedComponents: [],
     supportsAutoWiring: false,
@@ -127,21 +137,46 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
 
   private credentials: ConnectedAzureContainerAppsCredentials | null = null;
   private client: AzureResourceManagerClient | null = null;
+  private deploymentConnection?: CloudDeploymentConnectionV1;
+
+  /** Internal authenticated broker input; never accepted by connect(credentials). */
+  async connectTransient(input: CloudDeploymentAdapterInputV1): Promise<void> {
+    const validated = validateCloudDeploymentAdapterInputV1(input, azureDeploymentContract);
+    const { authentication, connection } = validated;
+    if (authentication.kind !== 'azure-federation') throw new Error('Azure transient authorization is unavailable.');
+    const { principal } = authentication;
+    const credentials = { authMode: 'federated' as const, ...principal, resourceGroup: connection.nativeScope.resourceGroup,
+      location: connection.nativeScope.location, getAccessToken: authentication.getAccessToken,
+      readerVaultIds: [...new Set(connection.deployment.workloads.flatMap(workload => workload.runtimeSecrets.map(({ reference }) => {
+        const d = reference.destination;
+        if (d.provider !== 'azure-key-vault' || d.tenantId !== principal.tenantId || d.subscriptionId !== principal.subscriptionId) throw new Error('Azure reader scope does not match its deployment approval.');
+        return `/subscriptions/${d.subscriptionId}/resourceGroups/${d.resourceGroup}/providers/Microsoft.KeyVault/vaults/${d.vaultName}`;
+      })))] };
+    const client = new AzureResourceManagerClient(credentials);
+    await client.servicePrincipalId();
+    this.credentials = credentials;
+    this.client = client;
+    this.deploymentConnection = connection;
+  }
 
   async connect(credentials: unknown): Promise<void> {
+    this.deploymentConnection = undefined;
     const parsed = AzureContainerAppsCredentialsSchema.parse(credentials);
     const legacyLocation = credentials && typeof credentials === 'object' && typeof (credentials as Record<string, unknown>).location === 'string'
       ? (credentials as Record<string, string>).location
       : DEFAULT_AZURE_CONTAINER_APPS_LOCATION;
-    this.credentials = { ...parsed, location: AzureLocationSchema.parse(legacyLocation) };
+    this.credentials = { ...await resolveAzureAuthentication(parsed), location: AzureLocationSchema.parse(legacyLocation) };
     this.client = new AzureResourceManagerClient(this.credentials);
   }
 
   configureTarget(target: { region?: string }): void {
     if (!target.region) return;
+    if (this.deploymentConnection && target.region !== this.deploymentConnection.nativeScope.location) throw new Error('Azure placement requires a new deployment approval.');
     const { credentials } = this.connected();
     this.credentials = { ...credentials, location: AzureLocationSchema.parse(target.region) };
   }
+
+  getConnectionIdentity(): Record<string, string> { return azureConnectionIdentity(this.credentials); }
 
   async verify(): Promise<VerifyResult> {
     try {
@@ -159,9 +194,27 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
   async disconnect(): Promise<void> {
     this.client = null;
     this.credentials = null;
+    this.deploymentConnection = undefined;
   }
 
   async ensureProject(projectName: string, environment: Environment): Promise<Receipt> {
+    if (this.deploymentConnection?.preparedResources) {
+      try {
+        const connection = this.deploymentConnection, prepared = connection.preparedResources!, c = azurePreparedCoordinates(connection), bound = parseHostingBindings(environment);
+        if (environment.name !== connection.environment || bound.projectId && bound.projectId.toLowerCase() !== c.group.toLowerCase()
+          || bound.environmentId && bound.environmentId.toLowerCase() !== prepared.project.id.toLowerCase()) throw new Error();
+        for (const [id, version] of [[c.group, RESOURCE_API], [prepared.registry.id, REGISTRY_API], [prepared.project.id, CONTAINER_APPS_API]]) {
+          const native = await this.getResource(id, version);
+          if (!native || !this.isOwned(native, environment.id) || native.properties?.provisioningState !== 'Succeeded' || native.location !== connection.nativeScope.location) throw new Error();
+          if (id === prepared.registry.id && (native.properties.loginServer !== c.registryServer || native.properties.adminUserEnabled !== false)) throw new Error();
+        }
+        if (!await this.roleAssignmentExists(prepared.registry.id, await this.connected().client.servicePrincipalId(), ACR_PUSH_ROLE)) throw new Error();
+        return { success: true, message: 'Verified the exact administrator-installed Azure namespace; no cloud resources or permissions changed.', data: {
+          projectId: c.group, environmentId: prepared.project.id, providerBindings: { providerScope: { registryResourceId: prepared.registry.id,
+            registryCreatedAt: prepared.registry.lifetimeId, registryServer: c.registryServer, managedEnvironmentCreatedAt: prepared.project.lifetimeId } } } };
+      } catch { return { success: false, message: 'The exact installed Azure namespace could not be verified.', data: { mutationAttempted: false } }; }
+    }
+    if (this.deploymentConnection) return { success: false, message: 'Azure namespace creation and setup grants remain blocked until native creation ownership is verified.', data: { mutationAttempted: false, reason: 'create_ownership_unverified' } };
     try {
       const bindings = parseHostingBindings(environment);
       const desired = bindings.projectId
@@ -273,6 +326,24 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     envVars: Record<string, string>,
     options: DeploymentMutationOptions = {}
   ): Promise<DeployResult> {
+    if (this.deploymentConnection && !parseHostingBindings(environment).services?.[service.name]?.serviceId) return this.failedDeploy(service,
+      'Azure first workload creation remains blocked until native conditional creation ownership is verified.');
+    if (options.requireNewWorkload) return this.failedDeploy(service, 'Azure Container Apps does not expose a verified conditional-create API. This reviewed create-only request is blocked before provider access.');
+    let secretVersionRefs: Record<string, RuntimeSecretReference>;
+    try {
+      secretVersionRefs = validateRuntimeSecretReferences(options.secretVersionRefs, envVars, (destination) =>
+        destination.provider === 'azure-key-vault'
+        && destination.tenantId.toLowerCase() === this.connected().credentials.tenantId.toLowerCase()
+        && destination.subscriptionId.toLowerCase() === this.connected().credentials.subscriptionId.toLowerCase());
+    } catch { return this.failedDeploy(service, 'Invalid or conflicting runtime secret reference.'); }
+    if (this.deploymentConnection) {
+      const reviewed = this.deploymentConnection.deployment.workloads.find(workload => workload.name === service.name);
+      const expected = reviewed?.runtimeSecrets.map(({ key, reference }) => [key, reference] as const).sort(([left], [right]) => left.localeCompare(right));
+      const supplied = Object.entries(secretVersionRefs).sort(([left], [right]) => left.localeCompare(right));
+      if (environment.name !== this.deploymentConnection.environment || !reviewed || reviewed.kind !== serviceWorkloadKind(service)
+        || !isDeepStrictEqual(supplied, expected)) return this.failedDeploy(service, 'Runtime secret references differ from the separately approved deployment. Review new deployment access before changing them.');
+    }
+    if (this.deploymentConnection?.preparedResources) return this.deployPrepared(service, environment, envVars, secretVersionRefs);
     if (serviceWorkloadKind(service) !== 'web') {
       return this.failedDeploy(service, 'Azure Container Apps Jobs and workers require distinct lifecycle resources and are not yet supported.');
     }
@@ -283,9 +354,17 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     if (!bindings.projectId || !bindings.environmentId) {
       return this.failedDeploy(service, 'No bound Azure resource group and managed environment exist. The project action must complete first.');
     }
+    let runtimeReader: string | undefined;
     let attemptedApp: AzureResource | null = null;
     let createdService = false;
     try {
+      const runtimeBinding = runtimeAccessBindings(environment)?.runtimeIdentities[service.name];
+      if (runtimeBinding) {
+        const runtime = await this.runtimeIdentities.inspect({ environment, service, binding: runtimeBinding, mode: 'ensure',
+          environmentSpec: { secretDestinations: secretVersionRefs } as never });
+        if (runtime.state !== 'ready' || !runtime.identity) throw new Error('The reviewed Azure runtime identity and reader permissions are not ready.');
+        runtimeReader = runtime.identity.scope.identityResourceId ?? 'system';
+      }
       const project = this.projectFromResourceGroup(bindings.projectId, bindings.environmentId);
       if (project.environmentId !== bindings.environmentId) {
         throw new Error(`Bound managed environment ${bindings.environmentId} is outside ${bindings.projectId}.`);
@@ -324,6 +403,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
           project,
           service,
           envVars,
+          secretVersionRefs, runtimeReader,
         }));
         attemptedApp = app;
         createdService = true;
@@ -334,17 +414,20 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       this.assertAppEnvironment(app, project.environmentId);
       const principalId = app.identity?.principalId;
       if (!principalId) throw new Error(`Container App ${app.id} did not return its system-assigned identity.`);
-      await this.ensureRoleAssignment(project.registryId, principalId, ACR_PULL_ROLE, 'ServicePrincipal');
-      app = await this.connected().client.request<AzureResource>('PATCH', app.id, CONTAINER_APPS_API, this.appBody({
+      const desiredBody = this.appBody({
         app,
         environment,
         environmentId: project.environmentId,
         project,
         service,
         envVars,
-      }));
+        secretVersionRefs, runtimeReader,
+      });
+      await this.ensureRoleAssignment(project.registryId, principalId, ACR_PULL_ROLE, 'ServicePrincipal');
+      app = await this.connected().client.request<AzureResource>('PATCH', app.id, CONTAINER_APPS_API, desiredBody);
       app = await this.waitForProvisioning(app.id, CONTAINER_APPS_API);
       app = await this.waitForContainerAppRevision(app.id, previousReadyRevision);
+      this.assertSecretReferences(app, secretVersionRefs, runtimeReader ?? 'system');
       if (azureVolumeFingerprint(app.properties?.template) !== expectedVolumes) throw new Error('Azure volume mounts changed during runtime configuration.');
       if (azureRuntimeIdentityFingerprint(app) !== expectedIdentity) throw new Error('Azure workload identity changed during runtime configuration.');
       const url = this.appUrl(app);
@@ -372,6 +455,49 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     } catch (error) {
       return this.failedDeploy(service, this.formatError(error), attemptedApp?.id, createdService);
     }
+  }
+
+  private async deployPrepared(service: Service, environment: Environment, vars: Record<string, string>, references: Record<string, RuntimeSecretReference>): Promise<DeployResult> {
+    try {
+      const connection = this.deploymentConnection!, prepared = connection.preparedResources!.workloads.find(item => item.workload === service.name);
+      const bound = parseHostingBindings(environment).services?.[service.name], runtime = connection.runtimeIdentities.find(item => item.workload === service.name)?.principal;
+      if (!prepared || !bound || bound.serviceId !== prepared.id || bound.resourceUid !== prepared.lifetimeId || runtime?.kind !== 'azure-managed-identity'
+        || serviceWorkloadKind(service) !== 'web') throw new Error('The reviewed Azure prepared workload binding is unavailable.');
+      const app = await this.getResource(prepared.id, CONTAINER_APPS_API) as any;
+      const c = azurePreparedCoordinates(connection);
+      if (!app || app.id?.toLowerCase() !== prepared.id.toLowerCase() || app.systemData?.createdAt !== prepared.lifetimeId
+        || app.tags?.hypervibeInstallation !== connection.installationId || app.tags?.hypervibeDeployment !== c.owner
+        || app.properties?.managedEnvironmentId?.toLowerCase() !== c.managedEnvironment.toLowerCase()) throw new Error('Azure prepared workload identity changed.');
+      const binding = runtimeAccessBindings(environment)?.runtimeIdentities[service.name];
+      const authority = await this.runtimeIdentities.inspect({ environment, service, binding, mode: 'ensure', environmentSpec: { secretDestinations: references } as never });
+      if (authority.state !== 'ready' || !authority.identity) throw new Error('The installed Azure runtime reader is not ready.');
+      const transition = azurePreparedHoldingTransition(connection, environment, service.name, app);
+      const configuration = azurePreparedApplicationConfiguration({ identityId: runtime.identityResourceId, environmentId: c.managedEnvironment,
+        registryServer: c.registryServer, envVars: vars, secretVersionRefs: references,
+        startCommand: service.buildConfig.startCommand?.trim() || null, healthCheckPath: service.buildConfig.healthCheckPath?.trim() || null });
+      if (transition) {
+        if (azurePreparedApplicationDigest(configuration) !== transition.configurationDigest) throw new Error('Azure first runtime configuration requires a new reviewed preparation plan.');
+        return { serviceId: service.id, externalId: prepared.id, status: 'configured', receipt: { success: true,
+          message: 'Reviewed the first Azure application configuration; the holding workload remains unchanged until managed CI releases the candidate.',
+          data: { serviceId: prepared.id, serviceName: app.name, resourceUid: prepared.lifetimeId, resourceType: 'service',
+            imageUri: prepared.holding.image, createdService: false, deploymentDeferred: true, runtimeRolloutRequired: true,
+            rolloutBaseline: { state: 'present', deploymentId: transition.deploymentId } } } };
+      }
+      const current = azureObservedPreparedApplicationConfiguration(app), image = app.properties.template.containers[0].image;
+      const nativeIdentity = app.identity.userAssignedIdentities[runtime.identityResourceId];
+      if (!nativeIdentity || nativeIdentity.clientId !== runtime.clientId || nativeIdentity.principalId !== runtime.principalId
+        || typeof image !== 'string' || !image.startsWith(`${c.registryServer}/`) || !/@sha256:[a-f0-9]{64}$/.test(image)) throw new Error('Azure application runtime identity or image changed.');
+      if (azurePreparedApplicationDigest(current) !== azurePreparedApplicationDigest(configuration)) {
+        const markers = app.properties.template.containers[0].env.filter((entry: any) => ['HYPERVIBE_DEPLOY_SHA', 'HYPERVIBE_IMAGE_DIGEST'].includes(entry.name));
+        const body = { ...configuration, properties: { ...configuration.properties, template: { ...configuration.properties.template,
+          containers: [{ ...configuration.properties.template.containers[0], image, env: [...configuration.properties.template.containers[0].env, ...markers] }] } } };
+        await this.connected().client.request('PATCH', prepared.id, CONTAINER_APPS_API, body);
+        const observed = await this.waitForContainerAppRevision(prepared.id, app.properties.latestReadyRevisionName) as any;
+        if (observed.systemData?.createdAt !== prepared.lifetimeId || azurePreparedApplicationDigest(azureObservedPreparedApplicationConfiguration(observed)) !== azurePreparedApplicationDigest(configuration)) throw new Error('Azure runtime configuration is not yet verified.');
+      }
+      return { serviceId: service.id, externalId: prepared.id, status: 'configured', receipt: { success: true, message: 'Verified the exact Azure application runtime configuration.',
+        data: { serviceId: prepared.id, resourceUid: prepared.lifetimeId, resourceType: 'service', imageUri: image, deploymentDeferred: true, createdService: false } } };
+    } catch { return this.failedDeploy(service, 'Azure prepared runtime identity or configuration could not be verified.'); }
   }
 
   async readProviderEnvironmentVariables(request: ProviderEnvironmentVariablesRequest): Promise<ProviderEnvironmentVariablesResult> {
@@ -471,6 +597,11 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
   }
 
   async deleteEnvVars(environment: Environment, service: Service, keys: string[]): Promise<Receipt> {
+    if (this.deploymentConnection) {
+      const reviewed = this.deploymentConnection.deployment.workloads.find(workload => workload.name === service.name);
+      if (environment.name !== this.deploymentConnection.environment || !reviewed || reviewed.runtimeSecrets.some(reference => keys.includes(reference.key)))
+        return { success: false, message: 'Reviewed runtime secret references cannot be removed through the existing deployment approval.' };
+    }
     const appId = parseHostingBindings(environment).services?.[service.name]?.serviceId;
     if (!appId) return { success: true, message: 'Azure Container App has no retired environment variables to delete.' };
     try {
@@ -486,16 +617,10 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       const container = this.container(app);
       const expectedVolumes = azureVolumeFingerprint(app.properties?.template);
       const expectedIdentity = azureRuntimeIdentityFingerprint(app);
-      const secrets = await this.listAppSecrets(appId);
-      const secretRefs = new Set(
-        (container?.env ?? []).filter((item: any) => retired.has(item.name)).map((item: any) => item.secretRef).filter(Boolean)
-      );
       await this.connected().client.request('PATCH', appId, CONTAINER_APPS_API, {
         properties: {
-          configuration: {
-            ...app.properties?.configuration,
-            secrets: secrets.filter((secret: any) => !secretRefs.has(secret.name)),
-          },
+          // Retiring a variable removes its use, not an independently retained
+          // secret definition. Never read secret payloads to reconstruct it.
           template: {
             ...app.properties?.template,
             containers: [{
@@ -804,14 +929,28 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
         warnings.push(`Container App ${app.id} is not owned by this Hypervibe environment.`);
         continue;
       }
-      if (!app.identity?.principalId
+      const prepared = this.deploymentConnection?.preparedResources?.workloads.find(item => item.workload === name);
+      const runtime = prepared ? this.deploymentConnection!.runtimeIdentities.find(item => item.workload === name)?.principal : undefined;
+      if (prepared) {
+        if (runtime?.kind !== 'azure-managed-identity' || !await this.roleAssignmentExists(project.registryId, runtime.principalId, ACR_PULL_ROLE)) throw new Error('Azure installed registry reader authority could not be verified.');
+        const holding = azurePreparedHoldingTransition(this.deploymentConnection!, environment, name, app);
+        if (!holding) {
+          azureObservedPreparedApplicationConfiguration(app);
+          const assigned = app.identity?.userAssignedIdentities?.[runtime.identityResourceId];
+          if (assigned?.clientId !== runtime.clientId || assigned?.principalId !== runtime.principalId) throw new Error('Azure runtime identity changed.');
+          const refs = Object.fromEntries(this.deploymentConnection!.deployment.workloads.find(item => item.name === name)!.runtimeSecrets.map(item => [item.key, item.reference]));
+          this.assertSecretReferences(app, refs, runtime.identityResourceId);
+        }
+      } else if (!app.identity?.principalId
         || !await this.roleAssignmentExists(project.registryId, app.identity.principalId, ACR_PULL_ROLE)) {
         warnings.push(`Container App ${app.id} is missing its exact ACR pull role assignment.`);
         continue;
       }
       const container = this.container(app);
+      const definitions = app.properties?.configuration?.secrets ?? [];
+      const hasExternalReferences = definitions.some((item: any) => typeof item.keyVaultUrl === 'string');
       const secretValues = Object.fromEntries(
-        (await this.listAppSecrets(app.id)).filter((item: any) => typeof item.name === 'string' && typeof item.value === 'string')
+        (hasExternalReferences || this.deploymentConnection ? [] : await this.listAppSecrets(app.id)).filter((item: any) => typeof item.name === 'string' && typeof item.value === 'string')
           .map((item: any) => [item.name, item.value])
       );
       const envValues = Object.fromEntries(
@@ -821,6 +960,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
         ]).filter((entry: any[]) => typeof entry[0] === 'string' && typeof entry[1] === 'string')
       ) as Record<string, string>;
       const visible = Object.entries(envValues).filter(([key]) => !INTERNAL_ENV_KEYS.has(key));
+      const envVarSecretRefs = this.observedSecretReferences(app);
       const customDomains = this.azureCustomDomains(app).map((domain) => domain.name).filter(Boolean) as string[];
       const deployment = await this.observedCredentialDeployment(app);
       services.push({
@@ -836,12 +976,13 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
           public: app.properties?.configuration?.ingress?.external === true,
         },
         sourceState: 'disconnected',
-        envVarKeys: (container?.env ?? []).map((entry: any) => entry.name).filter((name: unknown): name is string => typeof name === 'string' && !INTERNAL_ENV_KEYS.has(name)).sort(),
-        envVarState: (container?.env ?? []).some((entry: any) => typeof envValues[entry.name] !== 'string') ? 'unknown' : 'resolved',
+        envVarKeys: [...new Set<string>((container?.env ?? []).flatMap((entry: any) => typeof entry.name === 'string' && !INTERNAL_ENV_KEYS.has(entry.name) ? [entry.name] : []))].sort(),
         envVarHashes: Object.fromEntries(visible.map(([key, value]) => [key, hashEnvValue(value)])),
+        envVarSecretRefs,
+        envVarState: (container?.env ?? []).some((entry: any) => typeof envValues[entry.name] !== 'string') ? 'unknown' : 'resolved',
         ...(deployment ? { deployment } : {}),
         status: app.properties?.provisioningState === 'Succeeded'
-          ? (container?.image === BOOTSTRAP_IMAGE ? 'empty' : 'running')
+          ? (container?.image === BOOTSTRAP_IMAGE || prepared && container?.image === prepared.holding.image ? 'empty' : 'running')
           : app.properties?.provisioningState === 'Failed' ? 'failed' : 'unknown',
         maintenance: {
           state: app.properties?.runningStatus === 'Stopped' ? 'suspended'
@@ -988,6 +1129,11 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
   }
 
   private desiredProject(projectName: string, environment: Environment, legacy = false): AzureProject {
+    if (this.deploymentConnection) {
+      if (environment.name !== this.deploymentConnection.environment) throw new Error('Azure deployment environment does not match its approval.');
+      const group = `/subscriptions/${this.deploymentConnection.nativeScope.subscriptionId}/resourceGroups/${this.deploymentConnection.nativeScope.resourceGroup}`;
+      return this.projectFromResourceGroup(group, `${group}/providers/Microsoft.App/managedEnvironments/runtime`);
+    }
     const scope = (legacy ? legacyAzureEnvironmentResourceGroupScope : azureEnvironmentResourceGroupScope)({
       subscriptionId: this.connected().credentials.subscriptionId,
       projectName,
@@ -999,6 +1145,9 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
   }
 
   private projectFromResourceGroup(resourceGroupId: string, boundEnvironmentId?: string): AzureProject {
+    if (this.deploymentConnection && resourceGroupId.toLowerCase() !== `/subscriptions/${this.deploymentConnection.nativeScope.subscriptionId}/resourceGroups/${this.deploymentConnection.nativeScope.resourceGroup}`.toLowerCase()) {
+      throw new Error('Azure bound namespace is outside its deployment approval.');
+    }
     const scope = parseAzureResourceGroupScope(
       resourceGroupId,
       this.connected().credentials.subscriptionId
@@ -1095,12 +1244,27 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
   }
 
   private async roleAssignmentExists(scope: string, principalId: string, roleId: string): Promise<boolean> {
-    const id = this.roleAssignmentId(scope, principalId, roleId);
+    const connection = this.deploymentConnection, prepared = connection?.preparedResources;
+    let key: string | undefined;
+    if (connection && prepared) {
+      if (roleId === ACR_PUSH_ROLE) {
+        const purpose = (['provision', 'release'] as const).find(purpose => connection.principals[purpose].kind === 'azure-managed-identity' && connection.principals[purpose].principalId === principalId);
+        if (purpose) key = `${purpose}:push`;
+      } else if (roleId === ACR_PULL_ROLE) {
+        const runtime = connection.runtimeIdentities.find(item => item.principal.kind === 'azure-managed-identity' && item.principal.principalId === principalId);
+        if (runtime) key = `runtime-${runtime.workload}:pull`;
+      }
+      if (!key || scope.toLowerCase() !== prepared.registry.id.toLowerCase()) throw new Error('Azure installed registry grant scope could not be verified.');
+    }
+    const owner = connection && prepared ? azurePreparedCoordinates(connection).owner : undefined;
+    const id = owner && key ? azurePreparedGrantId(owner, key, scope) : this.roleAssignmentId(scope, principalId, roleId);
     const assignment = await this.getResource(id, AUTHORIZATION_API);
     if (!assignment) return false;
     const properties = assignment.properties ?? {};
     if (String(properties.principalId).toLowerCase() !== principalId.toLowerCase()
-      || !String(properties.roleDefinitionId).toLowerCase().endsWith(`/roledefinitions/${roleId}`)) {
+      || !String(properties.roleDefinitionId).toLowerCase().endsWith(`/roledefinitions/${roleId}`)
+      || owner && key && (String(properties.scope).toLowerCase() !== scope.toLowerCase() || properties.condition != null || properties.principalType !== 'ServicePrincipal'
+        || properties.description !== azurePreparedGrantDescription(owner, key))) {
       throw new Error(`Azure role assignment ${id} changed identity.`);
     }
     return true;
@@ -1119,6 +1283,8 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     project: AzureProject;
     service: Service;
     envVars: Record<string, string>;
+    secretVersionRefs?: Record<string, RuntimeSecretReference>;
+    runtimeReader?: string;
   }): Record<string, unknown> {
     const currentContainer = this.container(params.app);
     const currentImage = currentContainer?.image ?? BOOTSTRAP_IMAGE;
@@ -1129,6 +1295,36 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       value,
     }));
     const configuration = params.app?.properties?.configuration ?? {};
+    const { secrets: previousSecrets, ...retainedConfiguration } = configuration;
+    const definitions = new Map<string, Record<string, unknown>>();
+    for (const entry of previousSecrets ?? []) {
+      if (!entry || typeof entry.name !== 'string' || definitions.has(entry.name)) throw new Error('Azure returned ambiguous secret configuration.');
+      definitions.set(entry.name, { ...entry });
+    }
+    const env = new Map<string, Record<string, unknown>>();
+    for (const entry of currentContainer?.env ?? []) {
+      if (!entry || typeof entry.name !== 'string' || env.has(entry.name)) throw new Error('Azure returned ambiguous environment configuration.');
+      env.set(entry.name, { ...entry });
+    }
+    for (const { key, name, value } of secretEntries) {
+      const existingRef = env.get(key)?.secretRef;
+      if (typeof existingRef === 'string' && definitions.get(existingRef)?.keyVaultUrl) throw new Error('A literal environment update conflicts with an existing native secret reference.');
+      definitions.set(name, { name, value });
+      env.set(key, { name: key, secretRef: name });
+    }
+    for (const [key, reference] of Object.entries(params.secretVersionRefs ?? {})) {
+      const native = runtimeSecretReferenceIdentity(reference);
+      const name = this.secretName(key);
+      definitions.set(name, { name, keyVaultUrl: `${native.resource}/${native.version}`, identity: params.runtimeReader ?? 'system' });
+      env.set(key, { name: key, secretRef: name });
+    }
+    const changeSecrets = secretEntries.length > 0 || Object.keys(params.secretVersionRefs ?? {}).length > 0;
+    if (changeSecrets && [...definitions.values()].some(entry => typeof entry.value !== 'string' && !(typeof entry.keyVaultUrl === 'string' && typeof entry.identity === 'string'))) {
+      throw new Error('Azure secret configuration contains an opaque existing secret; reference-only updates cannot safely replace its definition.');
+    }
+    if (params.service.buildConfig.startCommand) env.set(START_COMMAND_KEY, { name: START_COMMAND_KEY, value: params.service.buildConfig.startCommand });
+    else env.delete(START_COMMAND_KEY);
+    env.set(HEALTH_CHECK_PATH_KEY, { name: HEALTH_CHECK_PATH_KEY, value: params.service.buildConfig.healthCheckPath ?? '/' });
     const template = params.app?.properties?.template ?? {};
     return {
       location: params.app?.location ?? this.connected().credentials.location,
@@ -1137,11 +1333,12 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
         ...(params.app.identity?.userAssignedIdentities ? {
           userAssignedIdentities: Object.fromEntries(Object.keys(params.app.identity.userAssignedIdentities).map(id => [id, {}])),
         } : {}),
-      } : { type: 'SystemAssigned' },
+      } : { type: params.runtimeReader && params.runtimeReader !== 'system' ? 'SystemAssigned, UserAssigned' : 'SystemAssigned',
+        ...(params.runtimeReader && params.runtimeReader !== 'system' ? { userAssignedIdentities: { [params.runtimeReader]: {} } } : {}) },
       properties: {
         managedEnvironmentId: params.environmentId,
         configuration: {
-          ...configuration,
+          ...retainedConfiguration,
           activeRevisionsMode: 'Single',
           ingress: {
             ...configuration.ingress,
@@ -1153,7 +1350,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
           registries: params.app
             ? [{ server: params.project.registryServer, identity: 'system' }]
             : (configuration.registries ?? []),
-          secrets: secretEntries.map(({ name, value }) => ({ name, value })),
+          ...(changeSecrets ? { secrets: [...definitions.values()] } : {}),
         },
         template: {
           ...template,
@@ -1161,11 +1358,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
             ...currentContainer,
             name: 'main',
             image: currentImage,
-            env: [
-              ...secretEntries.map(({ key, name }) => ({ name: key, secretRef: name })),
-              ...(params.service.buildConfig.startCommand ? [{ name: START_COMMAND_KEY, value: params.service.buildConfig.startCommand }] : []),
-              { name: HEALTH_CHECK_PATH_KEY, value: params.service.buildConfig.healthCheckPath ?? '/' },
-            ],
+            env: [...env.values()],
             resources: { cpu: 0.25, memory: '0.5Gi' },
             ...(bootstrap
               ? { command: ['node'], args: ['-e', BOOTSTRAP_SCRIPT], probes: undefined }
@@ -1189,6 +1382,31 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       },
       tags: params.app?.tags ?? this.tags(params.environment),
     };
+  }
+
+  private observedSecretReferences(app: AzureResource): NonNullable<ObservedService['envVarSecretRefs']> {
+    const definitions: any[] = app.properties?.configuration?.secrets ?? [];
+    const refs: NonNullable<ObservedService['envVarSecretRefs']> = {};
+    for (const entry of this.container(app)?.env ?? []) {
+      if (typeof entry.name !== 'string' || entry.value !== undefined || INTERNAL_ENV_KEYS.has(entry.name)) continue;
+      const matches = definitions.filter(def => def.name === entry.secretRef);
+      const match = matches.length === 1 && typeof matches[0]?.keyVaultUrl === 'string'
+        ? matches[0].keyVaultUrl.match(/^(https:\/\/[a-z][a-z0-9-]{1,22}[a-z0-9]\.vault\.azure\.net\/secrets\/[A-Za-z0-9-]{1,127})\/([a-f0-9]{32})$/) : null;
+      if (match) refs[entry.name] = { provider: 'azure-key-vault', resource: match[1].toLowerCase(), version: match[2] };
+    }
+    return refs;
+  }
+
+  private assertSecretReferences(app: AzureResource, refs: Record<string, RuntimeSecretReference>, reader: string): void {
+    const observed = this.observedSecretReferences(app);
+    for (const [key, ref] of Object.entries(refs)) {
+      const expected = runtimeSecretReferenceIdentity(ref);
+      const entries = (this.container(app)?.env ?? []).filter((entry: any) => entry.name === key);
+      const definition = app.properties?.configuration?.secrets?.find((entry: any) => entry.name === entries[0]?.secretRef);
+      if (entries.length !== 1 || observed[key]?.resource !== expected.resource || observed[key]?.version !== expected.version || typeof definition?.identity !== 'string' || definition.identity.toLowerCase() !== reader.toLowerCase()) {
+        throw new Error('Azure did not verify the requested runtime secret references.');
+      }
+    }
   }
 
   private async waitForProvisioning(id: string, apiVersion: string): Promise<AzureResource> {
@@ -1408,6 +1626,13 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
   }
 
   private isOwned(resource: AzureResource, environmentId: string): boolean {
+    const connection = this.deploymentConnection, prepared = connection?.preparedResources;
+    if (connection && prepared) {
+      const c = azurePreparedCoordinates(connection), id = resource.id.toLowerCase();
+      const expected = [prepared.project, prepared.registry, ...prepared.workloads].find(item => item.id.toLowerCase() === id);
+      return (id === c.group.toLowerCase() || !!expected && resource.systemData?.createdAt === expected.lifetimeId)
+        && resource.tags?.hypervibeInstallation === connection.installationId && resource.tags?.hypervibeDeployment === c.owner;
+    }
     return resource.tags?.['managed-by'] === 'hypervibe'
       && resource.tags?.['hypervibe-environment-id'] === environmentId;
   }
@@ -1474,13 +1699,20 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
 }
 
 providerRegistry.register({
+  transientAuthentication: { ...azureDeploymentContract, createAdapter: async input => {
+    const adapter = new AzureContainerAppsAdapter(); await adapter.connectTransient(input); return adapter;
+  } },
   metadata: {
     name: 'azure-container-apps',
     displayName: 'Azure Container Apps',
+    runtimeSecretReferenceProviders: ['azure-key-vault'],
     category: 'deployment',
     credentialsSchema: AzureContainerAppsCredentialsSchema,
     setupHelpUrl: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
     credentials: {
+      canUseForAutomation: canUseAzureCredentialsForAutomation,
+      supportsNativeCliAuth: true,
+      verifiedIdentityKeys: ['authMode', 'subscriptionId', 'tenantId'],
       environmentVariableAliases: [
         ['HYPERVIBE_AZURE_TENANT_ID', 'AZURE_TENANT_ID'],
         ['HYPERVIBE_AZURE_SUBSCRIPTION_ID', 'AZURE_SUBSCRIPTION_ID'],
@@ -1497,6 +1729,7 @@ providerRegistry.register({
       project: { shareAcrossEnvironments: false },
       diff: { workloadKindObservation: 'exact' },
       ci: {
+        transientDeployment: 'github-oidc-broker-v1',
         displayName: 'Azure Container Apps',
         rendererRevision: 1,
         requiredSecrets: AZURE_CONTAINER_APPS_CI_REQUIRED_SECRETS,
@@ -1512,7 +1745,7 @@ providerRegistry.register({
       },
     },
     lifecycle: {
-      hosting: { workloadKinds: ['web'], serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only' }, customDomains: 'managed', domainTrafficProxy: 'dns-only', maintenance: 'managed', teardownBoundary: 'project' },
+      hosting: { preparedResources: 'installer-receipt-v1', runtimeIdentityTiming: 'before-workload', workloadKinds: ['web'], serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only' }, customDomains: 'managed', domainTrafficProxy: 'dns-only', maintenance: 'managed', teardownBoundary: 'project' },
     },
   },
   factory: async (credentials) => {

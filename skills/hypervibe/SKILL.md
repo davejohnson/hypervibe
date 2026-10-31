@@ -72,9 +72,15 @@ requires explicit intent to adopt and the exact reviewed mapping.
   invent unsupported parameters, or put secrets in a URL. If an applicable
   supported prefill is missing, report the guidance gap rather than claiming it
   is already filled.
-- Prefer provider-owned bootstrap and local authentication when offered. Perform
-  the agent's supported setup work; leave browser consent, MFA, payment details,
-  and ambiguous account or billing choices to the user.
+- For new AWS, Azure or GCP access, use `hv_cloud_connections` with
+  `purpose="connect-cloud"` for browser installation bound to the exact app and
+  environment, or invite the cloud administrator. Local cloud credentials and
+  manually prepared writer identities are not prerequisites. Perform supported
+  setup work; leave browser consent, MFA, payment details and ambiguous billing
+  choices to the user. Keep setup, deployment and collection approvals separate.
+  If hosted setup is unavailable, report the prerequisite; do not substitute
+  copied cloud keys. Local authentication and legacy bootstrap remain explicit
+  existing-connection paths.
 - Follow each result's `agentInstruction`. After blocked, failed, pending, or
   confirmation-required work, report the stopping point and next decision.
   Continue only within an explicit bounded continuation, or the user's explicit

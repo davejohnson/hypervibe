@@ -81,6 +81,8 @@ function save(ctx: CommandContext, env: Environment, role: string, update: Progr
 function slotsForRole(spec: ProjectSpec, role: string) {
   const slots = Object.entries(spec.secrets).filter(([, s]) => s.credential?.role === role).sort(([a], [b]) => a.localeCompare(b));
   if (!slots.length) throw new Error('Declare the credential role, source and destinations with hv_spec first.');
+  if (slots.some(([key]) => Object.values(spec.environments).some(environment => environment.secretDestinations?.[key])))
+    throw new Error('Native secret destinations cannot also declare credential lifecycle authority. Preserve the native reference; no credential source read or rotation is authorized.');
   const descriptor = JSON.parse(JSON.stringify(slots[0][1].credential)) as CredentialTracking;
   if (slots.some(([, s]) => !isDeepStrictEqual(JSON.parse(JSON.stringify(s.credential)), descriptor) || s.ownership !== slots[0][1].ownership)) throw new Error('Every alias of a role must declare the same source, purpose, identity and ownership.');
   if (slots[0][1].ownership === 'delegated' && !descriptor.source && descriptor.kind !== 'database-password') throw new Error('An externally supplied role requires one explicit source reference.');

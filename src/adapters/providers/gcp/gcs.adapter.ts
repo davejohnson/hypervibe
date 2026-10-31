@@ -1,6 +1,8 @@
+import { gcpGithubRecoveryAuthentication } from './gcp-github-automation.js';
 import { Readable } from 'node:stream';
 import { request as httpsRequest } from 'node:https';
 import { GoogleAuth } from 'google-auth-library';
+import { GcpGithubWorkloadAuthentication, gcpGithubWorkloadIdentitySchema } from './gcp-github-workload-identity.js';
 import { z } from 'zod';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { ObservedStorage } from '../../../domain/ports/observe.port.js';
@@ -15,6 +17,7 @@ import type {
   StorageObservationTarget,
   StorageRuntimeTarget,
 } from '../../../domain/ports/storage.port.js';
+import { GcsRuntimeAccess } from './gcs-runtime-access.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
 import {
   providerRegistry,
@@ -34,10 +37,18 @@ const ServiceAccountSchema = z.object({
 }).passthrough();
 
 const GcsStorageAuthenticationSchema = z.object({
-  authMode: z.enum(['default', 'serviceAccount']).default('serviceAccount'),
+  authMode: z.enum(['default', 'serviceAccount', 'github-workload-identity']).default('serviceAccount'),
+  projectId: z.string().regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/).optional(),
+  workloadIdentity: gcpGithubWorkloadIdentitySchema.optional(),
   credentials: z.string().min(1, 'GCP service account JSON is required').optional(),
   runtimeServiceAccountEmail: z.string().trim().email().optional(),
 }).strict().superRefine((value, ctx) => {
+  if (value.authMode === 'github-workload-identity') {
+    if (!value.workloadIdentity || value.workloadIdentity.projectId !== value.projectId || value.credentials !== undefined)
+      ctx.addIssue({ code: 'custom', path: ['workloadIdentity'], message: 'GitHub federation requires the exact nonsecret project identity and no private key.' });
+    return;
+  }
+  if (value.workloadIdentity !== undefined) ctx.addIssue({ code: 'custom', path: ['workloadIdentity'], message: 'A workload identity requires its explicit authentication mode.' });
   if (value.authMode === 'default' || value.credentials) return;
   ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['credentials'], message: 'GCP service account JSON is required' });
 });
@@ -47,6 +58,7 @@ export const GcsStorageCredentialsSchema = z.preprocess((input) => {
   const record = input as Record<string, unknown>;
   if (record.type === 'service_account') return { authMode: 'serviceAccount', credentials: JSON.stringify(record) };
   return { authMode: record.authMode ?? (record.credentials ? 'serviceAccount' : undefined),
+    ...(record.workloadIdentity !== undefined ? { workloadIdentity: record.workloadIdentity, projectId: record.projectId } : {}),
     credentials: record.credentials, runtimeServiceAccountEmail: record.runtimeServiceAccountEmail };
 }, GcsStorageAuthenticationSchema);
 
@@ -97,8 +109,9 @@ const rawGcsMediaFetch: typeof fetch = async (input, init) => new Promise((resol
   request.once('error', reject); request.end();
 });
 
-async function defaultTokenProvider(_credentials: GcsStorageCredentials, serviceAccount: ServiceAccount | null) {
-  const auth = new GoogleAuth({
+async function defaultTokenProvider(credentials: GcsStorageCredentials, serviceAccount: ServiceAccount | null) {
+  const auth = credentials.authMode === 'github-workload-identity'
+    ? new GcpGithubWorkloadAuthentication(credentials.workloadIdentity!).auth : new GoogleAuth({
     ...(serviceAccount ? { credentials: serviceAccount, projectId: serviceAccount.project_id } : {}),
     scopes: ['https://www.googleapis.com/auth/cloud-platform'],
   });
@@ -108,7 +121,7 @@ async function defaultTokenProvider(_credentials: GcsStorageCredentials, service
   if (!token) throw new Error('Google authentication did not return an access token.');
   return {
     token,
-    email: serviceAccount?.client_email ?? 'Google Application Default Credentials',
+    email: credentials.workloadIdentity?.serviceAccountEmail ?? serviceAccount?.client_email ?? 'Google Application Default Credentials',
     expiresAt: client.credentials.expiry_date ?? Date.now() + 50 * 60 * 1_000,
   };
 }
@@ -279,6 +292,12 @@ class GcsObjectClient implements StorageObjectClient {
   }
 }
 
+/** Selected native worker data plane: no account key or local credential export. */
+export function createGcsWorkloadObjectClient(bucket: string, getToken: () => Promise<string>, options: { fetch?: typeof fetch; mediaFetch?: typeof fetch } = {}): StorageObjectClient {
+  if (!/^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$/.test(bucket)) throw new Error('The selected GCS bucket name is invalid.');
+  return new GcsObjectClient(bucket, options.fetch ?? fetch, getToken, options.mediaFetch ?? options.fetch ?? rawGcsMediaFetch);
+}
+
 export class GcsStorageAdapter implements IStorageAdapter {
   readonly name = 'gcs';
   readonly capabilities = {
@@ -299,12 +318,16 @@ export class GcsStorageAdapter implements IStorageAdapter {
   private readonly mediaRequest: typeof fetch;
   private readonly tokenProvider: TokenProvider;
   private readonly defaultProjectProvider: () => Promise<string>;
+  readonly runtimeAccess: GcsRuntimeAccess;
 
   constructor(options: GcsStorageAdapterOptions = {}) {
     this.request = options.fetch ?? fetch;
     this.mediaRequest = options.mediaFetch ?? options.fetch ?? rawGcsMediaFetch;
     this.tokenProvider = options.tokenProvider ?? defaultTokenProvider;
     this.defaultProjectProvider = options.defaultProjectProvider ?? (() => new GoogleAuth().getProjectId());
+    this.runtimeAccess = new GcsRuntimeAccess(async () => ({ projectId: await this.connectedProjectId(),
+      managementEmail: this.credentials?.workloadIdentity?.serviceAccountEmail ?? this.serviceAccount?.client_email,
+      token: await this.accessToken() }), this.request);
   }
 
   runtimeEnvKeys(_name: string): string[] {
@@ -317,6 +340,11 @@ export class GcsStorageAdapter implements IStorageAdapter {
   async connect(credentials: unknown): Promise<void> {
     this.credentials = GcsStorageCredentialsSchema.parse(credentials);
     this.projectId = null;
+    if (this.credentials.authMode === 'github-workload-identity') {
+      this.serviceAccount = null;
+      this.projectId = this.credentials.workloadIdentity!.projectId;
+      return;
+    }
     if (this.credentials.authMode === 'default') {
       this.serviceAccount = null;
       return;
@@ -349,7 +377,7 @@ export class GcsStorageAdapter implements IStorageAdapter {
       const projectId = await this.connectedProjectId();
       const response = await this.authorized(`${STORAGE_API}/storage/v1/b?project=${encodeURIComponent(projectId)}&maxResults=1`);
       if (!response.ok) return { success: false, error: (await responseError(response)).message };
-      return { success: true, email: this.serviceAccount?.client_email ?? `Google ADC (${projectId})` };
+      return { success: true, email: this.credentials?.workloadIdentity?.serviceAccountEmail ?? this.serviceAccount?.client_email ?? `Google ADC (${projectId})` };
     } catch (error) {
       return { success: false, error: errorMessage(error) };
     }
@@ -561,10 +589,10 @@ export class GcsStorageAdapter implements IStorageAdapter {
   }
 
   async getRuntimeEnv(
-    _environment: Environment,
+    environment: Environment,
     context: StorageContext,
     externalId: string,
-    _name: string,
+    name: string,
     target?: StorageRuntimeTarget
   ): Promise<Record<string, string>> {
     await this.assertContext(context);
@@ -581,6 +609,9 @@ export class GcsStorageAdapter implements IStorageAdapter {
         || (configuredPrincipal && configuredPrincipal !== identity.principal)) {
         throw new Error('GCS runtime access requires the exact distinct Cloud Run workload identity and GCP project scope.');
       }
+      if (!target.serviceName || !target.runtimeAccessBinding) throw new Error('GCS workload access preparation requires its exact reviewed bucket grant before runtime wiring.');
+      const grant = await this.runtimeAccess.observe({ environment, context, externalId, storageName: name, serviceName: target.serviceName, identity }, target.runtimeAccessBinding);
+      if (grant.state !== 'present') throw new Error('GCS workload access grant is missing or unverified; apply its exact permission action before runtime wiring.');
       // Empty the legacy slot on reviewed runtime synchronization. Leaving an
       // old key installed would override workload ADC in existing consumers.
       return { ...runtimeEnv, GOOGLE_CLOUD_CREDENTIALS_JSON: '' };
@@ -706,8 +737,12 @@ providerRegistry.register({
     credentialsSchema: GcsStorageCredentialsSchema,
     setupHelpUrl: 'https://cloud.google.com/iam/docs/keys-create-delete',
     credentials: {
-      agentManagedKeys: ['runtimeServiceAccountEmail'],
+      automationAuthentication: gcpGithubRecoveryAuthentication,
+      agentManagedKeys: ['runtimeServiceAccountEmail', 'projectId', 'workloadIdentity'],
+      agentManagedChoices: { authMode: ['github-workload-identity'] },
       automationSecretKeys: { GCP_SERVICE_ACCOUNT_JSON: 'credentials' },
+      canUseForAutomation: credentials => credentials.authMode !== 'default'
+        && GcsStorageCredentialsSchema.safeParse(credentials).success,
       defaultScalarKey: 'credentials',
       supportsNativeCliAuth: true,
       environmentVariableAliases: [
@@ -715,7 +750,8 @@ providerRegistry.register({
       ],
     },
     connectionAliases: ['cloudrun'],
-    storageRuntimeContract: 'gcs-native-adc-v1',
+    storageRuntimeContract: 'gcs-native-adc-v2',
+    storageRuntimeAccess: { hostingProviders: ['cloudrun'] },
     maturity: {
       lifecycle: {
         storage: { status: 'ready-for-live' },

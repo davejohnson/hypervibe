@@ -5,7 +5,7 @@ import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
 import type { EnvironmentSpec, QueueSpec } from '../spec/spec.schema.js';
 import type { IProviderAdapter } from '../ports/provider.port.js';
-import { supportsManagedQueues, type IQueueAdapter } from '../ports/queue.port.js';
+import { supportsManagedQueues, type IQueueAdapter, type ManagedQueueSubscription } from '../ports/queue.port.js';
 import type { PlanAction, PlanFieldDiff } from '../plan/plan.types.js';
 
 /**
@@ -83,6 +83,15 @@ function queueBackend(adapter: IProviderAdapter): 'pubsub' | 'postgres' | undefi
   return adapter.capabilities.queues?.backend;
 }
 
+function matchesPubsubBinding(binding: QueueBinding | undefined, subscription: ManagedQueueSubscription, scope: Record<string, string>, topicName: string, subscriptionName: string): boolean {
+  return binding?.backend === 'pubsub'
+    && exactStringRecord(binding.providerScope, scope)
+    && binding.topicName === topicName
+    && binding.subscriptionName === subscriptionName
+    && subscription.topic === topicName
+    && subscription.name === subscriptionName;
+}
+
 function queueAction(params: {
   id: string;
   type: PlanAction['type'];
@@ -93,6 +102,7 @@ function queueAction(params: {
   verified: boolean;
   diff?: PlanFieldDiff[];
   dataBearing?: boolean;
+  billable?: boolean;
   requiresConfirm?: boolean;
   metadata?: Record<string, unknown>;
 }): PlanAction {
@@ -104,6 +114,7 @@ function queueAction(params: {
     reason: params.reason,
     ...(params.diff && params.diff.length > 0 ? { diff: params.diff } : {}),
     ...(params.dataBearing ? { dataBearing: true } : {}),
+    ...(params.billable ? { billable: true } : {}),
     ...(params.requiresConfirm ? { requiresConfirm: true } : {}),
     metadata: { operation: params.operation, ...(params.metadata ?? {}) },
   };
@@ -158,7 +169,7 @@ export async function planQueues(params: {
   }
 
   const provider = params.environmentSpec.hosting.provider;
-  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project, undefined, params.environment?.name);
   if (!adapterResult.success || !adapterResult.adapter) {
     const reason = `Cannot plan queues: ${adapterResult.error ?? `no ${provider} adapter`}`;
     return {
@@ -270,12 +281,8 @@ export async function planQueues(params: {
       const expectedSubscriptionName = currentProjectId
         ? `projects/${currentProjectId}/subscriptions/${subscriptionId}`
         : undefined;
-      const identityMatches = binding?.backend === 'pubsub'
-        && exactStringRecord(binding.providerScope, currentProviderScope)
-        && binding.topicName === expectedTopicName
-        && binding.subscriptionName === expectedSubscriptionName
-        && subscription.topic === expectedTopicName
-        && subscription.name === expectedSubscriptionName;
+      const identityMatches = Boolean(expectedTopicName && expectedSubscriptionName
+        && matchesPubsubBinding(binding, subscription, currentProviderScope, expectedTopicName, expectedSubscriptionName));
       if (!identityMatches) {
         const blockedReason = binding
           ? 'queue_binding_identity_mismatch'
@@ -415,6 +422,8 @@ function pubsubEnsureAction(
     operation: QUEUE_OPERATIONS.ensure,
     reason: options.reason,
     verified: options.verified,
+    billable: true,
+    requiresConfirm: true,
     metadata: {
       queueName: name,
       backend: 'pubsub',
@@ -471,6 +480,7 @@ export async function applyQueueAction(params: {
   envName: string;
   environmentSpec: EnvironmentSpec;
   action: PlanAction;
+  confirmedActionIds?: ReadonlySet<string>;
 }): Promise<{ success: boolean; message: string; error?: string; data?: Record<string, unknown> }> {
   const queueName = typeof params.action.metadata?.queueName === 'string'
     ? params.action.metadata.queueName
@@ -507,7 +517,7 @@ export async function applyQueueAction(params: {
     return { success: false, message: 'Environment not found locally', error: `No local environment "${params.envName}"` };
   }
 
-  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project, undefined, params.envName);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: 'Hosting adapter unavailable', error: adapterResult.error };
   }
@@ -622,13 +632,34 @@ export async function applyQueueAction(params: {
       return { success: true, message: `Destroyed Pub/Sub topic and subscription for "${queueName}"` };
     }
 
-    const ackDeadlineSeconds = typeof params.action.metadata?.ackDeadlineSeconds === 'number'
-      ? params.action.metadata.ackDeadlineSeconds
-      : params.environmentSpec.queues?.[queueName]?.ackDeadlineSeconds;
-    const result = await queueAdapter.ensureQueue(environment, queueName, { ackDeadlineSeconds });
     const { topicId, subscriptionId } = queueAdapter.queueResourceNames(environment, queueName);
     const expectedTopicName = `projects/${currentProviderScope.projectId}/topics/${topicId}`;
     const expectedSubscriptionName = `projects/${currentProviderScope.projectId}/subscriptions/${subscriptionId}`;
+    const binding = parseQueueBindings(environment)[queueName];
+    const subscription = await queueAdapter.getQueueSubscription(environment, queueName);
+    if (!subscription) {
+      if (binding || params.action.type !== 'create') {
+        return { success: false, message: `Queue action "${params.action.id}" has stale mutation authority`,
+          error: 'The reviewed queue is now absent or retains a missing identity. Re-run hv_plan; an update cannot create a replacement.' };
+      }
+      if (params.action.billable !== true || params.action.requiresConfirm !== true || !params.confirmedActionIds?.has(params.action.id)) {
+        return { success: false, message: `Queue creation "${params.action.id}" requires exact confirmation`,
+          error: 'Re-run hv_plan and confirm this exact billable queue creation action before provisioning.' };
+      }
+    } else if (params.action.type === 'create' || !matchesPubsubBinding(binding, subscription, currentProviderScope, expectedTopicName, expectedSubscriptionName)) {
+      return { success: false, message: `Queue action "${params.action.id}" has stale mutation authority`,
+        error: 'The live Pub/Sub queue must match its reviewed durable binding. Re-run hv_plan; existing resources cannot be silently adopted.' };
+    }
+    const ackDeadlineSeconds = typeof params.action.metadata?.ackDeadlineSeconds === 'number'
+      ? params.action.metadata.ackDeadlineSeconds
+      : params.environmentSpec.queues?.[queueName]?.ackDeadlineSeconds;
+    if (params.action.type === 'noop') {
+      const unchanged = ackDeadlineSeconds === undefined || subscription?.ackDeadlineSeconds === ackDeadlineSeconds;
+      return { success: unchanged, message: unchanged ? `Queue "${queueName}" is unchanged` : `Queue "${queueName}" changed after planning; re-run hv_plan.` };
+    }
+    const result = await queueAdapter.ensureQueue(environment, queueName, {
+      ackDeadlineSeconds, expectedState: params.action.type === 'create' ? 'absent' : 'present',
+    });
     const topicProjectId = pubsubResourceProjectId(result.topicName, 'topics');
     const subscriptionProjectId = pubsubResourceProjectId(result.subscriptionName, 'subscriptions');
     if (

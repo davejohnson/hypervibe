@@ -4,4 +4,6 @@ import '../adapters/providers/railway/railway.adapter.js';
 import '../adapters/providers/github/github.adapter.js';
 import '../adapters/providers/aws/s3.adapter.js';
 import '../adapters/providers/gcp/gcs.adapter.js';
+import '../adapters/providers/gcp/cloudrun.adapter.js';
+import '../adapters/providers/gcp/cloudsql.adapter.js';
 import '../adapters/providers/azure/azure-blob.adapter.js';

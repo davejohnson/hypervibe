@@ -1,18 +1,28 @@
+import { isRecoveryRuntimeAction } from '../services/recovery-runtime.service.js';
+import { recoveryRuntimeStepSchema } from '../ports/recovery-runtime.port.js';
+import { isRuntimeAccessAction, RUNTIME_ACCESS_OPERATIONS } from '../services/runtime-access.service.js';
 import { isDatabasePasswordAction, DATABASE_PASSWORD_OPERATIONS } from './database-password-plan.contract.js';
 import { isRepositoryVariableAction } from '../services/repository-variables.service.js';
 import { isDatabaseBootstrapAction } from './database-bootstrap.contract.js';
 import { DATABASE_FRESH_INITIALIZATION_OPERATION, isDatabaseInitializationAction } from './database-initialization.contract.js';
 import { isCredentialAction, CREDENTIAL_OPERATION } from './credential-plan.contract.js';
 import { databaseCredentialAliasesActionSchema, DATABASE_CREDENTIAL_ALIASES_OPERATION } from '../services/database-credential-aliases.service.js';
+import { secretReferenceActionMetadataSchema, SECRET_REFERENCE_OPERATION } from '../services/secret-reference-plan.js';
+import { secretContainerActionMetadataSchema, SECRET_DESTINATION_PREPARE } from '../ports/secret-destination-lifecycle.port.js';
 import { scheduleActivationActionMetadataSchema } from '../services/schedule-activation.service.js';
 import { INBOUND_SIGNING_KEY_OPERATION } from '../services/email-inbound-signing.service.js';
 import { databaseCheckpointIdentitySchema } from '../services/database-checkpoint.js';
 import { backupPolicyActionId, backupPolicyActionMetadataSchema, DAILY_BACKUP_OPERATION } from '../services/backup-policy-plan.service.js';
 import { DATABASE_SCOPE_BIND_OPERATION, isDatabaseScopeBindingAction } from '../services/database-scope-binding.service.js';
+import { HOSTING_PREPARED_OPERATION, isPreparedHostingAction } from '../services/hosting-prepared.service.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { API_POLICY_OPERATION } from '../services/api-policy.js';
 import { EMAIL_SIGNING_OPERATIONS } from '../services/email-signing.service.js';
 import type { PlanAction, PlanResourceKind } from './plan.types.js';
+import { isOperatorArtifactAction } from '../ports/operator-artifact.port.js';
+import { isLocalHoldingAction } from '../ports/local-holding-preparation.port.js';
+import { isLocalCloudScopeAction } from '../ports/local-cloud-scope.port.js';
+export { hasExactPlanActionConfirmationAuthority } from './action-confirmation.js';
 import { HOSTING_ENVIRONMENT_ENSURE_OPERATION } from './plan.service.js';
 import {
   isCloudflareDomainRegistrationAction,
@@ -96,13 +106,18 @@ import {
 } from '../services/managed-code-repository.contract.js';
 
 export type PlanMutationCapability =
+  | 'cloud.scope.prepare'
+  | 'operator.artifact.publish'
+  | 'hosting.holding.prepare'
   | 'database.bootstrap'
   | 'database.fresh-initialization'
   | 'credential.lifecycle.update'
   | 'database.credential-aliases.repair'
   | 'database.scope.bind'
+  | 'hosting.prepared.bind'
   | 'backup-policy.configure'
   | 'api.policy.accept'
+  | 'hosting.recovery-runtime.mutate'
   | 'hosting.volume.mutate'
   | 'hosting.environment.ensure'
   | 'domain.registration.mutate'
@@ -136,6 +151,8 @@ export type PlanMutationCapability =
   | 'load-balancer.pool.mutate'
   | 'load-balancer.mutate'
   | 'hosting.delegated-secret.sync'
+  | 'hosting.secret-reference.sync'
+  | 'secret.destination.prepare'
   | 'stripe.hosting-env.sync'
   | 'stripe.catalog.mutate'
   | 'stripe.webhook.mutate'
@@ -181,6 +198,8 @@ export type PlanMutationCapability =
   | 'local.environment.record'
   | 'hosting.project.ensure'
   | 'hosting.schedule.activate'
+  | 'hosting.runtime-identity.mutate'
+  | 'storage.runtime-access.mutate'
   | 'hosting.service.converge'
   | 'hosting.service.rollback';
 
@@ -201,15 +220,6 @@ export interface PlanActionAuthority {
  * the reviewed action retained its confirmation marker and the caller names
  * that exact action id.
  */
-export function hasExactPlanActionConfirmationAuthority(
-  action: PlanAction,
-  confirmationRequired: boolean,
-  confirmedActionIds: ReadonlySet<string>
-): boolean {
-  return !confirmationRequired
-    || (action.requiresConfirm === true && confirmedActionIds.has(action.id));
-}
-
 function authority(
   action: PlanAction,
   capability: PlanMutationCapability
@@ -500,6 +510,25 @@ export function resolvePlanActionAuthority(
   if (!action.id.trim() || !action.resource.name.trim() || !action.resource.provider.trim()) {
     return null;
   }
+  if (isLocalHoldingAction(action)) return authority(action, 'hosting.holding.prepare');
+  if (isOperatorArtifactAction(action)) return authority(action, 'operator.artifact.publish');
+  if (isLocalCloudScopeAction(action)) return authority(action, 'cloud.scope.prepare');
+
+  if (action.metadata?.operation === SECRET_DESTINATION_PREPARE) {
+    const parsed = secretContainerActionMetadataSchema.safeParse(action.metadata);
+    return parsed.success && action.verified === true && action.resource.kind === 'secret'
+      && action.id === `secret-destination:${action.resource.name}` && parsed.data.owner.key === action.resource.name
+      && (parsed.data.mode === 'create' ? action.type === 'create' && action.requiresConfirm === true && action.billable === true : action.type === 'update')
+      && providerRegistry.getMetadata(action.resource.provider)?.secretDestinationSetupProviders?.includes(parsed.data.destination.provider)
+      ? authority(action, 'secret.destination.prepare') : null;
+  }
+  if (action.metadata?.operation === SECRET_REFERENCE_OPERATION) {
+    const parsed = secretReferenceActionMetadataSchema.safeParse(action.metadata);
+    return action.type === 'update' && action.verified === true && action.resource.kind === 'secret'
+      && action.id === `secret:${action.resource.name}` && parsed.success
+      && providerRegistry.getMetadata(action.resource.provider)?.runtimeSecretReferenceProviders?.includes(parsed.data.reference.destination.provider)
+      ? authority(action, 'hosting.secret-reference.sync') : null;
+  }
 
   if (action.metadata?.operation === DATABASE_CREDENTIAL_ALIASES_OPERATION) {
     return databaseCredentialAliasesActionSchema.safeParse(action).success
@@ -508,6 +537,9 @@ export function resolvePlanActionAuthority(
 
   if (action.metadata?.operation === DATABASE_SCOPE_BIND_OPERATION) {
     return isDatabaseScopeBindingAction(action) ? authority(action, 'database.scope.bind') : null;
+  }
+  if (action.metadata?.operation === HOSTING_PREPARED_OPERATION) {
+    return isPreparedHostingAction(action) ? authority(action, 'hosting.prepared.bind') : null;
   }
   if (action.metadata?.operation === DATABASE_FRESH_INITIALIZATION_OPERATION) {
     return isDatabaseInitializationAction(action) ? authority(action, 'database.fresh-initialization') : null;
@@ -994,6 +1026,20 @@ export function resolvePlanActionAuthority(
     ) {
       return authority(action, 'storage.migration-target.destroy');
     }
+    return null;
+  }
+  if (isRecoveryRuntimeAction(action)) {
+    if (action.type !== 'update' || !action.verified || action.metadata?.blockedReason || !exactResource(action, 'service') || action.resource.name !== 'backup-runtime'
+      || !['ensure', 'destroy'].includes(String(action.metadata?.mode)) || action.id !== 'recovery-runtime:backup-runtime' || !/^[a-f0-9]{64}$/.test(String(action.metadata?.targetHash))
+      || !/^[a-f0-9]{64}$/.test(String(action.metadata?.bindingHash)) || !recoveryRuntimeStepSchema.safeParse(action.metadata?.step).success) return null;
+    return authority(action, 'hosting.recovery-runtime.mutate');
+  }
+  if (isRuntimeAccessAction(action)) {
+    const identity = action.metadata?.operation === RUNTIME_ACCESS_OPERATIONS.identity;
+    if (action.type !== 'update' || !action.verified || action.metadata?.blockedReason
+      || !metadataString(action, 'serviceName') || !/^[a-f0-9]{64}$/.test(String(action.metadata?.evidenceHash))) return null;
+    if (identity && exactResource(action, 'service') && action.resource.name === action.metadata?.serviceName && action.metadata?.step) return authority(action, 'hosting.runtime-identity.mutate');
+    if (!identity && exactResource(action, 'storage') && action.resource.name === action.metadata?.storageName) return authority(action, 'storage.runtime-access.mutate');
     return null;
   }
   if (

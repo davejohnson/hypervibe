@@ -38,7 +38,7 @@ export const postgresBackupEvidenceSchema = z.object({
   mechanism: z.literal('postgres-logical-archive'),
   source: recoverySourceIdentitySchema,
   destination: objectRecoveryIdentitySchema,
-  runId: z.string().uuid(),
+  runId: z.string().guid(),
   archiveKey: z.string().min(1),
   archiveRevision: storedObjectRevisionSchema,
   manifestKey: z.string().min(1),

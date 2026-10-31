@@ -1,3 +1,4 @@
+import { runtimeAccessBindings, runtimeAccessReady } from './runtime-access.service.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import type { Environment } from '../entities/environment.entity.js';
@@ -538,7 +539,9 @@ export function planStorage(params: {
       ));
       const keys = binding?.envKeys ?? storageEnvKeys(name);
       const runtimeContract = storageRuntimeContract(spec.provider, params.environmentSpec.hosting.provider);
-      const wired = !serviceIdentityMismatch
+      const nativeAccess = providerRegistry.getMetadata(spec.provider)?.storageRuntimeAccess?.hostingProviders.includes(params.environmentSpec.hosting.provider);
+      const accessReady = !nativeAccess || runtimeAccessReady(params.observed?.runtimeAccess, name, serviceName);
+      const wired = accessReady && !serviceIdentityMismatch
         && binding?.services.includes(serviceName)
         && (!runtimeContract || binding.runtimeContracts?.[serviceName] === runtimeContract)
         && keys.every((key) => observedService?.envVarKeys.includes(key));
@@ -560,6 +563,7 @@ export function planStorage(params: {
           envKeys: keys,
           ...(runtimeContract ? { runtimeContract } : {}),
           ...(serviceId ? { serviceId } : { serviceIdPending: true }),
+          ...(!accessReady ? { blockedReason: 'runtime_access_unverified' } : {}),
           ...(serviceIdentityMismatch ? {
             blockedReason: 'service_binding_identity_mismatch',
           } : {}),
@@ -667,24 +671,33 @@ export function isStorageAction(planAction: PlanAction): boolean {
 
 async function storageRuntimeTarget(params: {
   project: Project; environmentSpec: EnvironmentSpec; environment: Environment;
-  serviceName: string; connectionProvider?: string; usesWorkloadIdentity?: boolean;
+  serviceName: string; storageName: string; connectionProvider?: string; usesWorkloadIdentity?: boolean;
   hosting?: IProviderAdapter;
 }): Promise<StorageRuntimeTarget> {
   const target: StorageRuntimeTarget = { hostingProvider: params.environmentSpec.hosting.provider,
-    connectionProvider: params.connectionProvider };
+    connectionProvider: params.connectionProvider, serviceName: params.serviceName,
+    runtimeAccessBinding: runtimeAccessBindings(params.environment)?.storageRuntimeAccess[params.storageName]?.[params.serviceName]?.binding };
   if (!params.usesWorkloadIdentity) return target;
   const result = params.hosting ? { success: true, adapter: params.hosting }
-    : await adapterFactory.getProviderAdapter(target.hostingProvider, params.project);
+    : await adapterFactory.getProviderAdapter(target.hostingProvider, params.project, undefined, params.environment.name);
   if (!result.success || !result.adapter || result.adapter.name !== target.hostingProvider) {
     throw new Error('Storage runtime identity requires the selected hosting connection.');
   }
   const hosting = result.adapter;
   await hosting.configureTarget?.({ region: params.environmentSpec.hosting.region });
-  if (hosting.resolveRuntimeIdentity) {
-    const desired = params.environmentSpec.services[params.serviceName];
-    if (!desired) throw new Error('Storage runtime destination service is missing from the reviewed project.');
-    target.identity = await hosting.resolveRuntimeIdentity(params.environment, { name: params.serviceName,
-      buildConfig: { workloadKind: desired.workloadKind, cronSchedule: desired.cronSchedule } });
+  const desired = params.environmentSpec.services[params.serviceName];
+  if (!desired) throw new Error('Storage runtime destination service is missing from the reviewed project.');
+  const service = { name: params.serviceName,
+    buildConfig: { workloadKind: desired.workloadKind, cronSchedule: desired.cronSchedule } };
+  if (hosting.runtimeIdentities) {
+    const state = runtimeAccessBindings(params.environment);
+    if (!state) throw new Error('Storage runtime identity bindings are invalid.');
+    const observed = await hosting.runtimeIdentities.inspect({ environment: params.environment,
+      environmentSpec: params.environmentSpec, service, binding: state.runtimeIdentities[params.serviceName], mode: 'ensure' });
+    if (observed.state !== 'ready' || !observed.identity) throw new Error('Storage workload identity preparation is incomplete.');
+    target.identity = observed.identity;
+  } else if (hosting.resolveRuntimeIdentity) {
+    target.identity = await hosting.resolveRuntimeIdentity(params.environment, service);
   }
   return target;
 }
@@ -702,14 +715,14 @@ export async function resolveStorageServiceEnvVars(
     const binding = bindings[name];
     if (!binding) continue;
     const adapterResult = await adapterFactory.getStorageAdapter(spec.provider, project);
-    if (!adapterResult.success || !adapterResult.adapter) continue;
+    if (!adapterResult.success || !adapterResult.adapter) throw new Error('A declared storage connection is unavailable; runtime configuration cannot be resolved safely.');
     const root = environment.platformBindings as { projectId?: string; environmentId?: string };
     const context = binding.instanceScope ?? contexts[spec.provider] ?? (environmentSpec.hosting.provider === spec.provider && root.projectId && root.environmentId
       ? { projectId: root.projectId, environmentId: root.environmentId }
       : undefined);
-    if (!context) continue;
+    if (!context) throw new Error('The declared storage scope is missing; runtime configuration cannot be resolved safely.');
     for (const serviceName of spec.injectInto) {
-      const target = await storageRuntimeTarget({ project, environmentSpec, environment, serviceName,
+      const target = await storageRuntimeTarget({ project, environmentSpec, environment, serviceName, storageName: name,
         connectionProvider: adapterResult.connectionProvider,
         usesWorkloadIdentity: adapterResult.adapter.capabilities.usesWorkloadIdentity });
       const vars = await adapterResult.adapter.getRuntimeEnv(environment, context, binding.externalId, name, target);
@@ -1303,6 +1316,8 @@ export async function applyStorageAction(params: {
   if (!binding || !context) return { success: false, message: `Storage binding/context missing for "${name}"` };
 
   if (operation === STORAGE_OPERATIONS.destroy) {
+    const access = runtimeAccessBindings(environment);
+    if (!access || Object.keys(access.storageRuntimeAccess[name] ?? {}).length) return { success: false, status: 'blocked', message: 'Reconcile retained bucket permissions before deleting this storage.' };
     const receipt = await adapter.destroyBucket(environment, context, binding.externalId);
     if (receipt.success) { const next = { ...bindings }; delete next[name]; persist(environment, next, contexts); }
     return { success: receipt.success, message: receipt.message, error: receipt.error, data: receipt.data };
@@ -1311,7 +1326,7 @@ export async function applyStorageAction(params: {
   const serviceName = String(params.action.metadata?.serviceName ?? '');
   const service = serviceRepo.findByProjectAndName(params.project.id, serviceName);
   if (!service) return { success: false, message: `Service "${serviceName}" not found locally` };
-  const hostingResult = await adapterFactory.getProviderAdapter(params.environmentSpec.hosting.provider, params.project);
+  const hostingResult = await adapterFactory.getProviderAdapter(params.environmentSpec.hosting.provider, params.project, undefined, params.envName);
   const hosting = hostingResult.adapter as IProviderAdapter | undefined;
   if (!hostingResult.success || !hosting?.setEnvVars) return { success: false, message: 'Hosting adapter cannot sync storage variables', error: hostingResult.error };
   if (hosting.name !== params.environmentSpec.hosting.provider) {
@@ -1324,17 +1339,19 @@ export async function applyStorageAction(params: {
   }
 
   if (operation === STORAGE_OPERATIONS.unwire) {
+    const access = runtimeAccessBindings(environment);
+    if (!access || access.storageRuntimeAccess[name]?.[serviceName]) return { success: false, status: 'blocked', message: 'Reconcile the exact bucket permission removal before clearing runtime configuration.' };
     const cleared = Object.fromEntries((binding.envKeys ?? storageEnvKeys(name)).map((key) => [key, '']));
     const receipt = requireAppliedStorageEnvUpdate(await hosting.setEnvVars(environment, service, cleared));
     if (receipt.success) {
       persist(environment, { ...bindings, [name]: { ...binding, services: binding.services.filter((item) => item !== serviceName) } }, contexts);
     }
-    return { success: receipt.success, message: receipt.success ? `Removed storage "${name}" access from "${serviceName}"` : receipt.message, error: receipt.error,
+    return { success: receipt.success, message: receipt.success ? `Cleared storage "${name}" runtime configuration from "${serviceName}"` : receipt.message, error: receipt.error,
       data: receipt.success ? { serviceName, envKeys: Object.keys(cleared).sort(), ...storageRuntimeRolloutData(receipt, serviceName) } : receipt.data };
   }
 
   const runtimeTarget = await storageRuntimeTarget({ project: params.project, environmentSpec: params.environmentSpec,
-    environment, serviceName, hosting, connectionProvider: storageResult.connectionProvider,
+    environment, serviceName, storageName: name, hosting, connectionProvider: storageResult.connectionProvider,
     usesWorkloadIdentity: adapter.capabilities.usesWorkloadIdentity });
   const runtimeEnv = await adapter.getRuntimeEnv(environment, context, binding.externalId, name, runtimeTarget);
   const runtimeEnvKeys = Object.keys(runtimeEnv).sort();

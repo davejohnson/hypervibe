@@ -63,6 +63,7 @@ const webService = {
       env: [
         { name: 'DATABASE_URL', value: 'postgres://super-secret' },
         { name: 'SECRET_VALUE', valueSource: { secretKeyRef: { secret: 'secret', version: 'latest' } } },
+        { name: 'PINNED_TOKEN', valueSource: { secretKeyRef: { secret: 'projects/123456789012/secrets/api-token', version: '7' } } },
       ],
       startupProbe: { httpGet: { path: '/healthz' } },
     }],
@@ -228,7 +229,8 @@ describe('CloudRunAdapter.observe', () => {
           egress: 'PRIVATE_RANGES_ONLY',
         },
       },
-      envVarKeys: ['DATABASE_URL', 'SECRET_VALUE'],
+      envVarKeys: ['DATABASE_URL', 'SECRET_VALUE', 'PINNED_TOKEN'],
+      envVarSecretRefs: { PINNED_TOKEN: { provider: 'gcp-secret-manager', resource: 'projects/123456789012/secrets/api-token', version: '7' } },
       status: 'running',
     });
     expect(web?.envVarHashes).toEqual({

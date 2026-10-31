@@ -3,7 +3,7 @@ import { z } from 'zod';
 export const environmentNameSchema = z.enum(['local', 'staging', 'production']).or(z.string().min(1));
 
 export const createEnvironmentSchema = z.object({
-  projectId: z.string().uuid(),
+  projectId: z.string().guid(),
   name: environmentNameSchema,
   platformBindings: z.record(z.string(), z.unknown()).optional(),
 });

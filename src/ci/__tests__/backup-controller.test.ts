@@ -53,7 +53,7 @@ describe('recurring backup failure receipts', () => {
     const result = await runBackupController({ HYPERVIBE_BACKUP_OPERATION: 'backup', GITHUB_RUN_ATTEMPT: '1',
       GITHUB_TOKEN: 'synthetic-token', GITHUB_EVENT_NAME: 'workflow_dispatch', HYPERVIBE_BACKUP_CONTRACT: contract,
       HYPERVIBE_BACKUP_RECEIPT: receipt, GITHUB_REPOSITORY: 'owner/project', GITHUB_RUN_ID: '123',
-      AWS_ACCESS_KEY_ID: 'private-access', AWS_SECRET_ACCESS_KEY: 'private-secret' });
+      AWS_ACCESS_KEY_ID: 'AKIAABCDEFGHIJKLMNOP', AWS_SECRET_ACCESS_KEY: 'private-secret' });
     expect(open).toHaveBeenCalledOnce();
     expect(result).toMatchObject({ version: 2, status: 'unknown', counts: { applied: 0, skipped: 1 },
       diagnostic: { stage: 'archive-open', category: 'unknown', task: { mutationAttempted: false } } });

@@ -60,6 +60,51 @@ discovery/errors/hints, CI missing-credential guidance, apply blockers, and both
 Railway repository help outputs. No repository identity is inferred from log
 text.
 
+## Local cloud authentication recipes
+
+Reviewed 2026-10-27. Local/operator connection guidance now gives the agent
+structured install and browser-login commands for AWS, Azure and Google. The
+agent reuses a valid login, installs a missing CLI, starts browser authentication,
+and leaves consent/MFA to the user. Existing profiles and account selections are
+preserved; native scope verification and infrastructure plan/apply remain separate.
+Hosted Connect Cloud customers do not need these local tools.
+
+The challenged assumption was that default-credential support in the adapter
+was sufficient while ECS and Azure setup still directed users to create keys.
+The actual MCP describe response was the counterexample. Three missing-recipe
+cases failed before implementation; an additional Azure case failed because its
+primary example still required a client-secret file. The corrected MCP cases,
+guidance roster and legacy workflow tests pass (41 tests). A separate full CI
+run exposed the missing Entra guidance entry; its operator-only describe path now
+explains transient Graph authority without inventing a saved connection.
+
+Independent contracts: [AWS browser login](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sign-in.html),
+[Azure interactive login](https://learn.microsoft.com/en-us/cli/azure/authenticate-azure-cli-interactively),
+and [Google user ADC](https://docs.cloud.google.com/docs/authentication/set-up-adc-local-dev-environment).
+macOS installation commands follow [Homebrew AWS](https://formulae.brew.sh/formula/awscli),
+[Microsoft's macOS guide](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli-macos),
+and [Homebrew Google](https://formulae.brew.sh/cask/gcloud-cli).
+AWS browser login requires CLI 2.32.0 or newer and existing
+SignInLocalDevelopmentAccess authority; an existing IAM Identity Center profile
+uses its own SSO login. No new policy, cloud resource, key, or CI/runtime export is
+part of these recipes. Passing tests validates emitted guidance, not browser
+consent, native account authority, or every package-manager installation.
+
+AWS browser HTTP 400 recovery is now included in both existing AWS local-login
+recipes (ECS and S3). The assumption that reopening the same failed link is a
+sufficient login instruction was contradicted by repeated real browser errors.
+The active authorization completed in a private window and STS verified the
+intended account. AWS's [sign-in service issue](https://github.com/aws/aws-cli/issues/10186)
+independently documents this error pattern; stale cookies remain a hypothesis
+for this incident. Its [troubleshooting guide](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sign-in-troubleshoot.html)
+also identifies region and access restrictions.
+
+Guidance preserves the active CLI URL or starts a fresh scoped login after
+expiry, never edits OAuth state/callback/challenge, and does not clear cookies or
+profiles automatically. Two real MCP describe regressions failed before the
+guidance change. This checks delivery of recovery instructions, not automatic
+detection of AWS browser errors or proof that a language model follows them.
+
 ## macOS companion setup
 
 The companion now requests `hv_connections action="describe"` before presenting

@@ -1,0 +1,25 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { SqliteAdapter } from '../../../db/sqlite.adapter.js';
+import { ConnectionRepository } from '../../../db/repositories/connection.repository.js';
+import { SecretStore, getSecretStore } from '../../../secrets/secret-store.js';
+import { githubPackagePullSource } from '../package-pull.js';
+let directory:string;
+beforeEach(()=>{directory=mkdtempSync(path.join(tmpdir(),'hv-package-scope-'));vi.stubEnv('HYPERVIBE_DATA_DIR',directory);vi.stubEnv('HYPERVIBE_SECRET_KEY','a'.repeat(64));SecretStore.resetInstance();SqliteAdapter.resetInstance();SqliteAdapter.getInstance(path.join(directory,'state.db')).migrate();});
+afterEach(()=>{SecretStore.resetInstance();SqliteAdapter.resetInstance();vi.unstubAllEnvs();rmSync(directory,{recursive:true,force:true});});
+it('requires an exact verified repository package-read role for application builds without changing legacy ranked selection',()=>{
+  const repo=new ConnectionRepository(),store=getSecretStore();
+  const add=(scope:string|null,credentials:Record<string,string>,verified=true)=>{const c=repo.create({provider:'github',scope,credentialsEncrypted:store.encryptObject({login:'test',...credentials})});if(verified)repo.updateStatus(c.id,'verified');return c;};
+  const global=add(null,{packageReadToken:'global-synthetic-package-token'});add('acme/*',{packageReadToken:'owner-synthetic-package-token'});
+  const strict={githubRepo:'acme/operator',requireExactScope:true};
+  expect(githubPackagePullSource(strict)).toBeNull();
+  expect(githubPackagePullSource({githubRepo:'other/app'})?.connectionId).toBe(global.id);
+  add('acme/operator',{apiToken:'management-synthetic-token'});
+  expect(githubPackagePullSource(strict)).toBeNull();
+  repo.deleteByProviderAndScope('github','acme/operator');
+  const exact=add('acme/operator',{apiToken:'management-synthetic-token',packageReadToken:'exact-synthetic-package-token'},false);
+  expect(githubPackagePullSource(strict)).toBeNull();repo.updateStatus(exact.id,'verified');
+  expect(githubPackagePullSource(strict)).toMatchObject({connectionId:exact.id,credentialKey:'packageReadToken',token:'exact-synthetic-package-token'});
+});

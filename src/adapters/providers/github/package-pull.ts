@@ -35,12 +35,13 @@ export function githubPackagePullCredentials(
 
 /** Private provenance for the same selection used by CI and container pulls. */
 export function githubPackagePullSource(
-  options: { githubRepo?: string; githubLogin?: string } = {}
+  options: { githubRepo?: string; githubLogin?: string; requireExactScope?: boolean } = {}
 ): { connectionId: string; credentialKey: 'packageReadToken'; username: string; token: string } | null {
   const connectionRepo = new ConnectionRepository();
   const secretStore = getSecretStore();
   const ranked = connectionRepo.findAllByProvider('github')
-    .filter((connection) => connection.status === 'verified')
+    .filter((connection) => connection.status === 'verified'
+      && (!options.requireExactScope || Boolean(options.githubRepo) && connection.scope === options.githubRepo))
     .flatMap((connection) => {
       const rank = githubConnectionRank(connection.scope, options.githubRepo);
       return rank === null ? [] : [{ connection, rank }];

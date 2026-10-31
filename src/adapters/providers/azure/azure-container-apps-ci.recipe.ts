@@ -103,6 +103,7 @@ await writeFile('.hypervibe-release.json', JSON.stringify({ version: 1, provider
 }
 
 export function buildAzureContainerAppsPortableRecipe(target: BranchDeployTarget): PortableCiDeployRecipe {
+  if (target.deploymentAccess) throw new Error('Azure portable CI broker federation is unsupported; saved cloud keys cannot replace this deployment approval.');
   const resourceGroupId = target.providerProjectId?.trim();
   const appIds = [...new Set(target.providerServiceIds.map((value) => value.trim()).filter(Boolean))].sort();
   if (!resourceGroupId || appIds.length === 0) throw new Error(`Azure Container Apps bindings for ${target.environmentName} are incomplete; apply hosting first`);

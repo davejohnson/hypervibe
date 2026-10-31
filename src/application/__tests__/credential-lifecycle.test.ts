@@ -16,6 +16,8 @@ import { credentialInventory } from '../credential-inventory.js';
 import { createCommandRegistry } from '../commands.js';
 import { runCli } from '../../interfaces/cli/run.js';
 import { acceptedCredentialCiInputs } from '../../domain/services/accepted-credential-inputs.js';
+import { planCredentialLifecycle } from '../../domain/services/credential-lifecycle.service.js';
+import * as secretValueRef from '../../domain/services/secret-value-ref.js';
 import { parseStripeBindings, planStripeEnvironmentSync } from '../../domain/services/stripe-env.service.js';
 import { hashEnvValue } from '../../domain/ports/observe.port.js';
 import { registerCommandRegistry } from '../../interfaces/mcp/adapter.js';
@@ -67,6 +69,19 @@ it('reviews value-preserving adoption for one declared source and two aliases', 
   expect(f.wire.mutations).toEqual([]);
   expect(f.wire.variables.get(`staging-web/${stagingId}`)).toEqual({ API_KEY: 'existing-value', ALIAS_KEY: 'existing-value', KEEP_ME: '${{shared.VALUE}}' });
   expect(JSON.stringify(f.ctx.repos.runs.findById(plan.planRunId)!.plan)).not.toContain('existing-value');
+});
+
+it('rejects a native destination before reading a credential source or saving encrypted material', async () => {
+  const f = await fixture();
+  f.spec.spec.environments.staging.secretDestinations = { API_KEY: { destination: {
+    provider: 'gcp-secret-manager', projectId: 'synthetic-project', projectNumber: '123456789012', secretId: 'staging-api',
+  }, version: '7' } };
+  const read = vi.spyOn(secretValueRef, 'resolveSecretValueRef');
+  const result = await planCredentialLifecycle(f.project, f.spec.spec, f.spec.revision, 'staging', { scope: 'credentials', credential: 'application-api', intent: 'rotate' });
+  expect(result).toMatchObject({ error: expect.stringMatching(/credential.*native|native.*credential/i) });
+  expect(read).not.toHaveBeenCalled();
+  expect(f.ctx.repos.runs.findByProjectId(f.project.id)).toEqual([]);
+  expect(f.wire.mutations).toEqual([]);
 });
 
 it('rejects adoption of a local replacement instead of silently rotating', async () => {

@@ -1,14 +1,19 @@
-import { SpecStore } from '../spec/spec.store.js';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { pendingCredentialOperations } from './runtime-rollout.service.js';
+import { observeManagedReleaseArtifact } from './managed-release-observation.js';
+import { retainedManagedReleaseDispatch, beginManagedReleaseDispatch, settleManagedReleaseDispatch, sameManagedReleaseTarget, type ManagedReleaseDispatch } from './managed-release-dispatch.js';
+import { managedBackupCredentialKeys, managedBackupProvidersForSpec } from './managed-backup-target.service.js';
+import { SpecStore } from '../spec/spec.store.js';
 import { prepareGitHubCredentialRollout, observeGitHubCredentialRollout } from '../../adapters/providers/github/github-credential-activation.js';
 import { acceptedCredentialCiInputs } from './accepted-credential-inputs.js';
 import { createHash } from 'crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { githubPackagePullSource } from '../../adapters/providers/github/package-pull.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
-import type { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
+import { GitHubApiError, type GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
@@ -38,7 +43,6 @@ import {
   APPLIED_SPEC_HASH_VARIABLE,
   environmentDeploymentContractHashForApply,
 } from './deployment-contract.service.js';
-import { managedCiReleaseArtifactName } from './managed-ci-evidence.js';
 
 const OPERATION = 'githubActionsDeployBranch';
 export const GITHUB_ACTIONS_RELEASE_OPERATION = 'githubActionsRelease';
@@ -148,21 +152,31 @@ interface ManagedCiCredentialSource {
 
 export function providerSecretsForGitHubActions(
   provider: string,
-  options: { githubLogin?: string; githubRepo?: string; onSource?: (source: ManagedCiCredentialSource) => void } = {}
+  options: { githubLogin?: string; githubRepo?: string; backupProviders?: string[];
+    onSource?: (source: ManagedCiCredentialSource) => void } = {}
 ): ProviderSecret[] {
   const secrets: ProviderSecret[] = [];
-  const connection = connectionRepo.findBestVerifiedMatch(provider, options.githubRepo);
-  const ci = providerRegistry.getMetadata(provider)?.orchestration?.ci;
-
-  if (connection) {
+  const metadata = providerRegistry.getMetadata(provider);
+  const ci = metadata?.orchestration?.ci;
+  const selections = [{ provider, keys: Object.fromEntries((ci?.requiredSecrets ?? [])
+    .flatMap(name => ci?.secretCredentialKeys?.[name] ? [[name, ci.secretCredentialKeys[name]]] : [])) },
+  ...[...new Set(options.backupProviders ?? [])].map(provider => ({ provider, keys: managedBackupCredentialKeys(provider) ?? {} }))];
+  for (const selection of selections) {
+    const selectedMetadata = providerRegistry.getMetadata(selection.provider);
+    const connection = [selection.provider, ...(selectedMetadata?.connectionAliases ?? [])]
+      .map(candidate => connectionRepo.findBestVerifiedMatch(candidate, options.githubRepo)).find(Boolean);
+    if (!connection) continue;
     const credentials = getSecretStore().decryptObject<Record<string, unknown>>(connection.credentialsEncrypted);
-    for (const name of ci?.requiredSecrets ?? []) {
-      const credentialKey = ci?.secretCredentialKeys?.[name];
-      if (!credentialKey) continue;
-      const value = credentials[credentialKey];
-      if (typeof value === 'string' && value.length > 0) {
-        secrets.push({ name, value });
-        options.onSource?.({ connectionId: connection.id, credentialKey, name });
+    if (selectedMetadata?.credentials?.canUseForAutomation?.(credentials) !== false) {
+      for (const [name, credentialKey] of Object.entries(selection.keys)) {
+        const value = credentials[credentialKey];
+        if (typeof value === 'string' && value.length > 0) {
+          const prior = secrets.find(secret => secret.name === name);
+          if (prior && prior.value !== value) throw new Error(`Managed CI credential ${name} has conflicting provider connections. Reconcile the selected deployment and backup connections before publishing one environment secret.`);
+          if (prior) continue;
+          secrets.push({ name, value });
+          options.onSource?.({ connectionId: connection.id, credentialKey, name });
+        }
       }
     }
   }
@@ -399,10 +413,14 @@ export function resolveManagedWorkflowContract(params: {
   environmentName: string;
   environmentSpec: EnvironmentSpec;
   environment?: Environment | null;
+  /** Internal read-only recovery of a persisted metadata action's original producer inputs. */
+  reviewedTargetEnvironment?: Environment;
 }):
   | { ok: false; reason: 'target-missing' | 'bindings-incomplete'; error: string }
   | ({ ok: true } & ManagedWorkflowContract) {
-  const { targets, migration } = resolveBranchDeployTargets(params.project);
+  if (params.reviewedTargetEnvironment && (params.reviewedTargetEnvironment.projectId !== params.project.id
+    || params.reviewedTargetEnvironment.name !== params.environmentName)) throw new Error('Reviewed workflow bindings do not match the selected environment.');
+  const { targets, migration } = resolveBranchDeployTargets(params.project, params.reviewedTargetEnvironment);
   const target = targets.find((candidate) => candidate.environmentName === params.environmentName);
   if (!target) {
     return {
@@ -525,6 +543,7 @@ async function resolveManagedWorkflowSecrets(params: {
   environmentSpec: EnvironmentSpec;
   workflow: BranchDeployWorkflow;
   repository: string;
+  includeBackupCredentials?: boolean;
 }): Promise<{
   requiredProviderSecrets: string[];
   requiredDatabaseSecrets: string[];
@@ -535,17 +554,24 @@ async function resolveManagedWorkflowSecrets(params: {
   providerError?: string;
   appStoreError?: string;
 }> {
-  const requiredProviderSecrets = requiredProviderSecretNamesForGitHubActions(
+  const backupProviders = params.includeBackupCredentials ? managedBackupProvidersForSpec(params.environmentSpec) : [];
+  const requiredSecrets = [...new Set([...params.workflow.requiredSecrets,
+    ...backupProviders.flatMap(provider => Object.keys(managedBackupCredentialKeys(provider) ?? {}))])];
+  const requiredProviderSecrets = [...new Set([...requiredProviderSecretNamesForGitHubActions(
     params.environmentSpec.hosting.provider
-  ).filter((name) => params.workflow.requiredSecrets.includes(name));
-  const requiredDatabaseSecrets = params.workflow.requiredSecrets.includes('DATABASE_URL')
+  ), ...backupProviders.flatMap(provider => Object.keys(managedBackupCredentialKeys(provider) ?? {}))])]
+    .filter((name) => requiredSecrets.includes(name));
+  const requiredDatabaseSecrets = requiredSecrets.includes('DATABASE_URL')
     ? ['DATABASE_URL']
     : [];
+  let availableSecrets: ProviderSecret[] = [];
   let providerError: string | undefined;
-  let availableSecrets = providerSecretsForGitHubActions(
-    params.environmentSpec.hosting.provider,
-    { githubRepo: params.repository }
-  ).filter((secret) => params.workflow.requiredSecrets.includes(secret.name));
+  try {
+    availableSecrets = providerSecretsForGitHubActions(params.environmentSpec.hosting.provider,
+      { githubRepo: params.repository, backupProviders }).filter(secret => requiredSecrets.includes(secret.name));
+  } catch {
+    providerError = 'The selected deployment and backup connections cannot share their required GitHub environment secret names. Reconcile the exact scoped connections before synchronizing credentials.';
+  }
   if (requiredDatabaseSecrets.length > 0 && !availableSecrets.some((secret) => secret.name === 'DATABASE_URL')) {
     const databaseUrlSecret = await databaseUrlSecretForGitHubActions(
       params.project,
@@ -556,7 +582,7 @@ async function resolveManagedWorkflowSecrets(params: {
   // An explicit accepted role owns these exact destinations. Future CI sync
   // must not restore an older connection value or pick up a local file edit.
   for (const tracked of acceptedCredentialCiInputs(params.project, params.repository, params.environmentName)) {
-    if (!params.workflow.requiredSecrets.includes(tracked.name)) continue;
+    if (!requiredSecrets.includes(tracked.name)) continue;
     availableSecrets = availableSecrets.filter(secret => secret.name !== tracked.name);
     if (tracked.value !== undefined) availableSecrets.push({ name: tracked.name, value: tracked.value });
     else providerError = 'A declared credential role has not completed reviewed synchronization. Recover its credential plan before CI synchronization.';
@@ -594,6 +620,7 @@ function buildAction(params: {
   staleEnvironmentSecrets?: string[];
   retiredPaths?: string[];
   workflowPublicationRequired?: boolean;
+  includeBackupCredentials?: boolean;
   iosBuildCredentialsSource?: IosBuildCredentialsSource;
   dependsOn?: string[];
 }): PlanAction {
@@ -608,6 +635,7 @@ function buildAction(params: {
     ...(params.dependsOn?.length ? { dependsOn: params.dependsOn } : {}),
     metadata: {
       operation: OPERATION,
+      ...(params.includeBackupCredentials ? { includeBackupCredentials: true } : {}),
       ...(params.iosBuildCredentialsSource ? { iosBuildCredentialsSource: params.iosBuildCredentialsSource } : {}),
       ...(params.workflowPublicationRequired ? { workflowPublicationRequired: true } : {}),
       repository: params.repo,
@@ -721,6 +749,7 @@ export async function planGitHubActionsDeploy(params: {
   environmentSpec: EnvironmentSpec;
   environment: Environment | null;
   dependsOn?: string[];
+  includeBackupCredentials?: boolean;
 }): Promise<{ action?: PlanAction; warnings: string[]; error?: string }> {
   const { project, environmentName, environmentSpec } = params;
   const warnings: string[] = [];
@@ -849,6 +878,7 @@ export async function planGitHubActionsDeploy(params: {
     environmentSpec,
     workflow,
     repository: repo,
+    includeBackupCredentials: params.includeBackupCredentials,
   });
   if (missingProviderSecrets.length > 0) {
     warnings.push(
@@ -924,6 +954,7 @@ export async function planGitHubActionsDeploy(params: {
       staleProviderSecrets,
       missingDatabaseSecrets,
       staleDatabaseSecrets,
+      includeBackupCredentials: params.includeBackupCredentials,
       desiredEnvironmentSecretHashes: availableSecretHashes,
       reviewedEnvironmentSecrets: environmentSecretsObserved
         ? presentManagedSecretNames(
@@ -950,6 +981,8 @@ export async function applyGitHubActionsDeploy(params: {
     return { success: true, message: 'No GitHub Actions workflow or secret changes were requested.', data: { skipped: true, reason: 'noop' } };
   }
   const { project, environmentName, environmentSpec } = params;
+  if (params.action.metadata?.includeBackupCredentials === true && environmentSpec.backups?.mode !== 'daily')
+    return { success: false, status: 'blocked', message: 'Explicit daily backup intent changed; re-plan before copying backup credentials.' };
   const authority = params.authority ?? (
     params.action.metadata?.workflowPublicationRequired === true
       ? 'publication-only'
@@ -1101,6 +1134,7 @@ export async function applyGitHubActionsDeploy(params: {
     environmentSpec,
     workflow,
     repository: repo,
+    includeBackupCredentials: params.action.metadata?.includeBackupCredentials === true,
   });
 
   const reviewedEnvironmentSecrets = reviewedSecretNames(params.action.metadata?.reviewedEnvironmentSecrets);
@@ -1188,8 +1222,8 @@ export async function applyGitHubActionsDeploy(params: {
         contentHash: observation.liveContentHash!,
         inputHash,
         managedPaths: workflowFiles(workflow).map((file) => file.path),
-        syncedEnvironmentSecrets: syncedSecretNames,
-        syncedEnvironmentSecretHashes: secretHashes(syncedSecrets),
+        syncedEnvironmentSecrets: [...new Set([...(contract.binding?.syncedEnvironmentSecrets ?? []), ...syncedSecretNames])],
+        syncedEnvironmentSecretHashes: { ...contract.binding?.syncedEnvironmentSecretHashes, ...secretHashes(syncedSecrets) },
         updatedAt: new Date().toISOString(),
       },
     },
@@ -1343,31 +1377,14 @@ export async function applyGitHubActionsAppliedSpecHash(params: {
 }
 
 async function findVerifiedRelease(params: {
-  adapter: GitHubAdapter;
-  owner: string;
-  repo: string;
-  workflow: string;
-  environmentName: string;
-  targetSha: string;
+  adapter: GitHubAdapter; owner: string; repo: string; workflow: string; environmentName: string; targetSha: string; project: Project;
 }): Promise<{ runId: number; url: string } | null> {
-  const runs = await params.adapter.listWorkflowRuns(params.owner, params.repo, params.workflow, { per_page: 50 });
-  const expectedArtifact = managedCiReleaseArtifactName(params.environmentName, params.targetSha);
-  const candidates = runs.workflow_runs.filter((run) =>
-    run.status === 'completed'
-    && run.conclusion === 'success'
-    && (run.head_sha === params.targetSha || run.display_title?.includes(params.targetSha))
-  );
-  for (const run of candidates) {
-    const artifacts = await params.adapter.listWorkflowRunArtifacts(params.owner, params.repo, run.id);
-    if (artifacts.artifacts.some((artifact) =>
-      artifact.name === expectedArtifact
-      && artifact.expired === false
-      && artifact.workflow_run?.id === run.id
-    )) {
-      return { runId: run.id, url: run.html_url };
-    }
-  }
-  return null;
+  const spec = new SpecStore().get(params.project)?.spec;
+  const environment = new EnvironmentRepository().findByProjectAndName(params.project.id, params.environmentName);
+  if (!spec || !environment || Object.keys(pendingCredentialOperations(environment)).length) return null;
+  const proof = await observeManagedReleaseArtifact({ project: params.project, spec, environment });
+  return proof?.workflow === params.workflow && proof.sourceCommitSha === params.targetSha
+    ? { runId: proof.runId, url: `https://github.com/${params.owner}/${params.repo}/actions/runs/${proof.runId}` } : null;
 }
 
 export async function planGitHubActionsRelease(params: {
@@ -1454,7 +1471,7 @@ export async function planGitHubActionsRelease(params: {
       };
     }
     const existing = await findVerifiedRelease({
-      adapter: adapterResult.adapter,
+      project: params.project, adapter: adapterResult.adapter,
       owner,
       repo,
       workflow: workflow.path,
@@ -1473,6 +1490,13 @@ export async function planGitHubActionsRelease(params: {
           workflowInputHash,
           workflowContentHash: workflowObservation.liveContentHash,
           forceRelease: mustReleaseAfterPrerequisites,
+          ...(() => {
+            const environment = new EnvironmentRepository().findByProjectAndName(params.project.id, params.environmentName);
+            const retained = environment && retainedManagedReleaseDispatch(environment);
+            return { credentialOperationsHash: canonicalJsonSha256(environment ? pendingCredentialOperations(environment) : {}),
+              ...(retained && ['failed', 'rejected'].includes(retained.status) ? { retryAttemptId: retained.id }
+                : retained && ['completed', 'succeeded'].includes(retained.status) ? { previousAttemptId: retained.id } : {}) };
+          })(),
         },
         existing && !mustReleaseAfterPrerequisites ? 'noop' : 'update'
       ),
@@ -1494,6 +1518,53 @@ export function isGitHubActionsReleaseAction(action: PlanAction): boolean {
   return action.metadata?.operation === GITHUB_ACTIONS_RELEASE_OPERATION;
 }
 
+/** Native completion is separate from trusted deployment evidence. This reader
+ * is also used when source has changed while an earlier dispatch was pending. */
+async function observeRetainedGitHubDispatch(params: {
+  adapter: GitHubAdapter; owner: string; repo: string; environmentId: string;
+  attempt: ManagedReleaseDispatch; timeoutMs?: number; pollIntervalMs?: number;
+}): Promise<{ attempt: ManagedReleaseDispatch; run?: Awaited<ReturnType<GitHubAdapter['getWorkflowRun']>>;
+  problem?: { status: 'pending' | 'blocked'; message: string } }> {
+  let attempt = params.attempt;
+  const { adapter, owner, repo, environmentId } = params;
+  const target = attempt.target, repository = `${owner}/${repo}`;
+  if (target.repository !== repository) return { attempt, problem: { status: 'blocked', message: 'Retained release repository differs from current authorized scope.' } };
+  const deadline = Date.now() + (params.timeoutMs ?? RELEASE_WAIT_TIMEOUT_MS);
+  let run: Awaited<ReturnType<GitHubAdapter['getWorkflowRun']>> | undefined;
+  try {
+    do {
+      if (!attempt.runId) {
+        const matches: number[] = []; let complete = false;
+        for (let page = 1; page <= 10; page++) {
+          const listed = await adapter.listWorkflowRuns(owner, repo, target.workflow, { per_page: 100, page });
+          const title = `Deploy ${target.environmentName} ${target.targetSha} [hv:${attempt.id}]`;
+          for (const candidate of listed.workflow_runs) if (candidate.event === 'workflow_dispatch' && candidate.head_branch === target.ref
+            && candidate.display_title?.trim().replace(/\s+/g, ' ') === title) matches.push(candidate.id);
+          if (listed.workflow_runs.length < 100) { complete = true; break; }
+        }
+        if (!complete || matches.length > 1) return { attempt, problem: { status: 'blocked', message: 'Release dispatch recovery is incomplete or ambiguous; no repeated request is authorized.' } };
+        if (matches.length === 1) attempt = settleManagedReleaseDispatch(environmentId, attempt, { runId: matches[0], status: 'acknowledged' });
+      }
+      if (attempt.runId) {
+        run = await adapter.getWorkflowRun(owner, repo, attempt.runId);
+        if (run.id !== attempt.runId || run.path !== target.workflow || run.event !== 'workflow_dispatch'
+          || run.head_branch !== target.ref || run.repository?.full_name !== repository
+          || run.head_repository?.full_name !== repository || run.run_attempt !== 1)
+          return { attempt, problem: { status: 'blocked', message: 'Native release identity or attempt changed; no repeat dispatch is authorized.' } };
+        if (run.status === 'completed') {
+          if (!['success', 'failure', 'cancelled', 'timed_out', 'neutral', 'skipped', 'action_required', 'stale'].includes(run.conclusion ?? ''))
+            return { attempt, problem: { status: 'blocked', message: 'Native release completion is incomplete or unsupported; no retry is authorized.' } };
+          break;
+        }
+      }
+      if (Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, params.pollIntervalMs ?? RELEASE_POLL_INTERVAL_MS));
+    } while (Date.now() < deadline);
+    return { attempt, run };
+  } catch {
+    return { attempt, problem: { status: 'pending', message: 'The exact retained release could not be observed; no repeated dispatch is authorized.' } };
+  }
+}
+
 export async function applyGitHubActionsRelease(params: {
   project: Project;
   environmentName: string;
@@ -1504,6 +1575,9 @@ export async function applyGitHubActionsRelease(params: {
   workflowInputHash: string;
   workflowContentHash: string;
   forceRelease?: boolean;
+  retryAttemptId?: string;
+  previousAttemptId?: string;
+  credentialOperationsHash?: string;
   timeoutMs?: number;
   pollIntervalMs?: number;
 }): Promise<{ success: boolean; status?: 'pending' | 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
@@ -1517,6 +1591,7 @@ export async function applyGitHubActionsRelease(params: {
     return { success: false, status: 'blocked', message: 'GitHub adapter unavailable', error: adapterResult.error };
   }
   const adapter = adapterResult.adapter;
+  const connection = new ConnectionRepository().findBestVerifiedMatch('github', repository);
   const contract = resolveManagedWorkflowContract({
     project: params.project,
     environmentName: params.environmentName,
@@ -1566,119 +1641,109 @@ export async function applyGitHubActionsRelease(params: {
       error: error instanceof Error ? error.message : String(error),
     };
   }
-  const alreadyReleased = params.forceRelease
-    ? null
-    : await findVerifiedRelease({
-      adapter,
-      owner,
-      repo,
-      workflow: params.workflow,
-      environmentName: params.environmentName,
-      targetSha: params.targetSha,
-    });
+  const repositoryState = new EnvironmentRepository();
   const storedSpec = new SpecStore().get(params.project)?.spec;
-  const releaseEnvironment = new EnvironmentRepository().findByProjectAndName(params.project.id, params.environmentName);
-  const credentialPending = releaseEnvironment && Object.keys(pendingCredentialOperations(releaseEnvironment)).length > 0;
-  if (credentialPending && !storedSpec) return { success: false, status: 'blocked', message: 'Credential rollout requires the accepted project spec.' };
-  let existingCredentialActivation: Awaited<ReturnType<typeof observeGitHubCredentialRollout>> = [];
-  if (alreadyReleased && credentialPending && storedSpec) {
-    try { existingCredentialActivation = await observeGitHubCredentialRollout({ project: params.project, spec: storedSpec, runId: String(alreadyReleased.runId) }); }
-    catch { /* An older release has no authority for the replacement; dispatch the reviewed new release. */ }
+  const environment = repositoryState.findByProjectAndName(params.project.id, params.environmentName);
+  if (!storedSpec || !environment) return { success: false, status: 'blocked', message: 'Managed release requires retained source and environment identity.' };
+  const credentialOperationsHash = canonicalJsonSha256(pendingCredentialOperations(environment));
+  if (credentialOperationsHash !== (params.credentialOperationsHash ?? canonicalJsonSha256({})))
+    return { success: false, status: 'blocked', message: 'Accepted credential operations changed after planning. Re-plan before releasing their configuration.' };
+  const target = { repository, environmentName: params.environmentName, workflow: params.workflow, ref: params.ref,
+    targetSha: params.targetSha, workflowInputHash: params.workflowInputHash, workflowContentHash: params.workflowContentHash,
+    deploymentContractHash: environmentDeploymentContractHashForApply(storedSpec, params.environmentName), credentialOperationsHash };
+  let attempt;
+  try { attempt = retainedManagedReleaseDispatch(environment); }
+  catch { return { success: false, status: 'blocked', message: 'Retained managed release recovery is malformed; no dispatch was attempted.' }; }
+  if (attempt && !sameManagedReleaseTarget(attempt, target)) {
+    if (!['failed', 'rejected', 'completed', 'succeeded'].includes(attempt.status)) {
+      const observed = await observeRetainedGitHubDispatch({ adapter, owner, repo, environmentId: environment.id, attempt,
+        timeoutMs: params.timeoutMs, pollIntervalMs: params.pollIntervalMs });
+      if (observed.problem) return { success: false, ...observed.problem };
+      if (observed.run?.status !== 'completed') return { success: false, status: 'pending', message: 'The prior source release remains pending; no new dispatch is authorized.' };
+      settleManagedReleaseDispatch(environment.id, observed.attempt, { status: observed.run.conclusion === 'success' ? 'completed' : 'failed' });
+      return { success: false, status: 'blocked', message: 'The prior source run completed; its deployment is not accepted for current source. Re-plan to review the next exact release.' };
+    }
+    if (!['failed', 'rejected'].includes(attempt.status) && params.previousAttemptId !== attempt.id)
+      return { success: false, status: 'blocked', message: 'Re-plan to review a new release after the exact prior attempt completed.' };
   }
-  if (alreadyReleased && (!credentialPending || existingCredentialActivation.length)) {
-    return {
-      success: true,
-      message: `Verified deployed commit ${params.targetSha}`,
-      data: { repository, workflow: params.workflow, targetSha: params.targetSha, runId: alreadyReleased.runId, url: alreadyReleased.url },
-    };
+  if (!attempt || ['failed', 'rejected'].includes(attempt.status) && params.retryAttemptId === attempt.id
+    || ['completed', 'succeeded'].includes(attempt.status) && !sameManagedReleaseTarget(attempt, target)) {
+    if (!params.forceRelease && !attempt) {
+      const existing = await findVerifiedRelease({ project: params.project, adapter, owner, repo, workflow: params.workflow,
+        environmentName: params.environmentName, targetSha: params.targetSha });
+      if (existing) return { success: true, message: `Verified deployed commit ${params.targetSha}`, data: { repository, workflow: params.workflow, targetSha: params.targetSha, runId: existing.runId, url: existing.url } };
+    }
+    const dispatchFailure = await managedWorkflowDispatchTargetFailure({ adapter, owner, repo, branch: params.ref, expectedSha: params.targetSha });
+    if (dispatchFailure) {
+      const [reason, error] = dispatchFailure;
+      return { success: false, status: 'blocked', message: reason === 'default-branch'
+        ? 'Managed release default branch changed after planning' : reason === 'branch'
+          ? 'Managed release branch changed after planning' : 'Managed release branch could not be verified', error };
+    }
+    const active = await adapter.listWorkflowRuns(owner, repo, params.workflow, { per_page: 100 });
+    if (active.workflow_runs.some(run => run.status !== 'completed'))
+      return { success: false, status: 'pending', message: 'An existing workflow run must finish before a new managed release can be dispatched.' };
+    let dispatchInputs: Record<string, string>;
+    try {
+      dispatchInputs = await prepareGitHubCredentialRollout({ project: params.project, spec: storedSpec,
+        definition: params.workflow, ref: params.ref, inputs: { commit_sha: params.targetSha } });
+      // Authorization preparation can await external effects. Re-observe the
+      // exact reviewed source and workflow before committing dispatch intent.
+      const currentObservation = await observeManagedWorkflowFiles({ adapter, owner, repo, contract });
+      if (currentObservation.acceptance === 'drift' || currentObservation.liveContentHash !== params.workflowContentHash
+        || await managedWorkflowDispatchTargetFailure({ adapter, owner, repo, branch: params.ref, expectedSha: params.targetSha })
+        || !isDeepStrictEqual(new SpecStore().get(params.project)?.spec, storedSpec)
+        || !isDeepStrictEqual(new ConnectionRepository().findBestVerifiedMatch('github', repository), connection))
+        throw new Error('Reviewed source or authorization changed.');
+      // This CAS also rejects concurrent changes to native bindings and journals.
+      attempt = beginManagedReleaseDispatch(environment, target, params.retryAttemptId, params.previousAttemptId);
+    } catch { return { success: false, status: 'blocked', message: 'Managed release authorization changed before dispatch; no request was sent.' }; }
+    try {
+      const receipt = await adapter.triggerWorkflow(owner, repo, params.workflow, params.ref,
+        { ...dispatchInputs, hypervibe_release_id: attempt.id }, { returnRunDetails: true });
+      if (receipt) attempt = settleManagedReleaseDispatch(environment.id, attempt, { status: 'acknowledged', runId: receipt.runId });
+    } catch (error) {
+      // GitHub documents these exact errors as insufficient token permissions.
+      // Other 403s can be rate limits; transport/server errors stay uncertain.
+      if (error instanceof GitHubApiError && error.status === 403
+        && /^GitHub API error: Resource not accessible by (integration|personal access token)\.?$/.test(error.message)) {
+        settleManagedReleaseDispatch(environment.id, attempt, { status: 'rejected' });
+        return { success: false, status: 'blocked', message: 'GitHub explicitly rejected the release for insufficient permissions. Repair access and re-plan for a reviewed retry.', data: { attemptId: attempt.id } };
+      }
+      return { success: false, status: 'pending', message: 'The release dispatch acknowledgment is uncertain. Re-plan for read-only recovery; no repeated dispatch is authorized.', data: { attemptId: attempt.id } };
+    }
   }
-
-  const before = await adapter.listWorkflowRuns(owner, repo, params.workflow, { per_page: 50 });
-  const existingRunIds = new Set(before.workflow_runs.map((run) => run.id));
-  const dispatchFailure = await managedWorkflowDispatchTargetFailure({
-    adapter,
-    owner,
-    repo,
-    branch: params.ref,
-    expectedSha: params.targetSha,
-  });
-  if (dispatchFailure) {
-    const [reason, error] = dispatchFailure;
-    return {
-      success: false,
-      status: 'blocked',
-      message: reason === 'default-branch'
-        ? 'Managed release default branch changed after planning'
-        : reason === 'branch'
-          ? 'Managed release branch changed after planning'
-          : 'Managed release branch could not be verified',
-      error: `${error}${reason === 'observation-failed' ? '' : ' Re-run hv_plan.'}`,
-    };
-  }
-  let dispatchInputs: Record<string, string> = { commit_sha: params.targetSha };
-  try {
-    if (storedSpec) dispatchInputs = await prepareGitHubCredentialRollout({ project: params.project, spec: storedSpec, definition: params.workflow, ref: params.ref, inputs: dispatchInputs });
-  } catch {
-    return { success: false, status: 'blocked', message: 'Managed credential rollout preparation could not verify the exact reviewed workflow. Re-run hv_plan.' };
-  }
-  await adapter.triggerWorkflow(owner, repo, params.workflow, params.ref, dispatchInputs);
-  const deadline = Date.now() + (params.timeoutMs ?? RELEASE_WAIT_TIMEOUT_MS);
-  let selectedRun: Awaited<ReturnType<GitHubAdapter['listWorkflowRuns']>>['workflow_runs'][number] | undefined;
-  while (Date.now() < deadline) {
-    const observed = await adapter.listWorkflowRuns(owner, repo, params.workflow, { per_page: 50 });
-    selectedRun = selectedRun
-      ? observed.workflow_runs.find((run) => run.id === selectedRun?.id)
-      : observed.workflow_runs.find((run) =>
-        !existingRunIds.has(run.id)
-        && run.event === 'workflow_dispatch'
-        && (run.head_sha === params.targetSha || run.display_title?.includes(params.targetSha))
-      );
-    if (selectedRun?.status === 'completed') break;
-    await new Promise((resolve) => setTimeout(resolve, params.pollIntervalMs ?? RELEASE_POLL_INTERVAL_MS));
-  }
-  if (!selectedRun || selectedRun.status !== 'completed') {
-    return {
-      success: true,
-      status: 'pending',
-      message: `The exact-SHA ${params.environmentName} release is still running`,
-      data: { repository, workflow: params.workflow, targetSha: params.targetSha, ...(selectedRun ? { runId: selectedRun.id, url: selectedRun.html_url } : {}) },
-    };
-  }
+  if (['failed', 'rejected'].includes(attempt.status)) return { success: false, status: 'blocked', message: 'The retained release failed. Re-plan to review an explicit retry.', data: { attemptId: attempt.id, runId: attempt.runId } };
+  const observed = await observeRetainedGitHubDispatch({ adapter, owner, repo, environmentId: environment.id, attempt,
+    timeoutMs: params.timeoutMs, pollIntervalMs: params.pollIntervalMs });
+  attempt = observed.attempt;
+  if (observed.problem) return { success: false, ...observed.problem };
+  const selectedRun = observed.run;
+  const data = { repository, workflow: params.workflow, targetSha: params.targetSha, attemptId: attempt.id,
+    ...(attempt.runId ? { runId: attempt.runId, url: `https://github.com/${repository}/actions/runs/${attempt.runId}` } : {}) };
+  if (!selectedRun || selectedRun.status !== 'completed') return { success: false, status: 'pending', message: 'The exact managed release remains pending; recovery will only observe the retained attempt.', data };
   if (selectedRun.conclusion !== 'success') {
-    return {
-      success: false,
-      message: `The exact-SHA ${params.environmentName} release failed`,
-      error: `GitHub Actions run ${selectedRun.id} concluded ${selectedRun.conclusion ?? 'without a conclusion'}.`,
-      data: { repository, workflow: params.workflow, targetSha: params.targetSha, runId: selectedRun.id, url: selectedRun.html_url },
-    };
+    settleManagedReleaseDispatch(environment.id, attempt, { status: 'failed' });
+    return { success: false, message: 'The exact managed release failed; re-plan for a reviewed retry.', data };
   }
-  const artifacts = await adapter.listWorkflowRunArtifacts(owner, repo, selectedRun.id);
-  const expectedArtifact = managedCiReleaseArtifactName(params.environmentName, params.targetSha);
-  const releaseEvidence = artifacts.artifacts.find((artifact) =>
-    artifact.name === expectedArtifact
-    && artifact.expired === false
-    && artifact.workflow_run?.id === selectedRun?.id
-  );
-  if (!releaseEvidence) {
-    return {
-      success: false,
-      message: `The exact-SHA ${params.environmentName} release lacked verified release evidence`,
-      error: `Successful run ${selectedRun.id} did not emit ${expectedArtifact}.`,
-      data: { repository, workflow: params.workflow, targetSha: params.targetSha, runId: selectedRun.id, url: selectedRun.html_url },
-    };
-  }
+  const currentEnvironment = repositoryState.findById(environment.id)!;
+  const proof = await observeManagedReleaseArtifact({ project: params.project, spec: storedSpec, environment: currentEnvironment,
+    expected: { workflow: params.workflow, branch: params.ref, sourceCommitSha: params.targetSha,
+      workflowInputHash: params.workflowInputHash, workflowContentHash: params.workflowContentHash, runId: selectedRun.id } });
+  if (!proof) return { success: false, status: 'pending', message: 'The release run completed, but exact source, program, target and artifact evidence remains unverified.', data };
+  if (!isDeepStrictEqual(new SpecStore().get(params.project)?.spec, storedSpec)
+    || !isDeepStrictEqual(repositoryState.findById(environment.id)?.platformBindings, currentEnvironment.platformBindings)
+    || !isDeepStrictEqual(new ConnectionRepository().findBestVerifiedMatch('github', repository), connection))
+    return { success: false, status: 'blocked', message: 'Source, bindings or authorization changed during release verification. Re-plan for read-only recovery.', data };
   let credentialActivation: Awaited<ReturnType<typeof observeGitHubCredentialRollout>> = [];
-  try {
-    if (storedSpec) credentialActivation = await observeGitHubCredentialRollout({ project: params.project, spec: storedSpec, runId: String(selectedRun.id) });
-  } catch {
-    return { success: false, status: 'pending', message: 'The managed release finished, but credential activation evidence remains unverified.',
-      data: { repository, workflow: params.workflow, targetSha: params.targetSha, runId: selectedRun.id, url: selectedRun.html_url } };
-  }
-  return {
-    success: true,
-    message: `Deployed and verified exact commit ${params.targetSha}`,
-    data: { repository, workflow: params.workflow, targetSha: params.targetSha, runId: selectedRun.id, url: selectedRun.html_url, artifactId: releaseEvidence.id, ...(credentialActivation.length ? { credentialActivation } : {}) },
-  };
+  try { credentialActivation = await observeGitHubCredentialRollout({ project: params.project, spec: storedSpec, runId: String(selectedRun.id) }); }
+  catch { return { success: false, status: 'pending', message: 'The managed release finished, but credential activation evidence remains unverified.', data }; }
+  if (!isDeepStrictEqual(new SpecStore().get(params.project)?.spec, storedSpec))
+    return { success: false, status: 'blocked', message: 'Source changed during credential verification. Re-plan for read-only recovery.', data };
+  settleManagedReleaseDispatch(environment.id, attempt, { status: 'succeeded' });
+  return { success: true, message: `Deployed and verified exact commit ${params.targetSha}`, data: { ...data, artifactId: proof.artifactId,
+    ...(credentialActivation.length ? { credentialActivation } : {}) } };
+
 }
 
 function persistCiBindingPatch(

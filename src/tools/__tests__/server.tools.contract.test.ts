@@ -68,6 +68,42 @@ async function makeClient(workspaceRoot?: string, identity = { name: 'server-con
 }
 
 describe('server tool surface', () => {
+  it.each(['initialization', 'tool-description', 'empty-connections'] as const)(
+    'guides new AWS, Azure and GCP customers to browser installation through %s',
+    async (surface) => {
+      const { client, server } = await makeClient();
+      try {
+        let guidance: string;
+        if (surface === 'initialization') {
+          guidance = client.getInstructions() ?? '';
+        } else if (surface === 'tool-description') {
+          const { tools } = await client.listTools();
+          const connection = tools.find((tool) => tool.name === 'hv_connections');
+          guidance = JSON.stringify({ description: connection?.description, schema: connection?.inputSchema });
+        } else {
+          const result = parseToolEnvelope(await client.callTool({ name: 'hv_connections', arguments: {} }));
+          expect(result).toMatchObject({ ok: true, data: { connections: [] } });
+          guidance = result.hint ?? '';
+        }
+        expect(guidance).toContain('AWS, Azure or GCP');
+        expect(guidance).toContain('hv_cloud_connections');
+        expect(guidance.replaceAll('\\"', '"')).toContain('purpose="connect-cloud"');
+        expect(guidance).toMatch(/(?:without|no) local cloud credentials/i);
+        expect(guidance).toContain('legacy');
+        expect(guidance).toContain('service-account key');
+        expect(guidance).not.toMatch(/short, opinionated GCP setup|recommended one-time setup|For a first GCP Cloud Run|bounded GCP bootstrap above applies|intentionally wants chat entry/);
+        if (surface === 'initialization') {
+          expect.soft(guidance).toContain('Follow the returned nextStep');
+          expect.soft(guidance).toContain('Only mode="connect" may request a value-free spec patch');
+          expect.soft(guidance).toContain('connect-existing and migrate preserve the committed destinations and versions');
+          expect.soft(guidance).toContain('preview may infer gcpProjectId');
+        }
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    }
+  );
   // Independent client contract: Claude truncates startup instructions at
   // 4,096 characters since 2.1.296, and at 2,048 on older versions.
   // https://code.claude.com/docs/en/mcp#tool-search-for-mcp-server-authors
@@ -86,6 +122,11 @@ describe('server tool surface', () => {
       expect(instructions).toContain('complete query string');
       expect(instructions).toContain('action="describe"');
       expect(instructions).toContain('hypervibe://guidance');
+      // User contract: new customers do not need local cloud credentials or a key-generating bootstrap.
+      expect(instructions).toContain('AWS, Azure or GCP');
+      expect(instructions).toContain('purpose="connect-cloud"');
+      expect(instructions).toContain('without local cloud credentials');
+      expect(instructions).not.toContain('For a first GCP Cloud Run');
       const resources = await client.listResources();
       expect(resources.resources).toContainEqual(expect.objectContaining({ uri: 'hypervibe://guidance' }));
       const guidance = await client.readResource({ uri: 'hypervibe://guidance' });
@@ -224,6 +265,8 @@ describe('server tool surface', () => {
     expect(registry.get('hv_cloud_secrets')?.cliPath).toEqual(['cloud', 'secrets']);
     expect(registry.get('hv_cloud_connections')?.cliPath).toEqual(['cloud', 'connections']);
     expect(registry.get('hv_cloud_connections')?.inputShape.credentials).toBeUndefined();
+    expect(registry.get('hv_cloud_connections')?.inputShape.action.safeParse('propose-source').success).toBe(true);
+    expect(registry.get('hv_cloud_connections')?.description).not.toContain('New Azure installation remains blocked');
     expect(registry.get('hv_spec')?.cliPath).toEqual(['spec']);
     expect(registry.get('hv_connections')?.cliPath).toEqual(['connections']);
     expect(registry.get('hv_secrets')?.cliPath).toEqual(['secrets']);
@@ -255,7 +298,7 @@ describe('server tool surface', () => {
     expect(registry.get('hv_connections')?.description).toContain('{} lists every connection/provider');
     expect(registry.get('hv_spec')?.description).toContain('fresh git repository');
     expect(registry.get('hv_connections')?.description).toContain('{project} lists');
-    expect(registry.get('hv_connections')?.description).toContain('opinionated GCP setup');
+    expect(registry.get('hv_connections')?.description).toContain('explicit legacy action="bootstrap"');
     expect(registry.get('hv_secrets')?.description).toContain('{} or {project} lists sources');
     expect(registry.get('hv_secrets')?.description).toContain('Hosting mode requires explicit env');
     expect(registry.get('hv_inspect')?.description).toContain('{provider,project,env}');
@@ -386,15 +429,11 @@ describe('server tool surface', () => {
     expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
       'Never refer vaguely to a "Hypervibe credential flow"'
     );
-    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'action="bootstrap" with explicit project, gcpProjectId, and adminAuth="default"'
-    );
+    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain('purpose="connect-cloud"');
     expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
       'ask the user to choose one exact account'
     );
-    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'the bounded GCP bootstrap above applies'
-    );
+    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain('explicitly requested legacy setup');
     expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
       'Never choose a billable account for the user'
     );

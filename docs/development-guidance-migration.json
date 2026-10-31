@@ -1264,7 +1264,7 @@
         "reason": "Replace stale src/tools/respond.ts and server ToolContext wiring with the command registry/context/results model. ToolContext remains a compatibility alias, not the active architecture."
       },
       {
-        "heading": "The spec → plan → apply loop",
+        "heading": "The spec \u2192 plan \u2192 apply loop",
         "sourceLine": 129,
         "originalSha256": "282bc116236abb34c1135ec1e054b79470e10779f419e680d4d44d9240608ad0",
         "status": "corrected",
@@ -1310,6 +1310,26 @@
       "destination": "docs/development-guidance-product.md#dg-002",
       "destinationSha256": "a3e16a038a534a277f74f1eeabea409069355c24d54fad1e06aeb1f5ef5cfc53",
       "reason": "User-requested direct forms with every supported known non-secret field prefilled; preserve contextual tool URLs across clients."
+    }
+  ],
+  "postMigrationAdditions": [
+    {
+      "sourceRevision": "99bf0b0ab18fba9214e32a93ad49dc5ffe11f728",
+      "sourcePath": "AGENTS.md",
+      "destination": "docs/development-guidance-lifecycle.md#connect-cloud-project-allocation-exception",
+      "reason": "Preserve the owner-approved 2026-10-25 create-exclusive-v1 exception when integrating the maintainer guidance migration; existing DG-039 remains unchanged."
+    },
+    {
+      "sourcePath": "docs/development-guidance-product.md#dg-081",
+      "destination": "docs/development-guidance-product.md#dg-081",
+      "destinationSha256": "2d56d1d0fd6ad12862b7fc3611cccbbd7ef4ebe615c4184a47faf6a50835c8b9",
+      "reason": "User-requested autonomous setup: an explicit bounded read-only continuation may recover pending identities without renewed approval. Dependent mutations, unknown-write replay, changed consequential actions and blocked/failed results retain their existing boundaries."
+    },
+    {
+      "sourcePath": "docs/operator-applications.md",
+      "destination": "docs/development-guidance-lifecycle.md#explicit-operator-registration-restart",
+      "destinationSha256": "af289c9cbe752a105a072b546a8a3e27620169e924a02212acafc840cb8c1b0d",
+      "reason": "Requested partial-installation/restart support: explicitly reviewed new GitHub registration after expired browser-only state; preserve unknown predecessor effects, exact source/owner/destination scope, custody, lineage and fresh action approval. No native absence, cancellation or replay inference."
     }
   ]
 }

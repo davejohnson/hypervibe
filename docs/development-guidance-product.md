@@ -67,7 +67,7 @@ When a missing capability forces a user to perform routine provider setup manual
 
 ## DG-081
 
-Work stage-by-stage. After any blocked, failed, pending, or confirmation-required Hypervibe result, stop and report what worked, what failed, and the next decision needed from the user. Do not keep trying alternate tools, bypasses, or provider-specific workarounds unless the user explicitly asks you to investigate broadly or keep iterating.
+Work stage-by-stage. After any blocked, failed, pending, or confirmation-required Hypervibe result, stop dependent mutations and report the actual receipts. An explicit read-only continuation for pending work may inspect its retained identities without another user approval; it cannot replay uncertain writes or authorize dependent mutations. Preserve existing approvals for unchanged actions and request confirmation for new or changed consequential actions. Otherwise report the blocker and the next decision needed from the user. Do not keep trying alternate tools, bypasses, or provider-specific workarounds unless the user explicitly asks you to investigate broadly or keep iterating.
 
 ## DG-082
 

@@ -27,7 +27,7 @@ function fixture(kind: 'github' | 'portable', options: { denyTask?: boolean; mis
     requiresCompatibilities: ['FARGATE'], networkMode: 'awsvpc', cpu: '256', memory: '512',
     volumes: [{ name: 'data', efsVolumeConfiguration: { fileSystemId: 'fs-12345678', transitEncryption: 'ENABLED', authorizationConfig: { accessPointId: 'fsap-12345678', iam: 'ENABLED' } } }],
     containerDefinitions: [
-      { name: options.missingMain ? 'other' : 'Main', image: 'registry/original@sha256:' + 'c'.repeat(64), essential: true, portMappings: [{ containerPort: 8080, name: 'http', protocol: 'tcp' }], mountPoints: [{ sourceVolume: 'data', containerPath: '/data', readOnly: false }], environment: [{ name: 'EXISTING', value: 'retained' }], command: ['node', 'server.mjs'] },
+      { name: options.missingMain ? 'other' : 'Main', image: 'registry/original@sha256:' + 'c'.repeat(64), essential: true, portMappings: [{ containerPort: 8080, name: 'http', protocol: 'tcp' }], mountPoints: [{ sourceVolume: 'data', containerPath: '/data', readOnly: false }], environment: [{ name: 'EXISTING', value: 'retained' }], secrets: [{ name: 'API_TOKEN', valueFrom: 'arn:aws:secretsmanager:us-west-2:123456789012:secret:token-AbCdEf:::' + 'd'.repeat(32) }], command: ['node', 'server.mjs'] },
       { name: 'sidecar', image: 'registry/sidecar@sha256:' + 'd'.repeat(64), essential: false },
     ],
   };
@@ -110,6 +110,7 @@ describe.each(['github', 'portable'] as const)('%s ECS task-definition release',
     expect(registered.containerDefinitions[1]).toEqual(f.original.containerDefinitions[1]);
     expect(registered.containerDefinitions[0]).toMatchObject({ image: f.releaseImage, mountPoints: f.original.containerDefinitions[0].mountPoints, command: ['node', 'server.mjs'] });
     expect(registered.containerDefinitions[0].environment).toEqual(expect.arrayContaining([{ name: 'EXISTING', value: 'retained' }, { name: 'HYPERVIBE_DEPLOY_SHA', value: f.releaseSha }]));
+    expect(registered.containerDefinitions[0].secrets).toEqual(f.original.containerDefinitions[0].secrets);
     expect(f.requests.filter(r => r.operation === 'UpdateExpressGatewayService')).toHaveLength(1);
   });
 

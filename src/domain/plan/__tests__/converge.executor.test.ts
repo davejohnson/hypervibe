@@ -399,6 +399,39 @@ describe('ConvergeExecutor staleness', () => {
     expect(result.error).toContain('changed since this plan');
   });
 
+  // Independent lifecycle contract: reviewed workload identities and grants are
+  // authorization inputs even without disks. Exercise saved SQLite plans and
+  // the real executor's mutation boundary; provider observations are synthetic.
+  it.each(['omitted', 'empty'].flatMap(volumes => ['principal', 'grant', 'invalid'].map(change => ({ volumes, change }))))(
+    'rejects $change drift with $volumes service volumes before executing a saved plan', async ({ volumes, change }) => {
+      const before: ObservedState = {
+        provider: 'cloudrun', observedAt: '2026-10-26T00:00:00Z', projectExists: true,
+        projectId: 'cloud-project', services: [], databases: [], partial: false, warnings: [],
+        ...(volumes === 'empty' ? { serviceVolumes: {} } : {}),
+        runtimeAccess: {
+          identities: [{ provider: 'cloudrun', serviceName: 'web', mode: 'ensure', observation: { state: 'ready',
+            identity: { provider: 'gcp', principal: 'reviewed-runtime@example.test', scope: { projectId: 'cloud-project' }, source: 'observed' } } }],
+          grants: [{ provider: 'gcs', serviceName: 'web', storageName: 'uploads', desired: true,
+            observation: { state: 'present', binding: { id: 'reviewed-grant', attemptId: 'reviewed-attempt', evidence: { bucket: 'uploads' } } } }],
+        },
+      };
+      const fresh = structuredClone(before);
+      if (change === 'principal') {
+        const observation = fresh.runtimeAccess!.identities[0].observation;
+        if (observation.state !== 'ready' || !observation.identity) throw new Error('Expected an independently reviewed identity.');
+        observation.identity.principal = 'different-runtime@example.test';
+      }
+      if (change === 'grant') fresh.runtimeAccess!.grants[0].observation = { state: 'absent' };
+      if (change === 'invalid') fresh.runtimeAccess!.invalid = true;
+      const handler = vi.fn().mockResolvedValue({ success: true, message: 'Must not execute stale authority' });
+      const planRunId = storePlan([action({ id: 'service:web' })], { observedFingerprint: fingerprintObservedState(before) });
+      const result = await new ConvergeExecutor().execute({ planRunId, currentSpecRevision: 1,
+        freshObservedFingerprint: fingerprintObservedState(fresh), handler });
+      expect(result, change).toMatchObject({ success: false, error: expect.stringContaining('changed since this plan') });
+      expect(handler, change).not.toHaveBeenCalled();
+      expect(runRepo().findByEnvironmentId(environmentId).filter(run => run.type === 'apply')).toEqual([]);
+  });
+
   it('rejects when an observed integration changed since planning', async () => {
     const handler = vi.fn();
     const planId = storePlan(

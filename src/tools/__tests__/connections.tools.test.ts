@@ -22,6 +22,8 @@ import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { S3StorageAdapter } from '../../adapters/providers/aws/s3.adapter.js';
 import '../../adapters/providers/gcp/cloudrun.adapter.js';
+import '../../adapters/providers/gcp/cloudsql.adapter.js';
+import '../../adapters/providers/gcp/gcs.adapter.js';
 import '../../adapters/providers/secretmanagers/onepassword.adapter.js';
 import { StripeProjectsAdapter } from '../../adapters/providers/secretmanagers/stripe-projects.adapter.js';
 
@@ -1069,6 +1071,23 @@ describe('hv_connections', () => {
     expect(result.error.message).toContain('provider is required');
     expect(result.hint).toContain('hv_connections({project})');
     await t.close();
+  });
+
+  it('keeps workflow-owned Google federation out of manual credential forms', async () => {
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_connections', {});
+      expect(result.ok).toBe(true);
+      const providers = Object.values(result.data.availableProviders).flat() as Array<{
+        name: string; credentialFields: Array<{ name: string; options?: string[] }>;
+      }>;
+      for (const name of ['cloudrun', 'cloudsql', 'gcs']) {
+        const fields = providers.find(provider => provider.name === name)!.credentialFields;
+        expect(fields.find(field => field.name === 'authMode')?.options, name).toEqual(['default', 'serviceAccount']);
+        expect(fields.map(field => field.name), name).not.toContain('workloadIdentity');
+        if (name === 'gcs') expect(fields.map(field => field.name)).not.toContain('projectId');
+      }
+    } finally { await t.close(); }
   });
 
   it('returns connections without credentials plus providers grouped by category', async () => {

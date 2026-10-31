@@ -12,7 +12,7 @@ export const componentBindingsSchema = z.object({
 }).passthrough();
 
 export const createComponentSchema = z.object({
-  environmentId: z.string().uuid(),
+  environmentId: z.string().guid(),
   type: componentTypeSchema,
   bindings: componentBindingsSchema.optional(),
   externalId: z.string().optional(),

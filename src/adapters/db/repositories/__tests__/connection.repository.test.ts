@@ -94,6 +94,15 @@ describe('ConnectionRepository scope safety', () => {
     ])?.id).toBe(scoped.id);
   });
 
+  it('never discovers an exact environment connection without that environment scope', () => {
+    const scoped = create('cloudrun', 'github.com/acme/app#environment=staging');
+    repository.updateStatus(scoped.id, 'verified');
+    expect(repository.findBestVerifiedMatch('cloudrun')).toBeNull();
+    expect(repository.findBestVerifiedMatchFromHints('cloudrun')).toBeNull();
+    expect(repository.findBestVerifiedMatchFromHints('cloudrun', ['github.com/acme/app#environment=production', 'github.com/acme/app'])).toBeNull();
+    expect(repository.findBestVerifiedMatchFromHints('cloudrun', ['github.com/acme/app#environment=staging'])?.id).toBe(scoped.id);
+  });
+
   it('removes all semantic global rows when global removal is requested', () => {
     create('github');
     insertLegacyGlobal('github');

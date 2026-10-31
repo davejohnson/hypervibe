@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { createCloudJsonClient } from '../cloud-http.js';
 
@@ -25,6 +25,14 @@ afterEach(async () => {
   await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
 });
 describe('credential HTTP transport with a real local server', () => {
+  it('does not dispatch a deferred request after caller cancellation', async () => {
+    const controller = new AbortController();
+    const transport = vi.fn(async () => Response.json({}));
+    const pending = createCloudJsonClient(origin, transport)('/session', { token: 'synthetic-device-token', signal: controller.signal });
+    controller.abort();
+    await expect(pending).rejects.toThrow('Could not reach');
+    expect(transport).not.toHaveBeenCalled();
+  });
   it('rejects untrusted absolute request paths before making a network request', async () => {
     await expect(createCloudJsonClient(origin)(`${origin}/capture`, { token: 'test-grant' })).rejects.toThrow('relative API path');
     await expect(createCloudJsonClient(origin)('//attacker.example/capture', { token: 'test-grant' })).rejects.toThrow('relative API path');
@@ -42,5 +50,25 @@ describe('credential HTTP transport with a real local server', () => {
     await expect(createCloudJsonClient(origin)('/error')).rejects.toMatchObject({
       code: 'VALIDATION', message: 'Hypervibe rejected the request. Check connection status before retrying.',
     });
+  });
+  // The customer contract bounds the complete handoff, including injected
+  // transports and response cleanup. Abort notification alone is not a deadline.
+  it.each(['fetch', 'body', 'error-cleanup'] as const)('enforces the deadline when %s ignores cancellation', async stage => {
+    const never = () => new Promise<never>(() => {});
+    const transport = (async () => stage === 'fetch' ? never() : new Response(
+      new ReadableStream({ pull: never, cancel: never }),
+      { status: stage === 'error-cleanup' ? 403 : 200 }
+    )) as typeof fetch;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      createCloudJsonClient(origin, transport, 20)('/session', { token: 'synthetic-device-token' })
+        .then(() => 'unexpected-success', error => error),
+      new Promise(resolve => { timer = setTimeout(() => resolve('deadline-not-enforced'), 100); }),
+    ]);
+    clearTimeout(timer);
+    expect(result).toMatchObject(stage === 'error-cleanup'
+      ? { status: 403, code: 'VALIDATION' }
+      : { code: 'PROVIDER_ERROR', message: 'Could not reach Hypervibe cloud.' });
+    expect(JSON.stringify(result)).not.toContain('synthetic-device-token');
   });
 });

@@ -1,14 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { z } from 'zod';
 import { HvError } from './results.js';
-
-export const sourceBranchSchema = z.string().trim().min(1).max(255).refine(value => (
-  !/[\uD800-\uDFFF]/u.test(value) && !['@', 'HEAD'].includes(value)
-  && !value.startsWith('refs/') && !value.startsWith('-')
-  && !/[\x00-\x20\x7f~^:?*\[\\]/.test(value) && !value.includes('..')
-  && !value.includes('@{') && !value.endsWith('.')
-  && value.split('/').every(part => part && !part.startsWith('.') && !part.endsWith('.lock'))
-), 'Use a plain branch name.');
+import { sourceBranchSchema } from '../lib/source-branch.js';
+export { sourceBranchSchema } from '../lib/source-branch.js';
 
 /** Setup hint only. Detached/unreadable HEAD never implies a default branch. */
 export function resolveCloudSourceBranch(directory: string, explicit?: string, pending?: { sourceBranch?: string }): string | undefined {

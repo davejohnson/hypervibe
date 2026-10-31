@@ -30,6 +30,8 @@ export interface GcpBootstrapProject {
   state: 'ACTIVE' | 'DELETE_REQUESTED' | 'STATE_UNSPECIFIED';
   displayName?: string;
   parent?: string;
+  createTime?: string;
+  labels?: Record<string, string>;
 }
 
 export interface GcpProjectCreateOperation {
@@ -139,6 +141,7 @@ export class GcpBootstrapClient {
     projectId: string;
     displayName?: string;
     parent?: string;
+    labels?: Record<string, string>;
   }): Promise<GcpProjectCreateOperation> {
     this.assertProjectId(input.projectId);
     if (input.parent !== undefined && !PARENT_PATTERN.test(input.parent)) {
@@ -147,6 +150,8 @@ export class GcpBootstrapClient {
     if (input.displayName !== undefined && !input.displayName.trim()) {
       throw new Error('GCP project display name must not be empty.');
     }
+    if (input.labels && (Object.keys(input.labels).length > 64 || Object.entries(input.labels).some(([key, value]) =>
+      !/^[a-z][a-z0-9_-]{0,62}$/.test(key) || !/^[a-z0-9_-]{0,63}$/.test(value)))) throw new Error('Invalid GCP project creation labels.');
     const payload = await this.requestJson(
       `${CLOUD_RESOURCE_MANAGER_BASE}/projects`,
       {
@@ -155,12 +160,30 @@ export class GcpBootstrapClient {
           projectId: input.projectId,
           ...(input.displayName === undefined ? {} : { displayName: input.displayName }),
           ...(input.parent === undefined ? {} : { parent: input.parent }),
+          ...(input.labels === undefined ? {} : { labels: input.labels }),
         }),
       },
       'project creation'
     );
     const operation = this.parseOperation(payload, 'project creation');
     return { name: operation.name };
+  }
+
+  /** One read, no polling or writes; an expired native operation is not a failed create. */
+  async getProjectCreateOperation(operationName: string, projectId: string, options: { requireProjectType?: true } = {}): Promise<
+    { state: 'pending' | 'failed'; name: string } | { state: 'succeeded'; name: string; project: GcpBootstrapProject } | null
+  > {
+    this.assertOperationName(operationName); this.assertProjectId(projectId);
+    const value = await this.getNullable(`${CLOUD_RESOURCE_MANAGER_BASE}/${operationName}`, 'project operation lookup');
+    if (value === null) return null;
+    const operation = this.parseOperation(value, 'project creation');
+    if (operation.name !== operationName) throw new Error('GCP operation identity mismatch.');
+    if (operation.done !== true) return { state: 'pending', name: operationName };
+    if (operation.error !== undefined) return { state: 'failed', name: operationName };
+    if (!operation.response) throw new Error('GCP project operation completed without identity.');
+    if (options.requireProjectType && this.asRecord(operation.response, 'GCP project operation returned an invalid response.')['@type']
+      !== 'type.googleapis.com/google.cloud.resourcemanager.v3.Project') throw new Error('GCP project operation returned the wrong resource type.');
+    return { state: 'succeeded', name: operationName, project: this.parseProject(operation.response, projectId) };
   }
 
   async waitForProjectOperation(
@@ -310,6 +333,7 @@ export class GcpBootstrapClient {
     const expectedName = `${project.name}/services/${serviceName}`;
     const initial = await this.getService(projectId, serviceName, expectedName);
     if (initial?.state === 'ENABLED') return 'already_enabled';
+    if (initial?.state !== 'DISABLED') throw new Error('GCP service enablement requires a verified disabled state.');
 
     const payload = await this.requestJson(
       `${SERVICE_USAGE_BASE}/projects/${encodeURIComponent(projectId)}`
@@ -534,7 +558,7 @@ export class GcpBootstrapClient {
   ): Promise<{ name: string; state: GcpServiceState } | null> {
     const payload = await this.getNullable(
       `${SERVICE_USAGE_BASE}/projects/${encodeURIComponent(projectId)}`
-        + `/services/${encodeURIComponent(serviceName)}`,
+        + `/services/${encodeURIComponent(serviceName)}?fields=name,parent,config/name,state`,
       'service lookup'
     );
     if (payload === null) return null;
@@ -606,13 +630,23 @@ export class GcpBootstrapClient {
 
   private parseProject(value: unknown, expectedProjectId: string): GcpBootstrapProject {
     const record = this.asRecord(value, 'GCP project lookup returned an invalid response.');
+    // ProtoJSON implicit parent defaults mean no parent; unlike identity and
+    // explicit lifecycle success, an empty/null parent is valid native evidence.
+    const parent = record.parent ?? '';
+    if (record.createTime !== undefined && (typeof record.createTime !== 'string' || !Number.isFinite(Date.parse(record.createTime))))
+      throw new Error('GCP project creation time is invalid.');
+    let labels: Record<string, string> | undefined;
+    if (record.labels !== undefined && record.labels !== null) {
+      const parsed = this.asRecord(record.labels, 'GCP project labels are invalid.');
+      if (Object.keys(parsed).length > 64 || Object.values(parsed).some(item => typeof item !== 'string')) throw new Error('GCP project labels are invalid.');
+      labels = parsed as Record<string, string>;
+    }
     if (!PROJECT_NAME_PATTERN.test(this.stringValue(record.name))
       || record.projectId !== expectedProjectId
       || (record.state !== 'ACTIVE'
         && record.state !== 'DELETE_REQUESTED'
         && record.state !== 'STATE_UNSPECIFIED')
-      || (record.parent !== undefined
-        && (typeof record.parent !== 'string' || !PARENT_PATTERN.test(record.parent)))) {
+      || typeof parent !== 'string' || (parent !== '' && !PARENT_PATTERN.test(parent))) {
       throw new Error('GCP project lookup returned a different or invalid resource identity.');
     }
     return {
@@ -620,7 +654,9 @@ export class GcpBootstrapClient {
       projectId: expectedProjectId,
       state: record.state,
       ...(typeof record.displayName === 'string' ? { displayName: record.displayName } : {}),
-      ...(typeof record.parent === 'string' ? { parent: record.parent } : {}),
+      ...(parent === '' ? {} : { parent }),
+      ...(typeof record.createTime === 'string' ? { createTime: record.createTime } : {}),
+      ...(labels === undefined ? {} : { labels }),
     };
   }
 

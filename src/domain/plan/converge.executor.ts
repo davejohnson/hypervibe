@@ -1,3 +1,6 @@
+import { OPERATOR_APPLICATION_OPERATION, isOperatorApplicationAction, operatorApplicationPlanSchema } from '../ports/operator-application.port.js';
+import { isRecoveryRuntimeAction } from '../services/recovery-runtime.service.js';
+import { isRuntimeAccessAction } from '../services/runtime-access.service.js';
 import { DATABASE_PASSWORD_OPERATIONS, isDatabasePasswordPlan } from './database-password-plan.contract.js';
 import { isDatabaseBootstrapAction } from './database-bootstrap.contract.js';
 import { DATABASE_FRESH_INITIALIZATION_OPERATION, isDatabaseInitializationAction } from './database-initialization.contract.js';
@@ -7,16 +10,22 @@ import { databaseCredentialAliasesActionSchema, databaseCredentialAliasesMetadat
 import { isDeepStrictEqual } from 'node:util';
 import { API_POLICY_OPERATION } from '../services/api-policy.js';
 import { DATABASE_SCOPE_BIND_OPERATION, isDatabaseScopeBindingAction } from '../services/database-scope-binding.service.js';
+import { HOSTING_PREPARED_OPERATION, isPreparedHostingAction } from '../services/hosting-prepared.service.js';
 import { createHash } from 'crypto';
 import { z } from 'zod';
+import { isOperatorArtifactAction, OPERATOR_ARTIFACT_OPERATION, operatorArtifactPlanSchema } from '../ports/operator-artifact.port.js';
+import { isLocalHoldingAction, LOCAL_HOLDING_OPERATION, localHoldingPlanSchema } from '../ports/local-holding-preparation.port.js';
+import { isLocalCloudScopeAction, LOCAL_CLOUD_SCOPE_OPERATION, localCloudScopePlanSchema } from '../ports/local-cloud-scope.port.js';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import type { Run, RunReceipt } from '../entities/run.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
 import { CI_CONFIGURATION_SYNC_OPERATION } from '../services/managed-ci.contract.js';
 import { resolvePlanActionAuthority } from './action-authority.js';
 import type { PlanAction } from './plan.types.js';
-import { isManagedCiCredentialAction } from './plan-stage.js';
+import { isManagedCiCredentialAction, isRuntimeQueuePrerequisite } from './plan-stage.js';
 import { isScopedSecretAction } from './scoped-secrets.js';
+import { orderActions } from './order-actions.js';
+export { orderActions } from './order-actions.js';
 import { managedBackupTargetSchema } from '../services/managed-backup-target.service.js';
 import { managedBackupFilePaths } from '../services/backup-workflow.service.js';
 
@@ -233,12 +242,20 @@ export const planRunDocumentSchema = z.object({
   scope: z.enum([
     'full',
     'secrets',
+    'secret-destinations',
+    'cloud-scope',
+    'operator-artifacts',
+    'operator-applications',
+    'hosting-preparation',
     'credentials',
     'api-policy',
     'retained-cleanup',
     'managed-ci-bindings',
     'hosting-bindings',
+    'hosting-prepared-bindings',
     'service-volumes',
+    'runtime-access',
+    'backup-runtime',
     'database-checkpoint',
     'database-credential-aliases',
     'database-bindings',
@@ -252,6 +269,10 @@ export const planRunDocumentSchema = z.object({
     'managed-ci-credentials',
   ]).optional(),
   environmentName: z.string().min(1),
+  cloudScope: localCloudScopePlanSchema.optional(),
+  artifactPublication: operatorArtifactPlanSchema.optional(),
+  applicationRegistration: operatorApplicationPlanSchema.optional(),
+  holdingPreparation: localHoldingPlanSchema.optional(),
   databaseCredentialAliasesReady: z.boolean().optional(),
   databaseBootstrapReady: z.boolean().optional(),
   databaseCredentialAliasesVerification: databaseCredentialAliasesMetadataSchema.optional(),
@@ -279,6 +300,63 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'operator-applications') {
+    const proof = document.applicationRegistration;
+    if (!proof || !document.actions.length || document.actions.length > 100
+      || document.actions.some(action => !isOperatorApplicationAction(action)
+        || !isDeepStrictEqual(Object.fromEntries(Object.keys(proof).map(key => [key, action.metadata?.[key]])), proof))
+      || document.cloudScope || document.artifactPublication || document.holdingPreparation || document.overrides || document.inputRequired?.length
+      || document.sourceCommitSha || document.integrationFingerprints || document.lockEnvironmentIds?.length || document.observedFingerprint !== null)
+      ctx.addIssue({ code: 'custom', message: 'Operator registration requires exact isolated actions without deployment inputs.' });
+    return;
+  }
+  if (document.applicationRegistration || document.actions.some(action => action.metadata?.operation === OPERATOR_APPLICATION_OPERATION))
+    ctx.addIssue({ code: 'custom', message: 'Operator registration requires its isolated stage.' });
+  if (document.scope === 'hosting-preparation') {
+    const proof = document.holdingPreparation;
+    if (!proof || !document.actions.length || document.actions.length > 100
+      || document.actions.some(action => !isLocalHoldingAction(action)
+        || !isDeepStrictEqual(Object.fromEntries(Object.keys(proof).map(key => [key, action.metadata?.[key]])), proof))
+      || document.cloudScope || document.artifactPublication || document.overrides || document.inputRequired?.length || document.sourceCommitSha
+      || document.integrationFingerprints || document.lockEnvironmentIds?.length || document.observedFingerprint !== null)
+      ctx.addIssue({ code: 'custom', message: 'Holding preparation requires exact isolated saved actions without application inputs.' });
+    return;
+  }
+  if (document.holdingPreparation || document.actions.some(action => action.metadata?.operation === LOCAL_HOLDING_OPERATION))
+    ctx.addIssue({ code: 'custom', message: 'Holding preparation requires its isolated plan stage.' });
+  if (document.scope === 'operator-artifacts') {
+    const proof = document.artifactPublication;
+    if (!proof || document.actions.length > 300 || (proof.mode === 'verified') !== (document.actions.length === 0)
+      || document.actions.some(action => !isOperatorArtifactAction(action)
+        || !isDeepStrictEqual(Object.fromEntries(Object.keys(proof).map(key => [key, action.metadata?.[key]])), proof))
+      || document.cloudScope || document.overrides || document.inputRequired?.length || document.sourceCommitSha || document.integrationFingerprints
+      || document.lockEnvironmentIds?.length || document.observedFingerprint !== null)
+      ctx.addIssue({ code: 'custom', message: 'Operator publication requires its exact isolated saved actions and no deployment inputs.' });
+    return;
+  }
+  if (document.artifactPublication || document.actions.some(action => action.metadata?.operation === OPERATOR_ARTIFACT_OPERATION))
+    ctx.addIssue({ code: 'custom', message: 'Operator publication requires its isolated plan stage.' });
+  if (document.scope === 'cloud-scope') {
+    const proof = document.cloudScope;
+    if (!proof || document.actions.length > 300 || (proof.mode === 'verified') !== (document.actions.length === 0)
+      || document.actions.some(action => !isLocalCloudScopeAction(action)
+        || !isDeepStrictEqual(Object.fromEntries(Object.keys(proof).map(key => [key, action.metadata?.[key]])), proof))
+      || document.overrides || document.inputRequired?.length || document.sourceCommitSha || document.integrationFingerprints
+      || document.lockEnvironmentIds?.length || document.observedFingerprint !== null)
+      ctx.addIssue({ code: 'custom', message: 'Cloud scope preparation requires exact preparation or read-only recovery actions and no deployment inputs.' });
+    return;
+  }
+  if (document.cloudScope || document.actions.some(action => action.metadata?.operation === LOCAL_CLOUD_SCOPE_OPERATION))
+    ctx.addIssue({ code: 'custom', message: 'Cloud scope preparation requires its isolated plan stage.' });
+  if (document.scope === 'secret-destinations') {
+    if (document.actions.some(action => resolvePlanActionAuthority(action)?.capability !== 'secret.destination.prepare')
+      || document.overrides || document.inputRequired?.length || document.sourceCommitSha || document.integrationFingerprints
+      || document.lockEnvironmentIds?.length || document.observedFingerprint !== null)
+      ctx.addIssue({ code: 'custom', message: 'Secret destination setup admits only exact container actions without value or deployment inputs.' });
+    return;
+  }
+  if (document.actions.some(action => action.metadata?.operation === 'secretDestinationPrepare'))
+    ctx.addIssue({ code: 'custom', message: 'Secret container preparation requires its isolated scope.' });
   if (document.scope === 'database-bootstrap') {
     if (document.actions.length > 1 || document.actions.some(action => !isDatabaseBootstrapAction(action))
       || (document.actions.length === 1) !== (document.databaseBootstrapReady === true)
@@ -358,6 +436,20 @@ export const planRunDocumentSchema = z.object({
   }
   if (document.scope !== 'database-bindings' && document.actions.some(action => action.metadata?.operation === DATABASE_SCOPE_BIND_OPERATION)) {
     ctx.addIssue({ code: 'custom', message: 'Database scope binding requires its isolated database-bindings stage.' });
+  }
+  if (document.scope !== 'hosting-prepared-bindings' && document.actions.some(action => action.metadata?.operation === HOSTING_PREPARED_OPERATION)) {
+    ctx.addIssue({ code: 'custom', message: 'Prepared hosting binding requires its isolated metadata stage.' });
+  }
+  if (document.scope === 'hosting-prepared-bindings') {
+    const keys = document.overrides?.delegatedSecretKeys;
+    const acceptedRuntimeInputs = document.overrides === undefined || Boolean(keys?.length && new Set(keys).size === keys.length
+      && document.overrides.delegatedSecretVarsEncrypted
+      && Object.keys(document.overrides).every(key => ['delegatedSecretKeys', 'delegatedSecretVarsEncrypted'].includes(key)));
+    if (document.actions.length !== 1 || !document.actions.every(isPreparedHostingAction) || document.observedFingerprint !== null
+      || !acceptedRuntimeInputs || document.integrationFingerprints || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
+      ctx.addIssue({ code: 'custom', message: 'Prepared hosting binding contains only one exact confirmed metadata action and no rollout inputs.' });
+    }
+    return;
   }
   if (document.scope === 'database-bindings') {
     if (document.actions.length !== 1 || document.actions.some(action => !isDatabaseScopeBindingAction(action))
@@ -455,6 +547,18 @@ export const planRunDocumentSchema = z.object({
       || document.overrides || document.integrationFingerprints
       || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
       ctx.addIssue({ code: 'custom', message: 'database-checkpoint plans must contain only the independent checkpoint action and no runtime or cross-environment inputs.' });
+    }
+    return;
+  }
+  if (document.scope === 'backup-runtime') {
+    if (document.actions.length !== 1 || !isRecoveryRuntimeAction(document.actions[0]) || document.overrides || document.inputRequired?.length || document.integrationFingerprints) {
+      ctx.addIssue({ code: 'custom', message: 'backup-runtime plan must contain only one exact prerequisite and no secret or unrelated integration inputs.' });
+    }
+    return;
+  }
+  if (document.scope === 'runtime-access') {
+    if (!document.actions.length || !(document.actions.every(isRuntimeAccessAction) || document.actions.every(isRuntimeQueuePrerequisite)) || document.overrides || document.inputRequired?.length) {
+      ctx.addIssue({ code: 'custom', message: 'runtime-access plan must contain only exact identity/grant actions or queue prerequisites, and no secret inputs.' });
     }
     return;
   }
@@ -584,6 +688,7 @@ const DEFAULT_MAX_PLAN_AGE_MS = 24 * 60 * 60 * 1000;
  */
 export function fingerprintObservedState(observed: ObservedState): string {
   const essence = {
+    ...(observed.runtimeAccess && (observed.runtimeAccess.invalid || observed.runtimeAccess.identities.length || observed.runtimeAccess.grants.length) ? { runtimeAccess: observed.runtimeAccess } : {}),
     ...(observed.serviceVolumes && Object.keys(observed.serviceVolumes).length > 0 ? {
       serviceVolumes: Object.fromEntries(Object.entries(observed.serviceVolumes).sort(([a], [b]) => a.localeCompare(b))),
     } : {}),
@@ -618,6 +723,9 @@ export function fingerprintObservedState(observed: ObservedState): string {
         sourceState: s.sourceState ?? null,
         envVarKeys: [...s.envVarKeys].sort(),
         envVarHashes: Object.fromEntries(Object.entries(s.envVarHashes).sort(([a], [b]) => a.localeCompare(b))),
+        ...(s.envVarSecretRefs && Object.keys(s.envVarSecretRefs).length ? {
+          envVarSecretRefs: Object.fromEntries(Object.entries(s.envVarSecretRefs).sort(([a], [b]) => a.localeCompare(b))),
+        } : {}),
         deployment: s.deployment ?? null,
         maintenance: s.maintenance ?? null,
       })),
@@ -688,42 +796,6 @@ export function fingerprintObservedState(observed: ObservedState): string {
 }
 
 /** Topological order by dependsOn; throws on cycles or unknown dependencies. */
-export function orderActions(actions: PlanAction[]): PlanAction[] {
-  const seen = new Set<string>();
-  for (const action of actions) {
-    if (seen.has(action.id)) {
-      throw new Error(`Duplicate plan action id "${action.id}"`);
-    }
-    seen.add(action.id);
-  }
-  const byId = new Map(actions.map((a) => [a.id, a]));
-  const ordered: PlanAction[] = [];
-  const state = new Map<string, 'visiting' | 'done'>();
-
-  const visit = (action: PlanAction) => {
-    const mark = state.get(action.id);
-    if (mark === 'done') return;
-    if (mark === 'visiting') {
-      throw new Error(`Dependency cycle involving "${action.id}"`);
-    }
-    state.set(action.id, 'visiting');
-    for (const dep of action.dependsOn ?? []) {
-      const target = byId.get(dep);
-      if (!target) {
-        throw new Error(
-          `Unknown dependency "${dep}" referenced by action "${action.id}"`
-        );
-      }
-      visit(target);
-    }
-    state.set(action.id, 'done');
-    ordered.push(action);
-  };
-
-  for (const action of actions) visit(action);
-  return ordered;
-}
-
 export class ConvergeExecutor {
   constructor(private runRepo = new RunRepository()) {}
 

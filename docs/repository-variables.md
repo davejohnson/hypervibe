@@ -115,6 +115,13 @@ changed spec could authorize a managed repository create, and an older persisted
 create plan could dispatch it while a variable write remained uncertain. Shared
 early guards now stop unrelated planning and apply before either mutation path.
 
+The same guard precedes the cloud and operator stages at the shared apply entry.
+An integration regression reproduced a saved operator-registration action reaching
+its mutation handler while a repository-variable write was still pending (RED).
+Moving the retained guard ahead of those early returns blocks dispatch and keeps
+the ownership journal unchanged (GREEN). This exercises the actual saved-plan
+loader, executor and SQLite with a synthetic operator handler, not a native write.
+
 Normal `npm test` executes the real request serializer against independently
 pinned schemas and synthetic HTTP fixtures, and exercises SpecStore, PlanService,
 ConvergeExecutor, encrypted connection selection, SQLite journals and shared

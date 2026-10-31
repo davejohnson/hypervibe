@@ -46,7 +46,11 @@ export interface IQueueAdapter {
   ensureQueue(
     environment: Environment,
     queueName: string,
-    options?: { ackDeadlineSeconds?: number }
+    options?: {
+      ackDeadlineSeconds?: number;
+      /** Recheck both native resources before any write; update authority never creates. */
+      expectedState?: 'absent' | 'present';
+    }
   ): Promise<QueueEnsureResult>;
   destroyQueue(environment: Environment, queueName: string): Promise<void>;
 }

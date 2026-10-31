@@ -25,13 +25,18 @@ import { InfraTransaction, type InfraTransactionRollbackResult } from './infra.t
 import { snapshotEnvironmentBindings } from './local-state.transaction.js';
 import { prepareHostingBindingTransition } from './hosting-binding-transition.js';
 import { parseServiceVolumeBindings } from './service-volume.service.js';
+import { validateRuntimeSecretReferences } from './runtime-secret-references.js';
+import type { RuntimeSecretReference } from '../ports/secret-destination.port.js';
+import { completePreparedDirectRelease } from './prepared-direct-release.service.js';
 
 export interface DeployOptions {
+  preparedRelease?: import('../ports/hosting-prepared.port.js').PreparedDirectReleaseControl;
   project: Project;
   environment: Environment;
   services?: Service[];
   envVars?: Record<string, string>;
   envVarsByService?: Record<string, Record<string, string>>;
+  secretVersionRefs?: Record<string, RuntimeSecretReference>;
   verifyHttpHealth?: boolean;
   /**
    * Configure provider resources without sourcing/building new application
@@ -100,12 +105,13 @@ export class DeployOrchestrator {
     // the persisted plan — runs.plan is returned verbatim by hv_runs, so
     // values (which include DATABASE_URL and resolved secrets) must never
     // be stored. The step reads the live options.envVars at execution time.
-    if (!options.requireNewWorkload && ((options.envVars && Object.keys(options.envVars).length > 0) || (options.envVarsByService && Object.keys(options.envVarsByService).length > 0))) {
+    if (!options.requireNewWorkload && !options.preparedRelease && ((options.envVars && Object.keys(options.envVars).length > 0) || (options.envVarsByService && Object.keys(options.envVarsByService).length > 0) || Object.keys(options.secretVersionRefs ?? {}).length > 0)) {
       steps.push({
         name: 'set_env_vars',
         action: 'setEnvVars',
         params: {
           envVarKeys: Object.keys(options.envVars ?? {}).sort(),
+          ...(Object.keys(options.secretVersionRefs ?? {}).length ? { secretReferenceKeys: Object.keys(options.secretVersionRefs!).sort() } : {}),
           ...(options.envVarsByService && Object.keys(options.envVarsByService).length > 0
             ? { serviceEnvVarKeys: Object.fromEntries(Object.entries(options.envVarsByService).map(([name, vars]) => [name, Object.keys(vars).sort()])) }
             : {}),
@@ -178,6 +184,10 @@ export class DeployOrchestrator {
     });
 
     try {
+      const refs = validateRuntimeSecretReferences(options.secretVersionRefs,
+        Object.assign({}, options.envVars, ...Object.values(options.envVarsByService ?? {})),
+        destination => options.adapter.capabilities.runtimeSecretReferenceProviders?.includes(destination.provider) === true);
+      options = { ...options, ...(Object.keys(refs).length ? { secretVersionRefs: refs } : {}) };
       if (options.requireNewWorkload && (options.deferProviderDeployment !== true
         || options.adapter.capabilities.supportsCreateOnlyDeploy !== true)) {
         throw new Error(`Provider ${options.adapter.name} does not support creation-only deferred workload provisioning.`);
@@ -489,7 +499,7 @@ export class DeployOrchestrator {
 
         case 'setEnvVars': {
           const vars = options.envVars ?? {};
-          if (Object.keys(vars).length === 0 && Object.keys(options.envVarsByService ?? {}).length === 0) {
+          if (Object.keys(vars).length === 0 && Object.keys(options.envVarsByService ?? {}).length === 0 && Object.keys(options.secretVersionRefs ?? {}).length === 0) {
             return {
               step: step.name,
               status: 'skipped',
@@ -518,13 +528,14 @@ export class DeployOrchestrator {
           const rolloutBaselines: Record<string, unknown> = {};
           for (const service of alreadyDeployed) {
             const serviceVars = { ...vars, ...(options.envVarsByService?.[service.name] ?? {}) };
-            if (Object.keys(serviceVars).length === 0) continue;
-            const receipt = options.deferProviderDeployment
+            if (Object.keys(serviceVars).length === 0 && Object.keys(options.secretVersionRefs ?? {}).length === 0) continue;
+            const referenceOptions = Object.keys(options.secretVersionRefs ?? {}).length ? { secretVersionRefs: options.secretVersionRefs } : {};
+            const receipt = options.deferProviderDeployment || Object.keys(referenceOptions).length
               ? await options.adapter.setEnvVars(
                 environment,
                 service,
                 serviceVars,
-                { deferDeployment: true }
+                { ...(options.deferProviderDeployment ? { deferDeployment: true } : {}), ...referenceOptions }
               )
               : await options.adapter.setEnvVars(environment, service, serviceVars);
             if (!receipt.success) {
@@ -577,6 +588,8 @@ export class DeployOrchestrator {
             ...(options.envVarsByService?.[service.name] ?? {}),
           };
           const mutationOptions: DeploymentMutationOptions = {
+            ...(options.preparedRelease ? { preparedRelease: options.preparedRelease } : {}),
+            ...(Object.keys(options.secretVersionRefs ?? {}).length ? { secretVersionRefs: options.secretVersionRefs } : {}),
             ...(options.deferProviderDeployment ? { deferDeployment: true } : {}),
             ...(options.deferWorkload ? { deferWorkload: true } : {}),
             ...(options.requireNewWorkload ? { requireNewWorkload: true } : {}),
@@ -669,7 +682,15 @@ export class DeployOrchestrator {
               environmentId: options.environment.id,
               label: `environment_bindings_deploy_${service.name}`,
             });
-            this.envRepo.updatePlatformBindings(options.environment.id, bindingUpdates);
+            if (deployData.preparedRelease !== undefined) {
+              const completed = completePreparedDirectRelease(latestEnvironment, deployData.preparedRelease);
+              const evidence = deployData.preparedRelease as import('../ports/hosting-prepared.port.js').PreparedDirectReleaseEvidence;
+              if (evidence.target.workload !== service.name || evidence.target.resourceId !== externalId
+                || evidence.target.resourceUid !== deployData.resourceUid || evidence.target.imageUri !== deployData.imageUri
+                || !this.envRepo.compareAndSwapPlatformBindings(options.environment.id, latestEnvironment.platformBindings, { ...completed, ...bindingUpdates })) {
+                throw new Error('Prepared release completion or its exact local binding changed.');
+              }
+            } else this.envRepo.updatePlatformBindings(options.environment.id, bindingUpdates);
 
             const createdService = result.receipt.data?.createdService === true || result.receipt.data?.created === true;
             if (createdService) {

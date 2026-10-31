@@ -108,6 +108,29 @@ describe('toolSuccess', () => {
     });
   });
 
+  it.each(['hv_plan', 'hv_status', 'hv_ci_status'])('allows only the suggested read-only %s after pending receipts', next => {
+    const response = toolSuccess({ applied: false, receipts: [
+      { actionId: 'account:holding', status: 'skipped_noop' },
+      { actionId: 'service:web', status: 'pending' },
+      { actionId: 'public:web', status: 'aborted' },
+    ] }, { next: [next] });
+    expect(response.agentInstruction).toMatchObject({ action: 'continue' });
+    expect(response.agentInstruction?.message).toMatch(/read-only/);
+    expect(response.agentInstruction?.message).toMatch(/Do not repeat.*mutation/);
+    expect(response.agentInstruction?.message).not.toMatch(/ask the user before retrying/);
+  });
+
+  it.each([
+    { next: undefined, status: 'pending' }, { next: ['hv_apply'], status: 'pending' },
+    { next: ['hv_status', 'hv_deploy'], status: 'pending' },
+    { next: ['hv_plan'], status: 'failed' }, { next: ['hv_status'], status: 'blocked' },
+    { next: ['hv_status'], status: 'unknown-status' },
+    { next: ['hv_plan'], status: 'skipped_requires_confirm' },
+  ])('does not turn missing/unsafe continuation or failure into permission: %j', ({ next, status }) => {
+    expect(toolSuccess({ applied: false, receipts: [{ actionId: 'service:web', status }] }, { next }).agentInstruction?.action)
+      .toBe('stop_and_report');
+  });
+
   it('tells agents to expose and offer to open concrete connection setup links', () => {
     const body = parse(toolSuccess({
       blocked: [{ provider: 'github', scope: 'davejohnson/livetrainer' }],

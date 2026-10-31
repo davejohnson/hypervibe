@@ -116,11 +116,11 @@ describe('independent backup setup and deployment prerequisites at the real appl
     const result = await executePlanApply(ctx, { project, spec, specRevision: 1, planId: run.id, confirmActions: ['service:web'] });
     expect(observed).toHaveBeenCalledOnce();
     expect(result).toMatchObject({ kind: 'executed', result: { success: false,
-      receipts: [expect.objectContaining({ actionId: 'service:web', status: 'blocked', message: expect.stringMatching(/identity-only/i) })] } });
+      receipts: [expect.objectContaining({ actionId: 'service:web', status: 'blocked', message: expect.stringMatching(/fresh proof of absence or a bound empty workload/i) })] } });
     expect(deploy).not.toHaveBeenCalled();
   });
 
-  it('requires creation-only provider authority for deferred identity setup independently of backups', async () => {
+  it('requires reviewed creation authority for deferred identity setup independently of backups', async () => {
     const ctx = createCommandContext();
     const project = ctx.repos.projects.create({ name: 'ordinary-identity', defaultPlatform: 'railway' });
     const environment = ctx.repos.environments.create({ projectId: project.id, name: 'production',
@@ -130,14 +130,14 @@ describe('independent backup setup and deployment prerequisites at the real appl
     const run = ctx.repos.runs.create({ projectId: project.id, environmentId: environment.id, type: 'plan',
       plan: { kind: 'hv_plan', scope: 'hosting-bindings', environmentName: 'production', specRevision: 1,
         observedFingerprint: null, actions: [{ id: 'service:web', type: 'create', resource: { kind: 'service', provider: 'railway', name: 'web' },
-          verified: true, reason: 'Provision deferred service identity' }] } });
+          verified: true, billable: true, requiresConfirm: true, reason: 'Provision deferred service identity' }] } });
     vi.spyOn(PlanService.prototype, 'providerPreflight').mockReturnValue([]);
     vi.spyOn(PlanService.prototype, 'observeEnvironment').mockResolvedValue({ warnings: [], observed: {
       provider: 'railway', observedAt: new Date().toISOString(), projectExists: true, projectId: 'p', environmentId: 'e',
       services: [], databases: [], partial: false, warnings: [],
     } });
     const deploy = vi.spyOn(bootstrap, 'executeBootstrap').mockResolvedValue({ success: true, summary: { deploymentMode: 'provision' } });
-    const result = await executePlanApply(ctx, { project, spec, specRevision: 1, planId: run.id, confirmActions: [] });
+    const result = await executePlanApply(ctx, { project, spec, specRevision: 1, planId: run.id, confirmActions: ['service:web'] });
     expect(result).toMatchObject({ kind: 'executed', result: { success: true } });
     expect(deploy).toHaveBeenCalledWith(expect.objectContaining({ provisionOnly: true, requireNewWorkload: true }));
   });
@@ -173,7 +173,7 @@ describe('independent backup setup and deployment prerequisites at the real appl
       confirmActions: confirmed ? [action.id] : [], alwaysRunBootstrap: true });
     expect(result).toMatchObject({ kind: 'executed', result: { success: confirmed } });
     expect(publication).toHaveBeenCalledTimes(confirmed ? 1 : 0);
-    expect(providers).toHaveBeenCalledWith(['github']);
+    expect(providers).toHaveBeenCalledWith(['github'], project, 'production');
     expect(deploy).not.toHaveBeenCalled();
     expect(ctx.repos.environments.findById(environment.id)?.platformBindings).toEqual(environment.platformBindings);
   });

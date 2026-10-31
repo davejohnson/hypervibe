@@ -9,7 +9,7 @@ import { devOpsProviderRegistry } from '../registry/devops.registry.js';
 
 export interface ProviderSpecIssue {
   environment: string;
-  field: 'hosting.provider' | 'services.workloadKind' | 'services.volume' | 'database.provider' | 'database.engine' | 'cache.provider' | 'cache.engine' | 'storage.provider' | 'queues' | 'loadBalancer.provider' | 'devops.code.provider' | 'devops.ci.provider';
+  field: 'hosting.provider' | 'services.workloadKind' | 'services.volume' | 'services.instanceBounds' | 'database.provider' | 'database.engine' | 'cache.provider' | 'cache.engine' | 'storage.provider' | 'queues' | 'loadBalancer.provider' | 'devops.code.provider' | 'devops.ci.provider';
   provider: string;
   service?: string;
   workloadKind?: WorkloadKind;
@@ -169,6 +169,17 @@ export function validateProjectSpecProviders(spec: ProjectSpec): ProviderSpecIss
     });
   }
   for (const [environment, environmentSpec] of Object.entries(spec.environments)) {
+    if (environmentSpec.hosting.scopePreparation) {
+      const provider = environmentSpec.hosting.provider;
+      const capability = providerRegistry.getLocalScopePreparation(provider);
+      let valid = false;
+      try { valid = capability?.schemaVersion === 1 && Boolean(capability.parseScope(environmentSpec.hosting.scopePreparation.nativeScope))
+        && (!environmentSpec.hosting.scopePreparation.continuation || Boolean(capability.continuation?.parseSelection(environmentSpec.hosting.scopePreparation.continuation.nativeScope))); } catch { /* Native parser errors must not echo submitted fields. */ }
+      if (!valid) issues.push({ environment, field: 'hosting.provider', provider, capability: 'hosting', available: [],
+        configuration: { path: `environments.${environment}.hosting.scopePreparation`,
+          message: 'The selected provider does not support this exact local cloud scope preparation intent.',
+          hint: 'Use a declared provider capability and its reviewed native fields. No resource was allocated.' } });
+    }
     if (!providerRegistry.supports(environmentSpec.hosting.provider, 'hosting')) {
       issues.push({
         environment,
@@ -191,6 +202,14 @@ export function validateProjectSpecProviders(spec: ProjectSpec): ProviderSpecIss
         : [];
       for (const [service, serviceSpec] of Object.entries(environmentSpec.services)) {
         const hosting = providerRegistry.getMetadata(environmentSpec.hosting.provider)?.lifecycle?.hosting;
+        if (serviceSpec.instanceBounds && hosting?.instanceBounds !== 'service-wide') {
+          issues.push({ environment, field: 'services.instanceBounds', provider: environmentSpec.hosting.provider,
+            service, capability: 'hosting', available: [], configuration: {
+              path: `environments.${environment}.services.${service}.instanceBounds`,
+              message: 'This provider does not implement reviewed service-wide instance bounds.',
+              hint: 'Complete the provider scaling lifecycle before using instanceBounds; a revision limit or a local replica count is not equivalent.',
+            } });
+        }
         if (serviceSpec.volume && !hosting?.serviceVolumes?.workloadKinds.includes(serviceSpec.workloadKind)) {
           const nativeLimitation = hosting?.serviceVolumesUnsupported;
           const volumeSupport = nativeLimitation ? 'provider-unsupported' : hosting?.serviceVolumes ? 'workload-unsupported' : 'not-implemented';

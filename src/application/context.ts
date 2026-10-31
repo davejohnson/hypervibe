@@ -102,7 +102,7 @@ export function createCommandContext(): CommandContext {
         continue;
       }
       if (!existing) {
-        repos.environments.create({ projectId: project.id, name: envName, platformBindings });
+        repos.environments.create({ projectId: project.id, name: envName, platformBindings: mergeRepoPlatformBindings({}, platformBindings) });
         continue;
       }
       if (JSON.stringify(existing.platformBindings) !== JSON.stringify(platformBindings)) {
