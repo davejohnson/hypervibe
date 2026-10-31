@@ -59,7 +59,7 @@ const applicationConfiguration = {
       resources: { limits: { cpu: '1', memory: '512Mi' }, cpuIdle: true, startupCpuBoost: false },
       startupProbe: { tcpSocket: { port: 8080 }, periodSeconds: 240, timeoutSeconds: 240, failureThreshold: 1 } }] },
 };
-function fixture(options: { bounds?: boolean; secretCreateTime?: string; finalResponse?: (value: any) => any; rejectWrite?: boolean; loseAcknowledgment?: boolean; operationError?: string } = {}) {
+function fixture(options: { revokeBeforeJobCreate?: boolean; releaseCommand?: boolean; jobOutcome?: 'success' | 'failed' | 'lost-run' | 'lost-create' | 'pending-ack'; bounds?: boolean; secretCreateTime?: string; finalResponse?: (value: any) => any; rejectWrite?: boolean; loseAcknowledgment?: boolean; operationError?: string } = {}) {
   const expectedApplication = { ingress: applicationConfiguration.ingress, invokerIamDisabled: false,
     ...(options.bounds ? { scaling: { scalingMode: 'AUTOMATIC', minInstanceCount: 0, maxInstanceCount: 1 } } : {}),
     template: applicationConfiguration.template };
@@ -87,7 +87,8 @@ function fixture(options: { bounds?: boolean; secretCreateTime?: string; finalRe
       preparedHosting: { schemaVersion: 1, installationId, planDigest: connection.planDigest, receiptDigest: canonicalJsonSha256(connection),
         pendingFirstRelease: ['web'], firstReleaseConfigurationDigests: { web: digest(expectedApplication) } } } as Record<string, any> };
   const service = { id: 'local-web', projectId: 'local-app', name: 'web', buildConfig: { builder: 'dockerfile' as const, public: false,
-    ...(options.bounds ? { instanceBounds: { min: 0, max: 1 } } : {}) },
+    ...(options.bounds ? { instanceBounds: { min: 0, max: 1 } } : {}),
+    ...(options.releaseCommand ? { releaseCommand: 'npm run db:migrate:production' } : {}) },
     envVarSpec: {}, createdAt: now, updatedAt: now };
   const environmentSpec = environmentSpecSchema.parse({ hosting: { provider: 'cloudrun', region }, services: { web: { public: false,
     ...(options.bounds ? { instanceBounds: { min: 0, max: 1 } } : {}) } },
@@ -97,6 +98,21 @@ function fixture(options: { bounds?: boolean; secretCreateTime?: string; finalRe
     latestCreatedRevision: `${resource}/revisions/web-production-00001-hld`, latestReadyRevision: `${resource}/revisions/web-production-00001-hld`,
     ...structuredClone(holdingConfiguration) };
   const writes: Array<{ url: string; body: any }> = [];
+  const taskWrites: Array<{ url: string; body: any }> = [];
+  const taskResource = `projects/${projectId}/locations/${region}/jobs/${nativeServiceName}-migration`;
+  // Reconstructed independently from the Cloud Run v2 Job/Execution contracts.
+  const taskTemplate = { containers: [{ image: candidateImage, command: ['/bin/sh'], args: ['-lc', 'npm run db:migrate:production'],
+    env: structuredClone(applicationConfiguration.template.containers[0].env), resources: { limits: { cpu: '1', memory: '512Mi' } } }],
+    serviceAccount: runtime.serviceAccountEmail, maxRetries: 0, timeout: '3600s' };
+  const job = { name: taskResource, uid: 'native-migration-job-uid', etag: 'job-etag', generation: '1', observedGeneration: '1',
+    terminalCondition: { state: 'CONDITION_SUCCEEDED' }, template: { template: taskTemplate } };
+  const execution = { name: `${taskResource}/executions/exact-migration`, uid: 'native-execution-uid', job: taskResource,
+    template: taskTemplate, taskCount: 1, succeededCount: options.jobOutcome === 'failed' ? 0 : 1,
+    failedCount: options.jobOutcome === 'failed' ? 1 : 0, completionTime: '2026-10-31T12:02:00Z',
+    conditions: [{ type: 'Completed', state: options.jobOutcome === 'failed' ? 'CONDITION_FAILED' : 'CONDITION_SUCCEEDED' }] };
+  let jobCreated = false;
+  let authorized = true;
+  let operationReads = 0;
   const token = 'synthetic-prepared-token';
   const request = vi.fn(async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = String(input), method = init.method ?? 'GET';
@@ -116,14 +132,38 @@ function fixture(options: { bounds?: boolean; secretCreateTime?: string; finalRe
     if (url === `${secret}/versions/7`) return Response.json({ name: `projects/${projectNumber}/secrets/production-api/versions/7`, state: 'ENABLED' });
     if (url === `${secret}:getIamPolicy?options.requestedPolicyVersion=3`) return Response.json({ etag: 'reader-policy', bindings: [
       { role: 'roles/secretmanager.secretAccessor', members: [`serviceAccount:${runtime.serviceAccountEmail}`] }] });
+    if (url.endsWith('/operations/migration-run') && method === 'GET') {
+      if (options.jobOutcome === 'pending-ack' && ++operationReads === 1) throw new Error('Synthetic interruption observing acknowledged operation');
+      return Response.json({ name: `projects/${projectId}/locations/${region}/operations/migration-run`, done: true, response: execution });
+    }
+    if (options.releaseCommand && url.includes('/jobs')) {
+      if (method === 'GET' && url.endsWith('/executions/exact-migration')) return Response.json(execution);
+      if (method === 'GET' && url === `https://run.googleapis.com/v2/${taskResource}`) {
+        if (options.revokeBeforeJobCreate) authorized = false;
+        return jobCreated ? Response.json(job) : Response.json({}, { status: 404 });
+      }
+      if (method === 'POST') {
+        taskWrites.push({ url, body: JSON.parse(String(init.body)) });
+        if (url.endsWith(':run')) {
+          if (options.jobOutcome === 'lost-run') throw new Error('Synthetic lost run acknowledgment');
+          if (options.jobOutcome === 'pending-ack') return Response.json({ name: `projects/${projectId}/locations/${region}/operations/migration-run`, done: false });
+          return Response.json({ name: `projects/${projectId}/locations/${region}/operations/migration-run`, done: true, response: execution });
+        }
+        jobCreated = true;
+        if (options.jobOutcome === 'lost-create') throw new Error('Synthetic lost job creation acknowledgment');
+        return Response.json({ name: `projects/${projectId}/locations/${region}/operations/migration-create`, done: true, response: job });
+      }
+    }
     if (url.startsWith(`https://run.googleapis.com/v2/${resource}`)) {
       if (method === 'GET') return Response.json(current);
       if (method === 'PATCH') {
-        if (environment.platformBindings.preparedDirectReleaseAttempts) expect(environment.platformBindings.preparedDirectReleaseAttempts.web.status).toBe('attempted');
+        if (environment.platformBindings.preparedDirectReleaseAttempts) expect(['attempted', 'uncertain']).toContain(environment.platformBindings.preparedDirectReleaseAttempts.web.status);
         writes.push({ url, body: JSON.parse(String(init.body)) });
         if (options.rejectWrite) return Response.json({ error: { code: 409, status: 'ABORTED' } }, { status: 409 });
         // Independent final native response; not an echo of the submitted body.
+        if (options.releaseCommand) expect(taskWrites.filter(write => write.url.endsWith(':run'))).toHaveLength(1);
         current = { ...current, etag: 'application-etag', generation: '2', observedGeneration: '2',
+          ...(options.releaseCommand ? { annotations: { 'hypervibe.dev/release-command-sha256-v1': createHash('sha256').update('npm run db:migrate:production').digest('hex') } } : {}),
           ...structuredClone(expectedApplication), template: { ...structuredClone(applicationConfiguration.template),
             containers: [{ ...structuredClone(applicationConfiguration.template.containers[0]), image: candidateImage }] },
           latestCreatedRevision: `${resource}/revisions/web-production-00002-app`, latestReadyRevision: `${resource}/revisions/web-production-00002-app` };
@@ -140,13 +180,76 @@ function fixture(options: { bounds?: boolean; secretCreateTime?: string; finalRe
   vi.stubGlobal('fetch', request);
   const create = () => providerRegistry.createTransientAdapter<CloudRunAdapter>('cloudrun', { connection, capability: 'provision',
     authentication: { kind: 'gcp-impersonation', principal: provision, getAccessToken: async () => ({ token, expiresAt: new Date(Date.now() + 900_000).toISOString() }) } });
-  const control = createPreparedDirectReleaseControl({ planRunId: 'reviewed-plan', expectedImage: candidateImage, confirmed: true,
-    action: reviewPreparedDirectReleaseActions([{ id: 'service:web', type: 'update', verified: true, requiresConfirm: true, resource: { kind: 'service', provider: 'cloudrun', name: 'web' }, reason: 'Reviewed first application release' }], environment, { web: candidateImage })[0]!,
-    load: () => environment, save: (before, next) => { if (before.platformBindings !== environment.platformBindings) return false; environment.platformBindings = next; return true; }, authorize: () => true });
-  return { create, connection, environment, service, environmentSpec, request, writes, control, current: () => current };
+  const makeControl = (planRunId = 'reviewed-plan') => createPreparedDirectReleaseControl({ planRunId, expectedImage: candidateImage, confirmed: true,
+    action: reviewPreparedDirectReleaseActions([{ id: 'service:web', type: 'update', verified: true, requiresConfirm: true, resource: { kind: 'service', provider: 'cloudrun', name: 'web' }, reason: 'Reviewed first application release',
+      ...(options.releaseCommand ? { diff: [{ field: 'releaseCommand', to: 'npm run db:migrate:production' }] } : {}) }], environment, { web: candidateImage })[0]!,
+    load: () => environment, save: (before, next) => { if (before.platformBindings !== environment.platformBindings) return false; environment.platformBindings = next; return true; }, authorize: () => authorized });
+  const control = makeControl();
+  return { create, connection, environment, service, environmentSpec, request, writes, taskWrites, taskTemplate, control, makeControl, execution, current: () => current };
 }
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 describe('prepared Cloud Run first application release', () => {
+  it('stops before job creation if authorization changes during native absence observation', async () => {
+    const f = fixture({ releaseCommand: true, revokeBeforeJobCreate: true }), adapter = await f.create();
+    expect((await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control })).receipt.success).toBe(false);
+    expect(f.taskWrites).toEqual([]); expect(f.writes).toEqual([]);
+  });
+  it('runs the candidate migration with its final identity and references before the first service update', async () => {
+    const f = fixture({ releaseCommand: true }), adapter = await f.create();
+    const result = await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control });
+    expect(result.receipt.success).toBe(true);
+    expect(f.taskWrites).toHaveLength(2);
+    expect(f.taskWrites[0]!.body.template.template).toEqual(f.taskTemplate);
+    expect(f.taskWrites[1]!.body).toEqual({ etag: 'job-etag' });
+    expect(f.writes).toHaveLength(1);
+  });
+  it('resumes an acknowledged migration after a process restart without another create or run', async () => {
+    const f = fixture({ releaseCommand: true, jobOutcome: 'pending-ack' }), first = await f.create();
+    const values = { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' };
+    expect((await first.deploy(f.service, f.environment, values,
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control })).receipt.success).toBe(false);
+    expect(f.environment.platformBindings.preparedDirectReleaseAttempts.web.releaseTask.phase).toBe('run-acknowledged');
+    expect(f.writes).toEqual([]);
+    const restarted = await f.create();
+    expect((await restarted.deploy(f.service, f.environment, values,
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.makeControl('continuation-plan') })).receipt.success).toBe(true);
+    expect(f.taskWrites).toHaveLength(2); expect(f.writes).toHaveLength(1);
+  });
+  it('recovers a lost rollout acknowledgment only with the original verified migration execution', async () => {
+    const f = fixture({ releaseCommand: true, loseAcknowledgment: true }), adapter = await f.create();
+    expect((await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control })).receipt.success).toBe(false);
+    const inspect = () => adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control });
+    expect((await inspect()).receipt.success).toBe(true);
+    f.execution.uid = 'different-execution';
+    expect((await inspect()).receipt.success).toBe(false);
+    expect(f.taskWrites).toHaveLength(2); expect(f.writes).toHaveLength(1);
+  });
+  it.each(['failed', 'lost-run', 'lost-create'] as const)('preserves a %s migration attempt without rollout or blind resubmission', async jobOutcome => {
+    const f = fixture({ releaseCommand: true, jobOutcome }), adapter = await f.create();
+    const deploy = () => adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control });
+    expect((await deploy()).receipt.success).toBe(false);
+    expect(f.writes).toEqual([]);
+    const attempted = f.taskWrites.length;
+    expect(attempted).toBe(jobOutcome === 'lost-create' ? 1 : 2);
+    expect((await deploy()).receipt.success).toBe(false);
+    expect(f.taskWrites).toHaveLength(attempted);
+  });
+  it('does not roll out an empty-database application when its release command has not succeeded', async () => {
+    // DG-050 requires migrations from the candidate before any runtime change.
+    // The transport has no successful job execution; a service PATCH alone is
+    // not evidence of a migration. This counterexample used to deploy anyway.
+    const f = fixture(), adapter = await f.create();
+    const service = { ...f.service, buildConfig: { ...f.service.buildConfig, releaseCommand: 'npm run db:migrate:production' } };
+    const result = await adapter.deploy(service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control });
+    expect.soft(result.receipt.success).toBe(false);
+    expect(f.writes).toEqual([]);
+  });
   it('requires a durable reviewed direct-release attempt before sending the first PATCH', async () => {
     const f = fixture(), adapter = await f.create();
     const result = await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },

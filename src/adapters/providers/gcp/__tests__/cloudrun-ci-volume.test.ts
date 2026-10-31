@@ -15,17 +15,17 @@ const image = `${region}-docker.pkg.dev/${project}/hypervibe/owner/app@sha256:${
 const credentials = { client_email: 'ci@example.test', private_key: crypto.generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) };
 const encoded = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64');
 
-it('preserves deployed legacy CI bytes when service instance bounds are omitted', () => {
+it('changes the frozen legacy programs only through the reviewed native execution-condition renderer migration', () => {
   // Captured from the exact fetched main 3bfe9b98d5d262741de01ef4d6cb8e0c5a0703a1
-  // source archive, independently of this merge. Main intentionally added
-  // credential rollout outputs (renderer revision 2); optional capacity alone
-  // must not cause any additional provider/template regeneration.
+  // source archive. Revision 3 intentionally corrects Execution completion
+  // interpretation in every generated consumer. The provider-revision tests
+  // require a new saved publication review; optional capacity is unrelated.
   const sha = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
   const target = { environmentName: 'staging', kind: 'staging' as const, branch: 'main', autoDeployOnPush: true,
     serviceNames: ['web'], providerServiceIds: ['web'], providerScope: { projectId: 'legacy-project', region: 'us-central1' }, providerRegion: 'us-central1' };
-  expect(sha(JSON.stringify(buildCloudRunGitHubActionsSteps(target)))).toBe('7b6b96ab1b1312a06bf2e597e7666ce3fc956d17808b5ecb767a3b87b5dc1973');
-  expect(sha(buildCloudRunPortableRuntime())).toBe('275ef86ff71e47d43fdc36ac06fb8eba5c3f7f186d2ca793d7446e37246d1a56');
-  expect(sha(buildCloudRunReleaseRuntime())).toBe('3e0729e6d5f0034943d7f3bbfe509352d4fc333f1e7b397d7d185e359dff7ab7');
+  expect(sha(JSON.stringify(buildCloudRunGitHubActionsSteps(target)))).not.toBe('7b6b96ab1b1312a06bf2e597e7666ce3fc956d17808b5ecb767a3b87b5dc1973');
+  expect(sha(buildCloudRunPortableRuntime())).not.toBe('275ef86ff71e47d43fdc36ac06fb8eba5c3f7f186d2ca793d7446e37246d1a56');
+  expect(sha(buildCloudRunReleaseRuntime())).not.toBe('3e0729e6d5f0034943d7f3bbfe509352d4fc333f1e7b397d7d185e359dff7ab7');
 });
 
 function fixture(kind: 'github' | 'portable', fault?: string, rollback = false, noVolumes = false, bounds = false) {

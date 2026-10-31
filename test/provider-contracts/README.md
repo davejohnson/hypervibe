@@ -14,8 +14,9 @@ database registry, reconstructed Cloud SQL operation transport, and real SQLite
 plan/apply recovery, including missing confirmation, encrypted persistence,
 native lifetime drift, lost acknowledgments and existing database preservation.
 See [the observed counterexample and RED/GREEN record](../../docs/database-provisioning-recovery.md).
-Only Cloud SQL implements completion; synthetic SQL proof in the lifecycle suite
-and separate PostgreSQL wire tests do not establish live GCP recovery.
+Only Cloud SQL implements completion. Synthetic SQL proof in the lifecycle suite
+and separate PostgreSQL wire tests remain distinct from the approved native
+completion and actual SQL authentication recorded in the linked evidence.
 
 `service-instance-bounds.test.ts` pins all seven hosting providers against the
 [service capacity contract](../../docs/service-instance-bounds.md). Cloud Run
@@ -61,6 +62,13 @@ the [prepared hosting handoff](../../docs/connect-cloud-prepared-hosting.md).
 Shared receipt, repository replay and real SQLite plan/apply regressions run in normal
 Vitest discovery. Their synthetic native observations establish metadata authority and
 recovery boundaries, not cloud installation or first-release compatibility.
+
+Local Cloud Run first-release migration regressions exercise candidate task
+creation/execution, immutable execution readback, durable attempt progress,
+worker ordering, authorization revocation and restart recovery through the real
+SQLite/apply path. Generated execution readers run as emitted JavaScript in normal
+CI. [Evidence and remaining native gates](../../docs/connect-cloud-prepared-hosting.md#local-first-release-migrations)
+distinguish this operator path from unchanged hosted installer restrictions.
 
 `cloud-deployment-provider-roster.test.ts` pins every hosting provider against the
 [keyless deployment contract](../../docs/connect-cloud-deployment-contract.md).

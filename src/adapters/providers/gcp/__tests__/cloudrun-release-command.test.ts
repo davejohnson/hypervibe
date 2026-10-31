@@ -3,6 +3,7 @@ import {
   cloudRunMigrationJobName,
   cloudRunReleaseJobConfigurationMismatch,
   cloudRunReleaseCommandHash,
+  cloudRunPreparedExecutionVerified,
 } from '../cloudrun-release-command.js';
 
 describe('Cloud Run release command identities', () => {
@@ -51,6 +52,13 @@ describe('cloudRunReleaseJobConfigurationMismatch', () => {
       },
     },
   };
+
+  it('rejects conflicting terminal execution conditions even when task counts report success', () => {
+    const execution = { name: `${resourceName}/executions/run-1`, uid: 'execution-uid', job: resourceName,
+      template: expected.template.template, taskCount: 1, succeededCount: 1, completionTime: '2026-10-31T12:00:00Z',
+      conditions: [{ type: 'Completed', state: 'CONDITION_SUCCEEDED' }, { type: 'Completed', state: 'CONDITION_FAILED' }] };
+    expect(cloudRunPreparedExecutionVerified(execution, resourceName, expected)).toBe(false);
+  });
 
   it('accepts the exact executable candidate while ignoring provider output fields and named-list order', () => {
     const observed = structuredClone(expected) as typeof expected & { name: string };

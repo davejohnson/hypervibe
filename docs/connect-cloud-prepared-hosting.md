@@ -64,8 +64,55 @@ replace the holding image and principal with the candidate application image, fi
 runtime identity and reviewed configuration/references. Until that exact native state and
 release/source evidence are verified, the journal remains pending. Clearing it is another
 explicit metadata action. Holding code must never receive application secrets as an
-intermediate configuration step. New GCP cron/release-command support and broader storage
-or database provisioning require separate native lifecycle evidence.
+intermediate configuration step. Hosted GCP cron/release-command support and broader
+storage or database provisioning require separate native lifecycle evidence. Local
+operator release commands have the separately reviewed path below.
+
+## Local first-release migrations
+
+An empty database exposed a different path from an already initialized app:
+prepared direct deployment returned success after updating the service without
+running its declared release command. DG-050 independently requires the candidate
+schema command to succeed before runtime changes. Five reconstructed native HTTP
+cases failed before the correction, including missing execution, failed execution
+and lost create/run acknowledgments. A worker-ordering case and two executed
+generated-program completion cases also failed. The latter exposed a separate
+reader that treated a terminal `Completed` condition as still running.
+
+The first-release action now pins the command hash alongside image, native resource
+lifetime and reviewed private configuration. It creates the exact migration job
+with the final runtime account and references, one task, zero retries and a
+one-hour timeout. The [Run API](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs/run)
+returns an operation; that operation must resolve to the exact immutable
+[Execution](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs.executions).
+Its task configuration, account, command, image, task counts and terminal success
+are verified before rollout. [Task retries](https://docs.cloud.google.com/run/docs/reference/rest/v2/TaskTemplate)
+are a presence-sensitive union with default three: missing `maxRetries` does not
+prove zero. The v1 ExecutionStatus documents `Completed`; v2's string discriminator
+and condition-state contract are reconstructed together in offline fixtures,
+pending the native walkthrough.
+
+The existing private first-release journal records each attempted mutation and
+acknowledged identity. After restart, a new confirmed continuation can observe
+the original acknowledged operation and finish rollout without another job create
+or execution. Unacknowledged creates/runs stay blocked; same-name resources are
+never adopted as proof. Failed execution is retained for investigation, not
+automatically rerun or deleted. Task resources remain recorded for recovery and
+separately reviewed cleanup. A permission change during the absence check now
+stops before creation; that boundary regression also failed before correction.
+Workers explicitly depend on the migration-owning service. A lost service reply
+can be recovered only with the original successful execution and matching native
+application configuration. Normal tests exercise the actual SQLite planner,
+apply, bootstrap, export and read-only recovery paths.
+
+The generated Cloud Run execution reader uses the same completion interpretation.
+Provider renderer revision 3 requires a new workflow-publication review; historical
+revision-2 fingerprints remain in compatibility tests, while AWS/Azure legacy
+program bytes remain unchanged. This does not silently update accepted workflows.
+The named hosted installers for AWS, Azure and GCP still explicitly reject
+migration-bearing source placement. This local operator fix does not extend those
+hosted grants or claim native compatibility for another cloud. DigitalOcean, Fly,
+Railway and Vercel have no declared prepared direct-release capability.
 
 The pending-clear action reuses the existing scheduled-release provenance boundary:
 the exact managed workflow files, current source commit, successful native GitHub run,

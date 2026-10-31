@@ -13,6 +13,7 @@ import type { LocalPreparedHostingReceiptV1 } from '../../domain/ports/local-hol
 import { PlanService } from '../../domain/plan/plan.service.js';
 import { deriveHypervibeSecretValues } from '../../domain/services/hypervibe-secret-value.js';
 import type { Service } from '../../domain/entities/service.entity.js';
+import { createHash } from 'node:crypto';
 
 // Real local ADC loader + actual SQLite publication/holding journals + native
 // provider clients. Only OAuth/Google transport is synthetic; no hosted grant
@@ -22,7 +23,7 @@ let directory: string;
 beforeEach(() => { directory = mkdtempSync(join(tmpdir(), 'hv-local-first-release-')); vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', 'true');
   SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(join(directory, 'state.db')).migrate(); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.unstubAllGlobals(); SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true }); });
-async function fixture(changeHolding?: (native: Record<string, any>) => void, fullRuntime: boolean | 'secrets' = false, applicationMetadata = false) {
+async function fixture(changeHolding?: (native: Record<string, any>) => void, fullRuntime: boolean | 'secrets' = false, applicationMetadata = false, migration = false) {
   const f = await localHoldingApplicationFixture();
   for (let phase = 0; phase < 2; phase++) {
     const plan = await f.plan(); if ('error' in plan) throw new Error(plan.error);
@@ -36,7 +37,8 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
     DELEGATED_TOKEN: { ownership: 'delegated', principal: 'email:operator@example.test', environments: ['staging'], required: true },
   } : {}, environments: { staging: { ...f.desired.environments.staging,
     ...(fullRuntime === true ? { database: { provider: 'rds', engine: 'postgres' } } : {}),
-    envVars: { SETTING: 'reviewed-value', IMAGE_URI: candidate }, deploy: { strategy: 'manual' } } } });
+    envVars: { SETTING: 'reviewed-value', IMAGE_URI: candidate }, deploy: { strategy: 'manual' },
+    ...(migration ? { migrations: { mode: 'releaseCommand', runInDeploy: true, command: 'npm run db:migrate:production' } } : {}) } } });
   if (fullRuntime === true) {
     f.ctx.repos.components.create({ environmentId: f.environment.id, type: 'postgres', bindings: { provider: 'rds', connectionUrl: 'postgresql://app:synthetic-db-secret@db.internal:5432/app' } });
     f.ctx.repos.components.create({ environmentId: f.environment.id, type: 'redis', bindings: { connectionUrl: 'redis://cache.internal:6379' } });
@@ -51,6 +53,17 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
   const web = receipt.preparedResources.workloads.find(item => item.workload === 'web')!;
   const final = receipt.runtimeIdentities.find(item => item.workload === 'web')!.principal;
   if (final.kind !== 'gcp-service-account') throw new Error('Expected independently prepared native account');
+  const migrationCommand = 'npm run db:migrate:production', migrationHash = createHash('sha256').update(migrationCommand).digest('hex');
+  const jobResource = `${web.id.replace('/services/', '/jobs/')}-migration`;
+  const task = { containers: [{ image: candidate, command: ['/bin/sh'], args: ['-lc', migrationCommand],
+    env: Object.entries(expectedRuntime).map(([name, value]) => ({ name, value })), resources: { limits: { cpu: '1', memory: '512Mi' } } }],
+    serviceAccount: final.serviceAccountEmail, maxRetries: 0, timeout: '3600s' };
+  const job = { name: jobResource, uid: 'migration-job-uid', etag: 'migration-etag', generation: '1', observedGeneration: '1',
+    terminalCondition: { state: 'CONDITION_SUCCEEDED' }, template: { template: task } };
+  const execution = { name: `${jobResource}/executions/first-schema`, uid: 'migration-execution-uid', job: jobResource,
+    template: task, taskCount: 1, succeededCount: 1, completionTime: '2026-10-31T12:00:00Z',
+    conditions: [{ type: 'Completed', state: 'CONDITION_SUCCEEDED' }] };
+  const taskState = { creates: 0, runs: 0 };
   const request: typeof fetch = async (input, init = {}) => {
     const url = new URL(String(input));
     if (url.href === 'https://oauth2.googleapis.com/token') return Response.json({ access_token: 'synthetic-local-holding-token', token_type: 'Bearer', expires_in: 3600 });
@@ -61,10 +74,25 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
       }
       return Response.json({ services: [...f.native.services.values()] });
     }
-    if (url.hostname === 'run.googleapis.com' && url.pathname.endsWith('/jobs') && (!init.method || init.method === 'GET')) return Response.json({ jobs: [] });
+    if (migration && url.hostname === 'run.googleapis.com') {
+      if (url.pathname === `/v2/${execution.name}`) return Response.json(execution);
+      if (url.pathname === `/v2/${jobResource}` && (!init.method || init.method === 'GET'))
+        return taskState.creates ? Response.json(job) : Response.json({}, { status: 404 });
+      if (url.pathname.endsWith('/jobs') && init.method === 'POST') {
+        taskState.creates++;
+        expect(JSON.parse(String(init.body)).template.template).toEqual(task);
+        return Response.json({ name: 'projects/operator-project/locations/us-central1/operations/create-migration', done: true, response: job });
+      }
+      if (url.pathname === `/v2/${jobResource}:run` && init.method === 'POST') {
+        taskState.runs++; expect(JSON.parse(String(init.body))).toEqual({ etag: job.etag });
+        return Response.json({ name: 'projects/operator-project/locations/us-central1/operations/run-migration', done: true, response: execution });
+      }
+    }
+    if (url.hostname === 'run.googleapis.com' && url.pathname.endsWith('/jobs') && (!init.method || init.method === 'GET')) return Response.json({ jobs: taskState.creates ? [job] : [] });
     if (url.hostname === 'iam.googleapis.com' && url.pathname.endsWith(':testIamPermissions')) return Response.json({ permissions: state.actAs ? ['iam.serviceAccounts.actAs'] : [] });
     const target = receipt.preparedResources.workloads.find(item => url.pathname === `/v2/${item.id}`);
     if (url.hostname === 'run.googleapis.com' && target && init.method === 'PATCH') {
+      if (migration) expect(taskState).toEqual({ creates: 1, runs: 1 });
       state.patchRequests++;
       expect((load().platformBindings.preparedDirectReleaseAttempts as any)[target.workload].status).toBe('attempted'); state.patches++;
       const before = f.native.services.get(target.id)!;
@@ -73,6 +101,7 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
       const worker = target.workload === 'worker';
       // Independent final Service JSON, not a response echo of the PATCH body.
       f.native.services.set(target.id, { ...before, generation: '2', observedGeneration: '2', etag: 'application-etag',
+        ...(migration && !worker ? { annotations: { 'hypervibe.dev/release-command-sha256-v1': migrationHash } } : {}),
         latestCreatedRevision: `${target.id}/revisions/application-00002`, latestReadyRevision: `${target.id}/revisions/application-00002`,
         ingress: worker ? 'INGRESS_TRAFFIC_INTERNAL_ONLY' : 'INGRESS_TRAFFIC_ALL', invokerIamDisabled: false,
         ...(worker ? { scaling: { scalingMode: 'AUTOMATIC', minInstanceCount: 1, maxInstanceCount: 1 } } : {}),
@@ -98,13 +127,35 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
   if (!applicationMetadata) expect(await applyPreparedHosting({ ctx: f.ctx, project: f.project, environmentName: 'staging', environmentSpec, spec, managedSecretValues, action: metadata!,
     confirmedActionIds: new Set([metadata!.id]), authorize: () => true })).toMatchObject({ success: true });
   const now = new Date();
-  const service: Service = { id: 'local-web', projectId: f.project.id, name: 'web', buildConfig: { public: true }, envVarSpec: {}, createdAt: now, updatedAt: now };
+  const service: Service = { id: 'local-web', projectId: f.project.id, name: 'web', buildConfig: { public: true,
+    ...(migration ? { releaseCommand: migrationCommand } : {}) }, envVarSpec: {}, createdAt: now, updatedAt: now };
   const control = createPreparedDirectReleaseControl({ planRunId: 'reviewed-local-plan', confirmed: true, expectedImage: candidate,
-    action: reviewPreparedDirectReleaseActions([{ id: 'service:web', type: 'update', verified: true, requiresConfirm: true, resource: { kind: 'service', provider: 'cloudrun', name: 'web' }, reason: 'Reviewed local first release' }], load(), { web: candidate })[0]!,
+    action: reviewPreparedDirectReleaseActions([{ id: 'service:web', type: 'update', verified: true, requiresConfirm: true, resource: { kind: 'service', provider: 'cloudrun', name: 'web' }, reason: 'Reviewed local first release',
+      ...(migration ? { diff: [{ field: 'releaseCommand', to: migrationCommand }] } : {}) }], load(), { web: candidate })[0]!,
     load, save: (before, next) => !!f.ctx.repos.environments.compareAndSwapPlatformBindings(before.id, before.platformBindings, next), authorize: () => true });
-  return { ...f, load, receipt, adapter, service, control, state, candidate, environmentSpec, expectedRuntime, managedSecretValues, metadata };
+  return { ...f, load, receipt, adapter, service, control, state, candidate, environmentSpec, expectedRuntime, managedSecretValues, metadata, taskState, execution };
 }
 describe('local journal-backed prepared application release', () => {
+  it.each([false, true])('runs first-release migrations through the saved plan and verifies recovery with lost rollout=%s', async lost => {
+    const f = await fixture(undefined, false, true, true);
+    f.state.loseAcknowledgment = lost;
+    let recovered = false;
+    for (let phase = 0; phase < 7; phase++) {
+      const plan = await new PlanService().plan(f.project, 'staging');
+      if ('error' in plan) throw new Error(plan.error);
+      expect(plan.blocked).toEqual([]);
+      const web = plan.actions.find(action => action.id === 'service:web' && action.type !== 'noop');
+      if (web) expect(plan.actions.find(action => action.id === 'service:worker')?.dependsOn).toContain('service:web');
+      const applied = await f.apply(plan.planRunId, plan.actions.filter(action => action.requiresConfirm).map(action => action.id));
+      if (lost && !recovered && 'result' in applied && !applied.result.success && f.state.patches === 1) { recovered = true; continue; }
+      expect(applied).toMatchObject({ kind: 'executed', result: { success: true } });
+      if (f.state.patches === 2) break;
+    }
+    expect(f.state.patches).toBe(2); expect(f.taskState).toEqual({ creates: 1, runs: 1 });
+    expect(f.load().platformBindings.preparedHosting).toMatchObject({ pendingFirstRelease: [] });
+    f.execution.uid = 'replaced-execution';
+    expect(await f.adapter.preparedHosting!.inspect({ environment: f.load(), environmentSpec: f.environmentSpec })).toEqual({ state: 'unknown' });
+  });
   it.each([{ secrets: false, lost: false, race: false }, { secrets: true, lost: false, race: false }, { secrets: true, lost: true, race: false }, { secrets: true, lost: false, race: true }])('executes the saved application plan through bootstrap and orchestration %j', async ({ secrets, lost, race }) => {
     const f = await fixture(undefined, secrets ? 'secrets' : false, true);
     vi.stubEnv('HV_TEST_DELEGATED_VALUE', 'synthetic-delegated-token');

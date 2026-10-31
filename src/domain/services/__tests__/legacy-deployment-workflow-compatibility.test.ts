@@ -23,9 +23,6 @@ describe('legacy deployment workflow compatibility', () => {
       providerProjectId: 'arn:aws:ecs:us-west-2:123456789012:cluster/example',
       providerServiceIds: ['arn:aws:ecs:us-west-2:123456789012:service/example/web'],
     }, '599988816e1acd6ebc0d2665203063fc8944801c898c0515daf17f0f89dfa533'],
-    ['cloudrun', buildCloudRunGitHubActionsSteps, { ...base, providerRegion: 'us-west1',
-      providerScope: { projectId: 'test-project', region: 'us-west1' },
-    }, '1e24d640bcd2bb21b2aec5a772b2b692ea66d2f2e7cbbe5e8c723c2c9800b989'],
     ['azure-container-apps', buildAzureContainerAppsGitHubActionsSteps, { ...base,
       providerProjectId: '/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/example',
       providerServiceIds: ['/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/example/providers/Microsoft.App/containerApps/web'],
@@ -37,7 +34,7 @@ describe('legacy deployment workflow compatibility', () => {
   it('requires reviewed ECS bootstrap revision migration while preserving the legacy emitter bytes', () => {
     expect(providerRegistry.getMetadata('ecs')?.orchestration?.ci?.rendererRevision).toBe(2);
     expect(providerRegistry.getMetadata('azure-container-apps')?.orchestration?.ci?.rendererRevision).toBe(1);
-    expect(providerRegistry.getMetadata('cloudrun')?.orchestration?.ci?.rendererRevision).toBe(2);
+    expect(providerRegistry.getMetadata('cloudrun')?.orchestration?.ci?.rendererRevision).toBe(3);
     const broker = brokerTarget(), legacy = { ...broker }; delete legacy.deploymentAccess;
     const hash = (target: BranchDeployTarget) => githubActionsWorkflowInputHash({ provider: 'ecs', target, migration: { includeStep: false } });
     expect(hash(broker)).not.toBe(hash(legacy));
@@ -48,5 +45,16 @@ describe('legacy deployment workflow compatibility', () => {
     const previousEcs = canonicalJsonSha256({ version: 1, rendererRevision: GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION,
       providerRendererRevision: 1, provider: 'ecs', target: previousTarget, migration: { includeStep: false } });
     expect(hash(broker)).not.toBe(previousEcs);
+  });
+  it('requires a reviewed Cloud Run migration for native Execution completion conditions', () => {
+    const target = { ...base, providerRegion: 'us-west1', providerScope: { projectId: 'test-project', region: 'us-west1' } };
+    // Keep the independently frozen old emitter and input contract. This is an
+    // intentional provider renderer migration, not silent legacy regeneration.
+    expect(createHash('sha256').update(JSON.stringify(buildCloudRunGitHubActionsSteps(target))).digest('hex'))
+      .not.toBe('1e24d640bcd2bb21b2aec5a772b2b692ea66d2f2e7cbbe5e8c723c2c9800b989');
+    const migration = { includeStep: false };
+    const previous = canonicalJsonSha256({ version: 1, rendererRevision: GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION,
+      providerRendererRevision: 2, provider: 'cloudrun', target, migration });
+    expect(githubActionsWorkflowInputHash({ provider: 'cloudrun', target, migration })).not.toBe(previous);
   });
 });

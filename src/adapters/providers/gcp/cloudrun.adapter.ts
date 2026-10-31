@@ -43,7 +43,7 @@ import { CloudRunInstalledRuntimeIdentities } from './cloudrun-installed-runtime
 import { CloudRunPreparedHosting, gcpPreparedRuntimeEnvVars } from './cloudrun-prepared-hosting.js';
 import { CloudRunLocalPreparedRuntime } from './cloudrun-local-prepared-runtime.js';
 import { describePreparedHosting } from '../../../domain/services/hosting-prepared.service.js';
-import { preparedHostingMarkerSchema, type LocalPreparedHostingLoader, type PreparedDirectReleaseTarget } from '../../../domain/ports/hosting-prepared.port.js';
+import { preparedHostingMarkerSchema, type LocalPreparedHostingLoader, type PreparedDirectReleaseTarget, type PreparedDirectReleaseControl, type PreparedDirectReleaseAttempt, type PreparedReleaseTask } from '../../../domain/ports/hosting-prepared.port.js';
 import { parseGcpPreparedResources } from './gcp-cloud-deployment.js';
 import { cloudRunCloudSqlVolumeConfig, gcpPreparedApplicationConfiguration, gcpPreparedApplicationDigest, gcpObservedPreparedApplicationConfiguration, gcpPreparedHoldingTransition } from './gcp-prepared-release.js';
 import type { RuntimeIdentityBinding } from '../../../domain/ports/runtime-identity.port.js';
@@ -84,6 +84,8 @@ import {
   cloudRunMigrationJobName,
   cloudRunReleaseJobConfigurationMismatch,
   cloudRunReleaseCommandHash,
+  cloudRunPreparedExecutionVerified,
+  cloudRunPreparedReleaseJobSpec,
 } from './cloudrun-release-command.js';
 
 // Credentials schema for self-registration
@@ -275,6 +277,7 @@ interface CloudRunRevision {
 
 interface CloudRunExecution {
   name?: string;
+  uid?: string;
   job?: string;
   runningCount?: number;
   template?: { containers?: CloudRunContainer[] };
@@ -929,32 +932,46 @@ export class CloudRunAdapter implements
           if (!image || !this.isImmutableContainerImage(image) || image === prepared.transition.prepared.holding.image || !options.preparedRelease) throw new Error();
           if (!image.startsWith(`${this.credentials.region}-docker.pkg.dev/${this.credentials.projectId}/${prepared.connection.preparedResources.registry.id.split('/').at(-1)}/`)) throw new Error();
           const token = await this.getAccessToken(), resource = prepared.transition.prepared.id;
+          const releaseCommand = service.buildConfig.releaseCommand?.trim();
+          const releaseCommandHash = releaseCommand ? cloudRunReleaseCommandHash(releaseCommand) : undefined;
           const target: PreparedDirectReleaseTarget = { schemaVersion: 1, installationId: prepared.connection.installationId,
             planDigest: prepared.connection.planDigest, receiptDigest: prepared.connection.receiptDigest, workload: service.name,
             provider: this.name, projectId: this.credentials.projectId, environmentId: this.credentials.region,
             resourceId: prepared.name, resourceUid: prepared.transition.prepared.lifetimeId,
-            holdingRevision: prepared.transition.prepared.holding.revision!, configurationDigest: prepared.transition.configurationDigest, imageUri: image };
+            holdingRevision: prepared.transition.prepared.holding.revision!, configurationDigest: prepared.transition.configurationDigest, imageUri: image,
+            ...(releaseCommandHash ? { releaseCommandHash } : {}) };
           const retained = await options.preparedRelease.read(target);
           const resultFor = (observed: CloudRunService, attemptId: string): DeployResult => {
             if (observed.uid !== target.resourceUid || observed.template?.serviceAccount !== prepared.transition.principal.serviceAccountEmail
               || observed.template?.containers?.[0]?.image !== image || observed.latestReadyRevision === target.holdingRevision
-              || gcpPreparedApplicationDigest(gcpObservedPreparedApplicationConfiguration(observed)) !== target.configurationDigest) throw new Error();
+              || gcpPreparedApplicationDigest(gcpObservedPreparedApplicationConfiguration(observed)) !== target.configurationDigest
+              || releaseCommandHash && observed.annotations?.[CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION] !== releaseCommandHash) throw new Error();
             return { serviceId: service.id, externalId: prepared.name, url: observed.uri, status: 'deployed', receipt: { success: true,
               message: 'Verified the exact first application release and its dedicated runtime identity.', data: {
                 serviceName: prepared.name, resourceUid: observed.uid, imageUri: image, environmentId: this.credentials!.region, createdService: false,
+                ...(releaseCommandHash ? { releaseJobName: this.migrationJobName(prepared.name), releaseCommandHash } : {}),
                 preparedRelease: { schemaVersion: 1, kind: 'native-direct', attemptId, target, revision: observed.latestReadyRevision, generation: observed.generation } } } };
           };
           if (prepared.recovering) {
             if (!retained || !['attempted', 'uncertain'].includes(retained.status)) throw new Error();
+            if (releaseCommand) await this.runPreparedReleaseCommand({ control: options.preparedRelease, attempt: retained,
+              command: releaseCommand, target, configuration: prepared.configuration, token, readOnly: true });
             return resultFor(prepared.native, retained.id);
           }
-          if (retained && retained.status !== 'rejected') throw new Error();
+          if (retained && retained.status !== 'rejected' && (!releaseCommand || retained.rolloutAttempted)) throw new Error();
           const body = { etag: prepared.transition.etag, ...prepared.configuration,
+            ...(releaseCommandHash ? { annotations: { ...prepared.native.annotations, [CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION]: releaseCommandHash } } : {}),
             template: { ...prepared.configuration.template,
               ...(prepared.native.template?.labels ? { labels: prepared.native.template.labels } : {}),
               containers: [{ ...prepared.configuration.template.containers[0], image }] } };
-          attempted = (await options.preparedRelease.begin(target)).id;
-          const response = await this.request(`https://run.googleapis.com/v2/${resource}?updateMask=ingress,template${prepared.configuration.scaling ? ',scaling' : ''}`, {
+          const attempt = retained && retained.status !== 'rejected' ? retained : await options.preparedRelease.begin(target);
+          attempted = attempt.id;
+          if (releaseCommand) {
+            await this.runPreparedReleaseCommand({ control: options.preparedRelease, attempt, command: releaseCommand, target,
+              configuration: prepared.configuration, token });
+            await options.preparedRelease.checkpoint(attempted, { rolloutAttempted: true });
+          }
+          const response = await this.request(`https://run.googleapis.com/v2/${resource}?updateMask=ingress,template${prepared.configuration.scaling ? ',scaling' : ''}${releaseCommandHash ? ',annotations' : ''}`, {
             method: 'PATCH', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
           if (!response.ok) {
             await options.preparedRelease.settle(attempted, response.status >= 400 && response.status < 500 && ![408, 429].includes(response.status) ? 'rejected' : 'uncertain');
@@ -963,6 +980,7 @@ export class CloudRunAdapter implements
           await this.waitForCloudRunOperation(token, await response.json() as CloudRunOperation, 'first application release', resource);
           const observed = await this.waitForCloudRunServiceReady(prepared.name, token, { resourceName: resource, imageUri: image,
             runtimeServiceAccountEmail: prepared.transition.principal.serviceAccountEmail,
+            ...(releaseCommandHash ? { releaseCommandHash } : {}),
             startCommand: service.buildConfig.startCommand?.trim() || null, healthCheckPath: service.buildConfig.healthCheckPath?.trim() || null });
           if (!observed) throw new Error();
           return resultFor(observed, attempted);
@@ -4597,13 +4615,71 @@ export class CloudRunAdapter implements
       name: execution.name,
       generation: '',
       observedGeneration: '',
-      terminalCondition: execution.terminalCondition,
+      terminalCondition: execution.terminalCondition ?? execution.conditions?.find(condition => condition.type === 'Completed'),
       conditions: execution.conditions,
       reconciling: execution.reconciling,
     });
     if (readiness.ready) return 'completed';
     if (readiness.error) return 'failed';
     return 'running';
+  }
+
+  private async runPreparedReleaseCommand(input: {
+    control: PreparedDirectReleaseControl; attempt: PreparedDirectReleaseAttempt; command: string;
+    target: PreparedDirectReleaseTarget; configuration: ReturnType<typeof gcpPreparedApplicationConfiguration>;
+    token: string; readOnly?: boolean;
+  }): Promise<void> {
+    const { control, attempt, target, configuration, token } = input;
+    if (cloudRunReleaseCommandHash(input.command) !== target.releaseCommandHash) throw new Error('Release command review changed.');
+    const jobName = this.migrationJobName(target.resourceId);
+    const jobResource = `projects/${target.projectId}/locations/${target.environmentId}/jobs/${jobName}`;
+    const jobSpec = cloudRunPreparedReleaseJobSpec(configuration, target.imageUri, input.command);
+    let progress = attempt.releaseTask;
+    const checkpoint = async (next: PreparedReleaseTask) => { await control.checkpoint(attempt.id, { releaseTask: next }); progress = next; };
+    if (!progress) {
+      if (input.readOnly) throw new Error('Release task acknowledgment is missing.');
+      await checkpoint({ phase: 'create-started', jobName: jobResource });
+      const { job } = await this.upsertCloudRunJob({ token, jobName, jobSpec, description: 'prepared release command', bindingAuthority: 'unbound',
+        onCreateAttempt: async () => { await control.read(target); } });
+      if (!job.uid || !/^[a-zA-Z0-9-]{1,128}$/.test(job.uid) || !job.etag || !/^[a-zA-Z0-9_="-]{1,256}$/.test(job.etag)) throw new Error('Native release job identity is unverified.');
+      this.assertReleaseJobConfiguration(job, jobName, jobSpec);
+      await checkpoint({ phase: 'job-ready', jobName: jobResource, jobUid: job.uid, jobEtag: job.etag });
+    }
+    if (!progress || progress.jobName !== jobResource || ['create-started', 'run-started'].includes(progress.phase))
+      throw new Error('Release task acknowledgment is unresolved; no resubmission is authorized.');
+    const job = await this.getCloudRunJob(jobName, token);
+    if (!job || job.uid !== progress.jobUid) throw new Error('Release job lifetime changed.');
+    if (progress.phase === 'job-ready') {
+      if (input.readOnly || job.etag !== progress.jobEtag) throw new Error('Release task continuation is not authorized.');
+      this.assertReleaseJobConfiguration(job, jobName, jobSpec);
+      await checkpoint({ ...progress, phase: 'run-started' });
+      const response = await this.request(`https://run.googleapis.com/v2/${jobResource}:run`, { method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ etag: job.etag }) });
+      if (!response.ok) throw new Error('Release execution was not acknowledged.');
+      const operation = await response.json() as CloudRunOperation;
+      const prefix = `projects/${target.projectId}/locations/${target.environmentId}/operations/`;
+      if (!operation.name?.startsWith(prefix) || !/^[a-zA-Z0-9-]+$/.test(operation.name.slice(prefix.length))) throw new Error('Release operation identity is unverified.');
+      await checkpoint({ ...progress!, phase: 'run-acknowledged', operationName: operation.name });
+      const execution = await this.waitForCloudRunJobExecution(operation, jobName, token);
+      if (!cloudRunPreparedExecutionVerified(execution, jobResource, jobSpec)) throw new Error('Release execution has not verified success.');
+      await checkpoint({ ...progress!, phase: 'completed', executionName: execution!.name!, executionUid: execution!.uid! });
+    } else if (progress.phase === 'run-acknowledged') {
+      // Resume by observing the original operation, never by calling jobs.run.
+      const response = await this.request(`https://run.googleapis.com/v2/${progress.operationName}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!response.ok) throw new Error('Release operation is unavailable.');
+      const operation = await response.json() as CloudRunOperation;
+      if (operation.name !== progress.operationName) throw new Error('Release operation identity changed.');
+      const execution = await this.waitForCloudRunJobExecution(operation, jobName, token);
+      if (!cloudRunPreparedExecutionVerified(execution, jobResource, jobSpec)) throw new Error('Release execution has not verified success.');
+      await checkpoint({ ...progress, phase: 'completed', executionName: execution!.name!, executionUid: execution!.uid! });
+    }
+    const completed = progress as PreparedReleaseTask;
+    if (completed.phase !== 'completed') throw new Error('Release command is incomplete.');
+    const response = await this.request(`https://run.googleapis.com/v2/${completed.executionName}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!response.ok) throw new Error('Release execution proof is unavailable.');
+    const execution = await response.json() as CloudRunExecution;
+    if (execution.name !== completed.executionName || execution.uid !== completed.executionUid
+      || !cloudRunPreparedExecutionVerified(execution, jobResource, jobSpec)) throw new Error('Release execution proof changed.');
   }
 
   private async executeCloudRunJob(
@@ -6133,7 +6209,7 @@ export class CloudRunAdapter implements
     jobSpec: Record<string, unknown>;
     description: string;
     bindingAuthority?: 'bound' | 'unbound';
-    onCreateAttempt?: () => void;
+    onCreateAttempt?: () => void | Promise<void>;
     onCreateAccepted?: (identity: { name: string; uid?: string }) => void;
     expectedUid?: string;
   }): Promise<{ created: boolean; job: CloudRunJob }> {
@@ -6183,7 +6259,7 @@ export class CloudRunAdapter implements
     candidateTask.serviceAccount = runtimeServiceAccountEmail;
     delete candidateTask.serviceAccountName;
     if (params.expectedUid) params.jobSpec.etag = liveJob!.etag;
-    if (creatingJob) params.onCreateAttempt?.();
+    if (creatingJob) await params.onCreateAttempt?.();
     const upsertResponse = !creatingJob
       ? await this.request(`${jobsBaseUrl}/${params.jobName}`, {
           method: 'PATCH',
@@ -7112,7 +7188,7 @@ providerRegistry.register({
         displayName: 'Cloud Run',
         boundAuthentication: gcpGithubCiBoundAuthentication,
         transientDeployment: 'github-oidc-broker-v1',
-        rendererRevision: 2,
+        rendererRevision: 3,
         requiredSecrets: CLOUDRUN_CI_REQUIRED_SECRETS,
         secretCredentialKeys: {
           GCP_SERVICE_ACCOUNT_JSON: 'credentials',

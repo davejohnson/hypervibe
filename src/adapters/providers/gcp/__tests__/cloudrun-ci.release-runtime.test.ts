@@ -6,6 +6,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as
 ) => (...args: unknown[]) => Promise<unknown>;
 
 async function runtime(fetchImpl: typeof fetch): Promise<{
+  cloudRunReleaseExecutionStatus: (execution: unknown) => string;
   runCloudRunReleaseCommands: (params: Record<string, unknown>) => Promise<void>;
   cloudRunRuntimeResourcesFromBase64: (
     encoded: string,
@@ -24,12 +25,16 @@ async function runtime(fetchImpl: typeof fetch): Promise<{
 }> {
   const load = new AsyncFunction(
     'fetch',
-    `${buildCloudRunReleaseRuntime()}\nreturn { runCloudRunReleaseCommands, cloudRunRuntimeResourcesFromBase64, cloudRunContainerWithRuntime, cloudRunRuntimeMismatch };`
+    `${buildCloudRunReleaseRuntime()}\nreturn { cloudRunReleaseExecutionStatus, runCloudRunReleaseCommands, cloudRunRuntimeResourcesFromBase64, cloudRunContainerWithRuntime, cloudRunRuntimeMismatch };`
   );
   return await load(fetchImpl) as Awaited<ReturnType<typeof runtime>>;
 }
 
 describe('Cloud Run generated release runtime', () => {
+  it.each([['CONDITION_SUCCEEDED', 'completed'], ['CONDITION_FAILED', 'failed']])('reads native Execution Completed conditions: %s', async (state, expected) => {
+    const loaded = await runtime(vi.fn() as unknown as typeof fetch);
+    expect(loaded.cloudRunReleaseExecutionStatus({ conditions: [{ type: 'Completed', state }] })).toBe(expected);
+  });
   const projectId = 'gcp-project';
   const region = 'us-central1';
   const serviceName = 'cloudapp-staging-web';

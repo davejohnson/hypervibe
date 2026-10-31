@@ -46,9 +46,22 @@ export const preparedDirectReleaseTargetSchema = z.object({ schemaVersion: z.lit
   provider: name, projectId: coordinate, environmentId: coordinate, resourceId: coordinate, resourceUid: coordinate,
   holdingRevision: coordinate, configurationDigest: digest,
   imageUri: z.string().max(2048).regex(/^[^\s@]+@sha256:[a-f0-9]{64}$/),
+  releaseCommandHash: digest.optional(),
 }).strict();
+export const preparedReleaseTaskSchema = z.object({
+  phase: z.enum(['create-started', 'job-ready', 'run-started', 'run-acknowledged', 'completed']),
+  jobName: coordinate, jobUid: coordinate.optional(), jobEtag: coordinate.optional(),
+  operationName: coordinate.optional(), executionName: coordinate.optional(), executionUid: coordinate.optional(),
+}).strict().superRefine((value, context) => {
+  if (value.phase !== 'create-started' && (!value.jobUid || !value.jobEtag)
+    || ['run-acknowledged', 'completed'].includes(value.phase) && !value.operationName
+    || value.phase === 'completed' && (!value.executionName || !value.executionUid))
+    context.addIssue({ code: 'custom', message: 'Release task progress requires its exact acknowledged native identities.' });
+});
+export type PreparedReleaseTask = z.infer<typeof preparedReleaseTaskSchema>;
 export const preparedDirectReleaseAttemptSchema = z.object({ id: z.string().guid(), planRunId: z.string().min(1).max(255),
   actionId: coordinate, status: z.enum(['attempted', 'rejected', 'uncertain', 'completed']), target: preparedDirectReleaseTargetSchema,
+  releaseTask: preparedReleaseTaskSchema.optional(), rolloutAttempted: z.boolean().optional(),
 }).strict();
 export const preparedDirectReleaseEvidenceSchema = z.object({ schemaVersion: z.literal(1), kind: z.literal('native-direct'),
   attemptId: z.string().guid(), target: preparedDirectReleaseTargetSchema, revision: coordinate, generation: coordinate,
@@ -62,6 +75,7 @@ export interface PreparedDirectReleaseControl {
   read(target: PreparedDirectReleaseTarget): Promise<PreparedDirectReleaseAttempt | undefined>;
   begin(target: PreparedDirectReleaseTarget): Promise<PreparedDirectReleaseAttempt>;
   settle(attemptId: string, status: 'rejected' | 'uncertain'): Promise<void>;
+  checkpoint(attemptId: string, progress: { releaseTask?: PreparedReleaseTask; rolloutAttempted?: true }): Promise<void>;
 }
 export interface PreparedHostingObservation {
   state: 'verified';

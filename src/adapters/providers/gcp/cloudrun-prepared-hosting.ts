@@ -11,6 +11,7 @@ import { preparedReleaseAttempts } from '../../../domain/services/prepared-direc
 import { runtimeSecretReferenceSchema } from '../../../domain/ports/secret-destination.port.js';
 import { parseHostingBindings } from '../../../domain/ports/hosting.port.js';
 import { gcpHoldingConfigurationDigest, gcpObservedHoldingConfiguration } from './gcp-prepared-hosting.js';
+import { CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION, cloudRunPreparedExecutionVerified, cloudRunPreparedReleaseJobSpec, cloudRunReleaseCommandHash } from './cloudrun-release-command.js';
 
 /** Native read proof for the isolated local metadata frontier. It never adopts
  * or writes cloud resources, and holding readiness is not app convergence. */
@@ -66,6 +67,23 @@ export class CloudRunPreparedHosting implements IPreparedHosting {
         }
         if (!pending.includes(item.workload) && holding) return { state: 'unknown' };
         const attempt = attempts[item.workload];
+        if (!holding && attempt?.target.releaseCommandHash) {
+          const task = attempt.releaseTask;
+          if (task?.phase !== 'completed' || !attempt.rolloutAttempted
+            || native.annotations?.[CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION] !== attempt.target.releaseCommandHash) return { state: 'unknown' };
+          const prefix = `projects/${connection.nativeScope.projectId}/locations/${connection.deployment.region}/jobs/`;
+          if (!task.jobName.startsWith(prefix) || !/^[a-z][a-z0-9-]+$/.test(task.jobName.slice(prefix.length))
+            || !task.executionName?.startsWith(`${task.jobName}/executions/`)
+            || !/^[a-zA-Z0-9-]+$/.test(task.executionName.slice(`${task.jobName}/executions/`.length))) return { state: 'unknown' };
+          const response = await this.request(`https://run.googleapis.com/v2/${task.executionName}`, {
+            headers: { Authorization: `Bearer ${await this.token()}` }, redirect: 'error', signal: AbortSignal.timeout(30000) });
+          if (!response.ok) return { state: 'unknown' };
+          const execution = await response.json() as any, command = execution.template?.containers?.[0]?.args?.[1];
+          if (execution.name !== task.executionName || execution.uid !== task.executionUid || typeof command !== 'string'
+            || cloudRunReleaseCommandHash(command) !== attempt.target.releaseCommandHash
+            || !cloudRunPreparedExecutionVerified(execution, task.jobName,
+              cloudRunPreparedReleaseJobSpec(gcpObservedPreparedApplicationConfiguration(native), attempt.target.imageUri, command))) return { state: 'unknown' };
+        }
         if (!holding && attempt && (pending.includes(item.workload) && ['attempted', 'uncertain'].includes(attempt.status) || attempt.status === 'completed')
           && attempt.target.receiptDigest === receiptDigest && attempt.target.resourceUid === item.lifetimeId
           && attempt.target.resourceId === item.id.split('/').at(-1) && attempt.target.holdingRevision === item.holding.revision

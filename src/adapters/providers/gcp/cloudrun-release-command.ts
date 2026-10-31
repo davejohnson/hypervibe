@@ -1,4 +1,5 @@
 import { hashEnvValue } from '../../../domain/ports/observe.port.js';
+import type { GcpPreparedApplicationConfiguration } from './gcp-prepared-release.js';
 
 /** Versioned provider metadata key for the non-secret release-command digest. */
 export const CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION = 'hypervibe.dev/release-command-sha256-v1';
@@ -116,4 +117,32 @@ export function cloudRunReleaseJobConfigurationMismatch(
     if (!same(actualTask[field], expectedTask[field])) return `task ${field}`;
   }
   return null;
+}
+
+/** Executions are immutable snapshots, unlike the parent Job. Validate its
+ * actual task, not a current job that another administrator could have changed.
+ * https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs.executions
+ */
+export function cloudRunPreparedExecutionVerified(value: unknown, jobResource: string, expected: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const execution = value as Record<string, any>;
+  const prefix = `${jobResource}/executions/`;
+  return typeof execution.name === 'string' && execution.name.startsWith(prefix)
+    && /^[a-zA-Z0-9-]+$/.test(execution.name.slice(prefix.length))
+    && typeof execution.uid === 'string' && /^[a-zA-Z0-9-]{1,128}$/.test(execution.uid)
+    && execution.job === jobResource && execution.reconciling !== true
+    && typeof execution.completionTime === 'string' && Number.isFinite(Date.parse(execution.completionTime))
+    && execution.taskCount === 1 && execution.succeededCount === 1
+    && ['runningCount', 'failedCount', 'cancelledCount', 'retriedCount'].every(key => (execution[key] ?? 0) === 0)
+    && Array.isArray(execution.conditions) && execution.conditions.filter((condition: any) => condition?.type === 'Completed').length === 1
+    && execution.conditions.some((condition: any) => condition?.type === 'Completed' && condition.state === 'CONDITION_SUCCEEDED')
+    && cloudRunReleaseJobConfigurationMismatch({ name: jobResource, template: { template: execution.template } }, jobResource, expected) === null;
+}
+
+export function cloudRunPreparedReleaseJobSpec(configuration: GcpPreparedApplicationConfiguration, image: string, command: string) {
+  const container = configuration.template.containers[0]!;
+  return { template: { template: { containers: [{ image, command: ['/bin/sh'], args: ['-lc', command], env: container.env,
+    resources: { limits: container.resources.limits }, ...(container.volumeMounts ? { volumeMounts: container.volumeMounts } : {}) }],
+    serviceAccount: configuration.template.serviceAccount, ...(configuration.template.volumes ? { volumes: configuration.template.volumes } : {}),
+    maxRetries: 0, timeout: '3600s' } } };
 }

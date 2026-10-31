@@ -18,7 +18,7 @@ const target: PreparedDirectReleaseTarget = { schemaVersion: 1, installationId: 
   workload: 'web', provider: 'cloudrun', projectId: 'test-project', environmentId: 'us-central1', resourceId: 'prepared-web', resourceUid: 'original-native-uid',
   holdingRevision: 'projects/test-project/locations/us-central1/services/prepared-web/revisions/holding-00001', configurationDigest: 'c'.repeat(64),
   imageUri: `us-central1-docker.pkg.dev/test-project/images/app@sha256:${'d'.repeat(64)}` };
-function fixture() {
+function fixture(command?: string) {
   const projects = new ProjectRepository(), environments = new EnvironmentRepository(), project = projects.create({ name: 'app' });
   const receipt = { purpose: 'local-holding', marker: 'immutable original receipt' };
   const environment = environments.create({ projectId: project.id, name: 'staging', platformBindings: {
@@ -31,6 +31,7 @@ function fixture() {
   const originalAction: PlanAction = { id: 'service:web', type: 'update', verified: true, requiresConfirm: true,
     resource: { kind: 'service', provider: 'cloudrun', name: 'web' }, reason: 'Review the first immutable application release.' };
   const load = () => environments.findById(environment.id)!;
+  if (command) originalAction.diff = [{ field: 'releaseCommand', to: command }];
   const action = reviewPreparedDirectReleaseActions([originalAction], load(), { web: target.imageUri })[0]!;
   const control = (planRunId = 'plan-1', reviewed = action, confirmed = true) => createPreparedDirectReleaseControl({ planRunId, action: reviewed, confirmed, expectedImage: target.imageUri,
     load, authorize: () => state.authorized, save: (before, next) => {
@@ -40,6 +41,31 @@ function fixture() {
   return { environments, receipt, state, action, load, control };
 }
 describe('prepared direct release durable authority', () => {
+  it('orders a prepared worker after the service that owns its release migration', () => {
+    const f = fixture('npm run db:migrate:production'), environment = f.load();
+    (environment.platformBindings.preparedHosting as any).pendingFirstRelease.push('worker');
+    (environment.platformBindings.preparedHosting as any).firstReleaseConfigurationDigests.worker = 'e'.repeat(64);
+    (environment.platformBindings.services as any).worker = { serviceId: 'prepared-worker', resourceUid: 'worker-uid' };
+    const worker = { ...f.action, id: 'service:worker', resource: { ...f.action.resource, name: 'worker' }, diff: [{ field: 'startCommand', to: 'npm run worker' }], metadata: {} };
+    const reviewed = reviewPreparedDirectReleaseActions([worker, f.action], environment, { web: target.imageUri, worker: target.imageUri });
+    expect(reviewed[0]!.dependsOn).toContain('service:web');
+  });
+  it('persists monotonic migration progress and requires a confirmed continuation after restart', async () => {
+    const f = fixture('npm run db:migrate:production'), commandTarget = { ...target, releaseCommandHash: String((f.action.metadata?.preparedReleaseReview as any).releaseCommandHash) };
+    const control = f.control(), attempt = await control.begin(commandTarget);
+    await expect(control.checkpoint(attempt.id, { rolloutAttempted: true })).rejects.toThrow();
+    await control.checkpoint(attempt.id, { releaseTask: { phase: 'create-started', jobName: 'exact-job' } });
+    await expect(control.checkpoint(attempt.id, { releaseTask: { phase: 'job-ready', jobName: 'different-job', jobUid: 'uid', jobEtag: 'etag' } })).rejects.toThrow();
+    await control.checkpoint(attempt.id, { releaseTask: { phase: 'job-ready', jobName: 'exact-job', jobUid: 'uid', jobEtag: 'etag' } });
+    await control.settle(attempt.id, 'uncertain');
+    const [review] = reviewPreparedDirectReleaseActions([f.action], f.load(), { web: target.imageUri });
+    expect(review?.metadata?.preparedReleaseContinuation).toBe(attempt.id);
+    const next = { releaseTask: { phase: 'run-started' as const, jobName: 'exact-job', jobUid: 'uid', jobEtag: 'etag' } };
+    await expect(f.control('plan-2', review, false).checkpoint(attempt.id, next)).rejects.toThrow();
+    await f.control('plan-2', review).checkpoint(attempt.id, next);
+    await expect(f.control('plan-2', review).checkpoint(attempt.id, next)).rejects.toThrow();
+    expect((await f.control('plan-2', review).read(commandTarget))?.releaseTask?.phase).toBe('run-started');
+  });
   it('records before dispatch and never replays an uncertain attempt, including a new apply plan', async () => {
     const f = fixture(), control = f.control(), attempt = await control.begin(target);
     expect(await control.read(target)).toEqual(attempt);

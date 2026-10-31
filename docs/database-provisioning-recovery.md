@@ -49,7 +49,7 @@ This review does not extend native support by adding a common receipt field.
 | Railway | Exact template workflow, service/environment and volume; preserve issuer configuration and storage. | Unsupported; existing initialization and recovery remain separate. |
 | Supabase | Exact project reference, organization and ready managed database; ambiguous creates retain identity. | Unsupported. |
 | Neon | Exact project/branch and operation readiness; endpoint replacement is not database identity. | Unsupported. |
-| Cloud SQL | Exact project/instance, operation target, `RUNNABLE`, engine, region and creation lifetime. Password updates and logical database creates each return a separate native operation. | Implemented with offline coverage; live completion remains unverified. |
+| Cloud SQL | Exact project/instance, operation target, `RUNNABLE`, engine, region and creation lifetime. Password updates and logical database creates each return a separate native operation. | Implemented; approved disposable-instance completion and actual SQL authentication verified on October 31. |
 | RDS | Account, region, instance/ARN, available endpoint and network; existing adapter retains private credentials on partial failure. | Unsupported; no inference from the Cloud SQL path. |
 | Azure PostgreSQL | Full ARM server ID and `Ready`, approved scope and native database/firewall outcomes. PUT acknowledgment is not convergence or retry authority. | Unsupported. |
 | Fly Managed Postgres | Organization and cluster, exact ready state and database/user initialization. | Unsupported. |
@@ -62,9 +62,15 @@ and [instance metadata](https://docs.cloud.google.com/sql/docs/postgres/admin-ap
 Normal acceptance must cover private persistence, confirmation, native lifetime
 changes, cross-environment isolation, partial progress, restart, lost acknowledgment,
 existing database preservation and no duplicate create. Offline transport checks
-do not establish live recovery. The original disposable instance has not yet
-been repaired; no password reset, adoption, deletion or duplicate create has been
-performed.
+do not establish live recovery by themselves. The owner separately approved
+completion of the retained disposable instance. The packaged workflow performed
+one password update and one creation of the missing `app` database, then verified
+real SQL authentication. Independent native readback confirmed both exact
+operations completed and the original instance lifetime, backup configuration
+and network rules were preserved. No duplicate instance or deletion occurred.
+The nonsecret apply run is `c17e8477-a557-4283-8751-e66160ac24b8` on October 31,
+2026; database completion is separate from the still-unverified app rollout,
+browser onboarding, native backup and isolated restore walkthroughs.
 
 Additional RED/GREEN checks cover the shared plan/apply and SQLite boundary,
 including confirmation, existing database preservation, pending operations,
@@ -80,7 +86,8 @@ the retained creation timestamp. Missing lifetime evidence stays unknown.
 
 The lifecycle tests substitute PostgreSQL authentication, while separate real
 PostgreSQL wire tests cover password challenge and session identity. Neither is
-live GCP recovery evidence. This change preserves credentials when ordinary
+live GCP recovery evidence; the separately approved native walkthrough above
+supplies that evidence for this particular completion. This change preserves credentials when ordinary
 provision returns incomplete; it does not make the original instance-create call
 crash-atomic before its first retained receipt. Legacy missing credentials need
 the explicit reset review. A lost logical-database acknowledgment remains blocked

@@ -87,7 +87,7 @@ function cloudRunReleaseExecutionStatus(execution) {
   const completion = String(execution?.completionStatus || '').toLowerCase();
   if (completion.includes('succeed')) return 'completed';
   if (completion.includes('fail') || completion.includes('cancel') || completion.includes('timeout')) return 'failed';
-  const readiness = cloudRunReleaseReadiness(execution);
+  const readiness = cloudRunReleaseReadiness({ ...execution, terminalCondition: execution?.terminalCondition || (execution?.conditions || []).find(condition => condition.type === 'Completed') });
   if (readiness.ready) return 'completed';
   if (readiness.error) return 'failed';
   return 'running';
