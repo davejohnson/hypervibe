@@ -11,7 +11,7 @@ import { preparedReleaseAttempts } from '../../../domain/services/prepared-direc
 import { runtimeSecretReferenceSchema } from '../../../domain/ports/secret-destination.port.js';
 import { parseHostingBindings } from '../../../domain/ports/hosting.port.js';
 import { gcpHoldingConfigurationDigest, gcpObservedHoldingConfiguration } from './gcp-prepared-hosting.js';
-import { CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION, cloudRunMigrationJobName, cloudRunUnexecutedReleaseJob, cloudRunPreparedExecutionVerified, cloudRunPreparedReleaseJobSpec, cloudRunReleaseCommandHash } from './cloudrun-release-command.js';
+import { CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION, cloudRunMigrationJobName, cloudRunUnexecutedReleaseJob, verifyCloudRunPreparedExecution, cloudRunPreparedReleaseJobSpec, cloudRunReleaseCommandHash } from './cloudrun-release-command.js';
 
 /** Native read proof for the isolated local metadata frontier. It never adopts
  * or writes cloud resources, and holding readiness is not app convergence. */
@@ -104,8 +104,9 @@ export class CloudRunPreparedHosting implements IPreparedHosting {
           const execution = await response.json() as any, command = execution.template?.containers?.[0]?.args?.[1];
           if (execution.name !== task.executionName || execution.uid !== task.executionUid || typeof command !== 'string'
             || cloudRunReleaseCommandHash(command) !== attempt.target.releaseCommandHash
-            || !cloudRunPreparedExecutionVerified(execution, task.jobName,
-              cloudRunPreparedReleaseJobSpec(gcpObservedPreparedApplicationConfiguration(native), attempt.target.imageUri, command))) return { state: 'unknown' };
+            || !await verifyCloudRunPreparedExecution({ execution, jobResource: task.jobName, jobUid: task.jobUid!,
+              projectNumber: connection.nativeScope.projectNumber, token: await this.token(), request: this.request,
+              expected: cloudRunPreparedReleaseJobSpec(gcpObservedPreparedApplicationConfiguration(native), attempt.target.imageUri, command) })) return { state: 'unknown' };
         }
         if (!holding && attempt && (pending.includes(item.workload) && ['attempted', 'uncertain'].includes(attempt.status) || attempt.status === 'completed')
           && attempt.target.receiptDigest === receiptDigest && attempt.target.resourceUid === item.lifetimeId

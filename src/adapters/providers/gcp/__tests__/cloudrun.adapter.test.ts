@@ -792,7 +792,7 @@ it('maps environment-qualified services and scheduled jobs to logical names duri
     }
     if (url.hostname === 'run.googleapis.com' && url.pathname.endsWith('/executions')) {
       const job = url.pathname.slice(4, -'/executions'.length);
-      return Response.json({ executions: [{ name: `${job}/executions/new`, job, createTime: '2026-10-25T12:00:00Z', startTime: '2026-10-25T12:00:01Z', runningCount: 1, template: { containers: [{ env: [{ name: 'API_KEY', value: 'replacement' }] }] } }, { name: `${job}/executions/old`, job, createTime: '2026-10-25T11:00:00Z', startTime: '2026-10-25T11:00:01Z', runningCount: 1, template: { containers: [{ env: [{ name: 'API_KEY', value: 'old' }] }] } }] });
+      return Response.json({ executions: [{ name: `${job}/executions/new`, job: job.split('/').at(-1), createTime: '2026-10-25T12:00:00Z', startTime: '2026-10-25T12:00:01Z', runningCount: 1, template: { containers: [{ env: [{ name: 'API_KEY', value: 'replacement' }] }] } }, { name: `${job}/executions/old`, job, createTime: '2026-10-25T11:00:00Z', startTime: '2026-10-25T11:00:01Z', runningCount: 1, template: { containers: [{ env: [{ name: 'API_KEY', value: 'old' }] }] } }] });
     }
     if (url.hostname === 'run.googleapis.com' && url.pathname.endsWith(':getIamPolicy')) {
       return Response.json({ bindings: [] });

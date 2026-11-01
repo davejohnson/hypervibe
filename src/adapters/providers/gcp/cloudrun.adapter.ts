@@ -1,3 +1,4 @@
+import { cloudRunExecutionBelongsToJob } from './cloudrun-resource-identity.js';
 import { createGcpOperatorArtifactCapability } from './gcp-operator-artifacts.js';
 import { gcpGithubRecoveryAuthentication } from './gcp-github-automation.js';
 import { CloudRunRecoveryRuntime } from './cloudrun-recovery-runtime.js';
@@ -85,7 +86,7 @@ import {
   cloudRunMigrationJobName,
   cloudRunReleaseJobConfigurationMismatch,
   cloudRunReleaseCommandHash,
-  cloudRunPreparedExecutionVerified,
+  verifyCloudRunPreparedExecution,
   cloudRunPreparedReleaseJobSpec, cloudRunUnexecutedReleaseJob,
 } from './cloudrun-release-command.js';
 
@@ -956,7 +957,7 @@ export class CloudRunAdapter implements
           if (prepared.recovering) {
             if (!retained || !['attempted', 'uncertain'].includes(retained.status)) throw new Error();
             if (releaseCommand) await this.runPreparedReleaseCommand({ control: options.preparedRelease, attempt: retained,
-              command: releaseCommand, target, configuration: prepared.configuration, token, readOnly: true });
+              command: releaseCommand, target, projectNumber: prepared.connection.nativeScope.projectNumber, configuration: prepared.configuration, token, readOnly: true });
             return resultFor(prepared.native, retained.id);
           }
           if (retained && retained.status !== 'rejected' && (!releaseCommand || retained.rolloutAttempted)) throw new Error();
@@ -968,7 +969,7 @@ export class CloudRunAdapter implements
           const attempt = retained && retained.status !== 'rejected' ? retained : await options.preparedRelease.begin(target);
           attempted = attempt.id;
           if (releaseCommand) {
-            await this.runPreparedReleaseCommand({ control: options.preparedRelease, attempt, command: releaseCommand, target,
+            await this.runPreparedReleaseCommand({ control: options.preparedRelease, attempt, command: releaseCommand, target, projectNumber: prepared.connection.nativeScope.projectNumber,
               configuration: prepared.configuration, token });
             await options.preparedRelease.checkpoint(attempted, { rolloutAttempted: true });
           }
@@ -1628,7 +1629,7 @@ export class CloudRunAdapter implements
         onCreateAccepted: (identity) => { createdIdentity = identity; },
         ...(serviceBinding?.resourceUid || pendingActivation ? { expectedUid: serviceBinding?.resourceUid ?? pendingActivation!.jobUid } : {}),
       });
-      this.assertReleaseJobConfiguration(readyJob, jobName, jobSpec);
+      this.assertReleaseJobConfiguration(readyJob, jobName, currentJob ? cloudRunJobUpdateBody(currentJob, jobSpec) : jobSpec);
       this.assertVpcAccess(
         readyJob,
         vpcAccess,
@@ -3302,8 +3303,7 @@ export class CloudRunAdapter implements
     try {
       const executions = await this.listCloudRunJobExecutionsStrict(job.name.slice(prefix.length), token);
       const ids = new Set<string>();
-      if (executions.some(execution => !execution.name?.startsWith(`${job.name}/executions/`)
-        || execution.name.slice(`${job.name}/executions/`.length).includes('/') || execution.job !== job.name
+      if (executions.some(execution => !execution.name || !cloudRunExecutionBelongsToJob(execution, job.name!)
         || !execution.createTime || !Number.isFinite(Date.parse(execution.createTime))
         || ids.has(execution.name) || !ids.add(execution.name))) return {};
       const latest = [...executions].sort((left, right) => Date.parse(right.createTime!) - Date.parse(left.createTime!))[0];
@@ -4639,7 +4639,7 @@ export class CloudRunAdapter implements
   private async runPreparedReleaseCommand(input: {
     control: PreparedDirectReleaseControl; attempt: PreparedDirectReleaseAttempt; command: string;
     target: PreparedDirectReleaseTarget; configuration: ReturnType<typeof gcpPreparedApplicationConfiguration>;
-    token: string; readOnly?: boolean;
+    token: string; projectNumber: string; readOnly?: boolean;
   }): Promise<void> {
     const { control, attempt, target, configuration, token } = input;
     if (cloudRunReleaseCommandHash(input.command) !== target.releaseCommandHash) throw new Error('Release command review changed.');
@@ -4695,7 +4695,7 @@ export class CloudRunAdapter implements
       if (!operation.name?.startsWith(prefix) || !/^[a-zA-Z0-9-]+$/.test(operation.name.slice(prefix.length))) throw new Error('Release operation identity is unverified.');
       await checkpoint({ ...progress!, phase: 'run-acknowledged', operationName: operation.name });
       const execution = await this.waitForCloudRunJobExecution(operation, jobName, token);
-      if (!cloudRunPreparedExecutionVerified(execution, jobResource, jobSpec)) throw new Error('Release execution has not verified success.');
+      if (!await verifyCloudRunPreparedExecution({ execution, jobResource, jobUid: progress!.jobUid!, projectNumber: input.projectNumber, expected: jobSpec, token, request: (url, init) => this.request(url, init) })) throw new Error('Release execution has not verified success.');
       await checkpoint({ ...progress!, phase: 'completed', executionName: execution!.name!, executionUid: execution!.uid! });
     } else if (progress.phase === 'run-acknowledged') {
       // Resume by observing the original operation, never by calling jobs.run.
@@ -4704,7 +4704,7 @@ export class CloudRunAdapter implements
       const operation = await response.json() as CloudRunOperation;
       if (operation.name !== progress.operationName) throw new Error('Release operation identity changed.');
       const execution = await this.waitForCloudRunJobExecution(operation, jobName, token);
-      if (!cloudRunPreparedExecutionVerified(execution, jobResource, jobSpec)) throw new Error('Release execution has not verified success.');
+      if (!await verifyCloudRunPreparedExecution({ execution, jobResource, jobUid: progress!.jobUid!, projectNumber: input.projectNumber, expected: jobSpec, token, request: (url, init) => this.request(url, init) })) throw new Error('Release execution has not verified success.');
       await checkpoint({ ...progress, phase: 'completed', executionName: execution!.name!, executionUid: execution!.uid! });
     }
     const completed = progress as PreparedReleaseTask;
@@ -4713,7 +4713,7 @@ export class CloudRunAdapter implements
     if (!response.ok) throw new Error('Release execution proof is unavailable.');
     const execution = await response.json() as CloudRunExecution;
     if (execution.name !== completed.executionName || execution.uid !== completed.executionUid
-      || !cloudRunPreparedExecutionVerified(execution, jobResource, jobSpec)) throw new Error('Release execution proof changed.');
+      || !await verifyCloudRunPreparedExecution({ execution, jobResource, jobUid: progress!.jobUid!, projectNumber: input.projectNumber, expected: jobSpec, token, request: (url, init) => this.request(url, init) })) throw new Error('Release execution proof changed.');
   }
 
   private async executeCloudRunJob(

@@ -8,6 +8,10 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+Native execution parent names and missing Cloud SQL mounts are covered through
+actual serialized clients, including acknowledged-operation recovery and the
+UID-correlated v1 execution read. See [native evidence and limits](../../docs/connect-cloud-prepared-hosting.md#native-execution-readback).
+
 Prepared Cloud Run migration regressions include the recorded native opaque etag,
 create-operation restart recovery, and separately confirmed intent-only job adoption
 through the actual local SQLite/plan/apply boundary. See the [evidence and provider

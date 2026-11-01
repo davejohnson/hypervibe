@@ -245,12 +245,57 @@ constructed counterexamples also demonstrated execution of extra tasks or a chan
 working directory; verification now rejects both before `jobs.run`. The independent
 [container contract](https://docs.cloud.google.com/run/docs/reference/rest/v2/Container)
 and Job task-count contract define these executable inputs. These are offline
-regressions; live adoption, migration, seeding and application rollout remain pending.
+regressions. The approved live metadata adoption and single migration execution
+succeeded on 2026-11-01; seeding and application rollout are still pending.
 The first live recovery review additionally returned `latestCreatedExecution: {}`
 with omitted zero `executionCount`. The SQLite boundary reproduced its rejection
 before accepting that empty message. A nonempty execution reference still blocks,
 and an independently empty native execution inventory remains required. The
 holding resources were verified; the recovery review made no provider changes.
+
+## Native execution readback
+
+The same disposable migration completed once, but Hypervibe rejected its success.
+Two assumptions were false in recorded native responses: `Execution.job` is a short
+ID, and v2 Execution/Task omit the Cloud SQL mount exposed in the parent Job. The
+same v1 Execution retains `run.googleapis.com/cloudsql-instances`. Its UID matched
+the v2 execution, namespace matched the verified project number, and owner UID
+matched the retained Job. This is live read-only evidence; the successful migration
+alone does not establish completed deployment or backup/restore support.
+
+The [Execution](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs.executions)
+and [Task](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs.executions.tasks)
+contracts describe parent names without promising fully qualified paths. Shared
+provider helpers accept a short parent only alongside the exact full child path.
+Task observations can omit UID; task verification instead requires the full path
+under the already UID-verified execution, exact task index and successful exit.
+Cleanup still verifies the separate Job/Execution UIDs, exact names and etags.
+
+When v2 omits the single reviewed Cloud SQL mount, the release verifier reads the
+[same v1 execution](https://docs.cloud.google.com/run/docs/reference/rest/v1/namespaces.executions/get).
+It checks the UID, project number, owner Job UID and exact instance set using the
+[documented annotation](https://docs.cloud.google.com/run/docs/reference/rpc/google.cloud.run.v1#executiontemplatespec)
+before normalizing that one mount. Other missing mounts, changed identities,
+permission failures or conflicting attachments remain unknown/fail closed. It does
+not infer past configuration from the current mutable Job. Immediate completion,
+acknowledged-operation continuation and later prepared-hosting observation use the
+same verifier; no repeated `jobs.run` is needed to recognize an existing success.
+
+Four reconstructed transport regressions first failed for short parents across
+release/restart, observation and recovery. The Cloud SQL execution regression then
+failed after an acknowledged run; wrong UID, namespace, owner, instance and denied
+reads remain rejected. Existing ordinary cron coverage also caught a task-count
+regression: scheduled PATCH preserves its prior writable execution settings, while
+migration verification requires one task. The correction validates the retained
+pre-write cron configuration. These checks stay in ordinary `npm test`, including
+emitted GitHub/portable programs. Existing generated release programs already use
+full execution paths and do not interpret the short parent field; hosted prepared
+migration support is not expanded. Other six hosting providers are unchanged.
+The focused provider checks passed (233 cases), and the normal TypeScript check
+passed. Saved RED/GREEN logs are in the disposable walkthrough review directory;
+CI remains required for the committed change.
+Required acceptance is declared in both desired spec and committed workflow;
+that declaration does not prove live branch-protection enforcement.
 
 ## Local inline configuration custody
 

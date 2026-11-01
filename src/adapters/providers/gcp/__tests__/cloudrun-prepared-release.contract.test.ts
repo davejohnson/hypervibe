@@ -49,7 +49,7 @@ const holdingConfiguration = {
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 // Full first application configuration, with image outside this configuration
 // digest because managed CI has not built the exact candidate during plan/apply.
-const applicationConfiguration = {
+const baseApplicationConfiguration = {
   ingress: 'INGRESS_TRAFFIC_INTERNAL_ONLY', invokerIamDisabled: false,
   template: { serviceAccount: runtime.serviceAccountEmail, executionEnvironment: 'EXECUTION_ENVIRONMENT_GEN2',
     scaling: { minInstanceCount: 0, maxInstanceCount: 100 }, timeout: '300s', maxInstanceRequestConcurrency: 80,
@@ -59,7 +59,17 @@ const applicationConfiguration = {
       resources: { limits: { cpu: '1', memory: '512Mi' }, cpuIdle: true, startupCpuBoost: false },
       startupProbe: { tcpSocket: { port: 8080 }, periodSeconds: 240, timeoutSeconds: 240, failureThreshold: 1 } }] },
 };
-function fixture(options: { revokeBeforeJobCreate?: boolean; releaseCommand?: boolean; jobOutcome?: 'success' | 'failed' | 'lost-run' | 'lost-create' | 'pending-ack' | 'pending-create'; bounds?: boolean; secretCreateTime?: string; finalResponse?: (value: any) => any; rejectWrite?: boolean; loseAcknowledgment?: boolean; operationError?: string } = {}) {
+function fixture(options: { cloudSql?: boolean; v1Fault?: 'uid' | 'namespace' | 'owner' | 'instances' | 'denied'; revokeBeforeJobCreate?: boolean; releaseCommand?: boolean; jobOutcome?: 'success' | 'failed' | 'lost-run' | 'lost-create' | 'pending-ack' | 'pending-create'; bounds?: boolean; secretCreateTime?: string; finalResponse?: (value: any) => any; rejectWrite?: boolean; loseAcknowledgment?: boolean; operationError?: string } = {}) {
+  const applicationConfiguration: any = structuredClone(baseApplicationConfiguration);
+  if (options.cloudSql) {
+    applicationConfiguration.template.containers[0].env.splice(1, 0, { name: 'CLOUD_SQL_CONNECTION_NAME', value: `${projectId}:${region}:database` });
+    const { containers, ...template } = applicationConfiguration.template;
+    const { resources, startupProbe, ...container } = containers[0];
+    applicationConfiguration.template = { ...template,
+      volumes: [{ name: 'cloudsql', cloudSqlInstance: { instances: [`${projectId}:${region}:database`] } }],
+      containers: [{ ...container, volumeMounts: [{ name: 'cloudsql', mountPath: '/cloudsql' }], resources, startupProbe }],
+    };
+  }
   const expectedApplication = { ingress: applicationConfiguration.ingress, invokerIamDisabled: false,
     ...(options.bounds ? { scaling: { scalingMode: 'AUTOMATIC', minInstanceCount: 0, maxInstanceCount: 1 } } : {}),
     template: applicationConfiguration.template };
@@ -102,14 +112,19 @@ function fixture(options: { revokeBeforeJobCreate?: boolean; releaseCommand?: bo
   const taskResource = `projects/${projectId}/locations/${region}/jobs/${nativeServiceName}-migration`;
   // Reconstructed independently from the Cloud Run v2 Job/Execution contracts.
   const taskTemplate = { containers: [{ image: candidateImage, command: ['/bin/sh'], args: ['-lc', 'npm run db:migrate:production'],
-    env: structuredClone(applicationConfiguration.template.containers[0].env), resources: { limits: { cpu: '1', memory: '512Mi' } } }],
+    env: structuredClone(applicationConfiguration.template.containers[0].env), resources: { limits: { cpu: '1', memory: '512Mi' } }, ...(options.cloudSql ? { volumeMounts: applicationConfiguration.template.containers[0].volumeMounts } : {}) }],
+    ...(options.cloudSql ? { volumes: applicationConfiguration.template.volumes } : {}),
     serviceAccount: runtime.serviceAccountEmail, maxRetries: 0, timeout: '3600s' };
   const job = { name: taskResource, uid: 'native-migration-job-uid', etag: 'job-etag', generation: '1', observedGeneration: '1',
     terminalCondition: { state: 'CONDITION_SUCCEEDED' }, template: { template: structuredClone(taskTemplate) } };
   const execution = { name: `${taskResource}/executions/exact-migration`, uid: 'native-execution-uid', job: taskResource,
-    template: taskTemplate, taskCount: 1, succeededCount: options.jobOutcome === 'failed' ? 0 : 1,
+    template: structuredClone(taskTemplate), taskCount: 1, succeededCount: options.jobOutcome === 'failed' ? 0 : 1,
     failedCount: options.jobOutcome === 'failed' ? 1 : 0, completionTime: '2026-10-31T12:02:00Z',
     conditions: [{ type: 'Completed', state: options.jobOutcome === 'failed' ? 'CONDITION_FAILED' : 'CONDITION_SUCCEEDED' }] };
+  if (options.cloudSql) {
+    delete execution.template.volumes;
+    delete execution.template.containers[0]!.volumeMounts;
+  }
   let jobCreated = false;
   let authorized = true;
   let operationReads = 0;
@@ -119,6 +134,15 @@ function fixture(options: { revokeBeforeJobCreate?: boolean; releaseCommand?: bo
     const url = String(input), method = init.method ?? 'GET';
     expect(init.redirect).toBe('error');
     expect(new Headers(init.headers).get('authorization')).toBe(`Bearer ${token}`);
+    if (url === `https://${region}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${projectId}/executions/exact-migration`) {
+      if (options.v1Fault === 'denied') return Response.json({}, { status: 403 });
+      return Response.json({ kind: 'Execution', apiVersion: 'run.googleapis.com/v1', metadata: {
+        name: 'exact-migration', namespace: options.v1Fault === 'namespace' ? '999999999' : projectNumber,
+        uid: options.v1Fault === 'uid' ? 'different-execution' : 'native-execution-uid',
+        annotations: { 'run.googleapis.com/cloudsql-instances': options.v1Fault === 'instances' ? `${projectId}:${region}:other` : `${projectId}:${region}:database` },
+        ownerReferences: [{ kind: 'Job', name: `${nativeServiceName}-migration`, uid: options.v1Fault === 'owner' ? 'different-job' : 'native-migration-job-uid', controller: true }],
+      } });
+    }
     if (url === 'https://oauth2.googleapis.com/tokeninfo') return Response.json({ azp: provision.serviceAccountUniqueId,
       aud: provision.serviceAccountUniqueId, scope: 'https://www.googleapis.com/auth/cloud-platform', expires_in: '899', exp: String(Math.floor(Date.now() / 1000) + 899) });
     if (url === `https://cloudresourcemanager.googleapis.com/v3/projects/${projectNumber}`)
@@ -199,10 +223,59 @@ function fixture(options: { revokeBeforeJobCreate?: boolean; releaseCommand?: bo
       ...(options.releaseCommand ? { diff: [{ field: 'releaseCommand', to: 'npm run db:migrate:production' }] } : {}) }], environment, { web: candidateImage })[0]!,
     load: () => environment, save: (before, next) => { if (before.platformBindings !== environment.platformBindings) return false; environment.platformBindings = next; return true; }, authorize: () => authorized });
   const control = makeControl();
-  return { create, connection, environment, service, environmentSpec, request, writes, taskWrites, taskTemplate, control, makeControl, execution, job, current: () => current };
+  return { expectedApplication, create, connection, environment, service, environmentSpec, request, writes, taskWrites, taskTemplate, control, makeControl, execution, job, current: () => current };
 }
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 describe('prepared Cloud Run first application release', () => {
+  it.each([undefined, 'uid', 'namespace', 'owner', 'instances', 'denied'] as const)('verifies omitted v2 Cloud SQL mounts against the same immutable v1 execution: %s', async v1Fault => {
+    // Native v2 Execution/Task omit Cloud SQL volumes; the v1 Execution retains
+    // run.googleapis.com/cloudsql-instances, observed 2026-11-01. Reconstructed
+    // scoped responses exercise that mismatch and independent identity failures.
+    const f = fixture({ releaseCommand: true, cloudSql: true, v1Fault });
+    f.execution.job = f.job.name.split('/').at(-1)!;
+    const adapter = await f.create();
+    const target = { schemaVersion: 1 as const, provider: 'cloudrun' as const, workload: 'web', installationId,
+      planDigest: f.connection.planDigest, receiptDigest: canonicalJsonSha256(f.connection),
+      projectId, environmentId: region, resourceId: nativeServiceName, resourceUid,
+      holdingRevision: `${resource}/revisions/web-production-00001-hld`,
+      configurationDigest: digest(f.expectedApplication), imageUri: candidateImage,
+      releaseCommandHash: createHash('sha256').update('npm run db:migrate:production').digest('hex') };
+    const attempt = await f.control.begin(target);
+    const run = () => (adapter as any).runPreparedReleaseCommand({ control: f.control,
+      attempt: f.environment.platformBindings.preparedDirectReleaseAttempts.web, command: 'npm run db:migrate:production',
+      target, projectNumber, configuration: f.expectedApplication, token: 'synthetic-prepared-token' });
+    if (v1Fault) await expect(run()).rejects.toThrow();
+    else { await expect(run()).resolves.toBeUndefined(); await expect(run()).resolves.toBeUndefined(); }
+    expect(attempt.id).toBe(f.environment.platformBindings.preparedDirectReleaseAttempts.web.id);
+    expect(f.taskWrites.filter(w => w.url.endsWith(':run'))).toHaveLength(1);
+    expect(f.writes).toHaveLength(0);
+  });
+  it.each(['success', 'pending-ack'] as const)('accepts the native short job reference through %s without rerunning', async jobOutcome => {
+    const f = fixture({ releaseCommand: true, jobOutcome });
+    // Native Execution.job observed 2026-11-01; other fields are reconstructed.
+    f.execution.job = f.job.name.split('/').at(-1)!;
+    const values = { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' };
+    let result = await (await f.create()).deploy(f.service, f.environment, values,
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control });
+    if (jobOutcome === 'pending-ack') {
+      expect(result.receipt.success).toBe(false);
+      result = await (await f.create()).deploy(f.service, f.environment, values,
+        { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.makeControl('continued') });
+    }
+    expect(result.receipt.success).toBe(true);
+    expect(f.taskWrites).toHaveLength(2); expect(f.writes).toHaveLength(1);
+  });
+  it.each(['other-job', 'other-project', 'other-region', 'nested-execution'] as const)('rejects %s even with a matching short job reference', async drift => {
+    const f = fixture({ releaseCommand: true });
+    f.execution.job = f.job.name.split('/').at(-1)!;
+    if (drift === 'other-job') f.execution.job = 'unrelated';
+    if (drift === 'other-project') f.execution.name = f.execution.name.replace(projectId, 'another-project');
+    if (drift === 'other-region') f.execution.name = f.execution.name.replace(region, 'europe-west1');
+    if (drift === 'nested-execution') f.execution.name += '/nested';
+    const result = await (await f.create()).deploy(f.service, f.environment,
+      { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' }, { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control });
+    expect(result.receipt.success).toBe(false); expect(f.writes).toEqual([]);
+  });
   it('preserves the opaque version token returned by a real Cloud Run Job', async () => {
     const f = fixture({ releaseCommand: true }), adapter = await f.create();
     // Recorded nonsecret etag from the approved disposable deployment, 2026-11-01.
@@ -290,6 +363,7 @@ describe('prepared Cloud Run first application release', () => {
   });
   it('recovers a lost rollout acknowledgment only with the original verified migration execution', async () => {
     const f = fixture({ releaseCommand: true, loseAcknowledgment: true }), adapter = await f.create();
+    f.execution.job = f.job.name.split('/').at(-1)!;
     expect((await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },
       { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control })).receipt.success).toBe(false);
     const inspect = () => adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },
@@ -388,7 +462,7 @@ describe('prepared Cloud Run first application release', () => {
     expect(result.receipt.success).toBe(true);
     expect(f.writes).toHaveLength(1);
     expect(f.writes[0]!.body).toMatchObject({ etag: 'holding-etag', template: { serviceAccount: runtime.serviceAccountEmail,
-      containers: [expect.objectContaining({ image: candidateImage, env: applicationConfiguration.template.containers[0].env })] } });
+      containers: [expect.objectContaining({ image: candidateImage, env: baseApplicationConfiguration.template.containers[0].env })] } });
     expect(new URL(f.writes[0]!.url).searchParams.get('updateMask')).toContain('template');
     expect(f.writes[0]!.url).not.toContain('allowMissing=true');
     if (bounds) {
@@ -490,7 +564,7 @@ describe('prepared Cloud Run first application release', () => {
     }
     expect(f.writes).toHaveLength(1);
     expect(f.writes[0]!.body).toMatchObject({ etag: 'holding-etag', template: { serviceAccount: runtime.serviceAccountEmail,
-      containers: [expect.objectContaining({ image: candidateImage, env: applicationConfiguration.template.containers[0].env })] } });
+      containers: [expect.objectContaining({ image: candidateImage, env: baseApplicationConfiguration.template.containers[0].env })] } });
     expect(new URL(f.writes[0]!.url).searchParams.get('updateMask')).toContain('template');
     expect(failure).toBeUndefined();
     if (bounds) expect(f.writes[0]!.body.scaling).toEqual({ scalingMode: 'AUTOMATIC', minInstanceCount: 0, maxInstanceCount: 1 });

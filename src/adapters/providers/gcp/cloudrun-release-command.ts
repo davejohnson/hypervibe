@@ -1,3 +1,4 @@
+import { cloudRunExecutionBelongsToJob } from './cloudrun-resource-identity.js';
 import { hashEnvValue } from '../../../domain/ports/observe.port.js';
 import type { GcpPreparedApplicationConfiguration } from './gcp-prepared-release.js';
 
@@ -132,17 +133,58 @@ export function cloudRunReleaseJobConfigurationMismatch(
 export function cloudRunPreparedExecutionVerified(value: unknown, jobResource: string, expected: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
   const execution = value as Record<string, any>;
-  const prefix = `${jobResource}/executions/`;
-  return typeof execution.name === 'string' && execution.name.startsWith(prefix)
-    && /^[a-zA-Z0-9-]+$/.test(execution.name.slice(prefix.length))
+  return cloudRunExecutionBelongsToJob(execution, jobResource)
     && typeof execution.uid === 'string' && /^[a-zA-Z0-9-]{1,128}$/.test(execution.uid)
-    && execution.job === jobResource && execution.reconciling !== true
+    && execution.reconciling !== true
     && typeof execution.completionTime === 'string' && Number.isFinite(Date.parse(execution.completionTime))
     && execution.taskCount === 1 && execution.succeededCount === 1
     && ['runningCount', 'failedCount', 'cancelledCount', 'retriedCount'].every(key => (execution[key] ?? 0) === 0)
     && Array.isArray(execution.conditions) && execution.conditions.filter((condition: any) => condition?.type === 'Completed').length === 1
     && execution.conditions.some((condition: any) => condition?.type === 'Completed' && condition.state === 'CONDITION_SUCCEEDED')
     && cloudRunReleaseJobConfigurationMismatch({ name: jobResource, template: { template: execution.template } }, jobResource, expected) === null;
+}
+
+/** Native v2 executions omit Cloud SQL mounts. Read the *same immutable*
+ * execution through v1, whose documented annotation retains the attachment.
+ * Never substitute the mutable parent Job's current settings for this proof.
+ * https://docs.cloud.google.com/run/docs/reference/rest/v1/namespaces.executions/get
+ * https://docs.cloud.google.com/run/docs/reference/rpc/google.cloud.run.v1#executiontemplatespec
+ */
+export async function verifyCloudRunPreparedExecution(input: {
+  execution: unknown; jobResource: string; jobUid: string; projectNumber: string;
+  expected: unknown; token: string; request: typeof fetch;
+}): Promise<boolean> {
+  const { execution: value, jobResource, expected } = input;
+  if (cloudRunPreparedExecutionVerified(value, jobResource, expected)) return true;
+  if (!value || typeof value !== 'object') return false;
+  const execution = value as Record<string, any>;
+  if (!cloudRunExecutionBelongsToJob(execution, jobResource) || typeof execution.uid !== 'string'
+    || !/^[1-9][0-9]*$/.test(input.projectNumber) || !input.jobUid) return false;
+  const task = (expected as CloudRunReleaseJobShape)?.template?.template;
+  const volumes = task?.volumes, mounts = task?.containers?.[0]?.volumeMounts;
+  const instances = (volumes?.[0]?.cloudSqlInstance as { instances?: unknown })?.instances;
+  if (!Array.isArray(instances) || !instances.length || instances.some(i => typeof i !== 'string')
+    || !same(volumes, [{ name: 'cloudsql', cloudSqlInstance: { instances } }])
+    || !same(mounts, [{ name: 'cloudsql', mountPath: '/cloudsql' }])
+    || !sameOptionalList(execution.template?.volumes, undefined)
+    || !Array.isArray(execution.template?.containers) || execution.template.containers.length !== 1
+    || !sameOptionalList(execution.template.containers[0]?.volumeMounts, undefined)) return false;
+  const [, projectId, region, jobId] = jobResource.match(/^projects\/([^/]+)\/locations\/([^/]+)\/jobs\/([^/]+)$/)!;
+  const executionId = execution.name.split('/').at(-1);
+  const response = await input.request(`https://${region}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${projectId}/executions/${executionId}`, {
+    headers: { Authorization: `Bearer ${input.token}` }, redirect: 'error', signal: AbortSignal.timeout(30000),
+  });
+  if (!response.ok) return false;
+  const v1 = await response.json() as Record<string, any>, metadata = v1?.metadata;
+  const owners = metadata?.ownerReferences;
+  const annotation = metadata?.annotations?.['run.googleapis.com/cloudsql-instances'];
+  if (v1?.kind !== 'Execution' || v1.apiVersion !== 'run.googleapis.com/v1'
+    || metadata?.name !== executionId || metadata.namespace !== input.projectNumber || metadata.uid !== execution.uid
+    || !Array.isArray(owners) || owners.length !== 1 || owners[0]?.kind !== 'Job'
+    || owners[0].name !== jobId || owners[0].uid !== input.jobUid || owners[0].controller !== true
+    || typeof annotation !== 'string' || !same(annotation.split(',').sort(), [...instances].sort())) return false;
+  return cloudRunPreparedExecutionVerified({ ...execution, template: { ...execution.template, volumes,
+    containers: [{ ...execution.template.containers[0], volumeMounts: mounts }] } }, jobResource, expected);
 }
 
 export function cloudRunPreparedReleaseJobSpec(configuration: GcpPreparedApplicationConfiguration, image: string, command: string) {

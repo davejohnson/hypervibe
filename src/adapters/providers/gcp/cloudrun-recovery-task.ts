@@ -1,3 +1,4 @@
+import { cloudRunExecutionBelongsToJob, cloudRunTaskBelongsToExecution } from './cloudrun-resource-identity.js';
 import { createHash } from 'node:crypto';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { EnvironmentTaskOptions } from '../../../domain/ports/hosting.port.js';
@@ -123,7 +124,7 @@ export async function runCloudRunRecoveryTask(input: {
     const executionName = execution.name, executionUid = execution.uid;
     for (;;) {
       execution = record(await api(executionName));
-      if (execution.name !== executionName || execution.uid !== executionUid || execution.job !== name
+      if (execution.name !== executionName || execution.uid !== executionUid || !cloudRunExecutionBelongsToJob(execution, name)
         || !same(execution.labels, labels) || execution.taskCount !== 1 || !same(template(execution.template), template(taskTemplate))) throw new GcpRuntimeError('Cloud Run recovery execution identity or template changed.');
       const completed = Array.isArray(execution.conditions) ? execution.conditions.filter((condition: any) => condition.type === 'Completed') : [];
       if (completed.length !== 1) throw new GcpRuntimeError('Cloud Run recovery completion observation is incomplete.');
@@ -140,8 +141,9 @@ export async function runCloudRunRecoveryTask(input: {
     if (!Array.isArray(response.tasks) || response.tasks.length !== 1 || response.nextPageToken) throw new GcpRuntimeError('Cloud Run recovery task inventory is incomplete or ambiguous.');
     const task = record(response.tasks[0]);
     const attempt = record(task.lastAttemptResult); const status = record(attempt.status);
-    if (!nonempty(task.name) || !task.name.startsWith(`${executionName}/tasks/`) || !nonempty(task.uid)
-      || task.execution !== executionName || task.job !== name || !nonempty(task.completionTime)
+    // Native tasks can omit uid. Their full name under the exact UID-verified
+    // execution is required; no task-level mutation uses a missing UID.
+    if (!cloudRunTaskBelongsToExecution(task, executionName, name) || !nonempty(task.completionTime)
       || task.reconciling === true || (task.index ?? 0) !== 0 || (task.retried ?? 0) !== 0 || !same(template(task), template(taskTemplate))
       || (status.code ?? 0) !== 0 || (attempt.exitCode ?? 0) !== 0 || (attempt.termSignal ?? 0) !== 0
       || !Array.isArray(task.containers) || task.containers.length !== 1 || task.containers[0].image !== options.expectedImage) throw new GcpRuntimeError('Cloud Run recovery task did not report the exact successful helper exit.');
@@ -156,7 +158,7 @@ export async function runCloudRunRecoveryTask(input: {
       try {
         if (execution) {
           const observed = record(await api(execution.name));
-          if (observed.uid !== execution.uid || observed.job !== ownedJob.name || !nonempty(observed.etag)) throw new GcpRuntimeError('Recovery execution cleanup identity changed.');
+          if (observed.name !== execution.name || observed.uid !== execution.uid || !cloudRunExecutionBelongsToJob(observed, ownedJob.name) || !nonempty(observed.etag)) throw new GcpRuntimeError('Recovery execution cleanup identity changed.');
           await operation(await api(`${execution.name}?etag=${encodeURIComponent(observed.etag)}`, { method: 'DELETE' }));
           if (await api(execution.name) !== null) throw new GcpRuntimeError('Recovery execution remains after deletion.');
         }

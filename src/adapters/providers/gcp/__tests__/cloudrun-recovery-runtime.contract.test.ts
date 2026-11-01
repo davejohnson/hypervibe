@@ -55,12 +55,13 @@ let loseArchivePolicyResponse: boolean;
 let job: any;
 let execution: any;
 let task: any;
-let jobFault: 'failed' | 'lost-run' | 'retained-delete' | 'wrong-operation' | 'missing-task-status' | 'wrong-task-identity' | 'stale-generation' | undefined;
+let shortParentNames = false;
+let jobFault: 'failed' | 'lost-run' | 'retained-delete' | 'wrong-operation' | 'missing-task-status' | 'wrong-task-identity' | 'stale-generation' | 'wrong-execution-parent' | 'wrong-task-parent' | 'wrong-cleanup-parent' | undefined;
 
 beforeEach(() => {
   target = { environment: { id: envId, projectId: 'local-project', name: 'staging', createdAt: new Date(), updatedAt: new Date(), platformBindings: { provider: 'cloudrun', projectId, environmentId: region, services: {} } }, database: { provider: 'cloudsql', primaryExternalId: instance, providerScope: { projectId, region }, resourceIdentity: { instanceId: instance } }, destination: { provider: 'gcs', externalId: 'sequence-archive', instanceScope: { projectId } }, objects: [{ name: 'media', identity: { provider: 'gcs', externalId: 'sequence-media', instanceScope: { projectId } } }], runnerImage, privateInputFingerprints: { databaseUrl: credentialHash } };
   sa = undefined; secret = undefined; versions = []; policies = new Map(); calls = []; loseVersionResponse = false; rejectWriteStatus = undefined; rejectCommittedVersionRead = false;
-  job = undefined; execution = undefined; task = undefined; jobFault = undefined; localCallerCanActAs = true; bucketProjectNumber = projectNumber; ciAccountUniqueId = ciIdentity.serviceAccountUniqueId; loseDeleteResponse = false; retainDelete = false; loseArchivePolicyResponse = false;
+  shortParentNames = false; job = undefined; execution = undefined; task = undefined; jobFault = undefined; localCallerCanActAs = true; bucketProjectNumber = projectNumber; ciAccountUniqueId = ciIdentity.serviceAccountUniqueId; loseDeleteResponse = false; retainDelete = false; loseArchivePolicyResponse = false;
   sql = { name: instance, project: projectId, region, connectionName: `${projectId}:${region}:${instance}`, databaseVersion: 'POSTGRES_17', state: 'RUNNABLE', settings: { ipConfiguration: { ipv4Enabled: true, authorizedNetworks: [] } }, ipAddresses: [{ type: 'PRIMARY', ipAddress: '203.0.113.20' }] };
   vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input)); const method = init?.method ?? 'GET';
@@ -77,12 +78,20 @@ beforeEach(() => {
         return operation('create-job', job);
       }
       if (method === 'POST' && url.pathname.endsWith(':run')) {
-        execution = { name: `${job.name}/executions/one`, uid: '33333333-3333-4333-8333-333333333333', job: job.name, labels: job.labels, template: job.template.template, taskCount: 1, succeededCount: jobFault === 'failed' ? 0 : 1, ...(jobFault === 'failed' ? { failedCount: 1 } : {}), conditions: [{ type: 'Completed', state: jobFault === 'failed' ? 'CONDITION_FAILED' : 'CONDITION_SUCCEEDED' }], completionTime: '2026-10-24T12:00:00Z', etag: 'execution-etag' };
-        task = { name: `${execution.name}/tasks/0`, uid: '44444444-4444-4444-8444-444444444444', execution: execution.name, job: job.name, completionTime: execution.completionTime, ...job.template.template, serviceAccount: jobFault === 'wrong-task-identity' ? `deploy@${projectId}.iam.gserviceaccount.com` : job.template.template.serviceAccount, lastAttemptResult: { ...(jobFault !== 'missing-task-status' ? { status: {} } : {}), ...(jobFault === 'failed' ? { exitCode: 1 } : {}) } };
+        execution = { name: `${job.name}/executions/one`, uid: '33333333-3333-4333-8333-333333333333', job: shortParentNames ? job.name.split('/').at(-1) : job.name, labels: job.labels, template: job.template.template, taskCount: 1, succeededCount: jobFault === 'failed' ? 0 : 1, ...(jobFault === 'failed' ? { failedCount: 1 } : {}), conditions: [{ type: 'Completed', state: jobFault === 'failed' ? 'CONDITION_FAILED' : 'CONDITION_SUCCEEDED' }], completionTime: '2026-10-24T12:00:00Z', etag: 'execution-etag' };
+        task = { name: `${execution.name}/tasks/0`, uid: '44444444-4444-4444-8444-444444444444', execution: shortParentNames ? execution.name.split('/').at(-1) : execution.name, job: shortParentNames ? job.name.split('/').at(-1) : job.name, completionTime: execution.completionTime, ...job.template.template, serviceAccount: jobFault === 'wrong-task-identity' ? `deploy@${projectId}.iam.gserviceaccount.com` : job.template.template.serviceAccount, lastAttemptResult: { ...(jobFault !== 'missing-task-status' ? { status: {} } : {}), ...(jobFault === 'failed' ? { exitCode: 1 } : {}) } };
+        // The recorded native Task also omits uid; scope comes from the full
+        // task path under the exact UID-verified Execution, never a short name.
+        if (shortParentNames) delete task.uid;
+        if (jobFault === 'wrong-execution-parent') execution.job = job.name.replace(projectId, 'other-project');
+        if (jobFault === 'wrong-task-parent') task.execution = execution.name.replace(projectId, 'other-project');
         if (jobFault === 'lost-run') throw new Error('Lost execution response, credential could be echoed by a provider');
         return operation('run-job', execution);
       }
-      if (url.pathname.endsWith('/tasks')) return Response.json({ tasks: [task] });
+      if (url.pathname.endsWith('/tasks')) {
+        if (jobFault === 'wrong-cleanup-parent') execution.job = job.name.replace(projectId, 'other-project');
+        return Response.json({ tasks: [task] });
+      }
       if (url.pathname.includes('/executions/')) {
         if (method === 'DELETE') { const previous = execution; execution = undefined; return operation('delete-execution', previous); }
         return execution ? Response.json(execution) : Response.json({ error: { code: 404 } }, { status: 404 });
@@ -169,6 +178,13 @@ describe('Cloud Run private recovery job transport', () => {
         variableReferences: [], variables: { HYPERVIBE_BACKUP_CONFIG: JSON.stringify(config) } } });
   }
 
+  it('verifies scoped recovery executions and tasks with short native parent references', async () => {
+    shortParentNames = true;
+    const result = await execute();
+    expect(result).toMatchObject({ status: 'completed', exitCode: 0, receipt: { success: true, data: { cleanupVerified: true } } });
+    expect(calls.filter(call => call.method === 'POST' && call.url.endsWith(':run'))).toHaveLength(1);
+  });
+
   it('executes only the pinned helper under its prepared identity, then proves task and job cleanup', async () => {
     const result = await execute();
     expect(result).toMatchObject({ status: 'completed', exitCode: 0, receipt: { success: true, data: { cleanupVerified: true } } });
@@ -181,7 +197,7 @@ describe('Cloud Run private recovery job transport', () => {
     expect(secret).toBeDefined(); // Durable prepared credential, not an ephemeral export.
   });
 
-  it.each(['failed', 'lost-run', 'retained-delete', 'wrong-operation', 'missing-task-status', 'wrong-task-identity', 'stale-generation'] as const)('never certifies %s as a completed recovery', async fault => {
+  it.each(['failed', 'lost-run', 'retained-delete', 'wrong-operation', 'missing-task-status', 'wrong-task-identity', 'stale-generation', 'wrong-execution-parent', 'wrong-task-parent', 'wrong-cleanup-parent'] as const)('never certifies %s as a completed recovery', async fault => {
     jobFault = fault;
     const result = await execute();
     expect(result.receipt.success).toBe(false);
