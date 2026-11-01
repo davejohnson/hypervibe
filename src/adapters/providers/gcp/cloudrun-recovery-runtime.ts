@@ -94,11 +94,13 @@ export class CloudRunRecoveryRuntime implements IRecoveryRuntime {
   }
 
   /** Dispatcher reuses the same read-only prerequisites, including exact IAM. */
-  async verifyExecution(target: RecoveryRuntimeTarget, execution: RecoveryRuntimeExecutionTarget): Promise<void> {
+  async verifyExecution(target: RecoveryRuntimeTarget, execution: RecoveryRuntimeExecutionTarget): Promise<{ secret: string; version: string }> {
     let binding: RecoveryRuntimeBinding;
     try { binding = JSON.parse(execution.configuration.binding); } catch { throw new GcpRuntimeError('Prepared backup runtime binding is malformed.'); }
-    const observed = await this.inspect({ target, binding, mode: 'ensure' });
+    const { observation: observed, source } = await this.frontier({ target, binding, mode: 'ensure' });
     if (observed.state !== 'ready' || !observed.executionTarget || !same(observed.executionTarget, execution)) throw new GcpRuntimeError('Prepared backup runtime identity, network, credentials or permissions changed.');
+    const version = this.versionName(source, execution.configuration.secretVersion).split('/').at(-1)!;
+    return { secret: source.canonicalSecretName, version };
   }
 
   private async frontier(request: RecoveryRuntimeRequest, initialApply = false): Promise<{ source: Source; evidence: Record<string, string>; observation: RecoveryRuntimeObservation; step?: RecoveryRuntimeStep }> {
@@ -158,7 +160,9 @@ export class CloudRunRecoveryRuntime implements IRecoveryRuntime {
       let prior: unknown;
       try { prior = JSON.parse(pending.step.target.priorVersions); } catch { throw new GcpRuntimeError('Pending secret-version history is invalid.'); }
       if (!Array.isArray(prior) || prior.some(item => typeof item !== 'string') || pending.step.target.credentialHash !== source.credentialHash) throw new GcpRuntimeError('Pending backup credential input changed.');
-      const candidates = versions.filter(version => !prior.includes(version));
+      const priorNames = (prior as string[]).map(name => this.versionName(source, name));
+      if (new Set(priorNames).size !== priorNames.length) throw new GcpRuntimeError('Pending backup credential history contains duplicate aliases.');
+      const candidates = versions.filter(version => !priorNames.includes(version));
       if (candidates.length > 1) throw new GcpRuntimeError('Backup secret version creation is ambiguous.');
       if (candidates.length === 1) { evidence.secretVersion = await this.verifyVersion(source, candidates[0]); evidence.credentialHash = source.credentialHash; evidence.ownedVersions = JSON.stringify([...new Set([...JSON.parse(evidence.ownedVersions ?? '[]'), evidence.secretVersion])].sort()); return recover('database-secret-version'); }
       if (pending.step.operation === 'recover') throw new GcpRuntimeError('Expected backup credential recovery version is absent.');
@@ -168,7 +172,7 @@ export class CloudRunRecoveryRuntime implements IRecoveryRuntime {
       return action('database-secret-version', 'write', { secretName: source.secretName, credentialHash: source.credentialHash, priorVersions: JSON.stringify(versions) }, 'Write only the selected database credential into its encrypted backup reference', ['databaseUrl']);
     }
     const versionMetadata = record(await this.api(`${SM}${evidence.secretVersion}`));
-    if (versionMetadata.name !== evidence.secretVersion || versionMetadata.state !== 'ENABLED') throw new GcpRuntimeError('The bound backup database credential version is unavailable.');
+    if (this.versionName(source, versionMetadata.name) !== this.versionName(source, evidence.secretVersion) || versionMetadata.state !== 'ENABLED') throw new GcpRuntimeError('The bound backup database credential version is unavailable.');
     for (const permission of permissions.filter(permission => !['deployer-access', 'database-access'].includes(permission.component))) {
       const policy = parseGcpRuntimePolicy(await this.api(permission.readUrl));
       if (!hasGcpRuntimeRole(policy, permission.role, permission.member)) return action(permission.component, 'grant', { resource: permission.resource, role: permission.role, member: permission.member }, permission.description);
@@ -231,7 +235,7 @@ export class CloudRunRecoveryRuntime implements IRecoveryRuntime {
       if (typeof secret.etag !== 'string' || !secret.etag) throw new GcpRuntimeError('Backup credential deletion requires a native etag.');
       if (removed.includes('database-secret')) throw new GcpRuntimeError('A removed backup credential unexpectedly reappeared.');
       const owned: unknown = JSON.parse(evidence.ownedVersions ?? '[]');
-      if (!Array.isArray(owned) || owned.some(value => typeof value !== 'string') || !same([...owned].sort(), await this.versions(source)))
+      if (!Array.isArray(owned) || owned.some(value => typeof value !== 'string') || !same(owned.map(value => this.versionName(source, value)).sort(), await this.versions(source)))
         throw new GcpRuntimeError('Backup credential contains an unowned or unobserved version; preserve it.');
     }
     await this.noWorkerJobs(source);
@@ -378,7 +382,7 @@ export class CloudRunRecoveryRuntime implements IRecoveryRuntime {
     const secretId = resourceName('backup-database', { maxLength: 63, scope: [projectId, target.environment.id] });
     return { projectId, region, deployerEmail, controllerUniqueId, defaultAuthentication, credentialHash, connectionName, ipType, vpcAccess, target, targetHash, accountId,
       email: `${accountId}@${projectId}.iam.gserviceaccount.com`, owner: `hypervibe-recovery:${targetHash}`,
-      secretId, secretName: `projects/${projectId}/secrets/${secretId}` };
+      secretId, secretName: `projects/${projectId}/secrets/${secretId}`, canonicalSecretName: `projects/${projectNumber}/secrets/${secretId}` };
   }
 
   private async account(source: Source): Promise<Record<string, any> | null> {
@@ -396,7 +400,15 @@ export class CloudRunRecoveryRuntime implements IRecoveryRuntime {
     return result === null ? null : record(result);
   }
   private assertSecretOwner(source: Source, secret: Record<string, any>, attemptId?: string): void {
-    if (!attemptId || secret.name !== source.secretName || secret.labels?.hypervibe_recovery !== source.targetHash.slice(0, 63) || secret.labels?.hypervibe_attempt !== sha(attemptId).slice(0, 63)) throw new GcpRuntimeError('Existing backup secret has no exact owned creation intent.');
+    if (!attemptId || ![source.secretName, source.canonicalSecretName].includes(secret.name) || secret.labels?.hypervibe_recovery !== source.targetHash.slice(0, 63) || secret.labels?.hypervibe_attempt !== sha(attemptId).slice(0, 63)) throw new GcpRuntimeError('Existing backup secret has no exact owned creation intent.');
+  }
+  /** Both aliases must belong to the exact CRM-verified project and secret. */
+  private versionName(source: Source, name: unknown): string {
+    if (typeof name === 'string') for (const parent of [source.secretName, source.canonicalSecretName]) {
+      const prefix = `${parent}/versions/`;
+      if (name.startsWith(prefix) && /^[1-9][0-9]*$/.test(name.slice(prefix.length))) return `${source.canonicalSecretName}/versions/${name.slice(prefix.length)}`;
+    }
+    throw new GcpRuntimeError('Backup secret version does not identify the exact verified project and secret.');
   }
   private async versions(source: Source): Promise<string[]> {
     const versions: string[] = []; const seen = new Set<string>(); let pageToken = '';
@@ -404,8 +416,9 @@ export class CloudRunRecoveryRuntime implements IRecoveryRuntime {
       const response = record(await this.api(`${SM}${source.secretName}/versions?pageSize=100${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`));
       if (response.versions !== undefined && !Array.isArray(response.versions)) throw new GcpRuntimeError('Backup secret version inventory is incomplete.');
       for (const entry of response.versions ?? []) {
-        if (typeof entry.name !== 'string' || !entry.name.startsWith(`${source.secretName}/versions/`) || !/^\d+$/.test(entry.name.split('/').at(-1)) || versions.includes(entry.name)) throw new GcpRuntimeError('Backup secret version inventory is ambiguous.');
-        versions.push(entry.name);
+        const name = this.versionName(source, entry.name);
+        if (versions.includes(name)) throw new GcpRuntimeError('Backup secret version inventory is ambiguous.');
+        versions.push(name);
       }
       if (!response.nextPageToken) return versions.sort();
       if (typeof response.nextPageToken !== 'string' || seen.has(response.nextPageToken)) throw new GcpRuntimeError('Backup secret version pagination did not advance.');
@@ -414,10 +427,10 @@ export class CloudRunRecoveryRuntime implements IRecoveryRuntime {
     throw new GcpRuntimeError('Backup secret version inventory exceeded its read budget.');
   }
   private async verifyVersion(source: Source, name: unknown): Promise<string> {
-    if (typeof name !== 'string' || !name.startsWith(`${source.secretName}/versions/`) || !/^\d+$/.test(name.split('/').at(-1)!)) throw new GcpRuntimeError('Backup secret creation returned an unrelated version.');
-    const version = record(await this.api(`${SM}${name}:access`));
-    if (version.name !== name || typeof version.payload?.data !== 'string' || sha(Buffer.from(version.payload.data, 'base64').toString('utf8')) !== source.credentialHash) throw new GcpRuntimeError('Backup secret value did not match the selected encrypted input.');
-    return name;
+    const canonical = this.versionName(source, name);
+    const version = record(await this.api(`${SM}${canonical}:access`));
+    if (this.versionName(source, version.name) !== canonical || typeof version.payload?.data !== 'string' || sha(Buffer.from(version.payload.data, 'base64').toString('utf8')) !== source.credentialHash) throw new GcpRuntimeError('Backup secret value did not match the selected encrypted input.');
+    return canonical;
   }
   private validateDatabaseUrl(value: string, source: Source): void {
     let url: URL;

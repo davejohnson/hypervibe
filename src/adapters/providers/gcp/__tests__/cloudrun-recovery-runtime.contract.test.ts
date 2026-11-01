@@ -23,6 +23,8 @@ import type { RecoveryRuntimeBinding, RecoveryRuntimeTarget } from '../../../../
 // https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts/create
 // https://docs.cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/addVersion
 // https://docs.cloud.google.com/storage/docs/json_api/v1/buckets/setIamPolicy
+// Secret Manager returns numeric project names even when addressed by project ID.
+// Native metadata captured 2026-11-01; see connect-cloud-prepared-hosting.md.
 const projectId = 'sequence-contract';
 const projectNumber = '123456789012';
 const ciIdentity = { schemaVersion: 1, projectId, projectNumber,
@@ -112,7 +114,8 @@ beforeEach(() => {
       return Response.json({ name: url.pathname.split('/').at(-1), projectNumber: bucketProjectNumber, location: region, labels: { hypervibe_environment_id: envId } });
     }
     if (/:(get|set)IamPolicy$/.test(url.pathname) || url.pathname.endsWith('/iam')) {
-      const key = url.origin + url.pathname.replace(/:(get|set)IamPolicy$/, ':policy');
+      const key = url.origin + (url.hostname === 'secretmanager.googleapis.com'
+        ? url.pathname.replace(`/projects/${projectId}/`, `/projects/${projectNumber}/`) : url.pathname).replace(/:(get|set)IamPolicy$/, ':policy');
       if (url.pathname.endsWith(':setIamPolicy') || method === 'PUT') policies.set(key, { ...(body.policy ?? body), etag: 'updated-etag' });
       if (loseArchivePolicyResponse && method === 'PUT' && url.pathname === '/storage/v1/b/sequence-archive/iam') throw new Error('synthetic lost archive grant response');
       return Response.json(policies.get(key) ?? { version: 3, etag: 'initial-etag', bindings: [{ role: 'roles/viewer', members: ['user:retained@example.test'] }] });
@@ -137,15 +140,15 @@ beforeEach(() => {
       }
       if (url.pathname.endsWith('/versions')) return Response.json({ versions: versions.map(({ payload: _payload, ...version }) => version) });
       if (/\/versions\/\d+:access$/.test(url.pathname)) {
-        const version = versions.find(item => item.name === url.pathname.slice(4).replace(/:access$/, ''));
+        const version = versions.find(item => item.name === url.pathname.slice(4).replace(/:access$/, '').replace(`projects/${projectId}/`, `projects/${projectNumber}/`));
         return Response.json({ name: version.name, payload: version.payload });
       }
       if (/\/versions\/\d+$/.test(url.pathname)) {
-        const version = versions.find(item => item.name === url.pathname.slice(4));
+        const version = versions.find(item => item.name === url.pathname.slice(4).replace(`projects/${projectId}/`, `projects/${projectNumber}/`));
         return version ? Response.json({ name: version.name, state: version.state }) : Response.json({ error: { code: 404 } }, { status: 404 });
       }
       if (method === 'POST' && url.pathname.endsWith('/secrets')) {
-        secret = { name: `projects/${projectId}/secrets/${url.searchParams.get('secretId')}`, labels: body.labels, etag: 'secret-etag', replication: { automatic: {} } };
+        secret = { name: `projects/${projectNumber}/secrets/${url.searchParams.get('secretId')}`, labels: body.labels, etag: 'secret-etag', replication: { automatic: {} } };
         return Response.json(secret);
       }
       return secret ? Response.json(secret) : Response.json({ error: { code: 404 } }, { status: 404 });
@@ -228,6 +231,45 @@ async function advanceUntil(component: string, runtime = driver()) {
 }
 
 describe('Cloud Run staged recovery preparation', () => {
+  it('recovers a created numeric-project secret from its original intent without a second create', async () => {
+    const staged = await advanceUntil('database-secret');
+    await staged.runtime.apply({ ...staged, target, mode: 'ensure' });
+    // Retain the original pending state, as after a lost acknowledgement or the
+    // old project-ID-only ownership check. Creation is independently observable.
+    expect(secret.name).toMatch(new RegExp(`^projects/${projectNumber}/secrets/`));
+    const observed = await staged.runtime.inspect({ target, binding: staged.binding, mode: 'ensure' });
+    expect(observed).toMatchObject({ state: 'action', step: { component: 'database-secret', operation: 'recover', target: staged.step.target } });
+    if (observed.state !== 'action') throw new Error('Missing read-only recovery');
+    const before = calls.length;
+    expect((await staged.runtime.apply({ ...staged, target, mode: 'ensure', step: observed.step })).receipt.success).toBe(true);
+    expect(calls.slice(before).every(call => call.method === 'GET' || call.url.endsWith(':getIamPolicy'))).toBe(true);
+    expect(calls.filter(call => call.method === 'POST' && call.url.includes('/secrets?secretId='))).toHaveLength(1);
+  });
+
+  it('rejects an identical secret name and ownership labels in another numeric project', async () => {
+    const staged = await advanceUntil('database-secret');
+    await staged.runtime.apply({ ...staged, target, mode: 'ensure' });
+    secret.name = secret.name.replace(projectNumber, '923456789012');
+    calls = [];
+    expect(await staged.runtime.inspect({ target, binding: staged.binding, mode: 'ensure' })).toMatchObject({ state: 'unknown' });
+    expect(calls.every(call => call.method === 'GET' || call.url.endsWith(':getIamPolicy'))).toBe(true);
+  });
+
+  it('preserves a previously recorded project-ID version while observing its numeric native name', async () => {
+    const staged = await advanceUntil('archive-access');
+    const binding = { provider: 'cloudrun', evidence: { ...staged.binding.evidence,
+      secretVersion: staged.binding.evidence.secretVersion!.replace(projectNumber, projectId) } };
+    const before = structuredClone(binding);
+    expect(await staged.runtime.inspect({ target, binding, mode: 'ensure' })).toMatchObject({ state: 'action', step: { component: 'archive-access' } });
+    expect(binding).toEqual(before);
+  });
+
+  it('rejects duplicate version aliases instead of treating them as distinct writes', async () => {
+    const staged = await advanceUntil('archive-access');
+    versions.push({ ...versions[0], name: versions[0].name.replace(projectNumber, projectId) });
+    expect(await staged.runtime.inspect({ target, binding: { provider: 'cloudrun', evidence: staged.binding.evidence }, mode: 'ensure' })).toMatchObject({ state: 'unknown' });
+  });
+
   it.each([false, true])('prepares only the native-verified CI principal from its retained authorization; replaced=%s', async replaced => {
     target.environment.platformBindings.gcpGithubWorkloadIdentity = JSON.stringify(ciIdentity);
     if (replaced) ciAccountUniqueId = '923456789012345678901';
@@ -579,8 +621,11 @@ describe('reviewed recovery teardown preserves backup data and unrelated access'
     expect(secret).toBeDefined(); expect(sa).toBeDefined();
     expect(calls.some(call => call.method === 'DELETE' || call.method === 'PUT' || call.url.includes(':setIamPolicy'))).toBe(false);
   });
-  it('reviews each reverse frontier, uses native delete preconditions and keeps archive/source data', async () => {
+  it.each([false, true])('reviews reverse frontiers and preserves archive data with legacy version aliases=%s', async legacyAliases => {
     const f = await prepared(); let binding = f.binding;
+    if (legacyAliases) binding = { ...binding, evidence: { ...binding.evidence,
+      secretVersion: binding.evidence.secretVersion!.replace(projectNumber, projectId),
+      ownedVersions: JSON.stringify(JSON.parse(binding.evidence.ownedVersions!).map((name: string) => name.replace(projectNumber, projectId))) } };
     const accountUniqueId = sa.uniqueId, secretName = secret.name;
     // Dedicated resource policies have no independently added consumers. Bucket
     // and project policies retain unrelated users throughout removal.
@@ -602,7 +647,7 @@ describe('reviewed recovery teardown preserves backup data and unrelated access'
     expect(sa).toBeUndefined(); expect(secret).toBeUndefined();
     const deletions = calls.filter(call => call.method === 'DELETE');
     expect(deletions.map(call => call.url)).toEqual([
-      `https://secretmanager.googleapis.com/v1/${secretName}?etag=secret-etag`,
+      `https://secretmanager.googleapis.com/v1/${secretName.replace(projectNumber, projectId)}?etag=secret-etag`,
       `https://iam.googleapis.com/v1/projects/${projectId}/serviceAccounts/${accountUniqueId}`,
     ]);
     for (const [url, policy] of policies) if (url.includes('storage.googleapis.com') || url.includes('cloudresourcemanager.googleapis.com'))

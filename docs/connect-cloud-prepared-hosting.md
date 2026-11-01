@@ -644,3 +644,33 @@ still fails safely after exactly one POST. The focused pairing/HTTP/setup checks
 passed 57 tests. Payloads are reconstructed, not native response recordings.
 A lost response still grants no authority without browser approval and cannot
 be recovered by reading secret codes from the database.
+
+### Native backup secret resource names
+
+The approved backup secret create on 2026-11-01 committed, but its ownership
+verification assumed Secret Manager echoed the requested project ID. Independent
+read-only metadata returned a numeric project name; Resource Manager verified
+that number belonged to the selected project. The exact creation labels matched
+the retained intent and the version inventory was empty. This is a concrete
+counterexample to string equality with the request path, not evidence of a lost
+write or permission failure. The earlier incomplete service-account create has
+no proven common cause.
+
+Secret Manager's [metadata endpoint](https://docs.cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/get)
+returns a resource, and Google's [Cloud Run secret reference guidance](https://docs.cloud.google.com/run/docs/configuring/services/secrets)
+uses its project number. Recovery now accepts only the exact ID or number from
+the independently verified project, with unchanged secret names and ownership
+labels. Version inventory, uncertain-write recovery, metadata checks, worker
+references and teardown use the same interpretation. Existing recorded aliases
+remain intact. Another project's number and duplicate version aliases fail;
+unknown outcomes still cannot authorize a second create or secret version.
+
+The real REST transport fixture now returns the independently observed numeric
+shape rather than echoing the request's project ID. Before the runtime change,
+33 checks failed and 21 passed. Afterward the focused provider/runtime checks
+passed, including read-only recovery of the original create, lost version
+acknowledgment, immutable job references and legacy-reference cleanup; TypeScript
+passed. These reconstructed transports run in ordinary `npm test`. They establish
+the interpretation fix, not a completed live backup, restore or all-cloud
+walkthrough. Native continuation must use the retained attempt through a fresh
+Hypervibe recovery plan.

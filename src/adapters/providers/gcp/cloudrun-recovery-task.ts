@@ -92,9 +92,7 @@ export async function runCloudRunRecoveryTask(input: {
     });
     const target: RecoveryRuntimeTarget = { environment: input.environment, database: source, destination, objects,
       runnerImage: options.expectedImage, privateInputFingerprints: { databaseUrl: prepared.configuration.credentialHash } };
-    await input.runtime.verifyExecution(target, prepared);
-    const secret = prepared.configuration.secretVersion.match(new RegExp(`^(projects/${projectId}/secrets/[a-zA-Z0-9_-]+)/versions/([1-9][0-9]*)$`));
-    if (!secret) throw new GcpRuntimeError('Cloud Run recovery requires its exact prepared Secret Manager version.');
+    const secret = await input.runtime.verifyExecution(target, prepared);
     const vpcAccess = JSON.parse(prepared.configuration.vpcAccess);
     const jobId = `hv-recovery-${createHash('sha256').update(`${input.environment.id}:${options.executionId}`).digest('hex').slice(0, 32)}`;
     const name = `${prefix}jobs/${jobId}`;
@@ -103,7 +101,7 @@ export async function runCloudRunRecoveryTask(input: {
       ...(vpcAccess ? { vpcAccess } : {}), containers: [{ image: options.expectedImage, command: ['node'], args: ['/opt/hypervibe/dist/ci/backup-runner.js'],
         resources: { limits: { cpu: '2', memory: '4Gi' } }, env: [
           { name: 'HYPERVIBE_BACKUP_CONFIG', value: options.variables.HYPERVIBE_BACKUP_CONFIG },
-          { name: 'HYPERVIBE_BACKUP_DATABASE_URL', valueSource: { secretKeyRef: { secret: secret[1], version: secret[2] } } },
+          { name: 'HYPERVIBE_BACKUP_DATABASE_URL', valueSource: { secretKeyRef: secret } },
         ] }] };
     const body = { labels, template: { labels, taskCount: 1, parallelism: 1, template: taskTemplate } };
     token = await input.dependencies.token();
