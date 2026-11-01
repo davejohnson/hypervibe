@@ -293,10 +293,11 @@ describe('applyDataMigrationAction', () => {
     const targetClient = objectClient({});
     const sourceAdapter = storageAdapter('gcs', sourceContext, sourceClient, 'unused');
     const targetAdapter = storageAdapter('s3', targetContext, targetClient, 'new-aws-documents');
-    vi.spyOn(adapterFactory, 'getStorageAdapter').mockImplementation(async (provider) => ({
-      success: true,
-      adapter: provider === 'gcs' ? sourceAdapter : targetAdapter,
-    }));
+    vi.spyOn(adapterFactory, 'getStorageAdapter').mockImplementation(async (provider, selectedProject, environment) => {
+      expect(selectedProject).toEqual(project);
+      expect(environment).toBe(provider === 'gcs' ? 'staging' : 'production');
+      return { success: true, adapter: provider === 'gcs' ? sourceAdapter : targetAdapter };
+    });
 
     const result = await applyDataMigrationAction({
       ctx: createCommandContext(), project, spec, targetEnvironmentName: 'production', action,
@@ -324,6 +325,12 @@ describe('applyDataMigrationAction', () => {
         },
       },
     });
+    const cleanup = await applyDataMigrationAction({ ctx: createCommandContext(), project, spec, targetEnvironmentName: 'production',
+      action: { ...action, id: action.id + ':previous-destroy', type: 'destroy', metadata: { ...action.metadata,
+        operation: 'dataMigrationStoragePreviousDestroy', previousExternalId: 'old-aws-documents' } } });
+    expect(cleanup.success).toBe(true);
+    expect(targetAdapter.destroyBucket).toHaveBeenCalledWith(expect.objectContaining({ name: 'production' }), targetContext, 'old-aws-documents');
+    expect(sourceAdapter.destroyBucket).not.toHaveBeenCalled();
   });
 });
 

@@ -13,6 +13,7 @@ import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { environmentSpecSchema } from '../../spec/spec.schema.js';
 import { adapterFactory } from '../adapter.factory.js';
 import { applyStorageAction, planStorage, resolveStorageServiceEnvVars } from '../storage-plan.service.js';
+import { projectRuntimeAccessInput, observeRuntimeAccess } from '../runtime-access.service.js';
 import type { Environment } from '../../entities/environment.entity.js';
 import type { EnvironmentSpec } from '../../spec/spec.schema.js';
 import { gcpRuntimeAccount, gcpRuntimeOwner } from '../../../adapters/providers/gcp/cloudrun-runtime-identities.js';
@@ -37,9 +38,9 @@ afterEach(() => {
 function fixture(options: { cron?: boolean; missingImage?: boolean; retainLegacyKey?: boolean; replaceRuntimePrincipal?: boolean; lifecycleIdentityOnly?: boolean } = {}) {
   const name = options.cron ? 'cron' : 'web';
   const resource = `projects/${projectId}/locations/us-central1/${options.cron ? 'jobs' : 'services'}/bound-${name}`;
-  const project = new ProjectRepository().create({ name: 'runtime-identity', defaultPlatform: 'cloudrun' });
+  const project = new ProjectRepository().create({ name: 'runtime-identity', defaultPlatform: 'cloudrun', gitRemoteUrl: 'https://github.com/acme/runtime-identity' });
   const connectionRepo = new ConnectionRepository();
-  const connection = connectionRepo.create({ provider: 'cloudrun', credentialsEncrypted: getSecretStore().encryptObject({
+  const connection = connectionRepo.create({ provider: 'cloudrun', scope: 'github.com/acme/runtime-identity#environment=test', credentialsEncrypted: getSecretStore().encryptObject({
     projectId, credentials: JSON.stringify({
       type: 'service_account', project_id: projectId, private_key: 'synthetic-management-key',
       client_email: `deploy@${projectId}.iam.gserviceaccount.com`,
@@ -73,14 +74,14 @@ function fixture(options: { cron?: boolean; missingImage?: boolean; retainLegacy
   const original = adapterFactory.getProviderAdapter.bind(adapterFactory);
   vi.spyOn(adapterFactory, 'getProviderAdapter').mockImplementation(async (...args) => {
     const result = await original(...args);
-    Object.assign(result.adapter!, { accessToken: 'synthetic-token', tokenExpiry: new Date(Date.now() + 60_000),
+    if (result.adapter) Object.assign(result.adapter, { accessToken: 'synthetic-token', tokenExpiry: new Date(Date.now() + 60_000),
       ...(options.lifecycleIdentityOnly ? { resolveRuntimeIdentity: undefined } : {}) });
     return result;
   });
   const originalStorage = adapterFactory.getStorageAdapter.bind(adapterFactory);
   vi.spyOn(adapterFactory, 'getStorageAdapter').mockImplementation(async (...args) => {
     const result = await originalStorage(...args);
-    Object.assign(result.adapter!, { token: 'synthetic-token', tokenExpiresAt: Date.now() + 3_600_000 });
+    if (result.adapter) Object.assign(result.adapter, { token: 'synthetic-token', tokenExpiresAt: Date.now() + 3_600_000 });
     return result;
   });
   const task = { serviceAccount: runtimePrincipal, containers: [{
@@ -145,6 +146,14 @@ function wiringPlan(environment: Environment, environmentSpec: EnvironmentSpec =
 }
 
 describe('shared storage runtime credential boundary', () => {
+  it('observes the exact runtime grant using the environment-scoped cloud connection', async () => {
+    const f = fixture();
+    const input = await projectRuntimeAccessInput(f.project, f.environment, spec);
+    const observed = await observeRuntimeAccess(input);
+    expect(observed.grants).toHaveLength(1);
+    expect(observed.grants[0].observation.state).toBe('present');
+    expect(f.writes).toEqual([]);
+  });
   it('resolves the current runtime identity lifecycle without a legacy identity resolver', async () => {
     const f = fixture({ lifecycleIdentityOnly: true });
     const vars = await resolveStorageServiceEnvVars(f.project, spec, f.environment);

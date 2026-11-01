@@ -1,14 +1,27 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { createCloudJsonClient } from '../cloud-http.js';
+import { createHypervibeCloudPairingClient } from '../cloud-pairing.js';
 
 let server: Server;
 let origin: string;
 let leakedRequests: number;
+let pairingRequests: number;
+let pairingTimer: ReturnType<typeof setTimeout> | undefined;
 beforeEach(async () => {
   leakedRequests = 0;
+  pairingRequests = 0;
   server = createServer((req, res) => {
-    if (req.url === '/redirect') { res.writeHead(307, { location: `${origin}/capture` }); res.end(); }
+    if (req.url === '/api/v1/pairings') {
+      pairingRequests++;
+      pairingTimer = setTimeout(() => {
+        res.writeHead(201, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ deviceCode: 'A'.repeat(43), expiresAt: new Date(Date.now() + 600_000).toISOString(),
+          intervalSeconds: 2, repository: 'northstar/launchpad', userCode: '2345-6789',
+          verificationUrl: `${origin}/pair?code=2345-6789` }));
+      }, 10_600);
+    }
+    else if (req.url === '/redirect') { res.writeHead(307, { location: `${origin}/capture` }); res.end(); }
     else if (req.url === '/capture') { leakedRequests++; res.end('{}'); }
     else if (req.url === '/large') { res.writeHead(200); res.end(JSON.stringify({ value: 'x'.repeat(80_000) })); }
     else if (req.url === '/slow') { res.writeHead(200); res.write('{'); }
@@ -21,10 +34,24 @@ beforeEach(async () => {
   origin = `http://127.0.0.1:${address.port}`;
 });
 afterEach(async () => {
+  clearTimeout(pairingTimer);
   server.closeAllConnections();
   await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
 });
 describe('credential HTTP transport with a real local server', () => {
+  // Native Cloud Run request log on 2026-11-01: POST /api/v1/pairings
+  // completed HTTP 201 in 10.455206052s, after the original 10s client limit.
+  // Reconstruct that delay through real HTTP; the response is synthetic.
+  it('receives the first browser approval after a slow start without repeating its POST', async () => {
+    const result = await createHypervibeCloudPairingClient({ baseUrl: origin }).start('northstar/launchpad');
+    expect(result.verificationUrl).toBe(`${origin}/pair?code=2345-6789`);
+    expect(pairingRequests).toBe(1);
+  }, 20_000);
+  it('honors an explicit shorter pairing deadline and never resubmits an uncertain request', async () => {
+    await expect(createHypervibeCloudPairingClient({ baseUrl: origin, timeoutMs: 100 }).start('northstar/launchpad'))
+      .rejects.toThrow('Could not reach');
+    expect(pairingRequests).toBe(1);
+  });
   it('does not dispatch a deferred request after caller cancellation', async () => {
     const controller = new AbortController();
     const transport = vi.fn(async () => Response.json({}));

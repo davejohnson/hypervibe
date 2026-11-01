@@ -714,7 +714,7 @@ export async function resolveStorageServiceEnvVars(
   for (const [name, spec] of Object.entries(environmentSpec.storage)) {
     const binding = bindings[name];
     if (!binding) continue;
-    const adapterResult = await adapterFactory.getStorageAdapter(spec.provider, project);
+    const adapterResult = await adapterFactory.getStorageAdapter(spec.provider, project, environment.name);
     if (!adapterResult.success || !adapterResult.adapter) throw new Error('A declared storage connection is unavailable; runtime configuration cannot be resolved safely.');
     const root = environment.platformBindings as { projectId?: string; environmentId?: string };
     const context = binding.instanceScope ?? contexts[spec.provider] ?? (environmentSpec.hosting.provider === spec.provider && root.projectId && root.environmentId
@@ -865,7 +865,7 @@ export async function applyStorageAction(params: {
         error: 'The retained marker, desired storage target, or exact provider scope changed after planning. Re-run hv_plan.',
       };
     }
-    const storageResult = await adapterFactory.getStorageAdapter(desired.provider, params.project);
+    const storageResult = await adapterFactory.getStorageAdapter(desired.provider, params.project, params.envName);
     if (!storageResult.success || !storageResult.adapter) {
       return { success: false, message: 'Storage adapter unavailable', error: storageResult.error };
     }
@@ -974,7 +974,7 @@ export async function applyStorageAction(params: {
         error: 'The retained marker, desired storage target, exact provider identity, or scope changed after planning. Re-run hv_plan.',
       };
     }
-    const storageResult = await adapterFactory.getStorageAdapter(desired.provider, params.project);
+    const storageResult = await adapterFactory.getStorageAdapter(desired.provider, params.project, params.envName);
     if (!storageResult.success || !storageResult.adapter) {
       return { success: false, message: 'Storage adapter unavailable', error: storageResult.error };
     }
@@ -1163,7 +1163,7 @@ export async function applyStorageAction(params: {
     return { success: false, status: 'blocked', message: params.action.reason, error };
   }
 
-  const storageResult = await adapterFactory.getStorageAdapter(params.action.resource.provider, params.project);
+  const storageResult = await adapterFactory.getStorageAdapter(params.action.resource.provider, params.project, params.envName);
   if (!storageResult.success || !storageResult.adapter) return { success: false, message: 'Storage adapter unavailable', error: storageResult.error };
   const adapter = storageResult.adapter;
   if (adapter.name !== params.action.resource.provider) {

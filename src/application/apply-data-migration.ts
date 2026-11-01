@@ -559,8 +559,8 @@ async function applyStorageMigration(params: {
     || !exactStringRecord(sourceContext, plannedSourceScope)
   ) return stale(params.action, 'The tracked source bucket identity changed.');
 
-  const sourceAdapterResult = await adapterFactory.getStorageAdapter(identity.sourceProvider, params.project);
-  const targetAdapterResult = await adapterFactory.getStorageAdapter(identity.targetProvider, params.project);
+  const sourceAdapterResult = await adapterFactory.getStorageAdapter(identity.sourceProvider, params.project, sourceEnvironment.name);
+  const targetAdapterResult = await adapterFactory.getStorageAdapter(identity.targetProvider, params.project, targetEnvironment.name);
   if (
     !sourceAdapterResult.success
     || !sourceAdapterResult.adapter
@@ -860,7 +860,7 @@ async function destroyPreviousStorageTarget(params: {
     || previous.externalId !== previousExternalId
   ) return stale(params.action, 'The retained storage rollback target changed.');
 
-  const adapterResult = await adapterFactory.getStorageAdapter(previous.provider, params.project);
+  const adapterResult = await adapterFactory.getStorageAdapter(previous.provider, params.project, environment.name);
   if (!adapterResult.success || !adapterResult.adapter || adapterResult.adapter.name !== previous.provider) {
     return { success: false, status: 'blocked', message: 'Previous storage adapter is unavailable', error: 'The rollback target remains retained.' };
   }

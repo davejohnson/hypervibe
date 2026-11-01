@@ -600,3 +600,47 @@ passed 37 checks; TypeScript passed. Existing S3 selects its native STS account
 and Azure Blob verifies its configured subscription; their contracts are unchanged.
 These ordinary-CI checks are reconstructed transport evidence, not proof that
 backup creation or isolated restore has succeeded live.
+
+
+### Storage connections retain the selected environment
+
+The approved native backup-bucket attempt on 2026-11-01 stopped before adapter
+construction: planning found the verified `connect-test` connection, but apply
+omitted the environment and reported no GCS connection. The assumption that
+repository scope alone selects the same connection as planning is false. The
+independent requirement is exact app/environment authority; the counterexample
+is two environment-scoped accounts beside a different global fallback.
+
+Storage creation, recovery clear/finalize, runtime variables and permissions,
+backup health, migration source/target and retained-target cleanup now carry
+their exact environment through the existing factory. No credentials, trust,
+resource bindings or fallback precedence are rewritten. Source migration access
+uses the source environment; target creation and cleanup use the destination.
+
+The S3, GCS and Azure Blob lifecycle tests now exercise real SQLite/encrypted
+connection selection rather than stubbing the factory. Each failed before the
+fix and passed afterward, including isolated names and noop replanning. Native
+runtime transport tests also use an environment-scoped cloud connection. Recovery
+and streamed migration regressions failed before the change and passed afterward;
+target cleanup preserves source storage. The focused ten-suite check passed 126
+tests; TypeScript passed. These normal `npm test` regressions exercise synthetic
+provider boundaries, not live AWS/Azure creation or backup/restore completion.
+The failed live bucket attempt made no provider write; a fresh supported plan is
+required before continuing the existing exact bucket approval.
+
+### First browser approval deadline
+
+The native hosted request log records HTTP 201 for `POST /api/v1/pairings` after
+10.455 seconds, beyond the previous ten-second client deadline. Read-only app
+metadata confirms one unapproved request, which subsequently expired. This is
+independent evidence that a successful first request can outlast that deadline;
+Cloud Run cold start is only a possible cause of the delay.
+
+Initial pairing now allows one bounded thirty-second request. Explicit caller
+deadlines remain honored, polling keeps its existing budget, and no automatic
+retry is added. A real local HTTP server delaying the response 10.6 seconds
+failed under the old default and passed after the fix; the shorter-deadline test
+still fails safely after exactly one POST. The focused pairing/HTTP/setup checks
+passed 57 tests. Payloads are reconstructed, not native response recordings.
+A lost response still grants no authority without browser approval and cannot
+be recovered by reading secret codes from the database.

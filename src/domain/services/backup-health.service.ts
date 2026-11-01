@@ -87,7 +87,7 @@ export async function observeBackupHealth(context: BackupPolicyContext): Promise
       let archive: Awaited<ReturnType<typeof openRecoveryStorage>> | undefined;
       try {
         const destination = managed.target.destination.identity;
-        const adapter = await context.adapterFactory.getStorageAdapter(destination.provider, context.project);
+        const adapter = await context.adapterFactory.getStorageAdapter(destination.provider, context.project, context.environment.name);
         if (!adapter.success || !adapter.adapter) throw new Error('Unavailable archive');
         archive = await openRecoveryStorage(adapter.adapter, context.environment, destination);
         retained = await observeManagedRecoverySet({ target: managed.target, archive, now });

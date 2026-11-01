@@ -266,7 +266,7 @@ export async function projectRuntimeAccessInput(project: Project, environment: E
     ...Object.values(retained?.storageRuntimeAccess ?? {}).flatMap(records => Object.values(records).flatMap(record => [record.provider, ...(record.retiring ? [record.retiring.provider] : [])]))]);
   const storageAdapters: Input['storageAdapters'] = {};
   for (const provider of providers) {
-    const result = await adapterFactory.getStorageAdapter(provider, project);
+    const result = await adapterFactory.getStorageAdapter(provider, project, environment?.name);
     if (result.success && result.adapter?.name === provider) storageAdapters[provider] = result.adapter;
   }
   const needsHosting = providers.size > 0 || Boolean(identityCapability && Object.keys(environmentSpec.services).length) || Object.keys(retained?.runtimeIdentities ?? {}).length > 0;

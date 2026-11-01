@@ -7,6 +7,9 @@ export const DEFAULT_HYPERVIBE_CLOUD_BASE_URL = 'https://hypervibe.dev';
 export const HYPERVIBE_CLOUD_CONNECTION_PROVIDER = 'hypervibe-cloud';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+// Initial hosted startup can exceed the polling budget. Keep one bounded POST;
+// a missed acknowledgement still requires inspection, never automatic replay.
+const DEFAULT_START_TIMEOUT_MS = 30_000;
 
 const environmentSchema = z.object({
   id: z.string().min(1),
@@ -145,11 +148,12 @@ export function createHypervibeCloudPairingClient(options: {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   const request = createCloudJsonClient(baseUrl, fetchImpl, timeoutMs);
+  const startRequest = createCloudJsonClient(baseUrl, fetchImpl, options.timeoutMs ?? DEFAULT_START_TIMEOUT_MS);
 
   return {
     async start(repository, sourceBranch) {
       if (purpose === 'deployment-access' && !sourceBranch) throw new HvError('VALIDATION', 'Deployment access requires the exact reviewed source branch.');
-      const payload = await request('/api/v1/pairings', { body: {
+      const payload = await startRequest('/api/v1/pairings', { body: {
         repositoryFullName: repository, ...(purpose ? { purpose } : {}),
         ...(options.grant ? { environment: options.grant.environment } : {}),
         ...(sourceBranch !== undefined ? { sourceBranch: sourceBranchSchema.parse(sourceBranch) } : {}),
