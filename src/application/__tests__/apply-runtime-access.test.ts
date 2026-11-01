@@ -96,6 +96,12 @@ function fixture(managedCi = false) {
 }
 
 describe('runtime access through saved plans and SQLite', () => {
+  it('directs a partial deployment to the selected runtime scope without broadening its services', async () => {
+    const f = fixture(); f.createEnvironment('staging');
+    const result = await new PlanService().plan(f.project, 'staging', { serviceFilter: ['web'], includeEnvFile: false });
+    expect(result).toEqual({ error: expect.stringContaining('scope="runtime-access" services=["web"] includeEnvFile=false') });
+    expect(f.writes).toEqual([]);
+  });
   it('persists an isolated exact grant action, recovers a lost response across reload, and leaves production untouched', async () => {
     const f = fixture(); const staging = f.createEnvironment('staging'); const production = f.createEnvironment('production');
     const untouched = structuredClone(production.platformBindings); const planned = await f.plan();

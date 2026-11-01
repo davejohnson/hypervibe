@@ -55,7 +55,7 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
     ...(nativeReference ? [{ name: 'NATIVE_TOKEN', valueSource: { secretKeyRef: { secret: 'projects/123456789012/secrets/native-token', version: '7' } } }] : [])].sort((a, b) => a.name.localeCompare(b.name));
   const adc = join(directory, 'synthetic-adc.json'); writeFileSync(adc, JSON.stringify({ type: 'authorized_user', client_id: 'synthetic-client', client_secret: 'synthetic-client-secret', refresh_token: 'synthetic-refresh' }), { mode: 0o600 });
   vi.stubEnv('GOOGLE_APPLICATION_CREDENTIALS', adc);
-  const state = { repeatJobPatches: 0, repeatEnvPatches: 0, nextImage: undefined as string | undefined, loseCreateAcknowledgment: false, loseAcknowledgment: false, actAs: true, patches: 0, patchRequests: 0, generatedDisappears: false, finalObservations: 0, transportErrors: [] as string[] };
+  const state = { legacyLabelLoss: false, labelRepairs: 0, loseLabelAcknowledgment: false, rejectLabelRepair: false, loseLabelBeforeWrite: false, repeatJobPatches: 0, repeatEnvPatches: 0, nextImage: undefined as string | undefined, loseCreateAcknowledgment: false, loseAcknowledgment: false, actAs: true, patches: 0, patchRequests: 0, generatedDisappears: false, finalObservations: 0, transportErrors: [] as string[] };
   const web = receipt.preparedResources.workloads.find(item => item.workload === 'web')!;
   const final = receipt.runtimeIdentities.find(item => item.workload === 'web')!.principal;
   if (final.kind !== 'gcp-service-account') throw new Error('Expected independently prepared native account');
@@ -125,6 +125,21 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
     if (url.hostname === 'iam.googleapis.com' && url.pathname.endsWith(':testIamPermissions')) return Response.json({ permissions: state.actAs ? ['iam.serviceAccounts.actAs'] : [] });
     const target = receipt.preparedResources.workloads.find(item => url.pathname === `/v2/${item.id}`);
     if (url.hostname === 'run.googleapis.com' && target && init.method === 'PATCH') {
+      if (url.searchParams.get('updateMask') === 'labels') {
+        const body = JSON.parse(String(init.body)), before = f.native.services.get(target.id)!;
+        expect(Object.keys(body).sort()).toEqual(['etag', 'labels', 'name']);
+        expect(body.name).toBe(target.id); expect(body.etag).toBe(before.etag);
+        expect(url.searchParams.has('allowMissing')).toBe(false); expect(url.searchParams.has('forceNewRevision')).toBe(false);
+        if (state.rejectLabelRepair) return Response.json({}, { status: 412 });
+        if (state.loseLabelBeforeWrite) throw new Error('Synthetic unknown label delivery');
+        const original = (receipt.creationProofs[`gcp:holding:service:${target.workload}`] as any).resources[0];
+        expect(body.labels['hv-attempt']).toBe(original.identity.attemptId);
+        expect(body.labels['hv-owner']).toMatch(/^[a-f0-9]{63}$/);
+        state.labelRepairs++;
+        f.native.services.set(target.id, { ...before, labels: structuredClone(body.labels), etag: 'repaired-labels-etag', generation: '5', observedGeneration: '5' });
+        if (state.loseLabelAcknowledgment) { state.loseLabelAcknowledgment = false; throw new Error('Synthetic lost label acknowledgement'); }
+        return Response.json({ name: 'projects/operator-project/locations/us-central1/operations/repair-labels', done: true, response: { name: target.id, uid: target.lifetimeId } });
+      }
       if (state.nextImage) {
         const body = JSON.parse(String(init.body)), before = f.native.services.get(target.id)!;
         if (url.searchParams.get('updateMask') === 'template.containers') {
@@ -142,9 +157,12 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
         expect(body.template.containers[0].image).toBe(state.nextImage);
         expect(body.template.containers[0].env.slice().sort((a: any, b: any) => a.name.localeCompare(b.name))).toEqual(expectedEnv);
         // Independent next Service observation; never echo submitted payloads.
-        f.native.services.set(target.id, { ...before, etag: 'second-application-etag', generation: '4', observedGeneration: '4',
+        // Recorded Cloud Run labels PATCH behavior replaces the addressed map.
+        // Model that boundary explicitly; preserving the previous map here hid
+        // the loss of ownership labels in the 2026-11-01 live second release.
+        f.native.services.set(target.id, { ...before, labels: state.legacyLabelLoss && target.workload === 'web' ? { 'infraprint-environment': 'staging', 'infraprint-service': 'web' } : structuredClone(body.labels), etag: 'second-application-etag', generation: '4', observedGeneration: '4',
           latestCreatedRevision: `${target.id}/revisions/application-00004`, latestReadyRevision: `${target.id}/revisions/application-00004`,
-          template: { ...before.template, containers: [{ ...before.template.containers[0], image: state.nextImage }] } });
+          template: { ...before.template, labels: structuredClone(body.template.labels), containers: [{ ...before.template.containers[0], image: state.nextImage }] } });
         state.patchRequests++; state.patches++;
         return Response.json({ name: 'projects/operator-project/locations/us-central1/operations/second-application', done: true,
           response: { name: target.id, uid: target.lifetimeId } });
@@ -193,7 +211,127 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
     load, save: (before, next) => !!f.ctx.repos.environments.compareAndSwapPlatformBindings(before.id, before.platformBindings, next), authorize: () => true });
   return { ...f, load, receipt, adapter, service, control, state, candidate, environmentSpec, expectedRuntime, managedSecretValues, metadata, taskState, execution, job, reference };
 }
+async function acknowledgedLabelLoss() {
+  const f = await fixture(undefined, false, true, true, true);
+  for (let phase = 0; phase < 7 && f.state.patches < 2; phase++) {
+    const first = await new PlanService().plan(f.project, 'staging');
+    if ('error' in first) throw new Error(first.error);
+    expect(await f.apply(first.planRunId, first.actions.filter(a => a.type !== 'noop').map(a => a.id))).toMatchObject({ result: { success: true } });
+  }
+  const spec = f.store.get(f.project)!.spec;
+  f.state.nextImage = f.candidate.replace(/f{64}$/, 'b'.repeat(64));
+  f.store.replace(f.project, { ...spec, environments: { staging: { ...spec.environments.staging, envVars: { ...spec.environments.staging.envVars, IMAGE_URI: f.state.nextImage } } } });
+  const plan = await new PlanService().plan(f.project, 'staging', { serviceFilter: ['web', 'worker'], includeEnvFile: false });
+  if ('error' in plan) throw new Error(plan.error);
+  f.state.legacyLabelLoss = true;
+  const applied = await f.apply(plan.planRunId, ['service:web', 'service:worker']);
+  expect(applied).toMatchObject({ kind: 'executed', result: { success: false } });
+  expect(f.state.patches).toBe(3); expect(f.taskState.runs).toBe(2);
+  const web = f.receipt.preparedResources.workloads.find(item => item.workload === 'web')!;
+  const native = f.native.services.get(web.id)!;
+  native.labels['billing-team'] = 'retain-team';
+  return { ...f, web, nativeWeb: native, imagePlan: plan };
+}
 describe('local journal-backed prepared application release', () => {
+  it('reviews and repairs only missing ownership labels after an acknowledged update', async () => {
+    const f = await acknowledgedLabelLoss();
+    const planned = await new PlanService().plan(f.project, 'staging', { scope: 'runtime-access', serviceFilter: ['web'], includeEnvFile: false });
+    if ('error' in planned) throw new Error(planned.error);
+    expect(planned.blocked).toEqual([]);
+    expect(planned.actions).toHaveLength(1);
+    const repair = planned.actions[0];
+    expect(repair).toMatchObject({ id: 'runtime-identity:web', verified: true, requiresConfirm: true, metadata: { step: { operation: 'attach', target: { phase: 'local-prepared-ownership-labels' } } } });
+    expect(JSON.stringify(planned)).not.toContain('retain-team');
+    const before = structuredClone(f.nativeWeb), worker = structuredClone(f.native.services.get(f.receipt.preparedResources.workloads.find(item => item.workload === 'worker')!.id));
+    const result = await f.apply(planned.planRunId, [repair.id]);
+    expect(result).toMatchObject({ result: { success: true } }); expect(f.state.labelRepairs).toBe(1);
+    expect(f.native.services.get(f.receipt.preparedResources.workloads.find(item => item.workload === 'worker')!.id)).toEqual(worker);
+    expect(f.native.services.get(f.web.id)!.latestReadyRevision).toBe(before.latestReadyRevision);
+    expect(f.native.services.get(f.web.id)!.labels['billing-team']).toBe('retain-team');
+    expect(f.native.services.get(f.web.id)!.template).toEqual(before.template);
+    expect(f.state.patches).toBe(3); expect(f.taskState.runs).toBe(2);
+  });
+
+  it.each(['lost', 'rejected', 'unobserved'] as const)('preserves exact label repair intent after %s acknowledgment without a duplicate write', async outcome => {
+    const f = await acknowledgedLabelLoss();
+    const plan = await new PlanService().plan(f.project, 'staging', { scope: 'runtime-access', serviceFilter: ['web'] });
+    if ('error' in plan) throw new Error(plan.error);
+    f.state.loseLabelAcknowledgment = outcome === 'lost'; f.state.rejectLabelRepair = outcome === 'rejected'; f.state.loseLabelBeforeWrite = outcome === 'unobserved';
+    expect(await f.apply(plan.planRunId, ['runtime-identity:web'])).toMatchObject({ result: { success: false } });
+    const pending = (f.load().platformBindings.runtimeIdentities as any).web.pending;
+    if (outcome === 'lost') {
+      expect(pending.attemptId).toBeTruthy();
+      const recovery = await new PlanService().plan(f.project, 'staging', { scope: 'runtime-access', serviceFilter: ['web'] });
+      if ('error' in recovery) throw new Error(recovery.error);
+      expect(recovery.blocked).toEqual([]);
+      expect(recovery.actions).toMatchObject([{ metadata: { step: { operation: 'recover', requiresConfirm: false } } }]);
+      expect(await f.apply(recovery.planRunId, [])).toMatchObject({ result: { success: true } });
+      expect(f.state.labelRepairs).toBe(1);
+    } else if (outcome === 'unobserved') {
+      expect(pending.attemptId).toBeTruthy();
+      const recovery = await new PlanService().plan(f.project, 'staging', { scope: 'runtime-access', serviceFilter: ['web'] });
+      if ('error' in recovery) throw new Error(recovery.error);
+      expect(await f.apply(recovery.planRunId, [])).toMatchObject({ result: { success: false } });
+      expect((f.load().platformBindings.runtimeIdentities as any).web.pending.attemptId).toBe(pending.attemptId);
+      expect(f.state.labelRepairs).toBe(0);
+    } else { expect(pending).toBeUndefined(); expect(f.state.labelRepairs).toBe(0); }
+    expect(f.state.patches).toBe(3); expect(f.taskState.runs).toBe(2);
+  });
+
+  it('keeps repair recovery unresolved when runtime changed after a lost acknowledgment', async () => {
+    const f = await acknowledgedLabelLoss();
+    const plan = await new PlanService().plan(f.project, 'staging', { scope: 'runtime-access', serviceFilter: ['web'] });
+    if ('error' in plan) throw new Error(plan.error);
+    f.state.loseLabelAcknowledgment = true;
+    expect(await f.apply(plan.planRunId, ['runtime-identity:web'])).toMatchObject({ result: { success: false } });
+    const pending = structuredClone((f.load().platformBindings.runtimeIdentities as any).web.pending);
+    f.native.services.get(f.web.id)!.latestReadyRevision = `${f.web.id}/revisions/unreviewed-revision`;
+    const recovery = await new PlanService().plan(f.project, 'staging', { scope: 'runtime-access', serviceFilter: ['web'] });
+    if ('error' in recovery) throw new Error(recovery.error);
+    expect(recovery.actions).toMatchObject([{ verified: false }]);
+    expect(await f.apply(recovery.planRunId, [])).not.toMatchObject({ result: { success: true } });
+    expect((f.load().platformBindings.runtimeIdentities as any).web.pending).toEqual(pending);
+    expect(f.state.labelRepairs).toBe(1); expect(f.state.patches).toBe(3); expect(f.taskState.runs).toBe(2);
+  });
+
+  it.each(['owner', 'attempt', 'uid', 'image', 'identity', 'sibling', 'acknowledgment', 'newer-attempt', 'scope'] as const)('denies ownership repair with conflicting %s evidence', async fault => {
+    const f = await acknowledgedLabelLoss();
+    if (fault === 'owner') f.nativeWeb.labels['hv-owner'] = 'foreign-owner';
+    if (fault === 'attempt') f.nativeWeb.labels['hv-attempt'] = 'foreign-attempt';
+    if (fault === 'uid') f.nativeWeb.uid = 'recreated-uid';
+    if (fault === 'image') f.nativeWeb.template.containers[0].image = f.candidate;
+    if (fault === 'identity') f.nativeWeb.template.serviceAccount = 'foreign@operator-project.iam.gserviceaccount.com';
+    if (fault === 'sibling') f.native.services.delete(f.receipt.preparedResources.workloads.find(item => item.workload === 'worker')!.id);
+    if (fault === 'scope') { const env = f.load(); f.ctx.repos.environments.update(env.id, { platformBindings: { ...env.platformBindings, environmentId: 'foreign-region' } }); }
+    if (fault === 'acknowledgment') {
+      const run = f.ctx.repos.runs.findByEnvironmentId(f.environment.id).find(item => item.type === 'apply' && (item.plan as any).planRunId === f.imagePlan.planRunId)!;
+      f.ctx.repos.runs.addReceipt(run.id, { step: 'service:web', status: 'failure', timestamp: new Date().toISOString() });
+    }
+    if (fault === 'newer-attempt') {
+      const attempt = f.ctx.repos.runs.reserveApply({ projectId: f.project.id, environmentId: f.environment.id, environmentName: 'staging', specRevision: f.store.get(f.project)!.revision, planRunId: f.imagePlan.planRunId });
+      expect(attempt.reserved).toBe(true);
+      if (attempt.reserved) f.ctx.repos.runs.updateStatus(attempt.run.id, 'blocked');
+    }
+    const before = structuredClone(f.load().platformBindings);
+    const plan = await new PlanService().plan(f.project, 'staging', { scope: 'runtime-access', serviceFilter: ['web'] });
+    if ('error' in plan) throw new Error(plan.error);
+    if (fault !== 'scope') expect(plan.actions).toMatchObject([{ id: 'runtime-identity:web', verified: false }]);
+    else expect(plan.actions.filter(action => action.type !== 'noop')).toEqual([]);
+    expect(plan.blocked.length).toBeGreaterThan(0);
+    expect(await f.apply(plan.planRunId, ['runtime-identity:web'])).not.toMatchObject({ result: { success: true } });
+    expect(f.state.labelRepairs).toBe(0); expect(f.state.patches).toBe(3); expect(f.taskState.runs).toBe(2);
+    expect(f.load().platformBindings).toEqual(before);
+  });
+
+  it('rejects an ETag or runtime change between repair review and apply', async () => {
+    const f = await acknowledgedLabelLoss();
+    const plan = await new PlanService().plan(f.project, 'staging', { scope: 'runtime-access', serviceFilter: ['web'] });
+    if ('error' in plan) throw new Error(plan.error);
+    f.nativeWeb.etag = 'concurrent-change'; f.nativeWeb.template.scaling.maxInstanceCount = 8;
+    expect(await f.apply(plan.planRunId, ['runtime-identity:web'])).not.toMatchObject({ result: { success: true } });
+    expect(f.state.labelRepairs).toBe(0); expect(f.taskState.runs).toBe(2);
+  });
+
   it.each([false, true])('updates a completed native installation through plan/apply without legacy preparation; migration=%s', async migration => {
     // Redacted live counterexample, 2026-11-01: both first releases completed,
     // native identities/readers stayed ready, but the second image apply asked
@@ -209,6 +347,11 @@ describe('local journal-backed prepared application release', () => {
     expect(f.state.patches).toBe(2);
     expect(f.load().platformBindings.preparedHosting).toMatchObject({ pendingFirstRelease: [] });
     expect(f.ctx.repos.projects.findById(f.project.id)!.policies).not.toHaveProperty('cloudPreparation');
+    const ownedLabels = new Map([...f.native.services].map(([id, native]) => {
+      native.labels = { ...native.labels, 'billing-team': 'original-team' };
+      native.template.labels = { ...native.template.labels, 'revision-team': 'original-revision-team' };
+      return [id, { service: structuredClone(native.labels), template: structuredClone(native.template.labels) }];
+    }));
     const spec = f.store.get(f.project)!.spec, nextImage = f.candidate.replace(/f{64}$/, 'b'.repeat(64));
     f.store.replace(f.project, { ...spec, environments: { staging: { ...spec.environments.staging,
       envVars: { ...spec.environments.staging.envVars, IMAGE_URI: nextImage } } } });
@@ -220,6 +363,10 @@ describe('local journal-backed prepared application release', () => {
     const result = await f.apply(plan.planRunId, ['service:web', 'service:worker']);
     expect(result, JSON.stringify({ result, transportErrors: f.state.transportErrors })).toMatchObject({ kind: 'executed', result: { success: true } });
     expect(f.state.patches).toBe(4);
+    for (const [id, labels] of ownedLabels) {
+      expect(f.native.services.get(id)!.labels).toMatchObject(labels.service);
+      expect(f.native.services.get(id)!.template.labels).toMatchObject(labels.template);
+    }
     if (migration) { expect(f.taskState).toEqual({ creates: 1, runs: 2 }); expect(f.state.repeatJobPatches).toBe(1); }
     expect(f.ctx.repos.projects.findById(f.project.id)!.policies).not.toHaveProperty('cloudPreparation');
   });

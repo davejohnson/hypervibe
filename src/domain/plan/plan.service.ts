@@ -1,7 +1,8 @@
 import { operatorApplicationWorkRequired, planOperatorApplications, operatorApplicationUnavailable, operatorOutputPrerequisiteKeys } from '../services/operator-application.service.js';
 import { CloudInstallationError } from '../services/cloud-installation-runtime.js';
 import { observeRecoveryRuntime, planRecoveryRuntime } from '../services/recovery-runtime.service.js';
-import { observeRuntimeAccess, planRuntimeAccess, projectRuntimeAccessInput } from '../services/runtime-access.service.js';
+import { observeRuntimeAccess, planRuntimeAccess, projectRuntimeAccessInput, runtimeAccessBindings } from '../services/runtime-access.service.js';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { hasPendingDatabaseInitialization } from './database-initialization.contract.js';
 import { pendingRepositoryVariableEnvironment, planRepositoryVariables } from '../services/repository-variables.service.js';
 import { hasDatabaseBootstrapObservationOrCleanup, hasPendingDatabaseBootstrap } from './database-bootstrap.contract.js';
@@ -162,11 +163,29 @@ import {
   parseEnvironmentMaintenanceBinding,
 } from '../services/environment-maintenance.service.js';
 
+/** Bind a selected runtime stage to existing native workloads and their retained
+ * access records. Provider action evidence remains the native mutation authority. */
+export function runtimeAccessScopeFingerprint(environment: Environment | null, spec: EnvironmentSpec | undefined, services: readonly string[] | undefined): string | undefined {
+  if (!environment || !spec || !services?.length || new Set(services).size !== services.length
+    || environment.platformBindings.provider !== spec.hosting.provider) return undefined;
+  const bindings = environment.platformBindings.services as Record<string, { serviceId?: unknown }> | undefined;
+  const retained = runtimeAccessBindings(environment);
+  if (!bindings || !retained || services.some(name => !spec.services[name] || typeof bindings[name]?.serviceId !== 'string'
+    || !(bindings[name].serviceId as string).trim()
+    || Object.entries(bindings).some(([other, binding]) => other !== name && binding.serviceId === bindings[name].serviceId))) return undefined;
+  return canonicalJsonSha256({ projectId: environment.projectId, environmentId: environment.id, provider: spec.hosting.provider,
+    nativeProject: environment.platformBindings.projectId ?? null, nativeEnvironment: environment.platformBindings.environmentId ?? null,
+    providerScope: environment.platformBindings.providerScope ?? null,
+    services: Object.fromEntries([...services].sort().map(name => [name, { binding: bindings[name],
+      identity: retained.runtimeIdentities[name] ?? null,
+      grants: Object.fromEntries(Object.entries(retained.storageRuntimeAccess).filter(([, records]) => records[name]).map(([storage, records]) => [storage, records[name]])) }])) });
+}
+
 export interface PlanOptions {
   /** Restrict the plan to one lifecycle stage. Omission preserves full-plan behavior. */
   credential?: string;
   intent?: 'adopt' | 'rotate';
-  scope?: 'full' | 'credentials' | 'secret-destinations' | 'retained-cleanup' | 'secrets' | 'database-credential-aliases' | 'backups';
+  scope?: 'full' | 'credentials' | 'secret-destinations' | 'retained-cleanup' | 'secrets' | 'database-credential-aliases' | 'backups' | 'runtime-access';
   /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
   serviceFilter?: string[];
   /** One-off env var overrides merged over spec.envVars, frozen (encrypted) into the plan. */
@@ -1757,6 +1776,32 @@ export class PlanService {
     } catch (error) { return { error: error instanceof Error ? error.message : 'Secret containers could not be verified.' }; }
   }
 
+  private async planRuntimeAccessScope(project: Project, environmentName: string, specResult: SpecResult, options: PlanOptions): Promise<EnvironmentPlan | { error: string }> {
+    if (options.envVarOverrides !== undefined || options.envFile !== undefined || options.secretRefs !== undefined
+      || options.includeEnvFile === true || options.credential !== undefined || options.intent !== undefined)
+      return { error: 'scope="runtime-access" accepts selected services only, without deployment or credential inputs.' };
+    const environment = this.envRepo.findByProjectAndName(project.id, environmentName);
+    const desired = specResult.spec.environments[environmentName];
+    const fingerprint = runtimeAccessScopeFingerprint(environment, desired, options.serviceFilter);
+    if (!fingerprint) return { error: 'scope="runtime-access" requires unique nonempty services with exact existing workload bindings and valid retained access state.' };
+    const services = [...options.serviceFilter!].sort();
+    const observed = await observeRuntimeAccess(await projectRuntimeAccessInput(project, environment, desired, undefined, services));
+    const actions = planRuntimeAccess(observed);
+    const blocked = this.providerPreflight([desired.hosting.provider, ...actions.map(action => action.resource.provider)], project, environmentName);
+    if (observed.invalid || observed.identities.some(item => item.observation.state === 'unknown' || item.observation.state === 'waiting')
+      || observed.grants.some(item => item.waiting || item.observation.state === 'unknown')
+      || services.some(name => !observed.identities.some(item => item.serviceName === name) && !observed.grants.some(item => item.serviceName === name)))
+      blocked.push({ provider: 'hypervibe', policy: 'hard', reason: 'Selected runtime access is unknown or awaiting an exact prerequisite. Preserve retained attempts and resolve their readback before mutation.' });
+    const warnings = ['This plan changes only the selected existing workloads\' runtime identity or permissions. It does not deploy application code or prepare unrelated cloud setup.'];
+    const document: PlanRunDocument = { kind: 'hv_plan', scope: 'runtime-access', environmentName, specRevision: specResult.revision,
+      observedFingerprint: fingerprint, actions, overrides: { services }, warnings };
+    planRunDocumentSchema.parse(document);
+    const run = this.runRepo.create({ projectId: project.id, environmentId: environment!.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
+    this.runRepo.updateStatus(run.id, 'succeeded');
+    return { planRunId: run.id, scope: 'runtime-access', specRevision: specResult.revision, specSource: specResult.source ?? { kind: 'local' },
+      environmentName, verified: actions.every(action => action.verified) && blocked.length === 0, observed: null, actions, unmanaged: [], warnings, inputRequired: [], blocked };
+  }
+
   retainedDatabaseWork(project: Project, environmentName: string, scope: PlanOptions['scope'] = 'full') {
     const components = this.envRepo.findByProjectId(project.id)
       .filter(environment => scope === 'credentials' || environment.name === environmentName)
@@ -1808,6 +1853,11 @@ export class PlanService {
     if (scope !== 'credentials') {
       if (options?.credential || options?.intent) return { error: 'Credential review inputs require scope=credentials.' };
       if (Object.keys(options?.secretRefs ?? {}).some(key => specResult.spec.secrets[key]?.credential)) return { error: 'Tracked credentials require a reviewed credential adoption or rotation plan.' };
+    }
+    if (scope === 'runtime-access') {
+      const providerValidation = firstProviderSpecValidationFailure(specResult.spec);
+      if (providerValidation) return { error: providerValidation.message };
+      return this.planRuntimeAccessScope(projectWithSpecGitRemoteUrl(project, specResult.spec), environmentName, specResult, options!);
     }
     // Retained executions must remain observable/cleanable when current source
     // configuration drifts. New initialization or alias repairs cannot preempt
@@ -3379,7 +3429,8 @@ export class PlanService {
       && !ciBindingStageActive && !ciWorkflowPublicationStageActive && backupProgramPublicationActions.length === 1;
     const volumeStageActive = !runtimeAccessStageActive && !recoveryRuntimeStageActive && !providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive && !ciBindingStageActive && !ciWorkflowPublicationStageActive && !backupProgramPublicationStageActive
       && serviceVolumes.actions.some(action => action.type !== 'noop');
-    if (serviceFilter && (runtimeAccessStageActive || recoveryRuntimeStageActive)) return { error: 'Run hv_plan without services to review the current workload access prerequisite stage.' };
+    if (serviceFilter && runtimeAccessStageActive) return { error: `Run hv_plan scope="runtime-access" services=${JSON.stringify(serviceFilter)} includeEnvFile=false to review only these existing workloads' access prerequisites before deployment.` };
+    if (serviceFilter && recoveryRuntimeStageActive) return { error: 'Run hv_plan without services to review the current backup worker prerequisite stage.' };
     let backupProvisioningStageActive = false;
     let backupReadinessStageActive = false;
     let ciCredentialsStageActive = false;

@@ -21,7 +21,7 @@ import { applyPreparedHosting } from './apply-prepared-hosting.js';
 import { applyLocalHolding } from '../domain/services/local-holding-preparation.service.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { createPreparedDirectReleaseControl } from '../domain/services/prepared-direct-release.service.js';
-import { PlanService } from '../domain/plan/plan.service.js';
+import { PlanService, runtimeAccessScopeFingerprint } from '../domain/plan/plan.service.js';
 import { isScopedSecretAction, scopedSecretObservation } from '../domain/plan/scoped-secrets.js';
 import { deploymentPrerequisitePhase, isManagedCiCredentialAction } from '../domain/plan/plan-stage.js';
 import { withBackupStorageDefaults } from '../domain/services/backup-strategy.service.js';
@@ -1012,6 +1012,43 @@ export async function executePlanApply(ctx: CommandContext, params: {
             : undefined,
         })
       : { kind: 'env_missing', envName };
+  }
+
+  if (planScope === 'runtime-access' && loaded.document.overrides?.services !== undefined) {
+    const services = loaded.document.overrides.services;
+    const fingerprint = runtimeAccessScopeFingerprint(environment, envSpec, services);
+    const blocked = (reason: string): PlanApplyOutcome => ({ kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason }] });
+    if (!environment || !fingerprint || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap)
+      return blocked('Selected runtime access requires exact existing workloads and cannot run deployment or bootstrap.');
+    if (fingerprint !== loaded.document.observedFingerprint) return blocked('Selected workload bindings or retained runtime access changed; re-plan before mutation.');
+    const connectionBlocks = planService.providerPreflight([envSpec.hosting.provider, ...loaded.document.actions.map(action => action.resource.provider)], projectForPreflight, envName);
+    if (connectionBlocks.length) return { kind: 'blocked', applyBlocked: connectionBlocks };
+    if (!loaded.document.actions.length) {
+      const observed = await observeRuntimeAccess(await projectRuntimeAccessInput(projectForPreflight, environment, envSpec, undefined, services));
+      if (observed.invalid || planRuntimeAccess(observed).length || observed.identities.some(item => item.observation.state !== 'ready')
+        || observed.grants.some(item => item.waiting || item.observation.state === 'unknown')
+        || services.some(name => !observed.identities.some(item => item.serviceName === name) && !observed.grants.some(item => item.serviceName === name)))
+        return blocked('Selected runtime access is no longer verified ready. Re-plan its exact recovery or prerequisite.');
+    }
+    let expectedBindings = structuredClone(environment.platformBindings);
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
+      freshObservedFingerprint: fingerprint,
+      handler: async action => {
+        const capability = resolvePlanActionAuthority(action)?.capability;
+        if (!['hosting.runtime-identity.mutate', 'storage.runtime-access.mutate'].includes(String(capability)))
+          return { success: false, status: 'blocked', message: 'This selected runtime stage cannot execute unrelated actions.' };
+        const current = ctx.repos.environments.findById(environment.id);
+        if (!runtimeAccessScopeFingerprint(current, envSpec, services) || !isDeepStrictEqual(current!.platformBindings, expectedBindings))
+          return { success: false, status: 'blocked', message: 'Selected workload bindings became unavailable.' };
+        return applyRuntimeAccessAction({ ...await projectRuntimeAccessInput(projectForPreflight, current, envSpec, undefined, services),
+          action, confirmedActionIds: new Set(params.confirmActions),
+          save: bindings => {
+            const saved = ctx.repos.environments.compareAndSwapPlatformBindings(environment.id, expectedBindings, { ...expectedBindings, ...bindings });
+            if (!saved) throw Error('Runtime access bindings changed concurrently; preserve the exact pending attempt.');
+            expectedBindings = structuredClone(saved.platformBindings);
+          } });
+      } });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Only selected runtime identity or permission changes were reviewed. Deployment and unrelated cloud setup remain separate.'] };
   }
 
   if (planScope === 'database-bootstrap') {

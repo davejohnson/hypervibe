@@ -775,7 +775,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       env: envField,
       credential: z.string().optional().describe('Declared credential role to review across all aliases and environments.'),
       intent: z.enum(['adopt', 'rotate']).optional().describe('Adopt preserves existing values; rotate reviews one frozen replacement. Requires scope=credentials.'),
-      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'secret-destinations', 'backups']).optional().describe('Default full. backups isolates explicitly requested backup setup and never deploys. secret-destinations prepares reviewed missing empty native secret containers without values, IAM or workload deployment. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
+      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'secret-destinations', 'backups', 'runtime-access']).optional().describe('Default full. runtime-access requires explicit existing services and isolates their runtime identity or permission review, without deployment inputs, application deployment or unrelated cloud setup. backups isolates explicitly requested backup setup and never deploys. secret-destinations prepares reviewed missing empty native secret containers without values, IAM or workload deployment. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Existing immutable-image-only updates verify their exact published image and runtime dependencies without reauthorizing completed unrelated operator setup. Mutable images, changed runtime inputs and unfinished setup still require their ordinary review.'),
       envVars: z.record(z.string(), z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
@@ -784,6 +784,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
     },
     wrapCommandHandler(async ({ project: projectRef, env, scope, credential, intent, services, envVars, envFile, includeEnvFile, secretRefs }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
+      if (scope === 'runtime-access' && (!services?.length || new Set(services).size !== services.length
+        || envVars !== undefined || envFile !== undefined || secretRefs !== undefined || includeEnvFile === true
+        || credential !== undefined || intent !== undefined))
+        return commandError('VALIDATION', 'scope="runtime-access" requires unique nonempty existing services and accepts no deployment or credential inputs.', { next: ['hv_plan'] });
       if (scope === 'retained-cleanup' || scope === 'secret-destinations' || scope === 'backups') {
         const incompatibleInputs = [
           services !== undefined ? 'services' : null,
@@ -811,16 +815,16 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       // Retained database work owns the next stage. PlanService decides whether
       // its exact state permits observation/cleanup or requires current provider
       // validation; unrelated setup and dotenv inputs cannot preempt that choice.
-      const cloudScopeOnly = !databaseOnly && await localCloudScopeRequired(project, plannedEnvironment, currentSpec);
-      const retainedArtifactOnly = !databaseOnly && await operatorArtifactWorkRequired(project, plannedEnvironment);
-      const holdingOnly = !databaseOnly && await localHoldingWorkRequired(project, plannedEnvironment, currentSpec);
-      const operatorOnly = !databaseOnly && await operatorApplicationWorkRequired(project, plannedEnvironment, currentSpec);
+      const cloudScopeOnly = scope !== 'runtime-access' && !databaseOnly && await localCloudScopeRequired(project, plannedEnvironment, currentSpec);
+      const retainedArtifactOnly = scope !== 'runtime-access' && !databaseOnly && await operatorArtifactWorkRequired(project, plannedEnvironment);
+      const holdingOnly = scope !== 'runtime-access' && !databaseOnly && await localHoldingWorkRequired(project, plannedEnvironment, currentSpec);
+      const operatorOnly = scope !== 'runtime-access' && !databaseOnly && await operatorApplicationWorkRequired(project, plannedEnvironment, currentSpec);
       if (currentSpec && !databaseOnly && !cloudScopeOnly && !retainedArtifactOnly && !holdingOnly && !operatorOnly) validateInstalledProviders(currentSpec);
       // Local dotenv preparation is part of the hv_plan contract. Establish
       // its git-safety and filesystem boundary before PlanService persists an
       // executable plan, so an unsafe tracked .env cannot leave an undisclosed
       // authorization record behind.
-      const preparedLocalEnv = currentSpec && !databaseOnly && !cloudScopeOnly && !retainedArtifactOnly && !holdingOnly && !operatorOnly && scope !== 'credentials' && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'secret-destinations' && scope !== 'backups'
+      const preparedLocalEnv = currentSpec && !databaseOnly && !cloudScopeOnly && !retainedArtifactOnly && !holdingOnly && !operatorOnly && scope !== 'credentials' && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'secret-destinations' && scope !== 'backups' && scope !== 'runtime-access'
         ? ensureProjectLocalEnv({
           source: currentSpecResult?.source,
           projectName: project.name,
@@ -865,7 +869,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         : undefined;
       let localEnv: RepoEnvFileWrite | undefined;
       try {
-        localEnv = databaseOnly || result.scope === 'cloud-scope' || result.scope === 'operator-artifacts' || result.scope === 'operator-applications' || result.scope === 'hosting-preparation' || scope === 'credentials' || scope === 'secrets' || scope === 'secret-destinations' ? undefined : mergeLocalEnvWrites(
+        localEnv = databaseOnly || result.scope === 'cloud-scope' || result.scope === 'operator-artifacts' || result.scope === 'operator-applications' || result.scope === 'hosting-preparation' || scope === 'credentials' || scope === 'secrets' || scope === 'secret-destinations' || scope === 'runtime-access' ? undefined : mergeLocalEnvWrites(
           preparedLocalEnv,
           ensureProjectLocalEnv({
             source: currentSpecResult?.source,

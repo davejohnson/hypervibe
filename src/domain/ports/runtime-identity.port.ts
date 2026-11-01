@@ -20,12 +20,18 @@ export interface RuntimeIdentityBinding {
   pending?: { attemptId: string; step: RuntimeIdentityStep };
 }
 
+/** A successful individual action in a saved apply; overall apply may be blocked.
+ * This permits narrowly reviewed metadata recovery, never resource adoption. */
+export interface AcknowledgedRuntimeUpdate {
+  applyRunId: string; planRunId: string; serviceId: string; resourceUid: string; imageUri: string;
+}
 export interface RuntimeIdentityRequest {
   environment: Environment;
   environmentSpec?: EnvironmentSpec;
   service: Pick<Service, 'name' | 'buildConfig'>;
   binding?: RuntimeIdentityBinding;
   mode: 'ensure' | 'destroy';
+  acknowledgedUpdate?: AcknowledgedRuntimeUpdate;
 }
 
 export type RuntimeIdentityObservation =

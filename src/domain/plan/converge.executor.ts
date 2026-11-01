@@ -1,6 +1,6 @@
 import { OPERATOR_APPLICATION_OPERATION, isOperatorApplicationAction, operatorApplicationPlanSchema } from '../ports/operator-application.port.js';
 import { isRecoveryRuntimeAction } from '../services/recovery-runtime.service.js';
-import { isRuntimeAccessAction } from '../services/runtime-access.service.js';
+import { isRuntimeAccessAction, runtimeAccessActionService } from '../services/runtime-access.service.js';
 import { DATABASE_PASSWORD_OPERATIONS, isDatabasePasswordPlan } from './database-password-plan.contract.js';
 import { isDatabaseBootstrapAction } from './database-bootstrap.contract.js';
 import { DATABASE_FRESH_INITIALIZATION_OPERATION, isDatabaseInitializationAction } from './database-initialization.contract.js';
@@ -582,6 +582,16 @@ export const planRunDocumentSchema = z.object({
     return;
   }
   if (document.scope === 'runtime-access') {
+    if (document.overrides?.services !== undefined) {
+      const services = document.overrides.services;
+      if (!services.length || new Set(services).size !== services.length || Object.keys(document.overrides).some(key => key !== 'services')
+        || !/^[a-f0-9]{64}$/.test(document.observedFingerprint ?? '') || document.sourceCommitSha
+        || document.inputRequired?.length || document.integrationFingerprints || document.lockEnvironmentIds?.length
+        || document.actions.some(action => !services.includes(runtimeAccessActionService(action) ?? '')
+          || action.dependsOn?.some(id => !document.actions.some(dependency => dependency.id === id))))
+        ctx.addIssue({ code: 'custom', message: 'Selected runtime-access plans require exact existing services, matching runtime actions and no unrelated inputs or dependencies.' });
+      return;
+    }
     if (!document.actions.length || !(document.actions.every(isRuntimeAccessAction) || document.actions.every(isRuntimeQueuePrerequisite)) || document.overrides || document.inputRequired?.length) {
       ctx.addIssue({ code: 'custom', message: 'runtime-access plan must contain only exact identity/grant actions or queue prerequisites, and no secret inputs.' });
     }

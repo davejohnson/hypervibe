@@ -285,7 +285,8 @@ export function gcpLocalHoldingReceipt(record: CloudInstallationRecord<Intent>):
 
 /** Native observation of journal-proven local resources. No hosted authority,
  * writes, or interpretation of final application convergence occurs here. */
-export async function readGcpLocalPreparedResources(receipt: LocalPreparedHostingReceiptV1, token: string, signal: AbortSignal, request: typeof fetch = fetch): Promise<{ workloads: Record<string, Record<string, any>> }> {
+export async function readGcpLocalPreparedResources(receipt: LocalPreparedHostingReceiptV1, token: string, signal: AbortSignal, request: typeof fetch = fetch,
+  ownershipRepair?: { serviceName: string; resourceUid: string }): Promise<{ workloads: Record<string, Record<string, any>>; ownershipLabels: Record<string, { expected: Record<string, string>; missing: boolean }> }> {
   if (receipt.purpose !== 'local-holding' || receipt.provider !== 'gcp' || receipt.hostingProvider !== 'cloudrun') fail('identity_mismatch');
   const intent: Intent = { schemaVersion: 1, installationId: receipt.installationId, customerId: receipt.appId, appId: receipt.appId,
     environment: receipt.environment, source: receipt.source, provider: 'gcp', hostingProvider: 'cloudrun',
@@ -301,16 +302,25 @@ export async function readGcpLocalPreparedResources(receipt: LocalPreparedHostin
         || account.uniqueId !== owned.identity.uniqueId || account.description !== `hypervibe:holding:${s.owner}:${owned.identity.attemptId}` || account.disabled) fail();
     }
     const observed: Record<string, Record<string, any>> = {};
+    const ownershipLabels: Record<string, { expected: Record<string, string>; missing: boolean }> = {};
     for (const workload of s.topology) {
       const proof = parseEvidence(receipt.creationProofs[`gcp:holding:service:${workload.name}`], intent).resources[0];
       if (!proof) fail();
       const service = await client.json(`https://run.googleapis.com/v2/${s.services[workload.name]}`);
-      if (service.name !== proof.id || service.uid !== proof.identity.uid || (service.labels as any)?.['hv-owner'] !== s.owner.slice(0, 63)
-        || (service.labels as any)?.['hv-attempt'] !== proof.identity.attemptId || service.uri !== proof.identity.url) fail();
+      const expected = { 'hv-owner': s.owner.slice(0, 63), 'hv-attempt': proof.identity.attemptId };
+      const labels = service.labels as Record<string, unknown> | undefined;
+      const missing = Object.entries(expected).some(([key, value]) => labels?.[key] !== value);
+      // Diagnostic tolerance is limited to absent labels on one already bound
+      // lifetime. Foreign values and every sibling remain strict. No readiness
+      // or mutation authority follows from this diagnostic result alone.
+      const repairable = ownershipRepair?.serviceName === workload.name && ownershipRepair.resourceUid === proof.identity.uid
+        && Object.entries(expected).every(([key, value]) => labels?.[key] === undefined || labels[key] === value);
+      if (service.name !== proof.id || service.uid !== proof.identity.uid || service.uri !== proof.identity.url || missing && !repairable) fail();
+      ownershipLabels[workload.name] = { expected, missing };
       if (workload.public && !hasGcpRuntimeRole(parseGcpRuntimePolicy(await client.policy('service', proof.id)), 'roles/run.invoker', 'allUsers')) fail();
       observed[workload.name] = service;
     }
-    return { workloads: observed };
+    return { workloads: observed, ownershipLabels };
   }, true); // Final identities may receive separately reviewed runtime grants after preparation.
 }
 export function createGcpLocalHoldingCapability(): LocalHoldingPreparationCapability {

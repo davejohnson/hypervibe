@@ -707,3 +707,46 @@ and unresolved selected attempts; a completed selected service can update while
 its pending sibling remains unchanged. The focused lifecycle checks and adjacent
 bootstrap/image/provider suites pass (209 checks total), along with TypeScript.
 They remain in the normal `npm test` path; live rollout has not yet been retried.
+
+### Ownership labels survive later service updates
+
+The subsequent native attempt completed the web image update and normal migration,
+then stopped before deploying the worker. Readback confirmed the original web UID
+and new image, but its `hv-owner` and `hv-attempt` labels were gone. The worker
+still had its original labels, UID and image. The ordinary adapter sent a complete
+replacement label map containing only its general service labels; the synthetic
+transport had incorrectly retained the old map. Modeling the observed replacement
+semantics reproduced the successful-web/blocked-worker sequence before the fix.
+
+Service-level and revision-level labels must each preserve their existing values
+when ordinary deployments add metadata. The accepted installation identity is
+not recreated or discarded after a release. A repair for missing original
+ownership labels requires exact creation and current native identities, a retained
+acknowledgment for the successful Hypervibe update, the matching runtime identity
+and image, and non-conflicting current labels. Unknown or contradictory evidence
+must stop; an uncertain repair is reconciled by readback, without blind replay.
+
+Google's [Service contract](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services)
+defines a UID stable until deletion and an ETag for update conflicts. A supported
+repair uses the [PATCH update mask](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services/patch)
+for service labels only, preserving other labels and leaving the image, template,
+permissions and migration execution untouched. Provider reconciliation and native
+revision/traffic state still require readback; tests do not prove absence of
+provider side effects.
+
+An explicit `runtime-access` plan selects existing workloads and reaches only the
+registered runtime handlers. It must not refresh unrelated artifacts or operator
+registrations, run bootstrap, deploy application code, or overwrite unrelated
+bindings. Legacy internally generated runtime stages retain their own contract.
+The worker update is a separate subsequent plan after verified repair; the
+successful web image and migration are not replayed.
+
+The repair boundary initially failed with `runtime_identity_unknown` after an
+actual saved plan/apply recorded web success and worker blockage. The corrected
+SQLite/native-client lifecycle checks pass for labels-only repair, unchanged
+image/template/revisions/secret references, ETag conflicts, conflicting identity
+or acknowledgment, and read-only recovery after lost delivery. A later runtime
+change leaves that recovery unresolved. Adjacent runtime/preparation/release
+checks and TypeScript pass. These are reconstructed transport checks in normal
+`npm test`; they establish the request and persistence contract, while the live
+metadata repair and remaining worker rollout still require native verification.

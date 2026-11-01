@@ -1205,10 +1205,13 @@ export class CloudRunAdapter implements
         },
       };
 
-      const labels = {
+      const managedLabels = {
         'infraprint-environment': this.labelValue(environment.name),
         'infraprint-service': this.labelValue(service.name),
       };
+      // labels is a replaced map in Services.patch. Retain installation proof
+      // and customer metadata independently on the service and new revision.
+      const labels = { ...cloudRunService?.labels, ...managedLabels };
 
       // Cloud Run Admin API v2 Service shape. Workers get internal-only
       // ingress and min one instance: with no inbound traffic they would
@@ -1252,7 +1255,7 @@ export class CloudRunAdapter implements
         annotations,
         ingress: isWorker ? 'INGRESS_TRAFFIC_INTERNAL_ONLY' : 'INGRESS_TRAFFIC_ALL',
         template: {
-          labels,
+          labels: { ...cloudRunService?.template?.labels, ...managedLabels },
           ...(!instanceBounds && isWorker ? { scaling: { ...cloudRunService?.template?.scaling,
             minInstanceCount: Math.max(1, cloudRunService?.template?.scaling?.minInstanceCount ?? 0) } }
             : !instanceBounds && cloudRunService?.template?.scaling ? { scaling: cloudRunService.template.scaling } : {}),

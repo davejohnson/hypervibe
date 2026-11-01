@@ -65,6 +65,15 @@ unknown required resources or unfinished setup effects still need their normal
 review; do not bypass a blocked plan. Images outside operator publication and
 first-time service creation keep their existing deployment path.
 
+For access checks or a supported ownership-metadata repair on existing services,
+use `hv_plan scope="runtime-access"` with explicit `services` and
+`includeEnvFile: false`. Review only the returned runtime actions; this scope
+does not deploy code or run migrations, and does not authorize unrelated cloud
+setup. Preserve the successful parts of a partial release. After repairing and
+verifying its exact prerequisite, plan only the workloads still awaiting update.
+Missing or conflicting ownership evidence is not permission to adopt a resource
+by name, replace its identity or edit provider metadata directly.
+
 The existing environment policy and reviewed deployment bindings determine the
 release path. Portable managed CI is the normal push-deploy path where
 implemented. Do not change deploy-source settings or workflow content outside

@@ -8,7 +8,7 @@ import type { EnvironmentSpec } from '../spec/spec.schema.js';
 import type { PlanAction } from '../plan/plan.types.js';
 import type { IProviderAdapter, ProviderRuntimeIdentity } from '../ports/provider.port.js';
 import type { IStorageAdapter } from '../ports/storage.port.js';
-import type { RuntimeIdentityBinding, RuntimeIdentityObservation } from '../ports/runtime-identity.port.js';
+import type { RuntimeIdentityBinding, RuntimeIdentityObservation, AcknowledgedRuntimeUpdate } from '../ports/runtime-identity.port.js';
 import type { StorageRuntimeAccessTarget, StorageRuntimeAccessObservation } from '../ports/storage-runtime-access.port.js';
 import { runtimeCoordinateSchema, runtimeCoordinatesSchema } from '../../lib/value-free-coordinates.js';
 
@@ -27,6 +27,17 @@ type AccessRecord = z.infer<typeof recordSchema>;
 export const RUNTIME_ACCESS_OPERATIONS = { identity: 'runtimeIdentity', grant: 'storageRuntimeGrant', revoke: 'storageRuntimeRevoke', recover: 'storageRuntimeRecover' } as const;
 const operations = new Set<string>(Object.values(RUNTIME_ACCESS_OPERATIONS));
 export function isRuntimeAccessAction(action: PlanAction): boolean { return operations.has(String(action.metadata?.operation)); }
+/** Exact selected-service envelope; legacy internal stage recognition is unchanged. */
+export function runtimeAccessActionService(action: PlanAction): string | undefined {
+  const service = action.metadata?.serviceName;
+  if (!isRuntimeAccessAction(action) || action.type !== 'update' || typeof service !== 'string' || !service) return undefined;
+  if (action.metadata!.operation === RUNTIME_ACCESS_OPERATIONS.identity)
+    return action.id === `runtime-identity:${service}` && action.resource.kind === 'service' && action.resource.name === service ? service : undefined;
+  const storage = action.metadata?.storageName, retiring = action.metadata?.retiring;
+  return typeof storage === 'string' && storage.length > 0 && (retiring === undefined || retiring === true)
+    && action.id === `storage:${storage}:access:${service}${retiring ? ':retiring' : ''}`
+    && action.resource.kind === 'storage' && action.resource.name === storage ? service : undefined;
+}
 
 export function runtimeAccessBindings(environment: Pick<Environment, 'platformBindings'> | null) {
   const identities = identitiesSchema.safeParse(environment?.platformBindings.runtimeIdentities ?? {});
@@ -39,7 +50,7 @@ function canonical(value: unknown): string {
     ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
 }
 function fingerprint(value: unknown): string { return createHash('sha256').update(canonical(value)).digest('hex'); }
-interface Input { environment: Environment | null; environmentSpec: EnvironmentSpec; hosting?: IProviderAdapter; storageAdapters: Record<string, IStorageAdapter | undefined> }
+interface Input { environment: Environment | null; environmentSpec: EnvironmentSpec; hosting?: IProviderAdapter; storageAdapters: Record<string, IStorageAdapter | undefined>; selectedServices?: string[]; acknowledgedUpdates?: Record<string, AcknowledgedRuntimeUpdate> }
 interface IdentityItem { provider: string; serviceName: string; mode: 'ensure' | 'destroy'; binding?: RuntimeIdentityBinding; observation: RuntimeIdentityObservation }
 interface AccessItem { provider: string; serviceName: string; storageName: string; desired: boolean; target?: Omit<StorageRuntimeAccessTarget, 'environment'>; retained?: AccessRecord; previous?: AccessRecord; retiring?: boolean; observation: StorageRuntimeAccessObservation; waiting?: boolean }
 export interface RuntimeAccessObservation { identities: IdentityItem[]; grants: AccessItem[]; invalid?: boolean }
@@ -79,6 +90,7 @@ export async function observeRuntimeAccess(input: Input): Promise<RuntimeAccessO
   const identities = new Map<string, ProviderRuntimeIdentity>();
   const waiting = new Set<string>();
   for (const serviceName of [...consumers].sort()) {
+    if (input.selectedServices && !input.selectedServices.includes(serviceName)) continue;
     const desired = environmentSpec.services[serviceName];
     const binding = state.runtimeIdentities[serviceName];
     const mode = desired ? 'ensure' : 'destroy';
@@ -91,7 +103,7 @@ export async function observeRuntimeAccess(input: Input): Promise<RuntimeAccessO
         let observation: RuntimeIdentityObservation = mode === 'destroy' && grantRetained
           ? { state: 'waiting', reason: 'Revoke the retained bucket grants before removing this workload identity.' }
           : needsWorkload ? { state: 'waiting', reason: 'Bind the exact workload before preparing its runtime identity.' }
-            : identityObservation(await hosting.runtimeIdentities.inspect({ environment, environmentSpec, service, binding, mode }));
+            : identityObservation(await hosting.runtimeIdentities.inspect({ environment, environmentSpec, service, binding, mode, acknowledgedUpdate: input.acknowledgedUpdates?.[serviceName] }));
         if (binding?.pending && observation.state === 'action' && observation.step.operation !== 'recover') observation = { state: 'waiting', reason: 'The original runtime identity attempt must be independently recovered before another write.' };
         result.identities.push({ provider: environmentSpec.hosting.provider, serviceName, mode, binding, observation });
         if (observation.state === 'ready' && observation.identity) identities.set(serviceName, observation.identity);
@@ -109,6 +121,7 @@ export async function observeRuntimeAccess(input: Input): Promise<RuntimeAccessO
     const retainedRecords = state.storageRuntimeAccess[storageName] ?? {};
     const serviceNames = new Set([...Object.keys(retainedRecords), ...(spec?.injectInto ?? [])]);
     for (const serviceName of [...serviceNames].sort()) {
+      if (input.selectedServices && !input.selectedServices.includes(serviceName)) continue;
       const previous = retainedRecords[serviceName];
       const provider = previous?.provider ?? spec!.provider;
       const adapter = storageAdapters[provider];
@@ -202,7 +215,7 @@ export async function applyRuntimeAccessAction(input: Input & { action: PlanActi
       const attemptId = item.binding?.pending?.attemptId ?? randomUUID();
       const binding = { provider: environmentSpec.hosting.provider, evidence: item.binding?.evidence ?? {}, ...item.binding, pending: { attemptId, step } };
       await input.save({ runtimeIdentities: { ...state.runtimeIdentities, [serviceName]: binding } });
-      const result = await input.hosting.runtimeIdentities.apply({ environment, environmentSpec, service: { name: serviceName, buildConfig: environmentSpec.services[serviceName] ?? {} }, binding, mode: item.mode, step, attemptId });
+      const result = await input.hosting.runtimeIdentities.apply({ environment, environmentSpec, service: { name: serviceName, buildConfig: environmentSpec.services[serviceName] ?? {} }, binding, mode: item.mode, step, attemptId, acknowledgedUpdate: input.acknowledgedUpdates?.[serviceName] });
       if (result.binding) {
         const parsed = identityBindingSchema.safeParse(result.binding);
         if (!parsed.success || parsed.data.provider !== item.provider || result.receipt.success && parsed.data.pending) return block();
@@ -259,11 +272,11 @@ export async function applyRuntimeAccessAction(input: Input & { action: PlanActi
   } catch { return block('Runtime access could not complete. Any persisted attempt is retained for exact recovery.'); }
 }
 
-export async function projectRuntimeAccessInput(project: Project, environment: Environment | null, environmentSpec: EnvironmentSpec, hosting?: IProviderAdapter): Promise<Input> {
+export async function projectRuntimeAccessInput(project: Project, environment: Environment | null, environmentSpec: EnvironmentSpec, hosting?: IProviderAdapter, selectedServices?: string[]): Promise<Input> {
   const retained = runtimeAccessBindings(environment);
   const identityCapability = providerRegistry.getMetadata(environmentSpec.hosting.provider)?.lifecycle?.hosting?.runtimeIdentityTiming;
-  const providers = new Set([...Object.values(environmentSpec.storage ?? {}).filter(spec => providerRegistry.getMetadata(spec.provider)?.storageRuntimeAccess?.hostingProviders.includes(environmentSpec.hosting.provider)).map(spec => spec.provider),
-    ...Object.values(retained?.storageRuntimeAccess ?? {}).flatMap(records => Object.values(records).flatMap(record => [record.provider, ...(record.retiring ? [record.retiring.provider] : [])]))]);
+  const providers = new Set([...Object.values(environmentSpec.storage ?? {}).filter(spec => (!selectedServices || spec.injectInto.some(name => selectedServices.includes(name))) && providerRegistry.getMetadata(spec.provider)?.storageRuntimeAccess?.hostingProviders.includes(environmentSpec.hosting.provider)).map(spec => spec.provider),
+    ...Object.values(retained?.storageRuntimeAccess ?? {}).flatMap(records => Object.entries(records).filter(([name]) => !selectedServices || selectedServices.includes(name)).flatMap(([, record]) => [record.provider, ...(record.retiring ? [record.retiring.provider] : [])]))]);
   const storageAdapters: Input['storageAdapters'] = {};
   for (const provider of providers) {
     const result = await adapterFactory.getStorageAdapter(provider, project, environment?.name);
@@ -275,7 +288,13 @@ export async function projectRuntimeAccessInput(project: Project, environment: E
     if (result.success && result.adapter?.name === environmentSpec.hosting.provider) hosting = result.adapter;
   }
   if (needsHosting) await hosting?.configureTarget?.({ region: environmentSpec.hosting.region });
-  return { environment, environmentSpec, hosting, storageAdapters };
+  const acknowledgedUpdates: Record<string, AcknowledgedRuntimeUpdate> = {};
+  const { acknowledgedRuntimeUpdate } = await import('./runtime-update-evidence.service.js');
+  if (environment) for (const name of selectedServices ?? Object.keys(environmentSpec.services)) {
+    const evidence = acknowledgedRuntimeUpdate(project, environment, environmentSpec, name);
+    if (evidence) acknowledgedUpdates[name] = evidence;
+  }
+  return { environment, environmentSpec, hosting, storageAdapters, selectedServices, acknowledgedUpdates };
 }
 
 export function runtimeAccessReady(observed: RuntimeAccessObservation | undefined, storageName: string, serviceName: string): boolean {
