@@ -246,6 +246,11 @@ working directory; verification now rejects both before `jobs.run`. The independ
 [container contract](https://docs.cloud.google.com/run/docs/reference/rest/v2/Container)
 and Job task-count contract define these executable inputs. These are offline
 regressions; live adoption, migration, seeding and application rollout remain pending.
+The first live recovery review additionally returned `latestCreatedExecution: {}`
+with omitted zero `executionCount`. The SQLite boundary reproduced its rejection
+before accepting that empty message. A nonempty execution reference still blocks,
+and an independently empty native execution inventory remains required. The
+holding resources were verified; the recovery review made no provider changes.
 
 ## Local inline configuration custody
 

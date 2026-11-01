@@ -152,7 +152,7 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
   return { ...f, load, receipt, adapter, service, control, state, candidate, environmentSpec, expectedRuntime, managedSecretValues, metadata, taskState, execution, job };
 }
 describe('local journal-backed prepared application release', () => {
-  it.each(['uid', 'etag', 'execution', 'missing', 'runtime-account'] as const)('rejects %s drift after reviewing migration job adoption', async drift => {
+  it.each(['uid', 'etag', 'execution', 'execution-reference', 'missing', 'runtime-account'] as const)('rejects %s drift after reviewing migration job adoption', async drift => {
     const f = await fixture(undefined, false, false, true);
     f.state.loseCreateAcknowledgment = true;
     await f.adapter.deploy(f.service, f.load(), { ...f.expectedRuntime, IMAGE_URI: f.candidate }, { preparedRelease: f.control });
@@ -163,6 +163,7 @@ describe('local journal-backed prepared application release', () => {
     if (drift === 'uid') f.job.uid = 'replacement-uid';
     if (drift === 'etag') f.job.etag = 'changed-etag';
     if (drift === 'execution') f.taskState.runs = 1;
+    if (drift === 'execution-reference') Object.assign(f.job, { latestCreatedExecution: { name: f.execution.name } });
     if (drift === 'missing') f.taskState.creates = 0;
     if (drift === 'runtime-account') f.job.template.template.serviceAccount = 'unreviewed@operator-project.iam.gserviceaccount.com';
     const counts = { ...f.taskState };
@@ -171,6 +172,8 @@ describe('local journal-backed prepared application release', () => {
   });
   it('requires explicit exact-identity adoption of an unacknowledged job before a new reviewed release can run it', async () => {
     const f = await fixture(undefined, false, false, true);
+    // Recorded native zero-execution shape on the disposable GCP Job, 2026-11-01.
+    Object.assign(f.job, { latestCreatedExecution: {} });
     f.state.loseCreateAcknowledgment = true;
     expect((await f.adapter.deploy(f.service, f.load(), { ...f.expectedRuntime, IMAGE_URI: f.candidate }, { preparedRelease: f.control })).receipt.success).toBe(false);
     expect(f.taskState).toEqual({ creates: 1, runs: 0 });

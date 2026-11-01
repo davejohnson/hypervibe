@@ -166,6 +166,8 @@ export function cloudRunUnexecutedReleaseJob(value: unknown, expectedName: strin
     && typeof job.etag === 'string' && job.etag.length > 0 && job.etag.length <= 2048
     && job.generation === '1' && job.observedGeneration === '1' && (job.reconciling ?? false) === false
     && job.terminalCondition?.state === 'CONDITION_SUCCEEDED' && (job.executionCount ?? 0) === 0
-    && job.latestCreatedExecution === undefined && !job.startExecutionToken && !job.runExecutionToken && !job.deleteTime
+    && (job.latestCreatedExecution === undefined || job.latestCreatedExecution !== null
+      && typeof job.latestCreatedExecution === 'object' && !Array.isArray(job.latestCreatedExecution)
+      && Object.keys(job.latestCreatedExecution).length === 0) && !job.startExecutionToken && !job.runExecutionToken && !job.deleteTime
     && (job.template?.taskCount ?? 1) === 1 && [0, 1].includes(job.template?.parallelism ?? 0);
 }
