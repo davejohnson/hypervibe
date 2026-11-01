@@ -674,3 +674,36 @@ passed. These reconstructed transports run in ordinary `npm test`. They establis
 the interpretation fix, not a completed live backup, restore or all-cloud
 walkthrough. Native continuation must use the retained attempt through a fresh
 Hypervibe recovery plan.
+
+### Subsequent deployments retain scoped installation authority
+
+The approved image update on 2026-11-01 exposed a separate lifecycle mismatch:
+planning verified the existing GCP workloads, but apply required the legacy
+project-wide preparation marker after both first releases had completed. Native
+readback confirmed the original service identities, revisions and migration job
+were unchanged. The retained installation receipt and completed release records
+were still present; clearing `pendingFirstRelease` had not revoked installation
+authority.
+
+An ordinary update to a completed workload must verify that retained installation
+through the shared native prepared-hosting inspection. It must preserve the exact
+scope, receipt and workload identities, reject unresolved attempts, and retain
+separate first-release authorization for any pending workload. This verification
+must not create a legacy preparation marker, grant additional permissions or
+reset first-release state. Failed native verification requires inspection and a
+fresh plan, rather than instructions to repeat broad cloud setup.
+
+A saved-plan/apply regression completes both first releases and then changes only
+the image. Before the correction, its second deployment reproduced the same
+legacy-preparation rejection with zero second-deployment writes. These provider
+transport fixtures are reconstructed; native completion of the approved update
+remains a separate acceptance step.
+
+After the correction, the native lifecycle suite passes both ordinary second
+updates and updates that run the unchanged migration command through the existing
+job before rollout, preserving runtime identities and immutable secret references.
+It also rejects unknown proof, missing/replaced bindings, changed scope/receipt
+and unresolved selected attempts; a completed selected service can update while
+its pending sibling remains unchanged. The focused lifecycle checks and adjacent
+bootstrap/image/provider suites pass (209 checks total), along with TypeScript.
+They remain in the normal `npm test` path; live rollout has not yet been retried.

@@ -1,6 +1,8 @@
 import { isDeepStrictEqual } from 'node:util';
 import { SpecStore } from '../spec/spec.store.js';
 import { preparedHostingMarkerSchema } from '../ports/hosting-prepared.port.js';
+import { observePreparedHosting } from './hosting-prepared.service.js';
+import { preparedReleaseAttempts } from './prepared-direct-release.service.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { adapterFactory } from './adapter.factory.js';
@@ -241,14 +243,15 @@ export async function executeBootstrap(params: {
   const hostingProject = project.defaultPlatform?.toLowerCase() === targetPlatform
     ? project
     : { ...project, defaultPlatform: targetPlatform };
-  const preparedHostingResult = params.preparedRelease ? await adapterFactory.getHostingAdapter(hostingProject, environment.name) : undefined;
   const cloudPrepareProfile = getCloudPrepareProfile(targetPlatform);
+  const preparedHostingResult = params.preparedRelease || cloudPrepareProfile && environment.platformBindings.preparedHosting !== undefined
+    ? await adapterFactory.getHostingAdapter(hostingProject, environment.name) : undefined;
   let verifiedPreparation = false;
   if (preparedHostingResult?.success && preparedHostingResult.adapter?.preparedHosting) {
     try {
       const marker = preparedHostingMarkerSchema.parse(environment.platformBindings.preparedHosting);
       const environmentSpec = new SpecStore().getForInspection(project)?.spec.environments[environment.name];
-      if (environmentSpec && workloads.every(service => marker.pendingFirstRelease.includes(service.name))) {
+      if (params.preparedRelease && environmentSpec && workloads.every(service => marker.pendingFirstRelease.includes(service.name))) {
         const proof = await preparedHostingResult.adapter.preparedHosting.inspect({ environment, environmentSpec,
           runtimeEnvVarsByService: Object.fromEntries(workloads.map(service => [service.name,
             { ...params.queueEnvVars, ...params.envVars, ...params.envVarsByService?.[service.name] }])) });
@@ -256,6 +259,21 @@ export async function executeBootstrap(params: {
           && marker.installationId === proof.preparation.installationId && marker.planDigest === proof.preparation.planDigest
           && workloads.every(service => proof.preparation.pendingFirstRelease.includes(service.name)
             && isDeepStrictEqual(marker.firstReleaseConfigurationDigests?.[service.name], proof.preparation.firstReleaseConfigurationDigests?.[service.name]));
+      } else if (environmentSpec && workloads.every(service => !marker.pendingFirstRelease.includes(service.name))) {
+        // Completing a first release does not discard its scoped installation.
+        // Re-read native ownership/runtime evidence instead of requiring the
+        // unrelated legacy project-wide preparation grants. Pending siblings
+        // keep their reviewed first-release inputs and receive no authority here.
+        const attempts = preparedReleaseAttempts(environment);
+        if (workloads.some(service => ['attempted', 'uncertain'].includes(attempts[service.name]?.status))) throw new Error();
+        const proof = await observePreparedHosting({ environment, environmentSpec,
+          hosting: preparedHostingResult.adapter, reviewedPreparation: marker });
+        const retained = parseHostingBindings(environment).services;
+        verifiedPreparation = !proof.taskAdoptions?.length
+          && workloads.every(service => !proof.preparation.pendingFirstRelease.includes(service.name)
+            && (['serviceId', 'resourceUid', 'resourceType', 'workloadKind'] as const).every(key =>
+              typeof retained?.[service.name]?.[key] === 'string'
+              && retained[service.name]![key] === proof.bindings.services[service.name]?.[key]));
       }
     } catch { /* A missing native or current-source proof retains the ordinary prerequisite blocker. */ }
   }
@@ -263,7 +281,13 @@ export async function executeBootstrap(params: {
     const cleanup = await tx.rollback();
     return {
       success: false,
-      summary: {
+      summary: environment.platformBindings.preparedHosting !== undefined ? {
+        blocked: true,
+        error: 'The retained scoped hosting installation could not be verified. Inspect its current native resources and recovery records, then re-run hv_plan. No new setup or deployment was authorized.',
+        provider: targetPlatform,
+        rollback: cleanup,
+        transaction: { created: tx.listResources() },
+      } : {
         error: `${cloudPrepareProfile.label} is not prepared for Hypervibe deploys. Run hv_connections provider="${targetPlatform}" action="prepare" confirm=true before applying.`,
         action: 'cloud_prepare',
         provider: targetPlatform,

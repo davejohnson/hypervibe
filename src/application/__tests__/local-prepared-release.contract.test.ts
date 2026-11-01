@@ -11,6 +11,7 @@ import { preparedSecretReleaseError } from '../apply-secret-references.js';
 import { createPreparedDirectReleaseControl, completePreparedDirectRelease, reviewPreparedDirectReleaseActions } from '../../domain/services/prepared-direct-release.service.js';
 import type { CloudRunAdapter } from '../../adapters/providers/gcp/cloudrun.adapter.js';
 import type { LocalPreparedHostingReceiptV1 } from '../../domain/ports/local-holding-preparation.port.js';
+import { executeBootstrap } from '../../domain/services/bootstrap.service.js';
 import { PlanService } from '../../domain/plan/plan.service.js';
 import { deriveHypervibeSecretValues } from '../../domain/services/hypervibe-secret-value.js';
 import type { Service } from '../../domain/entities/service.entity.js';
@@ -54,7 +55,7 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
     ...(nativeReference ? [{ name: 'NATIVE_TOKEN', valueSource: { secretKeyRef: { secret: 'projects/123456789012/secrets/native-token', version: '7' } } }] : [])].sort((a, b) => a.name.localeCompare(b.name));
   const adc = join(directory, 'synthetic-adc.json'); writeFileSync(adc, JSON.stringify({ type: 'authorized_user', client_id: 'synthetic-client', client_secret: 'synthetic-client-secret', refresh_token: 'synthetic-refresh' }), { mode: 0o600 });
   vi.stubEnv('GOOGLE_APPLICATION_CREDENTIALS', adc);
-  const state = { loseCreateAcknowledgment: false, loseAcknowledgment: false, actAs: true, patches: 0, patchRequests: 0, generatedDisappears: false, finalObservations: 0, transportErrors: [] as string[] };
+  const state = { repeatJobPatches: 0, repeatEnvPatches: 0, nextImage: undefined as string | undefined, loseCreateAcknowledgment: false, loseAcknowledgment: false, actAs: true, patches: 0, patchRequests: 0, generatedDisappears: false, finalObservations: 0, transportErrors: [] as string[] };
   const web = receipt.preparedResources.workloads.find(item => item.workload === 'web')!;
   const final = receipt.runtimeIdentities.find(item => item.workload === 'web')!.principal;
   if (final.kind !== 'gcp-service-account') throw new Error('Expected independently prepared native account');
@@ -68,6 +69,7 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
   const execution = { name: `${jobResource}/executions/first-schema`, uid: 'migration-execution-uid', job: jobResource,
     template: task, taskCount: 1, succeededCount: 1, completionTime: '2026-10-31T12:00:00Z',
     conditions: [{ type: 'Completed', state: 'CONDITION_SUCCEEDED' }] };
+  let secondExecution: typeof execution | undefined;
   const taskState = { creates: 0, runs: 0 };
   const request: typeof fetch = async (input, init = {}) => {
     const url = new URL(String(input));
@@ -89,6 +91,21 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
       return Response.json({ services: [...f.native.services.values()] });
     }
     if (migration && url.hostname === 'run.googleapis.com') {
+      if (secondExecution && url.pathname === `/v2/${secondExecution.name}`) return Response.json(secondExecution);
+      if (state.nextImage && url.pathname === `/v2/${jobResource}` && init.method === 'PATCH') {
+        const submitted = JSON.parse(String(init.body)).template.template;
+        const nextTask = { ...task, containers: [{ ...task.containers[0], image: state.nextImage }], maxRetries: 1 };
+        expect(submitted).toEqual(nextTask);
+        state.repeatJobPatches++;
+        Object.assign(job, { etag: 'second-migration-etag', generation: '2', observedGeneration: '2', template: { template: nextTask } });
+        return Response.json({ name: 'projects/operator-project/locations/us-central1/operations/update-migration', done: true, response: job });
+      }
+      if (state.nextImage && url.pathname === `/v2/${jobResource}:run` && init.method === 'POST') {
+        expect(JSON.parse(String(init.body))).toEqual({});
+        taskState.runs++;
+        secondExecution = { ...execution, name: `${jobResource}/executions/second-schema`, uid: 'second-migration-execution-uid', template: structuredClone(job.template.template) };
+        return Response.json({ name: 'projects/operator-project/locations/us-central1/operations/second-migration', done: true, response: secondExecution });
+      }
       if (url.pathname === `/v2/${jobResource}/executions`) return Response.json({ executions: taskState.runs ? [execution] : [] });
       if (url.pathname === `/v2/${execution.name}`) return Response.json(execution);
       if (url.pathname === `/v2/${jobResource}` && (!init.method || init.method === 'GET'))
@@ -108,6 +125,30 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
     if (url.hostname === 'iam.googleapis.com' && url.pathname.endsWith(':testIamPermissions')) return Response.json({ permissions: state.actAs ? ['iam.serviceAccounts.actAs'] : [] });
     const target = receipt.preparedResources.workloads.find(item => url.pathname === `/v2/${item.id}`);
     if (url.hostname === 'run.googleapis.com' && target && init.method === 'PATCH') {
+      if (state.nextImage) {
+        const body = JSON.parse(String(init.body)), before = f.native.services.get(target.id)!;
+        if (url.searchParams.get('updateMask') === 'template.containers') {
+          expect(body.template.containers[0].image).toBe(before.template.containers[0].image);
+          expect(body.template.containers[0].env.slice().sort((a: any, b: any) => a.name.localeCompare(b.name))).toEqual(expectedEnv);
+          expect(body.template).not.toHaveProperty('serviceAccount');
+          state.repeatEnvPatches++;
+          f.native.services.set(target.id, { ...before, etag: 'second-runtime-etag', generation: '3', observedGeneration: '3',
+            latestCreatedRevision: `${target.id}/revisions/runtime-00003`, latestReadyRevision: `${target.id}/revisions/runtime-00003` });
+          return Response.json({ name: 'projects/operator-project/locations/us-central1/operations/second-runtime', done: true,
+            response: { name: target.id, uid: target.lifetimeId } });
+        }
+        if (migration && target.workload === 'web') { expect(taskState).toEqual({ creates: 1, runs: 2 }); expect(state.repeatJobPatches).toBe(1); }
+        expect(body.template.serviceAccount).toBe(before.template.serviceAccount);
+        expect(body.template.containers[0].image).toBe(state.nextImage);
+        expect(body.template.containers[0].env.slice().sort((a: any, b: any) => a.name.localeCompare(b.name))).toEqual(expectedEnv);
+        // Independent next Service observation; never echo submitted payloads.
+        f.native.services.set(target.id, { ...before, etag: 'second-application-etag', generation: '4', observedGeneration: '4',
+          latestCreatedRevision: `${target.id}/revisions/application-00004`, latestReadyRevision: `${target.id}/revisions/application-00004`,
+          template: { ...before.template, containers: [{ ...before.template.containers[0], image: state.nextImage }] } });
+        state.patchRequests++; state.patches++;
+        return Response.json({ name: 'projects/operator-project/locations/us-central1/operations/second-application', done: true,
+          response: { name: target.id, uid: target.lifetimeId } });
+      }
       if (migration) expect(taskState).toEqual({ creates: 1, runs: 1 });
       state.patchRequests++;
       expect((load().platformBindings.preparedDirectReleaseAttempts as any)[target.workload].status).toMatch(/^(attempted|uncertain)$/); state.patches++;
@@ -153,6 +194,78 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
   return { ...f, load, receipt, adapter, service, control, state, candidate, environmentSpec, expectedRuntime, managedSecretValues, metadata, taskState, execution, job, reference };
 }
 describe('local journal-backed prepared application release', () => {
+  it.each([false, true])('updates a completed native installation through plan/apply without legacy preparation; migration=%s', async migration => {
+    // Redacted live counterexample, 2026-11-01: both first releases completed,
+    // native identities/readers stayed ready, but the second image apply asked
+    // for broad legacy preparation because pendingFirstRelease was empty.
+    const f = await fixture(undefined, false, true, migration, true);
+    for (let phase = 0; phase < 7 && f.state.patches < 2; phase++) {
+      const first = await new PlanService().plan(f.project, 'staging');
+      if ('error' in first) throw new Error(first.error);
+      expect(first.blocked).toEqual([]);
+      expect(await f.apply(first.planRunId, first.actions.filter(a => a.type !== 'noop').map(a => a.id)))
+        .toMatchObject({ kind: 'executed', result: { success: true } });
+    }
+    expect(f.state.patches).toBe(2);
+    expect(f.load().platformBindings.preparedHosting).toMatchObject({ pendingFirstRelease: [] });
+    expect(f.ctx.repos.projects.findById(f.project.id)!.policies).not.toHaveProperty('cloudPreparation');
+    const spec = f.store.get(f.project)!.spec, nextImage = f.candidate.replace(/f{64}$/, 'b'.repeat(64));
+    f.store.replace(f.project, { ...spec, environments: { staging: { ...spec.environments.staging,
+      envVars: { ...spec.environments.staging.envVars, IMAGE_URI: nextImage } } } });
+    const plan = await new PlanService().plan(f.project, 'staging', { serviceFilter: ['web', 'worker'], includeEnvFile: false });
+    if ('error' in plan) throw new Error(plan.error);
+    expect(plan.blocked).toEqual([]);
+    expect(plan.actions.filter(a => a.type !== 'noop').map(a => a.id)).toEqual(['service:web', 'service:worker']);
+    f.state.nextImage = nextImage;
+    const result = await f.apply(plan.planRunId, ['service:web', 'service:worker']);
+    expect(result, JSON.stringify({ result, transportErrors: f.state.transportErrors })).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(f.state.patches).toBe(4);
+    if (migration) { expect(f.taskState).toEqual({ creates: 1, runs: 2 }); expect(f.state.repeatJobPatches).toBe(1); }
+    expect(f.ctx.repos.projects.findById(f.project.id)!.policies).not.toHaveProperty('cloudPreparation');
+  });
+
+  it.each(['unknown', 'missing-binding', 'missing-uid', 'changed-uid', 'receipt', 'scope', 'uncertain'] as const)('blocks completed preparation with %s before runtime writes', async fault => {
+    const f = await fixture();
+    const release = await f.adapter.deploy(f.service, f.load(), f.environmentSpec.envVars, { preparedRelease: f.control });
+    expect(release.receipt.success).toBe(true);
+    const before = f.load();
+    const bound = completePreparedDirectRelease(before, release.receipt.data!.preparedRelease);
+    f.ctx.repos.environments.compareAndSwapPlatformBindings(before.id, before.platformBindings, bound);
+    const changed = structuredClone(f.load().platformBindings) as any;
+    if (fault === 'missing-binding') delete changed.services.web;
+    if (fault === 'missing-uid') delete changed.services.web.resourceUid;
+    if (fault === 'changed-uid') changed.services.web.resourceUid = 'replacement-uid';
+    if (fault === 'receipt') changed.preparedHosting.receiptDigest = '9'.repeat(64);
+    if (fault === 'scope') changed.projectId = 'another-project';
+    if (fault === 'uncertain') changed.preparedDirectReleaseAttempts.web.status = 'uncertain';
+    f.ctx.repos.environments.compareAndSwapPlatformBindings(f.environment.id, f.load().platformBindings, changed);
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: f.adapter as never });
+    if (fault === 'unknown') vi.spyOn(f.adapter.preparedHosting!, 'inspect').mockResolvedValue({ state: 'unknown' });
+    const result = await executeBootstrap({ projectName: f.project.name, environmentName: 'staging', services: ['web'], envVars: f.environmentSpec.envVars });
+    expect(result).toMatchObject({ success: false, summary: { blocked: true, error: expect.stringContaining('re-run hv_plan') } });
+    expect(JSON.stringify(result)).not.toContain('action=\"prepare\"');
+    expect(f.state.patches).toBe(1); expect(f.state.repeatEnvPatches).toBe(0);
+  });
+  it('updates a completed selected workload while preserving a pending sibling', async () => {
+    const f = await fixture();
+    const release = await f.adapter.deploy(f.service, f.load(), f.environmentSpec.envVars, { preparedRelease: f.control });
+    expect(release.receipt.success).toBe(true);
+    const before = f.load(), bound = completePreparedDirectRelease(before, release.receipt.data!.preparedRelease);
+    f.ctx.repos.environments.compareAndSwapPlatformBindings(before.id, before.platformBindings, bound);
+    const marker = structuredClone(f.load().platformBindings.preparedHosting);
+    const pending = f.receipt.preparedResources.workloads.find(item => item.workload === 'worker')!;
+    const pendingNative = structuredClone(f.native.services.get(pending.id));
+    f.state.nextImage = f.candidate.replace(/f{64}$/, 'b'.repeat(64));
+    const result = await executeBootstrap({ projectName: f.project.name, environmentName: 'staging', services: ['web'],
+      envVars: { ...f.environmentSpec.envVars, IMAGE_URI: f.state.nextImage } });
+    expect(result, JSON.stringify({ result, transportErrors: f.state.transportErrors })).toMatchObject({ success: true });
+    expect(f.load().platformBindings.preparedHosting).toEqual(marker);
+    expect(f.native.services.get(pending.id)).toEqual(pendingNative);
+    expect(f.state.patches).toBe(2);
+    const mixed = await executeBootstrap({ projectName: f.project.name, environmentName: 'staging', services: ['web', 'worker'], envVars: f.environmentSpec.envVars });
+    expect(mixed).toMatchObject({ success: false, summary: { blocked: true } });
+    expect(f.state.patches).toBe(2);
+  });
   it.each(['uid', 'etag', 'execution', 'execution-reference', 'missing', 'runtime-account'] as const)('rejects %s drift after reviewing migration job adoption', async drift => {
     const f = await fixture(undefined, false, false, true);
     f.state.loseCreateAcknowledgment = true;
