@@ -74,7 +74,7 @@ export function createPreparedDirectReleaseControl(input: {
       const before = entry[1], next = preparedDirectReleaseAttemptSchema.parse({ ...before, ...progress });
       if (before.rolloutAttempted || next.releaseTask && !before.target.releaseCommandHash) throw unavailable();
       if (progress.releaseTask) {
-        const phases = ['create-started', 'job-ready', 'run-started', 'run-acknowledged', 'completed'];
+        const phases = ['create-started', 'create-acknowledged', 'job-ready', 'run-started', 'run-acknowledged', 'completed'];
         if (phases.indexOf(progress.releaseTask.phase) !== (before.releaseTask ? phases.indexOf(before.releaseTask.phase) + 1 : 0)) throw unavailable();
         for (const [key, value] of Object.entries(before.releaseTask ?? {}))
           if (key !== 'phase' && progress.releaseTask[key as keyof typeof progress.releaseTask] !== value) throw unavailable();
@@ -106,9 +106,9 @@ export function reviewPreparedDirectReleaseActions(actions: PlanAction[], enviro
       ...(() => { const command = action.diff?.find(item => item.field === 'releaseCommand')?.to;
         return typeof command === 'string' && command.trim() ? { releaseCommandHash: hashEnvValue(command.trim()) } : {}; })() };
     if (attempt && ['attempted', 'uncertain'].includes(attempt.status) && !attempt.rolloutAttempted
-      && attempt.releaseTask && ['job-ready', 'run-acknowledged', 'completed'].includes(attempt.releaseTask.phase)
+      && attempt.releaseTask && ['create-acknowledged', 'job-ready', 'run-acknowledged', 'completed'].includes(attempt.releaseTask.phase)
       && isDeepStrictEqual(targetReview(attempt.target), review)) return { ...action, requiresConfirm: true,
-        reason: 'Continue the acknowledged release task by exact native readback, then roll out only after verified migration success. Never repeat a task create or execution.',
+        reason: 'Continue the recorded release task by exact native readback, then roll out only after verified migration success. Never repeat a task create or execution.',
         metadata: { ...action.metadata, preparedReleaseReview: review, preparedReleaseContinuation: attempt.id } };
     if (attempt && ['attempted', 'uncertain'].includes(attempt.status)) return { ...action, verified: false, requiresConfirm: false,
       reason: 'The first release has an unresolved native attempt. Only exact read-only recovery can establish completion; no repeat deployment is authorized.',

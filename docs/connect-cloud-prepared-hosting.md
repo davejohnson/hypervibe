@@ -96,7 +96,8 @@ The existing private first-release journal records each attempted mutation and
 acknowledged identity. After restart, a new confirmed continuation can observe
 the original acknowledged operation and finish rollout without another job create
 or execution. Unacknowledged creates/runs stay blocked; same-name resources are
-never adopted as proof. Failed execution is retained for investigation, not
+never treated as creation proof. A local unexecuted creation candidate may instead
+use the separately reviewed exact-identity adoption described below. Failed execution is retained for investigation, not
 automatically rerun or deleted. Task resources remain recorded for recovery and
 separately reviewed cleanup. A permission change during the absence check now
 stops before creation; that boundary regression also failed before correction.
@@ -209,6 +210,42 @@ Publication still needs owner approval. Publish to the reviewed public operator
 registry, observe its immutable manifest digest and anonymous pull availability,
 then configure that exact reference in Hypercloud. No image was published or
 configured in a live environment by this change.
+
+## Migration job acknowledgment and explicit adoption
+
+The approved 2026-11-01 disposable deployment created its migration Job but
+stopped before `jobs.run`: the native etag contained `/`, while Hypervibe accepted
+only a URL-safe alphabet. The [Job contract](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs)
+defines an opaque string fingerprint. A real transport regression using the recorded
+nonsecret token failed before the correction and passes with byte-preserving
+round-trip. A separate interrupted-create test failed because the journal retained
+only intent after receiving a trackable operation. The create operation name is now
+saved before polling; restart observes that operation and checks its returned UID
+against the ready job before any execution. Lost create replies remain unresolved.
+
+For historical intent-only records, the existing `hosting-prepared-bindings` plan
+can offer **explicit adoption**, not inferred creation acknowledgment. This is
+implemented only for local GCP holding preparations; AWS ECS, Azure Container Apps,
+DigitalOcean, Fly, Railway and Vercel do not declare this optional migration-job
+recovery. Their existing release paths are unchanged. The reviewed metadata action
+names the prior attempt, exact native job name, UID and etag. Native reads must
+verify the candidate image, command hash, runtime account, original generation,
+readiness and zero execution history. The action changes only local ownership
+metadata, preserves the uncertain attempt and pending release, and requires exact
+confirmation. Changed IDs, fingerprints, execution history, unavailable reads or
+concurrent local changes block it. Full runtime configuration is independently
+checked again by the subsequent separately reviewed deployment before the only run.
+A name match alone grants nothing. An uncertain execution can never use this path.
+
+The actual SQLite/plan/apply regression first failed to offer that metadata stage;
+it now covers missing confirmation, adoption without cloud writes, and continuation
+without another create. Additional drift cases exercise identity replacement,
+version change, execution, absence and runtime-account changes. Two independently
+constructed counterexamples also demonstrated execution of extra tasks or a changed
+working directory; verification now rejects both before `jobs.run`. The independent
+[container contract](https://docs.cloud.google.com/run/docs/reference/rest/v2/Container)
+and Job task-count contract define these executable inputs. These are offline
+regressions; live adoption, migration, seeding and application rollout remain pending.
 
 ## Local inline configuration custody
 

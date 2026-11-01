@@ -5,7 +5,7 @@ import type { EnvironmentSpec } from '../spec/spec.schema.js';
 import type { PlanAction } from '../plan/plan.types.js';
 import type { IHostingAdapter } from '../ports/hosting.port.js';
 import { preparedHostingBindingsSchema, preparedHostingMarkerSchema, preparedHostingReleaseEvidenceSchema,
-  preparedDirectReleaseEvidenceSchema, type PreparedHostingMarker, type PreparedHostingObservation, type PreparedHostingReleaseEvidence } from '../ports/hosting-prepared.port.js';
+  preparedReleaseTaskAdoptionSchema, preparedDirectReleaseEvidenceSchema, type PreparedHostingMarker, type PreparedHostingObservation, type PreparedHostingReleaseEvidence } from '../ports/hosting-prepared.port.js';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import type { Project } from '../entities/project.entity.js';
 import type { ProjectSpec } from '../spec/spec.schema.js';
@@ -30,7 +30,8 @@ export const HOSTING_PREPARED_OPERATION = 'hostingPreparedBindings';
 const unavailable = 'Installer-prepared hosting identity or pending release could not be verified. No binding or workload change is authorized.';
 export const preparedBindingFingerprint = canonicalJsonSha256;
 export const preparedHostingObservationSchema = z.object({ state: z.literal('verified'), bindings: preparedHostingBindingsSchema,
-  preparation: preparedHostingMarkerSchema, directReleaseEvidence: z.array(preparedDirectReleaseEvidenceSchema).min(1).max(50).optional() }).strict();
+  preparation: preparedHostingMarkerSchema, taskAdoptions: z.array(preparedReleaseTaskAdoptionSchema).min(1).max(50)
+    .refine(items => new Set(items.map(item => item.workload)).size === items.length).optional(), directReleaseEvidence: z.array(preparedDirectReleaseEvidenceSchema).min(1).max(50).optional() }).strict();
 export const preparedHostingActionMetadataSchema = z.object({ operation: z.literal(HOSTING_PREPARED_OPERATION),
   proof: preparedHostingObservationSchema.extend({ releaseEvidence: preparedHostingReleaseEvidenceSchema.optional() }),
   previousPreparation: preparedHostingMarkerSchema.optional(), beforeBindingsFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
@@ -79,6 +80,25 @@ export function mergePreparedHostingBindings(environment: Environment, spec: Env
     services[name] = { ...old, ...service };
   }
   let completed = before;
+  for (const adoption of proof.taskAdoptions ?? []) {
+    const attempts = preparedReleaseAttempts({ ...environment, platformBindings: completed }), attempt = attempts[adoption.workload];
+    if (!completed.localPreparedHosting || !attempt || attempt.id !== adoption.attemptId || attempt.rolloutAttempted
+      || !['attempted', 'uncertain'].includes(attempt.status) || !attempt.target.releaseCommandHash
+      || attempt.target.workload !== adoption.workload || attempt.target.installationId !== proof.preparation.installationId
+      || attempt.target.planDigest !== proof.preparation.planDigest || attempt.target.receiptDigest !== proof.preparation.receiptDigest
+      || attempt.target.resourceId !== next.services[adoption.workload]?.serviceId
+      || attempt.target.provider !== next.provider || attempt.target.projectId !== next.projectId || attempt.target.environmentId !== next.environmentId
+      || attempt.target.resourceUid !== next.services[adoption.workload]?.resourceUid
+      || attempt.target.configurationDigest !== proof.preparation.firstReleaseConfigurationDigests?.[adoption.workload]
+      || !proof.preparation.pendingFirstRelease.includes(adoption.workload) || attempt.releaseTask?.jobName !== adoption.jobName)
+      throw new Error(unavailable);
+    const task = { phase: 'job-ready' as const, jobName: adoption.jobName, jobUid: adoption.jobUid, jobEtag: adoption.jobEtag, adopted: true as const };
+    if (!isDeepStrictEqual(attempt.releaseTask, { phase: 'create-started', jobName: adoption.jobName })
+      && !isDeepStrictEqual(attempt.releaseTask, task)) throw new Error(unavailable);
+    // This separately confirmed metadata action grants ownership of the exact
+    // candidate. It does not turn the old uncertain create into an ACK or run it.
+    completed = { ...completed, preparedDirectReleaseAttempts: { ...attempts, [adoption.workload]: { ...attempt, releaseTask: task } } };
+  }
   for (const evidence of proof.directReleaseEvidence ?? []) {
     completed = completePreparedDirectRelease({ ...environment, platformBindings: completed }, evidence);
     if (next.services[evidence.target.workload]?.imageUri !== evidence.target.imageUri) throw new Error(unavailable);
@@ -143,7 +163,9 @@ export async function planPreparedHosting(input: PreparedHostingInput): Promise<
   if (isDeepStrictEqual(input.environment.platformBindings, after)) return null;
   return { id: `hosting-prepared:${input.environmentSpec.hosting.provider}:${input.environment.name}`, type: 'update', verified: true, requiresConfirm: true,
     resource: { kind: 'project', provider: input.environmentSpec.hosting.provider, name: input.environment.name },
-    reason: 'Record the exact administrator-prepared hosting resources and pending first releases without changing cloud resources.',
+    reason: proof.taskAdoptions?.length
+      ? 'Adopt the reviewed, never-executed migration job identities after an unacknowledged create. This records ownership only; a separate release plan must verify full runtime configuration before execution.'
+      : 'Record the exact administrator-prepared hosting resources and pending first releases without changing cloud resources.',
     metadata: { operation: HOSTING_PREPARED_OPERATION, proof,
       ...(proof.releaseEvidence || proof.directReleaseEvidence ? { previousPreparation: preparedHostingMarkerSchema.parse(input.environment.platformBindings.preparedHosting) } : {}),
       beforeBindingsFingerprint: preparedBindingFingerprint(input.environment.platformBindings),

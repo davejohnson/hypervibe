@@ -49,11 +49,12 @@ export const preparedDirectReleaseTargetSchema = z.object({ schemaVersion: z.lit
   releaseCommandHash: digest.optional(),
 }).strict();
 export const preparedReleaseTaskSchema = z.object({
-  phase: z.enum(['create-started', 'job-ready', 'run-started', 'run-acknowledged', 'completed']),
+  phase: z.enum(['create-started', 'create-acknowledged', 'job-ready', 'run-started', 'run-acknowledged', 'completed']),
   jobName: coordinate, jobUid: coordinate.optional(), jobEtag: coordinate.optional(),
-  operationName: coordinate.optional(), executionName: coordinate.optional(), executionUid: coordinate.optional(),
+  adopted: z.literal(true).optional(), createOperationName: coordinate.optional(), operationName: coordinate.optional(), executionName: coordinate.optional(), executionUid: coordinate.optional(),
 }).strict().superRefine((value, context) => {
-  if (value.phase !== 'create-started' && (!value.jobUid || !value.jobEtag)
+  if (!['create-started', 'create-acknowledged'].includes(value.phase) && (!value.jobUid || !value.jobEtag)
+    || value.phase === 'create-acknowledged' && !value.createOperationName
     || ['run-acknowledged', 'completed'].includes(value.phase) && !value.operationName
     || value.phase === 'completed' && (!value.executionName || !value.executionUid))
     context.addIssue({ code: 'custom', message: 'Release task progress requires its exact acknowledged native identities.' });
@@ -77,11 +78,16 @@ export interface PreparedDirectReleaseControl {
   settle(attemptId: string, status: 'rejected' | 'uncertain'): Promise<void>;
   checkpoint(attemptId: string, progress: { releaseTask?: PreparedReleaseTask; rolloutAttempted?: true }): Promise<void>;
 }
+/** Explicit ownership adoption, never an inferred creation acknowledgment. */
+export const preparedReleaseTaskAdoptionSchema = z.object({ workload: name, attemptId: z.string().guid(),
+  jobName: coordinate, jobUid: coordinate, jobEtag: coordinate }).strict();
+export type PreparedReleaseTaskAdoption = z.infer<typeof preparedReleaseTaskAdoptionSchema>;
 export interface PreparedHostingObservation {
   state: 'verified';
   bindings: PreparedHostingBindings;
   preparation: PreparedHostingMarker;
   directReleaseEvidence?: PreparedDirectReleaseEvidence[];
+  taskAdoptions?: PreparedReleaseTaskAdoption[];
 }
 export interface IPreparedHosting {
   /** Read-only native lifetime, ownership, holding/final rollout proof. Unknown never authorizes adoption.

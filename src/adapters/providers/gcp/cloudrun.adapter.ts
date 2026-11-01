@@ -86,7 +86,7 @@ import {
   cloudRunReleaseJobConfigurationMismatch,
   cloudRunReleaseCommandHash,
   cloudRunPreparedExecutionVerified,
-  cloudRunPreparedReleaseJobSpec,
+  cloudRunPreparedReleaseJobSpec, cloudRunUnexecutedReleaseJob,
 } from './cloudrun-release-command.js';
 
 // Credentials schema for self-registration
@@ -4652,10 +4652,31 @@ export class CloudRunAdapter implements
       if (input.readOnly) throw new Error('Release task acknowledgment is missing.');
       await checkpoint({ phase: 'create-started', jobName: jobResource });
       const { job } = await this.upsertCloudRunJob({ token, jobName, jobSpec, description: 'prepared release command', bindingAuthority: 'unbound',
-        onCreateAttempt: async () => { await control.read(target); } });
-      if (!job.uid || !/^[a-zA-Z0-9-]{1,128}$/.test(job.uid) || !job.etag || !/^[a-zA-Z0-9_="-]{1,256}$/.test(job.etag)) throw new Error('Native release job identity is unverified.');
+        onCreateAttempt: async () => { await control.read(target); },
+        onCreateOperation: async createOperationName => {
+          await checkpoint({ phase: 'create-acknowledged', jobName: jobResource, createOperationName });
+        } });
+      // A provider etag is an opaque fingerprint. Preserve its bytes, including
+      // quotes, slashes and padding, rather than imposing a URL-safe alphabet.
+      if (!job.uid || !/^[a-zA-Z0-9-]{1,128}$/.test(job.uid) || typeof job.etag !== 'string' || !job.etag || job.etag.length > 2048)
+        throw new Error('Native release job identity is unverified.');
       this.assertReleaseJobConfiguration(job, jobName, jobSpec);
-      await checkpoint({ phase: 'job-ready', jobName: jobResource, jobUid: job.uid, jobEtag: job.etag });
+      await checkpoint({ ...progress!, phase: 'job-ready', jobName: jobResource, jobUid: job.uid, jobEtag: job.etag });
+    } else if (progress.phase === 'create-acknowledged') {
+      if (input.readOnly || progress.jobName !== jobResource) throw new Error('Release task continuation is not authorized.');
+      const prefix = `projects/${target.projectId}/locations/${target.environmentId}/operations/`;
+      if (!progress.createOperationName?.startsWith(prefix) || !/^[a-zA-Z0-9-]+$/.test(progress.createOperationName.slice(prefix.length)))
+        throw new Error('Release create operation identity is unverified.');
+      const response = await this.request(`https://run.googleapis.com/v2/${progress.createOperationName}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!response.ok) throw new Error('Release create operation is unavailable.');
+      const operation = await response.json() as CloudRunOperation;
+      if (operation.name !== progress.createOperationName) throw new Error('Release create operation identity changed.');
+      const completed = await this.waitForCloudRunOperation(token, operation, 'prepared release command create', jobResource);
+      const job = await this.waitForCloudRunJobReady(jobName, token);
+      if (!job.uid || job.uid !== completed.response?.uid || !/^[a-zA-Z0-9-]{1,128}$/.test(job.uid)
+        || typeof job.etag !== 'string' || !job.etag || job.etag.length > 2048) throw new Error('Native release job identity is unverified.');
+      this.assertReleaseJobConfiguration(job, jobName, jobSpec);
+      await checkpoint({ ...progress, phase: 'job-ready', jobUid: job.uid, jobEtag: job.etag });
     }
     if (!progress || progress.jobName !== jobResource || ['create-started', 'run-started'].includes(progress.phase))
       throw new Error('Release task acknowledgment is unresolved; no resubmission is authorized.');
@@ -4664,6 +4685,7 @@ export class CloudRunAdapter implements
     if (progress.phase === 'job-ready') {
       if (input.readOnly || job.etag !== progress.jobEtag) throw new Error('Release task continuation is not authorized.');
       this.assertReleaseJobConfiguration(job, jobName, jobSpec);
+      if (progress.adopted && !cloudRunUnexecutedReleaseJob(job, jobResource)) throw new Error('The adopted release job has changed or already executed.');
       await checkpoint({ ...progress, phase: 'run-started' });
       const response = await this.request(`https://run.googleapis.com/v2/${jobResource}:run`, { method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ etag: job.etag }) });
@@ -6224,6 +6246,7 @@ export class CloudRunAdapter implements
     bindingAuthority?: 'bound' | 'unbound';
     onCreateAttempt?: () => void | Promise<void>;
     onCreateAccepted?: (identity: { name: string; uid?: string }) => void;
+    onCreateOperation?: (operationName: string) => Promise<void>;
     expectedUid?: string;
   }): Promise<{ created: boolean; job: CloudRunJob }> {
     if (!this.credentials) {
@@ -6291,10 +6314,16 @@ export class CloudRunAdapter implements
     }
 
     const operation = await upsertResponse.json() as CloudRunOperation;
+    if (creatingJob && params.onCreateOperation) {
+      const prefix = `projects/${projectId}/locations/${region}/operations/`;
+      if (!operation.name?.startsWith(prefix) || !/^[a-zA-Z0-9-]+$/.test(operation.name.slice(prefix.length)))
+        throw new Error('Release create operation identity is unverified.');
+      await params.onCreateOperation(operation.name);
+    }
     if (creatingJob && operation.response?.name === expectedJobName) {
       params.onCreateAccepted?.({ name: expectedJobName });
     }
-    await this.waitForCloudRunOperation(
+    const completedOperation = await this.waitForCloudRunOperation(
       params.token,
       operation,
       `${params.description} ${creatingJob ? 'create' : 'update'}`,
@@ -6305,6 +6334,8 @@ export class CloudRunAdapter implements
     if (job.name !== jobResourceName) {
       throw new Error(`Cloud Run ${params.description} became ready with a different resource identity.`);
     }
+    if (creatingJob && params.onCreateOperation && (!completedOperation.response?.uid || job.uid !== completedOperation.response.uid))
+      throw new Error('Created release job lifetime changed before readback.');
     if (params.expectedUid && job.uid !== params.expectedUid) {
       throw new Error(`Cloud Run ${params.description} became ready with a different resource UID.`);
     }
@@ -6741,7 +6772,7 @@ export class CloudRunAdapter implements
     operation: CloudRunOperation,
     description: string,
     expectedResponseName?: string
-  ): Promise<void> {
+  ): Promise<CloudRunOperation> {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }
@@ -6768,7 +6799,7 @@ export class CloudRunAdapter implements
         if (expectedResponseName && current.response?.name !== expectedResponseName) {
           throw new Error(`Cloud Run ${description} operation returned a different resource identity.`);
         }
-        return;
+        return current;
       }
 
       await new Promise((resolve) => setTimeout(resolve, 1000));

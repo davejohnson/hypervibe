@@ -59,7 +59,7 @@ const applicationConfiguration = {
       resources: { limits: { cpu: '1', memory: '512Mi' }, cpuIdle: true, startupCpuBoost: false },
       startupProbe: { tcpSocket: { port: 8080 }, periodSeconds: 240, timeoutSeconds: 240, failureThreshold: 1 } }] },
 };
-function fixture(options: { revokeBeforeJobCreate?: boolean; releaseCommand?: boolean; jobOutcome?: 'success' | 'failed' | 'lost-run' | 'lost-create' | 'pending-ack'; bounds?: boolean; secretCreateTime?: string; finalResponse?: (value: any) => any; rejectWrite?: boolean; loseAcknowledgment?: boolean; operationError?: string } = {}) {
+function fixture(options: { revokeBeforeJobCreate?: boolean; releaseCommand?: boolean; jobOutcome?: 'success' | 'failed' | 'lost-run' | 'lost-create' | 'pending-ack' | 'pending-create'; bounds?: boolean; secretCreateTime?: string; finalResponse?: (value: any) => any; rejectWrite?: boolean; loseAcknowledgment?: boolean; operationError?: string } = {}) {
   const expectedApplication = { ingress: applicationConfiguration.ingress, invokerIamDisabled: false,
     ...(options.bounds ? { scaling: { scalingMode: 'AUTOMATIC', minInstanceCount: 0, maxInstanceCount: 1 } } : {}),
     template: applicationConfiguration.template };
@@ -113,6 +113,7 @@ function fixture(options: { revokeBeforeJobCreate?: boolean; releaseCommand?: bo
   let jobCreated = false;
   let authorized = true;
   let operationReads = 0;
+  let createOperationReads = 0;
   const token = 'synthetic-prepared-token';
   const request = vi.fn(async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = String(input), method = init.method ?? 'GET';
@@ -132,6 +133,10 @@ function fixture(options: { revokeBeforeJobCreate?: boolean; releaseCommand?: bo
     if (url === `${secret}/versions/7`) return Response.json({ name: `projects/${projectNumber}/secrets/production-api/versions/7`, state: 'ENABLED' });
     if (url === `${secret}:getIamPolicy?options.requestedPolicyVersion=3`) return Response.json({ etag: 'reader-policy', bindings: [
       { role: 'roles/secretmanager.secretAccessor', members: [`serviceAccount:${runtime.serviceAccountEmail}`] }] });
+    if (url.endsWith('/operations/migration-create') && method === 'GET') {
+      if (options.jobOutcome === 'pending-create' && ++createOperationReads === 1) throw new Error('Synthetic interruption observing acknowledged create');
+      return Response.json({ name: `projects/${projectId}/locations/${region}/operations/migration-create`, done: true, response: job });
+    }
     if (url.endsWith('/operations/migration-run') && method === 'GET') {
       if (options.jobOutcome === 'pending-ack' && ++operationReads === 1) throw new Error('Synthetic interruption observing acknowledged operation');
       return Response.json({ name: `projects/${projectId}/locations/${region}/operations/migration-run`, done: true, response: execution });
@@ -159,6 +164,7 @@ function fixture(options: { revokeBeforeJobCreate?: boolean; releaseCommand?: bo
         }
         jobCreated = true;
         if (options.jobOutcome === 'lost-create') throw new Error('Synthetic lost job creation acknowledgment');
+        if (options.jobOutcome === 'pending-create') return Response.json({ name: `projects/${projectId}/locations/${region}/operations/migration-create`, done: false });
         return Response.json({ name: `projects/${projectId}/locations/${region}/operations/migration-create`, done: true, response: job });
       }
     }
@@ -197,6 +203,38 @@ function fixture(options: { revokeBeforeJobCreate?: boolean; releaseCommand?: bo
 }
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 describe('prepared Cloud Run first application release', () => {
+  it('preserves the opaque version token returned by a real Cloud Run Job', async () => {
+    const f = fixture({ releaseCommand: true }), adapter = await f.create();
+    // Recorded nonsecret etag from the approved disposable deployment, 2026-11-01.
+    // Google documents a string fingerprint, not a URL-safe alphabet. Other
+    // response fields here are reconstructed fixtures, not live evidence.
+    f.job.etag = '"CMqOmtcGELDv6bgC/cHJvamVjdHMvaHYtaHlwZXJjbG91ZC1jb25uZWMtYmNhNGU3NDMvbG9jYXRpb25zL3VzLWNlbnRyYWwxL2pvYnMvd2ViLWZhZGE4NmE3ODYtbWlncmF0aW9u"';
+    const result = await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control });
+    expect(result.receipt.success).toBe(true);
+    expect(f.taskWrites[1]!.body).toEqual({ etag: f.job.etag });
+  });
+  it.each(['task-count', 'working-directory'] as const)('does not run an unreviewed %s in the returned job', async drift => {
+    const f = fixture({ releaseCommand: true }), adapter = await f.create();
+    if (drift === 'task-count') Object.assign(f.job.template, { taskCount: 2 });
+    else Object.assign(f.job.template.template.containers[0], { workingDir: '/unreviewed' });
+    expect((await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control })).receipt.success).toBe(false);
+    expect(f.taskWrites).toHaveLength(1); expect(f.writes).toEqual([]);
+  });
+  it('retains an acknowledged create across interruption and observes it before the only run', async () => {
+    const f = fixture({ releaseCommand: true, jobOutcome: 'pending-create' }), first = await f.create();
+    const values = { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' };
+    expect((await first.deploy(f.service, f.environment, values,
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.control })).receipt.success).toBe(false);
+    expect(f.environment.platformBindings.preparedDirectReleaseAttempts.web.releaseTask).toMatchObject({
+      phase: 'create-acknowledged', createOperationName: `projects/${projectId}/locations/${region}/operations/migration-create` });
+    expect(f.taskWrites).toHaveLength(1); expect(f.writes).toEqual([]);
+    const restarted = await f.create();
+    expect((await restarted.deploy(f.service, f.environment, values,
+      { secretVersionRefs: { API_TOKEN: reference }, preparedRelease: f.makeControl('continuation-plan') })).receipt.success).toBe(true);
+    expect(f.taskWrites).toHaveLength(2); expect(f.writes).toHaveLength(1);
+  });
   it('seeds through the retained migration job using its current update and execution preconditions', async () => {
     const f = fixture({ releaseCommand: true }), adapter = await f.create();
     const deployed = await adapter.deploy(f.service, f.environment, { IMAGE_URI: candidateImage, SETTING: 'reviewed-nonsecret' },

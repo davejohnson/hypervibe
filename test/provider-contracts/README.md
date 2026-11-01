@@ -8,6 +8,11 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+Prepared Cloud Run migration regressions include the recorded native opaque etag,
+create-operation restart recovery, and separately confirmed intent-only job adoption
+through the actual local SQLite/plan/apply boundary. See the [evidence and provider
+limits](../../docs/connect-cloud-prepared-hosting.md#migration-job-acknowledgment-and-explicit-adoption).
+
 Incomplete database creation uses the optional capability reviewed in
 `database-provisioning-provider-matrix.json`. Normal acceptance checks the entire
 database registry, reconstructed Cloud SQL operation transport, and real SQLite

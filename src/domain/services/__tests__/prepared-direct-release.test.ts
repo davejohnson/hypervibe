@@ -55,12 +55,13 @@ describe('prepared direct release durable authority', () => {
     const control = f.control(), attempt = await control.begin(commandTarget);
     await expect(control.checkpoint(attempt.id, { rolloutAttempted: true })).rejects.toThrow();
     await control.checkpoint(attempt.id, { releaseTask: { phase: 'create-started', jobName: 'exact-job' } });
+    await control.checkpoint(attempt.id, { releaseTask: { phase: 'create-acknowledged', jobName: 'exact-job', createOperationName: 'exact-create' } });
     await expect(control.checkpoint(attempt.id, { releaseTask: { phase: 'job-ready', jobName: 'different-job', jobUid: 'uid', jobEtag: 'etag' } })).rejects.toThrow();
-    await control.checkpoint(attempt.id, { releaseTask: { phase: 'job-ready', jobName: 'exact-job', jobUid: 'uid', jobEtag: 'etag' } });
+    await control.checkpoint(attempt.id, { releaseTask: { phase: 'job-ready', jobName: 'exact-job', createOperationName: 'exact-create', jobUid: 'uid', jobEtag: 'etag' } });
     await control.settle(attempt.id, 'uncertain');
     const [review] = reviewPreparedDirectReleaseActions([f.action], f.load(), { web: target.imageUri });
     expect(review?.metadata?.preparedReleaseContinuation).toBe(attempt.id);
-    const next = { releaseTask: { phase: 'run-started' as const, jobName: 'exact-job', jobUid: 'uid', jobEtag: 'etag' } };
+    const next = { releaseTask: { phase: 'run-started' as const, jobName: 'exact-job', createOperationName: 'exact-create', jobUid: 'uid', jobEtag: 'etag' } };
     await expect(f.control('plan-2', review, false).checkpoint(attempt.id, next)).rejects.toThrow();
     await f.control('plan-2', review).checkpoint(attempt.id, next);
     await expect(f.control('plan-2', review).checkpoint(attempt.id, next)).rejects.toThrow();

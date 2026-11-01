@@ -33,6 +33,7 @@ export function cloudRunMigrationJobName(serviceName: string): string {
 type CloudRunReleaseJobShape = {
   name?: string;
   template?: {
+    taskCount?: number;
     template?: {
       containers?: Array<Record<string, unknown>>;
       volumes?: Array<Record<string, unknown>>;
@@ -91,6 +92,7 @@ export function cloudRunReleaseJobConfigurationMismatch(
   const observed = observedValue as CloudRunReleaseJobShape;
   const expectedSpec = expectedValue as CloudRunReleaseJobShape;
   if (observed.name !== expectedResourceName) return 'resource identity';
+  if ((observed.template?.taskCount ?? 1) !== (expectedSpec.template?.taskCount ?? 1)) return 'task count';
   const actualTask = observed.template?.template;
   const expectedTask = expectedSpec.template?.template;
   if (!actualTask || !expectedTask) return 'task';
@@ -99,6 +101,10 @@ export function cloudRunReleaseJobConfigurationMismatch(
   }
   const actualContainer = actualTask.containers[0]!;
   const expectedContainer = expectedTask.containers[0]!;
+  for (const field of ['workingDir', 'sourceCode', 'ports', 'livenessProbe', 'startupProbe', 'readinessProbe', 'dependsOn', 'baseImageUri', 'sandboxLauncher']) {
+    const value = actualContainer[field];
+    if (value !== undefined && value !== '' && value !== false && !(Array.isArray(value) && value.length === 0)) return `container ${field}`;
+  }
   for (const field of ['image', 'command', 'args'] as const) {
     if (!same(actualContainer[field], expectedContainer[field])) return `container ${field}`;
   }
@@ -145,4 +151,21 @@ export function cloudRunPreparedReleaseJobSpec(configuration: GcpPreparedApplica
     resources: { limits: container.resources.limits }, ...(container.volumeMounts ? { volumeMounts: container.volumeMounts } : {}) }],
     serviceAccount: configuration.template.serviceAccount, ...(configuration.template.volumes ? { volumes: configuration.template.volumes } : {}),
     maxRetries: 0, timeout: '3600s' } } };
+}
+
+/** Provider defaults are not an execution receipt. This bounded read proves only
+ * that an exact job is ready and reports no prior execution; ownership adoption
+ * needs its own reviewed metadata action, and jobs.run still needs release authority.
+ * Job.executionCount, latestCreatedExecution and ExecutionTemplate.taskCount:
+ * https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs
+ */
+export function cloudRunUnexecutedReleaseJob(value: unknown, expectedName: string): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const job = value as Record<string, any>;
+  return job.name === expectedName && typeof job.uid === 'string' && /^[a-zA-Z0-9-]{1,128}$/.test(job.uid)
+    && typeof job.etag === 'string' && job.etag.length > 0 && job.etag.length <= 2048
+    && job.generation === '1' && job.observedGeneration === '1' && (job.reconciling ?? false) === false
+    && job.terminalCondition?.state === 'CONDITION_SUCCEEDED' && (job.executionCount ?? 0) === 0
+    && job.latestCreatedExecution === undefined && !job.startExecutionToken && !job.runExecutionToken && !job.deleteTime
+    && (job.template?.taskCount ?? 1) === 1 && [0, 1].includes(job.template?.parallelism ?? 0);
 }

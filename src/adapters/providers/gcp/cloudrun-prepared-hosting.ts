@@ -1,7 +1,7 @@
 import type { CloudDeploymentConnectionV1, CloudDeploymentSourceAuthorizationV1 } from '../../../domain/ports/cloud-deployment.port.js';
 import { cloudDeploymentEffectiveSourceV1 } from '../../../domain/services/cloud-deployment-authentication.js';
 import { preparedHostingMarkerSchema, preparedHostingReleaseEvidenceSchema, type IPreparedHosting, type PreparedHostingBindings, type LocalPreparedHostingLoader,
-  type PreparedDirectReleaseEvidence } from '../../../domain/ports/hosting-prepared.port.js';
+  type PreparedDirectReleaseEvidence, type PreparedReleaseTaskAdoption } from '../../../domain/ports/hosting-prepared.port.js';
 import { createGcpCloudDeploymentDriver, parseGcpPreparedResources } from './gcp-cloud-deployment.js';
 import { gcpPreparedApplicationConfiguration, gcpPreparedApplicationDigest, gcpObservedPreparedApplicationConfiguration } from './gcp-prepared-release.js';
 import type { ProjectSpec } from '../../../domain/spec/spec.schema.js';
@@ -11,7 +11,7 @@ import { preparedReleaseAttempts } from '../../../domain/services/prepared-direc
 import { runtimeSecretReferenceSchema } from '../../../domain/ports/secret-destination.port.js';
 import { parseHostingBindings } from '../../../domain/ports/hosting.port.js';
 import { gcpHoldingConfigurationDigest, gcpObservedHoldingConfiguration } from './gcp-prepared-hosting.js';
-import { CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION, cloudRunPreparedExecutionVerified, cloudRunPreparedReleaseJobSpec, cloudRunReleaseCommandHash } from './cloudrun-release-command.js';
+import { CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION, cloudRunMigrationJobName, cloudRunUnexecutedReleaseJob, cloudRunPreparedExecutionVerified, cloudRunPreparedReleaseJobSpec, cloudRunReleaseCommandHash } from './cloudrun-release-command.js';
 
 /** Native read proof for the isolated local metadata frontier. It never adopts
  * or writes cloud resources, and holding readiness is not app convergence. */
@@ -42,6 +42,7 @@ export class CloudRunPreparedHosting implements IPreparedHosting {
         : await readGcpLocalPreparedResources(receipt, await this.token(), AbortSignal.timeout(30000), this.request);
       const pending = previous ? [...previous.pendingFirstRelease] : prepared.workloads.map(item => item.workload);
       const configurations: Record<string, string> = {}, services: PreparedHostingBindings['services'] = {};
+      const taskAdoptions: PreparedReleaseTaskAdoption[] = [];
       const directReleaseEvidence: PreparedDirectReleaseEvidence[] = [], attempts = preparedReleaseAttempts(environment);
       for (const item of prepared.workloads) {
         const workload = connection.deployment.workloads.find(value => value.name === item.workload)!;
@@ -67,6 +68,28 @@ export class CloudRunPreparedHosting implements IPreparedHosting {
         }
         if (!pending.includes(item.workload) && holding) return { state: 'unknown' };
         const attempt = attempts[item.workload];
+        if (holding && receipt.purpose === 'local-holding' && attempt && ['attempted', 'uncertain'].includes(attempt.status)
+          && !attempt.rolloutAttempted && attempt.target.releaseCommandHash && attempt.releaseTask
+          && (attempt.releaseTask.phase === 'create-started' || attempt.releaseTask.phase === 'job-ready' && attempt.releaseTask.adopted)) {
+          const jobName = `projects/${connection.nativeScope.projectId}/locations/${connection.deployment.region}/jobs/${cloudRunMigrationJobName(item.id.split('/').at(-1)!)}`;
+          if (attempt.releaseTask.jobName !== jobName || attempt.target.resourceUid !== item.lifetimeId) return { state: 'unknown' };
+          const response = await this.request(`https://run.googleapis.com/v2/${jobName}`, {
+            headers: { Authorization: `Bearer ${await this.token()}` }, redirect: 'error', signal: AbortSignal.timeout(30000) });
+          if (!response.ok) return { state: 'unknown' };
+          const job = await response.json() as any, container = job.template?.template?.containers?.[0];
+          if (!cloudRunUnexecutedReleaseJob(job, jobName) || job.template.template.containers.length !== 1
+            || job.template.template.serviceAccount !== runtime.serviceAccountEmail || container?.image !== attempt.target.imageUri
+            || JSON.stringify(container.command) !== '["/bin/sh"]' || !Array.isArray(container.args) || container.args.length !== 2
+            || container.args[0] !== '-lc' || typeof container.args[1] !== 'string'
+            || cloudRunReleaseCommandHash(container.args[1]) !== attempt.target.releaseCommandHash) return { state: 'unknown' };
+          const executions = await this.request(`https://run.googleapis.com/v2/${jobName}/executions?pageSize=1`, {
+            headers: { Authorization: `Bearer ${await this.token()}` }, redirect: 'error', signal: AbortSignal.timeout(30000) });
+          if (!executions.ok) return { state: 'unknown' };
+          const inventory = await executions.json() as any;
+          if (!inventory || typeof inventory !== 'object' || Array.isArray(inventory) || inventory.nextPageToken
+            || inventory.executions !== undefined && (!Array.isArray(inventory.executions) || inventory.executions.length)) return { state: 'unknown' };
+          taskAdoptions.push({ workload: item.workload, attemptId: attempt.id, jobName, jobUid: job.uid, jobEtag: job.etag });
+        }
         if (!holding && attempt?.target.releaseCommandHash) {
           const task = attempt.releaseTask;
           if (task?.phase !== 'completed' || !attempt.rolloutAttempted
@@ -122,7 +145,7 @@ export class CloudRunPreparedHosting implements IPreparedHosting {
           projectId: connection.nativeScope.projectId, region: connection.deployment.region,
           artifactRepository: prepared.registry.id.split('/').at(-1)!, artifactRepositoryCreateTime: prepared.registry.lifetimeId }, services },
       preparation: { schemaVersion: 1, installationId: connection.installationId, planDigest: connection.planDigest, receiptDigest,
-        pendingFirstRelease: pending, firstReleaseConfigurationDigests: configurations }, ...(directReleaseEvidence.length ? { directReleaseEvidence } : {}) };
+        pendingFirstRelease: pending, firstReleaseConfigurationDigests: configurations }, ...(directReleaseEvidence.length ? { directReleaseEvidence } : {}), ...(taskAdoptions.length ? { taskAdoptions } : {}) };
     } catch { return { state: 'unknown' }; }
   }
 }

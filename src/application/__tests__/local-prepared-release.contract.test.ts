@@ -53,7 +53,7 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
     ...(nativeReference ? [{ name: 'NATIVE_TOKEN', valueSource: { secretKeyRef: { secret: 'projects/123456789012/secrets/native-token', version: '7' } } }] : [])].sort((a, b) => a.name.localeCompare(b.name));
   const adc = join(directory, 'synthetic-adc.json'); writeFileSync(adc, JSON.stringify({ type: 'authorized_user', client_id: 'synthetic-client', client_secret: 'synthetic-client-secret', refresh_token: 'synthetic-refresh' }), { mode: 0o600 });
   vi.stubEnv('GOOGLE_APPLICATION_CREDENTIALS', adc);
-  const state = { loseAcknowledgment: false, actAs: true, patches: 0, patchRequests: 0, generatedDisappears: false, finalObservations: 0, transportErrors: [] as string[] };
+  const state = { loseCreateAcknowledgment: false, loseAcknowledgment: false, actAs: true, patches: 0, patchRequests: 0, generatedDisappears: false, finalObservations: 0, transportErrors: [] as string[] };
   const web = receipt.preparedResources.workloads.find(item => item.workload === 'web')!;
   const final = receipt.runtimeIdentities.find(item => item.workload === 'web')!.principal;
   if (final.kind !== 'gcp-service-account') throw new Error('Expected independently prepared native account');
@@ -88,12 +88,14 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
       return Response.json({ services: [...f.native.services.values()] });
     }
     if (migration && url.hostname === 'run.googleapis.com') {
+      if (url.pathname === `/v2/${jobResource}/executions`) return Response.json({ executions: taskState.runs ? [execution] : [] });
       if (url.pathname === `/v2/${execution.name}`) return Response.json(execution);
       if (url.pathname === `/v2/${jobResource}` && (!init.method || init.method === 'GET'))
         return taskState.creates ? Response.json(job) : Response.json({}, { status: 404 });
       if (url.pathname.endsWith('/jobs') && init.method === 'POST') {
         taskState.creates++;
         expect(JSON.parse(String(init.body)).template.template).toEqual(task);
+        if (state.loseCreateAcknowledgment) throw new Error('Synthetic lost create acknowledgment');
         return Response.json({ name: 'projects/operator-project/locations/us-central1/operations/create-migration', done: true, response: job });
       }
       if (url.pathname === `/v2/${jobResource}:run` && init.method === 'POST') {
@@ -107,7 +109,7 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
     if (url.hostname === 'run.googleapis.com' && target && init.method === 'PATCH') {
       if (migration) expect(taskState).toEqual({ creates: 1, runs: 1 });
       state.patchRequests++;
-      expect((load().platformBindings.preparedDirectReleaseAttempts as any)[target.workload].status).toBe('attempted'); state.patches++;
+      expect((load().platformBindings.preparedDirectReleaseAttempts as any)[target.workload].status).toMatch(/^(attempted|uncertain)$/); state.patches++;
       const before = f.native.services.get(target.id)!;
       const principal = receipt.runtimeIdentities.find(item => item.workload === target.workload)!.principal;
       if (principal.kind !== 'gcp-service-account') throw new Error('Expected runtime identity');
@@ -147,9 +149,52 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
     action: reviewPreparedDirectReleaseActions([{ id: 'service:web', type: 'update', verified: true, requiresConfirm: true, resource: { kind: 'service', provider: 'cloudrun', name: 'web' }, reason: 'Reviewed local first release',
       ...(migration ? { diff: [{ field: 'releaseCommand', to: migrationCommand }] } : {}) }], load(), { web: candidate })[0]!,
     load, save: (before, next) => !!f.ctx.repos.environments.compareAndSwapPlatformBindings(before.id, before.platformBindings, next), authorize: () => true });
-  return { ...f, load, receipt, adapter, service, control, state, candidate, environmentSpec, expectedRuntime, managedSecretValues, metadata, taskState, execution };
+  return { ...f, load, receipt, adapter, service, control, state, candidate, environmentSpec, expectedRuntime, managedSecretValues, metadata, taskState, execution, job };
 }
 describe('local journal-backed prepared application release', () => {
+  it.each(['uid', 'etag', 'execution', 'missing', 'runtime-account'] as const)('rejects %s drift after reviewing migration job adoption', async drift => {
+    const f = await fixture(undefined, false, false, true);
+    f.state.loseCreateAcknowledgment = true;
+    await f.adapter.deploy(f.service, f.load(), { ...f.expectedRuntime, IMAGE_URI: f.candidate }, { preparedRelease: f.control });
+    const plan = await new PlanService().plan(f.project, 'staging');
+    if ('error' in plan) throw new Error(plan.error);
+    expect(plan.scope).toBe('hosting-prepared-bindings');
+    const before = f.load().platformBindings;
+    if (drift === 'uid') f.job.uid = 'replacement-uid';
+    if (drift === 'etag') f.job.etag = 'changed-etag';
+    if (drift === 'execution') f.taskState.runs = 1;
+    if (drift === 'missing') f.taskState.creates = 0;
+    if (drift === 'runtime-account') f.job.template.template.serviceAccount = 'unreviewed@operator-project.iam.gserviceaccount.com';
+    const counts = { ...f.taskState };
+    expect(await f.apply(plan.planRunId, plan.actions.map(action => action.id))).toMatchObject({ kind: 'executed', result: { success: false } });
+    expect(f.load().platformBindings).toEqual(before); expect(f.taskState).toEqual(counts); expect(f.state.patches).toBe(0);
+  });
+  it('requires explicit exact-identity adoption of an unacknowledged job before a new reviewed release can run it', async () => {
+    const f = await fixture(undefined, false, false, true);
+    f.state.loseCreateAcknowledgment = true;
+    expect((await f.adapter.deploy(f.service, f.load(), { ...f.expectedRuntime, IMAGE_URI: f.candidate }, { preparedRelease: f.control })).receipt.success).toBe(false);
+    expect(f.taskState).toEqual({ creates: 1, runs: 0 });
+    const before = f.load().platformBindings;
+    const plan = await new PlanService().plan(f.project, 'staging');
+    if ('error' in plan) throw new Error(plan.error);
+    expect(plan.scope).toBe('hosting-prepared-bindings');
+    expect(plan.blocked).toEqual([]);
+    expect(plan.actions).toHaveLength(1);
+    expect(plan.actions[0].reason).toContain('Adopt');
+    expect((await f.apply(plan.planRunId, []))).toMatchObject({ kind: 'executed', result: { success: false } });
+    expect(f.load().platformBindings).toEqual(before);
+    expect(await f.apply(plan.planRunId, plan.actions.map(action => action.id))).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(f.taskState).toEqual({ creates: 1, runs: 0 }); expect(f.state.patches).toBe(0);
+    expect((f.load().platformBindings.preparedDirectReleaseAttempts as any).web.releaseTask).toMatchObject({ phase: 'job-ready', adopted: true, jobUid: f.job.uid, jobEtag: f.job.etag });
+    for (let phase = 0; phase < 5; phase++) {
+      const next = await new PlanService().plan(f.project, 'staging');
+      if ('error' in next) throw new Error(next.error);
+      expect(next.blocked).toEqual([]);
+      expect(await f.apply(next.planRunId, next.actions.filter(a => a.requiresConfirm).map(a => a.id))).toMatchObject({ kind: 'executed', result: { success: true } });
+      if (f.state.patches === 2) break;
+    }
+    expect(f.state.patches).toBe(2); expect(f.taskState).toEqual({ creates: 1, runs: 1 });
+  });
   it.each([false, true])('deploys and accepts an immutable native reference through its actual first-release plan with drift=%s', async drift => {
     // Observed live on 2026-11-01: the planner added preparedReleaseBinding,
     // then the strict apply schema rejected that same metadata before rollout.
