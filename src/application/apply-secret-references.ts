@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { CommandContext } from './context.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
-import type { ProjectSpec } from '../domain/spec/spec.schema.js';
+import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { ActionResult } from '../domain/plan/converge.executor.js';
 import type { ObservedState } from '../domain/ports/observe.port.js';
@@ -14,6 +14,28 @@ import { planSecretReference, referenceState, secretReferencesForEnvironment,
 import { syncHostingEnvVars } from '../domain/services/hosting-env.service.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { recordRuntimeRolloutRequirements } from '../domain/services/runtime-rollout.service.js';
+import { preparedReleaseAttempts } from '../domain/services/prepared-direct-release.service.js';
+
+/** Both value and native-reference acceptance require the original completed
+ * release and fresh provider proof. The marker never authorizes a secret write. */
+export async function preparedSecretReleaseError(input: { ctx: CommandContext; project: Project; environment: Environment;
+  environmentSpec: EnvironmentSpec; services: string[]; actions: PlanAction[]; planId: string }): Promise<string | undefined> {
+  const { ctx, project, environment, environmentSpec, services, actions, planId } = input;
+  const attempts = preparedReleaseAttempts(environment);
+  if (!environment.platformBindings.localPreparedHosting || services.some(name => {
+    const attempt = attempts[name], serviceAction = actions.find(candidate => candidate.id === `service:${name}`);
+    return !attempt || attempt.status !== 'completed' || attempt.actionId !== serviceAction?.id
+      || serviceAction.type !== 'noop' && (attempt.planRunId !== planId
+        || !serviceAction.metadata?.preparedReleaseReview
+        || attempt.target.imageUri !== (serviceAction.metadata.preparedReleaseReview as Record<string, unknown>).imageUri);
+  })) return 'Managed secret acceptance requires every exact completed first-release action from this reviewed plan.';
+  const hosting = await ctx.adapterFactory.getHostingAdapter(project, environment.name);
+  const native = await hosting.adapter?.preparedHosting?.inspect({ environment, environmentSpec });
+  if (!hosting.success || native?.state !== 'verified' || services.some(name =>
+    !native.directReleaseEvidence?.some(evidence => evidence.attemptId === attempts[name]?.id
+      && isDeepStrictEqual(evidence.target, attempts[name]?.target))))
+    return 'The exact completed first revisions could not be reverified before managed secret acceptance.';
+}
 
 function identityError(environment: Environment, observed: ObservedState | null, services: string[], creating: ReadonlySet<string> = new Set()): string | undefined {
   const bindings = parseHostingBindings(environment);
@@ -40,7 +62,9 @@ function validateAction(spec: ProjectSpec, environment: Environment, action: Pla
     return 'The reviewed secret reference is not authorized by current desired state.';
   const current = planSecretReference({ key, slot, spec, environmentName: environment.name,
     hostingProvider: env.hosting.provider, environment, observed });
-  const { creationOnlyServices: plannedCreation = [], ...plannedIdentity } = parsed.data;
+  const { creationOnlyServices: plannedCreation = [], preparedReleaseBinding, ...plannedIdentity } = parsed.data;
+  if (preparedReleaseBinding && !environment.platformBindings.localPreparedHosting)
+    return 'Prepared native reference acceptance requires the original local preparation.';
   const { creationOnlyServices: currentCreation = [], ...currentIdentity } = current.action.metadata ?? {};
   if (current.blockers.length || current.inputRequired.length || !isDeepStrictEqual(currentIdentity, plannedIdentity)
     || !Array.isArray(currentCreation) || currentCreation.some(name => !plannedCreation.includes(name) || !creating.has(name)))
@@ -53,7 +77,8 @@ function validateAction(spec: ProjectSpec, environment: Environment, action: Pla
 }
 
 export async function applySecretReference(input: { ctx: CommandContext; project: Project; spec: ProjectSpec;
-  environmentName: string; action: PlanAction; confirmed: ReadonlySet<string>; applyRunId: string }): Promise<ActionResult> {
+  environmentName: string; action: PlanAction; confirmed: ReadonlySet<string>; applyRunId: string;
+  review?: { actions: PlanAction[]; planId: string } }): Promise<ActionResult> {
   const { ctx, project, spec, action, confirmed } = input;
   const environment = ctx.repos.environments.findByProjectAndName(project.id, input.environmentName);
   const fail = (error: string): ActionResult => ({ success: false, status: 'blocked', message: error });
@@ -64,7 +89,13 @@ export async function applySecretReference(input: { ctx: CommandContext; project
   const error = validateAction(spec, environment, action, before, confirmed);
   if (error) return fail(error);
   const metadata = secretReferenceActionMetadataSchema.parse(action.metadata);
-  if (metadata.activation === 'application-release'
+  if (metadata.preparedReleaseBinding) {
+    if (!input.review) return fail('The original prepared release plan is required for native reference acceptance.');
+    const releaseError = await preparedSecretReleaseError({ ctx, project, environment, environmentSpec: env,
+      services: metadata.services, ...input.review });
+    if (releaseError) return fail(releaseError);
+  }
+  if ((metadata.activation === 'application-release' || metadata.preparedReleaseBinding)
     && referenceState(before, metadata.services, action.resource.name, metadata.reference) !== 'matching')
     return fail('The exact application release has not verified the requested native references; no separate secret write is authorized.');
   let applied = 0;
@@ -105,7 +136,7 @@ export async function applySecretReference(input: { ctx: CommandContext; project
     || referenceState(after, metadata.services, action.resource.name, metadata.reference) !== 'matching')
     return fail('The provider has not verified the requested native secret reference. Re-observe before retrying.');
   const existing = latest.platformBindings.secretVersionBindings;
-  const { creationOnlyServices: _fulfilledCreation, activation: _activation, ...acceptedMetadata } = metadata;
+  const { creationOnlyServices: _fulfilledCreation, activation: _activation, preparedReleaseBinding: _preparedReleaseBinding, ...acceptedMetadata } = metadata;
   ctx.repos.environments.updatePlatformBindings(latest.id, { secretVersionBindings: {
     ...(existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {}),
     [action.resource.name]: acceptedMetadata,

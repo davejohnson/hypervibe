@@ -23,7 +23,7 @@ let directory: string;
 beforeEach(() => { directory = mkdtempSync(join(tmpdir(), 'hv-local-first-release-')); vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', 'true');
   SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(join(directory, 'state.db')).migrate(); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.unstubAllGlobals(); SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true }); });
-async function fixture(changeHolding?: (native: Record<string, any>) => void, fullRuntime: boolean | 'secrets' = false, applicationMetadata = false, migration = false) {
+async function fixture(changeHolding?: (native: Record<string, any>) => void, fullRuntime: boolean | 'secrets' = false, applicationMetadata = false, migration = false, nativeReference = false) {
   const f = await localHoldingApplicationFixture();
   for (let phase = 0; phase < 2; phase++) {
     const plan = await f.plan(); if ('error' in plan) throw new Error(plan.error);
@@ -32,10 +32,12 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
   const load = () => f.ctx.repos.environments.findById(f.environment.id)!;
   const receipt = load().platformBindings.localPreparedHosting as LocalPreparedHostingReceiptV1;
   const candidate = `us-central1-docker.pkg.dev/operator-project/hypervibe/application-candidate@sha256:${'f'.repeat(64)}`;
+  const reference = { destination: { provider: 'gcp-secret-manager', projectId: 'operator-project', projectNumber: '123456789012', secretId: 'native-token' }, version: '7' };
   f.store.replace(f.project, { ...f.desired, secrets: fullRuntime ? {
     GENERATED_TOKEN: { ownership: 'hypervibe', generator: 'random-base64url-32-v1', generation: 1, environments: ['staging'] },
     DELEGATED_TOKEN: { ownership: 'delegated', principal: 'email:operator@example.test', environments: ['staging'], required: true },
-  } : {}, environments: { staging: { ...f.desired.environments.staging,
+  } : nativeReference ? { NATIVE_TOKEN: { ownership: 'delegated', principal: 'email:operator@example.test', environments: ['staging'], required: true } } : {}, environments: { staging: { ...f.desired.environments.staging,
+    ...(nativeReference ? { secretDestinations: { NATIVE_TOKEN: reference } } : {}),
     ...(fullRuntime === true ? { database: { provider: 'rds', engine: 'postgres' } } : {}),
     envVars: { SETTING: 'reviewed-value', IMAGE_URI: candidate }, deploy: { strategy: 'manual' },
     ...(migration ? { migrations: { mode: 'releaseCommand', runInDeploy: true, command: 'npm run db:migrate:production' } } : {}) } } });
@@ -47,16 +49,18 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
   const expectedRuntime = { SETTING: 'reviewed-value', ...managedSecretValues, ...(fullRuntime === true ? {
     DATABASE_URL: 'postgresql://app:synthetic-db-secret@db.internal:5432/app', DIRECT_URL: 'postgresql://app:synthetic-db-secret@db.internal:5432/app',
     DATABASE_PORT: '5432', DB_PORT: '5432', PGPORT: '5432', REDIS_URL: 'redis://cache.internal:6379' } : {}) };
+  const expectedEnv = [...Object.entries(expectedRuntime).map(([name, value]) => ({ name, value })),
+    ...(nativeReference ? [{ name: 'NATIVE_TOKEN', valueSource: { secretKeyRef: { secret: 'projects/123456789012/secrets/native-token', version: '7' } } }] : [])].sort((a, b) => a.name.localeCompare(b.name));
   const adc = join(directory, 'synthetic-adc.json'); writeFileSync(adc, JSON.stringify({ type: 'authorized_user', client_id: 'synthetic-client', client_secret: 'synthetic-client-secret', refresh_token: 'synthetic-refresh' }), { mode: 0o600 });
   vi.stubEnv('GOOGLE_APPLICATION_CREDENTIALS', adc);
-  const state = { loseAcknowledgment: false, actAs: true, patches: 0, patchRequests: 0, generatedDisappears: false, finalObservations: 0 };
+  const state = { loseAcknowledgment: false, actAs: true, patches: 0, patchRequests: 0, generatedDisappears: false, finalObservations: 0, transportErrors: [] as string[] };
   const web = receipt.preparedResources.workloads.find(item => item.workload === 'web')!;
   const final = receipt.runtimeIdentities.find(item => item.workload === 'web')!.principal;
   if (final.kind !== 'gcp-service-account') throw new Error('Expected independently prepared native account');
   const migrationCommand = 'npm run db:migrate:production', migrationHash = createHash('sha256').update(migrationCommand).digest('hex');
   const jobResource = `${web.id.replace('/services/', '/jobs/')}-migration`;
   const task = { containers: [{ image: candidate, command: ['/bin/sh'], args: ['-lc', migrationCommand],
-    env: Object.entries(expectedRuntime).map(([name, value]) => ({ name, value })), resources: { limits: { cpu: '1', memory: '512Mi' } } }],
+    env: expectedEnv, resources: { limits: { cpu: '1', memory: '512Mi' } } }],
     serviceAccount: final.serviceAccountEmail, maxRetries: 0, timeout: '3600s' };
   const job = { name: jobResource, uid: 'migration-job-uid', etag: 'migration-etag', generation: '1', observedGeneration: '1',
     terminalCondition: { state: 'CONDITION_SUCCEEDED' }, template: { template: task } };
@@ -68,9 +72,18 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
     const url = new URL(String(input));
     if (url.href === 'https://oauth2.googleapis.com/token') return Response.json({ access_token: 'synthetic-local-holding-token', token_type: 'Bearer', expires_in: 3600 });
     if (url.pathname.endsWith('/domainmappings')) return Response.json({ items: [] });
+    if (nativeReference && url.hostname === 'secretmanager.googleapis.com') {
+      expect(init.method ?? 'GET').toBe('GET');
+      const name = 'projects/123456789012/secrets/native-token';
+      if (url.pathname === `/v1/${name}`) return Response.json({ name, createTime: '2026-10-25T02:00:00Z' });
+      if (url.pathname === `/v1/${name}/versions/7`) return Response.json({ name: `${name}/versions/7`, state: 'ENABLED' });
+      if (url.pathname === `/v1/${name}:getIamPolicy`) return Response.json({ etag: 'synthetic-reader-policy', bindings: [{ role: 'roles/secretmanager.secretAccessor',
+        members: receipt.runtimeIdentities.map(item => `serviceAccount:${(item.principal as any).serviceAccountEmail}`) }] });
+      throw new Error('Unexpected native secret read');
+    }
     if (url.hostname === 'run.googleapis.com' && url.pathname.endsWith('/services') && (!init.method || init.method === 'GET')) {
-      if (state.patches === 2 && ++state.finalObservations === 3 && state.generatedDisappears) {
-        for (const service of f.native.services.values()) service.template.containers[0].env = service.template.containers[0].env.filter((item: any) => item.name !== 'GENERATED_TOKEN');
+      if (state.patches === 2 && ++state.finalObservations === (nativeReference ? 1 : 3) && state.generatedDisappears) {
+        for (const service of f.native.services.values()) service.template.containers[0].env = service.template.containers[0].env.filter((item: any) => !['GENERATED_TOKEN', 'NATIVE_TOKEN'].includes(item.name));
       }
       return Response.json({ services: [...f.native.services.values()] });
     }
@@ -107,7 +120,7 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
         ...(worker ? { scaling: { scalingMode: 'AUTOMATIC', minInstanceCount: 1, maxInstanceCount: 1 } } : {}),
         template: { serviceAccount: principal.serviceAccountEmail, executionEnvironment: 'EXECUTION_ENVIRONMENT_GEN2',
           scaling: { minInstanceCount: worker ? 1 : 0, maxInstanceCount: 100 }, timeout: '300s', maxInstanceRequestConcurrency: 80,
-          containers: [{ image: candidate, ports: [{ containerPort: 8080 }], env: Object.entries(expectedRuntime).map(([name, value]) => ({ name, value })),
+          containers: [{ image: candidate, ports: [{ containerPort: 8080 }], env: structuredClone(expectedEnv),
             resources: { limits: { cpu: '1', memory: '512Mi' }, cpuIdle: !worker, startupCpuBoost: false },
             startupProbe: { tcpSocket: { port: 8080 }, periodSeconds: 240, timeoutSeconds: 240, failureThreshold: 1 } }] } });
       if (state.loseAcknowledgment) { state.loseAcknowledgment = false; throw new Error('Synthetic lost application acknowledgment'); }
@@ -115,7 +128,8 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
     }
     return f.native.request(input, init);
   };
-  vi.stubGlobal('fetch', request);
+  vi.stubGlobal('fetch', async (...args: Parameters<typeof fetch>) => { try { return await request(...args); }
+    catch (error) { state.transportErrors.push(String(error)); throw error; } });
   changeHolding?.(f.native.services.get(web.id)!);
   const resolved = await adapterFactory.getHostingAdapter(f.project, 'staging');
   expect(resolved.success, resolved.error).toBe(true);
@@ -136,6 +150,30 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
   return { ...f, load, receipt, adapter, service, control, state, candidate, environmentSpec, expectedRuntime, managedSecretValues, metadata, taskState, execution };
 }
 describe('local journal-backed prepared application release', () => {
+  it.each([false, true])('deploys and accepts an immutable native reference through its actual first-release plan with drift=%s', async drift => {
+    // Observed live on 2026-11-01: the planner added preparedReleaseBinding,
+    // then the strict apply schema rejected that same metadata before rollout.
+    const f = await fixture(undefined, false, true, true, true);
+    f.state.generatedDisappears = drift;
+    for (let phase = 0; phase < 7; phase++) {
+      const plan = await new PlanService().plan(f.project, 'staging');
+      if ('error' in plan) throw new Error(plan.error);
+      expect(plan.blocked).toEqual([]);
+      const applied = await f.apply(plan.planRunId, plan.actions.filter(action => action.requiresConfirm).map(action => action.id));
+      if (drift && f.state.patches === 2 && 'result' in applied && !applied.result.success) {
+        expect(f.state.patchRequests).toBe(2);
+        expect(f.load().platformBindings.secretVersionBindings).toBeUndefined();
+        return;
+      }
+      expect(applied, JSON.stringify({ applied, transportErrors: f.state.transportErrors })).toMatchObject({ kind: 'executed', result: { success: true } });
+      if (f.state.patches === 2) break;
+    }
+    expect(f.state.patchRequests).toBe(2);
+    expect(drift).toBe(false);
+    expect(f.taskState).toEqual({ creates: 1, runs: 1 });
+    expect(f.load().platformBindings.secretVersionBindings).toMatchObject({ NATIVE_TOKEN: { reference: { version: '7' } } });
+    expect((f.load().platformBindings.secretVersionBindings as any).NATIVE_TOKEN).not.toHaveProperty('preparedReleaseBinding');
+  });
   it.each([false, true])('runs first-release migrations through the saved plan and verifies recovery with lost rollout=%s', async lost => {
     const f = await fixture(undefined, false, true, true);
     f.state.loseAcknowledgment = lost;

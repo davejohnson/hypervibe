@@ -72,6 +72,16 @@ describe('native references at the persisted apply boundary', () => {
       expect.objectContaining({ name: 'web' }), {}, expect.objectContaining({ secretVersionRefs: { FLOW_KEY: reference } }));
     expect(f.ctx.repos.runs.findById(run.id)!.plan).not.toHaveProperty('overrides');
   });
+  it.each([undefined, '7'])('does not let a prepared marker replace release proof for current reference %s', async current => {
+    const f = fixture(current);
+    f.action.metadata!.preparedReleaseBinding = true;
+    f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { localPreparedHosting: { untrustedMarker: true } });
+    const result = await executePlanApply(f.ctx, { project: f.project, spec: f.spec, specRevision: 1,
+      planId: f.run().id, confirmActions: [] });
+    expect(result).toMatchObject({ kind: 'executed', result: { success: false } });
+    expect(f.setEnvVars).not.toHaveBeenCalled();
+    expect(f.ctx.repos.environments.findById(f.environment.id)!.platformBindings.secretVersionBindings).toBeUndefined();
+  });
   it('rejects a saved native reference action after the slot acquires credential authority', async () => {
     const f = fixture(); const run = f.run();
     f.spec.secrets.FLOW_KEY.credential = { role: 'external-api', label: 'External API', purpose: 'Web requests', kind: 'opaque',

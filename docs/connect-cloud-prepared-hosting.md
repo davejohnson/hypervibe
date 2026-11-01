@@ -116,6 +116,20 @@ current fingerprint, and execution uses the freshly verified fingerprint. The
 successful migration-to-seed boundary runs through the real adapter and serialized
 transport. This is offline evidence; native migration and seed remain pending.
 
+The approved disposable host's first deployment on 2026-11-01 exposed a real
+producer/consumer mismatch before any migration Job or service update: planning
+marked native references `preparedReleaseBinding`, but apply's strict metadata
+schema rejected that exact marker. Backup retention had already increased to
+eight; the dependent app, migration, seed and reference acceptance were not run.
+The actual SQLite plan/apply regression reproduced the same authorization error
+before the correction. It now exercises an immutable native reference together
+with the migration and both first service revisions. Inline and native-reference
+acceptance share the same completed-plan and fresh native-release proof. The
+marker cannot authorize a reference write, unknown metadata remains rejected,
+and post-release drift blocks without another service PATCH. Final acceptance
+stores only reference ownership metadata, not the temporary release marker.
+These passing regressions do not establish a successful resumed live release.
+
 The generated Cloud Run execution reader uses the same completion interpretation.
 Provider renderer revision 3 requires a new workflow-publication review; historical
 revision-2 fingerprints remain in compatibility tests, while AWS/Azure legacy

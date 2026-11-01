@@ -19,6 +19,8 @@ export const secretReferenceActionMetadataSchema = z.object({
   /** Conditional creation intent; this is not evidence of provider absence. */
   creationOnlyServices: z.array(z.string().min(1)).min(1).optional(),
   activation: z.literal('application-release').optional(),
+  /** Accept metadata only after the exact prepared application release. */
+  preparedReleaseBinding: z.literal(true).optional(),
 }).strict().superRefine((value, ctx) => {
   if (new Set(value.services).size !== value.services.length) ctx.addIssue({ code: 'custom', message: 'Duplicate services' });
   if (value.creationOnlyServices && (new Set(value.creationOnlyServices).size !== value.creationOnlyServices.length

@@ -5,7 +5,7 @@ import { applyCredentialLifecycle, pendingCredentialUpdate } from '../domain/ser
 import { applyRepositoryVariable, isRepositoryVariableAction, pendingRepositoryVariableEnvironment, repositoryVariablesEnvironment } from '../domain/services/repository-variables.service.js';
 import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from '../domain/services/database-credential-aliases.service.js';
 import { applySecretContainer, assertReadySecretContainers } from '../domain/services/secret-container-setup.js';
-import { applySecretReference, assertDeploymentSecretReferences } from './apply-secret-references.js';
+import { applySecretReference, assertDeploymentSecretReferences, preparedSecretReleaseError } from './apply-secret-references.js';
 import { applyDatabaseFreshInitialization } from '../domain/services/database-fresh-initialization.service.js';
 import { applyDatabaseProvisioningRecovery } from '../domain/services/database-provisioning-recovery.service.js';
 import { hasPendingDatabaseInitialization } from '../domain/plan/database-initialization.contract.js';
@@ -19,7 +19,7 @@ import { applyDatabaseScopeBinding } from './apply-database-scope-binding.js';
 import { applyPreparedHosting } from './apply-prepared-hosting.js';
 import { applyLocalHolding } from '../domain/services/local-holding-preparation.service.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
-import { preparedReleaseAttempts, createPreparedDirectReleaseControl } from '../domain/services/prepared-direct-release.service.js';
+import { createPreparedDirectReleaseControl } from '../domain/services/prepared-direct-release.service.js';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { isScopedSecretAction, scopedSecretObservation } from '../domain/plan/scoped-secrets.js';
 import { deploymentPrerequisitePhase, isManagedCiCredentialAction } from '../domain/plan/plan-stage.js';
@@ -1880,7 +1880,8 @@ export async function executePlanApply(ctx: CommandContext, params: {
     }
     if (capability === 'hosting.secret-reference.sync') {
       return applySecretReference({ ctx, project: applyProject, spec, environmentName: envName,
-        action, confirmed: confirmedActionIds, applyRunId: executionContext.applyRunId });
+        action, confirmed: confirmedActionIds, applyRunId: executionContext.applyRunId,
+        review: { actions: loaded.document.actions, planId } });
     }
     if (capability === 'hosting.delegated-secret.sync') {
       if (envSpec.secretDestinations?.[action.resource.name])
@@ -1927,19 +1928,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
 
       const preparedReleaseBinding = metadata?.preparedReleaseBinding === true;
       if (preparedReleaseBinding) {
-        const attempts = preparedReleaseAttempts(latestEnvironment);
-        if (!latestEnvironment.platformBindings.localPreparedHosting || destinationServices.some(name => {
-          const attempt = attempts[name], serviceAction = loaded.document.actions.find(candidate => candidate.id === `service:${name}`);
-          return !attempt || attempt.status !== 'completed' || attempt.actionId !== serviceAction?.id
-            || serviceAction.type !== 'noop' && (attempt.planRunId !== planId
-              || !serviceAction.metadata?.preparedReleaseReview || attempt.target.imageUri !== asRecord(serviceAction.metadata.preparedReleaseReview)?.imageUri);
-        })) return blockedActionIdentity(action, 'Managed value acceptance requires every exact completed first-release action from this reviewed plan.');
-        const hosting = await ctx.adapterFactory.getHostingAdapter(applyProject, envName);
-        const native = await hosting.adapter?.preparedHosting?.inspect({ environment: latestEnvironment, environmentSpec: envSpec });
-        if (!hosting.success || native?.state !== 'verified' || destinationServices.some(name =>
-          !native.directReleaseEvidence?.some(evidence => evidence.attemptId === attempts[name]?.id
-            && isDeepStrictEqual(evidence.target, attempts[name]?.target))))
-          return blockedActionIdentity(action, 'The exact completed first revisions could not be reverified before managed value acceptance.');
+        const releaseError = await preparedSecretReleaseError({ ctx, project: applyProject, environment: latestEnvironment,
+          environmentSpec: envSpec, services: destinationServices, actions: loaded.document.actions, planId });
+        if (releaseError) return blockedActionIdentity(action, releaseError);
         const live = (await planService.observeEnvironment(applyProject, latestEnvironment, envSpec, { hostingOnly: true })).observed;
         const values = liveHashesForSecret(live, destinationServices, key);
         if (values.hasUnknownDestination || values.state !== 'consistent' || values.hash !== hashEnvValue(value))
