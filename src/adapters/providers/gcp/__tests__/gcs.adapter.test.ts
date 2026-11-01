@@ -25,6 +25,49 @@ function json(body: unknown, status = 200): Response {
 }
 
 describe('GcsStorageAdapter', () => {
+  // ADC is authentication, not the bucket-list target. Google requires an
+  // explicit project query parameter. Reconstruct the live missing-default
+  // project counterexample through the actual adapter and serialized transport.
+  // https://cloud.google.com/storage/docs/json_api/v1/buckets/list
+  it.each(['connection', 'retained-hosting', 'retained-storage'] as const)(
+    'uses the exact %s project when ADC has no machine default', async source => {
+      const fallback = vi.fn(async () => { throw new Error('Unable to detect a Project Id in the current environment.'); });
+      const request = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        expect(init?.method ?? 'GET').toBe('GET');
+        expect(url.origin + url.pathname).toBe('https://storage.googleapis.com/storage/v1/b');
+        expect(url.searchParams.get('project')).toBe('reviewed-project');
+        return json({ kind: 'storage#buckets', items: [] });
+      });
+      const adapter = new GcsStorageAdapter({ fetch: request as typeof fetch, defaultProjectProvider: fallback,
+        tokenProvider: async () => ({ token: 'synthetic-access-token', email: 'operator@example.test' }) });
+      await adapter.connect({ authMode: 'default', ...(source === 'connection' ? { projectId: 'reviewed-project' } : {}) });
+      const env = environment();
+      if (source === 'retained-hosting') env.platformBindings = { provider: 'cloudrun', projectId: 'reviewed-project', environmentId: 'us-central1' };
+      const resolved = source === 'retained-storage'
+        ? await adapter.ensureContext('logical-app-name-is-not-a-cloud-id', env, { projectId: 'reviewed-project' })
+        : await adapter.resolveObservationContext('logical-app-name-is-not-a-cloud-id', env, 'us-central1');
+      expect(resolved).toMatchObject({ receipt: { success: true }, context: { projectId: 'reviewed-project' } });
+      expect(await adapter.observe(env, resolved.context!)).toEqual([]);
+      expect(fallback).not.toHaveBeenCalled();
+      expect(request).toHaveBeenCalledTimes(1);
+      await expect(adapter.observe(env, { ...resolved.context!, projectId: 'foreign-project' })).rejects.toThrow(/project|context/i);
+      expect(request).toHaveBeenCalledTimes(1);
+    });
+
+  it('preserves an explicitly selected storage project separate from Cloud Run hosting and rejects retained conflicts', async () => {
+    const fallback = vi.fn(async () => 'unrelated-machine-project');
+    const adapter = new GcsStorageAdapter({ defaultProjectProvider: fallback,
+      tokenProvider: async () => ({ token: 'synthetic-access-token', email: 'operator@example.test' }) });
+    await adapter.connect({ authMode: 'default', projectId: 'storage-project' });
+    const env = environment(); env.platformBindings = { provider: 'cloudrun', projectId: 'hosting-project' };
+    expect(await adapter.resolveObservationContext('logical-app', env, 'us-central1'))
+      .toMatchObject({ receipt: { success: true }, context: { projectId: 'storage-project' } });
+    expect(await adapter.ensureContext('logical-app', env, { projectId: 'foreign-project' }))
+      .toMatchObject({ receipt: { success: false } });
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
   it('keeps same logical names isolated through shared plan/apply and observation', async () => {
     const buckets = new Map<string, Record<string, any>>();
     const request = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {

@@ -735,7 +735,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     credentialExample: 'hv_connections provider="gcs"',
     notes: [
       'If the project already has a verified cloudrun connection, Hypervibe reuses it; no separate Cloud Storage connection or HMAC key is required.',
-      'For local use, run gcloud auth application-default login and gcloud config set project <project-id>, then add the connection without credentials.',
+      'For local operator use, reuse or initiate Google Application Default Credentials sign-in. Hypervibe uses the exact connected project or retained storage/Cloud Run project; it does not change the machine-wide gcloud project. A standalone legacy connection without that scope still requires a configured default project.',
       'For unattended automation, pass the service-account JSON key file directly; Hypervibe derives the project id from that signed credential. Storage location comes from the spec.',
       'Hypervibe enforces uniform bucket-level access and public-access prevention. The service-account JSON is supplied only to selected workloads as a runtime secret and never enters repo bindings or output.',
       'Application Default Credentials can manage and migrate data, but a local gcloud user session is never copied into a workload. Runtime access uses a matching Cloud Run identity or an explicit service account for cross-cloud hosting.',

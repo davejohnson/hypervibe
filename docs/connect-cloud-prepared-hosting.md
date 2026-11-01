@@ -569,3 +569,34 @@ and error handling. A real-child descriptor regression failed before this change
 and passed afterward; supplied-input digest and nonzero-exit checks passed too.
 The existing packed-helper/candidate checks passed without publication. These
 checks establish the command boundary, not a new Docker or cloud deployment.
+
+### GCS project selection with local authentication
+
+The corrected backup review then reached archive planning and correctly refused
+an unknown bucket inventory. A read-only diagnostic found the GCS connection was
+verified, but context resolution failed before any Storage request because ADC
+could not discover a machine-wide project. The local allocation retained an exact
+Cloud Run project and a legacy `{authMode: default}` GCS connection. The adapter
+also discarded an explicit project ID on reused default-auth Cloud Run connections.
+
+The challenged assumption was that discovering authentication also selects the
+customer's resource project. Google's [ADC documentation](https://cloud.google.com/docs/authentication/application-default-credentials)
+describes credential discovery, while [bucket listing](https://cloud.google.com/storage/docs/json_api/v1/buckets/list)
+requires a separate `project` parameter. The counterexample is valid ADC plus a
+retained project, with no machine default or a different machine default.
+
+GCS now preserves explicit default-auth connection scope and otherwise resolves
+the reviewed storage context or same-provider Cloud Run binding before falling
+back to legacy discovery. An explicitly separate storage project is preserved.
+Already selected, service-account and workload-identity project conflicts still
+block. The shared resolver serves observation, creation, runtime wiring, transfer
+and deletion; no credential record, global CLI configuration or cloud resource is
+edited by this repair. Provider inventory and ownership checks remain required.
+
+Four actual-adapter regressions failed before the fix and passed afterward,
+checking serialized bucket-list targets and cross-project rejection. The GCS
+storage, runtime identity/access, recovery-stream and repository-scope suites
+passed 37 checks; TypeScript passed. Existing S3 selects its native STS account
+and Azure Blob verifies its configured subscription; their contracts are unchanged.
+These ordinary-CI checks are reconstructed transport evidence, not proof that
+backup creation or isolated restore has succeeded live.

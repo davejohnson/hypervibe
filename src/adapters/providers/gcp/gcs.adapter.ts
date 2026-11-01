@@ -5,6 +5,7 @@ import { GoogleAuth } from 'google-auth-library';
 import { GcpGithubWorkloadAuthentication, gcpGithubWorkloadIdentitySchema } from './gcp-github-workload-identity.js';
 import { z } from 'zod';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
+import { parseHostingBindings } from '../../../domain/ports/hosting.port.js';
 import type { ObservedStorage } from '../../../domain/ports/observe.port.js';
 import type { Receipt, VerifyResult } from '../../../domain/ports/provider.port.js';
 import type {
@@ -59,6 +60,7 @@ export const GcsStorageCredentialsSchema = z.preprocess((input) => {
   if (record.type === 'service_account') return { authMode: 'serviceAccount', credentials: JSON.stringify(record) };
   return { authMode: record.authMode ?? (record.credentials ? 'serviceAccount' : undefined),
     ...(record.workloadIdentity !== undefined ? { workloadIdentity: record.workloadIdentity, projectId: record.projectId } : {}),
+    ...(record.authMode === 'default' && record.projectId !== undefined ? { projectId: record.projectId } : {}),
     credentials: record.credentials, runtimeServiceAccountEmail: record.runtimeServiceAccountEmail };
 }, GcsStorageAuthenticationSchema);
 
@@ -406,7 +408,10 @@ export class GcsStorageAdapter implements IStorageAdapter {
   ): Promise<StorageEnsureResult> {
     try {
       this.connectedCredentials();
-      const projectId = await this.connectedProjectId();
+      const hosting = parseHostingBindings(environment);
+      const requestedProject = context.projectId ?? (this.credentials?.authMode === 'default'
+        && !this.credentials.projectId && hosting.provider === 'cloudrun' ? hosting.projectId : undefined);
+      const projectId = await this.connectedProjectId(requestedProject);
       if (context.projectId && context.projectId !== projectId) {
         throw new Error(`Bound GCP project ${context.projectId} does not match connected project ${projectId}.`);
       }
@@ -673,20 +678,21 @@ export class GcsStorageAdapter implements IStorageAdapter {
     return this.credentials;
   }
 
-  private async connectedProjectId(): Promise<string> {
-    this.connectedCredentials();
-    if (this.projectId) return this.projectId;
-    const projectId = this.serviceAccount?.project_id ?? await this.defaultProjectProvider();
+  private async connectedProjectId(requestedProject?: string): Promise<string> {
+    const credentials = this.connectedCredentials();
+    const projectId = this.projectId ?? this.serviceAccount?.project_id ?? credentials.projectId
+      ?? (credentials.authMode === 'default' ? requestedProject : undefined) ?? await this.defaultProjectProvider();
     if (!projectId?.trim()) {
-      throw new Error('Google Application Default Credentials did not resolve a project. Select one with gcloud config set project <project-id>.');
+      throw new Error('Google Cloud Storage has no target project. Connect the app’s exact GCP project or retain its reviewed storage context before planning storage.');
     }
+    if (requestedProject && requestedProject !== projectId) throw new Error('Google Cloud Storage context does not match the connected project.');
     this.projectId = projectId;
     return projectId;
   }
 
   private async assertContext(context: StorageContext): Promise<void> {
     if (!context.projectId) throw new Error('Google Cloud Storage project context is missing.');
-    if (context.projectId !== await this.connectedProjectId()) throw new Error('Google Cloud Storage context does not match the connected project.');
+    if (context.projectId !== await this.connectedProjectId(context.projectId)) throw new Error('Google Cloud Storage context does not match the connected project.');
   }
 
   private async accessToken(): Promise<string> {
