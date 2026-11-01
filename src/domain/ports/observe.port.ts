@@ -302,6 +302,13 @@ export interface IObservableHosting {
   observe(environment: Environment, context?: HostingObservationContext): Promise<ObservedState>;
 }
 
+/** Explicit service completeness wins over unrelated resource failures. Older
+ * observations without category evidence still require an entirely known read. */
+export function hasCompleteServiceObservation(observed: ObservedState | null | undefined): observed is ObservedState {
+  return !!observed && (observed.completeness?.services === 'complete'
+    || observed.completeness?.services === undefined && !observed.partial);
+}
+
 /** Value-free declared consumer names; these do not prove live configuration. */
 export interface HostingObservationContext {
   databaseEnvAliases?: Record<string, Record<string, 'DATABASE_URL' | 'DIRECT_URL'>>;

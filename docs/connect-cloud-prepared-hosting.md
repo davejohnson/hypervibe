@@ -520,4 +520,52 @@ are unchanged; no new AWS or Azure native acceptance is claimed.
 The focused application/reference checks passed 42 tests. Shared release-authority
 and custody checks, TypeScript checking and normal acceptance are tracked in the
 PR. All regressions run through ordinary `npm test`. The previously approved live
-release remains partial until its remaining secret acceptance actions converge.
+release subsequently completed through a fresh, supported plan: workloads and
+native references were already verified noops, and only two local generated-secret
+acceptance records remained. That apply made no provider writes or repeated tasks.
+
+### Service evidence during backup preparation
+
+The next live backup review on 2026-11-01 found complete Cloud Run service reads,
+including all six pinned references in both running workloads, alongside unknown
+archive-storage observation. All 76 recorded HTTP reads succeeded; no writes ran.
+The secret planner nevertheless rejected every reference because it assumed the
+aggregate `partial` flag meant service evidence was incomplete. This contradicts
+the architecture's per-capability observation contract. Storage uncertainty must
+still block storage decisions; it does not erase independently complete service
+evidence.
+
+Planning and apply now share the service-completeness predicate already used for
+delegated-secret absence. Explicit `services=unknown` wins over `partial=false`;
+legacy observations require `partial=false`. Matching references, rotation review,
+immutable conflicts, conditional first creation, release activation and accepted
+credential checks use this distinction. Identity-only evidence never proves native
+reference contents; existing acknowledgement-only credential semantics remain
+separate. Duplicate workloads, missing key inventories and lifecycle conflicts
+still block.
+
+The reconstructed native-observation counterexample failed before the runtime
+change, including at the persisted SQLite apply boundary, and passed afterward.
+Shared tests plus the real serialized Cloud Run, ECS and Azure reference suites
+passed. These providers already report per-category completeness; no provider API
+contract, ownership rule or mutation authority changed. Regressions run through
+ordinary `npm test`, selected by `vitest.config.ts` and the committed acceptance
+workflow and desired required check. That is not proof of live branch protection
+or completion of any new-customer cloud walkthrough. Native backup creation and
+restore remain separate acceptance requirements.
+
+### No-input operator commands
+
+GitHub acceptance run 41279091648 failed at the operator command's stdin error
+handler during a candidate-build test. The previous helper opened and wrote an
+empty pipe even for Git/tar commands requiring no input. The assumption that this
+extra write cannot fail is unsafe when a fast child exits first. The exact child
+and native errno were intentionally absent from the secret-safe diagnostic, so
+this race is a hypothesis for that CI incident, not a proven root cause.
+
+Following Node's [stdio contract](https://nodejs.org/api/child_process.html#optionsstdio),
+no-input commands now receive the null input device. Nonempty input keeps its pipe
+and error handling. A real-child descriptor regression failed before this change
+and passed afterward; supplied-input digest and nonzero-exit checks passed too.
+The existing packed-helper/candidate checks passed without publication. These
+checks establish the command boundary, not a new Docker or cloud deployment.

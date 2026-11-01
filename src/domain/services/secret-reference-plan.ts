@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type { PlanAction } from '../plan/plan.types.js';
-import type { ObservedState } from '../ports/observe.port.js';
+import { hasCompleteServiceObservation, type ObservedState } from '../ports/observe.port.js';
 import { runtimeSecretReferenceSchema, type RuntimeSecretReference } from '../ports/secret-destination.port.js';
 import type { ProjectSecretSpec, ProjectSpec } from '../spec/spec.schema.js';
 import { runtimeSecretReferenceIdentity } from './runtime-secret-references.js';
@@ -41,7 +41,7 @@ export function secretReferencesForEnvironment(spec: ProjectSpec, environmentNam
 export function referenceState(observed: ObservedState | null, services: string[], key: string,
   reference: RuntimeSecretReference, knownAbsent = false): 'unknown' | 'missing' | 'matching' | 'replacement' {
   if (knownAbsent) return 'missing';
-  if (!observed || observed.partial || !services.length) return 'unknown';
+  if (!hasCompleteServiceObservation(observed) || !services.length) return 'unknown';
   const target = runtimeSecretReferenceIdentity(reference);
   let missing = false;
   let matching = false;
@@ -96,13 +96,13 @@ export function planSecretReference(input: {
       metadata.reference = parsed.data;
       const hosting = input.environment ? parseHostingBindings(input.environment) : null;
       const creationOnlyServices = hosting?.projectId && hosting.provider === input.hostingProvider
-        && input.observed && !input.observed.partial && input.observed.completeness?.services === 'complete'
+        && hasCompleteServiceObservation(input.observed) && input.observed.completeness?.services === 'complete'
         && providerRegistry.getMetadata(input.hostingProvider)?.supportsCreateOnlyDeploy === true
         ? services.filter(name => !hosting.services?.[name]?.serviceId && !hosting.services?.[name]?.jobName
           && !input.observed!.services.some(service => service.name === name)) : [];
       if (creationOnlyServices.length) metadata.creationOnlyServices = creationOnlyServices;
       const existingServices = services.filter(name => !creationOnlyServices.includes(name));
-      if (!creationOnlyServices.length && existingServices.length && input.observed && !input.observed.partial
+      if (!creationOnlyServices.length && existingServices.length && hasCompleteServiceObservation(input.observed)
         && existingServices.every(name => input.observed!.services.filter(service => service.name === name
           && service.externalId === hosting?.services?.[name]?.serviceId
           && service.runtimeSecretReferenceActivation === 'application-release').length === 1)) metadata.activation = 'application-release';
@@ -119,7 +119,7 @@ export function planSecretReference(input: {
       const retainedNativeConflict = prior && typeof prior === 'object' && !Array.isArray(prior)
         && conflicts.some(conflict => Object.hasOwn(prior, conflict));
       const conflictsUnknownOrPresent = immutable && conflicts.some(conflict => !input.destinationsAreKnownAbsent
-        && (!input.observed || input.observed.partial || existingServices.some(name => {
+        && (!hasCompleteServiceObservation(input.observed) || existingServices.some(name => {
           const service = input.observed!.services.find(candidate => candidate.name === name);
           return !service || !Array.isArray(service.envVarKeys) || service.envVarKeys.includes(conflict);
         })));

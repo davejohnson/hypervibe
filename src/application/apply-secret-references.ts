@@ -5,7 +5,7 @@ import type { Environment } from '../domain/entities/environment.entity.js';
 import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { ActionResult } from '../domain/plan/converge.executor.js';
-import type { ObservedState } from '../domain/ports/observe.port.js';
+import { hasCompleteServiceObservation, type ObservedState } from '../domain/ports/observe.port.js';
 import { parseHostingBindings } from '../domain/ports/hosting.port.js';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { hasExactPlanActionConfirmationAuthority } from '../domain/plan/action-authority.js';
@@ -38,7 +38,7 @@ export async function preparedSecretReleaseError(input: { ctx: CommandContext; p
 
 function identityError(environment: Environment, observed: ObservedState | null, services: string[], creating: ReadonlySet<string> = new Set()): string | undefined {
   const bindings = parseHostingBindings(environment);
-  if (!observed || observed.partial || observed.provider !== bindings.provider) return 'Runtime reference observation is incomplete.';
+  if (!hasCompleteServiceObservation(observed) || observed.provider !== bindings.provider) return 'Runtime reference observation is incomplete.';
   for (const name of services) {
     const expected = bindings.services?.[name];
     const candidates = observed.services.filter(service => service.name === name);

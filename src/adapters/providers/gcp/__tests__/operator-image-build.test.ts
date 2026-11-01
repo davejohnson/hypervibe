@@ -8,6 +8,20 @@ import { inspectOperatorImage, prepareOperatorImages, runOperatorCommand, type O
 const temporary: string[] = [];
 afterEach(() => temporary.splice(0).forEach(directory => rmSync(directory,{ recursive:true,force:true })));
 describe('operator image package and command boundary', () => {
+  it.each([undefined, ''])('gives a no-input child an EOF source without an unused writable pipe (%s)', async input => {
+    // Node's stdio=ignore contract connects fd 0 to /dev/null. Inspect the
+    // actual child descriptor; do not depend on reproducing a timing race.
+    const output = await runOperatorCommand(process.execPath, ['-e',
+      "const fs=require('node:fs');console.log(JSON.stringify({nullInput:fs.fstatSync(0).isCharacterDevice(),bytes:fs.readFileSync(0).length}))"], { input });
+    expect(JSON.parse(output)).toEqual({ nullInput: true, bytes: 0 });
+  });
+  it('delivers supplied input intact and retains failure checking', async () => {
+    const output = await runOperatorCommand(process.execPath, ['-e',
+      "const fs=require('node:fs'),crypto=require('node:crypto');console.log(crypto.createHash('sha256').update(fs.readFileSync(0)).digest('hex'))"],
+      { input: 'synthetic-sensitive-input' });
+    expect(output.trim()).toBe(createHash('sha256').update('synthetic-sensitive-input').digest('hex'));
+    await expect(runOperatorCommand(process.execPath, ['-e', 'process.exit(9)'])).rejects.toThrow('Operator artifact command failed.');
+  });
   it('builds from actual npm packed bytes and the shipped dependency lock; never logs in or publishes during preparation', async () => {
     const root=mkdtempSync(path.join(tmpdir(),'hv-packed-image-contract-'));temporary.push(root);
     for(const directory of ['dist/operator-artifacts','templates/cloud-holding','templates/backup-runner','test']) mkdirSync(path.join(root,directory),{recursive:true});

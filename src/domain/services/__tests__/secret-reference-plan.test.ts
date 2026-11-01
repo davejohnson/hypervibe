@@ -24,6 +24,51 @@ function setup(version?: string, observedVersion?: string) {
 }
 
 describe('reference-only secret planning', () => {
+  // Reconstructed from the 2026-11-01 live backup-plan observation: both
+  // workloads and their native references were complete; only storage was
+  // unknown. This tests the shared metadata boundary, not provider transport.
+  it.each(['matching', 'replacement', 'immutable', 'activation', 'creation'] as const)(
+    'uses complete service evidence despite unrelated storage uncertainty: %s', kind => {
+      const input = setup('7', kind === 'replacement' ? '6' : '7');
+      input.observed.partial = true;
+      input.observed.completeness = { services: 'complete', storage: 'unknown' };
+      if (kind === 'immutable') input.spec.secrets.FLOW_KEY = {
+        ownership: 'hypervibe', generator: 'random-base64url-32-v1', generation: 1,
+        environments: ['staging'], replacementPolicy: 'immutable', conflictsWith: ['OLD_KEY'],
+      };
+      if (kind === 'activation') input.observed.services[0].runtimeSecretReferenceActivation = 'application-release';
+      if (kind === 'creation') input.observed.services = [];
+      const result = planDelegatedSecrets({ ...input, environment: { platformBindings: {
+        provider: 'cloudrun', projectId: 'synthetic-project',
+        services: kind === 'creation' ? {} : { web: { serviceId: 'web-id' } },
+      } } });
+      expect(result.blockers).toEqual([]);
+      expect(result.desiredEnvVars).toEqual({});
+      expect(result.actions[0]).toMatchObject({ verified: true,
+        type: ['replacement', 'activation', 'creation'].includes(kind) ? 'update' : 'noop' });
+      if (kind === 'replacement') expect(result.actions[0].requiresConfirm).toBe(true);
+      if (kind === 'activation') expect(result.actions[0].metadata?.activation).toBe('application-release');
+      if (kind === 'creation') expect(result.actions[0].metadata?.creationOnlyServices).toEqual(['web']);
+    });
+
+  it.each(['unknown', 'legacy-partial', 'identity-only', 'duplicate', 'missing-keys', 'conflict'] as const)(
+    'keeps incomplete or contradictory service evidence blocked: %s', kind => {
+      const input = setup('7', '7');
+      input.observed.partial = kind !== 'unknown';
+      input.observed.completeness = { services: 'complete', storage: 'unknown' };
+      if (kind === 'unknown') input.observed.completeness.services = 'unknown';
+      if (kind === 'legacy-partial') delete input.observed.completeness;
+      if (kind === 'identity-only') input.observed.completeness = { services: 'unknown', serviceIdentities: 'complete' };
+      if (kind === 'duplicate') input.observed.services.push({ ...input.observed.services[0] });
+      if (kind === 'missing-keys') delete (input.observed.services[0] as Partial<typeof input.observed.services[0]>).envVarKeys;
+      if (kind === 'conflict') {
+        input.spec.secrets.FLOW_KEY = { ownership: 'hypervibe', generator: 'random-base64url-32-v1', generation: 1,
+          environments: ['staging'], replacementPolicy: 'immutable', conflictsWith: ['OLD_KEY'] };
+        input.observed.services[0].envVarKeys.push('OLD_KEY');
+      }
+      expect(planDelegatedSecrets(input).blockers).toEqual([expect.objectContaining({ key: 'FLOW_KEY' })]);
+    });
+
   it('blocks a credential role instead of installing its native reference in unreviewed services', () => {
     const input = setup('7');
     input.spec.environments.staging.services.worker = { ...input.spec.environments.staging.services.web };

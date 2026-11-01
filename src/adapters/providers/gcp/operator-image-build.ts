@@ -13,16 +13,19 @@ export type OperatorCommand = (program: string, args: string[], options?: Operat
 export const runOperatorCommand: OperatorCommand = async (program, args, options = {}) => {
   if (options.signal?.aborted) throw new Error('Operator artifact command cancelled.');
   return new Promise<string>((resolve, reject) => {
-    const child = spawn(program, args, { cwd: options.cwd, env: options.env, stdio: ['pipe', 'pipe', 'pipe'], signal: options.signal });
+    // Commands without input need only EOF. An unused writable pipe can fail
+    // after a fast child exits and incorrectly discard its successful result.
+    const child = spawn(program, args, { cwd: options.cwd, env: options.env,
+      stdio: [options.input ? 'pipe' : 'ignore', 'pipe', 'pipe'], signal: options.signal });
     const output: Buffer[] = []; let bytes = 0;
     const consume = (chunk: Buffer) => { bytes += chunk.length; if (bytes > 64 * 1024 * 1024) child.kill('SIGTERM'); else output.push(chunk); };
-    child.stdout.on('data', consume);
+    child.stdout!.on('data', consume);
     // Drain but never expose stderr, even when it contains a native token echo.
-    child.stderr.on('data', (chunk: Buffer) => { bytes += chunk.length; if (bytes > 64 * 1024 * 1024) child.kill('SIGTERM'); });
+    child.stderr!.on('data', (chunk: Buffer) => { bytes += chunk.length; if (bytes > 64 * 1024 * 1024) child.kill('SIGTERM'); });
     child.once('error', () => reject(new Error('Operator artifact command failed.')));
     child.once('close', code => code === 0 && bytes <= 64 * 1024 * 1024 ? resolve(Buffer.concat(output).toString('utf8')) : reject(new Error('Operator artifact command failed.')));
-    child.stdin.on('error', () => reject(new Error('Operator artifact command failed.')));
-    child.stdin.end(options.input ?? '');
+    child.stdin?.on('error', () => reject(new Error('Operator artifact command failed.')));
+    child.stdin?.end(options.input);
   });
 };
 export function operatorPackageRoot(): string {

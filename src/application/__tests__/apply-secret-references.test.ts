@@ -72,6 +72,22 @@ describe('native references at the persisted apply boundary', () => {
       expect.objectContaining({ name: 'web' }), {}, expect.objectContaining({ secretVersionRefs: { FLOW_KEY: reference } }));
     expect(f.ctx.repos.runs.findById(run.id)!.plan).not.toHaveProperty('overrides');
   });
+  it.each(['complete', 'unknown', 'identity-only'] as const)(
+    'revalidates persisted reference acceptance using service completeness: %s', async completeness => {
+      const f = fixture('7');
+      const state = observation('7');
+      state.partial = completeness !== 'unknown';
+      state.completeness = { storage: 'unknown', services: completeness === 'complete' ? 'complete' : 'unknown',
+        ...(completeness === 'identity-only' ? { serviceIdentities: 'complete' } : {}) };
+      vi.mocked(PlanService.prototype.observeEnvironment).mockResolvedValue({ observed: state, warnings: [] });
+      const result = await executePlanApply(f.ctx, { project: f.project, spec: f.spec, specRevision: 1,
+        planId: f.run().id, confirmActions: [] });
+      expect(result).toMatchObject({ kind: 'executed', result: { success: completeness === 'complete' } });
+      expect(f.setEnvVars).not.toHaveBeenCalled();
+      const retained = f.ctx.repos.environments.findById(f.environment.id)!.platformBindings.secretVersionBindings;
+      if (completeness === 'complete') expect(retained).toHaveProperty('FLOW_KEY.reference', reference);
+      else expect(retained).toBeUndefined();
+    });
   it.each([undefined, '7'])('does not let a prepared marker replace release proof for current reference %s', async current => {
     const f = fixture(current);
     f.action.metadata!.preparedReleaseBinding = true;

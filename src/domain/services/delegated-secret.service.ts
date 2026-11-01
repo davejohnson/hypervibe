@@ -2,7 +2,7 @@ import { EnvironmentRepository } from '../../adapters/db/repositories/environmen
 import type { Environment } from '../entities/environment.entity.js';
 import type { ActionReceipt } from '../plan/converge.executor.js';
 import type { PlanAction } from '../plan/plan.types.js';
-import { hashEnvValue, type ObservedState } from '../ports/observe.port.js';
+import { hasCompleteServiceObservation, hashEnvValue, type ObservedState } from '../ports/observe.port.js';
 import type {
   DelegatedSecretSpec,
   HypervibeSecretSpec,
@@ -240,8 +240,7 @@ export function liveHashesForSecret(
     };
   }
   const byName = new Map(observed.services.map((service) => [service.name, service]));
-  const servicesAreComplete = observed.completeness?.services === 'complete'
-    || (observed.completeness?.services === undefined && observed.partial !== true);
+  const servicesAreComplete = hasCompleteServiceObservation(observed);
   let missing = false;
   let unknown = false;
   const hashes: string[] = [];
@@ -443,14 +442,14 @@ export function planDelegatedSecrets(params: {
     if (slot.credential) {
       const tracked = asRecord(asRecord(params.environment?.platformBindings.credentialUpdates)?.[slot.credential.role]);
       const hashes = asRecord(asRecord(tracked?.hostingHashes)?.[key]);
-      const observedValuesMatch = params.observed && !params.observed.partial && serviceNames.every(name => {
+      const observedValuesMatch = hasCompleteServiceObservation(params.observed) && serviceNames.every(name => {
         const service = params.observed!.services.find(service => service.name === name);
         return service?.envVarEvidence !== 'recorded-update' && service?.envVarHashes[key]
           && service.envVarHashes[key] === (hashes?.[name] ?? binding?.valueHash);
       });
       const acknowledgedOnly = asRecord(tracked?.hostingEvidence)?.[key] === 'acknowledgement'
         && params.observed && (params.observed.completeness?.serviceIdentities === 'complete'
-          || !params.observed.partial && params.observed.completeness?.services === 'complete')
+          || params.observed.completeness?.services === 'complete')
         && serviceNames.every(name => {
           const service = params.observed!.services.find(service => service.name === name);
           return service?.envVarKeys.includes(key) && (service.envVarEvidence === 'recorded-update' || !service.envVarHashes[key] || service.envVarHashes[key] === (hashes?.[name] ?? binding?.valueHash));
