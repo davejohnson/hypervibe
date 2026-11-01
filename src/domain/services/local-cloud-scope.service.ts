@@ -93,10 +93,18 @@ async function context(project: Project, environment: Environment, intent: Local
       // The cleanup driver independently re-observes all native identity lifetimes;
       // only immutable predecessor receipts authorize its exact removal targets.
       const kind = capability.continuation.boundContinuationKind?.(intent.nativeScope);
-      const history = await journal(project, environment).findByScope();
-      if (kind === 'prerequisite' && !retainedBindingMatches(project, environment, previous, history)) return false;
-      const verified = kind ? previous : await reconcileCloudInstallationV1({
+      let history = await journal(project, environment).findByScope();
+      const retained = history.find(record => record.installationId === intent.installationId);
+      // Initial prerequisite installation must not depend on the API it enables.
+      // Once that exact installation completed, a transient ancestor read failure
+      // may be recovered without granting mutation authority or changing bindings.
+      const recoverPrerequisiteParent = kind === 'prerequisite' && mode === 'recover' && input.phase !== 'mutate'
+        && previous.status !== 'scope-ready' && retained && isDeepStrictEqual(retained.intent, intent)
+        && retained.plan.actions.length > 0 && retained.plan.actions.every(action => retained.completed[action.id]);
+      const verified = kind && !recoverPrerequisiteParent ? previous : await reconcileCloudInstallationV1({
         ...await context(project, environment, previous.intent, 'recover', authorize), installationId: previous.installationId, planDigest: previous.plan.digest });
+      if (recoverPrerequisiteParent) history = await journal(project, environment).findByScope();
+      if (kind === 'prerequisite' && !retainedBindingMatches(project, environment, verified, history)) return false;
       if (!kind && verified.status !== 'scope-ready' || !isDeepStrictEqual(capability.continuation.nextScope(verified, intent.selection, history), intent.nativeScope)) return false;
     }
     return true;
@@ -263,7 +271,7 @@ export async function planLocalCloudScope(input: { project: Project; environment
   let environment = new EnvironmentRepository().findByProjectAndName(project.id, environmentName);
   if (!environment && !desired?.scopePreparation) return undefined;
   if (!environment) environment = new EnvironmentRepository().create({ projectId: project.id, name: environmentName, platformBindings: { provider: desired!.provider } });
-  const history = await journal(project, environment).findByScope();
+  let history = await journal(project, environment).findByScope();
   let record = acceptedLeaf(history);
   if (!record && !desired?.scopePreparation) return undefined;
   const deploymentInputs = input.options && ['serviceFilter', 'envVarOverrides', 'envFile', 'includeEnvFile', 'secretRefs'].some(key => Object.hasOwn(input.options!, key));
@@ -294,7 +302,10 @@ export async function planLocalCloudScope(input: { project: Project; environment
       throw new Error('This environment already allocated a cloud project. Its accepted identity is retained; editing desired names does not authorize a replacement.');
     // An admitted cleanup verifies its own exact native targets; removed trust
     // cannot be required to authorize removing the remaining grants.
-    if (record.status === 'scope-ready' && !boundScope) await verifyBindingPrerequisites(project, environment, record);
+    if (record.status === 'scope-ready' && !boundScope) {
+      await verifyBindingPrerequisites(project, environment, record);
+      history = await journal(project, environment).findByScope();
+    }
     if (deploymentInputs) {
       // A completed binding is an ordinary deployment prerequisite. Verify it
       // before passing input handling back to full planning; unfinished or

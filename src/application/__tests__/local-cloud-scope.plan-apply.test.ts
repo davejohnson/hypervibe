@@ -532,7 +532,7 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       expect(JSON.stringify({ reviewed, applied })).not.toContain(token);
     });
 
-  it.each(['quota-public-api-parent-drift', 'quota-public-api', 'quota-public-api-lost-ack', 'quota-public-api-binding-conflict', 'quota-public-api-lifetime', 'quota-public-api-denied', 'github-ci-quota-api-partial-revoke', 'github-ci-quota-api', 'normal', 'private-operation-missing-time', 'public-operation-missing-time', 'legacy-binding-repair', 'legacy-binding-source-edit', 'legacy-binding-declaration-removed', 'legacy-binding-stale', 'legacy-binding-conflict', 'legacy-binding-unknown', 'legacy-binding-replaced', 'legacy-api-review', 'legacy-api-pending', 'legacy-api-rejected', 'legacy-api-satisfied', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-disconnected-metadata', 'github-ci-disconnected-metadata-foreign-owner', 'github-ci-legacy-binding-repair', 'github-ci-lost-ack', 'github-ci-rejected-first', 'github-ci-rejected-middle', 'public-registry', 'public-grant-lost-ack', 'public-grant-rejected', 'github-ci-public-registry', 'github-ci-public-registry-prerequisite-drift'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
+  it.each(['quota-public-api-parent-read-recovery', 'quota-public-api-parent-read-recovery-drift', 'quota-public-api-parent-read-recovery-binding', 'quota-public-api-parent-drift', 'quota-public-api', 'quota-public-api-lost-ack', 'quota-public-api-binding-conflict', 'quota-public-api-lifetime', 'quota-public-api-denied', 'github-ci-quota-api-partial-revoke', 'github-ci-quota-api', 'normal', 'private-operation-missing-time', 'public-operation-missing-time', 'legacy-binding-repair', 'legacy-binding-source-edit', 'legacy-binding-declaration-removed', 'legacy-binding-stale', 'legacy-binding-conflict', 'legacy-binding-unknown', 'legacy-binding-replaced', 'legacy-api-review', 'legacy-api-pending', 'legacy-api-rejected', 'legacy-api-satisfied', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-disconnected-metadata', 'github-ci-disconnected-metadata-foreign-owner', 'github-ci-legacy-binding-repair', 'github-ci-lost-ack', 'github-ci-rejected-first', 'github-ci-rejected-middle', 'public-registry', 'public-grant-lost-ack', 'public-grant-rejected', 'github-ci-public-registry', 'github-ci-public-registry-prerequisite-drift'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
     const f = fixture(); const allocated = await f.plan(); if ('error' in allocated) throw new Error(allocated.error);
     expect(await f.apply(allocated.planRunId)).toMatchObject({ kind: 'executed', result: { success: true } });
     const desired = structuredClone(f.desired) as any;
@@ -844,7 +844,33 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
         const name = `projects/${nativeId}/locations/us-central1/repositories/operator-public`;
         registries.set(name, { ...registries.get(name), createTime: '2026-10-29T00:00:00Z' });
       }
+      if (scenario.startsWith('quota-public-api-parent-read-recovery')) {
+        // A native prerequisite GET is temporarily unavailable after successful
+        // setup. Losing current observation must not erase completed ownership
+        // or permanently veto the read-only recovery of that exact ancestor.
+        const nativeRequest = f.request.getMockImplementation()!;
+        f.request.mockImplementation(async (input, init) => new URL(String(input)).pathname.endsWith('/services/run.googleapis.com')
+          ? Response.json({}, { status: 503 }) : nativeRequest(input, init));
+        expect(await f.plan()).toMatchObject({ error: expect.stringMatching(/Cloud project preparation/) });
+        expect(f.adapters).not.toHaveBeenCalled(); expect(writes).toEqual([...beforeWrites, 'quota-api']);
+        f.request.mockImplementation(nativeRequest);
+        if (scenario.endsWith('-drift')) {
+          const name = `projects/${nativeId}/locations/us-central1/repositories/operator-public`;
+          registries.set(name, { ...registries.get(name), createTime: '2026-10-29T00:00:00Z' });
+        }
+        if (scenario.endsWith('-binding')) {
+          const changed = structuredClone(acceptedBindings);
+          (changed.providerScope as Record<string, unknown>).projectNumber = '111111111111';
+          f.ctx.repos.environments.update(environment.id, { platformBindings: changed });
+        }
+      }
       const resumed = await f.plan();
+      if (scenario === 'quota-public-api-parent-read-recovery-drift' || scenario === 'quota-public-api-parent-read-recovery-binding') {
+        expect('error' in resumed || resumed.scope === 'cloud-scope').toBe(true);
+        expect(f.adapters).not.toHaveBeenCalled(); expect(writes).toEqual([...beforeWrites, 'quota-api']);
+        expect(['cloudrun', 'cloudsql', 'gcs'].map(provider => f.ctx.repos.connections.findByProviderAndScope(provider, 'github.com/acme/operator-host#environment=staging'))).toEqual(connections);
+        return;
+      }
       if (scenario === 'quota-public-api-parent-drift') {
         expect(resumed).toMatchObject({ error: expect.stringMatching(/Cloud project preparation/) });
         expect(f.adapters).not.toHaveBeenCalled(); expect(writes).toEqual([...beforeWrites, 'quota-api']);

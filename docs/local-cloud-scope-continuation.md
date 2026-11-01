@@ -371,6 +371,36 @@ application cases, the original continuation/provider-roster contracts and the
 artifact-preservation cases below. The tests remain in ordinary `npm test`;
 normal remote acceptance and fresh packaged execution are separate gates.
 
+### Recover a completed prerequisite after temporary read failure
+
+A later native deployment review found the original service and registry records
+pending after timeouts, while their creation attempts and completion evidence
+were retained. The quota stage then reported revoked authorization before issuing
+any native read. The challenged assumption was that a prerequisite's previously
+accepted parent would always remain currently ready. The user requirement for
+restart recovery and the present/absent/unknown contract require read-only
+reverification of those exact resources; an unknown read cannot authorize a
+replacement or permanently revoke that recovery path.
+
+An application/SQLite regression injects a temporary HTTP 503 on an existing
+Service Usage GET after quota setup succeeds. The next ordinary plan originally
+remained stuck after the endpoint recovered. A completed prerequisite may now
+reconcile its original parent during read-only recovery, then check the same
+bindings and connection scope. Initial API enablement still avoids the API it is
+trying to enable; unresolved writes gain no resubmission authority. The planner
+also reloads ancestor observations after recovery instead of interpreting its
+stale pre-recovery snapshot. Changed bindings or native resource lifetimes still
+block ordinary deployment, and cleanup retains its separate semantics.
+
+The counterexample failed before the correction and passed afterward with no
+additional cloud writes. All 78 application lifecycle cases and `npm run typecheck` pass; their results
+are recorded with the PR. These reconstructed transports establish recovery behavior,
+not the cause of the earlier native timeouts. A separate read-only native check
+confirmed all 14 hosting APIs enabled in approximately four seconds; that timing
+does not prove the duration of the entire ancestor chain. The named provider
+matrix above is unchanged. Normal acceptance discovers these regressions through
+`npm test`; live branch-protection enforcement was not re-inspected.
+
 ### Preserve prepared content across an unrelated spec revision
 
 The quota declaration also exposed a second assumption: an unattempted artifact
