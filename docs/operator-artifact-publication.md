@@ -108,14 +108,71 @@ behavior, not native backup execution or the behavior of an older published imag
 
 An existing immutable publication remains tied to its original package archive.
 Installing another unpublished candidate with the same version and dependency
-lock does not silently replace that receipt. To refresh the backup helper from a
-previous two-helper selection, review an explicit change of that declaration's
-`artifacts` to `["backup-runner-v1"]`. The existing lifecycle prepares a new image
-and predecessor-linked publication plan, retaining historical receipts and the
-holding image's independent runtime bindings. After the new upload and immutable
-pull are verified, separately update `backups.runnerImage` to that exact receipt
-and review the resulting recovery program. Neither selecting a new helper nor
-publishing it changes an existing pinned backup program automatically.
+lock does not silently replace that receipt. To publish corrected helper bytes
+without changing the package version or inventing another artifact name, set
+`refreshFrom` on the existing declaration. Copy the installation ID and plan
+digest from that declaration's latest completed publication plan:
+
+```json
+{
+  "refreshFrom": {
+    "installationId": "11111111-1111-4111-8111-111111111111",
+    "planDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}
+```
+
+Use `hv_spec` to select this intent, then `hv_plan` and the separately approved
+`hv_apply`. The marker must name the exact completed publication in the same
+repository, app, environment and artifact declaration. It cannot select an
+unattempted proposal, another environment or an older ancestor. The provider's
+existing refresh capability verifies the native target and prepares one frozen,
+predecessor-linked proposal. Repeated plans and process restarts retain its exact
+archive and image. An uncertain publication is reconciled from its original
+attempt before changed or removed declarations can select any new work.
+
+Keep the marker after completion: the same declaration then becomes a noop.
+A later explicit refresh names the newly completed publication. Removing a
+consumed marker or reverting it to an older publication blocks; it never
+implicitly prepares or uploads another image. Existing declarations without a
+marker retain their package-version/artifact-selection upgrade behavior. For S3,
+refresh still reuses unchanged content digests, immutable versions and existing
+exact public-read grants rather than duplicating objects. Other providers remain
+unsupported as shown in the matrix above; this field does not add a publisher.
+
+Historical receipts and existing runtime references remain unchanged. After the
+new upload and immutable pull are verified, separately update
+`backups.runnerImage` to that exact receipt and review the resulting recovery
+program. Neither selecting a new helper nor publishing it changes an existing
+pinned backup program automatically.
+
+The counterexample was a corrected backup-only helper with the same package
+version and dependency lock: ordinary planning correctly preserved its accepted
+receipt, but there was no explicit way to request a new review. The owner's
+requirements establish both that refresh is needed and that retained receipts,
+uncertain attempts and pinned runtime references must stay intact. Eight actual
+SpecStore/SQLite/application regressions first failed because `refreshFrom` was
+rejected by the declaration schema. The completed implementation exercises exact
+approval, preserved receipts, restart/proposal reuse, removed/stale/foreign
+markers and lost-push acknowledgment recovery. These tests use the real GCP
+publication driver with reconstructed HTTP and synthetic Docker/package
+boundaries; they do not build or publish a helper or establish live cloud support.
+
+The AWS application regression exposed a second assumption: the outer executor
+skips noop actions, so a refreshed publication's inherited target/object evidence
+was never recorded before its dependent public-policy check. Provider-only tests
+had applied those noops explicitly. Ordinary application apply initially blocked
+with `not_converged`; artifact apply now uses the existing read-only reconciliation
+to verify inherited evidence before the selected action. The application/SQLite
+test retains identical immutable URLs and versions with zero additional native
+stack, object or policy writes. A mixed refresh then exposed why readback failure
+must stop dependent work: loss of a retained template still allowed another
+template upload. Each inherited noop is now reconciled separately in dependency
+order, with verified completion required before proceeding. Denied reads and
+missing retained objects block with zero new writes. A separate completed-marker regression first
+accepted another repository as noop; source scope is now checked for consumed as
+well as new markers. These checks remain in ordinary acceptance alongside the
+unchanged native publication and private application-candidate suites.
 
 ## Contract evidence
 

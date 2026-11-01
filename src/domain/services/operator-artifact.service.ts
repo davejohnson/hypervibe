@@ -11,7 +11,7 @@ import type { Environment } from '../entities/environment.entity.js';
 import type { CloudInstallationContext, CloudInstallationRecord, OperatorArtifactIntent } from '../ports/cloud-installation.port.js';
 import { OPERATOR_ARTIFACT_OPERATION, isOperatorArtifactAction, operatorArtifactPlanSchema, type OperatorArtifactPlan } from '../ports/operator-artifact.port.js';
 import type { PlanAction } from '../plan/plan.types.js';
-import type { ActionResult } from '../plan/converge.executor.js';
+import { orderActions, type ActionResult } from '../plan/converge.executor.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { SpecStore, type SpecResult } from '../spec/spec.store.js';
 import { applyCloudInstallationV1, planCloudInstallationV1, reconcileCloudInstallationV1 } from './cloud-installation-runtime.js';
@@ -40,7 +40,8 @@ function selection(project: Project, environment: Environment, name: string, res
   const capability = providerRegistry.getArtifactPublication(declaration.provider); if (!capability) throw unavailable();
   const nativeScope = capability.parseDeclaration(declaration.nativeScope, declaration.artifacts, environment.platformBindings);
   return { declaration, capability, nativeScope, source: source(project, result),
-    proof: { declarationDigest: canonicalJsonSha256(declaration), nativeScopeDigest: canonicalJsonSha256(nativeScope) } };
+    proof: { declarationDigest: canonicalJsonSha256(declaration), nativeScopeDigest: canonicalJsonSha256(nativeScope),
+      ...(declaration.refreshFrom ? { refreshFromDigest: canonicalJsonSha256(declaration.refreshFrom) } : {}) } };
 }
 function current(project: Project, environment: Environment, name: string, intent: OperatorArtifactIntent): boolean {
   try {
@@ -49,7 +50,8 @@ function current(project: Project, environment: Environment, name: string, inten
     if (!freshProject || !freshEnvironment || freshEnvironment.projectId !== project.id || freshEnvironment.name !== intent.environment || !result) return false;
     const selected = selection(freshProject, freshEnvironment, name, result);
     return selected.declaration.provider === intent.artifactProvider && selected.source.repository === intent.source.repository
-      && isDeepStrictEqual(selected.proof, intent.selection) && isDeepStrictEqual(selected.declaration.artifacts, intent.artifacts);
+      && isDeepStrictEqual(selected.proof, intent.selection) && isDeepStrictEqual(selected.declaration.artifacts, intent.artifacts)
+      && (!selected.declaration.refreshFrom || isDeepStrictEqual(selected.declaration.refreshFrom, intent.predecessor));
   } catch { return false; }
 }
 async function context(project: Project, environment: Environment, name: string, intent: OperatorArtifactIntent, readOnly: boolean,
@@ -132,10 +134,19 @@ export async function planOperatorArtifacts(input: { project: Project; environme
       || !isDeepStrictEqual(record.intent.selection, selected.proof) || record.intent.artifactProvider !== selected.declaration.provider))
       return projected(record, name, 'recover', environment);
     if (!selected) continue;
+    const refreshFrom = selected.declaration.refreshFrom;
+    if (!record && refreshFrom) throw unavailable();
     let nextScope: { [key: string]: string } | undefined, predecessor: OperatorArtifactIntent['predecessor'];
     if (record?.status === 'scope-ready') {
       const changed = !isDeepStrictEqual(record.intent.selection, selected.proof) || !isDeepStrictEqual(record.intent.artifacts, selected.declaration.artifacts);
       if (record.intent.artifactProvider !== selected.declaration.provider) throw unavailable();
+      if (refreshFrom && record.intent.source.repository !== selected.source.repository) throw unavailable();
+      // A completed successor consumes its exact marker. A new refresh must
+      // name the current accepted receipt; an ancestor or removed marker must
+      // not become an implicit publication through declaration drift.
+      if (refreshFrom && !(!changed && isDeepStrictEqual(record.intent.predecessor, refreshFrom))) {
+        if (!isDeepStrictEqual(refreshFrom, { installationId: record.installationId, planDigest: record.plan.digest })) throw unavailable();
+      } else if (!refreshFrom && record.intent.selection?.refreshFromDigest) throw unavailable();
       const next = changed ? selected.capability.refreshScope?.(record, selected.nativeScope, selected.declaration.artifacts) : selected.capability.nextScope(record);
       if (changed && !next) throw unavailable();
       if (!next) continue;
@@ -177,6 +188,13 @@ export async function applyOperatorArtifacts(input: { project: Project; environm
     if (input.action ? !isOperatorArtifactAction(input.action) || !expected.actions.some(action => isDeepStrictEqual(action, input.action)) : proof.mode !== 'verified') throw unavailable();
     const readOnly = proof.mode !== 'prepare' || record.attempts.some(attempt => attempt.actionId === input.action?.id);
     const execution = await context(input.project, input.environment, proof.name, record.intent, readOnly, input.authorize);
+    // The outer executor skips noops. Re-observe inherited artifact evidence
+    // before its dependent action; never synthesize completion or replay a write.
+    if (!readOnly) for (const noop of orderActions(record.plan.actions).filter(action => action.type === 'noop' && !record.completed[action.id])) {
+      const verified = await reconcileCloudInstallationV1({ ...execution, installationId: record.installationId, planDigest: record.plan.digest,
+        onlyActionId: noop.id, authorize: async authorization => authorization.phase !== 'mutate' && execution.authorize(authorization) });
+      if (!verified.completed[noop.id] || verified.reason) throw unavailable();
+    }
     const target = { ...execution, installationId: record.installationId, planDigest: record.plan.digest, ...(input.action ? { onlyActionId: input.action.id } : {}) };
     const updated = readOnly ? await reconcileCloudInstallationV1(target) : await applyCloudInstallationV1({ ...target, confirmActions: [input.action!.id] });
     const success = updated.status === 'scope-ready' || updated.status === 'pending' && !updated.reason && Boolean(input.action && updated.completed[input.action.id]);

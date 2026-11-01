@@ -51,14 +51,15 @@ describe('unattempted operator artifact proposal preservation', () => {
       operatorArtifacts: { helpers: { provider: 'cloudrun', artifacts: ['backup-runner-v1'],
         nativeScope: { scopeKind: 'gar-image-publication-v1', projectId: scope.projectId, region: scope.region, packageVersion: provenance.packageVersion } } },
     } } });
-    const imageId = 'sha256:' + 'a'.repeat(64), registryDigest = 'sha256:' + 'd'.repeat(64);
+    const imageId = 'sha256:' + 'a'.repeat(64);
     const image = 'us-central1-docker.pkg.dev/example-quota-project/operator-public/backup-runner-v1';
     const owner = (id: string) => createHash('sha256').update(JSON.stringify([project.id, project.id, environment.name, id])).digest('hex');
-    let quotaBlocked = false, publishedAttempt: string | undefined;
+    let quotaBlocked = false, lostPush = false, unknownRead = false;
+    let candidate = { packageArchiveSha256: 'f'.repeat(64), backupImageId: imageId };
+    const published = new Map<string, string>();
     const pushes: string[] = [], requests: string[] = [];
     const capability = providerRegistry.getArtifactPublication('cloudrun')!;
-    const prepare = vi.spyOn(capability, 'prepare').mockImplementation(async nativeScope => ({ ...nativeScope,
-      packageArchiveSha256: 'f'.repeat(64), backupImageId: imageId }));
+    const prepare = vi.spyOn(capability, 'prepare').mockImplementation(async nativeScope => ({ ...nativeScope, ...candidate }));
     const request: typeof fetch = async (input, init = {}) => {
       const url = new URL(String(input)); requests.push(url.toString());
       expect(new Headers(init.headers).get('authorization')).toBe('Bearer synthetic-artifact-token');
@@ -74,20 +75,30 @@ describe('unattempted operator artifact proposal preservation', () => {
         description: `hypervibe:operator-registry:${owner(scope.publicArtifactInstallationId)}:${scope.publicArtifactAttemptId}` });
       if (url.pathname.endsWith(':getIamPolicy')) return Response.json({ version: 3, etag: 'synthetic-etag', bindings: [{ role: 'roles/artifactregistry.reader', members: ['allUsers'] }] });
       if (url.pathname.endsWith(':testIamPermissions')) return Response.json({ permissions: ['artifactregistry.repositories.uploadArtifacts', 'artifactregistry.repositories.downloadArtifacts'] });
-      if (url.pathname.includes('/tags/')) return publishedAttempt
-        ? Response.json({ name: `${scope.publicArtifactRepositoryName}/packages/backup-runner-v1/tags/hv-${publishedAttempt}`,
-          version: `${scope.publicArtifactRepositoryName}/packages/backup-runner-v1/versions/${registryDigest}` })
-        : Response.json({}, { status: 404 });
-      if (url.pathname.includes('/dockerImages/')) return Response.json({ name: `${scope.publicArtifactRepositoryName}/dockerImages/backup-runner-v1@${registryDigest}`,
-        uri: `${image}@${registryDigest}`, uploadTime: '2026-10-29T00:00:00Z' });
+      if (url.pathname.includes('/tags/')) {
+        if (unknownRead) return Response.json({}, { status: 503 });
+        const tag = url.pathname.split('/tags/')[1], registryDigest = published.get(tag);
+        return registryDigest ? Response.json({ name: `${scope.publicArtifactRepositoryName}/packages/backup-runner-v1/tags/${tag}`,
+          version: `${scope.publicArtifactRepositoryName}/packages/backup-runner-v1/versions/${registryDigest}` }) : Response.json({}, { status: 404 });
+      }
+      if (url.pathname.includes('/dockerImages/')) {
+        const registryDigest = decodeURIComponent(url.pathname).split('@')[1];
+        expect([...published.values()]).toContain(registryDigest);
+        return Response.json({ name: `${scope.publicArtifactRepositoryName}/dockerImages/backup-runner-v1@${registryDigest}`,
+          uri: `${image}@${registryDigest}`, uploadTime: '2026-10-29T00:00:00Z' });
+      }
       throw new Error('Unexpected reconstructed GAR request');
     };
     vi.spyOn(capability, 'create').mockImplementation(async nativeScope => ({
       driver: createGcpOperatorArtifactDriver({ fetch: request, command: async (program, args) => {
         expect(program).toBe('docker');
-        if (args[0] === 'image') return JSON.stringify([{ Id: imageId, Os: 'linux', Architecture: 'amd64',
+        if (args[0] === 'image') return JSON.stringify([{ Id: nativeScope.backupImageId, Os: 'linux', Architecture: 'amd64',
           Config: { User: 'postgres', Labels: artifactImageLabels(nativeScope, 'backup-runner-v1') } }]);
-        if (args[0] === 'push') { pushes.push(args[1]); publishedAttempt = args[1].split(':hv-')[1]; return ''; }
+        if (args[0] === 'push') {
+          pushes.push(args[1]); published.set('hv-' + args[1].split(':hv-')[1], 'sha256:' + createHash('sha256').update(nativeScope.backupImageId).digest('hex'));
+          if (lostPush) { unknownRead = true; throw new Error('Synthetic lost push acknowledgment'); }
+          return '';
+        }
         if (['login', 'tag', 'pull'].includes(args[0])) return '';
         throw new Error('Unexpected Docker command');
       } }),
@@ -117,7 +128,18 @@ describe('unattempted operator artifact proposal preservation', () => {
         intent: { ...original.intent, installationId: randomUUID(), source: { ...original.intent.source,
           specRevision: original.intent.source.specRevision + 1, specDigest: '9'.repeat(64) } } });
     };
-    return { ctx, project, environment, store, prepare, plan, apply, record, pushes, requests, imageId, duplicateHistoricalProposal,
+    const desired = (edit: (spec: NonNullable<ReturnType<SpecStore['get']>>['spec']) => void) => {
+      const spec = structuredClone(store.get(project)!.spec); edit(spec); store.replace(project, spec);
+    };
+    const requestRefresh = (previous: { installationId: string; planDigest: string }) => desired(spec => {
+      Object.assign(spec.environments.staging.operatorArtifacts!.helpers, { refreshFrom: previous });
+    });
+    const inspect = () => planOperatorArtifacts({ project, environmentName: environment.name, specResult: store.get(project)! });
+    const restart = () => { SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(path.join(directory, 'state.db')).migrate(); };
+    return { ctx, project, environment, store, prepare, plan, inspect, apply, record, pushes, requests, imageId, duplicateHistoricalProposal,
+      desired, requestRefresh, restart, receipts: (id: string) => capability.receipts(record(id)),
+      changeCandidate: () => { candidate = { packageArchiveSha256: 'b'.repeat(64), backupImageId: 'sha256:' + 'c'.repeat(64) }; },
+      losePush: () => { lostPush = true; }, resolvePush: () => { lostPush = false; unknownRead = false; },
       setQuotaBlocked: (value: boolean) => { quotaBlocked = value; } };
   }
 
@@ -169,5 +191,95 @@ describe('unattempted operator artifact proposal preservation', () => {
     await expect(f.plan()).rejects.toThrow(/publication could not be verified/);
     expect(f.prepare).toHaveBeenCalledOnce();
     expect(f.pushes).toEqual([]);
+  });
+
+  it('refreshes same-version backup bytes once through exact approval and retains the accepted receipt and runtime selection', async () => {
+    const f = fixture();
+    const pinned = 'us-central1-docker.pkg.dev/example-quota-project/operator-public/backup-runner-v1@sha256:' + '8'.repeat(64);
+    f.desired(spec => { spec.environments.staging.backups = { mode: 'daily', runnerImage: pinned }; });
+    const original = await f.plan();
+    expect(await f.apply(original.planId, original.actions.map(action => action.id))).toMatchObject({ kind: 'executed', result: { success: true } });
+    const originalRecord = f.record(original.artifactPublication.installationId), originalReceipts = f.receipts(originalRecord.installationId);
+    const bindings = f.ctx.repos.environments.findById(f.environment.id)!.platformBindings;
+    f.changeCandidate();
+    expect(await f.inspect()).toBeUndefined();
+    expect(f.prepare).toHaveBeenCalledOnce(); expect(f.pushes).toHaveLength(1);
+    f.requestRefresh({ installationId: originalRecord.installationId, planDigest: originalRecord.plan.digest });
+    const next = await f.plan(), prepared = f.record(next.artifactPublication.installationId);
+    expect(prepared.intent).toMatchObject({ predecessor: { installationId: originalRecord.installationId, planDigest: originalRecord.plan.digest },
+      nativeScope: { packageVersion: '0.1.45', packageLockSha256: 'e'.repeat(64), packageArchiveSha256: 'b'.repeat(64), backupImageId: 'sha256:' + 'c'.repeat(64) } });
+    expect(next.actions).toHaveLength(1); expect(next.actions[0].requiresConfirm).toBe(true);
+    expect(next.actions[0].type).not.toBe('noop'); expect(f.pushes).toHaveLength(1);
+    f.restart();
+    const repeated = await f.plan();
+    expect(repeated.artifactPublication).toEqual(next.artifactPublication); expect(f.prepare).toHaveBeenCalledTimes(2);
+    await f.apply(repeated.planId, []); expect(f.pushes).toHaveLength(1);
+    expect(await f.apply(repeated.planId, repeated.actions.map(action => action.id))).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(f.pushes).toHaveLength(2); expect(await f.inspect()).toBeUndefined();
+    expect(f.prepare).toHaveBeenCalledTimes(2);
+    expect(f.record(originalRecord.installationId)).toMatchObject({ intent: originalRecord.intent, plan: originalRecord.plan,
+      completed: originalRecord.completed, attempts: originalRecord.attempts.map(({ updatedAt: _updatedAt, ...attempt }) => attempt) });
+    expect(f.receipts(originalRecord.installationId)).toEqual(originalReceipts);
+    expect(f.receipts(prepared.installationId)[0].image).not.toBe(originalReceipts[0].image);
+    expect(f.ctx.repos.environments.findById(f.environment.id)!.platformBindings).toEqual(bindings);
+    expect(f.store.get(f.project)!.spec.environments.staging.backups).toEqual({ mode: 'daily', runnerImage: pinned });
+  });
+
+  it.each(['missing', 'wrong-digest', 'other-environment', 'other-name', 'other-repository'] as const)('rejects a %s refresh predecessor before preparing another artifact', async invalid => {
+    const f = fixture(), original = await f.plan();
+    await f.apply(original.planId, original.actions.map(action => action.id));
+    const previous = { installationId: original.artifactPublication.installationId, planDigest: original.artifactPublication.planDigest };
+    if (invalid === 'missing') previous.installationId = randomUUID();
+    if (invalid === 'wrong-digest') previous.planDigest = '0'.repeat(64);
+    f.requestRefresh(previous);
+    if (invalid === 'other-environment') f.desired(spec => { spec.environments.production = structuredClone(spec.environments.staging); });
+    if (invalid === 'other-name') f.desired(spec => { spec.environments.staging.operatorArtifacts = { other: spec.environments.staging.operatorArtifacts!.helpers }; });
+    if (invalid === 'other-repository') f.desired(spec => { spec.gitRemoteUrl = 'https://github.com/acme/other.git'; });
+    await expect(invalid === 'other-environment' ? planOperatorArtifacts({ project: f.project, environmentName: 'production', specResult: f.store.get(f.project)! }) : f.inspect()).rejects.toThrow();
+    expect(f.prepare).toHaveBeenCalledOnce(); expect(f.pushes).toHaveLength(1);
+  });
+
+  it('rejects a removed or stale consumed marker instead of preparing an unrequested refresh', async () => {
+    const f = fixture(), original = await f.plan();
+    await f.apply(original.planId, original.actions.map(action => action.id));
+    f.requestRefresh({ installationId: original.artifactPublication.installationId, planDigest: original.artifactPublication.planDigest });
+    const second = await f.plan(); await f.apply(second.planId, second.actions.map(action => action.id));
+    const saved = f.store.get(f.project)!.spec;
+    f.desired(spec => { Reflect.deleteProperty(spec.environments.staging.operatorArtifacts!.helpers, 'refreshFrom'); });
+    await expect(f.inspect()).rejects.toThrow();
+    expect(f.prepare).toHaveBeenCalledTimes(2); expect(f.pushes).toHaveLength(2);
+    f.store.replace(f.project, saved);
+    f.requestRefresh({ installationId: second.artifactPublication.installationId, planDigest: second.artifactPublication.planDigest });
+    const third = await f.plan(); await f.apply(third.planId, third.actions.map(action => action.id));
+    f.store.replace(f.project, saved);
+    await expect(f.inspect()).rejects.toThrow();
+    expect(f.prepare).toHaveBeenCalledTimes(3); expect(f.pushes).toHaveLength(3);
+  });
+
+  it('does not accept a consumed refresh marker under another repository', async () => {
+    const f = fixture(), original = await f.plan();
+    await f.apply(original.planId, original.actions.map(action => action.id));
+    f.requestRefresh({ installationId: original.artifactPublication.installationId, planDigest: original.artifactPublication.planDigest });
+    const next = await f.plan(); await f.apply(next.planId, next.actions.map(action => action.id));
+    f.desired(spec => { spec.gitRemoteUrl = 'https://github.com/acme/other.git'; });
+    await expect(f.inspect()).rejects.toThrow();
+    expect(f.prepare).toHaveBeenCalledTimes(2); expect(f.pushes).toHaveLength(2);
+  });
+
+  it('reconciles an uncertain refresh after restart and marker change without another push or prepared image', async () => {
+    const f = fixture(), original = await f.plan();
+    await f.apply(original.planId, original.actions.map(action => action.id));
+    f.changeCandidate(); f.requestRefresh({ installationId: original.artifactPublication.installationId, planDigest: original.artifactPublication.planDigest });
+    const refresh = await f.plan(); f.losePush();
+    expect(await f.apply(refresh.planId, refresh.actions.map(action => action.id))).toMatchObject({ kind: 'executed', result: { success: false } });
+    expect(f.pushes).toHaveLength(2); expect(f.record(refresh.artifactPublication.installationId).attempts.at(-1)?.status).toBe('uncertain');
+    f.restart(); f.requestRefresh({ installationId: randomUUID(), planDigest: '0'.repeat(64) });
+    const recovery = await f.plan();
+    expect(recovery.artifactPublication).toMatchObject({ installationId: refresh.artifactPublication.installationId, mode: 'recover' });
+    expect(recovery.actions.every(action => action.requiresConfirm === false && action.metadata?.mode === 'recover')).toBe(true);
+    f.resolvePush();
+    expect(await f.apply(recovery.planId, [])).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(f.pushes).toHaveLength(2); expect(f.prepare).toHaveBeenCalledTimes(2);
+    await expect(f.inspect()).rejects.toThrow();
   });
 });

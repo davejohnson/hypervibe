@@ -46,6 +46,16 @@ disabled. That scoped proposal changes only its selected backup program. To
 retire a managed program, declare backups disabled and review a backup-scoped
 removal; retained data and native snapshots remain untouched.
 
+For a corrected operator helper at the same package version, use the existing
+`operatorArtifacts.<name>` declaration's `refreshFrom` with its latest completed
+publication's exact `installationId` and `planDigest`. Plan and separately review
+the new upload; do not invent another artifact name or replace a retained receipt.
+Keep that marker after completion so repeated plans remain noops. A later refresh
+names the new completed publication; removed or stale markers block. Reconcile
+uncertain uploads through their existing attempts. After verified publication,
+select its immutable digest in `backups.runnerImage` and review the backup program
+separately; publishing a helper does not update an existing runtime reference.
+
 The existing environment policy and reviewed deployment bindings determine the
 release path. Portable managed CI is the normal push-deploy path where
 implemented. Do not change deploy-source settings or workflow content outside

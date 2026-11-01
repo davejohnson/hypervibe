@@ -162,6 +162,95 @@ describe('operator artifact publication through application and SQLite', () => {
     expect(f.ordinary).not.toHaveBeenCalled(); expect(f.native.writes).toEqual(['stack', 'object', 'object', 'policy']);
   });
 
+  it('consumes an explicit refresh of unchanged AWS templates without republishing versions or changing policy', async () => {
+    const f = fixture(), first = await f.plan(); if ('error' in first) throw new Error(first.error);
+    expect(await f.apply(first.planRunId, first.actions.map(action => action.id)))
+      .toMatchObject({ kind: 'executed', result: { success: true } });
+    const firstPlan = f.ctx.repos.runs.findById(first.planRunId)!.plan as any;
+    const prior = f.native.capability.parseRecord(f.ctx.repos.runs.findById(firstPlan.artifactPublication.installationId)!.plan);
+    const originalReceipts = f.native.capability.receipts(prior), originalWrites = [...f.native.writes];
+    const originalPolicy = structuredClone(f.native.policy());
+    expect(originalWrites).toEqual(['stack', 'object', 'object', 'policy']);
+    const refreshFrom = { installationId: prior.installationId, planDigest: prior.plan.digest };
+    const changed = structuredClone(f.store.get(f.project)!.spec);
+    changed.environments.staging.operatorArtifacts!.templates.refreshFrom = refreshFrom;
+    f.store.replace(f.project, changed);
+
+    const refreshed = await f.plan(); if ('error' in refreshed) throw new Error(refreshed.error);
+    expect(refreshed.scope).toBe('operator-artifacts');
+    expect(f.native.writes).toEqual(originalWrites);
+    const applied = await f.apply(refreshed.planRunId, refreshed.actions.filter(action => action.requiresConfirm).map(action => action.id));
+    const saved = f.ctx.repos.runs.findById(refreshed.planRunId)!.plan as any;
+    const successor = f.native.capability.parseRecord(f.ctx.repos.runs.findById(saved.artifactPublication.installationId)!.plan);
+    expect(applied, JSON.stringify({ status: successor.status, reason: successor.reason, completed: Object.keys(successor.completed),
+      actions: refreshed.actions.map(({ id, type }) => ({ id, type })), attempts: successor.attempts.map(({ actionId, status, reason }) => ({ actionId, status, reason })) }))
+      .toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(successor.installationId).not.toBe(prior.installationId);
+    expect(successor).toMatchObject({ status: 'scope-ready', intent: { predecessor: refreshFrom }, attempts: [] });
+    expect(f.native.capability.receipts(successor)).toEqual(originalReceipts);
+    expect(f.native.writes).toEqual(originalWrites);
+    expect(f.native.policy()).toEqual(originalPolicy);
+
+    // Keeping the consumed marker in desired state must not create another
+    // publication. Ordinary hosting inspection is separate from this noop.
+    f.ordinary.mockResolvedValue({ success: false, error: 'Synthetic ordinary native inspection unavailable' });
+    for (let repeat = 0; repeat < 2; repeat++) {
+      f.ordinary.mockClear();
+      const again = await f.plan();
+      expect('error' in again ? again.error : again.scope).not.toMatch(/Operator artifact|operator-artifacts/);
+      expect(f.ordinary).toHaveBeenCalled();
+      expect(f.native.capability.receipts(f.native.capability.parseRecord(f.ctx.repos.runs.findById(successor.installationId)!.plan)))
+        .toEqual(originalReceipts);
+      expect(f.native.writes).toEqual(originalWrites);
+      expect(f.native.policy()).toEqual(originalPolicy);
+    }
+  });
+
+  it('blocks explicit AWS refresh when inherited-resource reads fail without inventing completion or writing', async () => {
+    const f = fixture(), first = await f.plan(); if ('error' in first) throw new Error(first.error);
+    expect(await f.apply(first.planRunId, first.actions.map(action => action.id)))
+      .toMatchObject({ kind: 'executed', result: { success: true } });
+    const firstPlan = f.ctx.repos.runs.findById(first.planRunId)!.plan as any;
+    const prior = f.native.capability.parseRecord(f.ctx.repos.runs.findById(firstPlan.artifactPublication.installationId)!.plan);
+    const originalWrites = [...f.native.writes], originalPolicy = structuredClone(f.native.policy());
+    const changed = structuredClone(f.store.get(f.project)!.spec);
+    changed.environments.staging.operatorArtifacts!.templates.refreshFrom = { installationId: prior.installationId, planDigest: prior.plan.digest };
+    f.store.replace(f.project, changed);
+    const refreshed = await f.plan(); if ('error' in refreshed) throw new Error(refreshed.error);
+    f.native.setReadsDenied(true);
+    expect(await f.apply(refreshed.planRunId, refreshed.actions.filter(action => action.requiresConfirm).map(action => action.id)))
+      .toMatchObject({ kind: 'executed', result: { success: false } });
+    const saved = f.ctx.repos.runs.findById(refreshed.planRunId)!.plan as any;
+    const successor = f.native.capability.parseRecord(f.ctx.repos.runs.findById(saved.artifactPublication.installationId)!.plan);
+    expect(successor).toMatchObject({ status: 'blocked', completed: {}, attempts: [] });
+    expect(f.native.writes).toEqual(originalWrites);
+    expect(f.native.policy()).toEqual(originalPolicy);
+    expect(f.native.capability.receipts(f.native.capability.parseRecord(f.ctx.repos.runs.findById(prior.installationId)!.plan)))
+      .toEqual(f.native.capability.receipts(prior));
+  });
+
+  it('does not upload a new AWS template after an inherited noop loses its native object', async () => {
+    const f = fixture(), initial = structuredClone(f.store.get(f.project)!.spec);
+    initial.environments.staging.operatorArtifacts!.templates.artifacts = ['aws-collection-template-v1'];
+    f.store.replace(f.project, initial);
+    const first = await f.plan(); if ('error' in first) throw new Error(first.error);
+    expect(await f.apply(first.planRunId, first.actions.map(action => action.id)))
+      .toMatchObject({ kind: 'executed', result: { success: true } });
+    const firstPlan = f.ctx.repos.runs.findById(first.planRunId)!.plan as any;
+    const prior = f.native.capability.parseRecord(f.ctx.repos.runs.findById(firstPlan.artifactPublication.installationId)!.plan);
+    const originalWrites = [...f.native.writes], changed = structuredClone(f.store.get(f.project)!.spec);
+    changed.environments.staging.operatorArtifacts!.templates.artifacts = ['aws-collection-template-v1', 'aws-deployment-template-v1'];
+    changed.environments.staging.operatorArtifacts!.templates.refreshFrom = { installationId: prior.installationId, planDigest: prior.plan.digest };
+    f.store.replace(f.project, changed);
+    const refreshed = await f.plan(); if ('error' in refreshed) throw new Error(refreshed.error);
+    // Independent native disappearance after review: the retained version must
+    // still be verified before this successor can perform its new upload.
+    f.native.objects.clear();
+    expect(await f.apply(refreshed.planRunId, refreshed.actions.filter(action => action.requiresConfirm).map(action => action.id)))
+      .toMatchObject({ kind: 'executed', result: { success: false } });
+    expect(f.native.writes).toEqual(originalWrites);
+  });
+
   it.each(['stack', 'object', 'policy'] as const)('recovers lost %s acknowledgments with no repeated native mutation', async lost => {
     const f = fixture({ lost }); const planned = await f.plan(); if ('error' in planned) throw new Error(planned.error);
     let current = planned;
