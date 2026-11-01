@@ -1,4 +1,5 @@
 import { applyOperatorApplications, operatorApplicationUnavailable } from '../domain/services/operator-application.service.js';
+import { operatorImageUpdateSelection, verifyOperatorImageUpdate } from '../domain/services/operator-image-update.service.js';
 import { applyRecoveryRuntimeAction } from '../domain/services/recovery-runtime.service.js';
 import { applyRuntimeAccessAction, observeRuntimeAccess, planRuntimeAccess, projectRuntimeAccessInput } from '../domain/services/runtime-access.service.js';
 import { applyCredentialLifecycle, pendingCredentialUpdate } from '../domain/services/credential-lifecycle.service.js';
@@ -848,6 +849,15 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const envName = loaded.document.environmentName;
   const planScope = loaded.document.scope ?? 'full';
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (loaded.document.overrides?.operatorImageUpdate) {
+    try {
+      const selected = await operatorImageUpdateSelection(project, environment, spec, { scope: planScope,
+        serviceFilter: loaded.document.overrides.services, includeEnvFile: false });
+      if (!selected || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment!.id || params.alwaysRunBootstrap) throw new Error();
+      await verifyOperatorImageUpdate(project, environment!, spec, selected.images);
+    } catch { return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'The exact existing image update dependencies changed or could not be verified. Re-plan before deployment; no setup writes are authorized.' }] }; }
+  }
   try {
     const pendingVariables = pendingRepositoryVariableEnvironment(project.id);
     if (pendingVariables && (planScope !== 'full' || envName !== pendingVariables

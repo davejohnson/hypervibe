@@ -14,7 +14,7 @@ import type { PlanAction } from '../plan/plan.types.js';
 import { orderActions, type ActionResult } from '../plan/converge.executor.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { SpecStore, type SpecResult } from '../spec/spec.store.js';
-import { applyCloudInstallationV1, planCloudInstallationV1, reconcileCloudInstallationV1 } from './cloud-installation-runtime.js';
+import { applyCloudInstallationV1, historicalInstallationEvidence, planCloudInstallationV1, reconcileCloudInstallationV1 } from './cloud-installation-runtime.js';
 type Record = CloudInstallationRecord<OperatorArtifactIntent>;
 const routing = z.object({ intent: z.object({ artifactProvider: z.string().min(1) }).passthrough() }).passthrough();
 const unavailable = () => new Error('Operator artifact publication could not be verified. Retain its exact plan, native operation and immutable receipts; no replacement or repeated upload is authorized.');
@@ -94,6 +94,42 @@ function projected(record: Record, name: string, mode: OperatorArtifactPlan['mod
 }
 function retainedNames(project: Project, environment: Environment) {
   return operatorArtifactJournalNames({ projectId: project.id, environmentId: environment.id, environmentName: environment.name });
+}
+/** Name matching selects a verification obligation, never mutation authority.
+ * Unrelated CI/external images retain the ordinary partial-deployment path. */
+export async function selectsOperatorImageTarget(project: Project, environment: Environment, images: string[]) {
+  const targets = new Set<string>();
+  for (const name of retainedNames(project, environment)) {
+    const history = await journal(project, environment, name).findByScope();
+    acceptedJournalLeaf(history); // Reject malformed or ambiguous ownership history.
+    for (const record of history) for (const evidence of [ ...Object.values(record.completed),
+      ...record.attempts.flatMap(attempt => attempt.status === 'succeeded' && attempt.evidence ? [attempt.evidence] : []) ])
+      for (const resource of evidence.resources) if (resource.kind === 'image' && /@sha256:[a-f0-9]{64}$/.test(resource.id))
+        targets.add(resource.id.split('@')[0]);
+  }
+  return images.length > 0 && images.every(image => targets.has(image.split('@')[0].replace(/:[^/:]+$/, '')));
+}
+/** Image-only updates consume exact immutable image receipts. Other completed
+ * setup effects retain their current unknown/readiness state without cloud reads. */
+export async function verifyOperatorArtifactImages(project: Project, environment: Environment, images: string[]) {
+  const required = new Set(images), selected: Record[] = [];
+  const repository = normalizeGitRemoteIdentity(project.gitRemoteUrl ?? undefined);
+  for (const name of retainedNames(project, environment)) {
+    const record = acceptedJournalLeaf(await journal(project, environment, name).findByScope());
+    if (!record) continue;
+    const historical = historicalInstallationEvidence(record);
+    if (!historical || record.intent.source.repository !== repository) throw unavailable();
+    const matches = Object.values(historical).flatMap(item => item.resources)
+      .filter(resource => resource.kind === 'image' && required.has(resource.id));
+    if (!matches.length) continue;
+    selected.push(record);
+    const fresh = await reconcileCloudInstallationV1({ ...await context(project, environment, name, record.intent, true),
+      installationId: record.installationId, planDigest: record.plan.digest });
+    if (fresh.status !== 'scope-ready') throw unavailable();
+    for (const resource of Object.values(fresh.completed).flatMap(item => item.resources))
+      if (resource.kind === 'image') required.delete(resource.id);
+  }
+  if (required.size || !selected.length) throw unavailable();
 }
 /** Narrow scopes cannot conceal accepted, unfinished publication work. */
 export async function operatorArtifactWorkRequired(project: Project, environmentName: string): Promise<boolean> {

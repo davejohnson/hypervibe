@@ -380,6 +380,19 @@ async function read<I extends CloudInstallationExecutableIntent = CloudInstallat
   if (record.installationId !== id) throw new CloudInstallationError('scope_mismatch');
   return record;
 }
+/** Historical success is evidence of finished effects, never current readiness.
+ * Call only with a provider-validated record; do not repair its completed map. */
+export function historicalInstallationEvidence(record: CloudInstallationRecord<CloudInstallationExecutableIntent>) {
+  const evidence: typeof record.completed = {};
+  for (const action of record.plan.actions) {
+    const attempt = record.attempts.filter(item => item.actionId === action.id).at(-1);
+    if (attempt && attempt.status !== 'succeeded') return undefined;
+    const proof = record.completed[action.id] ?? attempt?.evidence;
+    if (!proof) return undefined;
+    evidence[action.id] = proof;
+  }
+  return evidence;
+}
 export async function planCloudInstallationV1<I extends CloudInstallationExecutableIntent = CloudInstallationIntent>(input: CloudInstallationContext<I> & { intent: unknown }): Promise<CloudInstallationRecord<I>> {
   const intent = parseCloudInstallationIntentV1(input.intent, input.driver);
   const existing = await read(input, intent.installationId);

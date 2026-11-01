@@ -15,7 +15,7 @@ import type { PlanAction } from '../plan/plan.types.js';
 import type { ActionResult } from '../plan/converge.executor.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { SpecStore, type SpecResult } from '../spec/spec.store.js';
-import { CloudInstallationError, applyCloudInstallationV1, planCloudInstallationV1, reconcileCloudInstallationV1, reviewCloudInstallationRetryV1 } from './cloud-installation-runtime.js';
+import { CloudInstallationError, applyCloudInstallationV1, historicalInstallationEvidence, planCloudInstallationV1, reconcileCloudInstallationV1, reviewCloudInstallationRetryV1 } from './cloud-installation-runtime.js';
 import { verifiedLocalHoldingReceipt } from './local-holding-preparation.service.js';
 import { assertReadySecretContainers } from './secret-container-setup.js';
 import { operatorOutputSelectionSchema } from '../ports/operator-output.port.js';
@@ -161,6 +161,18 @@ export async function operatorApplicationWorkRequired(project: Project, environm
     if (record ? record.status !== 'scope-ready' : declared.includes(name)) return true;
   }
   return false;
+}
+/** Finished registration is not continuing deployment authority. Runtime
+ * references are checked separately; an unfinished or changed setup still blocks. */
+export async function assertOperatorApplicationsComplete(project: Project, environment: Environment, spec: ProjectSpec) {
+  const declarations = spec.environments[environment.name]?.operatorApplications ?? {};
+  const repository = normalizeGitRemoteIdentity(spec.gitRemoteUrl ?? project.gitRemoteUrl ?? undefined);
+  for (const name of new Set([...names(project, environment), ...Object.keys(declarations)])) {
+    const record = acceptedJournalLeaf(await journal(project, environment, name).findByScope());
+    if (!record || !historicalInstallationEvidence(record) || record.intent.source.repository !== repository
+      || declarations[name] && record.intent.selection?.declarationDigest !== canonicalJsonSha256(declarations[name]))
+      throw operatorApplicationUnavailable();
+  }
 }
 export async function planOperatorApplications(input: { project: Project; environmentName: string; specResult: SpecResult; options?: object }) {
   const declaration = input.specResult.spec.environments[input.environmentName]?.operatorApplications ?? {};

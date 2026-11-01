@@ -174,6 +174,40 @@ accepted another repository as noop; source scope is now checked for consumed as
 well as new markers. These checks remain in ordinary acceptance alongside the
 unchanged native publication and private application-candidate suites.
 
+## Updating an existing app without repeating unrelated setup
+
+An explicit `hv_plan` service selection can review an image-only update to
+already-bound workloads when their immutable image belongs to a validated
+operator publication target. Disable implicit env-file inputs for this review.
+The selected digest must have an exact accepted publication receipt and pass
+fresh native verification. Matching an image name only selects the verification
+path; it does not establish ownership or authorize deployment.
+
+This path preserves unrelated completed artifact and application-registration
+journals without contacting their administrator accounts. Historical finished
+effects remain distinct from current readiness: an expired AWS session may leave
+a completed template publication marked unknown without blocking an existing
+GCP image update. Excluded setup is not reported as freshly verified. Unfinished
+effects, ambiguous history and changed registration declarations still block.
+
+Normal hosting, native identity, runtime access, secret-reference, database and
+release-command checks remain in force. Only verified updates or noops for the
+selected existing services are admitted; required dependencies must be verified
+noops. Changed commands, secret references, ordinary runtime settings or missing
+permissions require their normal separate review. The saved plan carries the
+narrow contract, and apply rechecks the exact image and workload identities.
+
+Partial creates, branch builds and images outside an operator publication target
+retain their existing planning path. This does not add an ECR/ACR publisher or
+claim native deployment compatibility for every hosting provider.
+
+The live counterexample was an approved GCP image update preempted by expired
+AWS credentials while re-observing already-published templates. A regression
+through the actual command returned an artifact-recovery stage before the fix.
+Command, CLI, MCP and apply regressions cover the corrected boundary with real
+SQLite records and reconstructed provider transports; cloud effects remain
+unverified until the reviewed native rollout succeeds.
+
 ## Contract evidence
 
 Official sources reviewed for native behavior:

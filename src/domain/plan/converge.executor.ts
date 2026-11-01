@@ -289,6 +289,7 @@ export const planRunDocumentSchema = z.object({
   inputRequired: z.array(z.object({ key: z.string(), principal: z.string(), reason: z.string() })).optional(),
   overrides: z.object({
     services: z.array(z.string()).optional(),
+    operatorImageUpdate: z.literal(true).optional(),
     envFilePath: z.string().optional(),
     envFileKeys: z.array(z.string()).optional(),
     envFileVarsEncrypted: z.string().optional(),
@@ -302,6 +303,13 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.overrides?.operatorImageUpdate && (document.scope !== 'full' || !document.overrides.services?.length
+    || Object.keys(document.overrides).some(key => !['services', 'operatorImageUpdate'].includes(key))
+    || document.actions.some(action => action.type !== 'noop' && (action.type !== 'update' || action.resource.kind !== 'service'
+      || !action.verified || action.metadata?.blockedReason || !action.diff?.length
+      || action.diff.some(change => change.field !== 'env:IMAGE_URI' && change.field !== `env:IMAGE_URI_${action.resource.name.toUpperCase().replace(/[^A-Z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '')}`)
+      || action.id !== `service:${action.resource.name}` || !document.overrides!.services!.includes(action.resource.name)))))
+    ctx.addIssue({ code: 'custom', message: 'An existing image update can only update the selected bound services without other runtime inputs.' });
   if (document.scope === 'database-provisioning-recovery') {
     if (document.actions.length > 1 || document.actions.some(action => !isDatabaseProvisioningRecoveryAction(action))
       || (document.actions.length === 1) !== Boolean(document.overrides?.databaseProvisioningEncrypted)

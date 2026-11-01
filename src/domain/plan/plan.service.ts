@@ -12,6 +12,7 @@ import { planCredentialLifecycle, pendingCredentialUpdate } from '../services/cr
 import { planDatabaseCredentialAliases } from '../services/database-credential-aliases.service.js';
 import { planSecretContainers } from '../services/secret-container-setup.js';
 import { operatorArtifactWorkRequired, planOperatorArtifacts } from '../services/operator-artifact.service.js';
+import { operatorImageUpdateSelection, verifyOperatorImageUpdate } from '../services/operator-image-update.service.js';
 import { localCloudScopeRequired, planLocalCloudScope } from '../services/local-cloud-scope.service.js';
 import { localHoldingWorkRequired, planLocalHolding } from '../services/local-holding-preparation.service.js';
 import type { CloudInstallationReview } from '../ports/cloud-installation.port.js';
@@ -1845,11 +1846,17 @@ export class PlanService {
           unmanaged: [], warnings: prepared.warnings, inputRequired: [], blocked: [] };
       }
     } catch { return { error: 'Cloud project preparation could not be verified. Preserve any saved allocation and its exact native operation; no hosting or replacement project is authorized.' }; }
+    let operatorImageUpdate: Awaited<ReturnType<typeof operatorImageUpdateSelection>>;
+    try {
+      const existing = this.envRepo.findByProjectAndName(project.id, environmentName);
+      operatorImageUpdate = await operatorImageUpdateSelection(project, existing, specResult.spec, options);
+      if (operatorImageUpdate) await verifyOperatorImageUpdate(project, existing!, specResult.spec, operatorImageUpdate.images);
+    } catch { return { error: 'The existing image update prerequisites could not be verified. Preserve retained setup records and use the full plan to review other changes.' }; }
     if (scope !== 'full') {
       try { if (await operatorArtifactWorkRequired(project, environmentName)) return { error: 'Run hv_plan with scope=full to recover the retained operator artifact operation before narrower work.' }; }
       catch { return { error: 'Retained operator artifact history could not be verified; preserve its exact operation before narrower work.' }; }
     }
-    if (scope === 'full') {
+    if (scope === 'full' && !operatorImageUpdate) {
       try {
         const prepared = await planOperatorArtifacts({ project, environmentName, specResult, options });
         if (prepared) {
@@ -1881,11 +1888,11 @@ export class PlanService {
       }
     } catch { return { error: 'Holding preparation requires its exact reviewed local project scope, published holding image and retained native identity; no application deployment is authorized.' }; }
     try {
-      const outputPrerequisites = scope === 'full' ? await operatorOutputPrerequisiteKeys(project, environmentName, specResult.spec) : [];
+      const outputPrerequisites = scope === 'full' && !operatorImageUpdate ? await operatorOutputPrerequisiteKeys(project, environmentName, specResult.spec) : [];
       if (outputPrerequisites.length) return this.planSecretDestinations(projectWithSpecGitRemoteUrl(project, specResult.spec), environmentName, specResult, options ?? {}, outputPrerequisites);
       if (scope !== 'full' && await operatorApplicationWorkRequired(project, environmentName, specResult.spec))
         return { error: 'Run hv_plan with scope=full to recover operator application registration before narrower work.' };
-      const registration = scope === 'full' ? await planOperatorApplications({ project, environmentName, specResult, options }) : undefined;
+      const registration = scope === 'full' && !operatorImageUpdate ? await planOperatorApplications({ project, environmentName, specResult, options }) : undefined;
       if (registration) {
         const document: PlanRunDocument = { kind: 'hv_plan', scope: 'operator-applications', environmentName,
           specRevision: specResult.revision, observedFingerprint: null, actions: registration.actions,
@@ -2220,7 +2227,7 @@ export class PlanService {
       };
     }
     let generatedSecretValues: Record<string, string> = {};
-    if (!serviceFilter) {
+    if (!serviceFilter || operatorImageUpdate) {
       try {
         generatedSecretValues = deriveHypervibeSecretValues(specResult.spec, environmentName);
       } catch {
@@ -2386,7 +2393,7 @@ export class PlanService {
         error: 'Environment maintenance must use a full environment plan. Remove services= and re-run hv_plan.',
       };
     }
-    const delegatedSecrets = serviceFilter
+    const delegatedSecrets = serviceFilter && !operatorImageUpdate
       ? { actions: [], desiredEnvVars: {}, inputRequired: [], warnings: [], blockers: [] }
       : planDelegatedSecrets({
         spec: specResult.spec,
@@ -2398,7 +2405,9 @@ export class PlanService {
         generatedValues: generatedSecretValues,
         destinationsAreKnownAbsent,
       });
-    const managedSecretValues = {
+    // The image-only contract verifies accepted generated values without
+    // supplying, rotating or persisting new runtime secret inputs.
+    const managedSecretValues = operatorImageUpdate ? {} : {
       ...delegatedSecretValues,
       ...generatedSecretValues,
     };
@@ -3476,6 +3485,20 @@ export class PlanService {
     }
 
     const filterWarnings: string[] = [];
+    if (operatorImageUpdate) {
+      const selected = new Set(operatorImageUpdate.services.map(name => `service:${name}`));
+      const updates = actions.filter(action => selected.has(action.id));
+      const imageKeys = new Set(['env:IMAGE_URI', ...operatorImageUpdate.services.map(name =>
+        `env:IMAGE_URI_${name.toUpperCase().replace(/[^A-Z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '')}`)]);
+      const dependencies = actionDependencyClosure(actions, [...selected]);
+      if (updates.length !== selected.size || updates.some(action => !['noop', 'update'].includes(action.type) || !action.verified
+          || action.metadata?.blockedReason || action.type !== 'noop' && (!action.diff?.length || action.diff.some(change => !imageKeys.has(change.field))))
+        || dependencies.some(action => !action.verified || action.metadata?.blockedReason || !selected.has(action.id) && action.type !== 'noop')
+        || delegatedSecrets.actions.some(action => action.type !== 'noop' || !action.verified || action.metadata?.blockedReason)
+        || observed?.runtimeAccess?.identities.some(item => operatorImageUpdate!.services.includes(item.serviceName) && item.observation.state !== 'ready')
+        || observed?.runtimeAccess?.grants.some(item => operatorImageUpdate!.services.includes(item.serviceName) && (item.waiting || item.retained?.pending)))
+        return { error: 'The selected image update has unresolved hosting, runtime, secret or database prerequisites, or changes other runtime configuration. Review them through the full plan first.' };
+    }
     if (serviceFilter) {
       // A filtered plan is an honest "deploy these services" plan: keep the
       // scaffolding (project/environment) and database creates the deploy
@@ -3579,6 +3602,7 @@ export class PlanService {
       || (envFileVars && Object.keys(envFileVars).length > 0)
       ? {
         ...(serviceFilter ? { services: serviceFilter } : {}),
+        ...(operatorImageUpdate ? { operatorImageUpdate: true as const } : {}),
         ...(envFileVars && Object.keys(envFileVars).length > 0
           ? {
             envFilePath: envFile?.path,

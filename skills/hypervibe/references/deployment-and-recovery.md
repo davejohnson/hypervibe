@@ -56,6 +56,15 @@ uncertain uploads through their existing attempts. After verified publication,
 select its immutable digest in `backups.runnerImage` and review the backup program
 separately; publishing a helper does not update an existing runtime reference.
 
+For an image-only update to existing services using a published operator image,
+select those services explicitly in `hv_plan` and set `includeEnvFile: false`.
+Hypervibe verifies the exact immutable image and runtime dependencies while
+preserving unrelated completed setup records. An expired administrator session
+for another cloud is not a reason to repeat that setup. Other runtime changes,
+unknown required resources or unfinished setup effects still need their normal
+review; do not bypass a blocked plan. Images outside operator publication and
+first-time service creation keep their existing deployment path.
+
 The existing environment policy and reviewed deployment bindings determine the
 release path. Portable managed CI is the normal push-deploy path where
 implemented. Do not change deploy-source settings or workflow content outside
