@@ -14,7 +14,7 @@ import { planSecretReference, referenceState, secretReferencesForEnvironment,
 import { syncHostingEnvVars } from '../domain/services/hosting-env.service.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { recordRuntimeRolloutRequirements } from '../domain/services/runtime-rollout.service.js';
-import { preparedReleaseAttempts } from '../domain/services/prepared-direct-release.service.js';
+import { preparedReleaseAttempts, preparedReleaseTargetReview } from '../domain/services/prepared-direct-release.service.js';
 
 /** Both value and native-reference acceptance require the original completed
  * release and fresh provider proof. The marker never authorizes a secret write. */
@@ -25,9 +25,8 @@ export async function preparedSecretReleaseError(input: { ctx: CommandContext; p
   if (!environment.platformBindings.localPreparedHosting || services.some(name => {
     const attempt = attempts[name], serviceAction = actions.find(candidate => candidate.id === `service:${name}`);
     return !attempt || attempt.status !== 'completed' || attempt.actionId !== serviceAction?.id
-      || serviceAction.type !== 'noop' && (attempt.planRunId !== planId
-        || !serviceAction.metadata?.preparedReleaseReview
-        || attempt.target.imageUri !== (serviceAction.metadata.preparedReleaseReview as Record<string, unknown>).imageUri);
+      || serviceAction.type !== 'noop' && (attempt.planRunId !== planId && serviceAction.metadata?.preparedReleaseContinuation !== attempt.id
+        || !isDeepStrictEqual(serviceAction.metadata?.preparedReleaseReview, preparedReleaseTargetReview(attempt.target)));
   })) return 'Managed secret acceptance requires every exact completed first-release action from this reviewed plan.';
   const hosting = await ctx.adapterFactory.getHostingAdapter(project, environment.name);
   const native = await hosting.adapter?.preparedHosting?.inspect({ environment, environmentSpec });

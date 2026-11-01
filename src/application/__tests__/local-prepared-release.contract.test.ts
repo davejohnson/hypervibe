@@ -7,6 +7,7 @@ import { localHoldingApplicationFixture } from './local-holding-preparation.fixt
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import { planPreparedHosting } from '../../domain/services/hosting-prepared.service.js';
 import { applyPreparedHosting } from '../apply-prepared-hosting.js';
+import { preparedSecretReleaseError } from '../apply-secret-references.js';
 import { createPreparedDirectReleaseControl, completePreparedDirectRelease, reviewPreparedDirectReleaseActions } from '../../domain/services/prepared-direct-release.service.js';
 import type { CloudRunAdapter } from '../../adapters/providers/gcp/cloudrun.adapter.js';
 import type { LocalPreparedHostingReceiptV1 } from '../../domain/ports/local-holding-preparation.port.js';
@@ -32,7 +33,7 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
   const load = () => f.ctx.repos.environments.findById(f.environment.id)!;
   const receipt = load().platformBindings.localPreparedHosting as LocalPreparedHostingReceiptV1;
   const candidate = `us-central1-docker.pkg.dev/operator-project/hypervibe/application-candidate@sha256:${'f'.repeat(64)}`;
-  const reference = { destination: { provider: 'gcp-secret-manager', projectId: 'operator-project', projectNumber: '123456789012', secretId: 'native-token' }, version: '7' };
+  const reference = { destination: { provider: 'gcp-secret-manager' as const, projectId: 'operator-project', projectNumber: '123456789012', secretId: 'native-token' }, version: '7' };
   f.store.replace(f.project, { ...f.desired, secrets: fullRuntime ? {
     GENERATED_TOKEN: { ownership: 'hypervibe', generator: 'random-base64url-32-v1', generation: 1, environments: ['staging'] },
     DELEGATED_TOKEN: { ownership: 'delegated', principal: 'email:operator@example.test', environments: ['staging'], required: true },
@@ -149,7 +150,7 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
     action: reviewPreparedDirectReleaseActions([{ id: 'service:web', type: 'update', verified: true, requiresConfirm: true, resource: { kind: 'service', provider: 'cloudrun', name: 'web' }, reason: 'Reviewed local first release',
       ...(migration ? { diff: [{ field: 'releaseCommand', to: migrationCommand }] } : {}) }], load(), { web: candidate })[0]!,
     load, save: (before, next) => !!f.ctx.repos.environments.compareAndSwapPlatformBindings(before.id, before.platformBindings, next), authorize: () => true });
-  return { ...f, load, receipt, adapter, service, control, state, candidate, environmentSpec, expectedRuntime, managedSecretValues, metadata, taskState, execution, job };
+  return { ...f, load, receipt, adapter, service, control, state, candidate, environmentSpec, expectedRuntime, managedSecretValues, metadata, taskState, execution, job, reference };
 }
 describe('local journal-backed prepared application release', () => {
   it.each(['uid', 'etag', 'execution', 'execution-reference', 'missing', 'runtime-account'] as const)('rejects %s drift after reviewing migration job adoption', async drift => {
@@ -170,12 +171,12 @@ describe('local journal-backed prepared application release', () => {
     expect(await f.apply(plan.planRunId, plan.actions.map(action => action.id))).toMatchObject({ kind: 'executed', result: { success: false } });
     expect(f.load().platformBindings).toEqual(before); expect(f.taskState).toEqual(counts); expect(f.state.patches).toBe(0);
   });
-  it('requires explicit exact-identity adoption of an unacknowledged job before a new reviewed release can run it', async () => {
-    const f = await fixture(undefined, false, false, true);
+  it.each([false, true])('requires explicit exact-identity adoption before a new reviewed release with native reference=%s', async nativeReference => {
+    const f = await fixture(undefined, false, false, true, nativeReference);
     // Recorded native zero-execution shape on the disposable GCP Job, 2026-11-01.
     Object.assign(f.job, { latestCreatedExecution: {} });
     f.state.loseCreateAcknowledgment = true;
-    expect((await f.adapter.deploy(f.service, f.load(), { ...f.expectedRuntime, IMAGE_URI: f.candidate }, { preparedRelease: f.control })).receipt.success).toBe(false);
+    expect((await f.adapter.deploy(f.service, f.load(), { ...f.expectedRuntime, IMAGE_URI: f.candidate }, { preparedRelease: f.control, ...(nativeReference ? { secretVersionRefs: { NATIVE_TOKEN: f.reference } } : {}) })).receipt.success).toBe(false);
     expect(f.taskState).toEqual({ creates: 1, runs: 0 });
     const before = f.load().platformBindings;
     const plan = await new PlanService().plan(f.project, 'staging');
@@ -189,14 +190,33 @@ describe('local journal-backed prepared application release', () => {
     expect(await f.apply(plan.planRunId, plan.actions.map(action => action.id))).toMatchObject({ kind: 'executed', result: { success: true } });
     expect(f.taskState).toEqual({ creates: 1, runs: 0 }); expect(f.state.patches).toBe(0);
     expect((f.load().platformBindings.preparedDirectReleaseAttempts as any).web.releaseTask).toMatchObject({ phase: 'job-ready', adopted: true, jobUid: f.job.uid, jobEtag: f.job.etag });
+    let completedPlan: Exclude<Awaited<ReturnType<PlanService['plan']>>, { error: string }> | undefined;
     for (let phase = 0; phase < 5; phase++) {
       const next = await new PlanService().plan(f.project, 'staging');
       if ('error' in next) throw new Error(next.error);
       expect(next.blocked).toEqual([]);
-      expect(await f.apply(next.planRunId, next.actions.filter(a => a.requiresConfirm).map(a => a.id))).toMatchObject({ kind: 'executed', result: { success: true } });
-      if (f.state.patches === 2) break;
+      const applied = await f.apply(next.planRunId, next.actions.filter(a => a.requiresConfirm).map(a => a.id));
+      expect(applied, JSON.stringify(applied)).toMatchObject({ kind: 'executed', result: { success: true } });
+      if (f.state.patches === 2) { completedPlan = next; break; }
     }
     expect(f.state.patches).toBe(2); expect(f.taskState).toEqual({ creates: 1, runs: 1 });
+    if (nativeReference) {
+      expect(f.load().platformBindings.secretVersionBindings).toMatchObject({ NATIVE_TOKEN: { reference: { version: '7' } } });
+      expect(completedPlan).toBeDefined();
+      for (const drift of ['missing-continuation', 'different-attempt', 'configuration', 'resource-lifetime'] as const) {
+        const actions = structuredClone(completedPlan!.actions);
+        const web = actions.find(action => action.id === 'service:web')!;
+        if (drift === 'missing-continuation') delete web.metadata!.preparedReleaseContinuation;
+        if (drift === 'different-attempt') web.metadata!.preparedReleaseContinuation = 'another-attempt';
+        const review = web.metadata!.preparedReleaseReview as Record<string, unknown>;
+        if (drift === 'configuration') review.configurationDigest = 'e'.repeat(64);
+        if (drift === 'resource-lifetime') review.resourceUid = 'replacement-service-uid';
+        expect(await preparedSecretReleaseError({ ctx: f.ctx, project: f.project, environment: f.load(),
+          environmentSpec: f.environmentSpec, services: ['web', 'worker'], actions, planId: completedPlan!.planRunId }))
+          .toMatch(/exact completed first-release/);
+      }
+      expect(f.state.patchRequests).toBe(2); expect(f.taskState).toEqual({ creates: 1, runs: 1 });
+    }
   });
   it.each([false, true])('deploys and accepts an immutable native reference through its actual first-release plan with drift=%s', async drift => {
     // Observed live on 2026-11-01: the planner added preparedReleaseBinding,

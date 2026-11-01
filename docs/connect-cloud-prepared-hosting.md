@@ -486,3 +486,38 @@ The provider revision assertion separately freezes the old ECS revision 1
 semantic contract and requires review of revision 2. The focused legacy and
 emitted ECS task-definition suites pass 31 checks; this is offline compatibility
 evidence, not a live AWS deployment claim.
+
+
+### Secret acceptance after an approved release continuation
+
+The native first deployment on 2026-11-01 verified both application revisions and
+catalog seeding, but its first secret-reference acceptance action then blocked.
+The original migration attempt correctly retained its original plan ID through
+reviewed recovery, while the secret consumer incorrectly required the current
+plan ID. Native readiness returned HTTP 200; an independent read-only SQL query
+confirmed 81 migrations and two catalog rows. These establish workload readiness,
+not completion of the blocked acceptance actions or the all-cloud walkthroughs.
+
+The challenged assumption is that a completed first release always began in the
+same plan that finishes secret acceptance. The explicit partial-installation and
+restart requirement demands retaining original attempt identity. A real SQLite,
+planner/apply and serialized-client regression reproduced successful web/worker
+rollout followed by that exact blocked action after reviewed job adoption. It
+failed before the fix and passed afterward with exactly one migration execution
+and one update per service.
+
+Both native-reference and generated/delegated-value acceptance use the same
+release-authority check. It now admits the exact reviewed continuation attempt
+and compares the complete target review using the release controller's existing
+projection, including configuration digest and native resource lifetime. Missing
+or foreign continuation IDs, changed configuration and changed resource UID still
+block. Fresh native revision and secret-reference/value observations remain
+required; the marker grants no secret write authority. Original immutable intent
+and provider receipts are preserved. Completed-service noops retain their existing
+native revalidation path. The local-preparation scope and named provider matrix
+are unchanged; no new AWS or Azure native acceptance is claimed.
+
+The focused application/reference checks passed 42 tests. Shared release-authority
+and custody checks, TypeScript checking and normal acceptance are tracked in the
+PR. All regressions run through ordinary `npm test`. The previously approved live
+release remains partial until its remaining secret acceptance actions converge.

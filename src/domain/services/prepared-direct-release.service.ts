@@ -10,7 +10,7 @@ import { preparedDirectReleaseAttemptSchema, preparedDirectReleaseEvidenceSchema
 const attemptsSchema = z.record(z.string(), preparedDirectReleaseAttemptSchema);
 const unavailable = () => new Error('The exact prepared release attempt or current reviewed authority is unavailable; no repeat deployment is authorized.');
 const reviewKeys = ['installationId', 'planDigest', 'receiptDigest', 'configurationDigest', 'imageUri', 'projectId', 'environmentId', 'resourceId', 'resourceUid'] as const;
-const targetReview = (target: PreparedDirectReleaseTarget) => ({ ...Object.fromEntries(reviewKeys.map(key => [key, target[key]])),
+export const preparedReleaseTargetReview = (target: PreparedDirectReleaseTarget) => ({ ...Object.fromEntries(reviewKeys.map(key => [key, target[key]])),
   ...(target.releaseCommandHash ? { releaseCommandHash: target.releaseCommandHash } : {}) });
 export function preparedReleaseAttempts(environment: Environment) {
   return attemptsSchema.parse(environment.platformBindings.preparedDirectReleaseAttempts ?? {});
@@ -37,7 +37,7 @@ export function createPreparedDirectReleaseControl(input: {
       || !['create', 'update'].includes(input.action.type) || input.action.id !== `service:${target.workload}`
       || input.action.resource.kind !== 'service' || input.action.resource.name !== target.workload
       || input.action.resource.provider !== target.provider || input.expectedImage !== target.imageUri
-      || !isDeepStrictEqual(input.action.metadata?.preparedReleaseReview, targetReview(target))) throw unavailable();
+      || !isDeepStrictEqual(input.action.metadata?.preparedReleaseReview, preparedReleaseTargetReview(target))) throw unavailable();
     const environment = input.load(); scope(environment, target); return environment;
   };
   return {
@@ -107,7 +107,7 @@ export function reviewPreparedDirectReleaseActions(actions: PlanAction[], enviro
         return typeof command === 'string' && command.trim() ? { releaseCommandHash: hashEnvValue(command.trim()) } : {}; })() };
     if (attempt && ['attempted', 'uncertain'].includes(attempt.status) && !attempt.rolloutAttempted
       && attempt.releaseTask && ['create-acknowledged', 'job-ready', 'run-acknowledged', 'completed'].includes(attempt.releaseTask.phase)
-      && isDeepStrictEqual(targetReview(attempt.target), review)) return { ...action, requiresConfirm: true,
+      && isDeepStrictEqual(preparedReleaseTargetReview(attempt.target), review)) return { ...action, requiresConfirm: true,
         reason: 'Continue the recorded release task by exact native readback, then roll out only after verified migration success. Never repeat a task create or execution.',
         metadata: { ...action.metadata, preparedReleaseReview: review, preparedReleaseContinuation: attempt.id } };
     if (attempt && ['attempted', 'uncertain'].includes(attempt.status)) return { ...action, verified: false, requiresConfirm: false,
