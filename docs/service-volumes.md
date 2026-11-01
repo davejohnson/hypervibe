@@ -26,7 +26,12 @@ Use the normal `hv_spec` → `hv_plan` → `hv_apply` → `hv_status` workflow.
 1. A new service first needs a durable provider identity. Manual deployments get
    an isolated `hosting-bindings` plan; managed CI uses its existing binding
    stage. Apply and re-plan. These stages configure empty services, not disks or
-   application deployments.
+   application deployments. Missing delegated application credentials do not
+   block this volume prerequisite; declared database dependencies still require
+   their own provider connection, exact confirmation and successful provisioning.
+   The later application plan requests the missing credentials again before
+   allowing deployment. This does not waive credentials for an ordinary managed
+   CI binding stage that can configure existing workloads.
 2. A `service-volumes` plan contains `volume:<service>` or individual
    `volume:<service>:<component>` actions, including exact scope, mount path,
    capacity/cost notes and dependencies. Confirm the exact action IDs with
