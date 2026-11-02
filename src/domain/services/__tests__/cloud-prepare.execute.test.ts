@@ -236,10 +236,10 @@ describe('runCloudPrepare', () => {
           email: RUNTIME_SERVICE_ACCOUNT_EMAIL,
         });
       }
-      if (url === `${runtimePolicyUrl}:getIamPolicy` && method === 'POST') {
-        expect(JSON.parse(String(init?.body))).toEqual({
-          options: { requestedPolicyVersion: 3 },
-        });
+      // IAM serviceAccounts.getIamPolicy uses query options and an empty body;
+      // Resource Manager project policy reads below retain their JSON options.
+      if (url === `${runtimePolicyUrl}:getIamPolicy?options.requestedPolicyVersion=3` && method === 'POST') {
+        expect(init?.body).toBeUndefined();
         return Response.json(runtimePolicy);
       }
       if (url === `${runtimePolicyUrl}:setIamPolicy` && method === 'POST') {
@@ -337,6 +337,7 @@ describe('runCloudPrepare', () => {
 
   it('fails before project IAM changes when runtime account policy state has no etag', async () => {
     const project = seedProject();
+    let runtimePolicyReads = 0;
     const runtimeAccountUrl = `https://iam.googleapis.com/v1/projects/hls-property-care/serviceAccounts/`
       + `${encodeURIComponent(RUNTIME_SERVICE_ACCOUNT_EMAIL)}`;
     const runtimePolicyUrl = 'https://iam.googleapis.com/v1/projects/hls-property-care/'
@@ -370,7 +371,9 @@ describe('runCloudPrepare', () => {
           email: RUNTIME_SERVICE_ACCOUNT_EMAIL,
         });
       }
-      if (url === `${runtimePolicyUrl}:getIamPolicy` && method === 'POST') {
+      if (url === `${runtimePolicyUrl}:getIamPolicy?options.requestedPolicyVersion=3` && method === 'POST') {
+        expect(init?.body).toBeUndefined();
+        runtimePolicyReads += 1;
         return Response.json({ version: 1, bindings: [] });
       }
       throw new Error(`Unexpected fetch: ${method} ${url}`);
@@ -385,6 +388,7 @@ describe('runCloudPrepare', () => {
       confirm: true,
     });
 
+    expect(runtimePolicyReads).toBe(1);
     expect(result).toMatchObject({
       success: false,
       error: expect.stringContaining('runtime service account IAM policy'),

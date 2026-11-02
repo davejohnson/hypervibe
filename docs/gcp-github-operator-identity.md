@@ -189,3 +189,11 @@ those files then passed. The broader GCP adapter and IAM policy group passed
 797 checks with two existing skips, after rerunning five recovery transport tests
 with permission to open their local loopback fixture. Type checking passed.
 This follow-up changes tests and documentation only; it adds no cloud behavior.
+
+A repository-wide URL audit also found the legacy cloud-preparation fixture using
+the old account-policy URL/body. Its successful-grant case failed, and adding an
+explicit read count exposed a second false positive: the missing-etag case had
+been passing on an unexpected request instead of its intended response. Both
+cases now require the documented account-policy request while preserving project
+policy bodies. All 100 combined legacy preparation, policy and deployment fixture
+checks passed. These additional corrections also change no runtime code.
