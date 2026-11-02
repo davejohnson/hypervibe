@@ -93,3 +93,38 @@ choices. GCS project identity stays workflow-owned too. The shared form helper,
 MCP discovery and apply guidance use the same metadata. All 83 focused checks
 across guidance, actual MCP and registry suites pass; type checking passes.
 This is interface evidence, not proof of native federation or cloud authority.
+
+## Adding federation after the application is running
+
+The same seven-action installation can now be selected after the original project
+and hosting connections have been bound. Preserve the accepted allocation and
+continuation fields, then add the exact GitHub repository/owner IDs, default branch,
+release workflow and optional backup workflow to the existing continuation. Review
+`hv_plan` without deployment inputs; it returns the isolated cloud-scope stage
+before unrelated artifact preparation. Existing quota-API and public-registry
+ancestry remain authoritative. No new project or replacement hosting is involved.
+
+An explicit provider capability admits only the public `gcpGithubWorkloadIdentity`
+addition. Before IAM mutations, the shared lifecycle re-observes the accepted
+predecessor and verifies its exact local scope and saved connection configurations.
+An existing conflicting CI descriptor blocks installation. The final separately
+reviewed binding action adds only the verified descriptor, using a full-binding
+compare-and-swap that preserves services, runtime identities, recovery records and
+connections. Unknown native outcomes keep the same operation; read-only recovery
+remains available after a later denied read, without authorizing writes or a
+conflicting binding. This does not broaden the existing combined release/backup
+role or add a backup-only identity mode.
+
+The challenged assumption was that GitHub federation must precede hosting binding.
+The [official deployment-pipeline contract](https://docs.cloud.google.com/iam/docs/workload-identity-federation-with-deployment-pipelines)
+allows federation in an existing Google project. The actual saved-plan/SQLite/native
+transport regression initially returned a cloud-preparation error after successful
+hosting binding, instead of the seven separately confirmed identity actions.
+A second regression reproduced a completed, bound installation remaining stuck
+after a denied IAM read was restored. A third exercised the existing quota-API
+prerequisite followed by CI installation: its consumed quota selector was mistaken
+for a new request after the first IAM action. Exact predecessor/successor proof now
+keeps that quota prerequisite satisfied, including later disconnection. These
+checks exercise reconstructed native responses, not a live identity installation. The keyless archive backup pipeline
+already consumes the resulting descriptor; helper publication, workflow publication,
+GitHub OIDC execution and a verified retained backup/restore remain separate work.

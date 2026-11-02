@@ -116,8 +116,10 @@ export interface LocalCloudScopePreparationCapability {
   parseRecord(value: unknown): CloudInstallationRecord<LocalCloudScopePreparationIntent>;
   continuation?: {
     parseSelection(value: unknown, placement?: { region?: string }): Record<string, string>;
-    /** Provider-owned cleanup and independently verified prerequisites may preserve a binding. */
-    boundContinuationKind?(nativeScope: Record<string, string>): 'cleanup' | 'prerequisite' | undefined;
+    /** Provider-owned cleanup, prerequisites and explicit public identity additions may preserve a binding. */
+    boundContinuationKind?(nativeScope: Record<string, string>): 'cleanup' | 'prerequisite' | 'addition' | undefined;
+    /** An addition may write only these absent public binding keys; existing scope and connections must match its predecessor. */
+    additiveBindingKeys?(nativeScope: Record<string, string>): readonly string[];
     /** Historical reviews remain readable; false requires a new review before any fresh write. */
     isReviewCurrent?(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>): boolean;
     nextScope(record: CloudInstallationRecord<LocalCloudScopePreparationIntent>, selection: Record<string, string>, history?: CloudInstallationRecord<LocalCloudScopePreparationIntent>[]): Record<string, string> | null;

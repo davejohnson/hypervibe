@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import '../providers.js';
+import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { createCommandContext } from '../context.js';
 import { executePlanApply } from '../apply-plan.js';
@@ -532,7 +533,7 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       expect(JSON.stringify({ reviewed, applied })).not.toContain(token);
     });
 
-  it.each(['quota-public-api-parent-read-recovery', 'quota-public-api-parent-read-recovery-drift', 'quota-public-api-parent-read-recovery-binding', 'quota-public-api-parent-drift', 'quota-public-api', 'quota-public-api-lost-ack', 'quota-public-api-binding-conflict', 'quota-public-api-lifetime', 'quota-public-api-denied', 'github-ci-quota-api-partial-revoke', 'github-ci-quota-api', 'normal', 'private-operation-missing-time', 'public-operation-missing-time', 'legacy-binding-repair', 'legacy-binding-source-edit', 'legacy-binding-declaration-removed', 'legacy-binding-stale', 'legacy-binding-conflict', 'legacy-binding-unknown', 'legacy-binding-replaced', 'legacy-api-review', 'legacy-api-pending', 'legacy-api-rejected', 'legacy-api-satisfied', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-disconnected-metadata', 'github-ci-disconnected-metadata-foreign-owner', 'github-ci-legacy-binding-repair', 'github-ci-lost-ack', 'github-ci-rejected-first', 'github-ci-rejected-middle', 'public-registry', 'public-grant-lost-ack', 'public-grant-rejected', 'github-ci-public-registry', 'github-ci-public-registry-prerequisite-drift'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
+  it.each(['github-ci-legacy-binding-conflict', 'github-ci-legacy-binding-stale', 'bound-ci-quota-public-api-disconnect', 'bound-ci-changed-selection', 'bound-ci-quota-public-api', 'bound-ci-read-recovery', 'bound-ci-atomic-bind-failure', 'bound-ci-connection-drift', 'bound-ci', 'bound-ci-public-registry', 'bound-ci-conflict', 'bound-ci-stale', 'bound-ci-lost-ack', 'bound-ci-bind-conflict', 'bound-ci-concurrent-map', 'quota-public-api-parent-read-recovery', 'quota-public-api-parent-read-recovery-drift', 'quota-public-api-parent-read-recovery-binding', 'quota-public-api-parent-drift', 'quota-public-api', 'quota-public-api-lost-ack', 'quota-public-api-binding-conflict', 'quota-public-api-lifetime', 'quota-public-api-denied', 'github-ci-quota-api-partial-revoke', 'github-ci-quota-api', 'normal', 'private-operation-missing-time', 'public-operation-missing-time', 'legacy-binding-repair', 'legacy-binding-source-edit', 'legacy-binding-declaration-removed', 'legacy-binding-stale', 'legacy-binding-conflict', 'legacy-binding-unknown', 'legacy-binding-replaced', 'legacy-api-review', 'legacy-api-pending', 'legacy-api-rejected', 'legacy-api-satisfied', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-disconnected-metadata', 'github-ci-disconnected-metadata-foreign-owner', 'github-ci-legacy-binding-repair', 'github-ci-lost-ack', 'github-ci-rejected-first', 'github-ci-rejected-middle', 'public-registry', 'public-grant-lost-ack', 'public-grant-rejected', 'github-ci-public-registry', 'github-ci-public-registry-prerequisite-drift'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
     const f = fixture(); const allocated = await f.plan(); if ('error' in allocated) throw new Error(allocated.error);
     expect(await f.apply(allocated.planRunId)).toMatchObject({ kind: 'executed', result: { success: true } });
     const desired = structuredClone(f.desired) as any;
@@ -549,7 +550,7 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
     }
     let quotaPreparationStarted = false, quotaApiEnabled = false, quotaBillingReads = 0;
     const quotaScenario = scenario.includes('quota-');
-    const native = new Map<string, any>(), operations = new Map<string, any>(); let lostCiAck = false; let rejectedCi = false;
+    const native = new Map<string, any>(), operations = new Map<string, any>(); let lostCiAck = false; let rejectedCi = false; let denyCiReads = false; let lostDisconnectAck = false;
     let registryOperationComplete = !scenario.endsWith('operation-missing-time');
     const unrelated = { role: 'roles/viewer', members: ['user:unrelated@example.invalid'], condition: { title: 'retained', expression: 'true' } };
     const projectPolicy = { version: 3, etag: 'project-etag', bindings: [unrelated] } as any;
@@ -576,10 +577,14 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
           rejectedPublic = true; writes.push('public-iam-rejected'); return new Response(null, { status: 400 });
         }
         Object.assign(target, body.policy, { etag: target.etag + '-next' }); writes.push(target === publicPolicy ? 'public-iam-policy' : 'iam-policy');
+        if (scenario === 'bound-ci-quota-public-api-disconnect' && target === accountPolicy && body.policy.bindings.length === 0 && !lostDisconnectAck) {
+          lostDisconnectAck = true; throw new Error('Synthetic lost trust revocation acknowledgment');
+        }
         if (target === publicPolicy && scenario === 'public-grant-lost-ack' && !lostPublicAck) { lostPublicAck = true; throw new Error('synthetic lost public policy acknowledgment'); }
         return Response.json(target);
       }
       if (url.host === 'iam.googleapis.com') {
+        if (denyCiReads && method !== 'POST') return Response.json({}, { status: 403 });
         const name = url.pathname.replace('/v1/', '');
         if (method !== 'POST') return Response.json(operations.get(name) ?? native.get(name) ?? {}, { status: operations.has(name) || native.has(name) ? 200 : 404 });
         if (!rejectedCi && (scenario === 'github-ci-rejected-first' && name.endsWith('/workloadIdentityPools')
@@ -591,7 +596,7 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
           const id = url.searchParams.get('workloadIdentityPoolId') ?? url.searchParams.get('workloadIdentityPoolProviderId');
           const resource = `${name}/${id}`, operation = `${resource}/operations/synthetic-operation`;
           native.set(resource, { ...body, name: resource, state: 'ACTIVE' }); operations.set(operation, { name: operation, done: true });
-          if (!lostCiAck && scenario === 'github-ci-lost-ack' && name.endsWith('/workloadIdentityPools')) { lostCiAck = true; throw new Error(`lost WIF acknowledgment ${token}`); }
+          if (!lostCiAck && (scenario === 'github-ci-lost-ack' || scenario === 'bound-ci-lost-ack') && name.endsWith('/workloadIdentityPools')) { lostCiAck = true; throw new Error(`lost WIF acknowledgment ${token}`); }
           return Response.json({ name: operation, done: false });
         }
         if (name.endsWith('/serviceAccounts')) {
@@ -888,7 +893,127 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
         expect(current.completed).toEqual((historical.plan as any).completed);
       }
       expect(JSON.stringify(quotaPlan)).not.toContain(token);
-      if (!github) return;
+      if (!github && !scenario.startsWith('bound-ci')) return;
+    }
+    if (scenario.startsWith('bound-ci')) {
+      // Google permits adding GitHub OIDC trust to an existing project; no new
+      // hosting allocation is required. Retained application/runtime bindings
+      // are not part of this independent IAM installation authority.
+      // https://docs.cloud.google.com/iam/docs/workload-identity-federation-with-deployment-pipelines
+      const environment = f.ctx.repos.environments.findByProjectAndName(f.project.id, 'staging')!;
+      const preserved = { ...structuredClone(environment.platformBindings),
+        services: { web: { serviceId: 'existing-web', resourceUid: 'native-web-lifetime' } },
+        runtimeIdentities: { web: { retained: 'separate-reader' } }, recoveryRuntime: { retained: 'separate-backup-identity' } };
+      f.ctx.repos.environments.update(environment.id, { platformBindings: preserved });
+      const connections = ['cloudrun', 'cloudsql', 'gcs'].map(provider => f.ctx.repos.connections.findByProviderAndScope(provider, 'github.com/acme/operator-host#environment=staging'));
+      const histories = f.ctx.repos.runs.findByProjectId(f.project.id).filter(run => run.type === 'cloud-scope-preparation')
+        .map(run => ({ id: run.id, plan: structuredClone(run.plan) as any }));
+      const before = [...writes], adapterCalls = f.adapters.mock.calls.length;
+      Object.assign(desired.environments.staging.hosting.scopePreparation.continuation.nativeScope, { githubRepository: 'acme/operator-host',
+        githubRepositoryId: '123456789', githubRepositoryOwnerId: '987654321', githubBranch: 'main',
+        githubWorkflow: '.github/workflows/deploy-cloudrun-staging.yml', githubBackupWorkflow: '.github/workflows/hypervibe-backup-staging.yml' });
+      f.store.replace(f.project, desired);
+      if (scenario === 'bound-ci-conflict') f.ctx.repos.environments.updatePlatformBindings(environment.id, { gcpGithubWorkloadIdentity: 'foreign-existing-descriptor' });
+      const first = await f.plan();
+      if (scenario === 'bound-ci-conflict') {
+        expect(first).toHaveProperty('error'); expect(writes).toEqual(before); return;
+      }
+      expect(first).toMatchObject({ scope: 'cloud-scope' });
+      if ('error' in first) throw new Error(first.error);
+      expect(first.actions.map(action => action.id)).toEqual(['create-pool', 'create-account', 'create-provider', 'create-role', 'grant-role', 'grant-registry', 'grant-trust'].map(operation => `gcp:github-ci:${operation}`));
+      expect(first.actions.every(action => action.requiresConfirm)).toBe(true);
+      expect(await f.apply(first.planRunId, [])).toMatchObject({ kind: 'executed', result: { success: false } });
+      expect(writes).toEqual(before);
+      if (scenario === 'bound-ci-changed-selection') {
+        desired.environments.staging.hosting.scopePreparation.continuation.nativeScope.githubBranch = 'other-branch';
+        f.store.replace(f.project, desired);
+        expect(await f.apply(first.planRunId, first.actions.map(action => action.id))).toMatchObject({ kind: 'executed', result: { success: false } });
+        expect(writes).toEqual(before); return;
+      }
+      if (scenario === 'bound-ci-connection-drift') {
+        f.ctx.repos.connections.upsertVerifiedBatch([{ provider: 'cloudrun', scope: 'github.com/acme/operator-host#environment=staging', credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'foreign-project', authMode: 'default' }) }]);
+        expect(await f.apply(first.planRunId, first.actions.map(action => action.id))).toMatchObject({ kind: 'executed', result: { success: false } });
+        expect(writes).toEqual(before); return;
+      }
+      if (scenario === 'bound-ci-stale') {
+        f.ctx.repos.environments.updatePlatformBindings(environment.id, { providerScope: { ...((preserved as Record<string, unknown>).providerScope as object), projectNumber: '111111111111' } });
+        expect(await f.apply(first.planRunId, first.actions.map(action => action.id))).toMatchObject({ kind: 'executed', result: { success: false } });
+        expect(writes).toEqual(before); return;
+      }
+      for (let step = 0; step < 12; step++) {
+        const planned = step === 0 ? first : await f.plan(); if ('error' in planned) throw new Error(planned.error);
+        if (planned.actions.some(action => action.id === 'cloud-scope:bind')) break;
+        const current = f.store.get(f.project)!;
+        await executePlanApply(createCommandContext(), { project: f.project, spec: current.spec, specRevision: current.revision,
+          planId: planned.planRunId, confirmActions: planned.actions.filter(action => action.requiresConfirm).map(action => action.id) });
+      }
+      expect(writes.slice(before.length).filter(write => write === 'ci-identity')).toHaveLength(4);
+      expect(writes.slice(before.length).filter(write => write === 'iam-policy')).toHaveLength(3);
+      const handoff = await f.plan(); if ('error' in handoff) throw new Error(handoff.error);
+      expect(handoff.actions.map(action => action.id)).toEqual(['cloud-scope:bind']);
+      expect(f.ctx.repos.environments.findById(environment.id)!.platformBindings).toEqual(preserved);
+      if (scenario === 'bound-ci-bind-conflict') {
+        f.ctx.repos.environments.updatePlatformBindings(environment.id, { gcpGithubWorkloadIdentity: 'foreign-existing-descriptor' });
+        expect(await f.apply(handoff.planRunId, ['cloud-scope:bind'])).toMatchObject({ kind: 'executed', result: { success: false } });
+        expect(f.ctx.repos.environments.findById(environment.id)!.platformBindings).toEqual({ ...preserved, gcpGithubWorkloadIdentity: 'foreign-existing-descriptor' });
+        expect(writes).toHaveLength(before.length + 7); return;
+      }
+      if (scenario === 'bound-ci-concurrent-map') {
+        (preserved.services as Record<string, unknown>).worker = { serviceId: 'concurrent-worker', resourceUid: 'concurrent-native-lifetime' };
+        f.ctx.repos.environments.updatePlatformBindings(environment.id, { services: preserved.services });
+      }
+      if (scenario === 'bound-ci-atomic-bind-failure') {
+        const original = EnvironmentRepository.prototype.compareAndSwapPlatformBindings;
+        const race = vi.spyOn(EnvironmentRepository.prototype, 'compareAndSwapPlatformBindings').mockImplementationOnce(function (this: EnvironmentRepository, id, previous, next) {
+          this.updatePlatformBindings(id, { independentlyUpdated: { receipt: 'retain-me' } });
+          return original.call(this, id, previous, next);
+        });
+        expect(await f.apply(handoff.planRunId, ['cloud-scope:bind'])).toMatchObject({ kind: 'executed', result: { success: false } });
+        race.mockRestore();
+        // This injected change is inside the same transaction: a failed CAS
+        // rolls the complete local handoff back without claiming success.
+        expect(f.ctx.repos.environments.findById(environment.id)!.platformBindings).toEqual(preserved);
+      }
+      expect(await f.apply(handoff.planRunId, ['cloud-scope:bind'])).toMatchObject({ kind: 'executed', result: { success: true } });
+      const after = f.ctx.repos.environments.findById(environment.id)!.platformBindings;
+      const { gcpGithubWorkloadIdentity, ...unchanged } = after;
+      expect(unchanged).toEqual(preserved);
+      expect(JSON.parse(String(gcpGithubWorkloadIdentity))).toMatchObject({ repository: 'acme/operator-host', environment: 'staging', backupWorkflow: '.github/workflows/hypervibe-backup-staging.yml' });
+      expect(['cloudrun', 'cloudsql', 'gcs'].map(provider => f.ctx.repos.connections.findByProviderAndScope(provider, 'github.com/acme/operator-host#environment=staging'))).toEqual(connections);
+      for (const historical of histories) {
+        const current = f.ctx.repos.runs.findById(historical.id)!.plan as any;
+        expect(current.intent).toEqual(historical.plan.intent); expect(current.plan).toEqual(historical.plan.plan);
+        expect(current.completed).toEqual(historical.plan.completed);
+      }
+      expect(await localCloudScopeRequired(f.project, 'staging', f.store.get(f.project)!.spec)).toBe(false);
+      expect(writes).toHaveLength(before.length + 7); expect(f.adapters.mock.calls).toHaveLength(adapterCalls);
+      if (scenario === 'bound-ci-quota-public-api-disconnect') {
+        desired.environments.staging.hosting.scopePreparation.continuation.nativeScope.githubAccess = 'disconnect';
+        f.store.replace(f.project, desired);
+        for (let step = 0; step < 8; step++) {
+          const removal = await f.plan(); if ('error' in removal) throw new Error(removal.error);
+          const removed = await f.apply(removal.planRunId, removal.actions.filter(action => action.requiresConfirm).map(action => action.id));
+          expect(removed).toMatchObject({ kind: 'executed', result: { success: step !== 0 } });
+          if (removal.actions.some(action => action.id === 'cloud-scope:bind')) break;
+        }
+        expect(f.ctx.repos.environments.findById(environment.id)!.platformBindings).toEqual(preserved);
+        expect(await localCloudScopeRequired(f.project, 'staging', f.store.get(f.project)!.spec)).toBe(false);
+        expect(writes).toHaveLength(before.length + 10);
+      }
+      if (scenario === 'bound-ci-read-recovery') {
+        denyCiReads = true;
+        const denied = await f.plan();
+        expect(denied).toMatchObject({ scope: 'cloud-scope' });
+        denyCiReads = false;
+        f.adapters.mockResolvedValue({ success: false, error: 'Stop ordinary hosting observation' } as any);
+        const resumed = await f.plan();
+        expect('error' in resumed ? resumed.error : resumed.scope).not.toMatch(/Cloud project preparation|cloud-scope/);
+        const installationId = (f.ctx.repos.runs.findById(handoff.planRunId)!.plan as any).cloudScope.installationId;
+        expect((f.ctx.repos.runs.findById(installationId)!.plan as any).status).toBe('scope-ready');
+        expect(f.ctx.repos.environments.findById(environment.id)!.platformBindings).toEqual(after);
+        expect(writes).toHaveLength(before.length + 7);
+      }
+      return;
     }
     if (scenario.includes('legacy-binding-')) {
       // Reconstruct the previously accepted binding format. The old immutable
@@ -899,7 +1024,7 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       const legacy = structuredClone(accepted);
       const legacyScope = legacy.providerScope as Record<string, string>;
       delete legacyScope.artifactInstallationId; delete legacyScope.artifactAttemptId; delete legacyScope.billingAccountName;
-      if (scenario === 'legacy-binding-conflict') legacyScope.artifactAttemptId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+      if (scenario === 'legacy-binding-conflict' || scenario === 'github-ci-legacy-binding-conflict') legacyScope.artifactAttemptId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
       f.ctx.repos.environments.update(environment.id, { platformBindings: legacy });
       const connections = ['cloudrun', 'cloudsql', 'gcs'].map(provider => f.ctx.repos.connections.findByProviderAndScope(provider, 'github.com/acme/operator-host#environment=staging'));
       const retainedHistory = f.ctx.repos.runs.findById((f.ctx.repos.runs.findById(registryPlan.planRunId)!.plan as any).cloudScope.installationId)!.plan as any;
@@ -928,7 +1053,7 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       }
       expect(await localCloudScopeRequired(f.project, 'staging', f.store.get(f.project)!.spec)).toBe(true);
       const repair = await f.plan();
-      if (['legacy-binding-conflict', 'legacy-binding-unknown', 'legacy-binding-replaced'].includes(scenario)) {
+      if (['legacy-binding-conflict', 'github-ci-legacy-binding-conflict', 'legacy-binding-unknown', 'legacy-binding-replaced'].includes(scenario)) {
         expect('error' in repair || repair.blocked.length > 0 || !repair.actions.some(action => action.id === 'cloud-scope:normalize')).toBe(true);
         expect(f.ctx.repos.environments.findById(environment.id)!.platformBindings).toEqual(legacy);
         expect(writes).toEqual(before); return;
@@ -938,7 +1063,7 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       expect(await f.apply(repair.planRunId, [])).toMatchObject({ kind: 'executed', result: { success: false } });
       expect(f.ctx.repos.environments.findById(environment.id)!.platformBindings).toEqual(legacy);
       const reviewed = await f.plan(); if ('error' in reviewed) throw new Error(reviewed.error);
-      if (scenario === 'legacy-binding-stale') {
+      if (scenario === 'legacy-binding-stale' || scenario === 'github-ci-legacy-binding-stale') {
         const changed = structuredClone(legacy);
         (changed.providerScope as Record<string, unknown>).artifactAttemptId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
         f.ctx.repos.environments.update(environment.id, { platformBindings: changed });

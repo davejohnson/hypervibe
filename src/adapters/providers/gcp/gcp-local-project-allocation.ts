@@ -101,7 +101,9 @@ export function createGcpLocalProjectAllocationCapability(): LocalCloudScopePrep
       },
       parseSelection: (value, placement) => selectionSchema.parse({ ...selectionInputSchema.parse(value), hostingRegion: placement?.region ?? 'us-central1' }),
       boundContinuationKind: scope => gcpLocalQuotaApiScopeSchema.safeParse(scope).success ? 'prerequisite'
-        : gcpGithubCiDisconnectionScopeSchema.safeParse(scope).success ? 'cleanup' : undefined,
+        : gcpGithubCiDisconnectionScopeSchema.safeParse(scope).success ? 'cleanup'
+          : gcpGithubCiPreparationScopeSchema.safeParse(scope).success ? 'addition' : undefined,
+      additiveBindingKeys: scope => { gcpGithubCiPreparationScopeSchema.parse(scope); return ['gcpGithubWorkloadIdentity']; },
       isReviewCurrent: record => record.intent.nativeScope.scopeKind !== 'project-services' || isGcpLocalServicesReviewCurrent(record),
       nextScope(record, selection, history) {
         const selected = selectionSchema.parse(selection);
@@ -115,7 +117,19 @@ export function createGcpLocalProjectAllocationCapability(): LocalCloudScopePrep
           return next?.scopeKind === 'github-ci-disconnection' ? gcpGithubCiDisconnectionScopeSchema.parse({ ...next,
             quotaPrerequisiteInstallationId: record.installationId, quotaPrerequisitePlanDigest: record.plan.digest }) : next;
         }
-        if (selected.quotaProjectId && !record.intent.nativeScope.quotaPrerequisiteInstallationId) {
+        const predecessor = history?.find(item => item.installationId === record.intent.predecessor?.installationId
+          && item.plan.digest === record.intent.predecessor.planDigest);
+        // A CI installation may follow an already accepted quota prerequisite.
+        // Replay only that exact predecessor edge (and its later disconnect),
+        // never a same-project historical quota record or the selector alone.
+        const inheritedQuota = selected.quotaProjectId && record.intent.selection?.quotaProjectId === selected.quotaProjectId
+          && predecessor && predecessor.intent.appId === record.intent.appId && predecessor.intent.customerId === record.intent.customerId
+          && predecessor.intent.environment === record.intent.environment && predecessor.intent.source.repository === record.intent.source.repository
+          && predecessor.intent.provider === record.intent.provider && predecessor.intent.hostingProvider === record.intent.hostingProvider
+          && (record.intent.nativeScope.scopeKind === 'github-ci-identity' && predecessor.intent.nativeScope.scopeKind === 'project-quota-api-v1'
+            || record.intent.nativeScope.scopeKind === 'github-ci-disconnection' && predecessor.intent.nativeScope.scopeKind === 'github-ci-identity')
+          && isDeepStrictEqual(capability.continuation!.nextScope(predecessor, record.intent.selection, history), record.intent.nativeScope);
+        if (selected.quotaProjectId && !record.intent.nativeScope.quotaPrerequisiteInstallationId && !inheritedQuota) {
           if (selected.quotaProjectId !== record.intent.nativeScope.projectId || record.status !== 'scope-ready'
             || !['operator-artifact-registry-v1', 'operator-public-artifact-registry-v1', 'github-ci-identity', 'github-ci-disconnection'].includes(record.intent.nativeScope.scopeKind))
             throw new CloudInstallationBoundaryError('ownership_mismatch');

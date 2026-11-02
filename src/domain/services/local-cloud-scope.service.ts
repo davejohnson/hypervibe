@@ -101,10 +101,19 @@ async function context(project: Project, environment: Environment, intent: Local
       const recoverPrerequisiteParent = kind === 'prerequisite' && mode === 'recover' && input.phase !== 'mutate'
         && previous.status !== 'scope-ready' && retained && isDeepStrictEqual(retained.intent, intent)
         && retained.plan.actions.length > 0 && retained.plan.actions.every(action => retained.completed[action.id]);
-      const verified = kind && !recoverPrerequisiteParent ? previous : await reconcileCloudInstallationV1({
+      const verified = kind && kind !== 'addition' && !recoverPrerequisiteParent ? previous : await reconcileCloudInstallationV1({
         ...await context(project, environment, previous.intent, 'recover', authorize), installationId: previous.installationId, planDigest: previous.plan.digest });
       if (recoverPrerequisiteParent) history = await journal(project, environment).findByScope();
       if (kind === 'prerequisite' && !retainedBindingMatches(project, environment, verified, history)) return false;
+      if (kind === 'addition' && !emptyLocalScope(environment)) {
+        // A denied native read must not make the retained operation impossible
+        // to inspect. Read-only recovery cannot write or commit a binding;
+        // fresh mutations and the final handoff still reject conflicting keys.
+        const valid = mode === 'recover' && input.phase !== 'mutate'
+          ? retainedBindingMatches(project, environment, verified, history, true)
+          : additiveBindingSelection(project, environment, verified, history, intent.nativeScope, retained);
+        if (!valid) return false;
+      }
       if (!kind && verified.status !== 'scope-ready' || !isDeepStrictEqual(capability.continuation.nextScope(verified, intent.selection, history), intent.nativeScope)) return false;
     }
     return true;
@@ -175,16 +184,47 @@ function connectionsMatch(selected: NonNullable<Awaited<ReturnType<typeof accept
   });
 }
 /** A bootstrap prerequisite may not borrow a same-named or partially repaired binding. */
-function retainedBindingMatches(project: Project, environment: Environment, record: Record, history: Record[]): boolean {
+function retainedBindingMatches(project: Project, environment: Environment, record: Record, history: Record[], readOnlyRepair = false): boolean {
   try {
     const current = new EnvironmentRepository().findById(environment.id);
     const continuation = providerRegistry.getLocalScopePreparation(record.intent.hostingProvider)?.continuation;
     if (!current || current.projectId !== project.id || current.name !== environment.name || record.status !== 'scope-ready' || !continuation) return false;
     const expected = continuation.binding(record, { region: typeof current.platformBindings.environmentId === 'string' ? current.platformBindings.environmentId : undefined }, history);
     const selected = { expected, actual: current.platformBindings, scope: environmentConnectionScope(record.intent.source.repository, environment.name), repairable: [] };
-    return Object.entries(expected.platformBindings).every(([key, value]) => isDeepStrictEqual(current.platformBindings[key], value))
+    return Object.entries(expected.platformBindings).every(([key, value]) => {
+      if (isDeepStrictEqual(current.platformBindings[key], value)) return true;
+      // Preserve the existing reviewed normalization path. Only absent,
+      // provider-declared metadata may differ during independent native reads.
+      if (!readOnlyRepair || key !== 'providerScope') return false;
+      const shape = z.record(z.string(), z.unknown()), actual = shape.safeParse(current.platformBindings[key]), desired = shape.safeParse(value);
+      return actual.success && desired.success
+        && Object.entries(actual.data).every(([field, item]) => Object.hasOwn(desired.data, field) && isDeepStrictEqual(item, desired.data[field]))
+        && Object.keys(desired.data).every(field => Object.hasOwn(actual.data, field) || continuation.repairableProviderScopeFields?.includes(field));
+    })
       && (expected.removeBindings ?? []).every(item => !Object.hasOwn(current.platformBindings, item.key)) && connectionsMatch(selected);
   } catch { return false; }
+}
+/** Existing deployments may add only the provider's declared public identity keys. */
+function additiveBindingSelection(project: Project, environment: Environment, predecessor: Record, history: Record[],
+  nativeScope: { [key: string]: string }, completed?: Record) {
+  try {
+    const continuation = providerRegistry.getLocalScopePreparation(predecessor.intent.hostingProvider)?.continuation;
+    const current = new EnvironmentRepository().findById(environment.id);
+    if (!continuation || !current || continuation.boundContinuationKind?.(nativeScope) !== 'addition'
+      || !retainedBindingMatches(project, environment, predecessor, history)) return undefined;
+    const keys = continuation.additiveBindingKeys?.(nativeScope);
+    const previous = continuation.binding(predecessor, { region: String(current.platformBindings.environmentId) }, history);
+    if (!keys?.length || new Set(keys).size !== keys.length || keys.some(key => !key || ['__proto__', 'constructor', 'prototype'].includes(key)
+      || Object.hasOwn(previous.platformBindings, key)) || previous.removeBindings?.length) return undefined;
+    const expected = completed?.status === 'scope-ready'
+      ? continuation.binding(completed, { region: String(current.platformBindings.environmentId) }, history) : undefined;
+    if (expected && (expected.removeBindings?.length || !isDeepStrictEqual(expected.connections, previous.connections)
+      || !isDeepStrictEqual(Object.fromEntries(Object.entries(expected.platformBindings).filter(([key]) => !keys.includes(key))), previous.platformBindings)
+      || keys.some(key => !Object.hasOwn(expected.platformBindings, key)))) return undefined;
+    if (keys.some(key => Object.hasOwn(current.platformBindings, key)
+      && (!expected || !isDeepStrictEqual(current.platformBindings[key], expected.platformBindings[key])))) return undefined;
+    return { keys, current: current.platformBindings, expected };
+  } catch { return undefined; }
 }
 async function isBound(project: Project, environment: Environment, record: Record): Promise<boolean> {
   try {
@@ -229,8 +269,21 @@ async function verifyBindingPrerequisites(project: Project, environment: Environ
 
 async function bindLocalScope(project: Project, environment: Environment, record: Record, authorize: () => boolean): Promise<void> {
   const expected = await binding(project, environment, record); const connections = new ConnectionRepository(); const secrets = getSecretStore();
+  const continuation = providerRegistry.getLocalScopePreparation(record.intent.hostingProvider)?.continuation;
+  const history = await journal(project, environment).findByScope();
+  const predecessor = history.find(item => item.installationId === record.intent.predecessor?.installationId
+    && item.plan.digest === record.intent.predecessor.planDigest);
+  const additive = !emptyLocalScope(environment) && continuation?.boundContinuationKind?.(record.intent.nativeScope) === 'addition';
+  const addition = additive && predecessor ? additiveBindingSelection(project, environment, predecessor, history, record.intent.nativeScope, record) : undefined;
+  if (additive && !addition?.expected) throw unavailable();
   getDb().transaction(() => {
     if (!authorize() || !sameCurrentSource(project, environment, record.intent)) throw unavailable();
+    if (addition?.expected) {
+      if (!predecessor || !additiveBindingSelection(project, environment, predecessor, history, record.intent.nativeScope, record)
+        || !new EnvironmentRepository().compareAndSwapPlatformBindings(environment.id, addition.current, { ...addition.current,
+          ...Object.fromEntries(addition.keys.map(key => [key, addition.expected!.platformBindings[key]])) })) throw unavailable();
+      return;
+    }
     if (expected.removeBindings?.length) {
       const current = new EnvironmentRepository().findById(environment.id);
       if (!current || !Object.entries(expected.platformBindings).every(([key, value]) => isDeepStrictEqual(current.platformBindings[key], value))) throw unavailable();
@@ -279,7 +332,7 @@ export async function planLocalCloudScope(input: { project: Project; environment
   const capability = providerRegistry.getLocalScopePreparation(record?.intent.hostingProvider ?? desired!.provider);
   if (!capability) throw unavailable();
   if (record) {
-    let boundScope: { scope: { [key: string]: string }; selection: { [key: string]: string }; kind: 'cleanup' | 'prerequisite' } | undefined;
+    let boundScope: { scope: { [key: string]: string }; selection: { [key: string]: string }; kind: 'cleanup' | 'prerequisite' | 'addition' } | undefined;
     if (desired?.scopePreparation?.continuation && capability.continuation) {
       const selection = capability.continuation.parseSelection(desired.scopePreparation.continuation.nativeScope, desired);
       let scope: { [key: string]: string } | null | undefined;
@@ -288,10 +341,12 @@ export async function planLocalCloudScope(input: { project: Project; environment
       const kind = scope && capability.continuation.boundContinuationKind?.(scope);
       if (scope && kind) {
         if (kind === 'prerequisite' && !retainedBindingMatches(project, environment, record, history)) throw unavailable();
+        if (kind === 'addition' && !emptyLocalScope(environment)
+          && !additiveBindingSelection(project, environment, record, history, scope)) throw unavailable();
         boundScope = { scope, selection, kind };
       }
     }
-    if (!boundScope) {
+    if (!boundScope || boundScope.kind === 'addition') {
       const execution = await context(project, environment, record.intent, 'recover');
       record = await reconcileCloudInstallationV1({ ...execution, installationId: record.installationId, planDigest: record.plan.digest });
     }
@@ -302,10 +357,11 @@ export async function planLocalCloudScope(input: { project: Project; environment
       throw new Error('This environment already allocated a cloud project. Its accepted identity is retained; editing desired names does not authorize a replacement.');
     // An admitted cleanup verifies its own exact native targets; removed trust
     // cannot be required to authorize removing the remaining grants.
-    if (record.status === 'scope-ready' && !boundScope) {
+    if (record.status === 'scope-ready' && (!boundScope || boundScope.kind === 'addition')) {
       await verifyBindingPrerequisites(project, environment, record);
       history = await journal(project, environment).findByScope();
     }
+    if (boundScope?.kind === 'addition' && record.status !== 'scope-ready') throw unavailable();
     if (deploymentInputs) {
       // A completed binding is an ordinary deployment prerequisite. Verify it
       // before passing input handling back to full planning; unfinished or
@@ -409,7 +465,7 @@ export async function inspectLocalCloudScope(project: Project, environmentName: 
   const history = await journal(project, environment).findByScope();
   let record = acceptedLeaf(history) ?? history.at(-1);
   if (!record) return undefined;
-  if (record.status === 'scope-ready' && !emptyLocalScope(environment)) return undefined;
+  if (record.status === 'scope-ready' && !emptyLocalScope(environment) && await isBound(project, environment, record)) return undefined;
   // A continuation's outcome does not describe allocation. Follow only its
   // accepted immutable ancestry and freshly verify the exact allocated lifetime.
   let allocation = record;
