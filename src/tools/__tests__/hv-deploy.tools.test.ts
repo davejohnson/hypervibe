@@ -420,7 +420,9 @@ describe('hv_deploy', () => {
       actionId: 'service:web:deploy-source',
       status: 'succeeded',
     }));
-    expect(disconnectDeploySource).toHaveBeenCalledWith({ serviceId: 'rail-web' });
+    expect(disconnectDeploySource).toHaveBeenCalledWith({
+      serviceId: 'rail-web', projectId: 'rail-project', environmentId: 'rail-production',
+    });
     expect(deploy).not.toHaveBeenCalled();
     expect(result.next).toEqual(['hv_deploy']);
     await t.close();
