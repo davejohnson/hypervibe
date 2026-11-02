@@ -3360,6 +3360,12 @@ export class PlanService {
     if (backupReadinessStageActive && !backupReadiness.ready) planBlocked.push({ category: 'prerequisite', provider: 'hypervibe', policy: 'hard', reason: `Requested backup setup is incomplete. ${backupReadiness.gaps.join(' ')}` });
     const planInputRequired = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive || volumeStageActive
       ? []
+      // A volume's new workload identity is prepared with provisionOnly;
+      // no application code runs until a later, separately reviewed full plan.
+      // Keep runtime input requirements on that later plan, not this empty
+      // identity stage. Ordinary managed-CI bindings still require their inputs.
+      : ciBindingStageActive && volumeIdentityStage
+        ? []
       : ciBindingStageActive
         ? ciBindingInputRequired
         : secretInputRequired;
