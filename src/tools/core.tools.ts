@@ -970,7 +970,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           after: 'Connect them for full convergence, or apply this plan to converge independent actions and fail only blocked actions.',
         });
       } else {
-        hint = `Apply with hv_apply planId="${result.planRunId}"${confirmIds.length ? ` and confirmActions=${JSON.stringify(confirmIds)} for consequential actions that require explicit confirmation` : ''}.`;
+        hint = `Apply with hv_apply planId="${result.planRunId}"${confirmIds.length ? ` and confirmActions=${JSON.stringify(confirmIds)} after checking that existing task authorization covers these exact reviewed effects; ask only for missing authorization, not separately for routine setup grants` : ''}.`;
       }
 
       if (hardBlockRecovery) {
@@ -1501,11 +1501,11 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_apply',
-    'Apply a plan produced by hv_plan. Rejects stale plans (spec changed, infrastructure changed, plan expired, or already applied). Any consequential confirmation-gated action runs only when its exact action id is passed in confirmActions.',
+    'Apply a plan produced by hv_plan. Rejects stale plans (spec changed, infrastructure changed, plan expired, or already applied). Confirmation-gated actions require their exact ids in confirmActions. Reuse existing task authorization for unchanged reviewed effects, including routine narrow setup grants; ask only for missing authorization. This never authorizes changed or future scope.',
     {
       project: projectField,
       planId: z.string().describe('Plan id returned by hv_plan'),
-      confirmActions: z.array(z.string()).optional().describe('Exact action ids for consequential confirmation-gated changes such as purchases, deletion, or an application-secret rotation.'),
+      confirmActions: z.array(z.string()).optional().describe('All exact action ids required by this plan, supplied together after authorization. This machine confirmation does not require a new human question when existing authorization covers the unchanged reviewed effects.'),
     },
     wrapCommandHandler(async ({ project: projectRef, planId, confirmActions }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });

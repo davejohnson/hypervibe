@@ -181,6 +181,7 @@ function hasConnectionSetup(data: Record<string, unknown>): boolean {
 }
 
 const CONNECTION_SETUP_AGENT_MESSAGE = 'Stop before any dependent operation. Show the user the exact clickable setup links and required permissions from connectionSetup, recommend its recommendedSetupUrl, and offer to open that page in their browser. Preserve the complete query string, including the name and description; Hypervibe has prepared the supported known fields. Never replace a pre-filled form link with a dashboard URL or a click-by-click navigation checklist, and do not invent or rewrite query parameters. Explain only the remaining manual fields, review, or consent from the guidance; never put secrets in URLs. Then explain where to save the credential and show the complete credentialExample with /absolute/path replaced by the real local path. Never summarize this as a vague "Hypervibe credential flow" or ask the user to paste a token into chat.';
+const CONFIRMATION_AGENT_MESSAGE = 'Check existing user authorization against this exact current scope and its reviewed effects. A request to connect or deploy the app covers routine narrow setup permissions within that scope; do not ask separately for each grant. If already authorized, follow the returned continuation and supply only its required confirm=true or all required exact action IDs in confirmActions. Otherwise, ask once for the missing authorization, showing the account, resources, access and costs before any write. Changed scope or effects need review; this result grants no authority over future plans. Preserve separate setup, deployment, device, collection, secret-submission and runtime-reading authority. Do not bypass denied or revoked access, or repeat uncertain writes; recover those outcomes read-only.';
 
 function successAgentInstruction(data: unknown, next?: string[]): CommandEnvelope['agentInstruction'] | undefined {
   if (!isRecord(data)) return undefined;
@@ -205,6 +206,15 @@ function successAgentInstruction(data: unknown, next?: string[]): CommandEnvelop
       message: 'Report the pending receipts, then continue only with the suggested read-only recovery calls. Do not repeat any mutation or start dependent work while its outcome is uncertain. Preserve existing approvals for unchanged actions; review any new or changed action separately.',
     };
   }
+  if (next?.length === 1 && next[0] === 'hv_plan' && data.error === undefined
+    && hasReceiptStatus(data.receipts, new Set(['skipped_requires_confirm']))
+    && Array.isArray(data.receipts) && data.receipts.every(receipt => isRecord(receipt)
+      && typeof receipt.status === 'string' && ['succeeded', 'skipped_noop', 'skipped_requires_confirm', 'aborted'].includes(receipt.status))) {
+    return {
+      action: 'continue',
+      message: `Report the skipped receipts and obtain the suggested current plan before any apply. ${CONFIRMATION_AGENT_MESSAGE}`,
+    };
+  }
   if (data.applied === false || data.success === false || hasReceiptStatus(data.receipts, new Set(['failed', 'blocked', 'pending', 'aborted']))) {
     return {
       action: 'stop_and_report',
@@ -223,8 +233,8 @@ function errorAgentInstruction(code: ErrorCode, details?: unknown): CommandEnvel
   }
   if (code === 'CONFIRM_REQUIRED') {
     return {
-      action: 'ask_user',
-      message: 'Stop here. Report the confirmation requirement and ask the user before rerunning with confirm=true or confirmActions.',
+      action: 'continue',
+      message: CONFIRMATION_AGENT_MESSAGE,
     };
   }
   if (code === 'MISSING_CONNECTION') {

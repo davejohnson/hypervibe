@@ -1330,6 +1330,12 @@
       "destination": "docs/development-guidance-lifecycle.md#explicit-operator-registration-restart",
       "destinationSha256": "af289c9cbe752a105a072b546a8a3e27620169e924a02212acafc840cb8c1b0d",
       "reason": "Requested partial-installation/restart support: explicitly reviewed new GitHub registration after expired browser-only state; preserve unknown predecessor effects, exact source/owner/destination scope, custody, lineage and fresh action approval. No native absence, cancellation or replay inference."
+    },
+    {
+      "sourcePath": "docs/development-guidance-product.md#dg-005",
+      "destination": "docs/development-guidance-product.md#dg-005",
+      "destinationSha256": "3b3b49b7bf70f7505d69eecd16e4e12256163866003ce46d334685d50ea9ed5c",
+      "reason": "User-requested removal of repeated technical setup questions: reuse existing authorization for exact unchanged reviewed effects, including narrow IAM, while preserving exact machine confirmation, separate authority, changed-effect review and unknown-write recovery."
     }
   ]
 }

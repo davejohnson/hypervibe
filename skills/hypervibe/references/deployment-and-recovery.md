@@ -10,11 +10,17 @@ compute dependencies, then `hv_apply` for the exact reviewed plan.
 Preserve explicit user choices. Infer ordinary names and supported reversible
 defaults without a questionnaire; obtain only the missing access, ambiguous
 ownership/billing choice, or consequential confirmation required by the plan.
-Present costs honestly, including uncertainty. An authorization for one action
-does not authorize another provider resource or a changed plan.
+Present costs honestly, including uncertainty. Authorization does not extend
+to another provider resource or changed effects outside its reviewed scope.
+The reviewed connect/deploy task includes its routine narrow setup permissions;
+do not ask the user to manage each grant. Supply all required exact action IDs
+together when existing authorization covers the current reviewed effects.
+After replanning, compare effects and scope rather than treating a new plan ID
+as a new user decision. Ask only for missing authorization or changed effects.
 
-Stop dependent work after a blocked, failed, pending, or confirmation-required
-stage. Report what worked, what stopped, and the next decision. An explicit
+Stop dependent work after a blocked, failed or pending stage. A missing machine
+confirmation requires checking existing authorization before any write, not an
+automatic new question. Report what worked, what stopped, and the next decision. An explicit
 bounded `agentInstruction.action="continue"` permits only the stated work.
 Broad investigation or iteration requires the user's request and still cannot
 bypass resource ownership, confirmation, or secret boundaries.

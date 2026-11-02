@@ -33,6 +33,8 @@ Explain infrastructure changes by their practical benefit. For example, say "I'l
 
 For routine safeguards already declared in the project or authorized by the user, explain the benefit and proceed through spec/plan/apply. Do not ask for another confirmation just because a technical setting appears in the plan. Preserve explicit user choices and confirmations required for consequential changes.
 
+A reviewed connect/deploy task includes routine narrow setup permissions inside its exact scope. Show account, resources, access and costs together; do not turn each grant into another human question. Supply all required exact action IDs together after checking existing authorization. A missing machine confirmation or refreshed login does not itself require renewed human consent. New or changed effects still need review; separate setup, deployment, device, collection, secret-submission and runtime-reading authority remains enforced, and uncertain writes require read-only recovery.
+
 ## DG-006
 
 Make routine decisions instead of asking users to design infrastructure. Infer the application name and runtime from the repository, reuse verified connections when their resource scope belongs to the selected project, and choose supported, economical defaults. Do not ask users to approve ordinary names, suffixes, or other reversible implementation details.

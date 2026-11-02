@@ -126,6 +126,7 @@ describe('server tool surface', () => {
       expect(instructions).toContain('AWS, Azure or GCP');
       expect(instructions).toContain('purpose="connect-cloud"');
       expect(instructions).toContain('without local cloud credentials');
+      expect(instructions).toContain('Reuse existing task authorization');
       expect(instructions).not.toContain('For a first GCP Cloud Run');
       const resources = await client.listResources();
       expect(resources.resources).toContainEqual(expect.objectContaining({ uri: 'hypervibe://guidance' }));
@@ -144,6 +145,7 @@ describe('server tool surface', () => {
     try {
       const { HYPERVIBE_SERVER_INSTRUCTIONS } = await import('../../server.js');
       expect(client.getInstructions()).toBe(HYPERVIBE_SERVER_INSTRUCTIONS);
+      expect(client.getInstructions()).toContain('Reuse existing task authorization');
       expect(client.getInstructions()!.length).toBeGreaterThan(4096);
     } finally {
       await client.close();

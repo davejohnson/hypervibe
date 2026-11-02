@@ -54,8 +54,11 @@ connection or restart setup merely because a credential expires locally.
 When Hypervibe returns `connectionSetup.agentSetup`, execute only that exact
 unconfirmed preview. It may prepare account/project creation or a deployment
 identity. Present the concrete proposed resource scope, permission grants,
-billing choice, and cost implications before obtaining the required approval.
-Only the confirmed continuation may perform the corresponding changes.
+billing choice, and cost implications together. Reuse existing authorization
+for that exact reviewed task, including its routine narrow permissions; ask only
+for missing consent or changed effects. Supply all required action IDs together.
+Only the confirmed continuation may perform those changes, and it grants no
+authority over unreviewed future stages.
 
 For new AWS, Azure or GCP access, start `hv_cloud_connections` with
 `purpose="connect-cloud"` for the exact app and environment. Follow `nextStep`
@@ -77,7 +80,10 @@ shares the credential reader's machine and user context, and preserve existing
 profiles. Use the vendor's documented installation and browser login methods;
 the user handles consent, MFA and account/payment choices. Guidance is not a
 receipt that installation or login happened. Never export temporary sessions
-into CI/runtime or replay an earlier infrastructure confirmation after login.
+into CI/runtime. After login, obtain the current plan and compare its effects
+with the prior review. Reuse authorization for unchanged scope and effects;
+ask only for changes or missing consent. Renewed sign-in alone does not restore
+revoked authorization or permit replaying an uncertain write.
 Unknown credential-chain errors do not establish missing authentication.
 
 ## Externally issued credentials

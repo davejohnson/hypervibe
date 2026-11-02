@@ -120,15 +120,53 @@ describe('toolSuccess', () => {
     expect(response.agentInstruction?.message).not.toMatch(/ask the user before retrying/);
   });
 
+  it.each(['aws:writer-trust', 'azure:vault-access', 'gcp:writer-access'])(
+    'distinguishes the %s machine confirmation from another human approval', actionId => {
+      // User requirement: the reviewed Connect task already covers its narrow
+      // grants. Omitting the exact machine flag must not demand another prompt.
+      const receipts = [
+        { actionId: 'scope:existing', status: 'skipped_noop' },
+        { actionId, status: 'skipped_requires_confirm' },
+        { actionId: 'connection:verify', status: 'aborted' },
+      ];
+      const response = toolSuccess({ applied: false, receipts }, { next: ['hv_plan'] });
+      expect(response.agentInstruction?.action).toBe('continue');
+      expect(response.agentInstruction?.message).toMatch(/existing user authorization/i);
+      expect(response.agentInstruction?.message).toMatch(/exact.*scope/i);
+      expect(response.agentInstruction?.message).toMatch(/all.*action IDs/i);
+      expect(response.agentInstruction?.message).toMatch(/otherwise.*ask/i);
+      expect(response.agentInstruction?.message).toMatch(/uncertain.*writes/i);
+      expect(response.data).toEqual({ applied: false, receipts });
+      expect(toMcpToolResponse(response).structuredContent).toEqual(response);
+      expect(rendered(response)).not.toContain('ask the user before retrying');
+    });
+
+  it.each(['failed', 'pending', 'blocked', 'unknown-status'])(
+    'does not treat a confirmation flag as permission to continue mixed %s receipts', status => {
+      const response = toolSuccess({ applied: false, receipts: [
+        { actionId: 'access:writer', status: 'skipped_requires_confirm' },
+        { actionId: 'scope:existing', status },
+      ] }, { next: ['hv_plan'] });
+      expect(response.agentInstruction?.action).toBe('stop_and_report');
+    });
+
   it.each([
     { next: undefined, status: 'pending' }, { next: ['hv_apply'], status: 'pending' },
     { next: ['hv_status', 'hv_deploy'], status: 'pending' },
     { next: ['hv_plan'], status: 'failed' }, { next: ['hv_status'], status: 'blocked' },
     { next: ['hv_status'], status: 'unknown-status' },
-    { next: ['hv_plan'], status: 'skipped_requires_confirm' },
+    { next: undefined, status: 'skipped_requires_confirm' },
+    { next: ['hv_deploy'], status: 'skipped_requires_confirm' },
   ])('does not turn missing/unsafe continuation or failure into permission: %j', ({ next, status }) => {
     expect(toolSuccess({ applied: false, receipts: [{ actionId: 'service:web', status }] }, { next }).agentInstruction?.action)
       .toBe('stop_and_report');
+  });
+
+  it('keeps a confirmation-only receipt blocked when another error is present', () => {
+    const response = toolSuccess({ applied: false, error: 'Native authority is unknown', receipts: [
+      { actionId: 'access:writer', status: 'skipped_requires_confirm' },
+    ] }, { next: ['hv_plan'] });
+    expect(response.agentInstruction?.action).toBe('stop_and_report');
   });
 
   it('tells agents to expose and offer to open concrete connection setup links', () => {
@@ -236,6 +274,20 @@ describe('toolError', () => {
     });
     expect(rendered(response)).toContain('offer to open that page in their browser');
     expect(rendered(response)).toContain('complete credentialExample');
+  });
+
+  it('checks existing authorization before asking again for an exact confirmation flag', () => {
+    const response = toolError('CONFIRM_REQUIRED', 'Confirm the reviewed connection setup.');
+    expect(response.ok).toBe(false);
+    expect(response.error?.code).toBe('CONFIRM_REQUIRED');
+    expect(response.agentInstruction?.action).toBe('continue');
+    expect(response.agentInstruction?.message).toMatch(/existing user authorization/i);
+    expect(response.agentInstruction?.message).toMatch(/exact.*scope/i);
+    expect(response.agentInstruction?.message).toMatch(/otherwise.*ask/i);
+    expect(response.agentInstruction?.message).toMatch(/separate.*authorit/i);
+    expect(response.agentInstruction?.message).toMatch(/uncertain.*writes/i);
+    expect(toMcpToolResponse(response).structuredContent).toEqual(response);
+    expect(rendered(response)).not.toContain('ask the user before rerunning');
   });
 
   it('includes details when provided', () => {

@@ -50,8 +50,12 @@ replace them with remembered permission tables or dashboard procedures.
    another question; billing, ownership, spending, adoption, and destructive
    changes retain their required decisions and confirmations.
 3. Apply the exact reviewed plan with `hv_apply`, supplying only its required
-   confirmations after authorization. A stale or changed plan needs a fresh
-   review. Follow explicit prerequisite stages before dependent work.
+   confirmations after authorization. Reuse existing task authorization for
+   unchanged reviewed effects, including routine narrow setup permissions;
+   supply all required action IDs together without asking about each grant.
+   A stale plan needs current observation and review. Ask again only when the
+   effects exceed the authorization already given, not just because its ID or
+   a login session changed. Follow prerequisite stages before dependent work.
 4. Verify with the appropriate Hypervibe status, health, logs, or CI commands.
    Report what the evidence establishes and what remains pending or unchecked.
    A successful request is not proof of a healthy deployment or a tested restore.
@@ -77,12 +81,16 @@ requires explicit intent to adopt and the exact reviewed mapping.
   environment, or invite the cloud administrator. Local cloud credentials and
   manually prepared writer identities are not prerequisites. Perform supported
   setup work; leave browser consent, MFA, payment details and ambiguous billing
-  choices to the user. Keep setup, deployment and collection approvals separate.
+  choices to the user. Show account, resources, access and costs in one clear
+  setup review. Keep setup, deployment and collection authority separate;
+  routine permission grants within the approved task do not need more questions.
   If hosted setup is unavailable, report the prerequisite; do not substitute
   copied cloud keys. Local authentication and legacy bootstrap remain explicit
   existing-connection paths.
-- Follow each result's `agentInstruction`. After blocked, failed, pending, or
-  confirmation-required work, report the stopping point and next decision.
+- Follow each result's `agentInstruction`. After blocked, failed or pending work,
+  report the stopping point and next decision. A missing machine confirmation
+  means check existing authorization for the exact reviewed effects, then supply
+  the required field or ask only for the missing consent. It grants no new scope.
   Continue only within an explicit bounded continuation, or the user's explicit
   request to investigate or iterate. Do not bypass a blocker through provider
   CLIs, direct APIs, another connector, or an unrelated command.
