@@ -93,6 +93,21 @@ function initialAssignmentAction(intent: Intent): CloudInstallationAction {
     reason: 'Assign the reviewed billing account to this exact newly created project using transient browser authorization.',
     metadata: { operation: 'assign-initial-billing', category: 'scope', execution: 'api', native: { assignmentMode: n.assignmentMode } } };
 }
+/** Pure bounded setup preview; symbolic project-number/lifetime strings are
+ * display references only and never enter a native intent or request. */
+export function gcpInitialBillingSetupReview(n: Pick<ReturnType<typeof names>, 'projectId' | 'projectNumber' | 'projectParent' | 'projectCreateTime' | 'billingAccountName'>, billingAccountReview: string): import('../../../domain/ports/cloud-installation.port.js').CloudInstallationReview {
+  return {
+          resources: [{ kind: 'project', name: n.projectId, scope: `${n.projectParent}; projects/${n.projectNumber}; created ${n.projectCreateTime}` },
+            { kind: 'billing-account', name: n.billingAccountName, scope: `projects/${n.projectNumber}` }],
+          permissions: [{ principal: 'Browser-authorized administrator', scope: `projects/${n.projectNumber}`, actions: rolePermissions.link, purpose: 'installation-verification' },
+            { principal: 'Browser-authorized administrator', scope: n.billingAccountName, actions: ['billing.accounts.get', 'billing.resourceAssociations.create'], purpose: 'installation-verification' }],
+          costs: [{ resource: n.billingAccountName, description: 'This account will pay for resource usage in the exact newly created project. This step creates no application workloads.', pricingUrl: 'https://cloud.google.com/pricing' }],
+          warnings: [billingAccountReview, 'Reserve this newly created project for this setup and coordinate billing changes with other administrators until it finishes.',
+            'Google’s billing API can replace a concurrent external billing selection after our final check. This review authorizes the selected account for this initial assignment; it is not an atomic link-only operation.',
+            'A different account observed before the write is preserved and blocks setup. An uncertain response is recovered by reading, never by automatically repeating the assignment.',
+            'Only transient browser authorization is used. This step creates no temporary identities or IAM grants, and stores no administrator credential.'] };
+}
+
 function actions(intent: Intent): CloudInstallationAction[] {
   if (intent.mode !== 'disconnect') return allActions(intent);
   const grants = new Set(intent.installed?.map(item => item.native.actionId));
@@ -367,16 +382,7 @@ export function createGcpBillingPreparationDriver(options: { fetch?: typeof fetc
           { kind: 'project', name: n.projectId, scope: n.projectParent === 'none' ? 'No organization (observed)' : n.projectParent },
           { kind: 'billing-account', name: n.billingAccountName, scope: `projects/${n.projectNumber}` }],
           permissions: [], costs: [], warnings: [billingAccountReview, 'The selected billing association already exists. This stage verifies it without any billing or IAM changes.'] } };
-        if (n.assignmentMode === 'initial-reviewed-v1') return { actions: [initialAssignmentAction(context.intent)], review: {
-          resources: [{ kind: 'project', name: n.projectId, scope: `${n.projectParent}; projects/${n.projectNumber}; created ${n.projectCreateTime}` },
-            { kind: 'billing-account', name: n.billingAccountName, scope: `projects/${n.projectNumber}` }],
-          permissions: [{ principal: 'Browser-authorized administrator', scope: `projects/${n.projectNumber}`, actions: rolePermissions.link, purpose: 'installation-verification' },
-            { principal: 'Browser-authorized administrator', scope: n.billingAccountName, actions: ['billing.accounts.get', 'billing.resourceAssociations.create'], purpose: 'installation-verification' }],
-          costs: [{ resource: n.billingAccountName, description: 'This account will pay for resource usage in the exact newly created project. This step creates no application workloads.', pricingUrl: 'https://cloud.google.com/pricing' }],
-          warnings: [billingAccountReview, 'Reserve this newly created project for this setup and coordinate billing changes with other administrators until it finishes.',
-            'Google’s billing API can replace a concurrent external billing selection after our final check. This review authorizes the selected account for this initial assignment; it is not an atomic link-only operation.',
-            'A different account observed before the write is preserved and blocks setup. An uncertain response is recovered by reading, never by automatically repeating the assignment.',
-            'Only transient browser authorization is used. This step creates no temporary identities or IAM grants, and stores no administrator credential.'] } };
+        if (n.assignmentMode === 'initial-reviewed-v1') return { actions: [initialAssignmentAction(context.intent)], review: gcpInitialBillingSetupReview(n, billingAccountReview) };
         return { actions: actions(context.intent), blockedReason: 'billing_assignment_unverified' as const, review: {
           resources: [{ kind: 'temporary-service-account', name: n.email, scope: `projects/${n.projectNumber}` }, ...Object.values(n.roles).map(name => ({ kind: 'temporary-custom-role', name, scope: `projects/${n.projectNumber}` }))],
           permissions: [{ principal: n.email, scope: `projects/${n.projectNumber}`, actions: rolePermissions.link, purpose: 'installation-verification' },

@@ -1,7 +1,9 @@
 # Hosted cloud scope preparation
 
-Scope preparation is a separately reviewed installation stage, before collection
-installation. It uses transient browser authorization and the same durable CAS
+Scope preparation is a distinct native installation plan before collection
+installation. A [bounded hosted setup review](connect-cloud-contract.md#one-bounded-setup-approval)
+may approve its exact routine continuation effects together. It uses transient
+browser authorization and the same durable CAS
 records, exact action confirmations, dependency ordering and read-only recovery.
 It never loads ADC, opens local SQLite, creates a private key or authorizes a
 deployment. Existing collection records omit `stage` and retain their digest.

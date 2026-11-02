@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createAzureCloudInstallationDriver } from '../../src/adapters/providers/azure/azure-cloud-installation.js';
-import { applyCloudInstallationV1, planCloudInstallationV1 } from '../../src/application/hosted/cloud-installation.js';
+import { applyCloudInstallationV1, planCloudInstallationV1, prepareCloudInstallationSetupV1, parseCloudInstallationSetupV1, cloudInstallationSetupConfirmationsV1 } from '../../src/application/hosted/cloud-installation.js';
 import type { CloudInstallationAction, CloudInstallationContext, CloudInstallationEvidence, CloudInstallationIntent, CloudInstallationProviderContext, CloudInstallationRecord } from '../../src/domain/ports/cloud-installation.port.js';
 
 // These are reconstructed ARM responses, not live recordings. Native shapes,
@@ -115,6 +115,18 @@ function hostedContext(f: ReturnType<typeof fixture>): CloudInstallationContext 
 }
 
 describe('Azure hosted installation contract', () => {
+  it('retains the actual isolated namespace review through durable setup approval', async () => {
+    const f = fixture(); f.responses.delete(group);
+    const record = await planCloudInstallationV1({ ...hostedContext(f), intent });
+    expect(record.status).toBe('review-required');
+    const setup = prepareCloudInstallationSetupV1({ record, driver: f.driver });
+    const restored = parseCloudInstallationSetupV1(JSON.parse(JSON.stringify(setup)), f.driver);
+    expect(restored.review).toEqual(record.plan.review);
+    expect(cloudInstallationSetupConfirmationsV1({ setup: restored, approvedDigest: setup.digest, record, driver: f.driver }))
+      .toEqual(record.plan.actions.filter(action => action.type !== 'noop').map(action => action.id));
+    expect(f.events.every(event => event.method === 'GET')).toBe(true);
+  });
+
   it('blocks a pre-existing namespace before any registration or resource-group mutation', async () => {
     const f = fixture();
     for (const namespace of ['Microsoft.ManagedIdentity', 'Microsoft.KeyVault']) {

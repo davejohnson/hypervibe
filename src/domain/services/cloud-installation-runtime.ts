@@ -577,7 +577,7 @@ export async function reviewCloudInstallationRetryV1<I extends LocalCloudScopePr
   return { retryActions: [{ actionId: retry.actionId, attemptId: retry.id }], review };
 }
 
-/** Re-observe the prepared scope, then persist separately reviewed collection or deployment access. */
+/** Re-observe the prepared scope, then persist its distinct native collection or deployment plan. */
 export async function planCloudInstallationContinuationV1(input: CloudInstallationContext & {
   scopePreparationId: string; scopePreparationDigest: string; installationId: string;
   /** Exact independently read source; required to derive final deployment topology. */

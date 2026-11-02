@@ -360,3 +360,66 @@ recommended legacy GCP key creation. Both summaries now preserve the browser pat
 and their existing character limits; packaged skill guidance agrees. The normal
 server-tool contract checks enforce that boundary. This is instruction-delivery
 evidence, not proof that a coding model follows it or a live installation succeeds.
+
+## One bounded setup approval
+
+A setup approval may include routine permissions in a finite set of reviewed
+native stages. It does not authorize arbitrary future plans. The hosted library
+exports `cloudInstallationSetupStagesV1`, `prepareCloudInstallationSetupV1`,
+`parseCloudInstallationSetupV1` and `cloudInstallationSetupConfirmationsV1`.
+The host first reserves the returned stage kinds' installation IDs, prepares the
+value-free review, and records its authenticated human approval separately.
+Each stage still has its own immutable native plan, exact confirmations, attempt
+journal, ownership checks and read-only recovery. There is no second executor.
+
+The review digest binds the original plan and intent, reserved stage IDs, source,
+provider, customer/app/environment, host identity, secret names, scope and the
+provider-compiled resource/permission/cost recipe. Only explicitly declared native
+outputs may be resolved from verified predecessor receipts. Recompiling the
+recipe rejects a code or permission change that would broaden an old approval.
+The host must recheck the stored approval, current membership/invitation, source
+and cancellation state through the existing authorization callback before every
+write. Neither the review digest nor sign-in alone is authority. The library
+adds no time-based expiry to human approval; transient sign-in expiry, current
+revocation and an uncertain native operation remain independent constraints.
+
+| Provider/path | Approved scope | Continuation and limits |
+| --- | --- | --- |
+| AWS collection | Existing account/region, exact versioned template, stack, writer/trust and secret targets | Reuses the existing single native plan. The administrator still completes AWS's own console and IAM acknowledgment; Hypervibe cannot skip it. Native account, stack/template and role identity verification remains required. |
+| Azure collection | Existing tenant/subscription, isolated app/environment namespace, vault, managed identity, custom permissions and federation | Reuses the existing single native plan. Actual ARM acknowledgments/correlated operations remain authoritative; no placeholder secret values or account/subscription creation is added. |
+| GCP existing project | Exact project ID/number, writer, roles, APIs, reviewed empty containers and grants | Reuses the existing single native plan, including separate hosted impersonation and write-only permissions. |
+| GCP new project with explicit parent | Exact create-only project ID/parent and selected billing account, followed by initial billing and collection setup | One review reserves three stages. Project number/lifetime come only from verified creation. Initial billing uses its existing reviewed `initial-reviewed-v1` contract; the library cannot silently choose another payer or replace a conflicting association. |
+| GCP new project with provider-selected parent | Initial project plan; then actual verified parent plus exact billing and collection setup | The unknown organization is a real account decision. After creation, the combined billing/writer review removes repeated technical IAM approvals. This path does **not** claim one initial review. |
+| Deployment, migration, disconnection and local operator workflows | Existing separate authority and native plans | No new multi-stage approval is inferred. In particular this collection recipe does not create a hosted deployment engine or grant device, collection-management, contributor, runtime-reader or release authority. |
+
+Google documents that an omitted parent can be selected from the caller's
+organization, and that project numbers are assigned on creation. The review
+therefore cannot treat an unknown organization or a guessed project number as
+approved scope. [Google project creation](https://docs.cloud.google.com/dotnet/docs/reference/Google.Cloud.ResourceManager.V3/latest/Google.Cloud.ResourceManager.V3.ProjectsClient),
+[project identity](https://docs.cloud.google.com/resource-manager/docs/cloud-platform-resource-hierarchy).
+Billing association enables future usage charges and can replace an association;
+the existing initial-assignment caveat remains in the combined review.
+[Google billing contract](https://docs.cloud.google.com/billing/docs/reference/rest/v1/projects/updateBillingInfo).
+AWS requires its own IAM capability acknowledgment; Azure retains correlated
+native deployment history. [AWS quick-create review](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-console-create-stacks-quick-create-links.html),
+[Azure deployment history](https://learn.microsoft.com/en-us/azure/azure-resource-manager/templates/deployment-history).
+
+The challenged assumption was that each technical stage needed another human
+approval even when its exact effects could be reviewed together. The initial
+regression ran real GCP serialized planning and failed because the aggregate
+review API was absent; it now produces all bounded setup effects without a
+write. Actual GCP creation/billing/continuation tests verify the resolved native
+scope. Actual AWS external-plan and Azure namespace tests cover persisted JSON
+roundtrips and exact confirmation IDs. Synthetic shared-boundary tests additionally
+cover all three roster entries, source/scope/identity drift and live revocation.
+These are offline checks, not completed native customer walkthroughs.
+
+Two recovery counterexamples also failed before correction: a successful
+explicit retry retained an earlier rejected attempt, and read-only recovery
+stopped at the next unattempted action. Validation now considers the latest
+attempt per action, preserves all history and the original explicit retry rule,
+and supplies every non-noop ID required by the existing executor. Tests prove
+that the already completed write is not repeated. Pending, uncertain or rejected
+latest attempts never gain automatic retry authority from this approval.
+All regressions are in ordinary `npm test` discovery and the committed acceptance
+workflow runs that command; this does not assert live branch-protection settings.

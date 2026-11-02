@@ -17,13 +17,16 @@ const intent = {
     serviceAccountEmail: 'delivery@hosting-project.iam.gserviceaccount.com', subject: '123456789012345678901', issuer: 'https://accounts.google.com' },
 } as CloudInstallationIntent;
 function fixture(options: { lostAck?: boolean; deniedLookup?: boolean; deniedBilling?: boolean; pendingOperation?: boolean; rejectCreate?: boolean; automaticParent?: 'none' | string; changeBillingOnPrewriteRead?: boolean;
-  exclusiveAllocation?: boolean; lookupBeforeCreate?: number; revokeBeforeDispatch?: boolean; operationMismatch?: boolean; operationType?: string;
+  exclusiveAllocation?: boolean; initialBillingAssignment?: boolean; deploymentPurpose?: boolean; rejectBillingOnce?: boolean; lookupBeforeCreate?: number; revokeBeforeDispatch?: boolean; operationMismatch?: boolean; operationType?: string;
   noParentEncoding?: 'empty' | 'null' } = {}) {
   const selectedIntent = structuredClone(intent);
   if (options.exclusiveAllocation) selectedIntent.nativeScope.allocationMode = 'create-exclusive-v1';
+  if (options.initialBillingAssignment) selectedIntent.nativeScope.assignmentMode = 'initial-reviewed-v1';
+  if (options.deploymentPurpose) { selectedIntent.purpose = 'deployment'; selectedIntent.keys = []; }
   if (options.automaticParent) delete selectedIntent.nativeScope.parent;
   let project: Record<string, unknown> | null = null;
   let billing = '';
+  let billingRejected = false;
   let operationVisible = true;
   let serviceReads = 0;
   let createPermissionReads = 0;
@@ -66,7 +69,11 @@ function fixture(options: { lostAck?: boolean; deniedLookup?: boolean; deniedBil
       if (!project && options.lookupBeforeCreate) return Response.json({}, { status: options.lookupBeforeCreate });
       return project ? Response.json(project) : Response.json({}, { status: 404 });
     }
-    if (url.pathname === '/v1/projects/sequence-new-project/billingInfo') return Response.json({ name: 'projects/sequence-new-project/billingInfo', projectId: 'sequence-new-project', billingAccountName: billing, billingEnabled: !!billing });
+    if (url.pathname === '/v1/projects/sequence-new-project/billingInfo') {
+      if (method === 'PUT' && options.rejectBillingOnce && !billingRejected) { billingRejected = true; return Response.json({}, { status: 403 }); }
+      if (method === 'PUT') billing = body.billingAccountName;
+      return Response.json({ name: 'projects/sequence-new-project/billingInfo', projectId: 'sequence-new-project', billingAccountName: billing, billingEnabled: !!billing });
+    }
     if (url.pathname === '/v1/projects/sequence-new-project') return Response.json({ projectId: 'sequence-new-project', projectNumber: '987654321012', lifecycleState: 'ACTIVE' });
     if (url.hostname === 'serviceusage.googleapis.com' && method === 'GET') {
       serviceReads += 1;
@@ -95,6 +102,124 @@ function fixture(options: { lostAck?: boolean; deniedLookup?: boolean; deniedBil
 }
 
 describe('GCP fresh-project scope through real shared lifecycle and reconstructed native REST', () => {
+  it('reviews project, exact initial billing and writer setup together before any cloud write', async () => {
+    // User requirement: routine IAM stages belong to the same bounded setup
+    // approval. Google assigns project numbers only after create; the preview
+    // must describe that verified output reference, not guess a native ID.
+    const f = fixture({ exclusiveAllocation: true, initialBillingAssignment: true });
+    const root = await f.plan();
+    const setup = lifecycle.prepareCloudInstallationSetupV1({ record: root, driver: f.context.driver,
+      continuationInstallationIds: ['bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'] });
+    expect(setup.stages.map(stage => stage.stage)).toEqual(['scope-preparation', 'scope-preparation', 'collection']);
+    expect(setup.review.permissions.some(item => item.actions.includes('secretmanager.versions.add'))).toBe(true);
+    expect(setup.review.resources.some(item => item.name === intent.nativeScope.billingAccountName)).toBe(true);
+    expect(setup.digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(setup.review.warnings.join(' ')).not.toContain('A separate review will show');
+    expect(f.calls.filter(call => call.method !== 'GET' && !call.path.endsWith(':testIamPermissions'))).toEqual([]);
+  });
+
+  it('carries one reviewed setup through exact created-project billing and writer plans', async () => {
+    const f = fixture({ exclusiveAllocation: true, initialBillingAssignment: true });
+    const root = await f.plan();
+    const ids = ['bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'];
+    const setup = lifecycle.prepareCloudInstallationSetupV1({ record: root, driver: f.context.driver, continuationInstallationIds: ids });
+    const confirmed = (record: CloudInstallationRecord) => lifecycle.cloudInstallationSetupConfirmationsV1({
+      setup, approvedDigest: setup.digest, record, history: [...f.records.values()], driver: f.context.driver });
+    const apply = (record: CloudInstallationRecord) => lifecycle.applyCloudInstallationV1({ ...f.context,
+      installationId: record.installationId, planDigest: record.plan.digest, confirmActions: confirmed(record) });
+    const project = await apply(root);
+    expect(project.status).toBe('scope-ready');
+    const billing = await lifecycle.planCloudInstallationContinuationV1({ ...f.context, scopePreparationId: project.installationId,
+      scopePreparationDigest: project.plan.digest, installationId: ids[0] });
+    expect(confirmed(billing)).toEqual(['gcp:billing:initial-assignment-v1']);
+    const linked = await apply(billing);
+    expect(linked.status).toBe('scope-ready');
+    const collection = await lifecycle.planCloudInstallationContinuationV1({ ...f.context, scopePreparationId: linked.installationId,
+      scopePreparationDigest: linked.plan.digest, installationId: ids[1] });
+    expect(confirmed(collection)).toEqual(collection.plan.actions.filter(action => action.type !== 'noop').map(action => action.id));
+    expect(collection.intent.nativeScope).toEqual({ projectId: 'sequence-new-project', projectNumber: '987654321012' });
+    expect(f.calls.filter(call => call.method === 'POST' && call.path === '/v3/projects')).toHaveLength(1);
+    expect(f.calls.filter(call => call.method === 'PUT')).toHaveLength(1);
+    const before = f.calls.length;
+    expect(() => lifecycle.cloudInstallationSetupConfirmationsV1({ setup, approvedDigest: '0'.repeat(64), record: collection,
+      history: [...f.records.values()], driver: f.context.driver })).toThrow();
+    expect(() => lifecycle.cloudInstallationSetupConfirmationsV1({ setup, approvedDigest: setup.digest, record: collection,
+      history: [linked], driver: f.context.driver })).toThrow();
+    expect(f.calls).toHaveLength(before);
+    const unreserved = await lifecycle.planCloudInstallationContinuationV1({ ...f.context, scopePreparationId: linked.installationId,
+      scopePreparationDigest: linked.plan.digest, installationId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' });
+    expect(() => confirmed(unreserved)).toThrow();
+  });
+
+  it('keeps a completed explicitly retried stage eligible without erasing its rejected history', async () => {
+    const f = fixture({ exclusiveAllocation: true, initialBillingAssignment: true, rejectBillingOnce: true });
+    const root = await f.plan(), ids = ['bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'];
+    const setup = lifecycle.prepareCloudInstallationSetupV1({ record: root, driver: f.context.driver, continuationInstallationIds: ids });
+    const project = await f.apply(root);
+    const billing = await lifecycle.planCloudInstallationContinuationV1({ ...f.context, scopePreparationId: project.installationId,
+      scopePreparationDigest: project.plan.digest, installationId: ids[0] });
+    const rejected = await f.apply(billing);
+    expect(rejected.attempts[0].status).toBe('rejected');
+    expect(() => lifecycle.cloudInstallationSetupConfirmationsV1({ setup, approvedDigest: setup.digest, record: rejected,
+      history: [...f.records.values()], driver: f.context.driver })).toThrow();
+    // This explicitly reviewed retry is separate from the original setup approval.
+    const linked = await lifecycle.applyCloudInstallationV1({ ...f.context, installationId: billing.installationId,
+      planDigest: billing.plan.digest, confirmActions: ['gcp:billing:initial-assignment-v1'],
+      retryActions: [{ actionId: 'gcp:billing:initial-assignment-v1', attemptId: rejected.attempts[0].id }] });
+    expect(linked.status).toBe('scope-ready');
+    expect(linked.attempts.map(attempt => attempt.status)).toEqual(['rejected', 'succeeded']);
+    const collection = await lifecycle.planCloudInstallationContinuationV1({ ...f.context, scopePreparationId: linked.installationId,
+      scopePreparationDigest: linked.plan.digest, installationId: ids[1] });
+    expect(lifecycle.cloudInstallationSetupConfirmationsV1({ setup, approvedDigest: setup.digest, record: collection,
+      history: [...f.records.values()], driver: f.context.driver })).toContain('gcp:grant:impersonation');
+  });
+
+  it('keeps an unknown organization as a real choice then combines its verified billing and writer review', async () => {
+    const f = fixture({ exclusiveAllocation: true, initialBillingAssignment: true, automaticParent: 'organizations/654321' });
+    const root = await f.plan();
+    expect(lifecycle.cloudInstallationSetupStagesV1({ record: root, driver: f.context.driver })).toEqual([]);
+    const project = await f.apply(root);
+    const billing = await lifecycle.planCloudInstallationContinuationV1({ ...f.context, scopePreparationId: project.installationId,
+      scopePreparationDigest: project.plan.digest, installationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' });
+    expect(lifecycle.cloudInstallationSetupStagesV1({ record: billing, driver: f.context.driver })).toEqual(['collection']);
+    const setup = lifecycle.prepareCloudInstallationSetupV1({ record: billing, driver: f.context.driver,
+      continuationInstallationIds: ['cccccccc-cccc-4ccc-8ccc-cccccccccccc'] });
+    expect(setup.review.resources?.some(resource => resource.scope.includes('organizations/654321'))).toBe(true);
+    expect(setup.review.permissions.some(permission => permission.actions.includes('secretmanager.versions.add'))).toBe(true);
+    expect(setup.stages).toHaveLength(2);
+  });
+
+  it('keeps deployment setup separate and rejects permission expansion after approval', async () => {
+    const deployment = fixture({ exclusiveAllocation: true, initialBillingAssignment: true, deploymentPurpose: true });
+    const deploymentRoot = await deployment.plan();
+    expect(lifecycle.cloudInstallationSetupStagesV1({ record: deploymentRoot, driver: deployment.context.driver })).toEqual([]);
+    expect(() => lifecycle.prepareCloudInstallationSetupV1({ record: deploymentRoot, driver: deployment.context.driver,
+      continuationInstallationIds: ['bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'] })).toThrow();
+    const f = fixture({ exclusiveAllocation: true, initialBillingAssignment: true }), root = await f.plan();
+    const setup = lifecycle.prepareCloudInstallationSetupV1({ record: root, driver: f.context.driver,
+      continuationInstallationIds: ['bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'] });
+    const preview = f.context.driver.setup!.preview;
+    f.context.driver.setup!.preview = (...args) => {
+      const result = preview(...args);
+      result.review.permissions.push({ principal: 'host', scope: 'projects/another-project', actions: ['secretmanager.versions.access'], purpose: 'writer' });
+      return result;
+    };
+    expect(() => lifecycle.parseCloudInstallationSetupV1(setup, f.context.driver)).toThrow();
+    expect(f.calls.some(call => call.method !== 'GET' && !call.path.endsWith(':testIamPermissions'))).toBe(false);
+  });
+
+  it('cannot use setup approval to resubmit an unresolved exclusive create', async () => {
+    const f = fixture({ exclusiveAllocation: true, initialBillingAssignment: true, lostAck: true });
+    const root = await f.plan();
+    const setup = lifecycle.prepareCloudInstallationSetupV1({ record: root, driver: f.context.driver,
+      continuationInstallationIds: ['bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'] });
+    const pending = await f.apply(root);
+    expect(pending.status).toBe('pending');
+    expect(() => lifecycle.cloudInstallationSetupConfirmationsV1({ setup, approvedDigest: setup.digest, record: pending,
+      history: [...f.records.values()], driver: f.context.driver })).toThrow();
+    expect(f.calls.filter(call => call.method === 'POST' && call.path === '/v3/projects')).toHaveLength(1);
+  });
+
   it('creates only the reviewed project, retains native ownership and requires a separate billing review', async () => {
     const f = fixture(); const planned = await f.plan();
     expect(planned.status).toBe('review-required');

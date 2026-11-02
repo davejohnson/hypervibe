@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createAwsCloudInstallationDriver, createAwsCloudInstallationTemplateV1 } from '../aws-cloud-installation.js';
-import type { CloudInstallationIntent, CloudInstallationProviderContext } from '../../../../domain/ports/cloud-installation.port.js';
-import { parseCloudInstallationIntentV1 } from '../../../../application/hosted/cloud-installation.js';
+import type { CloudInstallationIntent, CloudInstallationProviderContext, CloudInstallationRecord } from '../../../../domain/ports/cloud-installation.port.js';
+import { parseCloudInstallationIntentV1, planCloudInstallationV1, prepareCloudInstallationSetupV1, parseCloudInstallationSetupV1, cloudInstallationSetupConfirmationsV1 } from '../../../../application/hosted/cloud-installation.js';
 
 // Reconstructed CloudFormation/IAM contracts. Template assertions check independent
 // required security properties; serialized native verification fixtures follow below.
@@ -106,6 +106,19 @@ async function nativeFixture(migrate = false, mode: 'migrate' | 'connect-existin
   return { d, ctx, action, attempt, state, requests, nativeParameters, handler };
 }
 describe('AWS reviewed console installation', () => {
+  it('retains the actual external installation review through durable setup approval', async () => {
+    const d = driver(); let saved: CloudInstallationRecord | null = null;
+    const record = await planCloudInstallationV1({ driver: d, intent, authentication: context().authentication,
+      authorize: async () => true, store: { read: async () => saved,
+        compareAndSwap: async (_id, _revision, next) => { saved = next; return true; } } });
+    const setup = prepareCloudInstallationSetupV1({ record, driver: d });
+    const restored = parseCloudInstallationSetupV1(JSON.parse(JSON.stringify(setup)), d);
+    expect(restored.review).toEqual(record.plan.review);
+    expect(record.plan.actions[0].metadata.execution).toBe('external');
+    expect(cloudInstallationSetupConfirmationsV1({ setup: restored, approvedDigest: setup.digest, record, driver: d })).toEqual(['aws:install']);
+    expect(record.attempts).toEqual([]);
+  });
+
   it('retains all secret containers and creates no placeholder values or runtime reader privileges', () => {
     const artifact = createAwsCloudInstallationTemplateV1();
     const template = JSON.parse(artifact.body);

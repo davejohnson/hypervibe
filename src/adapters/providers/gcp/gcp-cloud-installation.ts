@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type { CloudInstallationAction, CloudInstallationAttempt, CloudInstallationDriver, CloudInstallationEvidence,
   CloudInstallationIntent, CloudInstallationObservation, CloudInstallationProviderContext, CloudInstallationReason,
+  CloudInstallationSetupCapability, CloudInstallationRecord, CloudInstallationReview,
 } from '../../../domain/ports/cloud-installation.port.js';
 import { CloudInstallationBoundaryError } from '../../../domain/ports/cloud-installation.port.js';
 import { gcpSecretDestinationSchema } from '../../../domain/ports/secret-destination.port.js';
@@ -10,7 +11,7 @@ import { resourceName } from '../../../domain/services/resource-names.js';
 import { DestinationBoundaryError, DestinationBudget, destinationJson } from '../secret-destination-http.js';
 import { GcpSecretWriterClient, type WriterIamPolicy } from './gcp-secret-writer.client.js';
 import { createGcpProjectPreparationDriver, discoverGcpProjectPreparationScopes, gcpProjectPreparationScopeSchema } from './gcp-project-installation.js';
-import { createGcpBillingPreparationDriver, gcpBillingPreparationScopeSchema } from './gcp-billing-installation.js';
+import { createGcpBillingPreparationDriver, gcpBillingPreparationScopeSchema, gcpInitialBillingSetupReview } from './gcp-billing-installation.js';
 import { createGcpCloudDeploymentDriver } from './gcp-cloud-deployment.js';
 
 const SCOPE = 'https://www.googleapis.com/auth/cloud-platform';
@@ -62,8 +63,8 @@ function scope(intent: CloudInstallationIntent) {
   if (intent.provider !== 'gcp') throw new InstallationError('identity_mismatch');
   return scopeSchema.parse(intent.nativeScope);
 }
-function names(intent: CloudInstallationIntent) {
-  const native = scope(intent);
+function names(intent: CloudInstallationIntent) { return namesForScope(intent, scope(intent)); }
+function namesForScope(intent: CloudInstallationIntent, native: ReturnType<typeof scope>) {
   const parts = [intent.customerId, intent.appId, intent.environment, intent.installationId];
   const owner = createHash('sha256').update(JSON.stringify(parts)).digest('hex');
   const accountId = resourceName('writer', { maxLength: 30, scope: parts });
@@ -96,7 +97,9 @@ function makeAction(id: string, operation: typeof operations[number], name: stri
     dependsOn, metadata: { operation, category, execution: 'api', native } };
 }
 function actionsFor(intent: CloudInstallationIntent, existing: Record<string, string> = {}): CloudInstallationAction[] {
-  const n = names(intent);
+  return actionsForNames(intent, names(intent), existing);
+}
+function actionsForNames(intent: CloudInstallationIntent, n: ReturnType<typeof names>, existing: Record<string, string> = {}): CloudInstallationAction[] {
   if (intent.mode === 'disconnect') {
     if (!intent.installed?.length) throw new InstallationError('ownership_mismatch');
     return intent.installed.map(value => parseEvidence(value, intent)).filter(value => value.native.operation === 'grant').map((value, index) =>
@@ -125,6 +128,140 @@ function actionsFor(intent: CloudInstallationIntent, existing: Record<string, st
   verify.type = 'update'; actions.push(verify);
   return actions;
 }
+function collectionReview(intent: CloudInstallationIntent, n: ReturnType<typeof names>, actions: CloudInstallationAction[]): import('../../../domain/ports/cloud-installation.port.js').CloudInstallationReview {
+  return {
+        permissions: intent.mode === 'disconnect' ? actions.map(action => {
+          const original = parseEvidence(action.metadata.native.evidence, intent).native;
+          return { principal: String(original.member).slice('serviceAccount:'.length), scope: String(original.policyResource),
+            actions: [String(original.role)], purpose: 'writer' as const };
+        }) : [
+          ...Object.values(n.secrets).map(resource => ({ principal: n.email, scope: resource, actions: permissions.writer, purpose: 'writer' as const })),
+          { principal: n.email, scope: `projects/${n.projectNumber}`, actions: permissions.verifier, purpose: 'installation-verification' },
+          { principal: intent.hostIdentity.serviceAccountEmail, scope: n.account, actions: permissions.impersonator, purpose: 'writer' },
+        ], costs: [{ resource: 'Secret Manager', description: 'Active secret versions and API operations may incur charges after values are submitted.', pricingUrl: 'https://cloud.google.com/secret-manager/pricing' }],
+        warnings: [...(intent.mode === 'connect-existing' ? ['Authorize the first hosted writer for these exact existing secret containers. Existing values, versions and unrelated permissions are preserved; this does not establish container creation or deletion ownership.'] : []),
+          'Hypercloud handles submitted secret values transiently while delivering them to Google Secret Manager.',
+          'Removing collection access preserves stored versions and separately authorized runtime readers. Previously minted tokens may remain valid until expiry; IAM changes can take time to propagate.'],
+      };
+}
+
+function setupCapability(preparation: CloudInstallationDriver, billing: CloudInstallationDriver): CloudInstallationSetupCapability {
+  const fail = (): never => { throw new InstallationError('identity_mismatch'); };
+  const collection = (root: CloudInstallationRecord, id: string, projectId: string, projectNumber: string) => {
+    const intent = { ...root.intent, installationId: id, stage: 'collection' as const, nativeScope: { projectId, projectNumber } };
+    // A symbolic number exists only inside this pure preview. Native intents are
+    // derived later from verified creation evidence and parsed normally.
+    const n = namesForScope(intent, { projectId, projectNumber });
+    const actions = actionsForNames(intent, n);
+    return { actions, review: collectionReview(intent, n, actions) };
+  };
+  const append = (reviews: CloudInstallationReview[]): CloudInstallationReview => ({
+    resources: reviews.flatMap(review => review.resources ?? []), permissions: reviews.flatMap(review => review.permissions),
+    costs: reviews.flatMap(review => review.costs), warnings: reviews.flatMap(review => review.warnings),
+  });
+  const ready = (record: CloudInstallationRecord | undefined): CloudInstallationRecord => {
+    if (!record || record.status !== 'scope-ready' || record.plan.blockedReason
+      || record.plan.actions.some(action => {
+        const latest = record.attempts.filter(attempt => attempt.actionId === action.id).at(-1);
+        return latest && (latest.status !== 'succeeded' || !record.completed[action.id]);
+      })) fail();
+    return record!;
+  };
+  const billingEffects = (record: CloudInstallationRecord) => {
+    const native = gcpBillingPreparationScopeSchema.parse(record.intent.nativeScope);
+    if (native.assignmentMode !== 'initial-reviewed-v1' || record.plan.actions.length !== 1) fail();
+    const action = record.plan.actions[0];
+    if (action.id === 'gcp:billing:existing' && action.type === 'noop') {
+      if (record.plan.review.permissions.length || record.plan.review.costs.length) fail();
+    } else {
+      const expected = gcpInitialBillingSetupReview(native, `Billing account: ${native.billingAccountName}.`);
+      if (action.id !== 'gcp:billing:initial-assignment-v1'
+        || !isDeepStrictEqual(record.plan.review.permissions, expected.permissions)
+        || !isDeepStrictEqual(record.plan.review.costs, expected.costs)) fail();
+    }
+  };
+  const nextIntent = (previous: CloudInstallationRecord, installationId: string, stage: 'scope-preparation' | 'collection') => ({
+    ...previous.intent, installationId, stage,
+    nativeScope: (previous.intent.nativeScope.scopeKind === 'new-project' ? preparation : billing).scopePreparation!.resolvedScope(previous),
+    scopePreparation: { installationId: previous.installationId, planDigest: previous.plan.digest },
+  });
+  return {
+    continuationStages(root) {
+      if (root.intent.mode !== 'connect' || root.intent.stage !== 'scope-preparation'
+        || root.intent.purpose && root.intent.purpose !== 'collection') return [];
+      if (root.intent.nativeScope.scopeKind === 'new-project') {
+        const native = gcpProjectPreparationScopeSchema.parse(root.intent.nativeScope);
+        return native.parent && native.allocationMode === 'create-exclusive-v1' && native.assignmentMode === 'initial-reviewed-v1'
+          ? ['scope-preparation', 'collection'] : [];
+      }
+      if (root.intent.nativeScope.scopeKind === 'project-billing')
+        return gcpBillingPreparationScopeSchema.parse(root.intent.nativeScope).assignmentMode === 'initial-reviewed-v1' ? ['collection'] : [];
+      return [];
+    },
+    preview(root, ids) {
+      if (root.intent.mode !== 'connect' || root.intent.stage !== 'scope-preparation'
+        || root.intent.purpose && root.intent.purpose !== 'collection' || root.intent.migrationTargets) fail();
+      const allocating = root.intent.nativeScope.scopeKind === 'new-project';
+      const native = allocating ? gcpProjectPreparationScopeSchema.parse(root.intent.nativeScope) : gcpBillingPreparationScopeSchema.parse(root.intent.nativeScope);
+      if (native.assignmentMode !== 'initial-reviewed-v1' || ids.length !== (allocating ? 2 : 1)) fail();
+      // Google's default parent is a real account decision. It is not a routine
+      // IAM step that a setup approval may silently decide after creation.
+      if (allocating && (!('parent' in native) || !native.parent || native.allocationMode !== 'create-exclusive-v1')) fail();
+      const projectNumber = 'projectNumber' in native ? native.projectNumber : '{created-project-number}';
+      const projectParent = 'projectParent' in native ? native.projectParent : native.parent!;
+      const projectCreateTime = 'projectCreateTime' in native ? native.projectCreateTime : '{created-project-lifetime}';
+      const future = collection(root, ids.at(-1)!, native.projectId, projectNumber);
+      const resources = future.actions.filter(action => action.type === 'create').map(action => ({
+        kind: action.metadata.category, name: action.resource.name, scope: native.projectId,
+      }));
+      const billingReview = gcpInitialBillingSetupReview({ projectId: native.projectId, projectNumber, projectParent,
+        projectCreateTime, billingAccountName: native.billingAccountName }, `Billing account: ${native.billingAccountName}.`);
+      const rootReview = { ...root.plan.review, warnings: root.plan.review.warnings.map(warning => allocating
+        && warning === 'A separate review will show the actual project parent, selected billing account, costs and native initial-assignment behavior before billing is enabled.'
+        ? 'The selected project parent, billing account, initial-assignment behavior and collection permissions below are included in this setup review.' : warning) };
+      const review = append([rootReview, ...(allocating ? [billingReview] : []), { ...future.review, resources }]);
+      review.warnings.push('This review includes only the listed setup stages. Future project numbers and resource lifetimes are resolved from verified creation receipts; no permission or resource may be added to this approval.',
+        'Installation checks each stage using your current cloud authority. Sign-in may need renewing; pending or uncertain writes are only observed, never automatically resubmitted.',
+        'Deployment, device access, managing collection requests, submitting values and runtime reading each retain their separate authorization.');
+      return { stages: ids.map((installationId, index) => ({ installationId,
+        stage: allocating && index === 0 ? 'scope-preparation' : 'collection' })), review,
+      continuation: { kind: 'gcp-initial-collection-v1', projectId: native.projectId, projectParent,
+        billingAccountName: native.billingAccountName,
+        // Freeze the concrete permission/cost recipe in the digest. Recompiling
+        // on use rejects a library upgrade that would broaden these effects.
+        collection: { effects: future.actions.map(({ verified: _verified, ...effect }) => effect), review: future.review },
+        ...(allocating ? { billing: billingReview } : {}) } };
+    },
+    assertStage({ setup, record, history }) {
+      const index = setup.stages.findIndex(stage => stage.installationId === record.installationId);
+      if (index < 1) fail();
+      const root = ready(history.find(item => item.installationId === setup.root.installationId));
+      if (!isDeepStrictEqual(root.intent, setup.root.intent) || !isDeepStrictEqual(root.plan, setup.root.plan)) fail();
+      let previous = root;
+      for (let step = 1; step < index; step++) {
+        const retained = ready(history.find(item => item.installationId === setup.stages[step].installationId));
+        if (!isDeepStrictEqual(retained.intent, nextIntent(previous, retained.installationId, 'scope-preparation'))) fail();
+        billingEffects(retained);
+        previous = retained;
+      }
+      const stage = setup.stages[index].stage;
+      if (stage !== 'scope-preparation' && stage !== 'collection'
+        || !isDeepStrictEqual(record.intent, nextIntent(previous, record.installationId, stage))) fail();
+      if (stage === 'scope-preparation') {
+        // Existing selected billing is an explicit verified noop, never a new
+        // association or an alternate temporary-principal installation.
+        billingEffects(record);
+      } else {
+        const native = scopeSchema.parse(record.intent.nativeScope);
+        const expected = collection(root, record.installationId, native.projectId, native.projectNumber);
+        if (!isDeepStrictEqual(record.plan.actions, expected.actions)
+          || !isDeepStrictEqual(record.plan.review.permissions, expected.review.permissions)
+          || !isDeepStrictEqual(record.plan.review.costs, expected.review.costs)) fail();
+      }
+    },
+  };
+}
+
 function parseEvidence(value: unknown, intent: CloudInstallationIntent): CloudInstallationEvidence {
   const parsed = evidenceSchema.parse(value); const native = scope(intent);
   const n = names({ ...intent, installationId: parsed.native.installationId });
@@ -376,20 +513,7 @@ export function createGcpCloudInstallationDriver(options: { fetch?: typeof fetch
         }
         actions = actionsFor(context.intent, existing);
       });
-      return { actions, review: {
-        permissions: context.intent.mode === 'disconnect' ? actions.map(action => {
-          const original = parseEvidence(action.metadata.native.evidence, context.intent).native;
-          return { principal: String(original.member).slice('serviceAccount:'.length), scope: String(original.policyResource),
-            actions: [String(original.role)], purpose: 'writer' as const };
-        }) : [
-          ...Object.values(n.secrets).map(resource => ({ principal: n.email, scope: resource, actions: permissions.writer, purpose: 'writer' as const })),
-          { principal: n.email, scope: `projects/${n.projectNumber}`, actions: permissions.verifier, purpose: 'installation-verification' },
-          { principal: context.intent.hostIdentity.serviceAccountEmail, scope: n.account, actions: permissions.impersonator, purpose: 'writer' },
-        ], costs: [{ resource: 'Secret Manager', description: 'Active secret versions and API operations may incur charges after values are submitted.', pricingUrl: 'https://cloud.google.com/secret-manager/pricing' }],
-        warnings: [...(context.intent.mode === 'connect-existing' ? ['Authorize the first hosted writer for these exact existing secret containers. Existing values, versions and unrelated permissions are preserved; this does not establish container creation or deletion ownership.'] : []),
-          'Hypercloud handles submitted secret values transiently while delivering them to Google Secret Manager.',
-          'Removing collection access preserves stored versions and separately authorized runtime readers. Previously minted tokens may remain valid until expiry; IAM changes can take time to propagate.'],
-      } };
+      return { actions, review: collectionReview(context.intent, n, actions) };
     },
     async inspect(context) {
       try { driver.parseAction(context.action, context.intent); return await withClient(context, client => observe(client, context)); }
@@ -471,7 +595,7 @@ export function createGcpCloudInstallationDriver(options: { fetch?: typeof fetch
   const selected = (intent: CloudInstallationIntent) => intent.stage === 'scope-preparation'
     ? intent.nativeScope.scopeKind === 'project-billing' ? billing : preparation : intent.purpose === 'deployment' ? deployment : driver;
   return {
-    ...driver, deployment: deployment.deployment, scopePreparation: {
+    ...driver, setup: setupCapability(preparation, billing), deployment: deployment.deployment, scopePreparation: {
       continuationStage: record => selected(record.intent).scopePreparation!.continuationStage?.(record) ?? 'collection',
       resolvedScope: record => selected(record.intent).scopePreparation!.resolvedScope(record),
       reviewResources: record => selected(record.intent).scopePreparation!.reviewResources(record),

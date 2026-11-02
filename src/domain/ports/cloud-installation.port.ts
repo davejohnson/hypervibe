@@ -37,7 +37,7 @@ export interface CloudInstallationIntent {
   mode: 'connect' | 'connect-existing' | 'migrate' | 'disconnect';
   /** Omitted on historical collection records; scope preparation never authorizes writers. */
   stage?: CloudInstallationStage;
-  /** Immutable predecessor, separately reviewed before the collection installation. */
+  /** Immutable predecessor plan; a bounded hosted review may include both stages. */
   scopePreparation?: { installationId: string; planDigest: string };
   /** Provider's strict schema; only nonsecret native scope identifiers. */
   nativeScope: Record<string, string>;
@@ -209,7 +209,29 @@ export interface CloudInstallationScopeDiscovery {
   authority: 'not-verified';
   cursor?: string;
 }
+/** One human review can authorize only these exact, provider-compiled stages.
+ * Native plans and their per-action confirmation boundaries remain unchanged. */
+export interface CloudInstallationSetupReviewV1 {
+  schemaVersion: 1;
+  digest: string;
+  root: CloudInstallationRecord;
+  stages: Array<{ installationId: string; stage: CloudInstallationStage }>;
+  review: CloudInstallationReview;
+  continuation?: Record<string, unknown>;
+}
+export interface CloudInstallationSetupCapability {
+  /** Provider-neutral host discovery; empty retains the current single review. */
+  continuationStages(root: CloudInstallationRecord): CloudInstallationStage[];
+  /** Pure preview; no cloud calls and no assertion that future authority is ready. */
+  preview(root: CloudInstallationRecord, installationIds: string[]): {
+    stages: CloudInstallationSetupReviewV1['stages']; review: CloudInstallationReview; continuation: Record<string, unknown>;
+  };
+  /** Resolve only verified predecessor outputs and compare the actual saved plan. */
+  assertStage(input: { setup: CloudInstallationSetupReviewV1; record: CloudInstallationRecord; history: CloudInstallationRecord[] }): void;
+}
 export interface CloudInstallationDriver<I extends CloudInstallationExecutableIntent = CloudInstallationIntent> {
+  /** Hosted setup only; absent means an exact single-plan review, never future authority. */
+  readonly setup?: CloudInstallationSetupCapability;
   /** Local allocation or explicitly registered, predecessor-bound continuation. */
   readonly localScopePreparation?: { hostingProvider: string; continuation?: true; preparation?: 'holding-v1' };
   readonly artifactPublication?: { providerName: string; authentication: OperatorArtifactIntent['execution']['authentication'] };
@@ -238,7 +260,7 @@ export interface CloudInstallationDriver<I extends CloudInstallationExecutableIn
   /** Optional provider-owned scope preparation; absence is explicitly unsupported. */
   readonly scopePreparation?: {
     resolvedScope(record: CloudInstallationRecord<I>): Record<string, string>;
-    /** A prepared project may require one more reviewed billing scope before collection. */
+    /** A prepared project may require a distinct billing plan before collection. */
     continuationStage?(record: CloudInstallationRecord): CloudInstallationStage;
     /** Native ownership/billing selected after bootstrap must be shown in the next review. */
     reviewResources(record: CloudInstallationRecord<I>): NonNullable<CloudInstallationReview['resources']>;

@@ -43,6 +43,7 @@ export {
   planCloudInstallationV1, applyCloudInstallationV1, reconcileCloudInstallationV1, cloudInstallationConnectionsV1,
   cloudInstallationDeploymentConnectionV1,
   cloudInstallationResolvedScopeV1, cloudInstallationNextStageV1, cloudInstallationDisconnectionIntentV1, planCloudInstallationContinuationV1,
+  prepareCloudInstallationSetupV1, parseCloudInstallationSetupV1, cloudInstallationSetupConfirmationsV1, cloudInstallationSetupStagesV1,
 } from './application/hosted/cloud-installation.js';
 export { createAwsCloudInstallationDriver, createAwsCloudInstallationTemplateV1 } from './adapters/providers/aws/aws-cloud-installation.js';
 export { createAwsFederatedCredentialProvider } from './adapters/providers/aws/aws-federated-auth.js';
