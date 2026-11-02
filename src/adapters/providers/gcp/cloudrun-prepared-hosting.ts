@@ -1,6 +1,7 @@
+import { isDeepStrictEqual } from 'node:util';
 import type { CloudDeploymentConnectionV1, CloudDeploymentSourceAuthorizationV1 } from '../../../domain/ports/cloud-deployment.port.js';
 import { cloudDeploymentEffectiveSourceV1 } from '../../../domain/services/cloud-deployment-authentication.js';
-import { preparedHostingMarkerSchema, preparedHostingReleaseEvidenceSchema, type IPreparedHosting, type PreparedHostingBindings, type LocalPreparedHostingLoader,
+import { preparedHostingMarkerSchema, preparedHostingReleaseEvidenceSchema, preparedDirectReleaseEvidenceSchema, type IPreparedHosting, type PreparedHostingBindings, type LocalPreparedHostingLoader,
   type PreparedDirectReleaseEvidence, type PreparedReleaseTaskAdoption } from '../../../domain/ports/hosting-prepared.port.js';
 import { createGcpCloudDeploymentDriver, parseGcpPreparedResources } from './gcp-cloud-deployment.js';
 import { gcpPreparedApplicationConfiguration, gcpPreparedApplicationDigest, gcpObservedPreparedApplicationConfiguration } from './gcp-prepared-release.js';
@@ -68,6 +69,20 @@ export class CloudRunPreparedHosting implements IPreparedHosting {
         }
         if (!pending.includes(item.workload) && holding) return { state: 'unknown' };
         const attempt = attempts[item.workload];
+        const completed = attempt?.status === 'completed' && !pending.includes(item.workload);
+        let historical: PreparedDirectReleaseEvidence | undefined;
+        if (completed) {
+          historical = preparedDirectReleaseEvidenceSchema.parse((environment.platformBindings.preparedDirectReleaseEvidence as Record<string, unknown> | undefined)?.[item.workload]);
+          if (historical.attemptId !== attempt.id || !isDeepStrictEqual(historical.target, attempt.target)
+            || attempt.actionId !== `service:${item.workload}` || attempt.target.workload !== item.workload
+            || attempt.target.installationId !== connection.installationId || attempt.target.planDigest !== connection.planDigest
+            || attempt.target.receiptDigest !== receiptDigest || attempt.target.provider !== connection.hostingProvider
+            || attempt.target.projectId !== connection.nativeScope.projectId || attempt.target.environmentId !== connection.deployment.region
+            || attempt.target.resourceId !== item.id.split('/').at(-1) || attempt.target.resourceUid !== item.lifetimeId
+            || attempt.target.holdingRevision !== item.holding.revision || historical.revision === item.holding.revision
+            || !historical.revision.startsWith(`${item.id}/revisions/`) || !/^[1-9]\d*$/.test(historical.generation)
+            || attempt.target.releaseCommandHash && (attempt.releaseTask?.phase !== 'completed' || !attempt.rolloutAttempted)) return { state: 'unknown' };
+        }
         if (holding && receipt.purpose === 'local-holding' && attempt && ['attempted', 'uncertain'].includes(attempt.status)
           && !attempt.rolloutAttempted && attempt.target.releaseCommandHash && attempt.releaseTask
           && (attempt.releaseTask.phase === 'create-started' || attempt.releaseTask.phase === 'job-ready' && attempt.releaseTask.adopted)) {
@@ -90,7 +105,10 @@ export class CloudRunPreparedHosting implements IPreparedHosting {
             || inventory.executions !== undefined && (!Array.isArray(inventory.executions) || inventory.executions.length)) return { state: 'unknown' };
           taskAdoptions.push({ workload: item.workload, attemptId: attempt.id, jobName, jobUid: job.uid, jobEtag: job.etag });
         }
-        if (!holding && attempt?.target.releaseCommandHash) {
+        // Acknowledged completion is durable history. Later service templates and
+        // Google's bounded execution retention cannot invalidate it. Pending
+        // or uncertain first releases still require the exact native task proof.
+        if (!completed && !holding && attempt?.target.releaseCommandHash) {
           const task = attempt.releaseTask;
           if (task?.phase !== 'completed' || !attempt.rolloutAttempted
             || native.annotations?.[CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION] !== attempt.target.releaseCommandHash) return { state: 'unknown' };
@@ -108,11 +126,13 @@ export class CloudRunPreparedHosting implements IPreparedHosting {
               projectNumber: connection.nativeScope.projectNumber, token: await this.token(), request: this.request,
               expected: cloudRunPreparedReleaseJobSpec(gcpObservedPreparedApplicationConfiguration(native), attempt.target.imageUri, command) })) return { state: 'unknown' };
         }
-        if (!holding && attempt && (pending.includes(item.workload) && ['attempted', 'uncertain'].includes(attempt.status) || attempt.status === 'completed')
+        if (historical && !holding && native.template.containers[0].image === historical.target.imageUri
+          && native.latestReadyRevision === historical.revision && native.generation === historical.generation) directReleaseEvidence.push(historical);
+        if (!completed && !holding && attempt && pending.includes(item.workload) && ['attempted', 'uncertain'].includes(attempt.status)
           && attempt.target.receiptDigest === receiptDigest && attempt.target.resourceUid === item.lifetimeId
           && attempt.target.resourceId === item.id.split('/').at(-1) && attempt.target.holdingRevision === item.holding.revision
           && attempt.target.imageUri === native.template.containers[0].image
-          && (attempt.status === 'completed' || attempt.target.configurationDigest === previous?.firstReleaseConfigurationDigests?.[item.workload])
+          && attempt.target.configurationDigest === previous?.firstReleaseConfigurationDigests?.[item.workload]
           && gcpPreparedApplicationDigest(gcpObservedPreparedApplicationConfiguration(native)) === attempt.target.configurationDigest) {
           directReleaseEvidence.push({ schemaVersion: 1, kind: 'native-direct', attemptId: attempt.id, target: attempt.target,
             revision: String(native.latestReadyRevision), generation: String(native.generation) });

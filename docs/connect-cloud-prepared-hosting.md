@@ -750,3 +750,30 @@ change leaves that recovery unresolved. Adjacent runtime/preparation/release
 checks and TypeScript pass. These are reconstructed transport checks in normal
 `npm test`; they establish the request and persistence contract, while the live
 metadata repair and remaining worker rollout still require native verification.
+
+### Completed first releases remain historical
+
+The labels-only repair was subsequently verified live: the original labels
+returned while the web UID, image, revision and migration execution count stayed
+unchanged. The worker-only plan then exposed a separate read-side contradiction.
+An ordinary later web update omitted explicit revision scaling and execution
+environment fields. Its native identity and readiness remained valid, but the
+reader tried to validate its already completed first-release migration using the
+new template and the strict first-release configuration parser.
+
+A completed, nonpending first release is durable historical evidence. Validate
+its original attempt, receipt and native scope, keep it immutable, and observe
+the current service identity/readiness separately. Do not regenerate that history
+with a newer revision, or require an old execution to remain available forever:
+Google retains [at most 1,000 completed executions per job](https://docs.cloud.google.com/run/quotas)
+and automatically removes the oldest. Pending or uncertain first releases still
+require their exact original execution and configuration proof.
+
+Three saved-plan/apply regressions failed before this correction: a later
+ordinary template, an expired original execution, and a later revision using the
+same image. They now permit only the remaining worker update while preserving
+web, migration counts and original history. Changed execution identity is still
+rejected during uncertain recovery. The 50 lifecycle checks, 94 adjacent
+preparation/provider checks, 26 immutable-image planning checks and TypeScript
+pass in the normal test path. The corrected native worker rollout is still
+pending; reconstructed transport evidence is not a live completion claim.

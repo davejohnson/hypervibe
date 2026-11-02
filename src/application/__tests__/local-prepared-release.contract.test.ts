@@ -55,7 +55,7 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
     ...(nativeReference ? [{ name: 'NATIVE_TOKEN', valueSource: { secretKeyRef: { secret: 'projects/123456789012/secrets/native-token', version: '7' } } }] : [])].sort((a, b) => a.name.localeCompare(b.name));
   const adc = join(directory, 'synthetic-adc.json'); writeFileSync(adc, JSON.stringify({ type: 'authorized_user', client_id: 'synthetic-client', client_secret: 'synthetic-client-secret', refresh_token: 'synthetic-refresh' }), { mode: 0o600 });
   vi.stubEnv('GOOGLE_APPLICATION_CREDENTIALS', adc);
-  const state = { legacyLabelLoss: false, labelRepairs: 0, loseLabelAcknowledgment: false, rejectLabelRepair: false, loseLabelBeforeWrite: false, repeatJobPatches: 0, repeatEnvPatches: 0, nextImage: undefined as string | undefined, loseCreateAcknowledgment: false, loseAcknowledgment: false, actAs: true, patches: 0, patchRequests: 0, generatedDisappears: false, finalObservations: 0, transportErrors: [] as string[] };
+  const state = { ordinaryTemplateReplacement: false, expiredFirstExecution: false, legacyLabelLoss: false, labelRepairs: 0, loseLabelAcknowledgment: false, rejectLabelRepair: false, loseLabelBeforeWrite: false, repeatJobPatches: 0, repeatEnvPatches: 0, nextImage: undefined as string | undefined, loseCreateAcknowledgment: false, loseAcknowledgment: false, actAs: true, patches: 0, patchRequests: 0, generatedDisappears: false, finalObservations: 0, transportErrors: [] as string[] };
   const web = receipt.preparedResources.workloads.find(item => item.workload === 'web')!;
   const final = receipt.runtimeIdentities.find(item => item.workload === 'web')!.principal;
   if (final.kind !== 'gcp-service-account') throw new Error('Expected independently prepared native account');
@@ -107,7 +107,7 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
         return Response.json({ name: 'projects/operator-project/locations/us-central1/operations/second-migration', done: true, response: secondExecution });
       }
       if (url.pathname === `/v2/${jobResource}/executions`) return Response.json({ executions: taskState.runs ? [execution] : [] });
-      if (url.pathname === `/v2/${execution.name}`) return Response.json(execution);
+      if (url.pathname === `/v2/${execution.name}`) return state.expiredFirstExecution ? Response.json({}, { status: 404 }) : Response.json(execution);
       if (url.pathname === `/v2/${jobResource}` && (!init.method || init.method === 'GET'))
         return taskState.creates ? Response.json(job) : Response.json({}, { status: 404 });
       if (url.pathname.endsWith('/jobs') && init.method === 'POST') {
@@ -163,6 +163,9 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
         f.native.services.set(target.id, { ...before, labels: state.legacyLabelLoss && target.workload === 'web' ? { 'infraprint-environment': 'staging', 'infraprint-service': 'web' } : structuredClone(body.labels), etag: 'second-application-etag', generation: '4', observedGeneration: '4',
           latestCreatedRevision: `${target.id}/revisions/application-00004`, latestReadyRevision: `${target.id}/revisions/application-00004`,
           template: { ...before.template, labels: structuredClone(body.template.labels), containers: [{ ...before.template.containers[0], image: state.nextImage }] } });
+        if (state.ordinaryTemplateReplacement && target.workload === 'web') {
+          const live = f.native.services.get(target.id)!; delete live.template.scaling; delete live.template.executionEnvironment;
+        }
         state.patchRequests++; state.patches++;
         return Response.json({ name: 'projects/operator-project/locations/us-central1/operations/second-application', done: true,
           response: { name: target.id, uid: target.lifetimeId } });
@@ -330,6 +333,40 @@ describe('local journal-backed prepared application release', () => {
     f.nativeWeb.etag = 'concurrent-change'; f.nativeWeb.template.scaling.maxInstanceCount = 8;
     expect(await f.apply(plan.planRunId, ['runtime-identity:web'])).not.toMatchObject({ result: { success: true } });
     expect(f.state.labelRepairs).toBe(0); expect(f.taskState.runs).toBe(2);
+  });
+
+  it.each(['later-template', 'expired-execution', 'later-same-image-revision'] as const)('plans and applies only the remaining worker while retaining completed history: %s', async change => {
+    const f = await fixture(undefined, false, true, true, true);
+    for (let phase = 0; phase < 7 && f.state.patches < 2; phase++) {
+      const first = await new PlanService().plan(f.project, 'staging');
+      if ('error' in first) throw new Error(first.error);
+      expect(await f.apply(first.planRunId, first.actions.filter(a => a.type !== 'noop').map(a => a.id))).toMatchObject({ result: { success: true } });
+    }
+    const history = structuredClone({ attempts: f.load().platformBindings.preparedDirectReleaseAttempts, evidence: f.load().platformBindings.preparedDirectReleaseEvidence });
+    const spec = f.store.get(f.project)!.spec;
+    f.state.nextImage = f.candidate.replace(/f{64}$/, 'b'.repeat(64));
+    f.store.replace(f.project, { ...spec, environments: { staging: { ...spec.environments.staging, envVars: { ...spec.environments.staging.envVars, IMAGE_URI: f.state.nextImage } } } });
+    const web = f.receipt.preparedResources.workloads.find(item => item.workload === 'web')!;
+    if (change === 'later-template') {
+      const webPlan = await new PlanService().plan(f.project, 'staging', { serviceFilter: ['web'], includeEnvFile: false });
+      if ('error' in webPlan) throw new Error(webPlan.error);
+      f.state.ordinaryTemplateReplacement = true;
+      expect(await f.apply(webPlan.planRunId, ['service:web'])).toMatchObject({ result: { success: true } });
+      expect(f.state.patches).toBe(3);
+    } else if (change === 'expired-execution') f.state.expiredFirstExecution = true;
+    else {
+      const live = f.native.services.get(web.id)!;
+      Object.assign(live, { generation: '3', observedGeneration: '3', latestReadyRevision: `${web.id}/revisions/application-00003`, latestCreatedRevision: `${web.id}/revisions/application-00003` });
+    }
+    const beforeWeb = structuredClone(f.native.services.get(web.id)), beforeRuns = f.taskState.runs, beforePatches = f.state.patches;
+    const remaining = await new PlanService().plan(f.project, 'staging', { serviceFilter: ['worker'], includeEnvFile: false });
+    expect(remaining).not.toHaveProperty('error');
+    if ('error' in remaining) throw new Error(remaining.error);
+    expect(remaining.blocked).toEqual([]);
+    expect(remaining.actions.filter(action => action.type !== 'noop').map(action => action.id)).toEqual(['service:worker']);
+    expect(await f.apply(remaining.planRunId, ['service:worker'])).toMatchObject({ result: { success: true } });
+    expect(f.native.services.get(web.id)).toEqual(beforeWeb); expect(f.taskState.runs).toBe(beforeRuns); expect(f.state.patches).toBe(beforePatches + 1);
+    expect({ attempts: f.load().platformBindings.preparedDirectReleaseAttempts, evidence: f.load().platformBindings.preparedDirectReleaseEvidence }).toEqual(history);
   });
 
   it.each([false, true])('updates a completed native installation through plan/apply without legacy preparation; migration=%s', async migration => {
@@ -513,14 +550,22 @@ describe('local journal-backed prepared application release', () => {
       const web = plan.actions.find(action => action.id === 'service:web' && action.type !== 'noop');
       if (web) expect(plan.actions.find(action => action.id === 'service:worker')?.dependsOn).toContain('service:web');
       const applied = await f.apply(plan.planRunId, plan.actions.filter(action => action.requiresConfirm).map(action => action.id));
-      if (lost && !recovered && 'result' in applied && !applied.result.success && f.state.patches === 1) { recovered = true; continue; }
+      if (lost && !recovered && 'result' in applied && !applied.result.success && f.state.patches === 1) {
+        const originalUid = f.execution.uid; f.execution.uid = 'replaced-execution';
+        expect(await f.adapter.preparedHosting!.inspect({ environment: f.load(), environmentSpec: f.environmentSpec })).toEqual({ state: 'unknown' });
+        f.execution.uid = originalUid; recovered = true; continue;
+      }
       expect(applied).toMatchObject({ kind: 'executed', result: { success: true } });
       if (f.state.patches === 2) break;
     }
     expect(f.state.patches).toBe(2); expect(f.taskState).toEqual({ creates: 1, runs: 1 });
     expect(f.load().platformBindings.preparedHosting).toMatchObject({ pendingFirstRelease: [] });
+    // Acknowledged completion no longer depends on an old execution remaining
+    // readable forever. The same mismatch above remains fatal while uncertain.
+    const historical = structuredClone(f.load().platformBindings.preparedDirectReleaseEvidence);
     f.execution.uid = 'replaced-execution';
-    expect(await f.adapter.preparedHosting!.inspect({ environment: f.load(), environmentSpec: f.environmentSpec })).toEqual({ state: 'unknown' });
+    expect(await f.adapter.preparedHosting!.inspect({ environment: f.load(), environmentSpec: f.environmentSpec })).toMatchObject({ state: 'verified' });
+    expect(f.load().platformBindings.preparedDirectReleaseEvidence).toEqual(historical);
   });
   it.each([{ secrets: false, lost: false, race: false }, { secrets: true, lost: false, race: false }, { secrets: true, lost: true, race: false }, { secrets: true, lost: false, race: true }])('executes the saved application plan through bootstrap and orchestration %j', async ({ secrets, lost, race }) => {
     const f = await fixture(undefined, secrets ? 'secrets' : false, true);
