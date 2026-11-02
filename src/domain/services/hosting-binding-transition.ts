@@ -23,6 +23,7 @@ const RESERVED_PROVIDER_BINDINGS = new Set([
   'services',
   'serviceVolumes',
   'serviceCreateRecovery',
+  'serviceInstanceCreates',
   'previousHosting',
   'maintenance',
   'runtimeRollouts',
@@ -105,6 +106,10 @@ export function prepareHostingBindingTransition(params: {
     || !sameScope(current.providerScope, target.providerScope)
   );
   const resetActiveScope = changed || params.target.created === true;
+  if ((resetActiveScope || environmentId !== undefined && current.environmentId !== environmentId)
+    && Object.keys(current.serviceInstanceCreates ?? {}).length) {
+    return { ok: false, error: 'Retained service instance creation blocks hosting scope changes. Reconcile its exact parent and target first.' };
+  }
   if ((resetActiveScope || (environmentId !== undefined && current.environmentId !== environmentId))
     && hasRetainedServiceVolumes({ platformBindings: params.current })) {
     return { ok: false, error: 'Retained service volumes block hosting scope changes; volume migration is not implemented.' };

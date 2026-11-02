@@ -1,10 +1,12 @@
 import { createRailwayRegistryCredentialLifecycle } from './railway-registry-credential.js';
+import { railwayDeploySource } from './railway-deploy-source.js';
 import { runRailwayDatabaseTask } from './railway-database-task.js';
 import { createRailwayDatabaseInitializationInspection } from './railway-database-initialization-inspection.js';
 import { GraphQLClient, gql } from 'graphql-request';
 import { randomBytes } from 'crypto';
 import { z } from 'zod';
 import { resourceName } from '../../../domain/services/resource-names.js';
+import { railwayServiceInstances } from './railway-service-instance.js';
 import { parseGitHubRepoFromRemote } from '../../../lib/git-remote.js';
 import type {
   IProviderAdapter,
@@ -219,32 +221,6 @@ export function buildTaskStartCommand(command: string): string {
   return `/bin/sh -c ${shellSingleQuote(inner)}`;
 }
 
-function normalizeRailwayGitRepo(repo?: string): string | undefined {
-  if (!repo) {
-    return undefined;
-  }
-
-  return repo
-    .trim()
-    .replace(/^https?:\/\/(www\.)?github\.com\//i, '')
-    .replace(/^git@github\.com:/i, '')
-    .replace(/\.git$/i, '')
-    .replace(/^\/+|\/+$/g, '')
-    .toLowerCase() || undefined;
-}
-
-function cachedBranchForSource(
-  cachedSource: { repo?: string; branch?: string } | undefined,
-  sourceRepo: string | undefined
-): string | undefined {
-  if (!cachedSource?.branch || !sourceRepo) {
-    return undefined;
-  }
-  return normalizeRailwayGitRepo(cachedSource.repo) === normalizeRailwayGitRepo(sourceRepo)
-    ? cachedSource.branch
-    : undefined;
-}
-
 function railwayNamePart(value: string): string {
   return value
     .trim()
@@ -311,6 +287,8 @@ export class RailwayAdapter implements
   private client: GraphQLClient | null = null;
   private credentials: RailwayCredentials | null = null;
   private resolvedWorkspaceId: string | null | undefined;
+
+  readonly serviceInstances = railwayServiceInstances(() => this.client);
 
   readonly railwayDailyBackups = railwayDailyBackupPolicy(() => this.client, async ({ target, externalId }) => {
     const volume = await this.resolveBackupVolume(target, externalId);
@@ -5065,9 +5043,13 @@ export class RailwayAdapter implements
                   name
                   icon
                   repoTriggers(first: $limit) {
-                    pageInfo @include(if: $bounded) { hasNextPage }
+                    pageInfo { hasNextPage }
                     edges {
                       node {
+                        id
+                        projectId
+                        serviceId
+                        environmentId
                         repository
                         branch
                       }
@@ -5109,7 +5091,7 @@ export class RailwayAdapter implements
                         cronSchedule
                         numReplicas
                         sleepApplication
-                        source { image }
+                        source { image repo }
                         latestDeployment {
                           id
                           status
@@ -5552,14 +5534,74 @@ export class RailwayAdapter implements
     }
   }
 
+  private async globalSourceMutationScopeError(params: {
+    serviceId: string; projectId?: string; environmentId?: string;
+  }): Promise<string | undefined> {
+    if (!params.projectId?.trim() || !params.environmentId?.trim()) {
+      return 'Railway deploy-source changes require an exact project and environment target.';
+    }
+    const inventory = await this.serviceInstanceInventory(params.serviceId, params.projectId);
+    if (inventory.state !== 'complete') {
+      return 'Railway could not verify the complete service-instance inventory; deploy-source changes are blocked.';
+    }
+    if (inventory.environmentIds.length !== 1 || inventory.environmentIds[0] !== params.environmentId) {
+      return 'Railway repository connect/disconnect affects the global service. It is permitted only for its exact sole environment instance; shared-service source changes are blocked.';
+    }
+    // The official CLI says serviceConnect creates triggers for matching
+    // *project* environments, without promising to exclude an empty one.
+    // A sole ServiceInstance is therefore insufficient proof of isolation.
+    const unavailable = 'Railway could not verify a complete, single-environment project; global deploy-source changes are blocked.';
+    const environmentIds = new Set<string>();
+    const cursors = new Set<string>();
+    let after: string | null = null;
+    for (let page = 0; page < 100; page++) {
+      try {
+        const result: unknown = await this.client!.request(gql`
+          query GlobalDeploySourceProjectScope($projectId: String!, $after: String) {
+            project(id: $projectId) {
+              id
+              environments(first: 100, after: $after) {
+                edges { node { id } }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        `, { projectId: params.projectId, after });
+        if (!isRecord(result) || !isRecord(result.project) || result.project.id !== params.projectId
+          || !isRecord(result.project.environments)) return unavailable;
+        const environments = result.project.environments;
+        if (!Array.isArray(environments.edges) || !isRecord(environments.pageInfo)
+          || typeof environments.pageInfo.hasNextPage !== 'boolean') return unavailable;
+        for (const edge of environments.edges) {
+          if (!isRecord(edge) || !isRecord(edge.node) || typeof edge.node.id !== 'string'
+            || !edge.node.id.trim() || environmentIds.has(edge.node.id)) return unavailable;
+          environmentIds.add(edge.node.id);
+        }
+        if (environmentIds.size > 1 || [...environmentIds].some(id => id !== params.environmentId)) {
+          return 'Railway global deploy-source changes are blocked in a project with other environments, including empty environments. Use an environment-scoped deployment source.';
+        }
+        if (!environments.pageInfo.hasNextPage) return environmentIds.size === 1 ? undefined : unavailable;
+        const cursor = environments.pageInfo.endCursor;
+        if (typeof cursor !== 'string' || !cursor || cursors.has(cursor)) return unavailable;
+        cursors.add(cursor);
+        after = cursor;
+      } catch { return unavailable; }
+    }
+    return unavailable;
+  }
+
   async connectServiceToRepo(params: {
     serviceId: string;
+    projectId?: string;
+    environmentId?: string;
     repo: string;
     branch: string;
   }): Promise<Receipt> {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
     }
+    const scopeError = await this.globalSourceMutationScopeError(params);
+    if (scopeError) return { success: false, message: 'Railway deploy-source connection is blocked', error: scopeError };
 
     const mutation = gql`
       mutation ServiceConnect($id: String!, $input: ServiceConnectInput!) {
@@ -5595,10 +5637,12 @@ export class RailwayAdapter implements
     }
   }
 
-  async disconnectDeploySource(params: { serviceId: string }): Promise<Receipt> {
+  async disconnectDeploySource(params: { serviceId: string; projectId?: string; environmentId?: string }): Promise<Receipt> {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
     }
+    const scopeError = await this.globalSourceMutationScopeError(params);
+    if (scopeError) return { success: false, message: 'Railway deploy-source disconnection is blocked', error: scopeError };
 
     const mutation = gql`
       mutation ServiceDisconnect($id: String!) {
@@ -7426,18 +7470,19 @@ export class RailwayAdapter implements
         });
       }
 
-      // serviceConnect sets ServiceInstance.source.repo (per-environment);
-      // repoTriggers on the Service is for webhook-configured deploys.
-      // Use the instance source as primary, repoTriggers as fallback.
-      const repoTrigger = node.repoTriggers?.edges?.[0]?.node;
-      const cachedSource = bindings.services?.[observedServiceName]?.source;
-      const sourceRepo = instanceSourceRepo ?? repoTrigger?.repository;
-      const sourceBranch = repoTrigger?.branch ?? cachedBranchForSource(cachedSource, sourceRepo);
-      const sourceState: ObservedService['sourceState'] = sourceRepo
-        ? 'connected'
-        : instanceSourceObserved
-          ? 'disconnected'
-          : 'unknown';
+      // A project-global Service can have different sources and deployment
+      // triggers in each environment. The first parent trigger is not evidence
+      // about this instance. Incomplete or contradictory scope stays unknown.
+      const sourceObservation = railwayDeploySource({
+        projectId, serviceId: node.id, environmentId,
+        triggers: node.repoTriggers, instanceRepo: instanceSourceRepo, instanceSourceObserved,
+        cachedSource: bindings.services?.[observedServiceName]?.source,
+      });
+      const sourceState = sourceObservation.state;
+      if (sourceState === 'unknown') {
+        partial = true;
+        warnings.push(`Could not verify environment-scoped deploy-source evidence for "${observedServiceName}"; source state remains unknown.`);
+      }
 
       services.push({
         name: observedServiceName,
@@ -7457,8 +7502,8 @@ export class RailwayAdapter implements
           cronSchedule,
           public: isPublic,
         },
-        ...(sourceRepo
-          ? { source: { repo: sourceRepo, ...(sourceBranch ? { branch: sourceBranch } : {}) } }
+        ...(sourceObservation.source
+          ? { source: sourceObservation.source }
           : {}),
         sourceState,
         envVarKeys,
@@ -7844,7 +7889,7 @@ export interface RailwayServiceInstance {
   cronSchedule?: string;
   numReplicas?: number;
   sleepApplication?: boolean;
-  source?: { image?: string | null } | null;
+  source?: { image?: string | null; repo?: string | null } | null;
   latestDeployment?: { id?: string; status?: string } | null;
 }
 
@@ -7917,8 +7962,13 @@ export interface RailwayProjectDetails {
         name: string;
         icon?: string;
         repoTriggers: {
+          pageInfo?: { hasNextPage: boolean };
           edges: Array<{
             node: {
+              id: string;
+              projectId: string;
+              serviceId: string | null;
+              environmentId: string;
               repository: string;
               branch: string;
             };

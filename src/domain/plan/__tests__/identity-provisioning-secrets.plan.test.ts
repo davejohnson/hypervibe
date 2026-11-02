@@ -79,7 +79,7 @@ async function setup(database = false) {
 describe('application credentials stay outside identity-only provisioning', () => {
   it('prepares an empty service and its volume, then requires all application inputs before release', async () => {
     const f = await setup();
-    const production = structuredClone(f.fixture.services.get('production-web'));
+    const production = structuredClone(f.fixture.services.get('production-web')!.instances.get(productionId));
     const productionBindings = f.environments.findById(f.production.id)!.platformBindings;
     const first = await f.plan();
     expect(first.scope).toBe('hosting-bindings');
@@ -88,7 +88,7 @@ describe('application credentials stay outside identity-only provisioning', () =
 
     // Observe the actual apply refusal before fixing the planner, not just its
     // presentation. Required runtime inputs are relevant only to the later release.
-    expect(await f.apply(first)).toMatchObject({ kind: 'executed', result: { success: true } });
+    const firstResult=await f.apply(first); expect(firstResult,JSON.stringify(firstResult)).toMatchObject({ kind: 'executed', result: { success: true } });
     expect(first.inputRequired).toEqual([]);
     expect(new RunRepository().findById(first.planRunId)!.plan).not.toHaveProperty('overrides');
     const serviceId = (f.environments.findById(f.staging.id)!.platformBindings.services as Record<string, { serviceId: string }>).web.serviceId;
@@ -99,7 +99,7 @@ describe('application credentials stay outside identity-only provisioning', () =
     const volume = await f.plan();
     expect(volume.scope).toBe('service-volumes');
     expect(volume.inputRequired).toEqual([]);
-    expect(await f.apply(volume)).toMatchObject({ kind: 'executed', result: { success: true } });
+    const volumeResult=await f.apply(volume); expect(volumeResult,JSON.stringify(volumeResult)).toMatchObject({ kind: 'executed', result: { success: true } });
 
     const release = await f.plan();
     expect(release.scope).toBe('full');
@@ -107,24 +107,28 @@ describe('application credentials stay outside identity-only provisioning', () =
     const before = f.fixture.mutations.length;
     expect(await f.apply(release)).toMatchObject({ kind: 'input_required' });
     expect(f.fixture.mutations).toHaveLength(before);
-    expect(f.fixture.services.get('production-web')).toEqual(production);
+    expect(f.fixture.services.get('production-web')!.instances.get(productionId)).toEqual(production);
     expect(f.environments.findById(f.production.id)!.platformBindings).toEqual(productionBindings);
     expect(f.fixture.contractErrors).toEqual([]);
   });
 
   it('prepares the declared database dependency without treating its own credentials as application inputs', async () => {
     const f = await setup(true);
-    const production = structuredClone([...f.fixture.services.values()].filter(service => service.instances.has(productionId)));
+    // No accepted web parent: the ordinary new-Service path keeps its DB edge.
+    f.fixture.services.get('production-web')!.name='api';
+    f.environments.updatePlatformBindings(f.production.id,{services:{api:{serviceId:'production-web'}}});
+    const production = structuredClone([...f.fixture.services.values()].map(service => service.instances.get(productionId)));
     const first = await f.plan();
     expect(first.scope).toBe('hosting-bindings');
-    expect(first.actions.map(action => action.id).sort()).toEqual(['database:railway', 'service:web']);
-    expect(await f.apply(first)).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(first.actions.map(action => action.id).sort()).toEqual(['database:railway','service:web']);
+    const firstResult=await f.apply(first); expect(firstResult,JSON.stringify(firstResult)).toMatchObject({ kind: 'executed', result: { success: true } });
     expect(first.inputRequired).toEqual([]);
     expect(f.fixture.mutations.filter(mutation => mutation.field === 'templateDeployV2')).toHaveLength(1);
     expect(f.fixture.variables.get(`staging-Postgres/${stagingId}`)).toHaveProperty('POSTGRES_PASSWORD', 'synthetic-provider-generated-password');
     for (const values of f.fixture.variables.values()) for (const key of keys) expect(values).not.toHaveProperty(key);
     expect(f.fixture.mutations.some(mutation => /serviceInstance(?:Re)?deploy|serviceConnect/i.test(mutation.field))).toBe(false);
-    expect([...f.fixture.services.values()].filter(service => service.instances.has(productionId))).toEqual(production);
+    expect([...f.fixture.services.values()].map(service => service.instances.get(productionId)).filter(Boolean)).toEqual(production);
+
     expect(f.fixture.contractErrors).toEqual([]);
   });
 });

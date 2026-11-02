@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { serviceInstanceIntentsSchema } from './service-instance.port.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Service } from '../entities/service.entity.js';
 import type {
@@ -364,6 +365,7 @@ export const hostingBindingsSchema = z.object({
   providerScope: retainedProviderScopeSchema.optional(),
   services: hostingServicesSchema.optional(),
   serviceCreateRecovery: serviceCreateRecoveryMapSchema.optional(),
+  serviceInstanceCreates: serviceInstanceIntentsSchema.optional(),
   previousDatabase: previousDatabaseSchema.optional(),
   previousCache: previousCacheSchema.optional(),
   domainDns: z.object({
@@ -403,6 +405,7 @@ export function parseHostingBindings(
  * Hosting adapters handle deploying services to cloud platforms.
  */
 export interface IHostingAdapter {
+  readonly serviceInstances?: import('./service-instance.port.js').IServiceInstances;
   /** Read-only admission for an explicitly reviewed private database task. */
   readonly databaseInitialization?: import('./database-initialization-bootstrap.port.js').IDatabaseInitializationBootstrap;
   readonly serviceVolumes?: import('./service-volume.port.js').IServiceVolumes;
@@ -477,7 +480,7 @@ export interface IHostingAdapter {
    * Disconnect a provider-native repository source so pushes cannot bypass
    * manual promotion or a Hypervibe-owned CI deployment workflow.
    */
-  disconnectDeploySource?(params: { serviceId: string }): Promise<Receipt>;
+  disconnectDeploySource?(params: { serviceId: string; projectId?: string; environmentId?: string }): Promise<Receipt>;
 
   /**
    * Get the current deployment status.

@@ -47,6 +47,11 @@ export async function railwayHttpFixture(options: {
   dropBackupCreateResponse?: boolean; backupWorkflowId?: string | null;
   dropScheduleUpdateResponse?: boolean; ignoreScheduleUpdate?: boolean;
   dropVariableResponse?: boolean;
+  /** Redacted observed duplicate global Service rejection; not an instance-naming contract. */
+  rejectDuplicateServiceNames?: boolean;
+  instanceCreationWorkflowStatus?: 'Complete' | 'Running' | 'Error';
+  dropInstanceCreateResponse?: boolean;
+  afterInstanceCreate?: () => void;
   dropDeploymentResponse?: boolean;
   deploymentStatus?: string;
   mutationEnvironments?: string[];
@@ -285,6 +290,8 @@ export async function railwayHttpFixture(options: {
       .filter(instance => instance.latestDeployment?.id === id).map(instance => ({ id, projectId, environmentId: instance.environmentId, serviceId: service.id, snapshotId: null })))[0],
     deploymentSnapshot: ({ deploymentId }) => deploymentSnapshots.get(deploymentId) ?? null,
     environmentPatch: ({ id }) => environmentPatches.get(id) ?? null,
+    environmentStagedChanges: ({ environmentId }) => environmentPatches.get(`staged:${environmentId}`)
+      ?? { id: '<empty>', environmentId, status: 'STAGED', patch: {} },
     environmentCreate: ({ input }) => {
       expect(input.projectId).toBe(projectId);
       const environment = { id: stagingId, name: input.name, config: {} };
@@ -293,6 +300,9 @@ export async function railwayHttpFixture(options: {
     },
     serviceCreate: ({ input }) => {
       expect(input).toMatchObject({ projectId, environmentId: stagingId });
+      if (options.rejectDuplicateServiceNames && [...services.values()].some(service => service.name === input.name)) {
+        throw new GraphQLError('A service named "web" already exists in this project', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
       const service = addService(`staging-${input.name}`, input.name, input.environmentId);
       service.instances.get(stagingId)!.source = input.source ?? {};
       return serviceNode(service);
@@ -374,6 +384,26 @@ export async function railwayHttpFixture(options: {
     },
     environmentPatchCommit: ({ environmentId, patch }) => {
       const environment = environments.get(environmentId)!;
+      if (patch.services) {
+        // Reconstructed from official CLI b62467ef compiler.rs and new.rs:
+        // exact existing Service UUID, fresh empty target instance, no config copy.
+        expect(Object.keys(patch)).toEqual(['services']);
+        for (const [id, value] of Object.entries(patch.services)) {
+          expect(value).toEqual({ isCreated: true });
+          const service = services.get(id)!;
+          expect(service).toBeDefined();
+          expect(service.instances.has(environmentId)).toBe(false);
+          service.instances.set(environmentId, { id: `instance-${id}-${environmentId}`, serviceId:id,
+            environmentId, deletedAt:null, numReplicas:1, activeDeployments:[], source:{},
+            domains:{ serviceDomains:[], customDomains:[] } });
+          environment.config.services ??= {};
+          environment.config.services[id] = { deploy:{} };
+        }
+        backupWorkflows.set('instance-workflow', { status: options.instanceCreationWorkflowStatus ?? 'Complete', error:null });
+        options.afterInstanceCreate?.();
+        if (options.dropInstanceCreateResponse) throw new Error('Synthetic lost acknowledgement');
+        return 'instance-workflow';
+      }
       for (const [id, value] of Object.entries(patch.buckets as BucketConfig)) {
         expect(buckets.has(id)).toBe(true);
         // Synthetic asynchronous visibility. Railway's official BucketInstance
