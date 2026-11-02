@@ -1,4 +1,6 @@
 import { createHash } from 'crypto';
+import { parse as parseYaml } from 'yaml';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import type {
@@ -29,7 +31,8 @@ import {
 import { adapterFactory } from './adapter.factory.js';
 import { compileDatabaseRestoreDrillFiles } from './database-restore-drill.service.js';
 import { compileManagedBackupFiles } from './managed-backup-workflows.service.js';
-import { isManagedBackupFilePath, managedBackupFilePaths } from './backup-workflow.service.js';
+import { isManagedBackupFilePath, managedBackupFilePaths, parseBackupRetirementFiles, type BackupRetirementFile } from './backup-workflow.service.js';
+import { managedBackupTargetSchema } from './managed-backup-target.service.js';
 import { missingManagedCiReleaseBindings, resolveReviewedBranchDeployTargets } from './managed-ci-targets.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import { getGitHubAdapter } from './github-ops.service.js';
@@ -1373,6 +1376,7 @@ function infrastructureAction(params: {
   requiresConfirm?: boolean;
   backupWorkflowPublicationRequired?: boolean;
   backupEnvironment?: string;
+  retiredManagedFiles?: BackupRetirementFile[];
   preservedManagedPaths?: string[];
 }): PlanAction {
   return {
@@ -1396,6 +1400,7 @@ function infrastructureAction(params: {
       desiredFiles: desiredFileMetadata(params.files),
       ...(params.backupWorkflowPublicationRequired ? { backupWorkflowPublicationRequired: true } : {}),
       ...(params.backupEnvironment ? { backupEnvironment: params.backupEnvironment } : {}),
+      ...(params.retiredManagedFiles ? { retiredManagedFiles: params.retiredManagedFiles } : {}),
       ...(params.preservedManagedPaths !== undefined ? { preservedManagedPaths: params.preservedManagedPaths } : {}),
       ...(params.blockedReason ? { blockedReason: params.blockedReason } : {}),
     },
@@ -1684,6 +1689,23 @@ async function environmentTaskPublicationPrerequisites(params: {
   return result;
 }
 
+/** Recover historical generated ownership without requiring current backup readiness. */
+function isOwnedBackupProgram(project: string, environment: string, contents: Map<string, string | null>): boolean {
+  const [contractPath, workflowPath] = managedBackupFilePaths(environment);
+  const contractContent = contents.get(contractPath), workflowContent = contents.get(workflowPath);
+  if (!contractContent || !workflowContent?.startsWith('# Managed by Hypervibe. Change desired state with hv_spec.\n')) return false;
+  try {
+    const contract = managedBackupTargetSchema.parse(JSON.parse(contractContent));
+    const workflow = parseYaml(workflowContent);
+    const job = workflow?.jobs?.backup;
+    if (contract.project !== project || contract.environment !== environment || job?.environment !== environment
+      || !Array.isArray(job.steps)) return false;
+    return job.steps.some((step: { env?: Record<string, unknown> }) =>
+      step?.env?.HYPERVIBE_BACKUP_CONTRACT_HASH === canonicalJsonSha256(contract)
+      && step.env.HYPERVIBE_BACKUP_RUNNER_IMAGE === contract.runnerImage);
+  } catch { return false; }
+}
+
 async function planBackupRepositoryPublication(params: {
   project: Project; spec: ProjectSpec; environmentName: string; backupEnvironment?: string;
   repository: string; owner: string; repo: string;
@@ -1699,6 +1721,7 @@ async function planBackupRepositoryPublication(params: {
   const adapterResult = getGitHubAdapter(params.repository);
   let verified = !('error' in adapterResult);
   let blockedReason = compiled.issues.length ? 'managed_backup_prerequisites_incomplete' : undefined;
+  let retiredManagedFiles: BackupRetirementFile[] | undefined;
   const drift: string[] = [];
   if ('error' in adapterResult) {
     blockedReason = 'github_observation_unavailable';
@@ -1715,6 +1738,18 @@ async function planBackupRepositoryPublication(params: {
     const manifest = await adapterResult.adapter.getFileContent(params.owner, params.repo, GITHUB_INFRASTRUCTURE_MANIFEST);
     const previousPaths = parseManifest(manifest, true);
     const desiredPaths = [...new Set([...previousPaths.filter(path => !paths.has(path)), ...compiled.files.map(file => file.path)])].sort();
+    if (params.spec.environments[environment].backups?.mode === 'disabled') {
+      const contents = new Map<string, string | null>();
+      for (const path of paths) contents.set(path, await adapterResult.adapter.getFileContent(params.owner, params.repo, path));
+      retiredManagedFiles = [...contents].map(([path, content]) => ({ path, hash: content === null ? null : sha256(content) }));
+      const present = retiredManagedFiles.filter(file => file.hash !== null);
+      if (present.some(file => !previousPaths.includes(file.path)) && !isOwnedBackupProgram(params.project.name, environment, contents)) {
+        verified = false;
+        blockedReason = 'github_backup_retirement_ownership_unknown';
+        warnings.push('Backup files still exist, but their managed ownership could not be established. Retirement is blocked; no schedule removal has been verified.');
+      }
+      drift.push(...present.map(file => file.path));
+    }
     for (const file of compiled.files) {
       const current = await adapterResult.adapter.getFileContent(params.owner, params.repo, file.path);
       if (current !== file.content) drift.push(file.path);
@@ -1728,6 +1763,7 @@ async function planBackupRepositoryPublication(params: {
   const action = infrastructureAction({ repository: params.repository, files: compiled.files,
     type: drift.length || blockedReason ? 'update' : 'noop', verified, drift,
     backupEnvironment: environment, backupWorkflowPublicationRequired: drift.length > 0,
+    ...(retiredManagedFiles ? { retiredManagedFiles } : {}),
     billable: !blockedReason && drift.length > 0 && compiled.files.length > 0,
     requiresConfirm: !blockedReason && drift.length > 0,
     ...(blockedReason ? { blockedReason } : {}),
@@ -2640,6 +2676,8 @@ export async function proposeGitHubInfrastructureFiles(params: {
   preservedManagedPaths?: string[];
   /** Selected backup lifecycle only; paths are derived from its environment. */
   managedPathScope?: string[];
+  /** Reviewed contents/absence for both files of an explicitly retired program. */
+  retiredManagedFiles?: BackupRetirementFile[];
 }): Promise<GitHubInfrastructureProposalResult> {
   const { repository, desiredFiles } = params;
   const proposalBranch = params.proposalBranch ?? GITHUB_INFRASTRUCTURE_BRANCH;
@@ -2690,6 +2728,23 @@ export async function proposeGitHubInfrastructureFiles(params: {
     };
   }
 
+  const retirementChanged = async (ref: string): Promise<boolean> => {
+    try {
+      for (const file of params.retiredManagedFiles ?? []) {
+        const current = await adapter.getFile(parts.owner, parts.repo, file.path, ref);
+        // Absence is also valid after a completed or interrupted prior attempt.
+        if (current !== null && (file.hash === null || sha256(current.content) !== file.hash)) return true;
+      }
+      return false;
+    } catch { return true; }
+  };
+  const retirementBlocked: GitHubInfrastructureProposalResult = {
+    success: false, status: 'blocked',
+    message: 'The backup files changed or could not be observed after review. Re-run hv_plan scope="backups" before removing them.',
+  };
+  // Do this before even creating/updating the proposal branch.
+  if (params.retiredManagedFiles && await retirementChanged(baseBranch)) return retirementBlocked;
+
   const branch = await reconcileGitHubInfrastructureBranch({
     adapter,
     repository,
@@ -2701,6 +2756,7 @@ export async function proposeGitHubInfrastructureFiles(params: {
   });
   if (!branch.success) return branch.result;
   const existingPull = branch.existingPull;
+  if (params.retiredManagedFiles && await retirementChanged(proposalBranch)) return retirementBlocked;
 
   const oldManifest = params.reconcileManifest
     ? await adapter.getFile(
@@ -2713,6 +2769,7 @@ export async function proposeGitHubInfrastructureFiles(params: {
   const previousPaths = Array.from(new Set([
     ...(params.reconcileManifest ? parseManifest(oldManifest?.content ?? null, params.preservedManagedPaths !== undefined || Boolean(params.managedPathScope?.length)) : []),
     ...(params.retiredManagedPaths ?? []),
+    ...(params.retiredManagedFiles ?? []).map(file => file.path),
   ])).sort();
   const preservedPaths = new Set(params.preservedManagedPaths);
   if (params.preservedManagedPaths !== undefined) {
@@ -2754,6 +2811,8 @@ export async function proposeGitHubInfrastructureFiles(params: {
   for (const path of previousPaths.filter((path) => !desiredPaths.has(path))) {
     const current = await adapter.getFile(parts.owner, parts.repo, path, proposalBranch);
     if (!current) continue;
+    const reviewed = params.retiredManagedFiles?.find(file => file.path === path);
+    if (params.retiredManagedFiles && (!reviewed || reviewed.hash !== sha256(current.content))) return retirementBlocked;
     await adapter.deleteFile(
       parts.owner,
       parts.repo,
@@ -2764,6 +2823,17 @@ export async function proposeGitHubInfrastructureFiles(params: {
     );
     removed.push(path);
     fileChanges.push({ operation: 'removed', path });
+  }
+  if (params.retiredManagedFiles) {
+    try {
+      for (const file of params.retiredManagedFiles) {
+        if (await adapter.getFile(parts.owner, parts.repo, file.path, proposalBranch) !== null) {
+          return { success: false, status: 'blocked', message: 'Backup schedule removal is not yet verified on the proposal branch. Re-plan before continuing.' };
+        }
+      }
+    } catch {
+      return { success: false, status: 'blocked', message: 'Backup schedule removal could not be verified on the proposal branch. Re-plan before continuing.' };
+    }
   }
   if (manifestFile) {
     const current = await adapter.getFile(parts.owner, parts.repo, manifestFile.path, proposalBranch);
@@ -2818,6 +2888,7 @@ export async function proposeGitHubInfrastructureFiles(params: {
 export async function applyGitHubInfrastructure(params: {
   action: PlanAction;
 }): Promise<{ success: boolean; status?: 'pending' | 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
+  if (params.action.type === 'noop') return { success: true, message: 'No repository changes were planned.' };
   const repository = typeof params.action.metadata?.repository === 'string'
     ? params.action.metadata.repository
     : undefined;
@@ -2843,6 +2914,13 @@ export async function applyGitHubInfrastructure(params: {
       error: 'Repository or desired files are missing.',
     };
   }
+  const retirement = backupEnvironment !== undefined && desiredFiles.length === 0;
+  const retiredManagedFiles = retirement ? parseBackupRetirementFiles(params.action.metadata?.retiredManagedFiles, backupEnvironment) : undefined;
+  if ((retirement && (!retiredManagedFiles || !params.action.verified || params.action.requiresConfirm !== true
+    || params.action.metadata?.blockedReason || params.action.metadata?.backupWorkflowPublicationRequired !== true))
+    || (!retirement && params.action.metadata?.retiredManagedFiles !== undefined)) {
+    return { success: false, status: 'blocked', message: 'Backup retirement requires reviewed file observations. Re-run hv_plan scope="backups".' };
+  }
   const targetBranch = typeof params.action.metadata?.targetBranch === 'string'
     ? params.action.metadata.targetBranch
     : undefined;
@@ -2852,6 +2930,7 @@ export async function applyGitHubInfrastructure(params: {
     ...(targetBranch ? { targetBranch } : {}),
     reconcileManifest: true,
     ...(backupPaths ? { managedPathScope: backupPaths } : {}),
+    ...(retiredManagedFiles ? { retiredManagedFiles } : {}),
     ...(Array.isArray(params.action.metadata?.preservedManagedPaths)
       ? { preservedManagedPaths: params.action.metadata.preservedManagedPaths.filter((path): path is string => typeof path === 'string') }
       : {}),

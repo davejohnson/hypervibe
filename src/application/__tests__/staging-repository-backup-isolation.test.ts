@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import '../providers.js';
 import '../devops-providers.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
@@ -17,6 +18,7 @@ import { compileManagedGitHubFiles, GITHUB_INFRASTRUCTURE_ACTION_ID,
   GITHUB_INFRASTRUCTURE_BRANCH, GITHUB_INFRASTRUCTURE_PR_TITLE, GITHUB_INFRASTRUCTURE_PR_BODY_MARKER } from '../../domain/services/github-infrastructure.service.js';
 import { planGitHubActionsAppliedSpecHash } from '../../domain/services/ci-deploy.service.js';
 import { environmentDeploymentContractHash } from '../../domain/services/deployment-contract.service.js';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 
 // Reconstructed from the 2026-10-29 Invoice Perfect incident: staging explicitly
 // excludes backups, production has daily native snapshots but no bound archive
@@ -55,9 +57,21 @@ describe('selected-environment repository reconciliation with unrelated incomple
     { previousProgram: true, state: 'exact-accepted-bytes' },
     { previousProgram: false, state: 'explicit-ready' },
     { previousProgram: true, state: 'explicit-disabled' },
+    { previousProgram: true, state: 'explicit-disabled-no-manifest' },
+    { previousProgram: true, state: 'explicit-disabled-unlisted' },
+    { previousProgram: true, state: 'explicit-disabled-partial-manifest' },
+    { previousProgram: true, state: 'explicit-disabled-unowned' },
+    { previousProgram: true, state: 'explicit-disabled-changed-after-plan' },
+    { previousProgram: true, state: 'explicit-disabled-interrupted-delete' },
+    { previousProgram: true, state: 'explicit-disabled-unverified-delete' },
+    { previousProgram: true, state: 'explicit-disabled-unknown-apply-read' },
+    { previousProgram: true, state: 'explicit-disabled-malformed-contract' },
+    { previousProgram: true, state: 'explicit-disabled-foreign-contract-environment' },
+    { previousProgram: true, state: 'explicit-disabled-mismatched-contract-hash' },
     { previousProgram: true, state: 'unknown-manifest' },
     { previousProgram: true, state: 'malformed-manifest' },
     { previousProgram: false, state: 'absent-manifest' },
+    { previousProgram: true, state: 'absent-manifest' },
   ])('preserves ordinary reconciliation and accepted backups ($state; previous program: $previousProgram)', async ({ previousProgram, state }) => {
     const repository = 'acme/backup-isolation';
     const project = ctx.repos.projects.create({ name: 'backup-isolation', defaultPlatform: 'railway',
@@ -115,7 +129,7 @@ describe('selected-environment repository reconciliation with unrelated incomple
       delete next.environments.production.backups;
       stored = new SpecStore().replace(project, next);
     }
-    if (state === 'disabled' || state === 'explicit-disabled') {
+    if (state === 'disabled' || state.startsWith('explicit-disabled')) {
       const next = structuredClone(stored.spec);
       next.environments.production.backups = { mode: 'disabled', reason: 'Reviewed explicit removal of the recurring program.' };
       stored = new SpecStore().replace(project, next);
@@ -138,10 +152,44 @@ describe('selected-environment repository reconciliation with unrelated incomple
       manifest.files.push('.github/hypervibe/backups-staging.json', '.github/workflows/hypervibe-backup-staging.yml');
       manifest.files.sort(); files.set(GITHUB_INFRASTRUCTURE_MANIFEST, JSON.stringify(manifest, null, 2) + '\n');
     }
+    // The real generated program can outlive its bookkeeping. Explicit disabled
+    // intent must reconcile these observed bytes, independently of manifest loss.
+    const unknownOwnership = ['explicit-disabled-unowned', 'explicit-disabled-malformed-contract',
+      'explicit-disabled-foreign-contract-environment', 'explicit-disabled-mismatched-contract-hash'].includes(state);
+    if (['explicit-disabled-no-manifest', 'explicit-disabled-changed-after-plan'].includes(state) || unknownOwnership) {
+      files.delete(GITHUB_INFRASTRUCTURE_MANIFEST);
+    }
+    if (state === 'explicit-disabled-unlisted' || state === 'explicit-disabled-partial-manifest') {
+      const manifest = JSON.parse(files.get(GITHUB_INFRASTRUCTURE_MANIFEST)!);
+      manifest.files = manifest.files.filter((file: string) => file !== '.github/workflows/hypervibe-backup-production.yml'
+        && (state !== 'explicit-disabled-unlisted' || file !== '.github/hypervibe/backups-production.json'));
+      files.set(GITHUB_INFRASTRUCTURE_MANIFEST, JSON.stringify(manifest, null, 2) + '\n');
+    }
+    if (state === 'explicit-disabled-unowned') {
+      files.set('.github/workflows/hypervibe-backup-production.yml', 'name: User-owned workflow at a matching path\non: workflow_dispatch\n');
+    }
+    if (state === 'explicit-disabled-malformed-contract') files.set('.github/hypervibe/backups-production.json', '{incomplete');
+    if (state === 'explicit-disabled-foreign-contract-environment' || state === 'explicit-disabled-mismatched-contract-hash') {
+      const contractPath = '.github/hypervibe/backups-production.json';
+      const workflowPath = '.github/workflows/hypervibe-backup-production.yml';
+      const contract = JSON.parse(files.get(contractPath)!);
+      const originalHash = canonicalJsonSha256(contract);
+      if (state === 'explicit-disabled-foreign-contract-environment') {
+        contract.environment = 'staging';
+        files.set(contractPath, JSON.stringify(contract, null, 2) + '\n');
+        files.set(workflowPath, files.get(workflowPath)!.replaceAll('production', 'staging').replace(originalHash, canonicalJsonSha256(contract)));
+      } else files.set(workflowPath, files.get(workflowPath)!.replace(originalHash, 'e'.repeat(64)));
+    }
     const originalFiles = new Map(files);
+    // A pending proposal changes its branch only; default-branch observations
+    // must retain the still-running program until the proposal is accepted.
+    const defaultFiles = new Map(files);
     if (!['unknown-credentials', 'ready', 'explicit-ready'].includes(state)) ctx.repos.environments.updatePlatformBindings(production.id, { storage: {} });
     const originalProduction = ctx.repos.environments.findById(production.id)!.platformBindings;
     const writes: Array<{ method: string; route: string }> = [];
+    const deleteAttempts: string[] = [];
+    let secondDeleteFailed = false;
+    let applyStarted = false;
     const unexpected: string[] = [];
     let appliedHash = 'previous-staging-contract';
     const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), {
@@ -156,26 +204,36 @@ describe('selected-environment repository reconciliation with unrelated incomple
       if (method === 'GET' && route === root) return json({ default_branch: 'main', private: true });
       if (method === 'GET' && route === `${root}/labels`) return json([]);
       if (method === 'GET' && route === `${root}/environments/staging`) return json({ name: 'staging' });
-      if (state.startsWith('explicit-') && method === 'GET' && route.startsWith(`${root}/git/ref/`)) return json({ ref: decodeURIComponent(route.slice(`${root}/git/ref/`.length)), object: { sha: 'd'.repeat(40) } });
-      if (state.startsWith('explicit-') && method === 'GET' && route === `${root}/pulls`) return json([{ number: 1, html_url: 'https://github.com/acme/backup-isolation/pull/1',
+      if ((state.startsWith('explicit-') || state === 'absent-manifest') && method === 'GET' && route.startsWith(`${root}/git/ref/`)) return json({ ref: decodeURIComponent(route.slice(`${root}/git/ref/`.length)), object: { sha: 'd'.repeat(40) } });
+      if ((state.startsWith('explicit-') || state === 'absent-manifest') && method === 'GET' && route === `${root}/pulls`) return json([{ number: 1, html_url: 'https://github.com/acme/backup-isolation/pull/1',
         state: 'open', merged_at: null, title: GITHUB_INFRASTRUCTURE_PR_TITLE, body: GITHUB_INFRASTRUCTURE_PR_BODY_MARKER,
         head: { ref: GITHUB_INFRASTRUCTURE_BRANCH, sha: 'd'.repeat(40) }, base: { ref: 'main' } }]);
-      if (state.startsWith('explicit-') && method === 'GET' && route.startsWith(`${root}/compare/`)) return json({ status: 'ahead', ahead_by: 1, behind_by: 0 });
-      if (state.startsWith('explicit-') && ['PUT', 'DELETE'].includes(method) && route.startsWith(`${root}/contents/`)) {
+      if ((state.startsWith('explicit-') || state === 'absent-manifest') && method === 'GET' && route.startsWith(`${root}/compare/`)) return json({ status: 'ahead', ahead_by: 1, behind_by: 0 });
+      if ((state.startsWith('explicit-') || state === 'absent-manifest') && ['PUT', 'DELETE'].includes(method) && route.startsWith(`${root}/contents/`)) {
         const file = decodeURIComponent(route.slice(`${root}/contents/`.length)), body = JSON.parse(String(options?.body));
         expect(body.branch).toBe(GITHUB_INFRASTRUCTURE_BRANCH);
+        if (method === 'DELETE') {
+          deleteAttempts.push(file);
+          if (state === 'explicit-disabled-interrupted-delete' && file === '.github/workflows/hypervibe-backup-production.yml' && !secondDeleteFailed) {
+            secondDeleteFailed = true;
+            return json({ message: 'The second file deletion was denied.' }, 403);
+          }
+        }
         if (method === 'PUT') files.set(file, Buffer.from(body.content, 'base64').toString('utf8'));
-        else files.delete(file);
+        else if (!(state === 'explicit-disabled-unverified-delete' && file === '.github/workflows/hypervibe-backup-production.yml')) files.delete(file);
         writes.push({ method, route }); return json({});
       }
       if (method === 'GET' && route === `${root}/environments/production/secrets`) return ['ready', 'explicit-ready'].includes(state) ? json({ total_count: 1, secrets: [{ name: 'RAILWAY_API_TOKEN' }] }) : json({ message: 'Denied' }, 403);
       if (method === 'GET' && route.startsWith(`${root}/contents/`)) {
         const file = decodeURIComponent(route.slice(`${root}/contents/`.length));
+        if (applyStarted && state === 'explicit-disabled-unknown-apply-read' && file === '.github/workflows/hypervibe-backup-production.yml') return json({ message: 'Observation denied after review.' }, 403);
         if (file === '.github/hypervibe/backups-production.json' && state === 'unknown-backup-file') return json({ message: 'Denied' }, 403);
         if (file === GITHUB_INFRASTRUCTURE_MANIFEST && state === 'unknown-manifest') return json({ message: 'Denied' }, 403);
-        const content = file === GITHUB_INFRASTRUCTURE_MANIFEST && state === 'malformed-manifest' ? '{incomplete' : files.get(file);
+        const observedFiles = url.searchParams.get('ref') === GITHUB_INFRASTRUCTURE_BRANCH ? files : defaultFiles;
+        const content = file === GITHUB_INFRASTRUCTURE_MANIFEST && state === 'malformed-manifest' ? '{incomplete' : observedFiles.get(file);
         return content === undefined ? json({ message: 'Not Found' }, 404)
-          : json({ type: 'file', encoding: 'base64', content: Buffer.from(content).toString('base64'), sha: 'd'.repeat(40) });
+          : json({ type: 'file', encoding: 'base64', content: Buffer.from(content).toString('base64'),
+            sha: createHash('sha1').update(`blob ${Buffer.byteLength(content)}\0`).update(content).digest('hex') });
       }
       if (method === 'GET' && route === `${root}/environments/staging/variables/HYPERVIBE_APPLIED_SPEC_HASH`)
         return appliedHash ? json({ name: 'HYPERVIBE_APPLIED_SPEC_HASH', value: appliedHash }) : json({ message: 'Not Found' }, 404);
@@ -192,24 +250,99 @@ describe('selected-environment repository reconciliation with unrelated incomple
       ...(state.startsWith('explicit-') ? { backupEnvironment: 'production' } : {}) });
     if (state.startsWith('explicit-')) {
       const action = repositoryPlan.actions.find(action => action.id === GITHUB_INFRASTRUCTURE_ACTION_ID);
+      if (unknownOwnership) {
+        expect(action?.metadata?.blockedReason).toBeDefined();
+        expect(repositoryPlan.warnings.join(' ')).toMatch(/ownership|managed|generated|observation/i);
+        expect(writes).toEqual([]);
+        expect(files).toEqual(originalFiles);
+        expect(configureDaily).not.toHaveBeenCalled();
+        return;
+      }
       expect(action).toMatchObject({ type: 'update', requiresConfirm: true,
         metadata: { backupEnvironment: 'production', backupWorkflowPublicationRequired: true } });
-      expect((action!.metadata?.desiredFiles as Array<{ path: string }>).map(file => file.path).sort()).toEqual(state === 'explicit-disabled' ? [] : [
+      expect((action!.metadata?.desiredFiles as Array<{ path: string }>).map(file => file.path).sort()).toEqual(state.startsWith('explicit-disabled') ? [] : [
         '.github/hypervibe/backups-production.json', '.github/workflows/hypervibe-backup-production.yml'
       ].sort());
       expect(repositoryPlan.actions).toHaveLength(1);
-      expect(await applyGitHubInfrastructure({ action: action! })).toMatchObject({ success: false, status: 'pending' });
+      applyStarted = true;
+      if (state === 'explicit-disabled-changed-after-plan' || state === 'explicit-disabled-unknown-apply-read') {
+        const selectedWorkflow = '.github/workflows/hypervibe-backup-production.yml';
+        if (state === 'explicit-disabled-changed-after-plan') files.set(selectedWorkflow, files.get(selectedWorkflow)! + '\n# Independently changed after retirement was reviewed.\n');
+        const beforeApply = new Map(files);
+        expect(await applyGitHubInfrastructure({ action: action! })).toMatchObject({ success: false, status: 'blocked' });
+        expect(writes).toEqual([]);
+        expect(files).toEqual(beforeApply);
+        expect(configureDaily).not.toHaveBeenCalled();
+        expect(unexpected).toEqual([]);
+        return;
+      }
       const selected = ['.github/hypervibe/backups-production.json', '.github/workflows/hypervibe-backup-production.yml'];
-      expect(writes.map(write => write.route.slice(`/repos/${repository}/contents/`.length)).sort()).toEqual([...selected, GITHUB_INFRASTRUCTURE_MANIFEST].sort());
+      if (state === 'explicit-disabled-interrupted-delete') {
+        const interrupted = await applyGitHubInfrastructure({ action: action! })
+          .catch(() => ({ success: false, status: 'failed' }));
+        expect(interrupted.success).toBe(false);
+        expect(interrupted.status).not.toBe('pending');
+        expect(deleteAttempts).toEqual(selected);
+        expect(files.has(selected[0])).toBe(false);
+        expect(files.get(selected[1])).toBe(originalFiles.get(selected[1]));
+        expect(files.get(GITHUB_INFRASTRUCTURE_MANIFEST)).toBe(originalFiles.get(GITHUB_INFRASTRUCTURE_MANIFEST));
+        writes.length = 0;
+        expect(await applyGitHubInfrastructure({ action: action! })).toMatchObject({ success: false, status: 'pending' });
+        expect(deleteAttempts).toEqual([...selected, selected[1]]);
+        expect(writes.map(write => write.route.slice(`/repos/${repository}/contents/`.length)).sort())
+          .toEqual([selected[1], GITHUB_INFRASTRUCTURE_MANIFEST].sort());
+        for (const file of selected) expect(files.has(file)).toBe(false);
+        writes.length = 0;
+        expect(await applyGitHubInfrastructure({ action: action! })).toMatchObject({ success: false, status: 'pending' });
+        expect(writes).toEqual([]);
+        expect(deleteAttempts).toEqual([...selected, selected[1]]);
+        expect(configureDaily).not.toHaveBeenCalled();
+        expect(unexpected).toEqual([]);
+        return;
+      }
+      if (state === 'explicit-disabled-unverified-delete') {
+        expect(await applyGitHubInfrastructure({ action: action! })).toMatchObject({ success: false, status: 'blocked' });
+        expect(deleteAttempts).toEqual(selected);
+        expect(files.has(selected[0])).toBe(false);
+        expect(files.get(selected[1])).toBe(originalFiles.get(selected[1]));
+        expect(files.get(GITHUB_INFRASTRUCTURE_MANIFEST)).toBe(originalFiles.get(GITHUB_INFRASTRUCTURE_MANIFEST));
+        expect(writes.every(write => write.method === 'DELETE')).toBe(true);
+        expect(configureDaily).not.toHaveBeenCalled();
+        expect(unexpected).toEqual([]);
+        return;
+      }
+      expect(await applyGitHubInfrastructure({ action: action! })).toMatchObject({ success: false, status: 'pending' });
+      const expectedWrites = state === 'explicit-disabled-unlisted' ? selected : [...selected, GITHUB_INFRASTRUCTURE_MANIFEST];
+      expect(writes.map(write => write.route.slice(`/repos/${repository}/contents/`.length)).sort()).toEqual([...expectedWrites].sort());
       for (const [path, content] of originalFiles) {
         if (!selected.includes(path) && path !== GITHUB_INFRASTRUCTURE_MANIFEST) expect(files.get(path)).toBe(content);
       }
       const manifestPaths = JSON.parse(files.get(GITHUB_INFRASTRUCTURE_MANIFEST)!).files;
-      expect(manifestPaths.filter((path: string) => !selected.includes(path))).toEqual(JSON.parse(originalFiles.get(GITHUB_INFRASTRUCTURE_MANIFEST)!).files.filter((path: string) => !selected.includes(path)));
-      for (const path of selected) expect(manifestPaths.includes(path)).toBe(state !== 'explicit-disabled');
+      const originalManifestPaths: string[] = originalFiles.has(GITHUB_INFRASTRUCTURE_MANIFEST)
+        ? JSON.parse(originalFiles.get(GITHUB_INFRASTRUCTURE_MANIFEST)!).files : [];
+      expect(manifestPaths.filter((path: string) => !selected.includes(path))).toEqual(originalManifestPaths.filter((path: string) => !selected.includes(path)));
+      for (const path of selected) {
+        expect(manifestPaths.includes(path)).toBe(!state.startsWith('explicit-disabled'));
+        if (state.startsWith('explicit-disabled')) expect(files.has(path)).toBe(false);
+      }
       writes.length = 0;
       expect(await applyGitHubInfrastructure({ action: action! })).toMatchObject({ success: false, status: 'pending' });
       expect(writes).toEqual([]);
+      if (state === 'explicit-disabled-no-manifest') {
+        const pending = await planGitHubInfrastructure({ project, spec: stored.spec,
+          environmentName: 'production', backupEnvironment: 'production' });
+        expect(pending.actions).toEqual([expect.objectContaining({ type: 'update', requiresConfirm: true })]);
+        for (const file of selected) expect(defaultFiles.has(file)).toBe(true);
+        // Model the reviewed proposal being merged; only now has the default
+        // branch stopped publishing the recurring program.
+        defaultFiles.clear();
+        for (const [file, content] of files) defaultFiles.set(file, content);
+        const converged = await planGitHubInfrastructure({ project, spec: stored.spec,
+          environmentName: 'production', backupEnvironment: 'production' });
+        expect(converged.actions).toEqual([]);
+        expect(converged.warnings).toEqual([]);
+        expect(writes).toEqual([]);
+      }
       expect(configureDaily).not.toHaveBeenCalled();
       expect(unexpected).toEqual([]);
       return;
@@ -245,6 +378,13 @@ describe('selected-environment repository reconciliation with unrelated incomple
       const desired = repositoryPlan.actions[0].metadata?.desiredFiles as Array<{ path: string }>;
       expect(repositoryPlan.actions[0].metadata?.blockedReason).toBeUndefined();
       expect(desired.some(file => /backup-production|backups-production/.test(file.path))).toBe(false);
+      const action = repositoryPlan.actions.find(action => action.id === GITHUB_INFRASTRUCTURE_ACTION_ID)!;
+      expect(await applyGitHubInfrastructure({ action })).toMatchObject({ success: false, status: 'pending' });
+      expect(writes.map(write => write.route.slice(`/repos/${repository}/contents/`.length))).toEqual([GITHUB_INFRASTRUCTURE_MANIFEST]);
+      for (const file of previousBackups.files) expect(files.get(file.path)).toBe(file.content);
+      writes.length = 0;
+      expect(await applyGitHubInfrastructure({ action })).toMatchObject({ success: false, status: 'pending' });
+      expect(writes).toEqual([]);
       expect(configureDaily).not.toHaveBeenCalled();
       expect(unexpected).toEqual([]);
       return;

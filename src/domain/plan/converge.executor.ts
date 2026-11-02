@@ -18,7 +18,7 @@ import type { PlanAction } from './plan.types.js';
 import { isManagedCiCredentialAction } from './plan-stage.js';
 import { isScopedSecretAction } from './scoped-secrets.js';
 import { managedBackupTargetSchema } from '../services/managed-backup-target.service.js';
-import { managedBackupFilePaths } from '../services/backup-workflow.service.js';
+import { managedBackupFilePaths, parseBackupRetirementFiles } from '../services/backup-workflow.service.js';
 
 /**
  * Converge executor: applies a previously persisted plan (terraform
@@ -219,6 +219,8 @@ export function isBackupProgramPublicationAction(action: PlanAction): boolean {
   const paths = files.map(file => file && typeof file === 'object' ? (file as { path?: unknown }).path : undefined);
   const expected = managedBackupFilePaths(environment);
   if (paths.length !== 0 && (paths.length !== 2 || new Set(paths).size !== 2 || paths.some(path => !expected.includes(String(path))))) return false;
+  if (paths.length === 0 ? !parseBackupRetirementFiles(action.metadata?.retiredManagedFiles, environment)
+    : action.metadata?.retiredManagedFiles !== undefined) return false;
   return action.type === 'update' && action.resource.kind === 'repo' && action.resource.provider === 'github'
     && action.metadata?.operation === 'githubInfrastructurePullRequest'
     && action.metadata?.backupWorkflowPublicationRequired === true && !action.metadata?.blockedReason

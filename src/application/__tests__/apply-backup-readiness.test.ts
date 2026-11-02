@@ -18,6 +18,11 @@ import '../providers.js';
 const publicationFile = (path: string, content: string) => ({ path, content,
   hash: createHash('sha256').update(content).digest('hex') });
 
+const retirementEvidence = () => [
+  { path: '.github/workflows/hypervibe-backup-production.yml', hash: 'a'.repeat(64) },
+  { path: '.github/hypervibe/backups-production.json', hash: null },
+];
+
 describe('independent backup setup and deployment prerequisites at the real apply boundary', () => {
   let directory: string;
   beforeEach(() => {
@@ -157,7 +162,9 @@ describe('independent backup setup and deployment prerequisites at the real appl
       resource: { kind: 'repo', provider: 'github', name: 'acme/backup-publication' }, verified: true,
       requiresConfirm: true, billable: mode === 'daily', reason: 'Publish the reviewed backup workflow',
       metadata: { operation: 'githubInfrastructurePullRequest', repository: 'acme/backup-publication', backupWorkflowPublicationRequired: true,
-        backupEnvironment: 'production', desiredFiles: mode === 'disabled' ? [] : [
+        backupEnvironment: 'production',
+        ...(mode === 'disabled' ? { retiredManagedFiles: retirementEvidence() } : {}),
+        desiredFiles: mode === 'disabled' ? [] : [
           publicationFile('.github/workflows/hypervibe-backup-production.yml', 'reviewed workflow'),
           publicationFile('.github/hypervibe/backups-production.json', 'reviewed contract'),
         ] } };
@@ -178,7 +185,7 @@ describe('independent backup setup and deployment prerequisites at the real appl
     expect(ctx.repos.environments.findById(environment.id)?.platformBindings).toEqual(environment.platformBindings);
   });
 
-  it.each(['missing-environment', 'wrong-environment', 'unrelated-file', 'other-environment-files', 'partial-pair', 'ordinary-scope', 'malformed-content', 'invalid-hash'] as const)(
+  it.each(['missing-environment', 'wrong-environment', 'unrelated-file', 'other-environment-files', 'partial-pair', 'ordinary-scope', 'malformed-content', 'invalid-hash', 'daily-retirement-evidence'] as const)(
     'rejects backup publication with %s before any repository or deployment effects', async mutation => {
     const ctx = createCommandContext();
     const project = ctx.repos.projects.create({ name: 'scoped-backup-publication', defaultPlatform: 'railway',
@@ -205,6 +212,7 @@ describe('independent backup setup and deployment prerequisites at the real appl
     if (mutation === 'partial-pair') action.metadata.desiredFiles.pop();
     if (mutation === 'malformed-content') Object.assign(action.metadata.desiredFiles[0], { content: undefined });
     if (mutation === 'invalid-hash') action.metadata.desiredFiles[0].hash = 'f'.repeat(64);
+    if (mutation === 'daily-retirement-evidence') Object.assign(action.metadata, { retiredManagedFiles: retirementEvidence() });
     const run = ctx.repos.runs.create({ projectId: project.id, environmentId: environment.id, type: 'plan',
       plan: { kind: 'hv_plan', scope: mutation === 'ordinary-scope' ? 'full' : 'backup-program-publication',
         environmentName: 'production', specRevision: 1, observedFingerprint: null, actions: [action] } });
@@ -218,6 +226,53 @@ describe('independent backup setup and deployment prerequisites at the real appl
     const result = await executePlanApply(ctx, { project, spec, specRevision: 1, planId: run.id,
       confirmActions: [action.id], alwaysRunBootstrap: true });
     expect(result.kind).toBe('plan_not_found');
+    expect(publication).not.toHaveBeenCalled();
+    expect(deploy).not.toHaveBeenCalled();
+    expect(ctx.repos.environments.findById(environment.id)?.platformBindings).toEqual(environment.platformBindings);
+  });
+
+  // Independent authority requirement: retirement may affect only the two selected
+  // environment paths observed during planning. A null hash means confirmed absence;
+  // malformed or omitted evidence cannot authorize deletion when a manifest is missing.
+  it.each([
+    { mutation: 'missing-evidence', evidence: undefined },
+    { mutation: 'non-array-evidence', evidence: { path: retirementEvidence()[0].path, hash: null } },
+    { mutation: 'empty-evidence', evidence: [] },
+    { mutation: 'partial-pair', evidence: retirementEvidence().slice(0, 1) },
+    { mutation: 'duplicate-path', evidence: [retirementEvidence()[0], retirementEvidence()[0]] },
+    { mutation: 'unrelated-path', evidence: [retirementEvidence()[0], { path: '.github/workflows/deploy.yml', hash: null }] },
+    { mutation: 'other-environment', evidence: retirementEvidence().map(file => ({ ...file, path: file.path.replace('production', 'staging') })) },
+    { mutation: 'extra-path', evidence: [...retirementEvidence(), { path: '.github/workflows/deploy.yml', hash: null }] },
+    { mutation: 'missing-hash', evidence: [{ path: retirementEvidence()[0].path }, retirementEvidence()[1]] },
+    { mutation: 'invalid-hash', evidence: [{ ...retirementEvidence()[0], hash: 'g'.repeat(64) }, retirementEvidence()[1]] },
+    { mutation: 'non-string-hash', evidence: [{ ...retirementEvidence()[0], hash: 17 }, retirementEvidence()[1]] },
+  ])('rejects persisted backup retirement with $mutation before any effects', async ({ evidence }) => {
+    const ctx = createCommandContext();
+    const project = ctx.repos.projects.create({ name: 'backup-retirement-authority', defaultPlatform: 'railway',
+      gitRemoteUrl: 'https://github.com/acme/backup-retirement-authority' });
+    const environment = ctx.repos.environments.create({ projectId: project.id, name: 'production',
+      platformBindings: { provider: 'railway', projectId: 'p', environmentId: 'e', appliedSpecHash: 'old-contract' } });
+    const spec = projectSpecSchema.parse({ version: 1, project: project.name, gitRemoteUrl: project.gitRemoteUrl,
+      environments: { production: { hosting: { provider: 'railway' }, services: {}, email: { enabled: false },
+        backups: { mode: 'disabled', reason: 'Explicitly retire the managed production backup program' } } } });
+    const action = { id: 'github:infrastructure', type: 'update',
+      resource: { kind: 'repo', provider: 'github', name: 'acme/backup-retirement-authority' }, verified: true,
+      requiresConfirm: true, billable: false, reason: 'Retire only the reviewed production backup program',
+      metadata: { operation: 'githubInfrastructurePullRequest', repository: 'acme/backup-retirement-authority',
+        backupWorkflowPublicationRequired: true, backupEnvironment: 'production', desiredFiles: [],
+        ...(evidence === undefined ? {} : { retiredManagedFiles: evidence }),
+      } };
+    const run = ctx.repos.runs.create({ projectId: project.id, environmentId: environment.id, type: 'plan',
+      plan: { kind: 'hv_plan', scope: 'backup-program-publication', environmentName: 'production',
+        specRevision: 1, observedFingerprint: null, actions: [action] } });
+    const providers = vi.spyOn(PlanService.prototype, 'providerPreflight').mockReturnValue([]);
+    const publication = vi.spyOn(githubInfrastructure, 'applyGitHubInfrastructure')
+      .mockResolvedValue({ success: true, message: 'Unexpected retirement publication', data: { applied: 1 } });
+    const deploy = vi.spyOn(bootstrap, 'executeBootstrap').mockResolvedValue({ success: true, summary: {} });
+    const result = await executePlanApply(ctx, { project, spec, specRevision: 1, planId: run.id,
+      confirmActions: [action.id], alwaysRunBootstrap: true });
+    expect(result.kind).toBe('plan_not_found');
+    expect(providers).not.toHaveBeenCalled();
     expect(publication).not.toHaveBeenCalled();
     expect(deploy).not.toHaveBeenCalled();
     expect(ctx.repos.environments.findById(environment.id)?.platformBindings).toEqual(environment.platformBindings);
@@ -271,6 +326,7 @@ describe('independent backup setup and deployment prerequisites at the real appl
       requiresConfirm: true, billable: true, reason: 'Contradictory saved backup publication',
       metadata: { operation: 'githubInfrastructurePullRequest', repository: 'acme/backup-intent-guard',
         backupWorkflowPublicationRequired: true, backupEnvironment: 'production',
+        ...(mode === 'daily' ? { retiredManagedFiles: retirementEvidence() } : {}),
         desiredFiles: mode === 'daily' ? [] : [
           publicationFile('.github/workflows/hypervibe-backup-production.yml', 'reviewed workflow'),
           publicationFile('.github/hypervibe/backups-production.json', 'reviewed contract'),

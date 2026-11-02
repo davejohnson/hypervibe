@@ -14,6 +14,7 @@ import { SpecStore } from '../../domain/spec/spec.store.js';
 import { AdapterFactory } from '../../domain/services/adapter.factory.js';
 import { buildBranchDeployWorkflow, resolveBranchDeployTargets } from '../../domain/services/github-ops.service.js';
 import { workflowFiles } from '../../domain/services/ci-deploy.service.js';
+import { compileManagedBackupFiles } from '../../domain/services/managed-backup-workflows.service.js';
 import type { IDatabaseAdapter } from '../../domain/ports/database.port.js';
 import type { IStorageAdapter } from '../../domain/ports/storage.port.js';
 import * as bootstrap from '../../domain/services/bootstrap.service.js';
@@ -97,6 +98,7 @@ describe('backup activation through CI credentials and canonical repository publ
     const writes: Array<{ method: string; pathname: string; body: unknown }> = [];
     const unexpected: string[] = [];
     let secretsUnknown = false;
+    let unknownFile: string | undefined;
     const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, options?: RequestInit) => {
       const url = new URL(String(input)), method = options?.method ?? 'GET', route = url.pathname;
@@ -105,6 +107,7 @@ describe('backup activation through CI credentials and canonical repository publ
       if (method === 'GET' && route === '/repos/acme/backup-ci') return json({ default_branch: 'main', private: true });
       if (method === 'GET' && route.startsWith('/repos/acme/backup-ci/contents/')) {
         const file = decodeURIComponent(route.slice('/repos/acme/backup-ci/contents/'.length)), content = files.get(file);
+        if (file === unknownFile) return json({ message: 'Denied' }, 403);
         return content === undefined ? json({ message: 'Not Found' }, 404)
           : json({ type: 'file', encoding: 'base64', content: Buffer.from(content).toString('base64'), sha: 'b'.repeat(40) });
       }
@@ -128,7 +131,29 @@ describe('backup activation through CI credentials and canonical repository publ
     }));
     const plan = (env = 'production') => new PlanService().plan(project, env, { includeEnvFile: false, ...(env === 'production' ? { scope: 'backups' as const } : {}) });
     return { project, stored, environment, files, secretNames, writes, unexpected, plan, refreshWorkflow,
-      setUnknown: (value: boolean) => { secretsUnknown = value; } };
+      setUnknown: (value: boolean) => { secretsUnknown = value; },
+      setUnknownFile: (value: string) => { unknownFile = value; } };
+  }
+
+  const backupPaths = ['.github/hypervibe/backups-production.json', '.github/workflows/hypervibe-backup-production.yml'];
+
+  async function disabledProgramFixture(manifestPaths: string[] | null) {
+    const f = await fixture();
+    // A prior accepted program exists independently of whether its index survived.
+    // Compile while daily intent still supplies its real contract and scoped identities.
+    const compiled = await compileManagedBackupFiles({ project: f.project, spec: f.stored.spec, environmentName: 'production' });
+    expect(compiled.issues).toEqual([]);
+    expect(compiled.files.map(file => file.path)).toEqual(backupPaths);
+    for (const file of compiled.files) f.files.set(file.path, file.content);
+    if (manifestPaths !== null) f.files.set('.github/hypervibe/manifest.json',
+      JSON.stringify({ version: 1, managedBy: 'hypervibe', files: manifestPaths }));
+    f.files.set('.github/workflows/deploy-railway-production.yml', 'unrelated application workflow drift');
+    f.files.set('.github/hypervibe/backups-staging.json', 'preserved staging contract');
+    f.files.set('.github/workflows/hypervibe-backup-staging.yml', 'preserved staging workflow');
+    const disabled = structuredClone(f.stored.spec);
+    disabled.environments.production.backups = { mode: 'disabled', reason: 'Explicitly retire the managed backup program' };
+    new SpecStore().replace(f.project, disabled);
+    return { ...f, disabled };
   }
 
   it('sets only environment CI credentials before publishing the exact production backup contract', async () => {
@@ -206,13 +231,7 @@ describe('backup activation through CI credentials and canonical repository publ
   });
 
   it('reviews only the selected disabled program removal and then reports a nondeploying noop', async () => {
-    const f = await fixture();
-    const disabled = structuredClone(f.stored.spec);
-    disabled.environments.production.backups = { mode: 'disabled', reason: 'Explicitly retire the managed backup program' };
-    new SpecStore().replace(f.project, disabled);
-    const paths = ['.github/hypervibe/backups-production.json', '.github/workflows/hypervibe-backup-production.yml'];
-    f.files.set('.github/hypervibe/manifest.json', JSON.stringify({ version: 1, managedBy: 'hypervibe', files: paths }));
-    f.files.set('.github/workflows/deploy-railway-production.yml', 'unrelated application workflow drift');
+    const f = await disabledProgramFixture(backupPaths);
     const result = await f.plan();
     if ('error' in result) throw new Error(result.error);
     expect(result).toMatchObject({ scope: 'backup-program-publication', actions: [expect.objectContaining({
@@ -222,9 +241,50 @@ describe('backup activation through CI credentials and canonical repository publ
     expect(planRunDocumentSchema.safeParse(ctx.repos.runs.findById(result.planRunId)!.plan).success).toBe(true);
     expect(PlanService.prototype.observeEnvironment).not.toHaveBeenCalled();
     f.files.set('.github/hypervibe/manifest.json', JSON.stringify({ version: 1, managedBy: 'hypervibe', files: [] }));
+    for (const filePath of backupPaths) f.files.delete(filePath);
     expect(await f.plan()).toMatchObject({ scope: 'backup-readiness', actions: [], blocked: [], backupReadiness: { ready: true } });
     expect(f.writes).toEqual([]);
     expect(ctx.repos.environments.findById(f.environment.id)!.platformBindings.storage).toEqual(f.environment.platformBindings.storage);
+  });
+
+  it.each([
+    ['absent', null],
+    ['empty', []],
+    ['contract-only', [backupPaths[0]]],
+    ['workflow-only', [backupPaths[1]]],
+  ] as const)('reviews an observed owned program retirement with a %s manifest', async (_name, manifestPaths) => {
+    const f = await disabledProgramFixture(manifestPaths === null ? null : [...manifestPaths]);
+    const priorFiles = new Map(f.files);
+    const priorBindings = structuredClone(ctx.repos.environments.findById(f.environment.id)!.platformBindings);
+    const result = await f.plan();
+    if ('error' in result) throw new Error(result.error);
+    expect(result).toMatchObject({ scope: 'backup-program-publication', blocked: [], actions: [expect.objectContaining({
+      type: 'update', verified: true, requiresConfirm: true,
+      metadata: expect.objectContaining({ backupEnvironment: 'production', desiredFiles: [] }),
+    })] });
+    expect(result.actions[0].billable).not.toBe(true);
+    expect(planRunDocumentSchema.safeParse(ctx.repos.runs.findById(result.planRunId)!.plan).success).toBe(true);
+    expect(PlanService.prototype.observeEnvironment).not.toHaveBeenCalled();
+    expect(f.files).toEqual(priorFiles);
+    expect(ctx.repos.environments.findById(f.environment.id)!.platformBindings).toEqual(priorBindings);
+    expect(new SpecStore().get(f.project)?.spec.environments.production.envVars).toEqual(f.disabled.environments.production.envVars);
+    expect(f.writes).toEqual([]); expect(f.unexpected).toEqual([]);
+  });
+
+  it.each(backupPaths)('blocks disabled-program retirement when observing %s is unknown', async filePath => {
+    const f = await disabledProgramFixture([]);
+    f.setUnknownFile(filePath);
+    const priorFiles = new Map(f.files);
+    const priorBindings = structuredClone(ctx.repos.environments.findById(f.environment.id)!.platformBindings);
+    const result = await f.plan();
+    if ('error' in result) throw new Error(result.error);
+    expect(result.blocked.length).toBeGreaterThan(0);
+    expect(result.backupReadiness?.ready).toBe(false);
+    expect(result.actions.every(action => !action.requiresConfirm)).toBe(true);
+    expect(f.files).toEqual(priorFiles);
+    expect(ctx.repos.environments.findById(f.environment.id)!.platformBindings).toEqual(priorBindings);
+    expect(new SpecStore().get(f.project)?.spec.environments.production.envVars).toEqual(f.disabled.environments.production.envVars);
+    expect(f.writes).toEqual([]); expect(f.unexpected).toEqual([]);
   });
 
   it.each(['unknown-inventory', 'changed-inventory', 'workflow-drift'] as const)('rejects %s before writes from a saved credential plan', async change => {
