@@ -401,8 +401,8 @@ describe('infra_apply multi-service convergence', () => {
       services: ['web', 'worker'],
     });
     expect(connectServiceToRepo.mock.calls).toEqual([
-      [{ serviceId: 'rail-web', repo: 'davejohnson/billforge', branch: 'main' }],
-      [{ serviceId: 'rail-worker', repo: 'davejohnson/billforge', branch: 'main' }],
+      [{ serviceId: 'rail-web', projectId: 'rail-project-1', environmentId: 'rail-env-1', repo: 'davejohnson/billforge', branch: 'main' }],
+      [{ serviceId: 'rail-worker', projectId: 'rail-project-1', environmentId: 'rail-env-1', repo: 'davejohnson/billforge', branch: 'main' }],
     ]);
 
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;

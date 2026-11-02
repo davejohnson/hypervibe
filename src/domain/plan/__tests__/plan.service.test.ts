@@ -4236,7 +4236,20 @@ describe('PlanService.plan', () => {
 });
 
 describe('runtime prerequisite stage isolation', () => {
-  it.each([false, true])('provisions exact queues before waiting workload permissions without releasing code or carrying secret inputs (CI credential sync: %s)', async ciCredentialSync => {
+  async function prepareCompetingInstanceStage() {
+    const instances = await import('../../services/service-instance.service.js');
+    // Synthetic competing capability output exercises shared stage precedence,
+    // not native Cloud Run service-instance support or a provider mutation.
+    vi.spyOn(instances, 'planServiceInstances').mockImplementation(async ({ actions }) => {
+      const service = actions.find(action => action.id === 'service:worker');
+      expect(service).toBeDefined();
+      Object.assign(service!, { type: 'create', verified: true, requiresConfirm: true,
+        metadata: { operation: 'serviceInstanceCreate', version: 1, provider: service!.resource.provider,
+          target: { projectId: 'p', environmentId: 'e', sourceEnvironmentId: 'source', serviceId: 'worker-parent' },
+          sourceEnvironmentLocalId: 'source-local', sourceBindingSha256: 'a'.repeat(64), nativeFingerprint: 'b'.repeat(64) } });
+    });
+  }
+  it.each([[false, false], [true, false], [false, true], [true, true]])('provisions exact queues before waiting workload permissions without releasing code or carrying secret inputs (CI sync: %s, competing instance: %s)', async (ciCredentialSync, competingInstance) => {
     const queuePlanning = await import('../../services/queue-plan.service.js');
     const managedCi = await import('../../services/managed-ci.service.js');
     const { CLOUD_PREPARE_PROFILES } = await import('../../services/cloud-prepare.js');
@@ -4246,7 +4259,7 @@ describe('runtime prerequisite stage isolation', () => {
       requiredApis: profile.requiredApis, requiredRoles: [...profile.requiredRoles, 'projects/gcp-project/roles/hypervibeRuntimeIdentityV1'],
     } } } })!;
     new SpecStore().replace(project, { version: 1, project: project.name, ...(ciCredentialSync ? { gitRemoteUrl: project.gitRemoteUrl } : {}), environments: { staging: {
-      hosting: { provider: 'cloudrun' }, services: { web: {} }, queues: { jobs: {} },
+      hosting: { provider: 'cloudrun' }, services: { web: {}, ...(competingInstance ? { worker: {} } : {}) }, queues: { jobs: {} },
       ...(ciCredentialSync ? { deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' } } : {}),
     } } });
     new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: { provider: 'cloudrun', projectId: 'gcp-project', services: { web: { serviceId: 'web' } } } });
@@ -4266,13 +4279,16 @@ describe('runtime prerequisite stage isolation', () => {
       metadata: { operation: 'githubActionsDeployBranch', workflow: { requiredSecrets: ['GCP_SERVICE_ACCOUNT_JSON'] } },
     }] : [], warnings: [] });
     vi.spyOn(managedCi, 'planManagedCiAppliedSpecHash').mockResolvedValue({ actions: [], warnings: [] });
+    if (competingInstance) await prepareCompetingInstanceStage();
     const result = await new PlanService().plan(project, 'staging', { includeEnvFile: false, envVarOverrides: { PRIVATE_TOKEN: 'keep-private' } });
     expect(result).not.toHaveProperty('error');
     if ('error' in result) throw new Error(result.error);
     expect(result.scope).toBe('runtime-access');
     expect(result.actions).toHaveLength(1);
     expect(result.actions[0]).toMatchObject({ id: 'queue:jobs', requiresConfirm: true, billable: true });
-    expect(ciPlan).toHaveBeenCalledOnce();
+    // The competing identity-only stage already defers CI publication planning;
+    // the higher-priority queue stage must still remain executable on its own.
+    expect(ciPlan).toHaveBeenCalledTimes(competingInstance ? 0 : 1);
     expect(result.actions[0].dependsOn ?? []).toEqual([]);
     expect(result.inputRequired).toEqual([]);
     const loaded = new ConvergeExecutor().loadPlan(result.planRunId);
@@ -4280,13 +4296,21 @@ describe('runtime prerequisite stage isolation', () => {
     if ('error' in loaded) throw new Error(loaded.error);
     expect(loaded.document.overrides).toBeUndefined();
     expect(JSON.stringify(loaded.document)).not.toContain('keep-private');
+    if (competingInstance) {
+      const handler = vi.fn().mockResolvedValue({ success: true, message: 'Synthetic selected queue receipt' });
+      const applied = await new ConvergeExecutor().execute({ planRunId: result.planRunId, currentSpecRevision: loaded.document.specRevision,
+        confirmActions: ['queue:jobs'], freshObservedFingerprint: loaded.document.observedFingerprint, handler });
+      expect(applied.success).toBe(true);
+      expect(handler.mock.calls.map(([action]) => action.id)).toEqual(['queue:jobs']);
+      expect(applied.receipts.map(receipt => ({ id: receipt.actionId, status: receipt.status }))).toEqual([{ id: 'queue:jobs', status: 'succeeded' }]);
+    }
   });
 
-  it('persists only the current backup runtime resource step and defers application secrets and rollout', async () => {
+  it.each([false, true])('persists only the current backup runtime resource step and defers application secrets and rollout (competing instance: %s)', async competingInstance => {
     const recovery = await import('../../services/recovery-runtime.service.js');
     const stored = new SpecStore().get(project)!;
     new SpecStore().replace(project, { ...stored.spec, environments: { ...stored.spec.environments, staging: {
-      ...stored.spec.environments.staging, backups: { mode: 'daily' },
+      ...stored.spec.environments.staging, services: { web: {}, ...(competingInstance ? { worker: {} } : {}) }, backups: { mode: 'daily' },
     } } });
     const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: { provider: 'railway', projectId: 'p', environmentId: 'e' } });
     vi.spyOn(recovery, 'observeRecoveryRuntime').mockResolvedValue({ provider: 'railway', state: 'action',
@@ -4295,6 +4319,7 @@ describe('runtime prerequisite stage isolation', () => {
       step: { component: 'identity', operation: 'create', target: { resourceId: 'exact-runtime' }, description: 'Create the exact backup identity.', requiresConfirm: true },
     });
     mockObservingAdapter({ provider: 'railway', observedAt: new Date().toISOString(), projectExists: true, projectId: 'p', environmentId: 'e', services: [], databases: [], storage: [], partial: false, warnings: [] });
+    if (competingInstance) await prepareCompetingInstanceStage();
     const result = await new PlanService().plan(project, 'staging', { scope: 'backups', includeEnvFile: false });
     expect(result).not.toHaveProperty('error');
     if ('error' in result) throw new Error(result.error);
@@ -4307,5 +4332,13 @@ describe('runtime prerequisite stage isolation', () => {
     if ('error' in loaded) throw new Error(loaded.error);
     expect(loaded.document.overrides).toBeUndefined();
     expect(JSON.stringify(loaded.document)).not.toContain('keep-private');
+    if (competingInstance) {
+      const handler = vi.fn().mockResolvedValue({ success: true, message: 'Synthetic selected recovery receipt' });
+      const applied = await new ConvergeExecutor().execute({ planRunId: result.planRunId, currentSpecRevision: loaded.document.specRevision,
+        confirmActions: ['recovery-runtime:backup-runtime'], freshObservedFingerprint: loaded.document.observedFingerprint, handler });
+      expect(applied.success).toBe(true);
+      expect(handler.mock.calls.map(([action]) => action.id)).toEqual(['recovery-runtime:backup-runtime']);
+      expect(applied.receipts.map(receipt => ({ id: receipt.actionId, status: receipt.status }))).toEqual([{ id: 'recovery-runtime:backup-runtime', status: 'succeeded' }]);
+    }
   });
 });

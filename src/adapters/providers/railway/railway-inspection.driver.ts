@@ -2,6 +2,7 @@ import type { ComponentType } from '../../../domain/entities/component.entity.js
 import type { ProviderInspectionRequest } from '../../../domain/registry/provider.registry.js';
 import type { RailwayAdapter, RailwayProjectDetails } from './railway.adapter.js';
 import { railwayDatabaseReferences, selectRailwayDatabaseDirectUrlVariable } from './railway-postgres-template.js';
+import { railwayDeploySource, normalizeRailwayGitRepo } from './railway-deploy-source.js';
 
 export interface ImportCandidate {
   name: string;
@@ -27,6 +28,8 @@ export interface ImportServiceSummary {
     numReplicas?: number;
     sleepApplication?: boolean;
     sourceImage?: string;
+    sourceState?: 'connected' | 'disconnected' | 'unknown';
+    source?: { repo: string; branch?: string };
   }>;
 }
 
@@ -135,7 +138,15 @@ export async function inspectRailwayProject(
     const instancesByEnv: ImportServiceSummary['instancesByEnv'] = {};
     for (const instanceEdge of serviceEdge.node.serviceInstances?.edges ?? []) {
       const instance = instanceEdge.node;
+      const source = railwayDeploySource({
+        projectId: details.id, serviceId: serviceEdge.node.id, environmentId: instance.environmentId,
+        triggers: serviceEdge.node.repoTriggers,
+        instanceSourceObserved: instance.source !== undefined,
+        instanceRepo: instance.source?.repo,
+      });
       instancesByEnv[instance.environmentId] = {
+        sourceState: source.state,
+        ...(source.source ? { source: source.source } : {}),
         domains: instance.domains?.serviceDomains?.map((domain) => domain.domain) ?? [],
         customDomains: instance.domains?.customDomains?.map((domain) => domain.domain) ?? [],
         startCommand: instance.startCommand,
@@ -154,12 +165,17 @@ export async function inspectRailwayProject(
       serviceEdge.node.name,
       ...sourceImages,
     ].join(' '));
+    const instances = Object.values(instancesByEnv);
+    const firstSource = instances[0]?.source;
+    const uniformSource = firstSource && instances.every(instance => instance.sourceState === 'connected'
+      && normalizeRailwayGitRepo(instance.source?.repo) === normalizeRailwayGitRepo(firstSource.repo)
+      && instance.source?.branch === firstSource.branch) ? firstSource : undefined;
     return {
       name: serviceEdge.node.name,
       railwayId: serviceEdge.node.id,
-      repo: serviceEdge.node.repoTriggers.edges[0]?.node.repository ?? null,
-      branch: serviceEdge.node.repoTriggers.edges[0]?.node.branch ?? null,
-      hasGitHubDeploy: serviceEdge.node.repoTriggers.edges.length > 0,
+      repo: uniformSource?.repo ?? null,
+      branch: uniformSource?.branch ?? null,
+      hasGitHubDeploy: instances.some(instance => instance.sourceState === 'connected'),
       ...(datastoreEngine ? { datastoreEngine } : {}),
       instancesByEnv,
     };

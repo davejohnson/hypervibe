@@ -3,6 +3,7 @@ import { operatorImageUpdateSelection, verifyOperatorImageUpdate } from '../doma
 import { applyRecoveryRuntimeAction } from '../domain/services/recovery-runtime.service.js';
 import { applyRuntimeAccessAction, observeRuntimeAccess, planRuntimeAccess, projectRuntimeAccessInput } from '../domain/services/runtime-access.service.js';
 import { applyCredentialLifecycle, pendingCredentialUpdate } from '../domain/services/credential-lifecycle.service.js';
+import { applyServiceInstanceAction } from '../domain/services/service-instance.service.js';
 import { applyRepositoryVariable, isRepositoryVariableAction, pendingRepositoryVariableEnvironment, repositoryVariablesEnvironment } from '../domain/services/repository-variables.service.js';
 import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from '../domain/services/database-credential-aliases.service.js';
 import { applySecretContainer, assertReadySecretContainers } from '../domain/services/secret-container-setup.js';
@@ -1178,11 +1179,11 @@ export async function executePlanApply(ctx: CommandContext, params: {
     if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
     const result = await executor.execute({ planRunId: planId, confirmActions: params.confirmActions,
       currentSpecRevision: params.specRevision, handler: async action => {
-        if (resolvePlanActionAuthority(action)?.capability !== 'database.scope.bind') {
+        if (!['database.scope.bind', 'database.provision.recover', 'database.provision.candidate.bind'].includes(resolvePlanActionAuthority(action)?.capability ?? '')) {
           return { success: false, status: 'blocked', message: 'This stage can only record the reviewed existing database scope.' };
         }
         return applyDatabaseScopeBinding({ ctx, project, environmentName: envName, environmentSpec: envSpec,
-          action, confirmedActionIds: new Set(params.confirmActions) });
+          action, confirmedActionIds: new Set(params.confirmActions), specRevision: params.specRevision });
       } });
     return { kind: 'executed', envName, result, actionScopedWarnings: [] };
   }
@@ -1599,6 +1600,13 @@ export async function executePlanApply(ctx: CommandContext, params: {
     }
     const volumeSafetyBlock = retainedVolumeHostingBlock(volumeEnvironment, envSpec, action);
     if (volumeSafetyBlock) return { success: false, status: 'blocked', message: volumeSafetyBlock };
+    if (capability === 'hosting.service-instance.create') {
+      const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject);
+      if (!result.success || result.adapter?.name !== envSpec.hosting.provider || !result.adapter.serviceInstances || !volumeEnvironment)
+        return { success: false, status: 'blocked', message: 'Scoped service instance capability or environment unavailable.' };
+      return applyServiceInstanceAction({ project: applyProject, environment: volumeEnvironment, action,
+        driver: result.adapter.serviceInstances, confirmedActionIds, specRevision: params.specRevision });
+    }
     if (capability === 'hosting.volume.mutate') {
       const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject, undefined, envName);
       const volumes = (result.adapter as IProviderAdapter | undefined)?.serviceVolumes;

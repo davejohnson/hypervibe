@@ -24,6 +24,7 @@ const RESERVED_PROVIDER_BINDINGS = new Set([
   'services',
   'serviceVolumes',
   'serviceCreateRecovery',
+  'serviceInstanceCreates',
   'previousHosting',
   'maintenance',
   'runtimeRollouts',
@@ -117,6 +118,10 @@ export function prepareHostingBindingTransition(params: {
       || params.current.recoveryRuntime !== undefined || params.current.recoveryRuntimeSecretInputs !== undefined) {
       return { ok: false, error: 'Retained workload identity, bucket access or backup recovery authority blocks hosting scope changes. Reconcile that exact authority before replacing its provider scope.' };
     }
+  }
+  if ((resetActiveScope || environmentId !== undefined && current.environmentId !== environmentId)
+    && Object.keys(current.serviceInstanceCreates ?? {}).length) {
+    return { ok: false, error: 'Retained service instance creation blocks hosting scope changes. Reconcile its exact parent and target first.' };
   }
   if ((resetActiveScope || (environmentId !== undefined && current.environmentId !== environmentId))
     && hasRetainedServiceVolumes({ platformBindings: params.current })) {

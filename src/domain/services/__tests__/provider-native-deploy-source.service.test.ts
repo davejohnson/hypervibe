@@ -300,7 +300,7 @@ describe('provider-native deploy-source apply', () => {
     expect(result.success).toBe(true);
     expect(adapterFactory.getHostingAdapterByName).toHaveBeenCalledWith('railway', project, 'production');
     expect(disconnectDeploySource).toHaveBeenCalledTimes(1);
-    expect(disconnectDeploySource).toHaveBeenCalledWith({ serviceId: 'svc-web' });
+    expect(disconnectDeploySource).toHaveBeenCalledWith({ serviceId: 'svc-web', projectId: 'rail-project', environmentId: 'rail-production' });
     expect(updateBindings).toHaveBeenCalledTimes(1);
     expect(updateBindings).toHaveBeenCalledWith(environment.id, {
       services: {

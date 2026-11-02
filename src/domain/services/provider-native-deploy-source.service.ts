@@ -242,7 +242,10 @@ export async function applyProviderNativeDeploySourceAction(params: {
     };
   }
 
-  const receipt = await hosting.adapter.disconnectDeploySource({ serviceId });
+  const targetBindings = parseHostingBindings(environment);
+  const receipt = await hosting.adapter.disconnectDeploySource({
+    serviceId, projectId: targetBindings.projectId, environmentId: targetBindings.environmentId,
+  });
   if (!receipt.success) {
     return {
       success: false,

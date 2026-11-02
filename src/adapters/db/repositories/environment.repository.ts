@@ -9,6 +9,14 @@ import { writeRepoBindingsForEnvironment } from '../../../domain/spec/repo-bindi
 import { ComponentRepository } from './component.repository.js';
 
 export class EnvironmentRepository {
+  /** Database-only CAS. Call syncRepoBindingsForId only after the transaction commits. */
+  replacePlatformBindingsIfUnchanged(expected: Environment, bindings: Record<string, unknown>): boolean {
+    const row = getDb().prepare('SELECT platform_bindings FROM environments WHERE id = ?').get(expected.id) as {platform_bindings:string} | undefined;
+    if (!row || !isDeepStrictEqual(parseJsonColumn(platformBindingsColumnSchema, row.platform_bindings,
+      `environments.platform_bindings (${expected.id})`), expected.platformBindings)) return false;
+    return getDb().prepare('UPDATE environments SET platform_bindings = ?, updated_at = ? WHERE id = ? AND platform_bindings = ?')
+      .run(JSON.stringify(bindings), new Date().toISOString(), expected.id, row.platform_bindings).changes === 1;
+  }
   create(input: CreateEnvironmentInput): Environment {
     const db = getDb();
     const id = randomUUID();

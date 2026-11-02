@@ -2,6 +2,7 @@ import { isRecoveryRuntimeAction } from '../services/recovery-runtime.service.js
 import { recoveryRuntimeStepSchema } from '../ports/recovery-runtime.port.js';
 import { isRuntimeAccessAction, RUNTIME_ACCESS_OPERATIONS } from '../services/runtime-access.service.js';
 import { isDatabasePasswordAction, DATABASE_PASSWORD_OPERATIONS } from './database-password-plan.contract.js';
+import { isServiceInstanceAction } from '../services/service-instance.service.js';
 import { isRepositoryVariableAction } from '../services/repository-variables.service.js';
 import { isDatabaseBootstrapAction } from './database-bootstrap.contract.js';
 import { DATABASE_FRESH_INITIALIZATION_OPERATION, isDatabaseInitializationAction } from './database-initialization.contract.js';
@@ -13,7 +14,7 @@ import { scheduleActivationActionMetadataSchema } from '../services/schedule-act
 import { INBOUND_SIGNING_KEY_OPERATION } from '../services/email-inbound-signing.service.js';
 import { databaseCheckpointIdentitySchema } from '../services/database-checkpoint.js';
 import { backupPolicyActionId, backupPolicyActionMetadataSchema, DAILY_BACKUP_OPERATION } from '../services/backup-policy-plan.service.js';
-import { DATABASE_SCOPE_BIND_OPERATION, isDatabaseScopeBindingAction } from '../services/database-scope-binding.service.js';
+import { DATABASE_SCOPE_BIND_OPERATION, isDatabaseScopeBindingAction, DATABASE_PROVISION_RECOVERY_OPERATION, DATABASE_PROVISION_CANDIDATE_OPERATION, isDatabaseProvisionRecoveryAction } from '../services/database-scope-binding.service.js';
 import { HOSTING_PREPARED_OPERATION, isPreparedHostingAction } from '../services/hosting-prepared.service.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { API_POLICY_OPERATION } from '../services/api-policy.js';
@@ -116,6 +117,8 @@ export type PlanMutationCapability =
   | 'database.credential-aliases.repair'
   | 'database.scope.bind'
   | 'hosting.prepared.bind'
+  | 'database.provision.recover'
+  | 'database.provision.candidate.bind'
   | 'backup-policy.configure'
   | 'api.policy.accept'
   | 'hosting.recovery-runtime.mutate'
@@ -202,6 +205,7 @@ export type PlanMutationCapability =
   | 'hosting.runtime-identity.mutate'
   | 'storage.runtime-access.mutate'
   | 'hosting.service.converge'
+  | 'hosting.service-instance.create'
   | 'hosting.service.rollback';
 
 export interface PlanActionAuthority {
@@ -541,6 +545,12 @@ export function resolvePlanActionAuthority(
   }
   if (action.metadata?.operation === HOSTING_PREPARED_OPERATION) {
     return isPreparedHostingAction(action) ? authority(action, 'hosting.prepared.bind') : null;
+  }
+  if (action.metadata?.operation === DATABASE_PROVISION_RECOVERY_OPERATION) {
+    return isDatabaseProvisionRecoveryAction(action) ? authority(action, 'database.provision.recover') : null;
+  }
+  if (action.metadata?.operation === DATABASE_PROVISION_CANDIDATE_OPERATION) {
+    return isDatabaseProvisionRecoveryAction(action) ? authority(action, 'database.provision.candidate.bind') : null;
   }
   if (action.metadata?.operation === DATABASE_FRESH_INITIALIZATION_OPERATION) {
     return isDatabaseInitializationAction(action) ? authority(action, 'database.fresh-initialization') : null;
@@ -1511,6 +1521,7 @@ export function resolvePlanActionAuthority(
   ) {
     return authority(action, 'hosting.service.converge');
   }
+  if (isServiceInstanceAction(action)) return authority(action, 'hosting.service-instance.create');
   if (
     exactResource(action, 'service')
     && action.type === 'update'

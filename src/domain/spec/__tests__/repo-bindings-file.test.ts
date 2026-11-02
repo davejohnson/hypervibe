@@ -1,3 +1,5 @@
+import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
+import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
 import { describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { execFileSync } from 'node:child_process';
@@ -636,5 +638,49 @@ describe('runtime permission recovery binding merge', () => {
       expect(result.recoveryRuntime).toEqual(recoveryRuntime);
       expect(result.recoveryRuntimeSecretInputs).toBeUndefined();
     } finally { if (oldDisable === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC; else process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable; rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe('service instance intent export merge', () => {
+  const intent = { version:1, provider:'railway', target:{projectId:'p',environmentId:'target',sourceEnvironmentId:'source',serviceId:'web'},
+    sourceEnvironmentLocalId:'source-local',sourceBindingSha256:'a'.repeat(64),nativeFingerprint:'b'.repeat(64) };
+  it('preserves both native instance acknowledgment and runtime identity recovery from a stale combined export', () => {
+    const identity = { provider: 'cloudrun', evidence: { uniqueId: '123456789' }, pending: {
+      attemptId: 'retained-identity-attempt', step: { operation: 'attach', target: { uniqueId: '123456789' },
+        description: 'Attach the retained runtime identity.', requiresConfirm: true },
+    } };
+    const local = { serviceInstanceCreates: { web: { ...intent, workflowId: 'acknowledged-workflow' } },
+      runtimeIdentities: { api: identity } };
+    const stale = { serviceInstanceCreates: { web: intent }, runtimeIdentities: {
+      api: { provider: identity.provider, evidence: identity.evidence },
+    } };
+    const before = structuredClone(local);
+    expect(mergeRepoPlatformBindings(local, stale)).toEqual(local);
+    expect(local).toEqual(before);
+  });
+  it('never suppresses a same-shaped new recovery using historical evidence alone', () => {
+    const marker={provider:'railway',operation:'create',resourceName:'web',providerScope:{projectId:'p',environmentId:'target'},state:'unresolved'};
+    const digest=canonicalJsonSha256(marker);
+    const history=[{id:'history',digest,recordEncrypted:getSecretStore().encryptObject({marker,target:intent.target,serviceName:'web',disposition:'unresolved-not-retried'})}];
+    expect(mergeRepoPlatformBindings({serviceInstanceCreateHistory:history},{serviceCreateRecovery:{web:marker}}).serviceCreateRecovery).toEqual({web:marker});
+    expect(mergeRepoPlatformBindings({serviceInstanceCreateHistory:history,serviceCreateRecovery:{web:marker},
+      serviceInstanceCreates:{web:{...intent,priorCreateRecoverySha256:digest}}},{serviceCreateRecovery:{web:marker}}).serviceCreateRecovery).toEqual({web:marker});
+  });
+  it('preserves acknowledged progress when a repository still has the pre-dispatch intent', () => {
+    expect(mergeRepoPlatformBindings({serviceInstanceCreates:{web:{...intent,workflowId:'workflow'}}},
+      {serviceInstanceCreates:{web:intent}}).serviceInstanceCreates).toEqual({web:{...intent,workflowId:'workflow'}});
+  });
+  it('accepts an acknowledged export of the exact same pending attempt', () => {
+    expect(mergeRepoPlatformBindings({serviceInstanceCreates:{web:intent}},
+      {serviceInstanceCreates:{web:{...intent,workflowId:'workflow'}}}).serviceInstanceCreates).toEqual({web:{...intent,workflowId:'workflow'}});
+  });
+  it.each([
+    {...intent,workflowId:'different'},
+    {...intent,workflowId:'workflow',target:{...intent.target,serviceId:'other'}},
+    {...intent,workflowId:'workflow',nativeFingerprint:'c'.repeat(64)},
+    {...intent,workflowId:'workflow',completed:true},
+  ])('rejects conflicting identity or untrusted completion: %j', incoming => {
+    expect(()=>mergeRepoPlatformBindings({serviceInstanceCreates:{web:{...intent,workflowId:'workflow'}}},
+      {serviceInstanceCreates:{web:incoming}})).toThrow(/Conflicting service instance recovery/);
   });
 });

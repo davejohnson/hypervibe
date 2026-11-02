@@ -1,6 +1,10 @@
 import { mergeRecoveryRuntimeBindings, recoveryRuntimeBindings } from '../services/runtime-evidence.js';
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import path from 'path';
+import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import { hostingServiceCreateRecoverySchema } from '../ports/hosting.port.js';
+import { serviceInstanceIntentsSchema } from '../ports/service-instance.port.js';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { repoBindingsFileSchema } from './repo-bindings.schema.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
@@ -47,6 +51,7 @@ const LOCAL_ONLY_BINDING_KEYS = new Set([
   'managedReleaseDispatch',
   'localPreparedHosting',
   'repositoryVariableOwnership',
+  'serviceInstanceCreateHistory',
 ]);
 
 function bindingsPath(root: string): string {
@@ -111,6 +116,7 @@ export function mergeRepoPlatformBindings(
   }
   if (Object.hasOwn(repoBindings, 'managedReleaseDispatch')) throw new Error('Managed release dispatch recovery is local authority and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'recoveryRuntimeSecretInputs')) throw new Error('Private recovery inputs are local only and cannot be imported.');
+  if (Object.hasOwn(repoBindings, 'serviceInstanceCreateHistory')) throw new Error('Service instance attempt history is private local evidence and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'repositoryVariableOwnership')) throw new Error('Repository-variable ownership and recovery state are local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'credentialUpdates')) throw new Error('Credential acceptance and recovery state are local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'runtimeRollouts')) throw new Error('Runtime configuration expectations and activation requirements are local only and cannot be imported.');
@@ -141,6 +147,21 @@ export function mergeRepoPlatformBindings(
     merged.preparedHosting = local ?? incoming;
   }
   if (existing.recoveryRuntime !== undefined || repoBindings.recoveryRuntime !== undefined) merged.recoveryRuntime = mergeRecoveryRuntimeBindings(existing.recoveryRuntime, repoBindings.recoveryRuntime);
+  const localInstances = serviceInstanceIntentsSchema.parse(existing.serviceInstanceCreates ?? {});
+  const incomingInstances = serviceInstanceIntentsSchema.parse(repoBindings.serviceInstanceCreates ?? {});
+  for (const [name, intent] of Object.entries(incomingInstances)) {
+    const local = localInstances[name];
+    const identity = (value: typeof intent) => {
+      const { workflowId: _workflow, completed: _done, ...base } = value; return base;
+    };
+    if (local && (canonicalJsonSha256(identity(local)) !== canonicalJsonSha256(identity(intent))
+      || local.workflowId && intent.workflowId && local.workflowId !== intent.workflowId)
+      || intent.completed && !local?.completed)
+      throw new Error('Conflicting service instance recovery cannot replace accepted intent.');
+    if (local && !local.workflowId && intent.workflowId) localInstances[name] = { ...local, workflowId:intent.workflowId };
+  }
+  if (Object.keys(localInstances).length || Object.keys(incomingInstances).length)
+    merged.serviceInstanceCreates = { ...incomingInstances, ...localInstances };
   if (existing.backupPolicyAttempts !== undefined || repoBindings.backupPolicyAttempts !== undefined) {
     merged.backupPolicyAttempts = mergeBackupPolicyAttempts(existing.backupPolicyAttempts, repoBindings.backupPolicyAttempts);
   }
@@ -151,6 +172,7 @@ export function mergeRepoPlatformBindings(
     );
   }
   for (const [key, repoValue] of Object.entries(repoBindings)) {
+    if (key === 'serviceInstanceCreates') continue;
     if (key === 'localPreparedHosting') {
       merged[key] = existing[key];
       continue;
@@ -202,6 +224,46 @@ export function mergeRepoPlatformBindings(
     if (existingRecord && repoRecord) {
       merged[key] = mergeSanitizedBindingObject(existingRecord, repoRecord);
     }
+  }
+  // The repository can still hold the pre-dispatch marker after a failed
+  // export. Only an exact, privately archived attempt with active local replacement
+  // intent and no new local recovery is suppressed; different
+  // or newly introduced recovery remains active and vetoes later writes.
+  const history = existing.serviceInstanceCreateHistory;
+  if (history !== undefined) {
+    if (!Array.isArray(history)) throw new Error('Malformed private instance attempt history.');
+    const recoveries = asRecord(merged.serviceCreateRecovery);
+    if (recoveries) {
+      const retained = { ...recoveries };
+      for (const entry of history) {
+        const item = asRecord(entry);
+        if (!item || typeof item.recordEncrypted !== 'string' || typeof item.digest !== 'string')
+          throw new Error('Malformed private instance attempt history.');
+        let record: Record<string, unknown>;
+        try { record = getSecretStore().decryptObject(item.recordEncrypted); }
+        catch { throw new Error('Private instance attempt history could not be verified.'); }
+        const name = record.serviceName;
+        const marker = hostingServiceCreateRecoverySchema.safeParse(record.marker);
+        if (record.disposition !== 'unresolved-not-retried' || typeof name !== 'string' || !marker.success
+          || marker.data.resourceName !== name || canonicalJsonSha256(record.marker) !== item.digest)
+          throw new Error('Private instance attempt history could not be verified.');
+        if (localInstances[name]?.priorCreateRecoverySha256 === item.digest
+          && asRecord(existing.serviceCreateRecovery)?.[name] === undefined
+          && retained[name] !== undefined && canonicalJsonSha256(retained[name]) === item.digest) delete retained[name];
+      }
+      merged.serviceCreateRecovery = retained;
+    }
+  }
+  // A completed local receipt remains authoritative until its export succeeds.
+  // Stale files cannot erase or redirect the service ID committed with it.
+  for (const [name, intent] of Object.entries(localInstances)) {
+    if (!intent.completed) continue;
+    const localService = asRecord(asRecord(existing.services)?.[name]);
+    const incomingService = asRecord(asRecord(repoBindings.services)?.[name]);
+    if (localService?.serviceId !== intent.target.serviceId
+      || incomingService?.serviceId && incomingService.serviceId !== intent.target.serviceId)
+      throw new Error('Conflicting completed service instance identity.');
+    merged.services = { ...asRecord(merged.services), [name]:localService };
   }
   if (!parseServiceVolumeBindings({ platformBindings: merged })) {
     throw new Error('Malformed or duplicate merged service-volume identity; refusing to overwrite recovery state.');
@@ -259,6 +321,8 @@ function sanitizePlatformBindings(raw: Record<string, unknown>): Record<string, 
   }
   if (raw.secretDestinationContainers !== undefined) sanitized.secretDestinationContainers = secretContainerBindings(raw.secretDestinationContainers);
   if (raw.recoveryRuntime !== undefined) sanitized.recoveryRuntime = recoveryRuntimeBindings(raw.recoveryRuntime);
+  if (raw.serviceInstanceCreates !== undefined) sanitized.serviceInstanceCreates = Object.fromEntries(
+    Object.entries(serviceInstanceIntentsSchema.parse(raw.serviceInstanceCreates)).filter(([, intent]) => intent.completed !== true));
   if (raw.recoveryDatabases !== undefined) sanitized.recoveryDatabases = recoveryDatabaseBindings(raw.recoveryDatabases);
   if (raw.backupPolicyAttempts !== undefined) {
     // Strict value-free identities remain recoverable even for secret-shaped names.
