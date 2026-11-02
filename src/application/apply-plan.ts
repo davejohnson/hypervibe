@@ -1,4 +1,5 @@
 import { applyCredentialLifecycle, pendingCredentialUpdate } from '../domain/services/credential-lifecycle.service.js';
+import { applyServiceInstanceAction } from '../domain/services/service-instance.service.js';
 import { applyRepositoryVariable, isRepositoryVariableAction, pendingRepositoryVariableEnvironment, repositoryVariablesEnvironment } from '../domain/services/repository-variables.service.js';
 import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from '../domain/services/database-credential-aliases.service.js';
 import { applyDatabaseFreshInitialization } from '../domain/services/database-fresh-initialization.service.js';
@@ -1438,6 +1439,13 @@ export async function executePlanApply(ctx: CommandContext, params: {
 
     const volumeSafetyBlock = retainedVolumeHostingBlock(volumeEnvironment, envSpec, action);
     if (volumeSafetyBlock) return { success: false, status: 'blocked', message: volumeSafetyBlock };
+    if (capability === 'hosting.service-instance.create') {
+      const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject);
+      if (!result.success || result.adapter?.name !== envSpec.hosting.provider || !result.adapter.serviceInstances || !volumeEnvironment)
+        return { success: false, status: 'blocked', message: 'Scoped service instance capability or environment unavailable.' };
+      return applyServiceInstanceAction({ project: applyProject, environment: volumeEnvironment, action,
+        driver: result.adapter.serviceInstances, confirmedActionIds, specRevision: params.specRevision });
+    }
     if (capability === 'hosting.volume.mutate') {
       const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject);
       const volumes = (result.adapter as IProviderAdapter | undefined)?.serviceVolumes;

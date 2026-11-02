@@ -1,4 +1,5 @@
 import { hasPendingDatabaseInitialization } from './database-initialization.contract.js';
+import { planServiceInstances } from '../services/service-instance.service.js';
 import { pendingRepositoryVariableEnvironment, planRepositoryVariables } from '../services/repository-variables.service.js';
 import { hasDatabaseBootstrapObservationOrCleanup, hasPendingDatabaseBootstrap } from './database-bootstrap.contract.js';
 import { planDatabaseBootstrap } from '../services/database-bootstrap.service.js';
@@ -2455,6 +2456,7 @@ export class PlanService {
       ...diff.actions,
       ...maintenance.actions,
     ];
+    await planServiceInstances({ project: projectForPlan, environment, actions });
     if (databaseResilience.actions.length > 0) {
       const firstServiceIndex = actions.findIndex((action) => action.resource.kind === 'service');
       if (firstServiceIndex === -1) actions.push(...databaseResilience.actions);
@@ -2808,7 +2810,9 @@ export class PlanService {
           && action.verified && !action.metadata?.blockedReason)
       : [];
     const namespaceBindingStage = namespacePrerequisites.length > 0;
-    const ciBindingPrerequisites = namespaceBindingStage ? namespacePrerequisites : managedCiEnabled || volumeIdentityStage
+    const serviceInstancePrerequisites = actions.filter(action => ['serviceInstanceCreate','serviceInstanceFinalize'].includes(String(action.metadata?.operation)));
+    const instanceIdentityStage = serviceInstancePrerequisites.length > 0;
+    const ciBindingPrerequisites = namespaceBindingStage ? namespacePrerequisites : instanceIdentityStage ? serviceInstancePrerequisites : managedCiEnabled || volumeIdentityStage
       ? ciProjectBootstrapStage ? [projectAction!] : actions.filter(action => isManagedCiBindingRoot(action)
         && !(pendingVolumes && action.metadata?.workloadCreateRequired === true))
       : [];
@@ -3364,15 +3368,15 @@ export class PlanService {
       // no application code runs until a later, separately reviewed full plan.
       // Keep runtime input requirements on that later plan, not this empty
       // identity stage. Ordinary managed-CI bindings still require their inputs.
-      : ciBindingStageActive && volumeIdentityStage
+      : ciBindingStageActive && (volumeIdentityStage || instanceIdentityStage)
         ? []
       : ciBindingStageActive
         ? ciBindingInputRequired
         : secretInputRequired;
-    const planOverrides = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive || ciProjectBootstrapStage || namespaceBindingStage || volumeStageActive ? undefined : overrides;
+    const planOverrides = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || backupProgramPublicationStageActive || ciWorkflowPublicationStageActive || ciProjectBootstrapStage || namespaceBindingStage || volumeStageActive || instanceIdentityStage ? undefined : overrides;
     const persistedScope = databaseBindingStageActive ? 'database-bindings' as const : backupProgramPublicationStageActive ? 'backup-program-publication' as const : checkpointStageActive ? 'database-checkpoint' as const : backupPolicyStageActive ? 'backup-policy' as const
       : backupProvisioningStageActive ? 'backup-provisioning' as const : ciCredentialsStageActive ? 'managed-ci-credentials' as const : backupReadinessStageActive ? 'backup-readiness' as const : ciBindingStageActive
-      ? ((volumeIdentityStage || namespaceBindingStage) && !managedCiEnabled ? 'hosting-bindings' as const : 'managed-ci-bindings' as const)
+      ? ((volumeIdentityStage || namespaceBindingStage || instanceIdentityStage) && !managedCiEnabled ? 'hosting-bindings' as const : 'managed-ci-bindings' as const)
       : ciWorkflowPublicationStageActive
         ? 'managed-ci-publication' as const
         : volumeStageActive ? 'service-volumes' as const : 'full' as const;
@@ -3403,7 +3407,7 @@ export class PlanService {
       ...(!databaseBindingStageActive && !ciCredentialsStageActive && sourceCommitSha ? { sourceCommitSha } : {}),
       backupCoverage,
       backupReadiness,
-      observedFingerprint: databaseBindingStageActive || ciCredentialsStageActive || ciWorkflowPublicationStageActive || backupProgramPublicationStageActive || backupPolicyStageActive || backupReadinessStageActive
+      observedFingerprint: instanceIdentityStage || databaseBindingStageActive || ciCredentialsStageActive || ciWorkflowPublicationStageActive || backupProgramPublicationStageActive || backupPolicyStageActive || backupReadinessStageActive
         ? null
         : observed ? fingerprintObservedState(observed) : null,
       ...(!checkpointStageActive && dataMigration.pending && sourceEnvironment

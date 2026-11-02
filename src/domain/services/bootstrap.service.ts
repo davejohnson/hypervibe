@@ -23,7 +23,7 @@ const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
 
 type SourceConfigurableHostingAdapter = {
-  connectServiceToRepo?: (params: { serviceId: string; repo: string; branch: string }) => Promise<Receipt>;
+  connectServiceToRepo?: (params: { serviceId: string; projectId?: string; environmentId?: string; repo: string; branch: string }) => Promise<Receipt>;
   isGitHubRepoAccessible?: (fullRepoName: string) => Promise<boolean | null>;
 };
 
@@ -447,6 +447,8 @@ export async function executeBootstrap(params: {
 
       const receipt = await sourceAdapter.connectServiceToRepo({
         serviceId,
+        projectId: parseHostingBindings(latestEnvironment).projectId,
+        environmentId: parseHostingBindings(latestEnvironment).environmentId,
         repo: deploySource.source.repo,
         branch: deploySource.source.branch,
       });

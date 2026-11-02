@@ -53,7 +53,7 @@ const projectDetailsResponse = {
           node: {
             id: 'svc-web',
             name: 'web',
-            repoTriggers: { edges: [] },
+            repoTriggers: { edges: [], pageInfo: { hasNextPage: false } },
             serviceInstances: {
               edges: [
                 {
@@ -75,7 +75,7 @@ const projectDetailsResponse = {
           node: {
             id: 'svc-pg',
             name: 'postgres-db',
-            repoTriggers: { edges: [] },
+            repoTriggers: { edges: [], pageInfo: { hasNextPage: false } },
             serviceInstances: {
               edges: [
                 {
@@ -379,7 +379,8 @@ describe('RailwayAdapter observe', () => {
   it('surfaces the linked repo and branch as the service source', async () => {
     const withTrigger = structuredClone(projectDetailsResponse);
     (withTrigger.project.services.edges[0].node as { repoTriggers: unknown }).repoTriggers = {
-      edges: [{ node: { repository: 'dave/seq-planner', branch: 'main' } }],
+      pageInfo: { hasNextPage: false },
+      edges: [{ node: { id: 'trigger-prod', projectId: 'rail-project-1', serviceId: 'svc-web', environmentId: 'env-prod', repository: 'dave/seq-planner', branch: 'main' } }],
     };
     const request = vi.fn()
       .mockResolvedValueOnce(withTrigger)
@@ -683,7 +684,7 @@ describe('RailwayAdapter observe', () => {
       node: {
         id: 'svc-web-staging',
         name: 'web-staging',
-        repoTriggers: { edges: [] },
+        repoTriggers: { edges: [], pageInfo: { hasNextPage: false } },
         serviceInstances: {
           edges: [
             {

@@ -75,7 +75,10 @@ describe('RailwayAdapter service instance updates', () => {
   });
 
   it('connects a service to a GitHub repo and branch via serviceConnect', async () => {
-    const request = vi.fn().mockResolvedValueOnce({
+    const request = vi.fn()
+      .mockResolvedValueOnce(serviceInstanceInventory('project-prod', 'svc-web', ['env-prod']))
+      .mockResolvedValueOnce({ project: { id: 'project-prod', environments: { edges: [{ node: { id: 'env-prod' } }], pageInfo: { hasNextPage: false } } } })
+      .mockResolvedValueOnce({
       serviceConnect: {
         id: 'svc-web',
       },
@@ -86,13 +89,15 @@ describe('RailwayAdapter service instance updates', () => {
 
     const receipt = await adapter.connectServiceToRepo({
       serviceId: 'svc-web',
+      projectId: 'project-prod',
+      environmentId: 'env-prod',
       repo: 'davejohnson/billforge',
       branch: 'main',
     });
 
     expect(receipt.success).toBe(true);
-    expect(request).toHaveBeenCalledTimes(1);
-    expect(request.mock.calls[0]?.[1]).toEqual({
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(request.mock.calls[2]?.[1]).toEqual({
       id: 'svc-web',
       input: {
         repo: 'davejohnson/billforge',
@@ -102,7 +107,10 @@ describe('RailwayAdapter service instance updates', () => {
   });
 
   it('disconnects a provider-native repo source via serviceDisconnect', async () => {
-    const request = vi.fn().mockResolvedValueOnce({
+    const request = vi.fn()
+      .mockResolvedValueOnce(serviceInstanceInventory('project-prod', 'svc-web', ['env-prod']))
+      .mockResolvedValueOnce({ project: { id: 'project-prod', environments: { edges: [{ node: { id: 'env-prod' } }], pageInfo: { hasNextPage: false } } } })
+      .mockResolvedValueOnce({
       serviceDisconnect: {
         id: 'svc-web',
       },
@@ -113,15 +121,17 @@ describe('RailwayAdapter service instance updates', () => {
 
     const receipt = await adapter.disconnectDeploySource({
       serviceId: 'svc-web',
+      projectId: 'project-prod',
+      environmentId: 'env-prod',
     });
 
     expect(receipt).toMatchObject({
       success: true,
       data: { serviceId: 'svc-web' },
     });
-    expect(request).toHaveBeenCalledTimes(1);
-    expect(String(request.mock.calls[0]?.[0])).toContain('serviceDisconnect(id: $id)');
-    expect(request.mock.calls[0]?.[1]).toEqual({
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(String(request.mock.calls[2]?.[0])).toContain('serviceDisconnect(id: $id)');
+    expect(request.mock.calls[2]?.[1]).toEqual({
       id: 'svc-web',
     });
   });
