@@ -1,0 +1,34 @@
+{
+  "evidenceKind": "redacted-live-observation",
+  "observedAt": "2026-11-02",
+  "method": "Registered Railway adapter, GraphQL-query-only guard, read-only local SQLite; config requested with decryptVariables:false. No provider mutation in this diagnostic.",
+  "context": "After a separately reviewed environmentPatchCommit containing only services.<accepted-parent>.isCreated=true, its retained workflow was Complete and the exact native target instance existed.",
+  "identities": "Project, parent, environment, instance, workflow and trigger identifiers are intentionally omitted from this fixture.",
+  "source": null,
+  "latestDeployment": null,
+  "activeDeployments": [],
+  "targetTriggerCount": 0,
+  "stagedPatch": {},
+  "parentSourceAndIdentityFingerprintMatched": true,
+  "instanceConfig": {
+    "build": { "builder": "RAILPACK", "buildEnvironment": "V3" },
+    "deploy": {
+      "runtime": "V2",
+      "useLegacyStacker": false,
+      "ipv6EgressEnabled": false,
+      "multiRegionConfig": { "us-west2": { "numReplicas": 1 } }
+    }
+  },
+  "omittedInstanceFields": ["source", "variables", "volumeMounts", "networking", "configFile"],
+  "primarySource": {
+    "revision": "b62467ef1b5303e3e340283ed96425dcf9612993",
+    "url": "https://github.com/railwayapp/cli/blob/b62467ef1b5303e3e340283ed96425dcf9612993/src/controllers/config/environment.rs",
+    "interpretation": "ServiceInstance has separate optional source/build/deploy/configFile and variable/mount maps. BuildConfig permits builder and buildEnvironment; DeployConfig distinguishes commands, credentials, regions and replica counts. GraphQL EnvironmentConfig is opaque. Exact defaults above are observed native values, not defaults inferred from the CLI types; runtime and useLegacyStacker are not defined by this CLI parser."
+  },
+  "limits": [
+    "This records one empty target configuration, not a universal server default promise.",
+    "No source or deployment existed on the target; production's source/identity/trigger fingerprint was unchanged. This does not compare every unrelated production setting or runtime byte.",
+    "No credential, variable name/value, source repository, image, command or raw provider error is included.",
+    "Application deployment, binding finalization, volume attachment and package access were not performed or proved by this diagnostic."
+  ]
+}
