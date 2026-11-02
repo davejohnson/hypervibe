@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { gcpAccountPolicyGetContractResponse } from '../../../../test/gcp-iam-policy-contract.js';
 import { providerRegistry } from '../../../../domain/registry/provider.registry.js';
 import type { CloudRunAdapter } from '../cloudrun.adapter.js';
 import '../cloudrun.adapter.js';
@@ -70,8 +71,12 @@ function fixture(options: { tokenUid?: string; accountUid?: string; projectNumbe
         return Response.json({ name: `projects/${projectId}/serviceAccounts/${runtime.serviceAccountEmail}`, projectId,
           email: runtime.serviceAccountEmail, uniqueId: options.replacedRuntime ? '555555555555555555555' : runtime.serviceAccountUniqueId,
           description: `hypervibe:deployment:v1:${connection.runtimeIdentities[0]!.owner}:${connection.installationId}` });
-      if (url.endsWith(`${runtime.serviceAccountUniqueId}:getIamPolicy`)) return Response.json({ etag: 'sa-policy', bindings: [
+      if (new URL(url).pathname.endsWith(`${runtime.serviceAccountUniqueId}:getIamPolicy`)) {
+        const invalidPolicyRead = gcpAccountPolicyGetContractResponse(new URL(url), init?.method ?? 'GET', init?.body);
+        if (invalidPolicyRead) return invalidPolicyRead;
+        return Response.json({ etag: 'sa-policy', bindings: [
         { role: 'roles/iam.serviceAccountUser', members: Object.values(connection.principals).map(p => { if (p.kind !== 'gcp-service-account') throw new Error('fixture'); return `serviceAccount:${p.serviceAccountEmail}`; }) } ] });
+      }
       const services = `https://run.googleapis.com/v2/projects/${projectId}/locations/us-central1/services`;
       if (options.deployService && url.startsWith(`${services}?serviceId=`) && init?.method === 'POST') {
         serviceCreated = true;

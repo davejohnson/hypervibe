@@ -179,3 +179,13 @@ behavior. This correction follows the official contract; it is separate from
 the role GET's observed HTTP 400 and does not establish live federation or backup
 completion. Hypercloud must consume the corrected package before its hosted
 Google installation path benefits from either fix.
+
+The first full acceptance run exposed two older deployment fixtures that matched
+the complete policy URL without its query. Reproducing those tests yielded 35
+failures before the fixtures were corrected. They now route by pathname and use
+the same strict POST/query/empty-body contract as the other IAM tests; their
+deployment and lost-acknowledgement assertions are unchanged. All 77 checks in
+those files then passed. The broader GCP adapter and IAM policy group passed
+797 checks with two existing skips, after rerunning five recovery transport tests
+with permission to open their local loopback fixture. Type checking passed.
+This follow-up changes tests and documentation only; it adds no cloud behavior.

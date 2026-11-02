@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { gcpAccountPolicyGetContractResponse } from '../../../../test/gcp-iam-policy-contract.js';
 import { providerRegistry } from '../../../../domain/registry/provider.registry.js';
 import type { CloudDeploymentConnectionV1 } from '../../../../domain/ports/cloud-deployment.port.js';
 import type { CloudRunAdapter } from '../cloudrun.adapter.js';
@@ -132,6 +133,8 @@ function fixture(options: { cloudSql?: boolean; v1Fault?: 'uid' | 'namespace' | 
   const token = 'synthetic-prepared-token';
   const request = vi.fn(async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = String(input), method = init.method ?? 'GET';
+    const invalidPolicyRead = gcpAccountPolicyGetContractResponse(new URL(url), method, init.body);
+    if (invalidPolicyRead) return invalidPolicyRead;
     expect(init.redirect).toBe('error');
     expect(new Headers(init.headers).get('authorization')).toBe(`Bearer ${token}`);
     if (url === `https://${region}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${projectId}/executions/exact-migration`) {
@@ -150,7 +153,7 @@ function fixture(options: { cloudSql?: boolean; v1Fault?: 'uid' | 'namespace' | 
     for (const p of [provision, runtime, holding]) if (url === `https://iam.googleapis.com/v1/projects/${projectId}/serviceAccounts/${p.serviceAccountUniqueId}`)
       return Response.json({ name: `projects/${projectId}/serviceAccounts/${p.serviceAccountEmail}`, email: p.serviceAccountEmail, projectId,
         uniqueId: p.serviceAccountUniqueId, description: `hypervibe:deployment:v1:${owner}:${installationId}` });
-    if (url.endsWith(`${runtime.serviceAccountUniqueId}:getIamPolicy`)) return Response.json({ etag: 'sa-policy', bindings: [{ role: 'roles/iam.serviceAccountUser',
+    if (new URL(url).pathname.endsWith(`${runtime.serviceAccountUniqueId}:getIamPolicy`)) return Response.json({ etag: 'sa-policy', bindings: [{ role: 'roles/iam.serviceAccountUser',
       members: [provision, release].map(p => `serviceAccount:${p.serviceAccountEmail}`) }] });
     const secret = `https://secretmanager.googleapis.com/v1/projects/${projectNumber}/secrets/production-api`;
     if (url === secret) return Response.json({ name: `projects/${projectNumber}/secrets/production-api`, createTime: options.secretCreateTime ?? '2026-10-24T11:00:00Z' });
