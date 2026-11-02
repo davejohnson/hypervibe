@@ -199,6 +199,7 @@ export interface VerifyResult {
 }
 
 export interface IProviderAdapter {
+  readonly serviceInstances?: import('./service-instance.port.js').IServiceInstances;
   readonly serviceVolumes?: import('./service-volume.port.js').IServiceVolumes;
   readonly name: string;
 
@@ -259,7 +260,7 @@ export interface IProviderAdapter {
    * Disconnect a provider-native repository source so pushes cannot bypass
    * manual promotion or a Hypervibe-owned CI deployment workflow.
    */
-  disconnectDeploySource?(params: { serviceId: string }): Promise<Receipt>;
+  disconnectDeploySource?(params: { serviceId: string; projectId?: string; environmentId?: string }): Promise<Receipt>;
 
   getDeployStatus?(
     environment: Environment,

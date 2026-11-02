@@ -367,7 +367,7 @@ describe('hv_inspect / hv_import', () => {
         node: {
           id: 'svc-web',
           name: 'web',
-          repoTriggers: { edges: [{ node: { repository: 'acme/demo-app', branch: 'main' } }] },
+          repoTriggers: { pageInfo: { hasNextPage: false }, edges: [{ node: { id: 'trigger-prod', projectId: 'rp-1', serviceId: 'svc-web', environmentId: 'env-prod', repository: 'acme/demo-app', branch: 'main' } }] },
           serviceInstances: {
             edges: [{
               node: {

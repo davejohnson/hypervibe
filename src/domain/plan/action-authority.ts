@@ -1,4 +1,5 @@
 import { isDatabasePasswordAction, DATABASE_PASSWORD_OPERATIONS } from './database-password-plan.contract.js';
+import { isServiceInstanceAction } from '../services/service-instance.service.js';
 import { isRepositoryVariableAction } from '../services/repository-variables.service.js';
 import { isDatabaseBootstrapAction } from './database-bootstrap.contract.js';
 import { DATABASE_FRESH_INITIALIZATION_OPERATION, isDatabaseInitializationAction } from './database-initialization.contract.js';
@@ -184,6 +185,7 @@ export type PlanMutationCapability =
   | 'hosting.project.ensure'
   | 'hosting.schedule.activate'
   | 'hosting.service.converge'
+  | 'hosting.service-instance.create'
   | 'hosting.service.rollback';
 
 export interface PlanActionAuthority {
@@ -1469,6 +1471,7 @@ export function resolvePlanActionAuthority(
   ) {
     return authority(action, 'hosting.service.converge');
   }
+  if (isServiceInstanceAction(action)) return authority(action, 'hosting.service-instance.create');
   if (
     exactResource(action, 'service')
     && action.type === 'update'
