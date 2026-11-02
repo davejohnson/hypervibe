@@ -345,11 +345,25 @@ export interface ProviderOrchestrationMetadata {
   };
 }
 
+export interface ProviderCredentialUpdateCapability {
+  /** Existing private fields to scrub; public identity metadata is not secret material. */
+  secretKeys: readonly string[];
+  /** Recognize a narrow secondary-role payload; primary payloads retain replacement semantics. */
+  matches(supplied: Record<string, unknown>): boolean;
+  /** Read-only verification and private merge. Called only for a verified exact-scope connection. */
+  prepare(input: { existing: Record<string, unknown>; supplied: Record<string, unknown>; scope: string | null }): Promise<
+    | { success: true; credentials: Record<string, unknown>; credentialKeys: string[]; message: string }
+    | { success: false; error: string }
+  >;
+}
+
 export interface RegisteredProvider {
   metadata: ProviderMetadata;
   factory: (credentials: unknown) => unknown | Promise<unknown>;
   /** Optional hook to install CLI tools or other dependencies when a connection is created. */
   ensureDependencies?: () => Promise<{ installed: string[]; errors: string[] }>;
+  /** Optional narrow update which preserves an existing primary credential. */
+  credentialUpdate?: ProviderCredentialUpdateCapability;
   /** Optional provider-owned raw forensic reads used by hv_inspect. */
   inspection?: ProviderInspectionCapability;
   /** Bounded, exact-scope observation without local CLI state or provider mutations. */

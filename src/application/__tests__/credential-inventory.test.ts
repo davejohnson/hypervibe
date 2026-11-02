@@ -93,6 +93,33 @@ function acceptedRole(options: { pendingWrite?: boolean; pendingRollout?: boolea
 }
 
 describe('read-only credential inventory', () => {
+  it('keeps role-specific sources after a secondary update and resets them on a later full replacement', async () => {
+    const f = fixture();
+    const connection = f.ctx.repos.connections.create({ provider: 'github',
+      credentialsEncrypted: f.ctx.secretStore.encryptObject({ apiToken: 'private-api-role', packageReadToken: 'private-package-role' }) });
+    const event = (action: string, details: Record<string, unknown>) => f.ctx.repos.audit.create({ action,
+      resourceType: 'connection', resourceId: connection.id, details });
+    event('connection.created', { credentialsSource: 'env', credentialsRef: 'env:ORIGINAL_API',
+      credentialsResolution: { apiToken: { resolvedRef: 'env:ORIGINAL_API', sourceKey: 'ORIGINAL_API' } } });
+    event('connection.credentials.updated', { credentialKeys: ['packageReadToken'], credentialsSource: 'dotenv',
+      credentialsRef: 'dotenv:/private/secondary.env#PACKAGES', credentialsResolution: {
+        packageReadToken: { resolvedRef: 'dotenv:/private/secondary.env#PACKAGES', sourceKey: 'PACKAGES' } } });
+    // Equally timed appends must still have a deterministic acquisition order.
+    const tie = () => getDb().prepare('UPDATE audit_events SET timestamp = ? WHERE resource_id = ?')
+      .run('2026-11-02T12:00:00.000Z', connection.id);
+    tie();
+    const updated = await f.read();
+    const role = (result: any, key: string) => result.data.roles.find((item: any) => item.id === `connection:${connection.id}:${key}`);
+    expect(role(updated, 'apiToken').source).toMatchObject({ originalInput: 'env', ref: 'env:ORIGINAL_API', resolvedInputKey: 'ORIGINAL_API' });
+    expect(role(updated, 'packageReadToken').source).toMatchObject({ originalInput: 'dotenv', ref: 'dotenv:/private/secondary.env#PACKAGES', resolvedInputKey: 'PACKAGES' });
+    event('connection.created', { credentialsSource: 'file', credentialsRef: 'file:/private/replacement.json' }); tie();
+    const replacement = await f.read();
+    expect(role(replacement, 'apiToken').source).toMatchObject({ originalInput: 'file', ref: 'file:/private/replacement.json' });
+    expect(role(replacement, 'packageReadToken').source).toMatchObject({ originalInput: 'file', ref: 'file:/private/replacement.json' });
+    expect(role(replacement, 'packageReadToken').source).not.toHaveProperty('resolvedInputKey');
+    expect(JSON.stringify({ updated, replacement })).not.toMatch(/private-(api|package)-role/);
+  });
+
   it('reuses recorded connection sources and approved owner-request imports without inventing rotation dates', async () => {
     const f = fixture();
     writeFileSync(path.join(root, '.env.production'), 'ANTHROPIC_API_KEY=local-value\n');

@@ -436,7 +436,12 @@ export async function credentialInventory(ctx: CommandContext, project: Project,
     const best = ctx.repos.connections.findBestMatchFromHints(metadata.name, getProjectScopeHints(project));
     const selectedIds = new Set([best?.id, ...ciTargets.flatMap(target => target.sources.map(source => source.connectionId))]);
     for (const connection of ctx.repos.connections.findAllByProvider(metadata.name).filter(connection => selectedIds.has(connection.id))) {
-      const acquisition = ctx.repos.audit.findByResource('connection', connection.id, 100).find(event => event.action === 'connection.created');
+      const acquisitions = ctx.repos.audit.findByResource('connection', connection.id, 100);
+      const baseIndex = acquisitions.findIndex(event => event.action === 'connection.created');
+      const acquisition = acquisitions[baseIndex];
+      // A full replacement starts a new acquisition generation. Only later
+      // explicit role updates may override that generation's source evidence.
+      const updates = acquisitions.slice(0, baseIndex < 0 ? acquisitions.length : baseIndex);
       const sourceEvidence = { originalInput: string(acquisition?.details.credentialsSource) ?? 'unknown',
         ...(string(acquisition?.details.credentialsRef) ? { ref: string(acquisition?.details.credentialsRef) } : {}),
         lastReadAt: acquisition?.timestamp.toISOString() ?? null };
@@ -448,15 +453,20 @@ export async function credentialInventory(ctx: CommandContext, project: Project,
       for (const input of roles) {
         for (const key of input.credentialKeys.filter(key => typeof credentials[key] === 'string')) {
           exactValues.push(credentials[key] as string);
-          const resolvedSource = record(record(acquisition?.details.credentialsResolution)[key]);
+          const roleAcquisition = updates.find(event => event.action === 'connection.credentials.updated'
+            && Array.isArray(event.details.credentialKeys) && event.details.credentialKeys.includes(key)) ?? acquisition;
+          const roleSource = { originalInput: string(roleAcquisition?.details.credentialsSource) ?? 'unknown',
+            ...(string(roleAcquisition?.details.credentialsRef) ? { ref: string(roleAcquisition?.details.credentialsRef) } : {}),
+            lastReadAt: roleAcquisition?.timestamp.toISOString() ?? null };
+          const resolvedSource = record(record(roleAcquisition?.details.credentialsResolution)[key]);
           const entry = credential(`connection:${connection.id}:${key}`, input.comment.split(';')[0], input.comment,
             'provider-connection', { kind: 'connection', id: connection.id, provider: metadata.name, credentialRole: key,
-              scope: connection.scope, ...sourceEvidence,
+              scope: connection.scope, ...roleSource,
               ...(string(resolvedSource.resolvedRef) ? { resolvedRef: string(resolvedSource.resolvedRef) } : {}),
               ...(string(resolvedSource.sourceKey) ? { resolvedInputKey: string(resolvedSource.sourceKey) } : {}),
               ...(string(resolvedSource.sourceField) ? { resolvedField: string(resolvedSource.sourceField) } : {}),
-              ...(string(record(acquisition?.details.credentialsMap)[key]) ? { inputKey: string(record(acquisition?.details.credentialsMap)[key]) } : {}) });
-          entry.rotation.acceptedUpdateAt = acquisition?.timestamp.toISOString() ?? null;
+              ...(string(record(roleAcquisition?.details.credentialsMap)[key]) ? { inputKey: string(record(roleAcquisition?.details.credentialsMap)[key]) } : {}) });
+          entry.rotation.acceptedUpdateAt = roleAcquisition?.timestamp.toISOString() ?? null;
           const expectedHash = hashEnvValue(credentials[key] as string);
           if (input.envKey) { entry.aliases.push(input.envKey); candidates(entry, input.envKey, expectedHash); }
           // Connection verification timestamps are not per-role authentication or rotation evidence.
