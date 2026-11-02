@@ -328,7 +328,7 @@ describe('GcpBootstrapClient', () => {
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith(`/v3/projects/${PROJECT_ID}`)) return Response.json(project());
-      if (url.endsWith(`/v1/projects/${PROJECT_ID}/services/${serviceName}`)) {
+      if (url.endsWith(`/v1/projects/${PROJECT_ID}/services/${serviceName}?fields=name,parent,config/name,state`)) {
         servicePolls += 1;
         return Response.json({
           name: exactServiceName,
@@ -367,7 +367,7 @@ describe('GcpBootstrapClient', () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       if (url.endsWith(`/v3/projects/${PROJECT_ID}`)) return Response.json(project());
-      if (url.endsWith(`/v1/projects/${PROJECT_ID}/services/${serviceName}`)) {
+      if (url.endsWith(`/v1/projects/${PROJECT_ID}/services/${serviceName}?fields=name,parent,config/name,state`)) {
         return Response.json({
           name: `${PROJECT_NAME}/services/${serviceName}`,
           parent: PROJECT_NAME,
@@ -414,6 +414,18 @@ describe('GcpBootstrapClient', () => {
     )).rejects.toMatchObject({ status: 403 });
   });
 
+  it.each([undefined, 'STATE_UNSPECIFIED', 'UNKNOWN'])('never enables a service whose observed state is %s', async state => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === `/v3/projects/${PROJECT_ID}`) return Response.json(project());
+      if (init?.method === 'POST' || url.pathname.startsWith('/v1/operations/')) return Response.json({ name: 'operations/enable-unknown', done: true });
+      return Response.json({ name: `${PROJECT_NAME}/services/compute.googleapis.com`, parent: PROJECT_NAME,
+        config: { name: 'compute.googleapis.com' }, ...(state === undefined ? {} : { state }) });
+    });
+    await expect(client(fetchMock as typeof fetch).enableService(PROJECT_ID, 'compute.googleapis.com')).rejects.toThrow();
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(0);
+  });
+
   it('gets and sets an exact numeric service-account policy with its etag', async () => {
     const uniqueId = '109876543210987654321';
     const resourceUrl = `https://iam.googleapis.com/v1/projects/${PROJECT_ID}`
@@ -439,11 +451,9 @@ describe('GcpBootstrapClient', () => {
     };
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
-      if (url === `${resourceUrl}:getIamPolicy`) {
+      if (url === `${resourceUrl}:getIamPolicy?options.requestedPolicyVersion=3`) {
         expect(init?.method).toBe('POST');
-        expect(JSON.parse(String(init?.body))).toEqual({
-          options: { requestedPolicyVersion: 3 },
-        });
+        expect(init?.body).toBeUndefined();
         return Response.json(original);
       }
       if (url === `${resourceUrl}:setIamPolicy`) {

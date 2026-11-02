@@ -2,7 +2,7 @@ import { EnvironmentRepository } from '../../adapters/db/repositories/environmen
 import type { Environment } from '../entities/environment.entity.js';
 import type { ActionReceipt } from '../plan/converge.executor.js';
 import type { PlanAction } from '../plan/plan.types.js';
-import { hashEnvValue, type ObservedState } from '../ports/observe.port.js';
+import { hasCompleteServiceObservation, hashEnvValue, type ObservedState } from '../ports/observe.port.js';
 import type {
   DelegatedSecretSpec,
   HypervibeSecretSpec,
@@ -10,6 +10,7 @@ import type {
   ProjectSpec,
 } from '../spec/spec.schema.js';
 import { githubActionsCanonicalEnvironment } from '../spec/devops-selection.js';
+import { planSecretReference } from './secret-reference-plan.js';
 import { isDeepStrictEqual } from 'node:util';
 import { credentialRuntimeServices } from './credential-runtime-consumers.js';
 
@@ -239,8 +240,7 @@ export function liveHashesForSecret(
     };
   }
   const byName = new Map(observed.services.map((service) => [service.name, service]));
-  const servicesAreComplete = observed.completeness?.services === 'complete'
-    || (observed.completeness?.services === undefined && observed.partial !== true);
+  const servicesAreComplete = hasCompleteServiceObservation(observed);
   let missing = false;
   let unknown = false;
   const hashes: string[] = [];
@@ -422,6 +422,14 @@ export function planDelegatedSecrets(params: {
   const blockers: ManagedSecretBlocker[] = [];
 
   for (const [key, slot] of slots) {
+    if (params.spec.environments[params.environmentName]?.secretDestinations?.[key]) {
+      const reference = planSecretReference({ ...params, key, slot, suppliedValue: suppliedValues[key] });
+      actions.push(reference.action);
+      inputRequired.push(...reference.inputRequired);
+      blockers.push(...reference.blockers);
+      warnings.push(...reference.warnings);
+      continue;
+    }
     const serviceNames = credentialRuntimeServices(params.spec, params.environmentName, key, slot.credential);
     if (!serviceNames.length) continue;
     const binding = bindings.get(key);
@@ -434,14 +442,14 @@ export function planDelegatedSecrets(params: {
     if (slot.credential) {
       const tracked = asRecord(asRecord(params.environment?.platformBindings.credentialUpdates)?.[slot.credential.role]);
       const hashes = asRecord(asRecord(tracked?.hostingHashes)?.[key]);
-      const observedValuesMatch = params.observed && !params.observed.partial && serviceNames.every(name => {
+      const observedValuesMatch = hasCompleteServiceObservation(params.observed) && serviceNames.every(name => {
         const service = params.observed!.services.find(service => service.name === name);
         return service?.envVarEvidence !== 'recorded-update' && service?.envVarHashes[key]
           && service.envVarHashes[key] === (hashes?.[name] ?? binding?.valueHash);
       });
       const acknowledgedOnly = asRecord(tracked?.hostingEvidence)?.[key] === 'acknowledgement'
         && params.observed && (params.observed.completeness?.serviceIdentities === 'complete'
-          || !params.observed.partial && params.observed.completeness?.services === 'complete')
+          || params.observed.completeness?.services === 'complete')
         && serviceNames.every(name => {
           const service = params.observed!.services.find(service => service.name === name);
           return service?.envVarKeys.includes(key) && (service.envVarEvidence === 'recorded-update' || !service.envVarHashes[key] || service.envVarHashes[key] === (hashes?.[name] ?? binding?.valueHash));

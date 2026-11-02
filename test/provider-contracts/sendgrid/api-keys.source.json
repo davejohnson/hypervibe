@@ -1,0 +1,37 @@
+{
+  "sourceUrl": "https://raw.githubusercontent.com/twilio/sendgrid-oai/fb95a935c87b79f7f982ac34bd37adab1f697dbc/spec/json/tsg_api_keys_v3.json",
+  "upstreamRevision": "fb95a935c87b79f7f982ac34bd37adab1f697dbc",
+  "schemaFile": "api-keys.openapi.json",
+  "schemaSha256": "e9800c8d707fc10f52cae750e803d13671e11c0ba7909cf9069a9fbff8ca4733",
+  "extraction": "Exact downloaded bytes; no transformation. Create request selected for schema validation.",
+  "consultedAt": "2026-10-27",
+  "semanticEvidence": [
+    {
+      "sourceUrl": "https://www.twilio.com/docs/sendgrid/api-reference/api-keys/create-api-keys",
+      "coverage": "One-time credential, generated native ID, nonunique name, explicit scopes, default full access when scopes omitted and maximum 100 keys."
+    },
+    {
+      "sourceUrl": "https://www.twilio.com/docs/sendgrid/api-reference/users-api/retrieve-your-username",
+      "coverage": "Native user_id identifies the exact account for reviewed management access."
+    },
+    {
+      "sourceUrl": "https://www.twilio.com/docs/sendgrid/api-reference/api-key-permissions",
+      "coverage": "Documented whitelabel.read, user.email.read and user.username.read names; GET /scopes returns the authenticating key\u2019s scopes. Native sender-route success establishes actual read authority; alternate denied routes do not invalidate an independently verified exact sender."
+    },
+    {
+      "sourceUrl": "https://www.twilio.com/docs/sendgrid/ui/account-and-settings/teammate-permissions#user-settings",
+      "coverage": "Automatic sender verification and two-factor requirement flags; paired with pinned ApiKeyScopesResponse example for API-key readback. Only sender_verification_eligible, sender_verification_legacy and 2fa_required are accepted in addition to mail.send; no exemptions or other permissions."
+    }
+  ],
+  "nativeObservation": {
+    "observedAt": "2026-10-27T22:49:10.498Z",
+    "operation": "GET /v3/api_keys/{retainedNativeId}",
+    "status": 200,
+    "projection": {
+      "api_key_id": "string matching requested native ID",
+      "name": "string",
+      "scopes": "array"
+    },
+    "limits": "Read-only projection from one existing key. Official optional result[] schema is permissive and does not constrain these direct-object fields; native identity semantics require independent checks. No native creation, deletion or delivery evidence."
+  }
+}

@@ -1,4 +1,4 @@
-/** Shared by direct reconciliation and emitted CI; retain all registered runtime settings. */
+/** Select the configuration of the exact active deployment, never array order. */
 export function ecsCurrentConfiguration(service: any): any {
   const matches = (service?.activeConfigurations ?? []).filter((config: any) => config.serviceRevisionArn === service?.currentDeployment);
   if (!service?.currentDeployment || matches.length !== 1) throw new Error('ECS current deployment configuration is missing or ambiguous.');

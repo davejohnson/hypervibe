@@ -6,6 +6,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as
 ) => (...args: unknown[]) => Promise<unknown>;
 
 async function runtime(fetchImpl: typeof fetch): Promise<{
+  cloudRunReleaseExecutionStatus: (execution: unknown) => string;
   runCloudRunReleaseCommands: (params: Record<string, unknown>) => Promise<void>;
   cloudRunRuntimeResourcesFromBase64: (
     encoded: string,
@@ -24,12 +25,16 @@ async function runtime(fetchImpl: typeof fetch): Promise<{
 }> {
   const load = new AsyncFunction(
     'fetch',
-    `${buildCloudRunReleaseRuntime()}\nreturn { runCloudRunReleaseCommands, cloudRunRuntimeResourcesFromBase64, cloudRunContainerWithRuntime, cloudRunRuntimeMismatch };`
+    `${buildCloudRunReleaseRuntime()}\nreturn { cloudRunReleaseExecutionStatus, runCloudRunReleaseCommands, cloudRunRuntimeResourcesFromBase64, cloudRunContainerWithRuntime, cloudRunRuntimeMismatch };`
   );
   return await load(fetchImpl) as Awaited<ReturnType<typeof runtime>>;
 }
 
 describe('Cloud Run generated release runtime', () => {
+  it.each([['CONDITION_SUCCEEDED', 'completed'], ['CONDITION_FAILED', 'failed']])('reads native Execution Completed conditions: %s', async (state, expected) => {
+    const loaded = await runtime(vi.fn() as unknown as typeof fetch);
+    expect(loaded.cloudRunReleaseExecutionStatus({ conditions: [{ type: 'Completed', state }] })).toBe(expected);
+  });
   const projectId = 'gcp-project';
   const region = 'us-central1';
   const serviceName = 'cloudapp-staging-web';
@@ -160,7 +165,7 @@ describe('Cloud Run generated release runtime', () => {
           template: {
             containers: [{
               image: 'old-image',
-              env: [{ name: 'DATABASE_URL', valueSource: { secretKeyRef: { secret: 'database-url' } } }],
+              env: [{ name: 'DATABASE_URL', valueSource: { secretKeyRef: { secret: 'projects/123456789012/secrets/database-url', version: '7' } } }],
               resources: { limits: { cpu: '1', memory: '512Mi' }, cpuIdle: true },
               volumeMounts: [{ name: 'cloudsql', mountPath: '/cloudsql' }],
             }],
@@ -182,7 +187,7 @@ describe('Cloud Run generated release runtime', () => {
                 image: 'us-central1-docker.pkg.dev/gcp-project/infraprint/app@sha256:' + 'b'.repeat(64),
                 command: ['/bin/sh'],
                 args: ['-lc', 'npm run db:migrate'],
-                env: [{ name: 'DATABASE_URL', valueSource: { secretKeyRef: { secret: 'database-url' } } }],
+                env: [{ name: 'DATABASE_URL', valueSource: { secretKeyRef: { secret: 'projects/123456789012/secrets/database-url', version: '7' } } }],
                 resources: { limits: { cpu: '1', memory: '512Mi' } },
                 volumeMounts: [{ name: 'cloudsql', mountPath: '/cloudsql' }],
               }],
@@ -223,6 +228,7 @@ describe('Cloud Run generated release runtime', () => {
       resources: { limits: { cpu: '1', memory: '512Mi' } },
     });
     expect(body.template.template.containers[0].resources).not.toHaveProperty('cpuIdle');
+    expect(body.template.template.containers[0].env).toContainEqual({ name: 'DATABASE_URL', valueSource: { secretKeyRef: { secret: 'projects/123456789012/secrets/database-url', version: '7' } } });
     expect(body.template.template).toMatchObject({
       serviceAccount: 'runtime@gcp-project.iam.gserviceaccount.com',
       maxRetries: 1,

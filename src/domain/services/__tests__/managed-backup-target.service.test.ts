@@ -1,5 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../ci/providers.js';
+import '../../../adapters/providers/gcp/cloudrun.adapter.js';
+import '../../../adapters/providers/gcp/cloudsql.adapter.js';
 import '../../../adapters/providers/gcp/gcs.adapter.js';
 import '../../../adapters/providers/azure/azure-blob.adapter.js';
 import '../../../adapters/providers/aws/s3.adapter.js';
@@ -11,6 +13,47 @@ import { providerRegistry } from '../../registry/provider.registry.js';
 import { environmentSpecSchema } from '../../spec/spec.schema.js';
 import type { BackupPolicyContext } from '../backup-policy.service.js';
 import { resolveManagedBackupTarget } from '../managed-backup-target.service.js';
+import { compileBackupWorkflow } from '../backup-workflow.service.js';
+import { executeManagedBackup } from '../../../application/managed-backup.js';
+
+afterEach(() => vi.restoreAllMocks());
+
+it.each(['matching', 'changed-native-identity', 'unreviewed-backup-workflow'] as const)('carries the exact public federation descriptor from planning to the isolated controller: %s', async scenario => {
+  const f = fixture();
+  delete f.spec.database; f.context.components = [];
+  f.spec.hosting = { provider: 'cloudrun', region: 'us-central1' };
+  f.environment.platformBindings.provider = 'cloudrun';
+  f.environment.platformBindings.environmentId = 'us-central1';
+  for (const [name, storage] of Object.entries(f.storage)) {
+    storage.provider = 'gcs'; storage.instanceScope = { projectId: 'native-project' } as never;
+    f.spec.storage![name].provider = 'gcs';
+  }
+  if (f.spec.backups?.mode === 'daily') f.spec.backups.fileReferenceQueries = [];
+  const identity = { schemaVersion: 1, projectId: 'native-project', projectNumber: '123456789012',
+    workloadIdentityProvider: 'projects/123456789012/locations/global/workloadIdentityPools/hv-ci-test/providers/github',
+    serviceAccountEmail: 'ci-backup@native-project.iam.gserviceaccount.com', serviceAccountUniqueId: '223456789012345678901',
+    repository: 'owner/test-project', repositoryId: '12345', repositoryOwnerId: '67890', branch: 'main', environment: 'production',
+    workflow: '.github/workflows/deploy.yml', backupWorkflow: '.github/workflows/hypervibe-backup-production.yml' };
+  if (scenario === 'unreviewed-backup-workflow') identity.backupWorkflow = '.github/workflows/another.yml';
+  f.environment.platformBindings.gcpGithubWorkloadIdentity = JSON.stringify(identity);
+  const result = await resolveManagedBackupTarget(f.context);
+  if (scenario === 'unreviewed-backup-workflow') {
+    expect(result.state).toBe('blocked'); return;
+  }
+  expect(result.state, JSON.stringify(result)).toBe('ready');
+  if (result.state !== 'ready') throw new Error('Missing public recovery authority');
+  expect(result.providerCredentialNames).toEqual([]);
+  expect(JSON.parse(result.target.automation!.gcs.credentials)).toEqual({ projectId: identity.projectId, authMode: 'github-workload-identity', workloadIdentity: identity });
+  const files = compileBackupWorkflow({ project: result.target.project, environment: result.target.environment,
+    contractHash: result.contractHash, runnerImage: result.target.runnerImage, providerCredentialNames: result.providerCredentialNames, contract: result.target });
+  expect(JSON.stringify(files)).not.toContain('GCP_SERVICE_ACCOUNT_JSON');
+  if (scenario === 'changed-native-identity') f.environment.platformBindings.gcpGithubWorkloadIdentity = JSON.stringify({ ...identity, serviceAccountUniqueId: '923456789012345678901' });
+  const create = vi.spyOn(providerRegistry, 'createAdapter').mockRejectedValue(new Error('Stop before provider access.'));
+  await expect(executeManagedBackup({ target: result.target, environment: f.environment, operation: 'health',
+    repository: identity.repository, runId: '123', credentials: {} })).rejects.toThrow();
+  if (scenario === 'changed-native-identity') expect(create).not.toHaveBeenCalled();
+  else expect(create).toHaveBeenCalledWith('gcs', { projectId: identity.projectId, authMode: 'github-workload-identity', workloadIdentity: identity });
+});
 
 function fixture() {
   const now = new Date();
@@ -128,7 +171,7 @@ describe('managed backup target admission', () => {
     expect(result.state).toBe('blocked');
     if (result.state !== 'blocked') return;
     expect(result.issues).toContain(`${provider} has no reviewed private-worker credential handoff for combined SQL/files recovery.`);
-    expect(f.factory.getStorageAdapter).toHaveBeenCalledWith(provider, f.context.project);
+    expect(f.factory.getStorageAdapter).toHaveBeenCalledWith(provider, f.context.project, f.environment.name);
     expect(f.getCredentials).not.toHaveBeenCalled();
   });
 
@@ -174,4 +217,56 @@ describe('managed backup target admission', () => {
     expect(f.component.bindings.providerScope).toEqual({ projectId: 'external-gcp-project' });
     if (result.state === 'blocked') expect(result.issues.join(' ')).toMatch(/private.*database provider/);
   });
+});
+
+it.each(['safe', 'credential-key', 'worker-key', 'scope-key', 'nested-json', 'bearer-value', 'connection-url'] as const)('publishes only value-free native worker authority: %s', async scenario => {
+  const f = fixture();
+  const original = providerRegistry.getMetadata.bind(providerRegistry);
+  vi.spyOn(providerRegistry, 'getMetadata').mockImplementation(provider => {
+    const metadata = original(provider);
+    return provider === 'cloudrun' ? { ...metadata!, lifecycle: { ...metadata!.lifecycle, hosting: { ...metadata!.lifecycle!.hosting!,
+      recoveryTasks: { databaseProviders: ['cloudsql'], variableMode: 'references', status: 'ready-for-live' },
+      recoveryRuntime: { databaseProviders: ['cloudsql'], storageProviders: ['gcs'], status: 'ready-for-live' } } } } as never : metadata;
+  });
+  f.spec.hosting = { provider: 'cloudrun', region: 'us-central1' };
+  f.environment.platformBindings.provider = 'cloudrun';
+  f.spec.database!.provider = 'cloudsql'; f.component.bindings.provider = 'cloudsql';
+  f.component.bindings.connectionString = 'postgresql://user:private-password@/db?host=/cloudsql/native-project:us-central1:database-service';
+  f.component.bindings.providerScope = { projectId: 'native-project' };
+  f.observation.source = { provider: 'cloudsql', primaryExternalId: 'database-service', providerScope: { projectId: 'native-project' }, resourceIdentity: { instanceId: 'database-service' } };
+  for (const [name, storage] of Object.entries(f.storage)) {
+    storage.provider = 'gcs'; storage.instanceScope = { projectId: 'native-project' } as never;
+    f.spec.storage![name].provider = 'gcs';
+  }
+  const executionTarget = { provider: 'cloudrun', environmentId: 'env', region: 'us-central1', providerScope: { projectId: 'native-project', region: 'us-central1' },
+    identity: { provider: 'gcp', principal: 'backup@native-project.iam.gserviceaccount.com', source: 'observed', scope: { uniqueId: 'immutable' } },
+    configuration: { secretVersion: 'projects/native-project/secrets/backup-db/versions/1' }, worker: { provider: 'cloudrun', configuration: { ipType: 'PUBLIC' } } };
+  f.environment.platformBindings.recoveryRuntime = { provider: 'cloudrun', evidence: { uniqueId: 'immutable' } };
+  const inspect = vi.fn(async () => ({ state: 'ready', executionTarget }));
+  f.factory.getProviderAdapter.mockResolvedValue({ success: true, adapter: { name: 'cloudrun', recoveryRuntime: { inspect } } });
+  const secret = 'synthetic-admin-credential-value';
+  if (scenario === 'credential-key') Object.assign(executionTarget.configuration, { apiToken: secret });
+  if (scenario === 'worker-key') Object.assign(executionTarget.worker.configuration, { password: secret });
+  if (scenario === 'scope-key') Object.assign(executionTarget.providerScope, { privateKey: secret });
+  if (scenario === 'nested-json') Object.assign(executionTarget.configuration, { binding: JSON.stringify({ evidence: { apiToken: secret } }) });
+  if (scenario === 'bearer-value') Object.assign(executionTarget.configuration, { opaque: `Bearer ${secret}` });
+  if (scenario === 'connection-url') Object.assign(executionTarget.worker.configuration, { endpoint: `postgresql://user:${secret}@host/database` });
+  const result = await resolveManagedBackupTarget(f.context);
+  const files = result.state === 'ready' ? compileBackupWorkflow({ project: result.target.project, environment: result.target.environment,
+    contractHash: result.contractHash, runnerImage: result.target.runnerImage, providerCredentialNames: result.providerCredentialNames, contract: result.target }) : [];
+  expect(JSON.stringify(files).includes(secret)).toBe(false);
+  if (scenario !== 'safe') {
+    expect(result.state).toBe('blocked');
+    expect(JSON.stringify(result)).not.toContain(secret);
+    vi.restoreAllMocks(); return;
+  }
+  expect(result.state).toBe('ready');
+  if (result.state === 'ready') expect(result.target).toMatchObject({ executionTarget });
+  expect(inspect).toHaveBeenCalledTimes(1);
+  expect(f.getCredentials).not.toHaveBeenCalled();
+  expect(JSON.stringify(result)).not.toContain('private-password');
+  inspect.mockResolvedValue({ state: 'unknown', reason: 'Verification unavailable' } as never);
+  expect((await resolveManagedBackupTarget(f.context)).state).toBe('blocked');
+  expect((await resolveManagedBackupTarget(f.context, { allowUnpreparedRuntime: true })).state).toBe('ready');
+  vi.restoreAllMocks();
 });

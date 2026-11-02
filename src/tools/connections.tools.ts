@@ -1,3 +1,5 @@
+import { runtimeMailProbeSchema } from '../domain/ports/runtime-mail-authentication.port.js';
+import { verifyRuntimeMailConnection } from '../application/runtime-mail-authentication.js';
 import { parseCredentialRef, resolveLocalSecretRef, type ResolvedCredentialSource } from '../application/credential-reference.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
@@ -71,6 +73,7 @@ function providerDiscoveryEntry(metadata: Pick<
   const guidance = getConnectionGuidance(metadata.name, context);
   const credentialFields = credentialFieldsFromSchema(metadata.credentialsSchema, {
     exclude: metadata.credentials?.agentManagedKeys,
+    excludeChoices: metadata.credentials?.agentManagedChoices,
   });
   return {
     name: metadata.name,
@@ -101,12 +104,13 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
 
   commands.register(
     'hv_connections',
-    [CONTEXTUAL_SETUP_HINT, 'Connection modes: {} lists every connection/provider; {project} lists in validated project context; {provider,...} manages connections. With provider, action="add" is the default. Use action="bootstrap" with provider="cloudrun" for the short, opinionated GCP setup; "verify", "remove", and "prepare" remain explicit advanced operations. Project context never changes provider scope. Credentials are encrypted at rest and never returned; credentialsRef is preferred. Providers and credential sources that declare native CLI authentication may omit credentials to use the active local/default credential chain.'].join(' '),
+    [CONTEXTUAL_SETUP_HINT, 'For new AWS, Azure or GCP secret-manager connections, use hv_cloud_connections purpose="connect-cloud" for browser installation without local cloud credentials or manually prepared writers. Connection modes here: {} lists every connection/provider; {project} lists in validated project context; {provider,...} manages existing access. With provider, action="add" is the default. The explicit legacy action="bootstrap" with provider="cloudrun" creates a deployment service-account key; it is not the Connect Cloud onboarding path. "verify", "remove", and "prepare" remain explicit advanced operations. Project context never changes provider scope. Credentials are encrypted at rest and never returned; use credentialsRef for credentials the user already controls. Providers and credential sources that declare native CLI authentication may omit credentials to use the active local/default credential chain.'].join(' '),
     {
       provider: z.string().optional().describe(`Omit to list. Otherwise select a provider (available: ${providerNames.join(', ')}). action="remove" also accepts unregistered providers so stale connections can be deleted.`),
-      action: z.enum(['add', 'describe', 'verify', 'remove', 'prepare', 'bootstrap']).optional().describe('With provider: operation to perform (default: "add"). "describe" returns contextual forms without resolving credentials, observing providers, or writing state. For GCP, "bootstrap" is the recommended one-time setup.'),
+      action: z.enum(['add', 'describe', 'verify', 'remove', 'prepare', 'bootstrap']).optional().describe('With provider: operation to perform (default: "add"). "describe" returns contextual forms without resolving credentials, observing providers, or writing state. GCP "bootstrap" is an explicit legacy setup that creates a deployment service-account key. New Connect Cloud customers use hv_cloud_connections purpose="connect-cloud".'),
       credentials: z.record(z.string(), z.unknown()).optional().describe('action="add": provider-specific credentials object. Omit for providers supporting native CLI/default authentication. credentialsRef is recommended for explicit credentials, but raw credentials are accepted when intentional.'),
-      credentialsRef: z.string().optional().describe('action="add": recommended credential reference resolved by Hypervibe. Supports env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path for token/JSON files, secret-manager refs like 1password://vault/item#field, or an already-pulled active Stripe Projects environment with stripe-projects://<environment>/<provider>/<service>. The resolved value may be a JSON credentials object or a scalar.'),
+      credentialsRef: z.string().optional().describe('action="add", or action="verify" with runtimeMail: recommended credential reference resolved privately by Hypervibe. Supports env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path for token/JSON files, secret-manager refs like 1password://vault/item#field, or an already-pulled active Stripe Projects environment with stripe-projects://<environment>/<provider>/<service>. The resolved value may be a JSON credentials object or a scalar.'),
+      runtimeMail: runtimeMailProbeSchema.optional().describe('action="verify" with an explicit private credentialsRef: validate a fixed sandbox Mail Send request without sending email or saving a connection. Requires sender and a consenting test recipient; does not prove least privilege, sender authorization or live delivery.'),
       credentialsKey: z.string().optional().describe('action="add": wraps a scalar credentialsRef value under this provider credential key, e.g. apiToken or accessToken. Optional for common single-token providers.'),
       credentialsMap: z.record(z.string(), z.string()).optional().describe('action="add": for dotenv or structured secret-manager references, maps provider credential keys to source fields, e.g. {"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}.'),
       scope: z.string().optional().describe('Optional scope for fine-grained tokens (e.g., "owner/repo" for GitHub, "example.com" for Cloudflare). Use "org/*" for wildcard matching. Leave empty for global except action="bootstrap", which derives an exact repository scope from the selected project when omitted and never creates global GCP access.'),
@@ -130,6 +134,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       action,
       credentials,
       credentialsRef,
+      runtimeMail,
       credentialsKey,
       credentialsMap,
       scope,
@@ -181,6 +186,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         const mutationInput = action !== undefined
           || credentials !== undefined
           || credentialsRef !== undefined
+          || runtimeMail !== undefined
           || credentialsKey !== undefined
           || credentialsMap !== undefined
           || scope !== undefined
@@ -211,6 +217,14 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         return commandError('VALIDATION', `Unknown provider: ${provider}.`, {
           hint: `Available providers: ${providerNames.join(', ')}`,
         });
+      }
+      if (runtimeMail !== undefined) {
+        const incompatible = suppliedOptionNames({ credentials, credentialsKey, credentialsMap, scope, project: projectRef, repositoryContext,
+          gcpProjectId, billingAccountName, deployServiceAccountEmail, gcsAccess, memorystoreAccess, queueAccess,
+          adminAuth, adminCredentialsJson, adminCredentialsJsonRef, adminAccessToken, adminAccessTokenRef, confirm });
+        if (requestedAction !== 'verify' || !credentialsRef || incompatible.length)
+          return commandError('VALIDATION', 'runtimeMail requires action="verify", an explicit private credentialsRef, and no saved scope, raw credentials or setup options.');
+        return verifyRuntimeMailConnection(provider, credentialsRef, runtimeMail);
       }
       if (requestedAction === 'describe') {
         const incompatible = suppliedOptionNames({ credentials, credentialsRef, credentialsKey, credentialsMap,
@@ -557,7 +571,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         availableProviders['secrets'].push(providerDiscoveryEntry(p.metadata, guidanceContext));
       }
 
-      const discoveryHint = CONTEXTUAL_SETUP_HINT + ' This list is credential discovery only, not completed scoped setup. If a concrete task is blocked, use hv_connections with provider only when a safe credentialsRef is already available, the provider declares a native/default credential chain, or the user requested the bounded first-GCP bootstrap. Otherwise offer to help connect credentials the user already controls or prepare a value-free handoff naming the provider, scope, and blocked task for the person who manages that access. Do not assume provider membership or run hv_plan, hv_apply, or hv_deploy to bypass the missing connection.';
+      const discoveryHint = CONTEXTUAL_SETUP_HINT + ' This list is credential discovery only, not completed scoped setup. For new AWS, Azure or GCP secret-manager connections, use hv_cloud_connections purpose="connect-cloud" with the exact env: start browser device approval, check status, then connect to browser provider selection and administrator installation. No local cloud credentials or manually prepared writer are required. Installation, collection and deployment require separate authorization. If hosted setup is unavailable, report its prerequisite without substituting credential uploads or key creation. Use hv_connections with provider only when a safe credentialsRef is already available, the provider declares a native/default credential chain, or the user explicitly requested legacy GCP bootstrap that creates a deployment service-account key. Otherwise offer to help connect credentials the user already controls or prepare a value-free handoff naming the provider, scope, and blocked task for the person who manages that access. Do not assume provider membership or run hv_plan, hv_apply, or hv_deploy to bypass the missing connection.';
       return commandSuccess(
         {
           ...(project ? { project: { id: project.id, name: project.name } } : {}),
@@ -566,7 +580,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         },
         {
           hint: connections.length === 0
-            ? `No connections yet. Recommended: hv_connections provider="<name>" credentialsRef="env:NAME", credentialsRef="dotenv:/absolute/path/.env#KEY", or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if the user intentionally wants chat entry. ${discoveryHint}`
+            ? `No connections yet. ${discoveryHint} For credentials the user already controls, private references include credentialsRef="env:NAME", credentialsRef="dotenv:/absolute/path/.env#KEY", or credentialsRef="file:/absolute/path" for JSON credentials. Never request credential values in chat.`
             : discoveryHint,
         }
       );

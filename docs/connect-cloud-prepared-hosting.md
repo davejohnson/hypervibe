@@ -1,0 +1,779 @@
+# Installer-prepared hosting handoff
+
+This draft extends the existing deployment connection, plan/apply loop and managed
+CI. It does not establish live provider compatibility. Native GCP installation,
+session issuance and first-release proof have offline contract coverage; Azure's
+reviewed namespace installation and prepared runtime handoff also have offline coverage. No disposable-account first-release
+walkthrough has run for this handoff.
+
+An administrator may prepare exact hosting resources before the developer has a local
+environment. The versioned deployment receipt records project lifetime and observed
+parent, registry lifetime/ownership, and each workload's native identity, lifetime,
+ownership, immutable holding image, holding principal and configuration digest.
+Referenced secret containers can additionally retain exact native IDs and lifetime
+evidence. The provider requires complete unique reference coverage when native names
+and version numbers can recur after deletion; versions alone cannot pin a container.
+The holding principal is separate from the application runtime and both deployment
+principals. The provider parses its own native paths and coordinates. A generic string
+schema alone never proves cloud ownership.
+
+## Provider contract matrix
+
+| Hosting provider | Native identity and completion contract | Prepared handoff status |
+| --- | --- | --- |
+| GCP Cloud Run | Exact project number/create time/observed parent; registry create time; service UID, original holding revision/generation, reconciliation state and terminal condition. Resource name alone is reusable. Holding creation and IAM are separately reviewed installation actions. | Shared and native installation/session/handoff/first-release contracts implemented with offline evidence; see [native evidence and prerequisites](connect-cloud-gcp-deployment-evidence.md). Live walkthrough and operator holding-image publication remain gates. Initial billing uses a separate reviewed reserved-project assignment; unsupported ancestry and cron remain explicit. |
+| AWS ECS | Exact account/region/cluster/service ARN plus creation evidence and deployment state; IAM RoleID separately pins runtime identities. Service-list failures cannot establish absence. The installer does not pre-create workloads. Ordinary hosted apply creates a secret-free bootstrap; the exact-image CI release attaches the reviewed application references and task role. | Optional receipt absent preserves the existing path. Prepared handoff explicitly undeclared. |
+| Azure Container Apps | Exact subscription/resource group/ARM resource ID plus native creation metadata and terminal deployment provenance; reusable ARM names are insufficient. PUT is create-or-update, requiring explicit reviewed namespace authority rather than an atomic-create claim. Original holding revision and container-inaccessible managed identities constrain first release. | Native installation, prepared handoff, final configuration and read-only release-target enrollment have offline coverage; see [Azure evidence](connect-cloud-azure-evidence.md). An approved disposable-account walkthrough remains outstanding. |
+| DigitalOcean App Platform | Existing adapter only; no installer-prepared lifetime/holding contract reviewed. | Undeclared. |
+| Fly | Existing adapter only; no installer-prepared lifetime/holding contract reviewed. | Undeclared. |
+| Railway | Existing adapter only; no installer-prepared lifetime/holding contract reviewed. | Undeclared. |
+| Vercel | Existing adapter only; no installer-prepared lifetime/holding contract reviewed. | Undeclared. |
+
+The independent native references are the [Cloud Run Service resource](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services),
+[ECS DescribeServices](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_DescribeServices.html),
+[Azure Container Apps GET](https://learn.microsoft.com/en-us/rest/api/resource-manager/containerapps/container-apps/get?view=rest-resource-manager-containerapps-2025-07-01)
+and [Azure create-or-update](https://learn.microsoft.com/en-us/rest/api/resource-manager/containerapps/container-apps/create-or-update?view=rest-resource-manager-containerapps-2025-07-01).
+These published response contracts define evidence to inspect; they do not independently
+authorize adoption or prove the whole workflow was exercised live.
+
+## Local lifecycle and recovery
+
+The existing isolated project-binding stage creates the first local environment only
+after provider verification. The new `hosting-prepared-bindings` stage then re-observes
+the native receipt and records exact workload/registry bindings through one confirmed
+metadata action. It has no provider mutation method. An unchanged proof is a metadata
+noop. Unknown reads, conflicting retained identities, pending native attempts and
+retained provider transitions block; the existing checkpoint and prerequisite stages
+keep priority. A source revision, cancellation or local binding change during an await
+invalidates apply authority. A lost repository export retains the exact SQLite proof;
+retry can only re-verify and export that same reviewed state.
+The final SQLite update compares the complete expected binding state in an immediate
+transaction; a competing update after native observation cannot be silently overwritten.
+
+`preparedHosting` retains installation/plan/receipt digests and a per-workload
+`pendingFirstRelease` list. When present, `firstReleaseConfigurationDigests` covers
+exactly that list. For hosted managed CI it hashes reviewed nonsecret desired configuration and
+immutable secret references, never submitted secret values. A changed desired configuration needs
+a new metadata plan before replacing its expected digest. Reading or importing an older
+repository export cannot reinstate a completed first release or silently replace local
+authority. The strict journal survives export even when workload names contain words
+such as `token`; arbitrary payload fields remain rejected.
+
+Binding preparation does not mark the app deployed. Native first rollout must atomically
+replace the holding image and principal with the candidate application image, final
+runtime identity and reviewed configuration/references. Until that exact native state and
+release/source evidence are verified, the journal remains pending. Clearing it is another
+explicit metadata action. Holding code must never receive application secrets as an
+intermediate configuration step. Hosted GCP cron/release-command support and broader
+storage or database provisioning require separate native lifecycle evidence. Local
+operator release commands have the separately reviewed path below.
+
+## Local first-release migrations
+
+An empty database exposed a different path from an already initialized app:
+prepared direct deployment returned success after updating the service without
+running its declared release command. DG-050 independently requires the candidate
+schema command to succeed before runtime changes. Five reconstructed native HTTP
+cases failed before the correction, including missing execution, failed execution
+and lost create/run acknowledgments. A worker-ordering case and two executed
+generated-program completion cases also failed. The latter exposed a separate
+reader that treated a terminal `Completed` condition as still running.
+
+The first-release action now pins the command hash alongside image, native resource
+lifetime and reviewed private configuration. It creates the exact migration job
+with the final runtime account and references, one task, zero retries and a
+one-hour timeout. The [Run API](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs/run)
+returns an operation; that operation must resolve to the exact immutable
+[Execution](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs.executions).
+Its task configuration, account, command, image, task counts and terminal success
+are verified before rollout. [Task retries](https://docs.cloud.google.com/run/docs/reference/rest/v2/TaskTemplate)
+are a presence-sensitive union with default three: missing `maxRetries` does not
+prove zero. The v1 ExecutionStatus documents `Completed`; v2's string discriminator
+and condition-state contract are reconstructed together in offline fixtures,
+pending the native walkthrough.
+
+The existing private first-release journal records each attempted mutation and
+acknowledged identity. After restart, a new confirmed continuation can observe
+the original acknowledged operation and finish rollout without another job create
+or execution. Unacknowledged creates/runs stay blocked; same-name resources are
+never treated as creation proof. A local unexecuted creation candidate may instead
+use the separately reviewed exact-identity adoption described below. Failed execution is retained for investigation, not
+automatically rerun or deleted. Task resources remain recorded for recovery and
+separately reviewed cleanup. A permission change during the absence check now
+stops before creation; that boundary regression also failed before correction.
+Workers explicitly depend on the migration-owning service. A lost service reply
+can be recovered only with the original successful execution and matching native
+application configuration. Normal tests exercise the actual SQLite planner,
+apply, bootstrap, export and read-only recovery paths.
+
+The following seed task reuses the recorded migration Job only while its original
+workload and Job lifetimes still match. The independent
+[Job contract](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs)
+defines the native UID and update fingerprint; the Run API also accepts an `etag`.
+A reconstructed replacement with the same name first caused an unauthorized
+PATCH in the regression. A second regression showed the seed run omitted its
+execution precondition. Both now pass: the update checks the retained UID and
+current fingerprint, and execution uses the freshly verified fingerprint. The
+successful migration-to-seed boundary runs through the real adapter and serialized
+transport. This is offline evidence; native migration and seed remain pending.
+
+The approved disposable host's first deployment on 2026-11-01 exposed a real
+producer/consumer mismatch before any migration Job or service update: planning
+marked native references `preparedReleaseBinding`, but apply's strict metadata
+schema rejected that exact marker. Backup retention had already increased to
+eight; the dependent app, migration, seed and reference acceptance were not run.
+The actual SQLite plan/apply regression reproduced the same authorization error
+before the correction. It now exercises an immutable native reference together
+with the migration and both first service revisions. Inline and native-reference
+acceptance share the same completed-plan and fresh native-release proof. The
+marker cannot authorize a reference write, unknown metadata remains rejected,
+and post-release drift blocks without another service PATCH. Final acceptance
+stores only reference ownership metadata, not the temporary release marker.
+These passing regressions do not establish a successful resumed live release.
+
+The generated Cloud Run execution reader uses the same completion interpretation.
+Provider renderer revision 3 requires a new workflow-publication review; historical
+revision-2 fingerprints remain in compatibility tests, while AWS/Azure legacy
+program bytes remain unchanged. This does not silently update accepted workflows.
+The named hosted installers for AWS, Azure and GCP still explicitly reject
+migration-bearing source placement. This local operator fix does not extend those
+hosted grants or claim native compatibility for another cloud. DigitalOcean, Fly,
+Railway and Vercel have no declared prepared direct-release capability.
+
+The pending-clear action reuses the existing scheduled-release provenance boundary:
+the exact managed workflow files, current source commit, successful native GitHub run,
+first attempt, uniquely correlated artifact and trusted v4 release validator must agree.
+The artifact's immutable image and exact resource IDs are passed to the provider only
+after verification; the provider still checks original lifetimes, final principal,
+readiness and the previously approved configuration digest. Missing GitHub access or
+evidence leaves the first release pending and does not block initial resource binding.
+A changed run or source invalidates the reviewed completion action. Its saved prior
+marker permits exact verification/export recovery after SQLite committed completion
+but the repository export failed. It does not fabricate release provenance from current
+desired state. GCP direct first releases use the distinct native-direct completion evidence described below; it does not substitute a managed-CI artifact or hosted grant.
+The producer target resolver also receives that exact project/environment's reviewed
+prior marker during recovery. Merely restoring an observation object was insufficient:
+the resolver otherwise read the newer SQLite marker and changed the semantic hash.
+This override is internal and read-only; ordinary compilation still uses current state.
+
+## Observed regression evidence
+
+The challenged assumption was that knowing native names was enough to reuse a prepared
+workload. A first local environment instead planned service creation and lacked the
+reviewed metadata boundary: three real SQLite/spec/planner/apply tests failed before the
+new stage. Strict prepared receipts initially failed two boundary tests; native paths,
+principal separation, cardinality, immutable images and extra fields now have shared
+regressions. Native semantics in these shared tests are explicitly synthetic.
+
+Seven further failing repository tests reproduced stale first-release reinstatement,
+changed installation/configuration authority, permissive payloads and lost exported
+hashes. A separate failing test showed that losing the authenticated prepared capability
+could fall through to ordinary service creation; it now blocks while retaining history.
+A SQLite counterexample also reproduced a competing binding write after the last native
+read being overwritten and reported successful; atomic compare-and-swap now rejects it.
+The normal test gate also covers confirmation, no native writes, unknown/replaced native
+identity, cancellation/spec/binding changes during verification, checkpoint priority,
+pending recovery, exact export retry and reviewed configuration/progress changes.
+Two native run-provenance counterexamples failed before correction: a valid list summary
+without `run_attempt` prevented completion, and a rerun starting after artifact observation
+was accepted. Fresh exact run-detail reads now establish the attempt at both boundaries.
+Existing schedule-activation regressions execute the emitted v4 artifact producer and
+trusted validator; shared metadata tests use explicitly synthetic verified-release inputs.
+An additional real SQLite regression runs the emitted Azure producer and shared artifact
+validator before and after pending completion. It failed after completion until the
+target resolver used the reviewed original inputs, then passed without changing stored
+bindings; cross-project and cross-environment recovery inputs are rejected.
+Registry conformance pins all seven hosting providers and requires a native parser for
+every declared capability. Passing these tests proves these boundaries only; native
+installation and runtime release have separately named reconstructed transport suites,
+and approved disposable-account walkthroughs remain their own acceptance gate.
+
+## Operator holding container
+
+`templates/cloud-holding` contains the reviewed minimal Node 24 image source. It
+runs as a nonroot user, listens on the platform port, returns a fixed 503 response
+and never reads application configuration, logs requests or makes outgoing requests.
+The build context excludes the repository except this runtime file. The ordinary
+test gate sends synthetic request values through a real HTTP listener and checks
+the response does not reflect them. Its managed Node version remains tied to the
+shared helper runtime contract.
+
+A local Linux amd64 build and container smoke test passed on 2026-10-25. The smoke
+test disabled networking, used a read-only filesystem, removed Linux capabilities,
+verified the nonroot user and fixed response, checked empty container logs, and
+removed the exact test container. This is local container evidence, not native
+registry pull or hosting evidence. The local image ID was
+`sha256:2a19c8f7b32ff3ca239628e95772de64484b093f1a6746ce815af1b324845f9c`;
+it is **not** a published registry manifest digest and must not be used as one.
+
+Publication still needs owner approval. Publish to the reviewed public operator
+registry, observe its immutable manifest digest and anonymous pull availability,
+then configure that exact reference in Hypercloud. No image was published or
+configured in a live environment by this change.
+
+## Migration job acknowledgment and explicit adoption
+
+The approved 2026-11-01 disposable deployment created its migration Job but
+stopped before `jobs.run`: the native etag contained `/`, while Hypervibe accepted
+only a URL-safe alphabet. The [Job contract](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs)
+defines an opaque string fingerprint. A real transport regression using the recorded
+nonsecret token failed before the correction and passes with byte-preserving
+round-trip. A separate interrupted-create test failed because the journal retained
+only intent after receiving a trackable operation. The create operation name is now
+saved before polling; restart observes that operation and checks its returned UID
+against the ready job before any execution. Lost create replies remain unresolved.
+
+For historical intent-only records, the existing `hosting-prepared-bindings` plan
+can offer **explicit adoption**, not inferred creation acknowledgment. This is
+implemented only for local GCP holding preparations; AWS ECS, Azure Container Apps,
+DigitalOcean, Fly, Railway and Vercel do not declare this optional migration-job
+recovery. Their existing release paths are unchanged. The reviewed metadata action
+names the prior attempt, exact native job name, UID and etag. Native reads must
+verify the candidate image, command hash, runtime account, original generation,
+readiness and zero execution history. The action changes only local ownership
+metadata, preserves the uncertain attempt and pending release, and requires exact
+confirmation. Changed IDs, fingerprints, execution history, unavailable reads or
+concurrent local changes block it. Full runtime configuration is independently
+checked again by the subsequent separately reviewed deployment before the only run.
+A name match alone grants nothing. An uncertain execution can never use this path.
+
+The actual SQLite/plan/apply regression first failed to offer that metadata stage;
+it now covers missing confirmation, adoption without cloud writes, and continuation
+without another create. Additional drift cases exercise identity replacement,
+version change, execution, absence and runtime-account changes. Two independently
+constructed counterexamples also demonstrated execution of extra tasks or a changed
+working directory; verification now rejects both before `jobs.run`. The independent
+[container contract](https://docs.cloud.google.com/run/docs/reference/rest/v2/Container)
+and Job task-count contract define these executable inputs. These are offline
+regressions. The approved live metadata adoption and single migration execution
+succeeded on 2026-11-01; seeding and application rollout are still pending.
+The first live recovery review additionally returned `latestCreatedExecution: {}`
+with omitted zero `executionCount`. The SQLite boundary reproduced its rejection
+before accepting that empty message. A nonempty execution reference still blocks,
+and an independently empty native execution inventory remains required. The
+holding resources were verified; the recovery review made no provider changes.
+
+## Native execution readback
+
+The same disposable migration completed once, but Hypervibe rejected its success.
+Two assumptions were false in recorded native responses: `Execution.job` is a short
+ID, and v2 Execution/Task omit the Cloud SQL mount exposed in the parent Job. The
+same v1 Execution retains `run.googleapis.com/cloudsql-instances`. Its UID matched
+the v2 execution, namespace matched the verified project number, and owner UID
+matched the retained Job. This is live read-only evidence; the successful migration
+alone does not establish completed deployment or backup/restore support.
+
+The [Execution](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs.executions)
+and [Task](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs.executions.tasks)
+contracts describe parent names without promising fully qualified paths. Shared
+provider helpers accept a short parent only alongside the exact full child path.
+Task observations can omit UID; task verification instead requires the full path
+under the already UID-verified execution, exact task index and successful exit.
+Cleanup still verifies the separate Job/Execution UIDs, exact names and etags.
+
+When v2 omits the single reviewed Cloud SQL mount, the release verifier reads the
+[same v1 execution](https://docs.cloud.google.com/run/docs/reference/rest/v1/namespaces.executions/get).
+It checks the UID, project number, owner Job UID and exact instance set using the
+[documented annotation](https://docs.cloud.google.com/run/docs/reference/rpc/google.cloud.run.v1#executiontemplatespec)
+before normalizing that one mount. Other missing mounts, changed identities,
+permission failures or conflicting attachments remain unknown/fail closed. It does
+not infer past configuration from the current mutable Job. Immediate completion,
+acknowledged-operation continuation and later prepared-hosting observation use the
+same verifier; no repeated `jobs.run` is needed to recognize an existing success.
+
+Four reconstructed transport regressions first failed for short parents across
+release/restart, observation and recovery. The Cloud SQL execution regression then
+failed after an acknowledged run; wrong UID, namespace, owner, instance and denied
+reads remain rejected. Existing ordinary cron coverage also caught a task-count
+regression: scheduled PATCH preserves its prior writable execution settings, while
+migration verification requires one task. The correction validates the retained
+pre-write cron configuration. These checks stay in ordinary `npm test`, including
+emitted GitHub/portable programs. Existing generated release programs already use
+full execution paths and do not interpret the short parent field; hosted prepared
+migration support is not expanded. Other six hosting providers are unchanged.
+The focused provider checks passed (233 cases), and the normal TypeScript check
+passed. Saved RED/GREEN logs are in the disposable walkthrough review directory;
+CI remains required for the committed change.
+Required acceptance is declared in both desired spec and committed workflow;
+that declaration does not prove live branch-protection enforcement.
+
+## Local inline configuration custody
+
+The local operator first-release path also accepts managed runtime inputs through
+the encrypted plan boundary. Its expected configuration digest can therefore be
+an offline verifier for a guessed inline secret. Unlike hosted reference-only
+digests, local first-release digests and direct attempt/completion journals remain
+in authoritative local recovery state. Repository export retains native resource
+identities and pending workload names but omits those private fields. Repository
+replay preserves the local journals and cannot supply replacement recovery
+authority. Shared command output redacts configuration digests and the enclosing
+binding fingerprints before either MCP or CLI rendering.
+
+Five actual file-export/import and shared command-boundary tests failed before
+this correction; the focused 63-test group passes afterward, including existing
+hosted reference-only round trips. The independent requirement is the existing
+architecture rule keeping secret acceptance verifiers local. The counterexample
+uses a digest of a four-digit synthetic value; removing plaintext alone did not
+prevent an offline guess check. These are local custody tests, not cloud delivery
+or native first-deployment evidence.
+
+
+## Guarded local and hosted GCP direct first release
+
+A local holding receipt is loaded from its accepted SQLite installation journal,
+then checked against the exact current application/environment and native resource
+lifetimes. Its shared descriptor contains preparation facts only. It creates no
+hosted deployment connection, token exchange permission, CI authority or release
+artifact. Hosted preparation retains its independent connection/source checks.
+
+The ordinary saved-plan executor now passes a durable direct-release control
+through bootstrap and orchestration. Only a current confirmed `service:<name>`
+action can create its exact attempt, immediately before PATCH. Definite rejection
+needs a fresh plan naming that rejected attempt. Attempted/uncertain writes cannot
+be replayed. Fresh native image, final principal, original service UID, complete
+runtime configuration and converged revision/generation establish completion;
+SQLite retires only that workload in the same compare-and-swap as its binding.
+A lost acknowledgment can be reconciled through a read-only metadata plan without
+resupplying delegated secrets. That recovery preserves the prior reviewed inputs
+for remaining workloads. A completed image-selector-only diff becomes noop only
+with the same exact freshly verified native evidence; unrelated drift stays an
+update.
+
+First-release review and execution share the existing bootstrap runtime-input
+projection, including database/cache values, service aliases, queues and storage.
+Generated values are stable and are re-derived at apply; delegated values remain
+frozen in the existing encrypted saved plan. Only the reviewed candidate revision
+receives these values. The coordinator omits its preliminary environment-variable
+write for this guarded transition. Follow-up managed-secret actions independently
+verify all exact completed revisions and live value hashes, then record acceptance
+without a redundant provider write. Native secret references remain immutable and
+version-bound; their values are never materialized by this resolver.
+
+Observed RED counterexamples included a missing durable attempt permitting PATCH,
+a replaced original holding revision, raw-spec configuration digests rejecting
+resolved secret/component inputs, release metadata corrupting a runtime-identity
+action's authority, the legacy preparation flag blocking a verified local handoff,
+pre-sync trying to configure the holding image, redundant post-release secret
+writes, and lost-acknowledgment continuation attempting the already completed image.
+The actual SQLite/PlanService/executePlanApply regression now covers metadata,
+runtime binding, both web/worker first revisions, missing confirmation, encrypted
+input freezing, stable generation, native recovery without resubmitted input and
+one PATCH per workload. A two-observation race regression reproduced a generated value disappearing after its first verification and triggering two extra secret PATCHes; acceptance now blocks with zero additional writes. The integrated six-suite group passes 86 tests, and the adjacent plan/secret/custody/rollback checks pass (the legacy bootstrap prerequisite-order regression was retained and corrected). Native transport responses are reconstructed from the
+published Cloud Run Service contract; they are not live compatibility evidence.
+The existing hosted transport suite separately covers its authority path, while
+AWS and other undeclared prepared capabilities remain outside this change.
+
+
+## ECS ordinary first-release boundary
+
+ECS does not declare the optional installer-prepared handoff. Its existing hosted
+installation supplies separate task, execution and infrastructure roles, while
+ordinary apply creates the Express service and managed CI releases the application.
+The execution role is used by ECS; the bootstrap has no task role, application
+values, native secret references, environment files, additional containers or
+mounts. An existing local-key connection keeps its separate legacy behavior.
+
+The challenged assumption was that an immutable Secrets Manager reference could
+safely be configured before the application image. AWS documents that the value
+is injected when that container starts. The real SDK create regression first
+failed three assertions: the generic bootstrap received a native reference, an
+inline application value and the final task role. Executed generated-release
+regressions then showed missing final references/command/role, accepted native
+replacement and missing final reference. Additional RED checks covered unexpected
+mounts/volumes and final environment/command drift.
+
+Installed runtime inspection and release enrollment admit only the exact owned,
+lifetime-pinned secret-free bootstrap for the temporary missing task-role case.
+Reapplying it is read-only and remains pending an application release. Declared
+hosted runtime secret slots need immutable Secrets Manager destinations; inline
+credential updates are unsupported. The first release adds the reviewed references,
+final task role, command and configuration with the registry-returned image digest,
+then verifies native identity and final configuration. Existing runtime identities
+are preserved, and an uncertain create is never adopted or replayed by name.
+
+Only immutable references and identities enter generated workflow declarations.
+Nonsecret environment values come from the exact workflow source already verified
+by the release broker, in process memory. A real SQLite/managed-target regression
+first demonstrated environment-value changes rewriting workflow locks; it now
+keeps those locks stable. The default GCP/Azure broker program bytes remain equal
+to source `584342e`; ECS alone opts into retaining the verified source during the
+release. Its provider renderer revision is 2, requiring normal workflow review.
+
+Independent contracts: [ECS secret injection](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/secrets-envvar-secrets-manager.html),
+[Express creation](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_CreateExpressGatewayService.html),
+[Express update](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_UpdateExpressGatewayService.html).
+These regressions use reconstructed serialized AWS responses and execute emitted
+JavaScript. They do not establish a live AWS first deployment, successful runtime
+secret retrieval, or hosted browser compatibility.
+
+### Reference acceptance after application release
+
+A freshly observed workload may declare `runtimeSecretReferenceActivation:
+application-release` only after the provider verifies its exact bound identity,
+lifetime, installation ownership and runtime roles. This is sequencing evidence,
+not secret configuration evidence. For ECS it additionally verifies either the
+strict secret-free bootstrap or the installed final task role. Missing or
+unknown native proof blocks observation. Native version equality still comes
+only from independently read task-definition references.
+
+The named hosting matrix above remains exhaustive: installed ECS uses this
+mode; Cloud Run and Azure retain their separately verified prepared/direct
+release mechanisms; DigitalOcean, Fly, Railway and Vercel do not declare it.
+Existing local-key ECS behavior is unchanged. Shared planning uses this native
+observation contract without branching on a provider name.
+
+Reference acceptance uses the existing post-release dependency mechanism. It
+does not block the infrastructure-applied marker needed by the first CI run,
+but it depends on the exact managed release and then performs read-only native
+verification. The initial CI binding stage defers reference acceptance until
+replanning. The mode is never persisted as accepted-reference evidence. A stale
+plan, changed ownership, missing reference or unsupported release authority
+cannot authorize an acceptance or a separate reference write.
+
+An initial CI identity stage omits secret acceptance actions. Its exact service
+create retains the reviewed immutable `creationSecretReferences`; apply compares
+them with current desired state and requires every exact confirmed create. Any
+already-bound service must already match. This retains existing create-only
+authority without authorizing later reference writes or inventing acceptance.
+ECS and Cloud Run can use their existing conditional creation; Azure does not
+claim this contract and keeps its prepared lifecycle.
+
+Observed lifecycle evidence: the actual SQLite/PlanService/executePlanApply
+fixture first failed because the release-activation observation was absent. A
+second initial-CI case failed because the filtered identity stage had discarded
+its reference authority. Both pass after the fixes. The composed application
+cycle now orders marker, emitted AWS exact-image release and read-only reference
+acceptance, using one reconstructed AWS SDK transport. Separate tests construct
+the real managed marker/release actions. GitHub lifecycle responses in the
+composed execution fixture are explicitly synthetic; native GitHub provenance
+has separate existing contract tests. Denied release, lost native release ACK,
+replanning, replaced lifetimes, denied reads, missing references, altered mode
+and missing/mismatched creation authority retain unaccepted references.
+
+The focused AWS/application/shared group passes 404 tests across 27 files, and
+TypeScript checking passes. These tests are in ordinary Vitest discovery; the
+committed acceptance workflow runs `npm test`, and desired repository policy
+requires `Hypervibe / acceptance`. Live branch protection was not inspected by
+this change. No live ECS deployment was performed.
+
+**Shared CI recovery:** the original GitHub dispatch path could repeat a release
+after losing its acknowledgment, especially with `forceRelease`. The separate
+[managed dispatch recovery change](managed-release-dispatch.md) now retains
+intent before the request, recovers an exact run without dispatching again, and
+requires actual v4 release proof before dependent acceptance. These are offline
+regressions; live first-release walkthrough evidence remains a separate gate.
+
+Independent review found that task `entryPoint` and `healthCheck` overrides could
+survive the bootstrap image replacement and execute with final application
+authority. AWS documents both fields as executable container configuration in
+[ContainerDefinition](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_ContainerDefinition.html).
+Four emitted-native cases failed before restriction (unsafe bootstrap and final
+readback for both fields). Ten additional initial-bootstrap cases failed for
+user, working directory, privilege, Linux capabilities, hosts, system controls,
+security options, limits, credential specifications and FireLens configuration.
+Initial bootstrap validation now rejects those unreviewed inherited overrides;
+empty lists and false native boolean defaults remain allowed. This does not
+remove reviewed settings from ordinary existing local-key workloads. Final
+installed release verification independently rejects executable entry-point or
+health-command drift. Shared CI recovery is documented separately above.
+
+
+The legacy emitter compatibility check caught an additional regression: installed
+ECS changes leaked an extra internal return field and blank lines into the
+local-key renderer. Its frozen main-branch SHA-256 failed before the correction;
+the legacy bytes are now restored exactly without updating the fixture hash.
+The provider revision assertion separately freezes the old ECS revision 1
+semantic contract and requires review of revision 2. The focused legacy and
+emitted ECS task-definition suites pass 31 checks; this is offline compatibility
+evidence, not a live AWS deployment claim.
+
+
+### Secret acceptance after an approved release continuation
+
+The native first deployment on 2026-11-01 verified both application revisions and
+catalog seeding, but its first secret-reference acceptance action then blocked.
+The original migration attempt correctly retained its original plan ID through
+reviewed recovery, while the secret consumer incorrectly required the current
+plan ID. Native readiness returned HTTP 200; an independent read-only SQL query
+confirmed 81 migrations and two catalog rows. These establish workload readiness,
+not completion of the blocked acceptance actions or the all-cloud walkthroughs.
+
+The challenged assumption is that a completed first release always began in the
+same plan that finishes secret acceptance. The explicit partial-installation and
+restart requirement demands retaining original attempt identity. A real SQLite,
+planner/apply and serialized-client regression reproduced successful web/worker
+rollout followed by that exact blocked action after reviewed job adoption. It
+failed before the fix and passed afterward with exactly one migration execution
+and one update per service.
+
+Both native-reference and generated/delegated-value acceptance use the same
+release-authority check. It now admits the exact reviewed continuation attempt
+and compares the complete target review using the release controller's existing
+projection, including configuration digest and native resource lifetime. Missing
+or foreign continuation IDs, changed configuration and changed resource UID still
+block. Fresh native revision and secret-reference/value observations remain
+required; the marker grants no secret write authority. Original immutable intent
+and provider receipts are preserved. Completed-service noops retain their existing
+native revalidation path. The local-preparation scope and named provider matrix
+are unchanged; no new AWS or Azure native acceptance is claimed.
+
+The focused application/reference checks passed 42 tests. Shared release-authority
+and custody checks, TypeScript checking and normal acceptance are tracked in the
+PR. All regressions run through ordinary `npm test`. The previously approved live
+release subsequently completed through a fresh, supported plan: workloads and
+native references were already verified noops, and only two local generated-secret
+acceptance records remained. That apply made no provider writes or repeated tasks.
+
+### Service evidence during backup preparation
+
+The next live backup review on 2026-11-01 found complete Cloud Run service reads,
+including all six pinned references in both running workloads, alongside unknown
+archive-storage observation. All 76 recorded HTTP reads succeeded; no writes ran.
+The secret planner nevertheless rejected every reference because it assumed the
+aggregate `partial` flag meant service evidence was incomplete. This contradicts
+the architecture's per-capability observation contract. Storage uncertainty must
+still block storage decisions; it does not erase independently complete service
+evidence.
+
+Planning and apply now share the service-completeness predicate already used for
+delegated-secret absence. Explicit `services=unknown` wins over `partial=false`;
+legacy observations require `partial=false`. Matching references, rotation review,
+immutable conflicts, conditional first creation, release activation and accepted
+credential checks use this distinction. Identity-only evidence never proves native
+reference contents; existing acknowledgement-only credential semantics remain
+separate. Duplicate workloads, missing key inventories and lifecycle conflicts
+still block.
+
+The reconstructed native-observation counterexample failed before the runtime
+change, including at the persisted SQLite apply boundary, and passed afterward.
+Shared tests plus the real serialized Cloud Run, ECS and Azure reference suites
+passed. These providers already report per-category completeness; no provider API
+contract, ownership rule or mutation authority changed. Regressions run through
+ordinary `npm test`, selected by `vitest.config.ts` and the committed acceptance
+workflow and desired required check. That is not proof of live branch protection
+or completion of any new-customer cloud walkthrough. Native backup creation and
+restore remain separate acceptance requirements.
+
+### No-input operator commands
+
+GitHub acceptance run 41279091648 failed at the operator command's stdin error
+handler during a candidate-build test. The previous helper opened and wrote an
+empty pipe even for Git/tar commands requiring no input. The assumption that this
+extra write cannot fail is unsafe when a fast child exits first. The exact child
+and native errno were intentionally absent from the secret-safe diagnostic, so
+this race is a hypothesis for that CI incident, not a proven root cause.
+
+Following Node's [stdio contract](https://nodejs.org/api/child_process.html#optionsstdio),
+no-input commands now receive the null input device. Nonempty input keeps its pipe
+and error handling. A real-child descriptor regression failed before this change
+and passed afterward; supplied-input digest and nonzero-exit checks passed too.
+The existing packed-helper/candidate checks passed without publication. These
+checks establish the command boundary, not a new Docker or cloud deployment.
+
+### GCS project selection with local authentication
+
+The corrected backup review then reached archive planning and correctly refused
+an unknown bucket inventory. A read-only diagnostic found the GCS connection was
+verified, but context resolution failed before any Storage request because ADC
+could not discover a machine-wide project. The local allocation retained an exact
+Cloud Run project and a legacy `{authMode: default}` GCS connection. The adapter
+also discarded an explicit project ID on reused default-auth Cloud Run connections.
+
+The challenged assumption was that discovering authentication also selects the
+customer's resource project. Google's [ADC documentation](https://cloud.google.com/docs/authentication/application-default-credentials)
+describes credential discovery, while [bucket listing](https://cloud.google.com/storage/docs/json_api/v1/buckets/list)
+requires a separate `project` parameter. The counterexample is valid ADC plus a
+retained project, with no machine default or a different machine default.
+
+GCS now preserves explicit default-auth connection scope and otherwise resolves
+the reviewed storage context or same-provider Cloud Run binding before falling
+back to legacy discovery. An explicitly separate storage project is preserved.
+Already selected, service-account and workload-identity project conflicts still
+block. The shared resolver serves observation, creation, runtime wiring, transfer
+and deletion; no credential record, global CLI configuration or cloud resource is
+edited by this repair. Provider inventory and ownership checks remain required.
+
+Four actual-adapter regressions failed before the fix and passed afterward,
+checking serialized bucket-list targets and cross-project rejection. The GCS
+storage, runtime identity/access, recovery-stream and repository-scope suites
+passed 37 checks; TypeScript passed. Existing S3 selects its native STS account
+and Azure Blob verifies its configured subscription; their contracts are unchanged.
+These ordinary-CI checks are reconstructed transport evidence, not proof that
+backup creation or isolated restore has succeeded live.
+
+
+### Storage connections retain the selected environment
+
+The approved native backup-bucket attempt on 2026-11-01 stopped before adapter
+construction: planning found the verified `connect-test` connection, but apply
+omitted the environment and reported no GCS connection. The assumption that
+repository scope alone selects the same connection as planning is false. The
+independent requirement is exact app/environment authority; the counterexample
+is two environment-scoped accounts beside a different global fallback.
+
+Storage creation, recovery clear/finalize, runtime variables and permissions,
+backup health, migration source/target and retained-target cleanup now carry
+their exact environment through the existing factory. No credentials, trust,
+resource bindings or fallback precedence are rewritten. Source migration access
+uses the source environment; target creation and cleanup use the destination.
+
+The S3, GCS and Azure Blob lifecycle tests now exercise real SQLite/encrypted
+connection selection rather than stubbing the factory. Each failed before the
+fix and passed afterward, including isolated names and noop replanning. Native
+runtime transport tests also use an environment-scoped cloud connection. Recovery
+and streamed migration regressions failed before the change and passed afterward;
+target cleanup preserves source storage. The focused ten-suite check passed 126
+tests; TypeScript passed. These normal `npm test` regressions exercise synthetic
+provider boundaries, not live AWS/Azure creation or backup/restore completion.
+The failed live bucket attempt made no provider write; a fresh supported plan is
+required before continuing the existing exact bucket approval.
+
+### First browser approval deadline
+
+The native hosted request log records HTTP 201 for `POST /api/v1/pairings` after
+10.455 seconds, beyond the previous ten-second client deadline. Read-only app
+metadata confirms one unapproved request, which subsequently expired. This is
+independent evidence that a successful first request can outlast that deadline;
+Cloud Run cold start is only a possible cause of the delay.
+
+Initial pairing now allows one bounded thirty-second request. Explicit caller
+deadlines remain honored, polling keeps its existing budget, and no automatic
+retry is added. A real local HTTP server delaying the response 10.6 seconds
+failed under the old default and passed after the fix; the shorter-deadline test
+still fails safely after exactly one POST. The focused pairing/HTTP/setup checks
+passed 57 tests. Payloads are reconstructed, not native response recordings.
+A lost response still grants no authority without browser approval and cannot
+be recovered by reading secret codes from the database.
+
+### Native backup secret resource names
+
+The approved backup secret create on 2026-11-01 committed, but its ownership
+verification assumed Secret Manager echoed the requested project ID. Independent
+read-only metadata returned a numeric project name; Resource Manager verified
+that number belonged to the selected project. The exact creation labels matched
+the retained intent and the version inventory was empty. This is a concrete
+counterexample to string equality with the request path, not evidence of a lost
+write or permission failure. The earlier incomplete service-account create has
+no proven common cause.
+
+Secret Manager's [metadata endpoint](https://docs.cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/get)
+returns a resource, and Google's [Cloud Run secret reference guidance](https://docs.cloud.google.com/run/docs/configuring/services/secrets)
+uses its project number. Recovery now accepts only the exact ID or number from
+the independently verified project, with unchanged secret names and ownership
+labels. Version inventory, uncertain-write recovery, metadata checks, worker
+references and teardown use the same interpretation. Existing recorded aliases
+remain intact. Another project's number and duplicate version aliases fail;
+unknown outcomes still cannot authorize a second create or secret version.
+
+The real REST transport fixture now returns the independently observed numeric
+shape rather than echoing the request's project ID. Before the runtime change,
+33 checks failed and 21 passed. Afterward the focused provider/runtime checks
+passed, including read-only recovery of the original create, lost version
+acknowledgment, immutable job references and legacy-reference cleanup; TypeScript
+passed. These reconstructed transports run in ordinary `npm test`. They establish
+the interpretation fix, not a completed live backup, restore or all-cloud
+walkthrough. Native continuation must use the retained attempt through a fresh
+Hypervibe recovery plan.
+
+### Subsequent deployments retain scoped installation authority
+
+The approved image update on 2026-11-01 exposed a separate lifecycle mismatch:
+planning verified the existing GCP workloads, but apply required the legacy
+project-wide preparation marker after both first releases had completed. Native
+readback confirmed the original service identities, revisions and migration job
+were unchanged. The retained installation receipt and completed release records
+were still present; clearing `pendingFirstRelease` had not revoked installation
+authority.
+
+An ordinary update to a completed workload must verify that retained installation
+through the shared native prepared-hosting inspection. It must preserve the exact
+scope, receipt and workload identities, reject unresolved attempts, and retain
+separate first-release authorization for any pending workload. This verification
+must not create a legacy preparation marker, grant additional permissions or
+reset first-release state. Failed native verification requires inspection and a
+fresh plan, rather than instructions to repeat broad cloud setup.
+
+A saved-plan/apply regression completes both first releases and then changes only
+the image. Before the correction, its second deployment reproduced the same
+legacy-preparation rejection with zero second-deployment writes. These provider
+transport fixtures are reconstructed; native completion of the approved update
+remains a separate acceptance step.
+
+After the correction, the native lifecycle suite passes both ordinary second
+updates and updates that run the unchanged migration command through the existing
+job before rollout, preserving runtime identities and immutable secret references.
+It also rejects unknown proof, missing/replaced bindings, changed scope/receipt
+and unresolved selected attempts; a completed selected service can update while
+its pending sibling remains unchanged. The focused lifecycle checks and adjacent
+bootstrap/image/provider suites pass (209 checks total), along with TypeScript.
+They remain in the normal `npm test` path; live rollout has not yet been retried.
+
+### Ownership labels survive later service updates
+
+The subsequent native attempt completed the web image update and normal migration,
+then stopped before deploying the worker. Readback confirmed the original web UID
+and new image, but its `hv-owner` and `hv-attempt` labels were gone. The worker
+still had its original labels, UID and image. The ordinary adapter sent a complete
+replacement label map containing only its general service labels; the synthetic
+transport had incorrectly retained the old map. Modeling the observed replacement
+semantics reproduced the successful-web/blocked-worker sequence before the fix.
+
+Service-level and revision-level labels must each preserve their existing values
+when ordinary deployments add metadata. The accepted installation identity is
+not recreated or discarded after a release. A repair for missing original
+ownership labels requires exact creation and current native identities, a retained
+acknowledgment for the successful Hypervibe update, the matching runtime identity
+and image, and non-conflicting current labels. Unknown or contradictory evidence
+must stop; an uncertain repair is reconciled by readback, without blind replay.
+
+Google's [Service contract](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services)
+defines a UID stable until deletion and an ETag for update conflicts. A supported
+repair uses the [PATCH update mask](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services/patch)
+for service labels only, preserving other labels and leaving the image, template,
+permissions and migration execution untouched. Provider reconciliation and native
+revision/traffic state still require readback; tests do not prove absence of
+provider side effects.
+
+An explicit `runtime-access` plan selects existing workloads and reaches only the
+registered runtime handlers. It must not refresh unrelated artifacts or operator
+registrations, run bootstrap, deploy application code, or overwrite unrelated
+bindings. Legacy internally generated runtime stages retain their own contract.
+The worker update is a separate subsequent plan after verified repair; the
+successful web image and migration are not replayed.
+
+The repair boundary initially failed with `runtime_identity_unknown` after an
+actual saved plan/apply recorded web success and worker blockage. The corrected
+SQLite/native-client lifecycle checks pass for labels-only repair, unchanged
+image/template/revisions/secret references, ETag conflicts, conflicting identity
+or acknowledgment, and read-only recovery after lost delivery. A later runtime
+change leaves that recovery unresolved. Adjacent runtime/preparation/release
+checks and TypeScript pass. These are reconstructed transport checks in normal
+`npm test`; they establish the request and persistence contract, while the live
+metadata repair and remaining worker rollout still require native verification.
+
+### Completed first releases remain historical
+
+The labels-only repair was subsequently verified live: the original labels
+returned while the web UID, image, revision and migration execution count stayed
+unchanged. The worker-only plan then exposed a separate read-side contradiction.
+An ordinary later web update omitted explicit revision scaling and execution
+environment fields. Its native identity and readiness remained valid, but the
+reader tried to validate its already completed first-release migration using the
+new template and the strict first-release configuration parser.
+
+A completed, nonpending first release is durable historical evidence. Validate
+its original attempt, receipt and native scope, keep it immutable, and observe
+the current service identity/readiness separately. Do not regenerate that history
+with a newer revision, or require an old execution to remain available forever:
+Google retains [at most 1,000 completed executions per job](https://docs.cloud.google.com/run/quotas)
+and automatically removes the oldest. Pending or uncertain first releases still
+require their exact original execution and configuration proof.
+
+Three saved-plan/apply regressions failed before this correction: a later
+ordinary template, an expired original execution, and a later revision using the
+same image. They now permit only the remaining worker update while preserving
+web, migration counts and original history. Changed execution identity is still
+rejected during uncertain recovery. The 50 lifecycle checks, 94 adjacent
+preparation/provider checks, 26 immutable-image planning checks and TypeScript
+pass in the normal test path. The corrected native worker rollout is still
+pending; reconstructed transport evidence is not a live completion claim.

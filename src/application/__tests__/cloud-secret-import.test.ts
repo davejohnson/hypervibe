@@ -116,6 +116,17 @@ function setup() {
 }
 
 describe('one-time project secret import', () => {
+  it('rejects direct destination keys before consuming a legacy retrieval or writing an env file', async () => {
+    const specPath = path.join(root, '.hypervibe/spec.json');
+    const spec = JSON.parse(readFileSync(specPath, 'utf8'));
+    spec.environments.staging.secretDestinations = { SG_SCRIPT_KEY: { destination: { provider: 'gcp-secret-manager', projectId: 'synthetic-project', projectNumber: '123456789012', secretId: 'staging-flow' } } };
+    writeFileSync(specPath, JSON.stringify(spec)); git('add', '.hypervibe/spec.json'); git('commit', '-m', 'direct destination');
+    const { importer, fetchImpl } = setup();
+    await importer.run({ action: 'start', requestId, env: 'staging' });
+    await expect(importer.run({ action: 'receive', requestId, env: 'staging', confirm: true })).rejects.toMatchObject({ code: 'VALIDATION' });
+    expect(fetchImpl.mock.calls.map(([, init]) => init?.method)).toEqual(['GET']);
+    expect(() => readFileSync(path.join(root, '.env.staging'))).toThrow();
+  });
   it('records receipt and import times explicitly without replacing them on repeat reads', async () => {
     const f = setup();
     await f.importer.run({ action: 'start', requestId, env: 'staging' });

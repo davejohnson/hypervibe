@@ -162,6 +162,16 @@ function rolloutServices(action: PlanAction, receipt: ActionReceipt): string[] {
   if (dataService) services.add(dataService);
   if (metadataService) services.add(metadataService);
   if (action.resource.kind === 'service') services.add(action.resource.name);
+  const explicit = data?.runtimeRolloutServices;
+  const authorized = new Set(stringArray(metadata?.services));
+  if (metadataService) authorized.add(metadataService);
+  if (action.resource.kind === 'service') authorized.add(action.resource.name);
+  // A shared action can skip already-matching services. Narrow only to a
+  // nonempty, well-formed subset of its reviewed destinations; malformed or
+  // foreign receipt metadata retains the conservative existing behavior.
+  if (Array.isArray(explicit) && explicit.length > 0
+    && explicit.every(name => typeof name === 'string' && authorized.has(name))
+    && new Set(explicit).size === explicit.length) return [...explicit].sort();
   return [...services].sort();
 }
 

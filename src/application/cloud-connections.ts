@@ -39,7 +39,7 @@ const state = z.object({
   deviceCode: z.string().optional(), userCode: z.string().optional(), verificationUrl: z.string().optional(),
   sourceBranch: sourceBranchSchema.optional(),
   token: z.string().optional(), project: z.object({ id: identifier, name: z.string().max(200) }).optional(),
-  preview: z.object({ id: z.string().uuid(), digest: z.string(), expiresAt: z.string().datetime() }).optional(),
+  preview: z.object({ id: z.string().guid(), digest: z.string(), expiresAt: z.string().datetime() }).optional(),
 }).strict();
 type State = z.infer<typeof state>;
 type Provider = z.infer<typeof provider>;

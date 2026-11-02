@@ -32,6 +32,7 @@ import '../adapters/providers/cloudflare/cloudflare.adapter.js';
 import '../adapters/providers/sendgrid/sendgrid.adapter.js';
 import '../adapters/providers/twilio/twilio.adapter.js';
 import '../adapters/providers/github/github.adapter.js';
+import '../adapters/providers/github/github-operator-app.js';
 import '../adapters/providers/gitlab/gitlab.adapter.js';
 import '../adapters/providers/openai/openai.adapter.js';
 import '../adapters/providers/database/database.adapter.js';
@@ -52,3 +53,8 @@ import { registerProviderImport } from './import-provider.js';
 import { importRailwayProvider } from './provider-imports/railway.js';
 
 registerProviderImport('railway', importRailwayProvider);
+
+// Operator browser applications have separate registration authority.
+import '../adapters/providers/entra/entra-operator-application.js';
+import '../adapters/providers/gcp/gcp-operator-recaptcha.js';
+import '../adapters/providers/gcp/gcp-operator-oauth.js';

@@ -99,6 +99,7 @@ tar -xzf "$NODE_ARCHIVE" -C "$WORK_DIR"
 
 echo "Installing production server dependencies with bundled Node.js"
 cp "$ROOT/package.json" "$ROOT/package-lock.json" "$SERVER_STAGE/"
+cp -R "$ROOT/vendor" "$SERVER_STAGE/vendor"
 PATH="$NODE_DIR/bin:$PATH" "$NODE_DIR/bin/npm" ci \
     --omit=dev \
     --ignore-scripts=false \
@@ -115,6 +116,7 @@ cp -R "$ROOT/skills" "$RESOURCES/server/skills"
 cp -R "$ROOT/templates" "$RESOURCES/server/templates"
 cp -R "$SERVER_STAGE/node_modules" "$RESOURCES/server/node_modules"
 cp "$SERVER_STAGE/package.json" "$SERVER_STAGE/package-lock.json" "$RESOURCES/server/"
+cp -R "$SERVER_STAGE/vendor" "$RESOURCES/server/vendor"
 cp "$ROOT/LICENSE" "$RESOURCES/licenses/Hypervibe-LICENSE"
 cp "$MACOS_ROOT/Distribution/Info.plist" "$CONTENTS/Info.plist"
 

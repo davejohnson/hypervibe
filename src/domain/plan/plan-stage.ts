@@ -2,6 +2,13 @@ import type { PlanAction } from './plan.types.js';
 import { isProviderNativeDeploySourceAction } from '../services/provider-native-deploy-source.service.js';
 import { resolvePlanActionAuthority } from './action-authority.js';
 
+/** Queues must exist before an identity can receive exact-resource permission. */
+export function isRuntimeQueuePrerequisite(action: PlanAction): boolean {
+  return ['create', 'update'].includes(action.type) && action.verified
+    && !action.metadata?.blockedReason && action.metadata?.operation === 'queueEnsure'
+    && resolvePlanActionAuthority(action)?.capability === 'queue.mutate';
+}
+
 /** Existing accepted CI contracts may receive credentials before recovery runs. */
 export function isManagedCiCredentialAction(action: PlanAction): boolean {
   if (!['create', 'update'].includes(action.type) || !action.verified

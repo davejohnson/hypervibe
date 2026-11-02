@@ -8,6 +8,127 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+`gcp-iam-role-get.test.ts` checks actual serialized IAM role reads against Google's
+GET contract, with the same strict transport used by CI preparation, deployment
+and saved-plan retry tests. The list-only `view` option is rejected; only HTTP 404
+means absence. See [official sources, native counterexample and limits](../../docs/gcp-github-operator-identity.md#exact-iam-role-reads).
+Fixtures reconstruct response behavior and do not constitute a full IAM schema
+validator or live federation test.
+
+`gcp-iam-policy-get.test.ts` distinguishes service-account POST/query options from
+Resource Manager POST/body options through the real shared client and bootstrap
+wrapper. Runtime, installed-runtime and backup fixtures enforce the same IAM
+request shape. See [sources, observed regressions and native limits](../../docs/gcp-github-operator-identity.md#service-account-policy-request-options).
+
+Native execution parent names and missing Cloud SQL mounts are covered through
+actual serialized clients, including acknowledged-operation recovery and the
+UID-correlated v1 execution read. See [native evidence and limits](../../docs/connect-cloud-prepared-hosting.md#native-execution-readback).
+
+Prepared Cloud Run migration regressions include the recorded native opaque etag,
+create-operation restart recovery, and separately confirmed intent-only job adoption
+through the actual local SQLite/plan/apply boundary. See the [evidence and provider
+limits](../../docs/connect-cloud-prepared-hosting.md#migration-job-acknowledgment-and-explicit-adoption).
+
+Incomplete database creation uses the optional capability reviewed in
+`database-provisioning-provider-matrix.json`. Normal acceptance checks the entire
+database registry, reconstructed Cloud SQL operation transport, and real SQLite
+plan/apply recovery, including missing confirmation, encrypted persistence,
+native lifetime drift, lost acknowledgments and existing database preservation.
+See [the observed counterexample and RED/GREEN record](../../docs/database-provisioning-recovery.md).
+Only Cloud SQL implements completion. Synthetic SQL proof in the lifecycle suite
+and separate PostgreSQL wire tests remain distinct from the approved native
+completion and actual SQL authentication recorded in the linked evidence.
+
+`service-instance-bounds.test.ts` pins all seven hosting providers against the
+[service capacity contract](../../docs/service-instance-bounds.md). Cloud Run
+uses native service-level automatic limits; six other adapters explicitly reject
+the field. Normal CI also executes saved-plan confirmation, emitted GitHub and
+portable releases, prepared first release, and unchanged legacy renderer bytes.
+Synthetic serialized transport establishes offline behavior, not live scaling
+or a spending ceiling.
+
+`gcp-holding-service-scaling.test.ts` retains a sanitized native holding response
+with service maximum 20 and revision maximum 1. Application/SQLite recovery and
+executed generated-release tests exercise the same interpretation through actual
+clients. See the [observed counterexample and RED/GREEN record](../../docs/local-holding-preparation.md#observed-service-scaling-during-holding-recovery).
+
+The [local registry prerequisite](../../docs/local-artifact-registry.md) and
+[operator GitHub identity](../../docs/gcp-github-operator-identity.md) extend that
+same normal gate. Real serialized provider clients and the application/SQLite
+lineage cover separate public/private repositories, exact native lifetimes,
+uncertain acknowledgements and separately reviewed CI trust removal. Those
+contracts do not establish native publication or a live token exchange.
+
+`gcp-local-project-allocation.test.ts` and `gcp-local-project-journal.test.ts`
+exercise the reviewed local empty-project capability through reconstructed CRM v3
+transport. The latter composes the shared lifecycle with real SQLite to distinguish
+historical native success from current permission/lifetime drift, preserve exact
+operation evidence and prevent a second POST after restart. Local command and
+provider-roster tests run in ordinary `npm test` too. See the
+[contract and observed RED/GREEN evidence](../../docs/local-cloud-scope-preparation.md);
+these are offline checks, not live GCP allocation or all-cloud onboarding proof.
+
+`gcp-project-operation.test.ts` pins the unchanged official CRM v3
+[`projects.proto`](gcp/projects.proto), its source hash and an independently
+observed sanitized operation discriminator in [`gcp/source.json`](gcp/source.json).
+The real client consumes serialized HTTP responses using
+`type.googleapis.com/google.cloud.resourcemanager.v3.Project`; missing, malformed,
+wrong-resource/version and the formerly misspelled package remain rejected.
+This validates the specific protobuf package/message discriminator, not a full
+REST/protobuf schema. Hosted/local, SQLite and application recovery fixtures use
+that same official spelling. See [observed RED/GREEN evidence](../../docs/local-cloud-scope-preparation.md#gcp-operation-type-regression).
+
+`hosting-prepared-provider-roster.test.ts` pins the seven hosting providers against
+the [prepared hosting handoff](../../docs/connect-cloud-prepared-hosting.md).
+Shared receipt, repository replay and real SQLite plan/apply regressions run in normal
+Vitest discovery. Their synthetic native observations establish metadata authority and
+recovery boundaries, not cloud installation or first-release compatibility.
+
+Local Cloud Run first-release migration regressions exercise candidate task
+creation/execution, immutable execution readback, durable attempt progress,
+worker ordering, authorization revocation and restart recovery through the real
+SQLite/apply path. Generated execution readers run as emitted JavaScript in normal
+CI. [Evidence and remaining native gates](../../docs/connect-cloud-prepared-hosting.md#local-first-release-migrations)
+distinguish this operator path from unchanged hosted installer restrictions.
+
+`cloud-deployment-provider-roster.test.ts` pins every hosting provider against the
+[keyless deployment contract](../../docs/connect-cloud-deployment-contract.md).
+The shared deployment/install/session suites distinguish provision, release and runtime
+authority; emitted CI tests execute broker exchanges and native registry transports.
+All run through ordinary Vitest discovery in `npm test`. GCP native scoped installation
+and prepared first release now have [offline native evidence](../../docs/connect-cloud-gcp-deployment-evidence.md).
+Azure's reviewed namespace and prepared runtime handoff have separate offline native suites.
+GitLab broker authentication, AWS template publication
+and all three new-customer live walkthroughs remain explicit gates. Callback, renderer
+or registry presence does not establish a complete first deployment.
+
+Azure Connect Cloud preparation, federation, historical recovery, runtime readers and
+migration preservation are covered by `azure-cloud-installation.test.ts`,
+`azure-federated-auth.test.ts`, `azure-runtime-identities.test.ts` and the real
+Azure adapter reference suite. See [assumptions, official contracts, observed
+regressions and unresolved live gates](../../docs/connect-cloud-azure-evidence.md).
+`runtime-identity-provider-roster.test.ts` enforces the named hosting registry
+review; shared runtime-access tests exercise saved plans and SQLite recovery.
+The create-only probe tests are synthetic acceptance criteria, not evidence
+that Azure honors the proposed header. All run in the ordinary `npm test` gate.
+Azure's new reviewed namespace path retains native deployment acknowledgment and
+correlated creation operations; it does not claim atomic create-if-absent semantics.
+Prepared ACA first rollout keeps managed identities inaccessible to container code,
+and release enrollment verifies exact native resource lifetimes, scoped grants and
+configuration. These reconstructed contracts do not establish successful live onboarding.
+
+
+`secret-container-setup.test.ts` and the application/service suites with the same
+prefix enforce the [empty container setup contract](../../docs/secret-destination-delivery.md#empty-container-setup).
+The named matrix admits only GCP setup while preserving separate AWS/Azure
+delivery and runtime-reference capabilities. Independent Secret Manager and CRM
+contracts drive real synthetic REST requests; command tests use migrated SQLite
+and the real planner/executor. Initial regressions failed because the new scope
+fell through to ordinary deployment planning, discovery was absent, confirmation
+review omitted destination identities, and pre-create checks accepted changed
+local scope/source. The corrected tests run in normal `npm test`; no live
+provider call or credential value is involved.
+
 The [repository-variable contract](github/repository-variables/README.md) pins
 GitHub's numeric repository identity and Actions variable endpoints. The named
 CI-provider comparison explicitly leaves GitLab unsupported for this facet.
@@ -15,6 +136,7 @@ Normal acceptance exercises complete bounded inventory, serialized create/update
 acknowledgements, exact stale checks, explicit zero-write adoption, durable
 uncertain-outcome reconciliation, inspection and value-free command responses.
 These offline checks establish neither live permissions nor workflow execution.
+
 
 The [fresh database bootstrap review](../../docs/database-initialization-bootstrap.md)
 and `database-initialization-bootstrap-provider-matrix.json` cover all registered
@@ -182,6 +304,8 @@ API definitions.
 | Supabase v1 | Official OpenAPI commit `26585dd4a4d6db8910a595214c9f6e8fdd206768` | Organization response and project-create request validation through the adapter's HTTP transport; ID/slug distinction; negative project-response fixture validation |
 | Neon v2 | Official release OpenAPI snapshot, content hash in `source.json` | Real serialized project-create body/query validation; organization scope; negative input validation |
 | SendGrid v3 webhooks | Official OpenAPI commit `fb95a935c87b79f7f982ac34bd37adab1f697dbc` (selected operations) | Event Webhook exact-ID settings reads, signing PATCH serialization and unique URL discovery; Inbound Parse exact-hostname reads/PATCH requests, exact-ID policy reads, missing/null evidence and canonical P-256 key validation; shared signing/key lifecycle uses reconstructed transport and synthetic hosting observations |
+| SendGrid v3 API keys | Exact `tsg_api_keys_v3.json` at the same official commit, pinned separately as `sendgrid/api-keys.openapi.json` | Explicit send-only create requests, independent native direct-object key GET projection, private custody and exact-ID cleanup with no uncertain-create replay; see [operator SendGrid](../../docs/operator-sendgrid.md). Reconstructed creation/deletion/delivery responses are not live proof. |
+| SendGrid v3 Mail Send sandbox | Exact `tsg_mail_v3.json` at the same official commit, pinned separately as `sendgrid/mail.openapi.json` | Fixed sandbox request schema through real adapter/application/MCP/CLI; HTTP 200 and no-delivery semantics come separately from the official sandbox guide because generic OpenAPI omits sandbox success. Reconstructed responses only; see [runtime mail validation](../../docs/runtime-mail-validation.md). |
 | SendGrid v3 Email Logs | Exact `tsg_logs_v3.json` at the same official commit, pinned separately as `sendgrid/email-logs.openapi.json` | Full event-name union through the real adapter, safe search/timeline projection, strict account scope, request/body budgets and value-free failure metadata; see [Email Logs](sendgrid-email-logs.md). Separate bounded live account search and same-ID detail succeeded; this does not validate complete response schemas or certify other scopes/accounts. |
 
 Railway SDL is the complete lexicographically sorted official introspection
@@ -400,3 +524,29 @@ public health, and a subsequent noop plan. Customer production is not a
 destructive test fixture. Broader create/update/delete live certification stays
 in disposable accounts; the existing live harness's project/environment cleanup
 TODO remains a limitation, not a passing check.
+
+Connect Cloud scope preparation additionally runs
+`gcp-project-installation.test.ts` and `gcp-billing-installation.test.ts` in the
+ordinary Vitest gate. These use reconstructed Resource Manager/Billing REST
+responses, not captured live acceptance. Project creation has an independently
+reviewed continuation; existing billing verification is mutation-free. Versioned
+initial billing assignment requires a separately reviewed reserved-project scope:
+one exact transient-administrator write, no automatic replay after uncertainty, and
+an explicit warning that concurrent independently authorized association can be replaced.
+Unversioned plans retain the earlier blocker; inherited unlink permission on another
+account still invalidates a claim of atomic preservation. Cleanup tests
+reconstruct historical native resources and exact durable attempts, then exercise
+read-only recovery and explicit removal through the actual shared engine. The
+fixture's synthetic historical plan is not a runtime feature flag or a production
+bypass. See [scope evidence and remaining gaps](../../docs/connect-cloud-scope-preparation.md).
+
+`storage-runtime-access.contract.test.ts` covers all four storage and seven hosting
+providers. The native AWS/GCP/Azure transport suites and shared SQLite storage/queue
+lifecycle suites run in ordinary `npm test`; see [storage access evidence](../../docs/storage-runtime-access-evidence.md).
+These checks establish exact configured grant and recovery boundaries, not live
+application authorization or atomic exclusion of external IAM writers.
+
+`gcp-operator-origin-auth.test.ts` exercises the real GoogleAuth ADC loader and
+serialized origin/CAPTCHA transports. Four regressions preserve ADC and explicit
+SDK quota selection in reads and recovery; the diagnostic counterexample and
+coverage limits are recorded in [local authentication evidence](../../docs/gcp-local-default-auth.md#operator-origin-and-captcha-quota-propagation).

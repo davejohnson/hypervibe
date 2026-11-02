@@ -16,6 +16,7 @@ import { providerRegistry } from '../../registry/provider.registry.js';
 import { adapterFactory } from '../adapter.factory.js';
 import { executeBootstrap } from '../bootstrap.service.js';
 import { DeployOrchestrator } from '../deploy.orchestrator.js';
+import { CLOUD_PREPARE_PROFILES } from '../cloud-prepare.js';
 
 // Constructors only; no credentials or provider requests. Deferred deployment
 // allows reconfiguration of an existing workload and is not create-only proof.
@@ -24,7 +25,12 @@ const adapters: Record<string, IProviderAdapter> = {
   ecs: new EcsExpressAdapter(), 'azure-container-apps': new AzureContainerAppsAdapter(),
   digitalocean: new DigitalOceanAdapter(), vercel: new VercelAdapter(),
 };
-const unsupported = ['cloudrun', 'ecs', 'azure-container-apps', 'digitalocean', 'vercel'];
+// These admission expectations accompany the native create-vs-existing tests in
+// cloudrun-secret-references.test.ts and ecs-secret-references.test.ts. Cloud Run
+// POST service creation and ECS CreateExpressGatewayService refuse existing
+// workloads; ACA's current PUT path has no verified creation-only condition.
+const supported = ['railway', 'fly', 'cloudrun', 'ecs'];
+const unsupported = ['azure-container-apps', 'digitalocean', 'vercel'];
 
 beforeEach(() => {
   vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', 'true');
@@ -33,7 +39,14 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); SqliteAdapter.resetInstance(); });
 
 function fixture(provider: string, capabilities: ProviderCapabilities = adapters[provider].capabilities) {
-  const project = new ProjectRepository().create({ name: 'create-only-contract', defaultPlatform: provider });
+  const profile = CLOUD_PREPARE_PROFILES.cloudrun;
+  const project = new ProjectRepository().create({ name: 'create-only-contract', defaultPlatform: provider,
+    ...(provider === 'cloudrun' ? { policies: { cloudPreparation: { cloudrun: {
+      provider: 'cloudrun', version: profile.version, preparedAt: new Date().toISOString(),
+      gcpProjectId: 'native-project', deployServiceAccountEmail: 'deploy@native-project.iam.gserviceaccount.com',
+      requiredApis: profile.requiredApis, requiredRoles: profile.requiredRoles,
+    } } } } : {}),
+  });
   const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'staging',
     platformBindings: { provider, projectId: 'native-project', environmentId: 'native-environment', services: {} } });
   const service = new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: { workloadKind: 'web' }, envVarSpec: {} });
@@ -56,11 +69,29 @@ describe('creation-only hosting admission', () => {
     }
   });
 
-  it('accounts for every named hosting adapter and attests only the implemented Railway/Fly boundary', () => {
+  it('accounts for every named hosting adapter and admits only implemented creation-only boundaries', () => {
     expect(Object.keys(adapters).sort()).toEqual(providerRegistry.namesFor('hosting').sort());
     for (const [provider, adapter] of Object.entries(adapters)) {
-      expect(Boolean(adapter.capabilities.supportsCreateOnlyDeploy), provider).toBe(['railway', 'fly'].includes(provider));
+      expect(Boolean(adapter.capabilities.supportsCreateOnlyDeploy), provider).toBe(supported.includes(provider));
     }
+  });
+
+  it.each(['cloudrun', 'ecs'])('passes %s references only into the explicitly guarded creation payload', async provider => {
+    const f = fixture(provider);
+    const reference = provider === 'cloudrun'
+      ? { destination: { provider: 'gcp-secret-manager' as const, projectId: 'synthetic-project', projectNumber: '123456789012', secretId: 'api-token' }, version: '7' }
+      : { destination: { provider: 'aws-secrets' as const, accountId: '123456789012', region: 'us-east-1', secretArn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:api-token-AbCdEf' }, version: 'a'.repeat(32) };
+    expect(providerRegistry.getMetadata(provider)?.supportsCreateOnlyDeploy).toBe(true);
+    const result = await new DeployOrchestrator().execute({ project: f.project, environment: f.environment,
+      adapter: f.adapter, services: [f.service], ensureProject: false,
+      envVars: { TEST_SETTING: 'present' }, secretVersionRefs: { API_TOKEN: reference },
+      requireNewWorkload: true, deferProviderDeployment: true });
+    expect(result.success, result.errors.join(' ')).toBe(true);
+    expect(f.ensureProject).not.toHaveBeenCalled(); expect(f.setEnvVars).not.toHaveBeenCalled();
+    expect(f.deploy).toHaveBeenCalledExactlyOnceWith(f.service, f.environment, { TEST_SETTING: 'present' }, {
+      deferDeployment: true, requireNewWorkload: true, secretVersionRefs: { API_TOKEN: reference },
+    });
+    expect(new EnvironmentRepository().findById(f.environment.id)?.platformBindings.services).toMatchObject({ web: { serviceId: 'new-workload' } });
   });
 
   it.each(unsupported)('rejects %s creation-only orchestration before any provider effect', async provider => {
@@ -73,8 +104,8 @@ describe('creation-only hosting admission', () => {
     expect(f.ensureProject).not.toHaveBeenCalled(); expect(f.setEnvVars).not.toHaveBeenCalled(); expect(f.deploy).not.toHaveBeenCalled();
   });
 
-  it('rejects creation-only bootstrap without an explicit adapter capability before provider effects', async () => {
-    const f = fixture('railway', { ...adapters.railway.capabilities, supportsCreateOnlyDeploy: undefined });
+  it.each(supported)('rejects %s creation-only bootstrap without an explicit adapter capability before provider effects', async provider => {
+    const f = fixture(provider, { ...adapters[provider].capabilities, supportsCreateOnlyDeploy: undefined });
     vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: f.adapter as never });
     const result = await executeBootstrap({ projectName: f.project.name, environmentName: f.environment.name,
       services: ['web'], envVars: { TEST_SETTING: 'present' }, provisionOnly: true, requireNewWorkload: true });
@@ -83,8 +114,8 @@ describe('creation-only hosting admission', () => {
     expect(f.ensureProject).not.toHaveBeenCalled(); expect(f.setEnvVars).not.toHaveBeenCalled(); expect(f.deploy).not.toHaveBeenCalled();
   });
 
-  it('rejects creation-only bootstrap unless provisionOnly is explicitly set', async () => {
-    const f = fixture('railway', { ...adapters.railway.capabilities, supportsCreateOnlyDeploy: true });
+  it.each(supported)('rejects %s creation-only bootstrap unless provisionOnly is explicitly set', async provider => {
+    const f = fixture(provider);
     vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: f.adapter as never });
     const result = await executeBootstrap({ projectName: f.project.name, environmentName: f.environment.name,
       services: ['web'], requireNewWorkload: true });
@@ -93,8 +124,8 @@ describe('creation-only hosting admission', () => {
     expect(f.ensureProject).not.toHaveBeenCalled(); expect(f.setEnvVars).not.toHaveBeenCalled(); expect(f.deploy).not.toHaveBeenCalled();
   });
 
-  it('rejects creation-only orchestration unless provider deployment is explicitly deferred', async () => {
-    const f = fixture('railway', { ...adapters.railway.capabilities, supportsCreateOnlyDeploy: true });
+  it.each(supported)('rejects %s creation-only orchestration unless provider deployment is explicitly deferred', async provider => {
+    const f = fixture(provider);
     const result = await new DeployOrchestrator().execute({ project: f.project, environment: f.environment,
       adapter: f.adapter, services: [f.service], requireNewWorkload: true });
     expect(result.success).toBe(false);

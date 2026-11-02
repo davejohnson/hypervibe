@@ -17,6 +17,7 @@ interface LegacyDesiredState {
   databaseProvider?: string;
   setupEmail?: boolean;
   serviceConfig?: Record<string, {
+    instanceBounds?: { min: number; max: number };
     startCommand?: string;
     releaseCommand?: string;
     healthCheckPath?: string;
@@ -59,6 +60,7 @@ export function desiredStateToSpec(project: Project): ProjectSpec | null {
     const config = desired.serviceConfig?.[name] ?? {};
     services[name] = {
       workloadKind: config.cronSchedule ? 'cron' : 'web',
+      ...(config.instanceBounds ? { instanceBounds: config.instanceBounds } : {}),
       ...(config.startCommand ? { startCommand: config.startCommand } : {}),
       ...(config.releaseCommand ? { releaseCommand: config.releaseCommand } : {}),
       ...(config.healthCheckPath ? { healthCheckPath: config.healthCheckPath } : {}),

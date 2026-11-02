@@ -51,8 +51,13 @@ describe('released agent packages', () => {
     directories.push(cache);
     const result = spawnSync('npm', ['pack', '--json', '--ignore-scripts', '--pack-destination', cache], {
       cwd: root, encoding: 'utf8', timeout: 20_000,
+      // A built archive plus bundled credential dependencies exceeds Node's
+      // default 1 MiB capture limit. Keep a bounded allowance for its file list.
+      // https://nodejs.org/api/child_process.html#child_processspawnsynccommand-args-options
+      maxBuffer: 16 * 1024 * 1024,
       env: { ...process.env, npm_config_cache: cache },
     });
+    expect(result.error).toBeUndefined();
     expect(result.status, result.stderr).toBe(0);
     const packed = JSON.parse(result.stdout)[0];
     const files = (packed.files as { path: string }[]).map(file => file.path);
@@ -82,5 +87,5 @@ describe('released agent packages', () => {
     for (const filename of files.filter(file => /(?:^|\/)node_modules\/zod\/package\.json$/.test(file))) {
       expect(JSON.parse(readFileSync(path.join(installed, filename), 'utf8')).version).toMatch(/^4\./);
     }
-  });
+  }, 45_000);
 });

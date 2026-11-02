@@ -5,9 +5,11 @@ import { expect, vi } from 'vitest';
 import { initializeDatabase, SqliteAdapter } from '../../db/sqlite.adapter.js';
 import { ProjectRepository } from '../../db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../db/repositories/environment.repository.js';
+import { ConnectionRepository } from '../../db/repositories/connection.repository.js';
+import { getSecretStore } from '../../secrets/secret-store.js';
 import type { IStorageAdapter } from '../../../domain/ports/storage.port.js';
 import { environmentSpecSchema } from '../../../domain/spec/spec.schema.js';
-import { adapterFactory } from '../../../domain/services/adapter.factory.js';
+import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import { applyStorageAction, planStorage } from '../../../domain/services/storage-plan.service.js';
 
 /** Real shared plan/apply/binding path; callers mock only their provider boundary. */
@@ -15,9 +17,25 @@ export async function verifyIsolatedStorageLifecycle(adapter: IStorageAdapter, r
   const directory = mkdtempSync(join(tmpdir(), 'hypervibe-storage-scope-'));
   SqliteAdapter.resetInstance();
   initializeDatabase(join(directory, 'state.db'));
-  const factory = vi.spyOn(adapterFactory, 'getStorageAdapter').mockResolvedValue({ success: true, adapter });
+  // Exercise real encrypted connection selection too. The existing mock always
+  // returned an adapter and hid apply dropping the environment from its lookup.
+  // Only native client construction is replaced; the provider transport remains
+  // the caller's independent fixture. A distractor global account must not win.
+  let selectedEnvironment = '';
+  const selected: string[] = [];
+  const factory = vi.spyOn(providerRegistry, 'createAdapter').mockImplementation(async (provider, credentials) => {
+    expect(provider).toBe(adapter.name);
+    expect(credentials).toEqual({ testEnvironment: selectedEnvironment });
+    selected.push(selectedEnvironment);
+    return adapter as never;
+  });
   try {
-    const project = new ProjectRepository().create({ name: 'scope-contract', defaultPlatform: 'railway' });
+    const project = new ProjectRepository().create({ name: 'scope-contract', defaultPlatform: 'railway',
+      gitRemoteUrl: 'https://github.com/acme/scope-contract' });
+    new ConnectionRepository().upsertVerifiedBatch(['production', 'staging', 'foreign-global'].map(name => ({
+      provider: adapter.name, scope: name === 'foreign-global' ? null : `github.com/acme/scope-contract#environment=${name}`,
+      credentialsEncrypted: getSecretStore().encryptObject({ testEnvironment: name }),
+    })));
     const repository = new EnvironmentRepository();
     const spec = environmentSpecSchema.parse({
       hosting: { provider: 'railway' }, services: {},
@@ -25,6 +43,7 @@ export async function verifyIsolatedStorageLifecycle(adapter: IStorageAdapter, r
     });
     const targets = [];
     for (const name of ['production', 'staging']) {
+      selectedEnvironment = name;
       const environment = repository.create({ projectId: project.id, name, platformBindings: {} });
       const resolved = await adapter.ensureContext(project.name, environment, {}, region);
       expect(resolved.receipt.success).toBe(true);
@@ -52,6 +71,7 @@ export async function verifyIsolatedStorageLifecycle(adapter: IStorageAdapter, r
     expect(staging.live[0].externalId).not.toBe(production.live[0].externalId);
     expect(await adapter.observe(production.environment, production.context)).toEqual(production.live);
     expect(await adapter.observe(staging.environment, staging.context)).toEqual(staging.live);
+    expect(selected).toEqual(['production', 'staging']);
   } finally {
     factory.mockRestore();
     SqliteAdapter.resetInstance();

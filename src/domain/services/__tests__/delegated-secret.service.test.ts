@@ -848,6 +848,29 @@ describe('delegated-secret.service', () => {
     expect(drifted.desiredEnvVars).toEqual({});
   });
 
+  it.each(['complete', 'unknown', 'acknowledgement', 'identity-only'] as const)(
+    'checks accepted credential evidence independently of storage completeness: %s', completeness => {
+      const desired = spec();
+      const descriptor = { role: 'external-api', label: 'External API', purpose: 'Web requests', kind: 'opaque' as const,
+        source: 'env:PRIVATE_INPUT', runtimeConsumers: [{ environment: 'production', service: 'web', variable: 'ANTHROPIC_API_KEY' }] };
+      desired.secrets.ANTHROPIC_API_KEY.credential = descriptor;
+      const valueHash = hashEnvValue(FRIEND_KEY);
+      const live = observed(completeness === 'acknowledgement' || completeness === 'identity-only' ? undefined : valueHash);
+      live.services[0].envVarKeys = ['ANTHROPIC_API_KEY'];
+      live.partial = completeness !== 'unknown';
+      live.completeness = { services: completeness === 'complete' || completeness === 'acknowledgement' ? 'complete' : 'unknown',
+        storage: 'unknown', ...(completeness === 'identity-only' ? { serviceIdentities: 'complete' as const } : {}) };
+      const result = planDelegatedSecrets({ spec: desired, environmentName: 'production', hostingProvider: 'railway', observed: live,
+        environment: { platformBindings: {
+          delegatedEnvBindings: [{ name: 'ANTHROPIC_API_KEY', principal: 'github:alice', valueHash,
+            source: 'delegated-plan-input', syncedAt: '2026-07-17T00:00:00.000Z', applyRunId: 'apply-1', actionId: 'secret:ANTHROPIC_API_KEY' }],
+          credentialUpdates: { 'external-api': { state: 'accepted', descriptor,
+            ...(['acknowledgement', 'identity-only'].includes(completeness) ? { hostingEvidence: { ANTHROPIC_API_KEY: 'acknowledgement' } } : {}) } },
+        } } });
+      expect(result.blockers).toHaveLength(completeness === 'unknown' ? 1 : 0);
+      expect(result.desiredEnvVars).toEqual({});
+    });
+
   it('requires re-acceptance when the declared principal changes', () => {
     const acceptedHash = hashEnvValue(FRIEND_KEY);
     const changedPrincipalSpec = projectSpecSchema.parse({

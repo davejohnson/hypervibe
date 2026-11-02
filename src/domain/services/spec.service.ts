@@ -3,6 +3,7 @@ import { ComponentRepository } from '../../adapters/db/repositories/component.re
 import { buildDatabaseEnvVarsFromComponent } from './database-env.js';
 import type { Component } from '../entities/component.entity.js';
 import type { BuildConfig, WorkloadKind } from '../entities/service.entity.js';
+import { serviceInstanceBoundsSchema } from '../spec/spec.schema.js';
 
 const envRepo = new EnvironmentRepository();
 const componentRepo = new ComponentRepository();
@@ -20,6 +21,7 @@ export interface DesiredState {
   databaseProvider: string;
   setupEmail: boolean;
   serviceConfig?: Record<string, {
+    instanceBounds?: BuildConfig['instanceBounds'];
     workloadKind?: WorkloadKind;
     startCommand?: string;
     releaseCommand?: string;
@@ -95,6 +97,9 @@ export function normalizeServiceConfig(
     if (!serviceName.trim() || !rawConfig || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) continue;
     const configRecord = rawConfig as Record<string, unknown>;
     const nextConfig: NonNullable<DesiredState['serviceConfig']>[string] = {};
+    if (configRecord.instanceBounds !== undefined) {
+      nextConfig.instanceBounds = serviceInstanceBoundsSchema.parse(configRecord.instanceBounds);
+    }
 
     if (configRecord.workloadKind === 'web' || configRecord.workloadKind === 'worker' || configRecord.workloadKind === 'cron') {
       nextConfig.workloadKind = configRecord.workloadKind;
@@ -362,6 +367,7 @@ export function updateServiceInDesiredState(
   delete serviceConfig[previousName];
   serviceConfig[nextName] = {
     ...existingConfig,
+    ...(buildConfig.instanceBounds ? { instanceBounds: buildConfig.instanceBounds } : {}),
     ...(buildConfig.startCommand ? { startCommand: buildConfig.startCommand } : {}),
     ...(buildConfig.releaseCommand ? { releaseCommand: buildConfig.releaseCommand } : {}),
     ...(buildConfig.healthCheckPath ? { healthCheckPath: buildConfig.healthCheckPath } : {}),

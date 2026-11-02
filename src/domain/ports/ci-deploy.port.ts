@@ -1,5 +1,17 @@
 import type { ApiReleaseSpec } from '../spec/spec.schema.js';
 import type { ProjectRuntime } from '../spec/project-runtime.js';
+import type { CloudDeploymentConnectionV1, CloudDeploymentSourceAuthorizationV1 } from './cloud-deployment.port.js';
+
+/** Stable nonsecret broker binding. Approval is resolved server-side to avoid a workflow/policy hash cycle. */
+export interface CloudDeploymentCiAccessV1 {
+  origin: string;
+  projectId: string;
+  connectionId: string;
+  environment: string;
+  sourceBranch: string;
+  connection: CloudDeploymentConnectionV1;
+  sourceAuthorization?: CloudDeploymentSourceAuthorizationV1;
+}
 
 export type BranchDeployProvider = string;
 export type BranchDeployEnvironmentKind = 'development' | 'test' | 'staging' | 'production' | 'custom';
@@ -13,6 +25,7 @@ export interface BranchDeployReleaseResource {
 
 /** Exact reviewed runtime configuration for one provider-bound workload. */
 export interface BranchDeployRuntimeResource extends BranchDeployReleaseResource {
+  instanceBounds?: { min: number; max: number };
   /** Provider-confirmed lifetime identity, retained independently of bootstrap state. */
   providerResourceUid?: string;
   startCommand: string | null;
@@ -31,6 +44,15 @@ export interface BranchDeployReleaseTarget {
 }
 
 export interface BranchDeployTarget {
+  deploymentAccess?: CloudDeploymentCiAccessV1;
+  /** Provider-validated nonsecret access descriptor from its reviewed local lifecycle. */
+  nativeAuthentication?: Record<string, unknown>;
+  /** First rollout uses committed nonsecret settings and the reviewed local
+   * preparation journal. Collected values remain immutable provider references. */
+  preparedRuntime?: {
+    envVars: Record<string, string>;
+    preparation: import('./hosting-prepared.port.js').PreparedHostingMarker;
+  };
   environmentName: string;
   api?: ApiReleaseSpec;
   kind: BranchDeployEnvironmentKind;
@@ -127,6 +149,13 @@ export interface CiWorkflowDiagnostic {
 
 export interface ProviderCiDeployMetadata {
   displayName: string;
+  /** A registered provider owns parsing and exact-scope validation of this binding. */
+  boundAuthentication?: {
+    bindingKey: string;
+    parse(value: unknown, context: { environment: string; branch: string; providerProjectId?: string; repository?: string | null }): Record<string, unknown>;
+  };
+  /** Explicit emitted identity protocol; absence cannot fall back to copied cloud credentials. */
+  transientDeployment?: 'github-oidc-broker-v1';
   /** Opt-in migration of accepted GitHub workflow inputs for this provider only. */
   rendererRevision?: number;
   requiredSecrets: string[];

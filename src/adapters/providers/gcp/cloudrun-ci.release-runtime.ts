@@ -4,6 +4,7 @@ import type {
 } from '../../../domain/ports/ci-deploy.port.js';
 import { cloudRunFilesystemIdentity } from './cloudrun-volume-runtime.js';
 import { cloudRunJobUpdateBody } from './cloudrun-job-request.js';
+import { cloudRunInstanceBounds, assertCloudRunInstanceBounds } from './cloudrun-instance-bounds.js';
 
 export const CLOUD_RUN_PROVIDER_COMMAND_IMAGE_ENTRYPOINT =
   'echo "Hypervibe applies the runtime command during Cloud Run release." >&2; exit 1';
@@ -41,8 +42,8 @@ export function cloudRunContainerBuildStartCommand(target: BranchDeployTarget): 
 }
 
 /** Shared provider-API runtime used by GitHub and portable CI Cloud Run deploys. */
-export function buildCloudRunReleaseRuntime(): string {
-  return `${cloudRunFilesystemIdentity.toString()}
+export function buildCloudRunReleaseRuntime(options: { instanceBounds?: boolean } = {}): string {
+  return `${options.instanceBounds ? `${cloudRunInstanceBounds.toString()}\n${assertCloudRunInstanceBounds.toString()}\n` : ''}${cloudRunFilesystemIdentity.toString()}
 ${cloudRunJobUpdateBody.toString()}
 function cloudRunFilesystemGuard(resource, kind, expectedUid) {
   const template = kind === 'service' ? resource?.template : resource?.template?.template;
@@ -86,7 +87,7 @@ function cloudRunReleaseExecutionStatus(execution) {
   const completion = String(execution?.completionStatus || '').toLowerCase();
   if (completion.includes('succeed')) return 'completed';
   if (completion.includes('fail') || completion.includes('cancel') || completion.includes('timeout')) return 'failed';
-  const readiness = cloudRunReleaseReadiness(execution);
+  const readiness = cloudRunReleaseReadiness({ ...execution, terminalCondition: execution?.terminalCondition || (execution?.conditions || []).find(condition => condition.type === 'Completed') });
   if (readiness.ready) return 'completed';
   if (readiness.error) return 'failed';
   return 'running';
@@ -126,7 +127,7 @@ function cloudRunRuntimeResourcesFromBase64(encoded, serviceNames, jobNames) {
   if (resources.length !== expected.size) throw new Error('Cloud Run runtime resources do not match the reviewed provider bindings');
   const seen = new Set();
   for (const resource of resources) {
-    const keys = Object.keys(resource || {}).filter((key) => key !== 'providerResourceUid').sort().join(',');
+    const keys = Object.keys(resource || {}).filter((key) => key !== 'providerResourceUid'${options.instanceBounds ? " && key !== 'instanceBounds'" : ''}).sort().join(',');
     if (keys !== 'healthCheckPath,logicalName,providerResourceId,providerResourceType,startCommand,workloadKind'
         || typeof resource.logicalName !== 'string' || !resource.logicalName.trim()
         || typeof resource.providerResourceId !== 'string' || !resource.providerResourceId.trim()
@@ -143,7 +144,14 @@ function cloudRunRuntimeResourcesFromBase64(encoded, serviceNames, jobNames) {
       throw new Error('Cloud Run runtime resources do not match the reviewed provider bindings');
     }
     seen.add(resource.providerResourceType + ':' + resource.providerResourceId);
-  }
+${options.instanceBounds ? `    if (resource.instanceBounds !== undefined) {
+      const bounds = resource.instanceBounds;
+      if (!bounds || typeof bounds !== 'object' || Object.keys(bounds).sort().join(',') !== 'max,min'
+        || !Number.isSafeInteger(bounds.min) || !Number.isSafeInteger(bounds.max) || bounds.min < 0
+        || bounds.max < 1 || bounds.min > bounds.max || resource.workloadKind === 'cron'
+        || resource.workloadKind === 'worker' && bounds.min < 1) throw new Error('Reviewed service instance bounds are invalid');
+    }
+` : ''}  }
   return resources;
 }
 

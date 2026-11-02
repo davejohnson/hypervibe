@@ -303,10 +303,10 @@ describe('CloudSqlAdapter', () => {
           name: 'production-postgres',
           region: 'europe-west1',
         });
-        return Response.json({ name: 'instance-create-op' });
+        return Response.json({ name: 'instance-create-op', targetProject: 'gcp-project', targetId: 'production-postgres' });
       }
       if (url.endsWith('/operations/instance-create-op') && method === 'GET') {
-        return Response.json({ name: 'instance-create-op', status: 'DONE' });
+        return Response.json({ name: 'instance-create-op', status: 'DONE', targetProject: 'gcp-project', targetId: 'production-postgres' });
       }
       if (url.endsWith('/instances/production-postgres/databases/app') && method === 'GET') {
         return new Response('missing', { status: 404 });
@@ -354,10 +354,10 @@ describe('CloudSqlAdapter', () => {
           : new Response('observation unavailable', { status: 503 });
       }
       if (url.endsWith('/instances') && method === 'POST') {
-        return Response.json({ name: 'instance-create-op' });
+        return Response.json({ name: 'instance-create-op', targetProject: 'gcp-project', targetId: 'production-postgres' });
       }
       if (url.endsWith('/operations/instance-create-op') && method === 'GET') {
-        return Response.json({ name: 'instance-create-op', status: 'DONE' });
+        return Response.json({ name: 'instance-create-op', status: 'DONE', targetProject: 'gcp-project', targetId: 'production-postgres' });
       }
       throw new Error(`Unexpected fetch: ${method} ${url}`);
     });

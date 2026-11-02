@@ -238,6 +238,11 @@ async function waitForAbsence(name) {
 async function deleteOwned(instance, description) {
   assertGeneratedTarget(instance && instance.name);
   if (!hasOwnership(instance)) throw new Error('Refusing to delete ' + instance.name + ': restore-drill ownership labels do not match.');
+  const current = await getInstance(instance.name);
+  if (!current) return;
+  if (!hasOwnership(current) || (instance.createTime !== undefined && current.createTime !== instance.createTime)) {
+    throw new DrillError('Restore-drill cleanup ownership changed after observation.');
+  }
   const operation = await googleJson(
     apiBase + '/instances/' + encodeURIComponent(instance.name),
     { method: 'DELETE', headers: { Authorization: 'Bearer ' + token } },
@@ -265,16 +270,32 @@ async function cleanupCurrentRunBeforeOwnership() {
 
 async function listInstances() {
   const instances = [];
+  const names = new Set();
+  const pages = new Set();
   let pageToken = '';
   do {
+    if (pages.size >= 100 || pages.has(pageToken)) throw new DrillError('Cloud SQL instance inventory pagination is incomplete.');
+    pages.add(pageToken);
     const suffix = pageToken ? '?pageToken=' + encodeURIComponent(pageToken) : '';
     const result = await googleJson(
       apiBase + '/instances' + suffix,
       { headers: { Authorization: 'Bearer ' + token } },
       'Cloud SQL instance list'
     );
-    instances.push(...(result.items || []));
-    pageToken = result.nextPageToken || '';
+    const items = result.items ?? [];
+    const warnings = result.warnings ?? [];
+    if (!Array.isArray(items) || !Array.isArray(warnings) || warnings.length
+      || (result.nextPageToken != null && typeof result.nextPageToken !== 'string')) {
+      throw new DrillError('Cloud SQL instance inventory is incomplete.');
+    }
+    for (const instance of items) {
+      if (!instance || typeof instance.name !== 'string' || !/^[a-z][a-z0-9-]{0,97}$/.test(instance.name)
+        || instance.project !== config.projectId || typeof instance.region !== 'string' || !instance.region
+        || names.has(instance.name)) throw new DrillError('Cloud SQL instance inventory identity is ambiguous.');
+      names.add(instance.name);
+      instances.push(instance);
+    }
+    pageToken = result.nextPageToken ?? '';
   } while (pageToken);
   return instances;
 }
@@ -282,11 +303,30 @@ async function listInstances() {
 async function garbageCollectFailedDrills() {
   const cutoff = Date.now() - Number(config.retainFailedInstanceDays) * 24 * 60 * 60 * 1000;
   for (const instance of await listInstances()) {
+    if (instance.region !== config.region) continue;
     if (!instance.name || !instance.name.startsWith(namePrefix) || !hasOwnership(instance)) continue;
     const createdAt = Date.parse(instance.createTime || '');
     if (!Number.isFinite(createdAt) || createdAt >= cutoff) continue;
     await deleteOwned(instance, 'expired failed restore-drill cleanup');
     summary.push('- Deleted expired failed drill instance "' + instance.name + '".');
+  }
+}
+
+async function verifyRecoveryTime(pointInTime) {
+  const window = await googleJson(
+    apiBase + '/instances/' + encodeURIComponent(config.sourceInstanceId) + '/getLatestRecoveryTime',
+    { headers: { Authorization: 'Bearer ' + token } },
+    'Cloud SQL recovery window lookup'
+  );
+  const timestamp = (value) => typeof value === 'string'
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+    ? Date.parse(value) : NaN;
+  const earliest = timestamp(window.earliestRecoveryTime);
+  const latest = timestamp(window.latestRecoveryTime);
+  const requested = timestamp(pointInTime);
+  if (window.kind !== 'sql#getLatestRecoveryTime' || !Number.isFinite(earliest) || !Number.isFinite(latest)
+    || !Number.isFinite(requested) || earliest > latest || requested < earliest || requested > latest) {
+    throw new DrillError('The reviewed point-in-time is outside a verified Cloud SQL recovery window. Wait for recovery history, then run a new drill.');
   }
 }
 
@@ -376,7 +416,6 @@ try {
   await fs.writeFile(credentialsPath, credentialsText, { encoding: 'utf8', mode: 0o600 });
   process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialsPath;
   token = await accessToken();
-  await garbageCollectFailedDrills();
 
   const source = await getInstance(config.sourceInstanceId);
   const sourceBackup = source && source.settings && source.settings.backupConfiguration;
@@ -385,10 +424,13 @@ try {
     throw new Error('The reviewed Cloud SQL primary does not report enabled backups and point-in-time recovery.');
   }
 
+  const pointInTime = new Date(Date.now() - Number(config.restoreLagMinutes) * 60 * 1000).toISOString();
+  await verifyRecoveryTime(pointInTime);
+  await garbageCollectFailedDrills();
+
   targetName = generatedTargetName();
   assertGeneratedTarget(targetName);
   if (await getInstance(targetName)) throw new Error('Generated restore-drill target unexpectedly already exists.');
-  const pointInTime = new Date(Date.now() - Number(config.restoreLagMinutes) * 60 * 1000).toISOString();
   cloneRequested = true;
   const cloneOperation = await googleJson(
     apiBase + '/instances/' + encodeURIComponent(config.sourceInstanceId) + '/clone',

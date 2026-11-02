@@ -20,7 +20,7 @@ export const envVarSpecSchema = z.object({
 });
 
 export const createServiceSchema = z.object({
-  projectId: z.string().uuid(),
+  projectId: z.string().guid(),
   name: z.string().min(1).max(100),
   buildConfig: buildConfigSchema.optional(),
   envVarSpec: envVarSpecSchema.optional(),

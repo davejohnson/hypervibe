@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,7 +8,7 @@ import { expect, it } from 'vitest';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
-it('builds the real backup image and executes its packaged runtime and PostgreSQL restore smoke', () => {
+it.each(['source', 'packaged'] as const)('builds the real %s backup image and executes both entrypoints and PostgreSQL restore smoke', (kind) => {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'hv-backup-image-test-')));
   const tag = `hypervibe-backup-runner-test:${randomUUID()}`;
   const imageIdPath = join(directory, 'image-id');
@@ -26,10 +26,34 @@ it('builds the real backup image and executes its packaged runtime and PostgreSQ
     return result.stdout;
   };
   try {
-    // Use the release Dockerfile, real compiler and actual COPY boundary. The
-    // process-fixture publication tests cannot establish that this image builds.
-    docker(['build', '--platform', 'linux/amd64', '--file', join(root, 'templates/backup-runner/Dockerfile'),
-      '--iidfile', imageIdPath, '--tag', tag, root], 600_000);
+    let context = root, dockerfile = join(root, 'templates/backup-runner/Dockerfile');
+    if (kind === 'packaged') {
+      // Assemble real compiler output with the npm package's template/vendor
+      // assets. Keep this independent of an existing dist tree or release build.
+      const packageRoot = join(directory, 'package');
+      mkdirSync(packageRoot);
+      for (const file of ['package.json', 'templates', 'vendor', 'test/backup-runner-smoke.mjs']) {
+        const target = join(packageRoot, file); mkdirSync(dirname(target), { recursive: true });
+        cpSync(join(root, file), target, { recursive: true });
+      }
+      const compile = spawnSync(process.execPath, [join(root, 'node_modules/typescript/bin/tsc'),
+        '-p', join(root, 'tsconfig.build.json'), '--outDir', join(packageRoot, 'dist')],
+      { cwd: root, encoding: 'utf8', timeout: 120_000 });
+      expect(compile.error ?? compile.status, compile.stdout + compile.stderr).toBe(0);
+      mkdirSync(join(packageRoot, 'dist/operator-artifacts'), { recursive: true });
+      copyFileSync(join(root, 'package-lock.json'), join(packageRoot, 'dist/operator-artifacts/package-lock.json'));
+      context = join(directory, 'packaged-build'); mkdirSync(context);
+      const packed = spawnSync('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', context,
+        '--cache', join(directory, 'npm-cache')], { cwd: packageRoot, encoding: 'utf8', timeout: 120_000 });
+      expect(packed.error ?? packed.status, packed.stderr).toBe(0);
+      const [{ filename }] = JSON.parse(packed.stdout) as Array<{ filename: string }>;
+      copyFileSync(join(context, filename), join(context, 'package.tgz'));
+      dockerfile = join(root, 'templates/backup-runner/Dockerfile.packaged');
+    }
+    // Both production Dockerfiles, their real package/compile inputs and COPY
+    // boundaries must work; a mocked command cannot establish image readiness.
+    docker(['build', '--platform', 'linux/amd64', '--file', dockerfile,
+      '--iidfile', imageIdPath, '--tag', tag, context], 600_000);
     imageId = readFileSync(imageIdPath, 'utf8').trim();
     expect(imageId).toMatch(/^sha256:[a-f0-9]{64}$/);
     const [image] = JSON.parse(docker(['image', 'inspect', imageId]));

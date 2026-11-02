@@ -14,6 +14,8 @@ import { createToolContext } from '../../../application/context.js';
 import { PlanService } from '../../plan/plan.service.js';
 import { projectSpecSchema } from '../../spec/spec.schema.js';
 import { SpecStore } from '../../spec/spec.store.js';
+import { planRunDocumentSchema } from '../../plan/converge.executor.js';
+import * as operatorApplications from '../operator-application.service.js';
 
 // Independent lifecycle invariant: retained uncertain work cannot be bypassed by
 // changing desired providers. Native HTTP bodies are synthetic transport data.
@@ -117,5 +119,48 @@ describe('retained repository-variable outcome precedes other lifecycle stages',
     expect(methods.every(method => method === 'GET')).toBe(true);
     expect(result).toMatchObject({ kind: 'blocked' });
     expect(new EnvironmentRepository().findById(environment.id)!.platformBindings.repositoryVariableOwnership).toEqual(retained);
+  });
+
+  it('keeps retained variable recovery ahead of the early operator registration apply stage', async () => {
+    const ctx = createToolContext();
+    const project = ctx.repos.projects.create({ name: 'operator-stage-guard', defaultPlatform: 'unconfigured',
+      gitRemoteUrl: `https://github.com/${githubScope}.git` });
+    const desired = new SpecStore().replace(project, projectSpecSchema.parse({ version: 1, project: project.name,
+      gitRemoteUrl: project.gitRemoteUrl, devops: { code: { provider: 'github', scope: githubScope },
+        canonicalEnvironment: 'repository' }, environments: {} }));
+    const retained = { version: 1, ciProvider: 'github-actions', repository: {
+      provider: 'github', nativeId: '321', instanceScope: 'https://github.com',
+      canonicalScope: `https://github.com/${githubScope}`, path: githubScope,
+    }, variables: {}, pending: { operation: 'ci.repository-variable.sync', mode: 'create',
+      ciProvider: 'github-actions', codeProvider: 'github', repositoryScope: githubScope,
+      repositoryId: '321', instanceScope: 'https://github.com', canonicalScope: `https://github.com/${githubScope}`,
+      variableName: 'HEALTH_ENABLED', desiredHash: createHash('sha256').update('true').digest('hex'),
+      previous: null, ownershipHash: null } };
+    const environment = ctx.repos.environments.create({ projectId: project.id, name: 'repository',
+      platformBindings: { repositoryVariableOwnership: retained } });
+    // Independently reviewed operator actions still cannot bypass a subsequently
+    // retained uncertain repository write. Exercise the actual saved-plan loader
+    // and executor; the spy records whether mutation dispatch was reached.
+    const proof = { schemaVersion: 1 as const, name: 'browser',
+      installationId: '11111111-1111-4111-8111-111111111111', planDigest: 'f'.repeat(64),
+      provider: 'microsoft-entra' as const, mode: 'prepare' as const };
+    const document = planRunDocumentSchema.parse({ kind: 'hv_plan', scope: 'operator-applications',
+      environmentName: environment.name, specRevision: desired.revision, observedFingerprint: null, applicationRegistration: proof,
+      actions: [{ id: 'create-browser', type: 'create', resource: { kind: 'project', provider: 'microsoft-entra', name: 'browser' },
+        verified: true, requiresConfirm: true, reason: 'Reviewed synthetic operator application',
+        metadata: { ...proof, operation: 'operatorApplicationRegistration', nativeActionId: 'create-browser' } }] });
+    const saved = ctx.repos.runs.create({ projectId: project.id, environmentId: environment.id, type: 'plan',
+      plan: document as unknown as Record<string, unknown> });
+    ctx.repos.runs.updateStatus(saved.id, 'succeeded');
+    const dispatch = vi.spyOn(operatorApplications, 'applyOperatorApplications').mockResolvedValue({ success: true, message: 'Synthetic operator action accepted' });
+    methods.length = 0;
+    const result = await executePlanApply(ctx, { project, spec: desired.spec, specRevision: desired.revision,
+      planId: saved.id, confirmActions: ['create-browser'] });
+    expect.soft(result).toMatchObject({ kind: 'blocked', applyBlocked: [expect.objectContaining({
+      reason: expect.stringContaining('pending repository-variable write'),
+    })] });
+    expect.soft(dispatch).not.toHaveBeenCalled();
+    expect(methods.every(method => method === 'GET')).toBe(true);
+    expect(ctx.repos.environments.findById(environment.id)!.platformBindings.repositoryVariableOwnership).toEqual(retained);
   });
 });

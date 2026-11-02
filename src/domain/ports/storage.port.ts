@@ -22,6 +22,8 @@ export interface StorageRuntimeTarget {
   /** Actual selected connection provider, including an explicit alias. */
   connectionProvider?: string;
   identity?: import('./provider.port.js').ProviderRuntimeIdentity;
+  serviceName?: string;
+  runtimeAccessBinding?: import('./storage-runtime-access.port.js').StorageRuntimeAccessBinding;
 }
 
 export interface StorageObjectRecord {
@@ -196,6 +198,7 @@ export interface StorageEnsureResult {
 }
 
 export interface IStorageAdapter {
+  readonly runtimeAccess?: import('./storage-runtime-access.port.js').IStorageRuntimeAccess;
   readonly name: string;
   readonly dailyBackups?: import('./daily-backup.port.js').IDailyBackupPolicy<import('./daily-backup.port.js').StorageBackupTarget>;
   readonly capabilities: StorageCapabilities;

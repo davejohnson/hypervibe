@@ -44,7 +44,7 @@ export function recoveryFailure(stage: RecoveryDiagnostic['stage'], category: Re
 
 const failureMarker = 'HYPERVIBE_RECOVERY_FAILURE:';
 const workerDiagnosticSchema = recoveryDiagnosticSchema.omit({ task: true }).extend({ stage: z.enum(WORKER_RECOVERY_FAILURE_STAGES) }).strict();
-const markerSchema = z.object({ version: z.literal(1), executionId: z.string().uuid(), diagnostic: workerDiagnosticSchema }).strict();
+const markerSchema = z.object({ version: z.literal(1), executionId: z.string().guid(), diagnostic: workerDiagnosticSchema }).strict();
 export function formatRecoveryFailureMarker(diagnostic: RecoveryDiagnostic, executionId: string): string {
   const value = markerSchema.parse({ version: 1, executionId, diagnostic });
   return `${failureMarker}${JSON.stringify(value)}`;

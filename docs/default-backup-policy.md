@@ -64,6 +64,32 @@ archive from receiving its reviewed storage binding. Archive provisioning keeps
 its real namespace dependencies and does not synchronize CI credentials, wire
 application services or authorize a rollout in the same stage.
 
+When an accepted GitHub deployment workflow shares the environment with an
+explicitly requested backup program, backup-scoped credential preparation can
+include the backup source/archive providers. Ordinary deployment does not request
+those credentials or add them to its workflow requirements. The reviewed action
+records this additional purpose and exact secret hashes; apply rechecks the
+current daily intent, repository/environment inventory and selected values.
+Unrelated accepted credential acknowledgments survive a deployment-only refresh.
+This reuses existing automation-eligible connections; it does not make temporary
+local sessions or hosted customer keys eligible for credential copying.
+
+The named CI capability review covers GitHub Actions (including legacy GitHub
+specs) and GitLab CI. Only GitHub Actions implements separate backup credential
+preparation; GitLab reports that limitation while preserving its existing
+application credential behavior. Native backup policy and complete recurring
+backup execution remain separate capabilities.
+
+The October 29 integration falsified the assumption that removing backup inputs
+from deployment workflows also removed their need during explicit backup setup:
+the actual planner/apply/GitHub HTTP boundary omitted the GCS credential for an
+object-only backup hosted elsewhere. Two altered-purpose regressions also allowed
+writes before the fix, and an ordinary deployment refresh discarded the retained
+backup credential acknowledgment. These four failures now pass, with canonical
+and legacy CI routes covered. The expected isolation follows DG-011/DG-107 and
+GitHub's [environment-secret API contract](https://docs.github.com/en/rest/actions/secrets#create-or-update-an-environment-secret).
+The HTTP responses are synthetic; no live backup execution is established.
+
 Once the deployment workflow is accepted and its resource prerequisites exist,
 `managed-ci-credentials` prepares its environment credentials and records the
 accepted workflow binding. This may create the named GitHub environment if it

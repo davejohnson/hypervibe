@@ -1,3 +1,4 @@
+import { providerRegistry } from '../../../../domain/registry/provider.registry.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { spawnSync } from 'node:child_process';
@@ -789,6 +790,24 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
     expect(variablePlan.actions?.every((action) => action.resource.name.includes('HYPERVIBE_'))).toBe(true);
     expect(JSON.stringify(variablePlan)).not.toContain('railway-api-token');
     expect(JSON.stringify(variablePlan)).not.toContain('gitlab-registry-read-token');
+
+    // Credential admission is provider-owned. Exercise a changed decision after
+    // review through real GitLab reads, before any serialized variable write.
+    const metadata = providerRegistry.getMetadata('railway')!;
+    const originalMetadata = providerRegistry.getMetadata.bind(providerRegistry);
+    const rejectedMetadata = vi.spyOn(providerRegistry, 'getMetadata').mockImplementation(provider => provider === 'railway'
+      ? { ...metadata, credentials: { ...metadata.credentials, canUseForAutomation: () => false } }
+      : originalMetadata(provider));
+    const beforeRejected = mutationCalls.length;
+    const rejectedPlan = await gitLabCiLifecycle.planDeploy({ project, spec, environmentName: 'production',
+      environmentSpec: spec.environments.production, environment });
+    expect(rejectedPlan.error).toMatch(/durable.*automation/i);
+    const rejectedApply = await gitLabCiLifecycle.applyDeploy({ project, spec, environmentName: 'production',
+      environmentSpec: spec.environments.production, action: variablePlan.actions![0] });
+    expect(rejectedApply.success).toBe(false);
+    expect(rejectedApply.error).toMatch(/durable.*automation/i);
+    expect(mutationCalls).toHaveLength(beforeRejected);
+    rejectedMetadata.mockRestore();
 
     const stagingVariablePlan = await gitLabCiLifecycle.planDeploy({
       project,

@@ -467,6 +467,18 @@ describe('runtime rollout state', () => {
       expect(parseRuntimeRolloutBindings(updated)).toEqual([]);
     }
   });
+  it.each([
+    { explicit: ['worker'], expected: ['worker'] },
+    { explicit: [], expected: ['web', 'worker'] },
+    { explicit: ['foreign'], expected: ['web', 'worker'] },
+    { explicit: ['worker', 7], expected: ['web', 'worker'] },
+  ])('narrows pending rollout only for a valid nonempty authorized service list: $explicit', ({ explicit, expected }) => {
+    const scopedAction = { ...action, metadata: { ...action.metadata, services: ['web', 'worker'] } };
+    const updated = recordRuntimeRolloutRequirements({ environment, provider: 'railway', observed: observed('before'),
+      actions: [scopedAction], applyRunId: 'apply-scoped', receipts: [{ actionId: action.id, status: 'succeeded',
+        data: { runtimeRolloutRequired: true, runtimeRolloutServices: explicit } }] });
+    expect(parseRuntimeRolloutBindings(updated).map(binding => binding.service)).toEqual(expected);
+  });
 
   it('fails closed when the pre-apply deployment identity was unknown', () => {
     const updated = recordRuntimeRolloutRequirements({

@@ -298,7 +298,7 @@ describe('runGcpBootstrap', () => {
           return Response.json({ billingAccounts: [{ ...openBillingAccount, masterBillingAccount: '' }] });
         case `https://cloudbilling.googleapis.com/v1/projects/${GCP_PROJECT_ID}/billingInfo`:
           return Response.json({ name: `projects/${GCP_PROJECT_ID}/billingInfo`, projectId: GCP_PROJECT_ID });
-        case `https://serviceusage.googleapis.com/v1/projects/${GCP_PROJECT_ID}/services/iam.googleapis.com`:
+        case `https://serviceusage.googleapis.com/v1/projects/${GCP_PROJECT_ID}/services/iam.googleapis.com?fields=name,parent,config/name,state`:
           return Response.json({ name: `${observedProject.name}/services/iam.googleapis.com`,
             parent: observedProject.name, config: { name: 'iam.googleapis.com' }, state: 'DISABLED' });
         default:
@@ -326,6 +326,26 @@ describe('runGcpBootstrap', () => {
     expect(dependencies.verifyProvider).not.toHaveBeenCalled();
     expect(new ConnectionRepository().findAll()).toEqual([]);
     expect(JSON.stringify(result)).not.toContain(ADMIN_TOKEN);
+  });
+
+  it.each([false, true])('blocks unknown IAM state before previewed or confirmed bootstrap work (confirm=%s)', async confirm => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      expect(init?.method).toBe('GET');
+      if (url.hostname === 'cloudresourcemanager.googleapis.com') return Response.json(observedProject);
+      if (url.pathname === '/v1/billingAccounts') return Response.json({ billingAccounts: [openBillingAccount] });
+      if (url.pathname.endsWith('/billingInfo')) return Response.json(linkedBilling);
+      if (url.hostname === 'serviceusage.googleapis.com') return Response.json({ name: `${observedProject.name}/services/iam.googleapis.com`,
+        parent: observedProject.name, config: { name: 'iam.googleapis.com' }, state: 'STATE_UNSPECIFIED' });
+      throw new Error('Unexpected native operation');
+    });
+    const dependencies = makeDependencies(new GcpBootstrapClient({ accessToken: ADMIN_TOKEN, fetch: fetchMock, sleep: async () => {} }));
+    const result = await runGcpBootstrap({ project: seedProject(), gcpProjectId: GCP_PROJECT_ID, confirm,
+      ...(confirm ? { billingAccountName: BILLING_ACCOUNT } : {}) }, dependencies);
+    expect(result.success).toBe(false);
+    expect(dependencies.prepareCloud).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.every(([, init]) => init?.method === 'GET')).toBe(true);
+    expect(new ConnectionRepository().findAll()).toEqual([]);
   });
 
   it('returns exact local ADC setup and Hypervibe preview recovery without credentials', async () => {

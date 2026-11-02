@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "reviewedAt": "2026-10-27",
+  "evidenceKind": "primary documentation with reconstructed synthetic JSON and transport responses",
+  "sources": [
+    {
+      "url": "https://developers.google.com/identity/protocols/oauth2/resources/best-practices#manual-creation-and-configuration-of-oauth-clients",
+      "contract": "Standard OAuth client creation and modification require Google Console configuration and acknowledgement. This capability offers private import, not an OAuth client creation API."
+    },
+    {
+      "url": "https://googleapis.github.io/google-api-python-client/docs/client-secrets.html",
+      "contract": "The confidential web JSON contains client_id, client_secret, redirect_uris, auth_uri and token_uri. The maintained SDK guide documents the older accounts.google.com/o/oauth2/token endpoint.",
+      "limit": "This documentation is not a complete native JSON schema; project_id and exact single-callback requirements are Hypervibe isolation policy."
+    },
+    {
+      "url": "https://developers.google.com/identity/protocols/oauth2/web-server#creatingcred",
+      "contract": "Create a Web application client, download its private JSON outside source control and configure an exact redirect URI. The Python example includes numeric-only client ID 123456789.apps.googleusercontent.com."
+    },
+    {
+      "url": "https://developers.google.com/identity/gsi/web/guides/get-google-api-clientid",
+      "contract": "Current client-ID examples also use a numeric prefix followed by a hyphenated suffix and apps.googleusercontent.com."
+    }
+  ],
+  "localBoundary": {
+    "provider": "google-oauth",
+    "profile": "hypercloud-connect-v1",
+    "hypercloudHandler": "lib/cloudAdminAuthorization.js",
+    "callback": "${verifiedOrigin}/cloud-authorizations/gcp",
+    "runtimeKeys": ["CLOUD_CONNECT_GOOGLE_CLIENT_ID", "CLOUD_CONNECT_GOOGLE_CLIENT_SECRET"]
+  },
+  "limits": [
+    "Downloaded owner JSON does not prove native ownership, administrator authority, actual redirect configuration or successful browser authorization.",
+    "Synthetic Secret Manager transport exercises the real serialization and delivery lifecycle; no live cloud write or browser exchange is claimed.",
+    "Strict field, project and callback admission is Hypervibe isolation policy, not full compatibility with every historical downloaded JSON variant."
+  ]
+}

@@ -6,7 +6,7 @@ import type { EnvironmentTaskOptions } from '../../../../domain/ports/hosting.po
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
-it('rejects a managed recovery helper before reading or executing an application image', async () => {
+it('rejects an unprepared managed recovery helper before reading or executing an application image', async () => {
   const adapter = new CloudRunAdapter();
   await adapter.connect({ projectId: 'gcp-project', credentials: JSON.stringify({ type: 'service_account',
     project_id: 'gcp-project', private_key: 'dummy', client_email: 'deploy@gcp-project.iam.gserviceaccount.com' }) });
@@ -23,7 +23,8 @@ it('rejects a managed recovery helper before reading or executing an application
     databaseSource: { provider: 'cloudsql', primaryExternalId: 'database', providerScope: { projectId: 'gcp-project' }, resourceIdentity: {} },
     variableReferences: [], variables: {} } };
   const result = await adapter.runJob(environment, service, 'hypervibe-backup', options);
-  expect(result.receipt).toMatchObject({ success: false, data: { applied: 0, skipped: 1, mutationAttempted: false } });
-  expect(result.receipt.message).toContain('does not implement managed recovery tasks');
+  expect(result.receipt).toMatchObject({ success: false, data: { applied: 0, skipped: 1 } });
+  expect(result.mutationAttempted).toBe(false);
+  expect(result.diagnostic).toMatchObject({ stage: 'task-preflight', category: 'invalid-input' });
   expect(fetch).not.toHaveBeenCalled();
 });

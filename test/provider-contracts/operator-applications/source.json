@@ -1,0 +1,223 @@
+{
+  "reviewedAt": "2026-10-27",
+  "coverage": "Design and reconstructed transport evidence for operator application registration, real local HTTP and SQLite recovery. No live provider registration, browser authorization, code conversion, federation or private output delivery is certified here.",
+  "sources": [
+    {
+      "provider": "microsoft-entra",
+      "reviewedAt": "2026-10-28",
+      "documentation": "https://learn.microsoft.com/en-us/graph/api/resources/application?view=graph-rest-1.0",
+      "observation": "entra-application-timestamp-observation.json",
+      "contract": "createdDateTime is read-only UTC DateTimeOffset. A retained native 201 ACK contains seven fractional digits while subsequent list and exact-object GETs contain only the same whole UTC second. Other identity, attempt, ownership and reviewed configuration fields match.",
+      "coverage": "Reconstructed serialized Graph responses through the real adapter, PlanService/apply, shared status and SQLite restart; original ACK and shared CAS equality are preserved.",
+      "limit": "Only this exact whole-second projection of a verified retained ACK is admitted. No arbitrary fractional rounding, changed identity, blind create replay or native federation/browser completion is established."
+    },
+    {
+      "provider": "microsoft-entra",
+      "repository": "https://github.com/microsoftgraph/microsoft-graph-docs-contrib",
+      "revision": "02cb3eb0ca9f3f278a8ffa934a1304f640e6e792",
+      "paths": [
+        "api-reference/v1.0/api/application-post-applications.md",
+        "api-reference/v1.0/api/federatedidentitycredential-post.md",
+        "api-reference/v1.0/api/application-addpassword.md",
+        "api-reference/v1.0/api/application-removepassword.md",
+        "api-reference/v1.0/api/application-upsert.md",
+        "api-reference/v1.0/resources/application.md"
+      ],
+      "documentation": [
+        "https://learn.microsoft.com/en-us/graph/api/application-post-applications?view=graph-rest-1.0",
+        "https://learn.microsoft.com/en-us/graph/api/federatedidentitycredential-post?view=graph-rest-1.0"
+      ],
+      "uncertainties": [
+        "AppRegistration.Create does not establish FIC management or read/recovery authority.",
+        "Atomic application/password creation has conflicting status and resource documentation; this design creates no Entra password.",
+        "Upsert may update an existing app and is not a create-only primitive."
+      ],
+      "files": [
+        {
+          "path": "api-reference/v1.0/api/application-post-applications.md",
+          "sha256": "e884ddb194f531867cdf1a3492a5c8663f4660401254cece598a392ca3d8f945",
+          "bytes": 10688,
+          "url": "https://raw.githubusercontent.com/microsoftgraph/microsoft-graph-docs-contrib/02cb3eb0ca9f3f278a8ffa934a1304f640e6e792/api-reference/v1.0/api/application-post-applications.md"
+        },
+        {
+          "path": "api-reference/v1.0/api/federatedidentitycredential-post.md",
+          "sha256": "0b643761fe61c16e7eb366287a274237ac7d20dfe6c0d96b5383d878c0798e61",
+          "bytes": 7681,
+          "url": "https://raw.githubusercontent.com/microsoftgraph/microsoft-graph-docs-contrib/02cb3eb0ca9f3f278a8ffa934a1304f640e6e792/api-reference/v1.0/api/federatedidentitycredential-post.md"
+        },
+        {
+          "path": "api-reference/v1.0/api/application-addpassword.md",
+          "sha256": "b4f0261fcef7d6bcb3d0aab167aa6815d1bc1f9e234cd4cb2f94797edf109fb6",
+          "bytes": 6068,
+          "url": "https://raw.githubusercontent.com/microsoftgraph/microsoft-graph-docs-contrib/02cb3eb0ca9f3f278a8ffa934a1304f640e6e792/api-reference/v1.0/api/application-addpassword.md"
+        },
+        {
+          "path": "api-reference/v1.0/api/application-removepassword.md",
+          "sha256": "09a36c2735ce03b4f03e642508ece8d12e2f7bf31eac1f2695dcde07c0de8be9",
+          "bytes": 4381,
+          "url": "https://raw.githubusercontent.com/microsoftgraph/microsoft-graph-docs-contrib/02cb3eb0ca9f3f278a8ffa934a1304f640e6e792/api-reference/v1.0/api/application-removepassword.md"
+        },
+        {
+          "path": "api-reference/v1.0/api/application-upsert.md",
+          "sha256": "184b8dcb3fd25d6e9ea7a21baf8d990f7454bcf358461503c205d394a8a5220d",
+          "bytes": 9352,
+          "url": "https://raw.githubusercontent.com/microsoftgraph/microsoft-graph-docs-contrib/02cb3eb0ca9f3f278a8ffa934a1304f640e6e792/api-reference/v1.0/api/application-upsert.md"
+        },
+        {
+          "path": "api-reference/v1.0/resources/application.md",
+          "sha256": "3af0d36e6018d3b7beee1a6a1b60c2f91b0d8a27003dd8757c6c995c5009944e",
+          "bytes": 23723,
+          "url": "https://raw.githubusercontent.com/microsoftgraph/microsoft-graph-docs-contrib/02cb3eb0ca9f3f278a8ffa934a1304f640e6e792/api-reference/v1.0/resources/application.md"
+        }
+      ]
+    },
+    {
+      "provider": "microsoft-entra",
+      "repository": "https://github.com/AzureAD/microsoft-authentication-library-for-dotnet.wiki.git",
+      "revision": "83b376c443c259de6ae87377da898cc4b18a5fe5",
+      "path": "Credentials.md",
+      "sha256": "7dd8f723d4705366cd125ff8426dad38228a88ecad7576f74487c579f0dd94c3",
+      "documentation": "https://github.com/AzureAD/microsoft-authentication-library-for-dotnet/wiki/Credentials",
+      "contract": "The maintained federated WithClientAssertion example explicitly applies to AcquireTokenByAuthorizationCode; the following section extends the pattern to other identity providers.",
+      "limit": "Primary SDK-maintainer evidence; no live multitenant authorization-code exchange is claimed."
+    },
+    {
+      "provider": "microsoft-entra",
+      "documentation": "https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation-google-cloud",
+      "reviewedAt": "2026-10-27",
+      "contract": "Google service-account ID-token issuer https://accounts.google.com, immutable unique-ID subject, audience api://AzureADTokenExchange; no service-account key or retained assertion."
+    },
+    {
+      "provider": "github-app",
+      "repository": "https://github.com/github/docs",
+      "revision": "3869faed240317911b720c484aef61931b8474ec",
+      "path": "content/apps/sharing-github-apps/registering-a-github-app-from-a-manifest.md",
+      "documentation": [
+        "https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest",
+        "https://docs.github.com/en/rest/apps/apps#create-a-github-app-from-a-manifest"
+      ],
+      "contract": "Owner-approved manifest POST, bound random state, three-step completion within one hour, one-time code conversion returning native app identity and credentials.",
+      "limits": [
+        "No blind replay after an uncertain conversion.",
+        "Manifest loopback redirect acceptance and actual repository installation require native verification.",
+        "No undocumented App deletion or private-key revocation API is assumed."
+      ],
+      "files": [
+        {
+          "path": "content/apps/sharing-github-apps/registering-a-github-app-from-a-manifest.md",
+          "sha256": "9e92d531be9bce0ca93caf4e8146ce16831b2fcfd8c217c4e9f84b0619ca1af4",
+          "bytes": 14141,
+          "url": "https://raw.githubusercontent.com/github/docs/3869faed240317911b720c484aef61931b8474ec/content/apps/sharing-github-apps/registering-a-github-app-from-a-manifest.md"
+        }
+      ]
+    },
+    {
+      "provider": "google-oauth",
+      "documentation": "https://developers.google.com/identity/protocols/oauth2/resources/best-practices#manual-creation-and-configuration-of-oauth-clients",
+      "reviewedAt": "2026-10-27",
+      "contract": "Standard OAuth clients require manual Console creation/configuration and acknowledgement. No programmatic client-creation implementation is claimed.",
+      "limit": "Imported owner-selected configuration is not verified native authority or redirect proof."
+    },
+    {
+      "provider": "microsoft-entra",
+      "reviewedAt": "2026-10-27",
+      "documentation": [
+        "https://learn.microsoft.com/en-us/graph/api/application-list?view=graph-rest-1.0",
+        "https://learn.microsoft.com/en-us/graph/api/organization-list?view=graph-rest-1.0",
+        "https://learn.microsoft.com/en-us/graph/api/application-list-federatedidentitycredentials?view=graph-rest-1.0"
+      ],
+      "contract": "Organization tenant identity read, bounded application list and FIC readback use native IDs; directory pagination must retain the exact Graph origin and collection path. Application and FIC creates require 201; reads require 200.",
+      "limit": "Documentation-based reconstructed transport, no live tenant or write-permission proof."
+    },
+    {
+      "provider": "google-recaptcha",
+      "reviewedAt": "2026-10-27",
+      "documentation": [
+        "https://docs.cloud.google.com/recaptcha/docs/reference/rest/v1/projects.keys/create",
+        "https://docs.cloud.google.com/recaptcha/docs/reference/rest/v1/projects.keys",
+        "https://docs.cloud.google.com/recaptcha/docs/reference/rest/v1/projects.keys/list",
+        "https://docs.cloud.google.com/recaptcha/docs/reference/rest/v1/projects.keys/retrieveLegacySecretKey",
+        "https://docs.cloud.google.com/service-usage/docs/reference/rest/v1/services/enable",
+        "https://docs.cloud.google.com/recaptcha/docs/create-key-website",
+        "https://docs.cloud.google.com/recaptcha/docs/verify",
+        "https://cloud.google.com/security/products/recaptcha",
+        "https://protobuf.dev/programming-guides/json/#presence-and-default-values"
+      ],
+      "contract": "CreateKey accepts parent and Key body, with provider-assigned identity and no documented request-id or client key-ID parameter. Key exposes name, labels, createTime and web settings. SCORE domains exclude paths and inherit subdomains. Every new web key has a separately retrievable legacy secret. Service enablement is an independently reviewed operation, observed via exact service state. Omitted/null implicit false scalars retain false semantics.",
+      "coverage": "Reconstructed serialized REST responses with real installation kernel and actual SQLite private custody; not a full pinned schema validator.",
+      "limits": [
+        "No blind create retry after uncertain outcome; labels correlate only a durable original attempt and cannot establish adoption alone.",
+        "No live allocation, browser scoring, native secret delivery or cleanup is established by these offline tests."
+      ]
+    },
+    {
+      "provider": "sendgrid",
+      "reviewedAt": "2026-10-27",
+      "documentation": [
+        "https://www.twilio.com/docs/sendgrid/api-reference/api-keys/create-api-keys",
+        "https://www.twilio.com/docs/sendgrid/api-reference/api-keys/retrieve-an-existing-api-key",
+        "https://www.twilio.com/docs/sendgrid/api-reference/api-keys/delete-api-keys",
+        "https://www.twilio.com/docs/sendgrid/api-reference/users-api/retrieve-your-username",
+        "https://www.twilio.com/docs/sendgrid/for-developers/sending-email/sandbox-mode"
+      ],
+      "contract": "Reviewed runtime API-key creation on the existing SendGrid provider: explicit mail.send only, native account user_id, immutable generated API-key ID, nonunique names, one-time value, no idempotency key or native value retrieval. Fixed sandbox POST cannot deliver mail. Failed private capture cleans up only the exact acknowledged new ID, with retained evidence on incomplete cleanup.",
+      "coverage": "Pinned exact API-key OpenAPI requests plus independent redacted native GET-by-ID direct-object projection; actual installation kernel and SQLite private custody/delivery use reconstructed responses.",
+      "limits": [
+        "No create replay or name adoption after uncertain outcome.",
+        "mail.send is account-wide; sender verification does not restrict native API-key permission to that sender.",
+        "Offline tests do not establish native issuance, real invitation delivery or production email readiness."
+      ]
+    },
+    {
+      "provider": "github-app",
+      "reviewedAt": "2026-10-27",
+      "documentation": [
+        "https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app",
+        "https://docs.github.com/en/rest/apps/apps",
+        "https://docs.github.com/en/rest/apps/webhooks",
+        "https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app"
+      ],
+      "contract": "App names are globally unique and at most 34 characters. Manifest conversion returns 201 and a complete credential bundle. Authenticated App and webhook reads use App JWTs. The native App response does not expose OAuth callback URLs.",
+      "limit": "Real serialized transport and RSA signatures with reconstructed responses; loopback manifest acceptance and actual user installation remain live gates."
+    },
+    {
+      "provider": "github-app",
+      "reviewedAt": "2026-10-28",
+      "documentation": [
+        "https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest",
+        "https://docs.github.com/en/rest/apps/apps#create-a-github-app-from-a-manifest",
+        "https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app",
+        "https://docs.github.com/en/apps/maintaining-github-apps/modifying-a-github-app-registration",
+        "https://docs.github.com/en/graphql/overview/public-schema"
+      ],
+      "contract": "Manifest completion has a one-hour bound; conversion consumes the private code. Names are globally unique but editable. The documented API exposes no pending-manifest inventory, renewal or cancellation; intermediate native existence and automatic expiry cleanup are unspecified.",
+      "coverage": "Explicit user-requested new registration preserves the expired unconsumed predecessor as native-state unknown. Real PlanService/SQLite, private HTTP callback and reconstructed native conversion/output transports exercise predecessor CAS and unchanged scoped authority.",
+      "limits": [
+        "Owner-view not-listed observations and unauthenticated slug404 are not provider-confirmed absence.",
+        "No restart after any conversion or output attempt, no code replay and no old registration deletion.",
+        "Microsoft Entra, Google OAuth, Google reCAPTCHA and SendGrid do not expose this restart capability.",
+        "Offline tests do not establish native registration or cleanup."
+      ]
+    }
+  ],
+  "supportingSources": [
+    {
+      "provider": "gcp-secret-manager",
+      "reviewedAt": "2026-10-27",
+      "documentation": [
+        "https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets.versions/access",
+        "https://cloud.google.com/secret-manager/docs/reference/rest/v1/SecretPayload"
+      ],
+      "contract": "Exact version access requires secretmanager.versions.access and returns a named base64 payload with its stored CRC32C. The narrowly scoped internal GitHub signing-key read verifies owner/container lifetime, enabled immutable version, current source authority and checksum before private use.",
+      "limit": "No customer-secret read capability or generic command is exposed. Metadata checks cannot atomically exclude concurrent external resource changes."
+    },
+    {
+      "provider": "hypercloud-consumer",
+      "path": "config/environment.js",
+      "sha256": "f46531c672b8c82b803c27b06c12fa9b3b68ab1c64a47b59d0b7b11dd5b735db",
+      "reviewedAt": "2026-10-27",
+      "contract": "Hypercloud decodes GITHUB_APP_PRIVATE_KEY_BASE64 and requires App ID, slug, client ID, client secret and webhook secret together. The operator profile therefore delivers base64 PEM rather than raw PEM to that exact private-key slot.",
+      "limit": "This records the independent local consumer source; Hypercloud must also execute its consumer test against the actual packaged Hypervibe producer."
+    }
+  ]
+}

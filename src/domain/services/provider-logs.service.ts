@@ -177,7 +177,7 @@ export async function fetchProviderLogs(
   lines: number,
   options: { errorsOnly?: boolean } = {}
 ): Promise<{ deploymentStatus?: string; deploymentId?: string; logs: ProviderLogEntry[] }> {
-  const result = await adapterFactory.getProviderAdapter(provider, project);
+  const result = await adapterFactory.getProviderAdapter(provider, project, undefined, environment.name);
   if (!result.success || !result.adapter) {
     throw new ProviderLogsConnectionError(result.error || `Failed to create ${provider} adapter`);
   }
@@ -218,7 +218,7 @@ export async function fetchProviderDeployments(
   serviceName: string | undefined,
   limit: number
 ): Promise<ProviderDeployment[]> {
-  const result = await adapterFactory.getProviderAdapter(provider, project);
+  const result = await adapterFactory.getProviderAdapter(provider, project, undefined, environment.name);
   if (!result.success || !result.adapter) {
     throw new ProviderLogsConnectionError(result.error || `Failed to create ${provider} adapter`);
   }
@@ -249,7 +249,7 @@ export async function fetchProviderBuildLogs(
   serviceName: string,
   deploymentId?: string
 ): Promise<{ deploymentId: string; buildLogs: string }> {
-  const result = await adapterFactory.getProviderAdapter(provider, project);
+  const result = await adapterFactory.getProviderAdapter(provider, project, undefined, environment.name);
   if (!result.success || !result.adapter) {
     throw new ProviderLogsConnectionError(result.error || `Failed to create ${provider} adapter`);
   }

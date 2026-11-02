@@ -44,7 +44,8 @@ describe('connection guidance', () => {
         record.credentialExample.includes('credentialsRef=')
         || record.credentialExample.includes('credentials=')
         || providerRegistry.get(provider)?.metadata.credentials?.supportsNativeCliAuth === true
-        || secretManagerRegistry.get(provider)?.metadata.credentials?.supportsNativeCliAuth === true,
+        || secretManagerRegistry.get(provider)?.metadata.credentials?.supportsNativeCliAuth === true
+        || providerRegistry.getOperatorApplication(provider) !== undefined,
         provider
       ).toBe(true);
       expect(formatted).toContain('Token/credential type:');
@@ -529,10 +530,10 @@ describe('connection guidance', () => {
 describe('credentialFieldsFromSchema', () => {
   it('keeps hosting geography out of connection forms', () => {
     const expected = {
-      cloudrun: ['projectId', 'credentials'],
-      ecs: ['accessKeyId', 'secretAccessKey'],
-      'azure-container-apps': ['tenantId', 'subscriptionId', 'clientId', 'clientSecret'],
-      s3: ['authMode', 'accessKeyId', 'secretAccessKey'],
+      cloudrun: ['projectId', 'authMode', 'credentials'],
+      ecs: ['authMode', 'accessKeyId', 'secretAccessKey', 'sessionToken', 'profile', 'accountId'],
+      'azure-container-apps': ['authMode', 'tenantId', 'subscriptionId', 'clientId', 'clientSecret'],
+      s3: ['authMode', 'accessKeyId', 'secretAccessKey', 'sessionToken', 'profile', 'accountId'],
       gcs: ['authMode', 'credentials'],
       azureblob: ['authMode', 'tenantId', 'subscriptionId', 'clientId', 'clientSecret'],
       digitalocean: ['apiToken'],

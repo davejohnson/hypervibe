@@ -1,0 +1,11 @@
+{
+  "sourceUrl": "https://raw.githubusercontent.com/github/rest-api-description/755ee33b4a81d51f6f07a902cce26cbec3b822f2/descriptions/api.github.com/api.github.com.json",
+  "revision": "755ee33b4a81d51f6f07a902cce26cbec3b822f2",
+  "sourceSha256": "3177ad6a86ca04c57a9bef3fc24e28a339efb8eb040c6f950af3d3ed2fee7fa3",
+  "schemaSha256": "639214c507ee054cf70c17facfdd6538bffaf49b6d5dfb2566ff52aef67e1d24",
+  "apiVersion": "2026-03-10",
+  "extraction": "Exact workflow dispatch path and transitive component references; no schema modifications.",
+  "documentationUrl": "https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event",
+  "evidence": "Official OpenAPI; response fixtures reconstructed, not live recordings.",
+  "schemaFile": "workflow-dispatch.openapi.json"
+}

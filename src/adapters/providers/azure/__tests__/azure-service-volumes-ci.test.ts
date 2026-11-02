@@ -12,9 +12,9 @@ const digest = `sha256:${'b'.repeat(64)}`;
 const registry = `${azureRegistryName(group)}.azurecr.io`;
 
 async function execute(kind: 'github' | 'portable', loseMount: boolean, changeIdentity?: (app: any) => void, operationId?: string) {
-  let app: any = { id: appId, identity: { type: 'SystemAssigned, UserAssigned', principalId: '33333333-3333-4333-8333-333333333333', tenantId: '11111111-1111-4111-8111-111111111111', userAssignedIdentities: { [`${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/retained`]: { principalId: '44444444-4444-4444-8444-444444444444', clientId: '55555555-5555-4555-8555-555555555555' } } }, properties: { provisioningState: 'Succeeded', latestRevisionName: 'ready', latestReadyRevisionName: 'ready', configuration: { ingress: { fqdn: 'web.example.test' } }, template: {
+  let app: any = { id: appId, identity: { type: 'SystemAssigned, UserAssigned', principalId: '33333333-3333-4333-8333-333333333333', tenantId: '11111111-1111-4111-8111-111111111111', userAssignedIdentities: { [`${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/retained`]: { principalId: '44444444-4444-4444-8444-444444444444', clientId: '55555555-5555-4555-8555-555555555555' } } }, properties: { provisioningState: 'Succeeded', latestRevisionName: 'ready', latestReadyRevisionName: 'ready', configuration: { secrets: [{ name: 'api-token', keyVaultUrl: 'https://vault.vault.azure.net/secrets/token/' + 'c'.repeat(32), identity: 'system' }], ingress: { fqdn: 'web.example.test' } }, template: {
     volumes: [{ name: 'hypervibe-data', storageType: 'AzureFile', storageName: 'web' }],
-    containers: [{ name: 'main', image: 'old@' + digest, env: [], volumeMounts: [{ volumeName: 'hypervibe-data', mountPath: '/data' }] }],
+    containers: [{ name: 'main', image: 'old@' + digest, env: [{ name: 'API_TOKEN', secretRef: 'api-token' }], volumeMounts: [{ volumeName: 'hypervibe-data', mountPath: '/data' }] }],
   } } };
   const mutations: any[] = [];
   const fetch = async (input: string, init?: RequestInit) => {
@@ -28,6 +28,8 @@ async function execute(kind: 'github' | 'portable', loseMount: boolean, changeId
       mutations.push(payload);
       expect(payload.properties.template.volumes).toEqual(app.properties.template.volumes);
       expect(payload.properties.template.containers[0].volumeMounts).toEqual(app.properties.template.containers[0].volumeMounts);
+      expect(payload.properties.template.containers[0].env).toContainEqual({ name: 'API_TOKEN', secretRef: 'api-token' });
+      expect(payload.properties).not.toHaveProperty('configuration');
       app = { ...app, properties: { ...app.properties, template: payload.properties.template, ...(operationId ? { latestRevisionName: 'web--' + payload.properties.template.revisionSuffix, latestReadyRevisionName: 'web--' + payload.properties.template.revisionSuffix } : {}) } };
       if (loseMount) app.properties.template.containers[0].volumeMounts = [];
       changeIdentity?.(app);

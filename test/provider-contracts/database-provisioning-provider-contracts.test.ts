@@ -40,6 +40,7 @@ interface EvidenceRow {
   coverage: string;
   runtimeReferenceBinding: 'implemented' | 'unsupported';
   runtimeReferenceEvidence: string;
+  provisioningRecovery: { implementation: 'implemented' | 'unsupported'; evidence: string };
   freshInitializationRepair: {
     implementation: 'planned' | 'implemented' | 'unsupported';
     prerequisites: string;
@@ -155,6 +156,15 @@ async function registeredDatabaseAdapters(): Promise<Record<string, IDatabaseAda
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('complete database provisioning persistence contract', () => {
+  it('matches reviewed incomplete-provision completion capability to every registered database adapter', async () => {
+    const adapters = await registeredDatabaseAdapters();
+    expect(Object.keys(adapters).sort()).toEqual(providerRegistry.namesFor('database').sort());
+    for (const row of evidence.providers) {
+      expect(row.provisioningRecovery.evidence.length, row.provider).toBeGreaterThan(30);
+      expect(Boolean(adapters[row.provider].provisioningRecovery), row.provider)
+        .toBe(row.provisioningRecovery.implementation === 'implemented');
+    }
+  });
   it.each(unsupportedInitializationProviders)('accepts the native $provider scope before explicit capability rejection', ({ scope }) => {
     expect(databaseFreshInitializationIntentSchema.parse({ id: 'fresh-production', discardExistingData: true,
       target: { externalId: 'bound-database', providerScope: scope } }).target.providerScope).toEqual(scope);

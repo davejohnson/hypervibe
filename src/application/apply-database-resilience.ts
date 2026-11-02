@@ -69,7 +69,7 @@ export async function applyDatabaseResilienceAction(params: {
     );
   }
 
-  const adapterResult = await adapterFactory.getDatabaseAdapter(action.resource.provider, project);
+  const adapterResult = await adapterFactory.getDatabaseAdapter(action.resource.provider, project, environment.name);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: 'Database adapter unavailable', error: adapterResult.error };
   }

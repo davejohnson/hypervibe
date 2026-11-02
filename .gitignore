@@ -61,6 +61,7 @@ web_modules/
 
 # Output of 'npm pack'
 *.tgz
+!vendor/azure-identity-4.13.2-hypervibe.1.tgz
 
 # Yarn Integrity file
 .yarn-integrity

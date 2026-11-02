@@ -31,6 +31,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { executePlanApply } from '../../../application/apply-plan.js';
 import * as bootstrap from '../../services/bootstrap.service.js';
 import * as managedCi from '../../services/managed-ci.service.js';
+import * as recoveryRuntime from '../../services/recovery-runtime.service.js';
 
 // User requirement (2026-10-29): normal releases do not require enabled backups,
 // new archive storage, or fresh recovery evidence. Destructive-operation
@@ -77,7 +78,7 @@ describe('optional backup policy at the ordinary deployment planning boundary', 
       const connection = connections.create({ provider, credentialsEncrypted: getSecretStore().encryptObject(credentials) });
       connections.updateStatus(connection.id, 'verified');
     }
-    vi.spyOn(PlanService.prototype, 'observeEnvironment').mockResolvedValue({ warnings: [], observed: {
+    const observation = vi.spyOn(PlanService.prototype, 'observeEnvironment').mockResolvedValue({ warnings: [], observed: {
       provider: 'railway', observedAt: new Date().toISOString(), projectExists: true, ...scope, partial: false, warnings: [],
       services: [{ name: 'web', externalId: 'web-1', workloadKind: 'web', sourceState: 'disconnected',
         config: { startCommand: 'npm start', public: true }, envVarKeys: [], envVarHashes: {}, customDomains: [], status: 'running' }],
@@ -106,7 +107,7 @@ describe('optional backup policy at the ordinary deployment planning boundary', 
       resources: [{ resource, state: 'missing', reason: 'No completed backup or isolated restore exists.' }] });
     const checkpointPlanner = vi.spyOn(resilience, 'planDatabaseResilience')
       .mockReturnValue({ actions: [], warnings: [], unmanaged: [], serviceDependencies: [] });
-    return { project, spec, checkpointPlanner, plan: () => new PlanService().plan(project, 'production', { includeEnvFile: false }) };
+    return { project, spec, environment, observation, checkpointPlanner, plan: () => new PlanService().plan(project, 'production', { includeEnvFile: false }) };
   }
 
   it.each([false, true])('keeps ordinary service changes reachable with explicit backup intent=%s and no completed backup', async explicitBackup => {
@@ -119,6 +120,45 @@ describe('optional backup policy at the ordinary deployment planning boundary', 
       || action.resource.name === 'hypervibe-backups')).toBe(false);
     expect(new SpecStore().get(f.project)!.spec.environments.production.backups)
       .toEqual(explicitBackup ? { mode: 'daily' } : undefined);
+  });
+
+  it.each(['action', 'unknown'] as const)('does not turn %s backup-worker setup into a release prerequisite', async state => {
+    const f = await fixture(true);
+    const worker = vi.spyOn(recoveryRuntime, 'observeRecoveryRuntime').mockResolvedValue(state === 'unknown'
+      ? { provider: 'railway', state, reason: 'Worker authority is unknown.' }
+      : { provider: 'railway', state,
+        target: { environment: f.environment, database: { provider: 'railway', primaryExternalId: 'db-1',
+          providerScope: { projectId: 'project-1', environmentId: 'production-1' }, resourceIdentity: {} },
+          destination: { provider: 'railway', externalId: 'archive-1', instanceScope: { projectId: 'project-1', environmentId: 'production-1' } },
+          objects: [], runnerImage: `registry.example/helper@sha256:${'a'.repeat(64)}` },
+        step: { component: 'identity', operation: 'create', target: { resourceId: 'backup-worker-1' },
+          description: 'Prepare a dedicated backup identity.', requiresConfirm: true } });
+    const result = await f.plan();
+    expect(result).toMatchObject({ scope: 'full', blocked: [] });
+    if ('error' in result) throw new Error(result.error);
+    expect(result.actions).toContainEqual(expect.objectContaining({ id: 'service:web', type: 'update' }));
+    expect(worker).not.toHaveBeenCalled();
+  });
+
+  it.each(['full', 'backups'] as const)('reviews workload identity only in full scope, independently of backup evidence (scope=%s)', async scope => {
+    const f = await fixture(true);
+    const current = await f.observation(f.project, f.environment, f.spec.spec.environments.production);
+    f.observation.mockResolvedValue({ ...current, observed: { ...current.observed!, runtimeAccess: {
+      identities: [{ serviceName: 'web', provider: 'railway', mode: 'ensure', observation: { state: 'action',
+        step: { operation: 'attach', target: { principal: 'runtime-web' },
+          description: 'Attach the dedicated runtime identity.', requiresConfirm: true, restartsWorkload: true } } }], grants: [],
+    } } });
+    if (scope === 'backups') {
+      vi.spyOn(managedCi, 'planManagedCiDeploy').mockResolvedValue({ actions: [], warnings: [] });
+      vi.mocked(backupPolicy.observeBackupPolicy).mockResolvedValue({ policy: { mode: 'daily', source: 'explicit', resources: [] }, resources: [] });
+      vi.mocked(backupHealth.observeBackupHealth).mockResolvedValue({ observedAt: new Date().toISOString(), resources: [] });
+    }
+    const result = await new PlanService().plan(f.project, 'production', { scope, includeEnvFile: false });
+    expect(result).toMatchObject(scope === 'full'
+      ? { scope: 'runtime-access', blocked: [], actions: [expect.objectContaining({
+        id: 'runtime-identity:web', requiresConfirm: true, metadata: expect.objectContaining({ operation: 'runtimeIdentity' }),
+      })] }
+      : { scope: 'backup-readiness', actions: [] });
   });
 
   it('retains an explicitly requested destructive-operation checkpoint as an isolated prerequisite', async () => {

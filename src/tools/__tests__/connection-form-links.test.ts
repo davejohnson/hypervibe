@@ -44,6 +44,41 @@ function urls(setup: { setupUrls: string[] }): URL[] {
 // in docs/connection-form-links.md, not request-derived API response fixtures.
 // No credential creation or authenticated provider browser is exercised here.
 describe('contextual credential forms through MCP', () => {
+  it.each(['ecs','s3'])('explains AWS browser 400 recovery without reusing an expired authorization for %s', async provider => {
+    await withClient(async client => {
+      const response=await client.callTool({name:'hv_connections',arguments:{provider,action:'describe',scope:'operator-test'}});
+      const guidance=(parseToolEnvelope(response).data as any).connectionSetup.localAuthentication.agentInstruction;
+      expect(guidance).toMatch(/400.*private browser window/i);
+      expect(guidance).toMatch(/active CLI.*authorization URL/);
+      expect(guidance).toMatch(/expired.*fresh.*login/i);
+      expect(guidance).toMatch(/possible cause.*not a diagnosis/i);
+      expect(guidance).toMatch(/do not.*clear.*cookies/i);
+      expect(guidance).toMatch(/region.*existing.*SignInLocalDevelopmentAccess/);
+    });
+  });
+  it.each([
+    { provider: 'ecs', executable: 'aws', install: ['install', 'awscli'], login: ['login'] },
+    { provider: 'azure-container-apps', executable: 'az', install: ['install', 'azure-cli'], login: ['login'] },
+    { provider: 'cloudrun', executable: 'gcloud', install: ['install', '--cask', 'gcloud-cli'], login: ['auth', 'application-default', 'login'] },
+  ])('gives the agent a bounded native installation/login recipe for $provider', async ({ provider, executable, install, login }) => {
+    await withClient(async client => {
+      const response = await client.callTool({ name: 'hv_connections', arguments: { provider, action: 'describe', scope: 'operator-test' } });
+      const setup = (parseToolEnvelope(response).data as any).connectionSetup;
+      expect(setup.localAuthentication).toMatchObject({ credentialMode: 'default',
+        macosInstall: { command: 'brew', args: install }, signIn: { command: executable, args: login } });
+      expect(setup.localAuthentication.agentInstruction).toMatch(/install.*missing.*initiate.*browser/i);
+      expect(setup.localAuthentication.agentInstruction).toMatch(/preserve existing profiles/i);
+      expect(setup.localAuthentication.agentInstruction).toMatch(/no cloud resources/i);
+      expect(setup.localAuthentication.agentInstruction).toMatch(/consent.*MFA/);
+      expect(JSON.stringify(setup.localAuthentication)).not.toMatch(/accessKeyId|secretAccessKey|clientSecret|private_key/);
+      expect(setup.credentialExample).not.toContain('credentialsRef=');
+      if (provider === 'azure-container-apps') expect(setup.recommendedSetupUrl).toBe('https://learn.microsoft.com/en-us/cli/azure/authenticate-azure-cli-interactively');
+      if (provider === 'ecs') {
+        expect(setup.recommendedSetupUrl).toBe('https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sign-in.html');
+        expect(setup.credentialExample).not.toContain('credentialsRef=');
+      }
+    });
+  });
   it.each(['tool description', 'discovery hint'])('%s requires contextual setup before showing a human form', async surface => {
     await withClient(async client => {
       const tool = (await client.listTools()).tools.find(candidate => candidate.name === 'hv_connections')!;

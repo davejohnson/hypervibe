@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { preparedHostingMarkerSchema } from './hosting-prepared.port.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Service } from '../entities/service.entity.js';
 import type {
@@ -17,6 +18,8 @@ import type {
  * Used to determine what features are available for a given platform.
  */
 export interface HostingCapabilities {
+  /** Missing capability means unsupported; each destination is checked separately. */
+  runtimeSecretReferenceProviders?: Array<import('./secret-destination.port.js').SecretDestination['provider']>;
   /** Build methods the platform supports */
   supportedBuilders: Array<'nixpacks' | 'dockerfile' | 'buildpack' | 'static'>;
 
@@ -72,6 +75,8 @@ export interface ManagedRecoveryTaskOptions {
   expectedImage: string;
   executionId: string;
   databaseSource: import('./recovery-source.port.js').RecoverySourceIdentity;
+  /** Provider-owned prepared identity, network and exact private credential reference. */
+  executionTarget?: import('./recovery-runtime.port.js').RecoveryRuntimeExecutionTarget;
   variableReferences: Array<{ sourceServiceId: string; variableName: string; targetName: string }>;
   /** Non-secret reviewed worker configuration; never application environment. */
   variables: Record<string, string>;
@@ -159,6 +164,7 @@ export interface HostingBindings {
 
   /** Provider-native non-secret scope when projectId is a logical resource prefix. */
   providerScope?: Record<string, string>;
+  preparedHosting?: import('./hosting-prepared.port.js').PreparedHostingMarker;
 
   /** Map of service names to their external IDs */
   services: Record<string, {
@@ -362,6 +368,7 @@ export const hostingBindingsSchema = z.object({
   projectId: nonEmptyHostingBindingString.optional(),
   environmentId: nonEmptyHostingBindingString.optional(),
   providerScope: retainedProviderScopeSchema.optional(),
+  preparedHosting: preparedHostingMarkerSchema.optional(),
   services: hostingServicesSchema.optional(),
   serviceCreateRecovery: serviceCreateRecoveryMapSchema.optional(),
   previousDatabase: previousDatabaseSchema.optional(),
@@ -403,6 +410,12 @@ export function parseHostingBindings(
  * Hosting adapters handle deploying services to cloud platforms.
  */
 export interface IHostingAdapter {
+  readonly recoveryRuntime?: import('./recovery-runtime.port.js').IRecoveryRuntime;
+  readonly preparedHosting?: import('./hosting-prepared.port.js').IPreparedHosting;
+  /** Install a journal-backed read callback; never infer local preparation from
+   * spec or binding bytes alone. Credentials remain the existing connection. */
+  configureLocalPreparedHosting?(load: import('./hosting-prepared.port.js').LocalPreparedHostingLoader): void;
+  readonly runtimeIdentities?: import('./runtime-identity.port.js').IRuntimeIdentities;
   /** Read-only admission for an explicitly reviewed private database task. */
   readonly databaseInitialization?: import('./database-initialization-bootstrap.port.js').IDatabaseInitializationBootstrap;
   readonly serviceVolumes?: import('./service-volume.port.js').IServiceVolumes;

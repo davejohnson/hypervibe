@@ -106,7 +106,7 @@ describe('native storage credentials through managed backup worker handoff', () 
       task: { mutationAttempted: false } } });
     expect(f.run).toHaveBeenCalledOnce();
     expect(f.accepted[0].credentials).toMatchObject({ bucket: `archive-${f.environmentId}`, urlStyle: canonicalStyle });
-    expect(f.accepted[0].sourceCredentials.documents).toMatchObject({ bucket: `documents-${f.environmentId}`, urlStyle: canonicalStyle });
+    expect(f.accepted[0].sourceCredentials?.documents).toMatchObject({ bucket: `documents-${f.environmentId}`, urlStyle: canonicalStyle });
     expect(f.credentialScopes).toEqual([
       { projectId, environmentId: f.environmentId, bucketId: 'bucket-archive' },
       { projectId, environmentId: f.environmentId, bucketId: 'bucket-documents' },

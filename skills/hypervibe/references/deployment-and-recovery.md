@@ -46,6 +46,34 @@ disabled. That scoped proposal changes only its selected backup program. To
 retire a managed program, declare backups disabled and review a backup-scoped
 removal; retained data and native snapshots remain untouched.
 
+For a corrected operator helper at the same package version, use the existing
+`operatorArtifacts.<name>` declaration's `refreshFrom` with its latest completed
+publication's exact `installationId` and `planDigest`. Plan and separately review
+the new upload; do not invent another artifact name or replace a retained receipt.
+Keep that marker after completion so repeated plans remain noops. A later refresh
+names the new completed publication; removed or stale markers block. Reconcile
+uncertain uploads through their existing attempts. After verified publication,
+select its immutable digest in `backups.runnerImage` and review the backup program
+separately; publishing a helper does not update an existing runtime reference.
+
+For an image-only update to existing services using a published operator image,
+select those services explicitly in `hv_plan` and set `includeEnvFile: false`.
+Hypervibe verifies the exact immutable image and runtime dependencies while
+preserving unrelated completed setup records. An expired administrator session
+for another cloud is not a reason to repeat that setup. Other runtime changes,
+unknown required resources or unfinished setup effects still need their normal
+review; do not bypass a blocked plan. Images outside operator publication and
+first-time service creation keep their existing deployment path.
+
+For access checks or a supported ownership-metadata repair on existing services,
+use `hv_plan scope="runtime-access"` with explicit `services` and
+`includeEnvFile: false`. Review only the returned runtime actions; this scope
+does not deploy code or run migrations, and does not authorize unrelated cloud
+setup. Preserve the successful parts of a partial release. After repairing and
+verifying its exact prerequisite, plan only the workloads still awaiting update.
+Missing or conflicting ownership evidence is not permission to adopt a resource
+by name, replace its identity or edit provider metadata directly.
+
 The existing environment policy and reviewed deployment bindings determine the
 release path. Portable managed CI is the normal push-deploy path where
 implemented. Do not change deploy-source settings or workflow content outside

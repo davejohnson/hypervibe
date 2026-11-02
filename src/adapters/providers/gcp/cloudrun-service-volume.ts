@@ -11,7 +11,8 @@ const SUBNET_CIDR = '10.42.0.0/26';
 
 /** Individually authorized retained resources, never an implicit deploy helper. */
 export class CloudRunServiceVolumes implements IServiceVolumes {
-  constructor(private connection: () => { projectId: string; region: string }, private token: () => Promise<string>) {}
+  constructor(private connection: () => { projectId: string; region: string }, private token: () => Promise<string>,
+    private readonly request: typeof fetch = (input, init) => fetch(input, init)) {}
 
   readonly staged: NonNullable<IServiceVolumes['staged']> = {
     resolveTarget: async ({ environment, serviceName, mountPath }) => {
@@ -75,7 +76,7 @@ export class CloudRunServiceVolumes implements IServiceVolumes {
   }
 
   private async get(url: string): Promise<Json | null> {
-    const response = await fetch(url, { headers: { Authorization: `Bearer ${await this.token()}` }, signal: AbortSignal.timeout(30_000) });
+    const response = await this.request(url, { headers: { Authorization: `Bearer ${await this.token()}` }, signal: AbortSignal.timeout(30_000) });
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(`GCP filesystem observation failed (HTTP ${response.status}); verify API access and resource permissions.`);
     const body = await response.json();
@@ -97,7 +98,7 @@ export class CloudRunServiceVolumes implements IServiceVolumes {
         if (!s.projectNumber || !/^[0-9]+$/.test(s.projectNumber)) throw new Error('Missing verified numeric GCP project identity.');
         const api = key === 'compute-api' ? 'compute.googleapis.com' : 'file.googleapis.com';
         const name = `projects/${s.projectNumber}/services/${api}`;
-        const service = await this.get(`${USAGE}${name}`);
+        const service = await this.get(`${USAGE}${name}?fields=name,state`);
         if (!service || service.name !== name || !['ENABLED', 'DISABLED'].includes(service.state)) throw new Error('GCP API state is incomplete or outside the reviewed project.');
         return service.state === 'DISABLED' ? { state: 'absent' } : { state: 'present', externalId: name, pendingDeletion: false, ready: true };
       }
@@ -205,7 +206,7 @@ export class CloudRunServiceVolumes implements IServiceVolumes {
       if (key === 'compute-api' || key === 'file-api') {
         const api = key === 'compute-api' ? 'compute.googleapis.com' : 'file.googleapis.com';
         expectedTarget = `projects/${s.projectNumber}/services/${api}`;
-        const existing = await this.get(`${USAGE}${expectedTarget}`);
+        const existing = await this.get(`${USAGE}${expectedTarget}?fields=name,state`);
         if (existing?.name !== expectedTarget || existing.state !== 'DISABLED') throw new Error('The exact API prerequisite changed before enablement.');
         observedApiName = existing.name;
         url = `${USAGE}${expectedTarget}:enable`; body = {};
@@ -240,7 +241,7 @@ export class CloudRunServiceVolumes implements IServiceVolumes {
       }
       const token = await this.token();
       mutationAttempted = true;
-      const response = await fetch(url, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+      const response = await this.request(url, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
       if (!response.ok) throw new Error(`GCP filesystem mutation failed (HTTP ${response.status}); retained intent requires inspection before retry.`);
       const operation = await response.json() as Json;
       if (!operation || typeof operation.name !== 'string' || operation.error) throw new Error('GCP filesystem mutation did not return a valid operation acknowledgement.');
@@ -248,7 +249,7 @@ export class CloudRunServiceVolumes implements IServiceVolumes {
         if (!/^operations\/[A-Za-z0-9._~-]+$/.test(operation.name)) throw new Error('GCP API enablement returned an invalid operation identity.');
         acknowledgedId = observedApiName;
         for (let attempt = 0; attempt < 3; attempt++) {
-          const current = await this.get(`${USAGE}${observedApiName}`);
+          const current = await this.get(`${USAGE}${observedApiName}?fields=name,state`);
           if (current?.name !== observedApiName) throw new Error('GCP API identity changed during enablement observation.');
           if (current.state === 'ENABLED') return { success: true, externalId: current.name, mutationAttempted };
         }

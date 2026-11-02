@@ -1,3 +1,8 @@
+import { isDeepStrictEqual } from 'node:util';
+import { SpecStore } from '../spec/spec.store.js';
+import { preparedHostingMarkerSchema } from '../ports/hosting-prepared.port.js';
+import { observePreparedHosting } from './hosting-prepared.service.js';
+import { preparedReleaseAttempts } from './prepared-direct-release.service.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { adapterFactory } from './adapter.factory.js';
@@ -18,6 +23,8 @@ import {
 } from './spec.service.js';
 import { buildDeploySourceEnvVars, resolveGitDeploySource } from './deploy-source.js';
 import { reservedRuntimeEnvError } from './runtime-env-policy.js';
+import { validateRuntimeSecretReferences } from './runtime-secret-references.js';
+import type { RuntimeSecretReference } from '../ports/secret-destination.port.js';
 
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
@@ -69,6 +76,7 @@ function recordConnectedDeploySource(params: {
 }
 
 export async function executeBootstrap(params: {
+  preparedRelease?: import('../ports/hosting-prepared.port.js').PreparedDirectReleaseControl;
   projectName: string;
   environmentName: string;
   /** Non-secret desired hosting placement; provider default when omitted. */
@@ -82,6 +90,7 @@ export async function executeBootstrap(params: {
   verifyHttpHealth?: boolean;
   queueEnvVars?: Record<string, string>;
   envVarsByService?: Record<string, Record<string, string>>;
+  secretVersionRefs?: Record<string, RuntimeSecretReference>;
   ensureHostingProject?: boolean;
   /** Internal reviewed hosting-identity stage: configure an empty service, never deploy code. */
   provisionOnly?: boolean;
@@ -94,6 +103,11 @@ export async function executeBootstrap(params: {
   }
   const reservedError = reservedRuntimeEnvError(params.envVars, params.queueEnvVars, ...Object.values(params.envVarsByService ?? {}));
   if (reservedError) return { success: false, summary: { blocked: true, error: reservedError } };
+  let secretVersionRefs: Record<string, RuntimeSecretReference>;
+  try {
+    secretVersionRefs = validateRuntimeSecretReferences(params.secretVersionRefs,
+      Object.assign({}, params.envVars, params.queueEnvVars, ...Object.values(params.envVarsByService ?? {})), () => true);
+  } catch { return { success: false, summary: { blocked: true, error: 'Invalid or conflicting runtime secret references.' } }; }
   const tx = new InfraTransaction();
   const project = resolveProject({ projectName: params.projectName });
   if (!project) {
@@ -135,6 +149,7 @@ export async function executeBootstrap(params: {
         buildConfig: {
           workloadKind,
           builder: 'nixpacks',
+          ...(runtimeConfig?.instanceBounds ? { instanceBounds: runtimeConfig.instanceBounds } : {}),
           ...(runtimeConfig?.startCommand ? { startCommand: runtimeConfig.startCommand } : {}),
           ...(runtimeConfig?.releaseCommand ? { releaseCommand: runtimeConfig.releaseCommand } : {}),
           ...(runtimeConfig?.healthCheckPath ? { healthCheckPath: runtimeConfig.healthCheckPath } : {}),
@@ -155,6 +170,7 @@ export async function executeBootstrap(params: {
     } else {
       const nextBuildConfig = {
         ...service.buildConfig,
+        instanceBounds: runtimeConfig?.instanceBounds,
         workloadKind,
         ...(runtimeConfig?.startCommand ? { startCommand: runtimeConfig.startCommand } : {}),
         ...(runtimeConfig?.releaseCommand ? { releaseCommand: runtimeConfig.releaseCommand } : {}),
@@ -224,12 +240,54 @@ export async function executeBootstrap(params: {
   }
 
   const targetPlatform = hostingProviderForEnvironment(project, environment);
+  const hostingProject = project.defaultPlatform?.toLowerCase() === targetPlatform
+    ? project
+    : { ...project, defaultPlatform: targetPlatform };
   const cloudPrepareProfile = getCloudPrepareProfile(targetPlatform);
-  if (cloudPrepareProfile && !isCloudPrepared(project, targetPlatform)) {
+  const preparedHostingResult = params.preparedRelease || cloudPrepareProfile && environment.platformBindings.preparedHosting !== undefined
+    ? await adapterFactory.getHostingAdapter(hostingProject, environment.name) : undefined;
+  let verifiedPreparation = false;
+  if (preparedHostingResult?.success && preparedHostingResult.adapter?.preparedHosting) {
+    try {
+      const marker = preparedHostingMarkerSchema.parse(environment.platformBindings.preparedHosting);
+      const environmentSpec = new SpecStore().getForInspection(project)?.spec.environments[environment.name];
+      if (params.preparedRelease && environmentSpec && workloads.every(service => marker.pendingFirstRelease.includes(service.name))) {
+        const proof = await preparedHostingResult.adapter.preparedHosting.inspect({ environment, environmentSpec,
+          runtimeEnvVarsByService: Object.fromEntries(workloads.map(service => [service.name,
+            { ...params.queueEnvVars, ...params.envVars, ...params.envVarsByService?.[service.name] }])) });
+        verifiedPreparation = proof.state === 'verified' && marker.receiptDigest === proof.preparation.receiptDigest
+          && marker.installationId === proof.preparation.installationId && marker.planDigest === proof.preparation.planDigest
+          && workloads.every(service => proof.preparation.pendingFirstRelease.includes(service.name)
+            && isDeepStrictEqual(marker.firstReleaseConfigurationDigests?.[service.name], proof.preparation.firstReleaseConfigurationDigests?.[service.name]));
+      } else if (environmentSpec && workloads.every(service => !marker.pendingFirstRelease.includes(service.name))) {
+        // Completing a first release does not discard its scoped installation.
+        // Re-read native ownership/runtime evidence instead of requiring the
+        // unrelated legacy project-wide preparation grants. Pending siblings
+        // keep their reviewed first-release inputs and receive no authority here.
+        const attempts = preparedReleaseAttempts(environment);
+        if (workloads.some(service => ['attempted', 'uncertain'].includes(attempts[service.name]?.status))) throw new Error();
+        const proof = await observePreparedHosting({ environment, environmentSpec,
+          hosting: preparedHostingResult.adapter, reviewedPreparation: marker });
+        const retained = parseHostingBindings(environment).services;
+        verifiedPreparation = !proof.taskAdoptions?.length
+          && workloads.every(service => !proof.preparation.pendingFirstRelease.includes(service.name)
+            && (['serviceId', 'resourceUid', 'resourceType', 'workloadKind'] as const).every(key =>
+              typeof retained?.[service.name]?.[key] === 'string'
+              && retained[service.name]![key] === proof.bindings.services[service.name]?.[key]));
+      }
+    } catch { /* A missing native or current-source proof retains the ordinary prerequisite blocker. */ }
+  }
+  if (cloudPrepareProfile && !isCloudPrepared(project, targetPlatform) && !verifiedPreparation) {
     const cleanup = await tx.rollback();
     return {
       success: false,
-      summary: {
+      summary: environment.platformBindings.preparedHosting !== undefined ? {
+        blocked: true,
+        error: 'The retained scoped hosting installation could not be verified. Inspect its current native resources and recovery records, then re-run hv_plan. No new setup or deployment was authorized.',
+        provider: targetPlatform,
+        rollback: cleanup,
+        transaction: { created: tx.listResources() },
+      } : {
         error: `${cloudPrepareProfile.label} is not prepared for Hypervibe deploys. Run hv_connections provider="${targetPlatform}" action="prepare" confirm=true before applying.`,
         action: 'cloud_prepare',
         provider: targetPlatform,
@@ -242,10 +300,7 @@ export async function executeBootstrap(params: {
     };
   }
 
-  const hostingProject = project.defaultPlatform?.toLowerCase() === targetPlatform
-    ? project
-    : { ...project, defaultPlatform: targetPlatform };
-  const hostingResult = await adapterFactory.getHostingAdapter(hostingProject);
+  const hostingResult = preparedHostingResult ?? await adapterFactory.getHostingAdapter(hostingProject, environment.name);
   if (!hostingResult.success || !hostingResult.adapter) {
     const cleanup = await tx.rollback();
     return {
@@ -268,6 +323,10 @@ export async function executeBootstrap(params: {
         transaction: { created: tx.listResources() },
       },
     };
+  }
+  if (Object.values(secretVersionRefs).some(ref => !hostingAdapter.capabilities.runtimeSecretReferenceProviders?.includes(ref.destination.provider))) {
+    const cleanup = await tx.rollback();
+    return { success: false, summary: { blocked: true, error: 'The hosting provider cannot install the declared native secret references.', rollback: cleanup } };
   }
 
   if (params.requireNewWorkload && (hostingAdapter.capabilities.supportsCreateOnlyDeploy !== true
@@ -335,6 +394,7 @@ export async function executeBootstrap(params: {
     services: workloads,
     envVars: Object.keys(deployEnvVars).length > 0 ? deployEnvVars : undefined,
     ...(params.envVarsByService ? { envVarsByService: params.envVarsByService } : {}),
+    ...(Object.keys(secretVersionRefs).length ? { secretVersionRefs } : {}),
     ...(params.verifyHttpHealth ? { verifyHttpHealth: true } : {}),
     ...(deferProviderDeployment ? { deferProviderDeployment: true } : {}),
     ...(params.requireNewWorkload ? { requireNewWorkload: true } : {}),
@@ -344,6 +404,7 @@ export async function executeBootstrap(params: {
     ...(params.expectedSourceCommitSha ? { expectedSourceCommitSha: params.expectedSourceCommitSha } : {}),
     ensureProject: params.ensureHostingProject !== false,
     adapter: hostingAdapter,
+    ...(params.preparedRelease ? { preparedRelease: params.preparedRelease } : {}),
   });
 
   const rolloutBaselines: Record<string, unknown> = {};

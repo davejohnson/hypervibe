@@ -62,7 +62,7 @@ describe('daily backup policy-only executor stage', () => {
     const result = await executePlanApply(ctx, { project, spec, specRevision: 1, planId: run.id,
       confirmActions: [action.id], alwaysRunBootstrap: true });
     expect(result).toMatchObject({ kind: 'executed', result: { success: true } });
-    expect(providerPreflight).toHaveBeenCalledWith(['railway']);
+    expect(providerPreflight).toHaveBeenCalledWith(['railway'], project, 'production');
     expect(configure).toHaveBeenCalledTimes(1);
     expect(configure).toHaveBeenCalledWith(expect.objectContaining({ project, environmentName: 'production',
       action, confirmedActionIds: new Set([action.id]) }));

@@ -2,9 +2,9 @@ import { z } from 'zod';
 
 export const deployInputSchema = z.object({
   projectName: z.string().min(1).optional(),
-  projectId: z.string().uuid().optional(),
+  projectId: z.string().guid().optional(),
   environmentName: z.string().min(1).optional(),
-  environmentId: z.string().uuid().optional(),
+  environmentId: z.string().guid().optional(),
   services: z.array(z.string()).optional(),
   envVars: z.record(z.string(), z.string()).optional(),
 }).refine(
@@ -13,7 +13,7 @@ export const deployInputSchema = z.object({
 );
 
 export const deployStatusInputSchema = z.object({
-  runId: z.string().uuid(),
+  runId: z.string().guid(),
 });
 
 export type DeployInputSchema = z.infer<typeof deployInputSchema>;

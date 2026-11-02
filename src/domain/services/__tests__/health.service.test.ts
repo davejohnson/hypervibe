@@ -249,8 +249,8 @@ describe('health.service', () => {
       provider: 'vercel',
       state: 'healthy',
     }));
-    expect(adapterFactory.getHostingAdapterByName).toHaveBeenCalledWith('railway', project);
-    expect(adapterFactory.getHostingAdapterByName).toHaveBeenCalledWith('vercel', project);
+    expect(adapterFactory.getHostingAdapterByName).toHaveBeenCalledWith('railway', project, 'production');
+    expect(adapterFactory.getHostingAdapterByName).toHaveBeenCalledWith('vercel', project, 'staging');
   });
 
   it('checks only services in current desired state when bindings contain a renamed service', async () => {

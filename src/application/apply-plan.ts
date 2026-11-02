@@ -1,7 +1,14 @@
+import { applyOperatorApplications, operatorApplicationUnavailable } from '../domain/services/operator-application.service.js';
+import { operatorImageUpdateSelection, verifyOperatorImageUpdate } from '../domain/services/operator-image-update.service.js';
+import { applyRecoveryRuntimeAction } from '../domain/services/recovery-runtime.service.js';
+import { applyRuntimeAccessAction, observeRuntimeAccess, planRuntimeAccess, projectRuntimeAccessInput } from '../domain/services/runtime-access.service.js';
 import { applyCredentialLifecycle, pendingCredentialUpdate } from '../domain/services/credential-lifecycle.service.js';
 import { applyRepositoryVariable, isRepositoryVariableAction, pendingRepositoryVariableEnvironment, repositoryVariablesEnvironment } from '../domain/services/repository-variables.service.js';
 import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from '../domain/services/database-credential-aliases.service.js';
+import { applySecretContainer, assertReadySecretContainers } from '../domain/services/secret-container-setup.js';
+import { applySecretReference, assertDeploymentSecretReferences, preparedSecretReleaseError } from './apply-secret-references.js';
 import { applyDatabaseFreshInitialization } from '../domain/services/database-fresh-initialization.service.js';
+import { applyDatabaseProvisioningRecovery } from '../domain/services/database-provisioning-recovery.service.js';
 import { hasPendingDatabaseInitialization } from '../domain/plan/database-initialization.contract.js';
 import { databaseSeedGeneration } from '../domain/services/database-seed-generation.js';
 import { databaseBootstrapActionSchema, hasDatabaseBootstrapObservationOrCleanup, hasPendingDatabaseBootstrap, matchesDatabaseBootstrapObservationOrCleanup } from '../domain/plan/database-bootstrap.contract.js';
@@ -10,7 +17,11 @@ import { applyScheduleActivation } from '../domain/services/schedule-activation.
 import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js';
 import { applyApiPolicy, planApiPolicy } from '../domain/services/api-policy.js';
 import { applyDatabaseScopeBinding } from './apply-database-scope-binding.js';
-import { PlanService } from '../domain/plan/plan.service.js';
+import { applyPreparedHosting } from './apply-prepared-hosting.js';
+import { applyLocalHolding } from '../domain/services/local-holding-preparation.service.js';
+import { SpecStore } from '../domain/spec/spec.store.js';
+import { createPreparedDirectReleaseControl } from '../domain/services/prepared-direct-release.service.js';
+import { PlanService, runtimeAccessScopeFingerprint } from '../domain/plan/plan.service.js';
 import { isScopedSecretAction, scopedSecretObservation } from '../domain/plan/scoped-secrets.js';
 import { deploymentPrerequisitePhase, isManagedCiCredentialAction } from '../domain/plan/plan-stage.js';
 import { withBackupStorageDefaults } from '../domain/services/backup-strategy.service.js';
@@ -32,14 +43,18 @@ import {
 } from '../domain/spec/spec-bootstrap.js';
 import { executeBootstrap } from '../domain/services/bootstrap.service.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
+import { applyOperatorArtifacts } from '../domain/services/operator-artifact.service.js';
+import { applyLocalCloudScope } from '../domain/services/local-cloud-scope.service.js';
+import { isDeepStrictEqual } from 'node:util';
 import {
   applyCloudflareDomainRegistration,
   isCloudflareDomainRegistrationAction,
 } from '../domain/services/domain-registration.service.js';
 import { applyIosAction } from '../domain/services/appstore-plan.service.js';
 import { applyQueueAction } from '../domain/services/queue-plan.service.js';
-import { resolveQueueEnvVars } from '../domain/services/queue-env.js';
-import { applyStorageAction, resolveStorageServiceEnvVars } from '../domain/services/storage-plan.service.js';
+import { resolveBootstrapRuntimeInputs } from '../domain/services/bootstrap-runtime-inputs.js';
+import { validatePreparedManagedInputs } from '../domain/services/hosting-prepared.service.js';
+import { applyStorageAction } from '../domain/services/storage-plan.service.js';
 import { applyServiceVolumeAction, hasRetainedServiceVolumes, observeServiceVolumes, planServiceVolumes, retainedVolumeHostingBlock } from '../domain/services/service-volume.service.js';
 import {
   generatedSecretBindingEvidence,
@@ -121,11 +136,6 @@ import type {
 } from '../domain/ports/provider.port.js';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
 import { runEnvironmentTask } from '../domain/services/environment-task.service.js';
-import {
-  buildDatabaseAliasEnvVars,
-  buildDatabaseEnvVarsFromComponent,
-} from '../domain/services/database-env.js';
-import { buildCacheEnvVarsFromComponent } from '../domain/services/cache-env.js';
 import {
   parseUnresolvedCacheNetworkMutation,
   type CacheEngine,
@@ -387,6 +397,7 @@ function requiredCredentialKeys(block: ConnectionBlock): string[] {
   return metadata
     ? credentialFieldsFromSchema(metadata.credentialsSchema, {
       exclude: metadata.credentials?.agentManagedKeys,
+      excludeChoices: metadata.credentials?.agentManagedChoices,
     })
       ?.filter((field) => field.required)
       .map((field) => field.name) ?? []
@@ -817,33 +828,36 @@ export async function executePlanApply(ctx: CommandContext, params: {
 }): Promise<PlanApplyOutcome> {
   const { project, spec, planId } = params;
   const providerValidation = firstProviderSpecValidationFailure(spec);
-  const invalidSpec = providerValidation ? { kind: 'invalid_spec' as const, message: providerValidation.message,
-    hint: providerValidation.hint, details: providerValidation.details } : undefined;
-  // Ordinary unsupported desired state must still stop before plan loading.
-  // Only a retained native execution warrants inspecting an exact recovery plan.
-  if (invalidSpec && !ctx.repos.environments.findByProjectId(project.id).some(candidate =>
-    ctx.repos.components.findByEnvironmentId(candidate.id).some(component => hasDatabaseBootstrapObservationOrCleanup(component.bindings)))) {
-    return invalidSpec;
+  const invalidSpec: PlanApplyOutcome | undefined = providerValidation ? {
+    kind: 'invalid_spec',
+    message: providerValidation.message,
+    hint: providerValidation.hint,
+    details: providerValidation.details,
+  } : undefined;
+  if (invalidSpec) {
+    // A historical allocation may need recovery after the current provider
+    // changes. This routing hint permits parsing only, never action authority.
+    const saved = ctx.repos.runs.findById(planId);
+    const retainedDatabaseExecution = ctx.repos.environments.findByProjectId(project.id).some(candidate =>
+      ctx.repos.components.findByEnvironmentId(candidate.id).some(component => hasDatabaseBootstrapObservationOrCleanup(component.bindings)));
+    if (!retainedDatabaseExecution && (saved?.type !== 'plan' || saved.projectId !== project.id || !['cloud-scope', 'operator-artifacts', 'operator-applications', 'hosting-preparation'].includes(String(asRecord(saved.plan)?.scope))))
+      return invalidSpec;
   }
-  const planService = new PlanService();
-
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(planId);
-  if ('error' in loaded) {
-    return invalidSpec ?? { kind: 'plan_not_found', error: loaded.error };
-  }
+  if ('error' in loaded) return invalidSpec ?? { kind: 'plan_not_found', error: loaded.error };
   const envName = loaded.document.environmentName;
   const planScope = loaded.document.scope ?? 'full';
-  const secretsOnly = planScope === 'secrets';
-  const retainedCleanupOnly = planScope === 'retained-cleanup';
-  const backupProvisioningOnly = planScope === 'backup-provisioning';
-  const ciCredentialsOnly = planScope === 'managed-ci-credentials';
-  const managedCiBindingsOnly = planScope === 'managed-ci-bindings' || planScope === 'hosting-bindings';
-  const workflowPublicationOnly = planScope === 'managed-ci-publication' || planScope === 'backup-program-publication';
-  const projectForPreflight = spec.gitRemoteUrl
-    ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
-    : project;
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (loaded.document.overrides?.operatorImageUpdate) {
+    try {
+      const selected = await operatorImageUpdateSelection(project, environment, spec, { scope: planScope,
+        serviceFilter: loaded.document.overrides.services, includeEnvFile: false });
+      if (!selected || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment!.id || params.alwaysRunBootstrap) throw new Error();
+      await verifyOperatorImageUpdate(project, environment!, spec, selected.images);
+    } catch { return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'The exact existing image update dependencies changed or could not be verified. Re-plan before deployment; no setup writes are authorized.' }] }; }
+  }
   try {
     const pendingVariables = pendingRepositoryVariableEnvironment(project.id);
     if (pendingVariables && (planScope !== 'full' || envName !== pendingVariables
@@ -854,6 +868,81 @@ export async function executePlanApply(ctx: CommandContext, params: {
     }
   } catch { return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
     reason: 'Retained repository-variable ownership is malformed or ambiguous; no new mutation is authorized.' }] }; }
+  const initializationEnvironments = planScope === 'credentials'
+    ? ctx.repos.environments.findByProjectId(project.id) : environment ? [environment] : [];
+  if (planScope !== 'database-bootstrap' && initializationEnvironments.some(candidate =>
+    ctx.repos.components.findByEnvironmentId(candidate.id).some(component => hasPendingDatabaseBootstrap(component.bindings)))) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'Private database bootstrap has a retained attempt. Recover its isolated stage before other mutations.' }] };
+  }
+  if (planScope !== 'database-initialization' && initializationEnvironments.some(candidate =>
+    ctx.repos.components.findByEnvironmentId(candidate.id).some(component => hasPendingDatabaseInitialization(component.bindings)))) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'Database initialization needs exact readback verification. Recover its isolated stage before other mutations.' }] };
+  }
+  if (loaded.document.scope === 'operator-applications') {
+    const envName = loaded.document.environmentName, environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap)
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: operatorApplicationUnavailable().message }] };
+    const unchangedPlan = () => isDeepStrictEqual(ctx.repos.runs.findById(planId)?.plan, loaded.run.plan);
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
+      handler: (action, execution) => applyOperatorApplications({ project, environment, applicationRegistration: loaded.document.applicationRegistration, action,
+        authorize: () => ctx.repos.runs.findById(execution.applyRunId)?.status === 'running' && unchangedPlan() }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Only exact operator application actions were authorized; deployment and customer access remain separate.'] };
+  }
+  if (loaded.document.scope === 'hosting-preparation') {
+    const envName = loaded.document.environmentName;
+    const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap)
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'Holding preparation requires its exact saved scope and cannot release application code.' }] };
+    const unchangedPlan = () => isDeepStrictEqual(ctx.repos.runs.findById(planId)?.plan, loaded.run.plan);
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
+      handler: (action, execution) => applyLocalHolding({ project, environment, holdingPreparation: loaded.document.holdingPreparation, action,
+        authorize: () => ctx.repos.runs.findById(execution.applyRunId)?.status === 'running' && unchangedPlan() }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Only inert holding preparation or its exact binding was authorized. Application release remains separate.'] };
+  }
+  if (loaded.document.scope === 'operator-artifacts') {
+    const envName = loaded.document.environmentName;
+    const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap)
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'Operator publication requires its exact saved application/environment and cannot deploy workloads.' }] };
+    const unchangedPlan = () => isDeepStrictEqual(ctx.repos.runs.findById(planId)?.plan, loaded.run.plan);
+    if (!loaded.document.actions.length) {
+      const verified = await applyOperatorArtifacts({ project, environment, artifactPublication: loaded.document.artifactPublication, authorize: unchangedPlan });
+      if (!verified.success) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: verified.message }] };
+    }
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
+      handler: (action, execution) => applyOperatorArtifacts({ project, environment, artifactPublication: loaded.document.artifactPublication, action,
+        authorize: () => ctx.repos.runs.findById(execution.applyRunId)?.status === 'running' && unchangedPlan() }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Only the exact reviewed operator target, artifact and public-read actions were authorized.'] };
+  }
+  if (loaded.document.scope === 'cloud-scope') {
+    const envName = loaded.document.environmentName;
+    const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap)
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'Cloud project preparation requires its exact saved local scope and cannot deploy workloads.' }] };
+    const unchangedPlan = () => isDeepStrictEqual(ctx.repos.runs.findById(planId)?.plan, loaded.run.plan);
+    if (!loaded.document.actions.length) {
+      const verified = await applyLocalCloudScope({ project, environment, cloudScope: loaded.document.cloudScope, authorize: unchangedPlan });
+      if (!verified.success) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: verified.message }] };
+    }
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
+      handler: (action, execution) => applyLocalCloudScope({ project, environment, cloudScope: loaded.document.cloudScope, action,
+        authorize: () => ctx.repos.runs.findById(execution.applyRunId)?.status === 'running' && unchangedPlan() }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Only the exact saved cloud preparation actions were reviewed. Later billing, API, identity, connection or hosting stages require their own current plan.'] };
+  }
+  const planService = new PlanService();
+
+  const secretsOnly = planScope === 'secrets';
+  const retainedCleanupOnly = planScope === 'retained-cleanup';
+  const backupProvisioningOnly = planScope === 'backup-provisioning';
+  const ciCredentialsOnly = planScope === 'managed-ci-credentials';
+  const managedCiBindingsOnly = planScope === 'managed-ci-bindings' || planScope === 'hosting-bindings';
+  const workflowPublicationOnly = planScope === 'managed-ci-publication' || planScope === 'backup-program-publication';
+  const projectForPreflight = spec.gitRemoteUrl
+    ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
+    : project;
+
   const bootstrapAction = loaded.document.actions[0];
   const observationOrCleanup = planScope === 'database-bootstrap' && environment
     && loaded.run.projectId === project.id && loaded.run.environmentId === environment.id
@@ -870,18 +959,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
   if (pendingDatabaseAliases && planScope !== 'database-credential-aliases') {
     return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
       reason: 'A database reference repair needs readback verification. Recover its isolated plan before other mutations.' }] };
-  }
-  const initializationEnvironments = planScope === 'credentials'
-    ? ctx.repos.environments.findByProjectId(project.id) : environment ? [environment] : [];
-  if (planScope !== 'database-bootstrap' && initializationEnvironments.some(candidate =>
-    ctx.repos.components.findByEnvironmentId(candidate.id).some(component => hasPendingDatabaseBootstrap(component.bindings)))) {
-    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
-      reason: 'Private database bootstrap has a retained attempt. Recover its isolated stage before other mutations.' }] };
-  }
-  if (planScope !== 'database-initialization' && initializationEnvironments.some(candidate =>
-    ctx.repos.components.findByEnvironmentId(candidate.id).some(component => hasPendingDatabaseInitialization(component.bindings)))) {
-    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
-      reason: 'Database initialization needs exact readback verification. Recover its isolated stage before other mutations.' }] };
   }
   if (planScope === 'credentials') {
     if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'Credential plans require the exact existing environment and cannot bootstrap.' }] };
@@ -937,6 +1014,43 @@ export async function executePlanApply(ctx: CommandContext, params: {
       : { kind: 'env_missing', envName };
   }
 
+  if (planScope === 'runtime-access' && loaded.document.overrides?.services !== undefined) {
+    const services = loaded.document.overrides.services;
+    const fingerprint = runtimeAccessScopeFingerprint(environment, envSpec, services);
+    const blocked = (reason: string): PlanApplyOutcome => ({ kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason }] });
+    if (!environment || !fingerprint || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap)
+      return blocked('Selected runtime access requires exact existing workloads and cannot run deployment or bootstrap.');
+    if (fingerprint !== loaded.document.observedFingerprint) return blocked('Selected workload bindings or retained runtime access changed; re-plan before mutation.');
+    const connectionBlocks = planService.providerPreflight([envSpec.hosting.provider, ...loaded.document.actions.map(action => action.resource.provider)], projectForPreflight, envName);
+    if (connectionBlocks.length) return { kind: 'blocked', applyBlocked: connectionBlocks };
+    if (!loaded.document.actions.length) {
+      const observed = await observeRuntimeAccess(await projectRuntimeAccessInput(projectForPreflight, environment, envSpec, undefined, services));
+      if (observed.invalid || planRuntimeAccess(observed).length || observed.identities.some(item => item.observation.state !== 'ready')
+        || observed.grants.some(item => item.waiting || item.observation.state === 'unknown')
+        || services.some(name => !observed.identities.some(item => item.serviceName === name) && !observed.grants.some(item => item.serviceName === name)))
+        return blocked('Selected runtime access is no longer verified ready. Re-plan its exact recovery or prerequisite.');
+    }
+    let expectedBindings = structuredClone(environment.platformBindings);
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
+      freshObservedFingerprint: fingerprint,
+      handler: async action => {
+        const capability = resolvePlanActionAuthority(action)?.capability;
+        if (!['hosting.runtime-identity.mutate', 'storage.runtime-access.mutate'].includes(String(capability)))
+          return { success: false, status: 'blocked', message: 'This selected runtime stage cannot execute unrelated actions.' };
+        const current = ctx.repos.environments.findById(environment.id);
+        if (!runtimeAccessScopeFingerprint(current, envSpec, services) || !isDeepStrictEqual(current!.platformBindings, expectedBindings))
+          return { success: false, status: 'blocked', message: 'Selected workload bindings became unavailable.' };
+        return applyRuntimeAccessAction({ ...await projectRuntimeAccessInput(projectForPreflight, current, envSpec, undefined, services),
+          action, confirmedActionIds: new Set(params.confirmActions),
+          save: bindings => {
+            const saved = ctx.repos.environments.compareAndSwapPlatformBindings(environment.id, expectedBindings, { ...expectedBindings, ...bindings });
+            if (!saved) throw Error('Runtime access bindings changed concurrently; preserve the exact pending attempt.');
+            expectedBindings = structuredClone(saved.platformBindings);
+          } });
+      } });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Only selected runtime identity or permission changes were reviewed. Deployment and unrelated cloud setup remain separate.'] };
+  }
+
   if (planScope === 'database-bootstrap') {
     const reviewedAction = databaseBootstrapActionSchema.safeParse(loaded.document.actions[0]);
     if (loaded.document.databaseBootstrapReady !== true || !environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
@@ -954,6 +1068,23 @@ export async function executePlanApply(ctx: CommandContext, params: {
           : Promise.resolve({ success: false, status: 'blocked' as const, message: 'Only the exact reviewed database bootstrap action is authorized.' }) });
     return { kind: 'executed', envName, result, actionScopedWarnings: [
       'Private task authentication and schema bootstrap do not prove running application readiness. Future backups, restore verification and managed deployment remain separate.' ] };
+  }
+  if (planScope === 'database-provisioning-recovery') {
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
+      || loaded.document.actions.length !== 1 || params.alwaysRunBootstrap) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'Database completion requires its exact reviewed plan and existing environment; it cannot deploy applications.' }] };
+    }
+    const blocked = planService.providerPreflight([envSpec.database?.provider ?? 'unconfigured']);
+    if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision,
+      confirmActions: params.confirmActions, handler: action =>
+        resolvePlanActionAuthority(action)?.capability === 'database.provisioning-recovery'
+          ? applyDatabaseProvisioningRecovery({ project: projectForPreflight, spec: envSpec, environmentName: envName,
+            action, confirmed: new Set(params.confirmActions), encrypted: loaded.document.overrides?.databaseProvisioningEncrypted })
+          : Promise.resolve({ success: false, status: 'blocked' as const, message: 'Only exact database completion is authorized.' }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [
+      'Database completion does not establish application rollout, migrations, backups or restoration.' ] };
   }
   if (planScope === 'database-initialization') {
     if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
@@ -988,13 +1119,37 @@ export async function executePlanApply(ctx: CommandContext, params: {
         action, confirmed: new Set(params.confirmActions), encrypted: loaded.document.overrides?.databaseCredentialAliasesEncrypted }) });
     return { kind: 'executed', envName, result, actionScopedWarnings: ['Database reference configuration is separate from SQL authentication, application use and runtime rollout.'] };
   }
+  if (planScope === 'secret-destinations') {
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'Container setup requires the exact reviewed environment and cannot deploy workloads.' }] };
+    }
+    const blocked = loaded.document.actions.length ? planService.providerPreflight([envSpec.hosting.provider], projectForPreflight, envName) : [];
+    if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
+    if (!loaded.document.actions.length) {
+      const keys = Object.entries(envSpec.secretDestinations ?? {}).filter(([, value]) => value.version === undefined).map(([key]) => key);
+      try {
+        if (keys.length) await assertReadySecretContainers({ project: projectForPreflight, spec, environment, keys });
+      } catch {
+        return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: envSpec.hosting.provider,
+          reason: 'Current container ownership or lifetime could not be verified. Re-plan; no setup write was attempted.' }] };
+      }
+    }
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision,
+      confirmActions: params.confirmActions, handler: action => {
+        if (resolvePlanActionAuthority(action)?.capability !== 'secret.destination.prepare')
+          return Promise.resolve({ success: false, status: 'blocked' as const, message: 'This plan can only prepare its reviewed empty secret containers.' });
+        return applySecretContainer({ ctx, project: projectForPreflight, spec, environmentName: envName, action });
+      } });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Container verification does not verify writer access, credential delivery or runtime access.'] };
+  }
   if (secretsOnly && (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
     || envSpec.deploy?.strategy !== 'branch' || envSpec.deploy.trigger !== 'ci' || params.alwaysRunBootstrap)) {
     return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
       reason: 'Secret-only apply requires the reviewed existing project/environment and managed CI; it cannot deploy or repair bindings.' }] };
   }
   if (secretsOnly) {
-    const adapter = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, projectForPreflight);
+    const adapter = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, projectForPreflight, undefined, envName);
     if (!adapter.success || adapter.adapter?.capabilities.supportsDeferredSecretUpdates !== true) {
       return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: envSpec.hosting.provider,
         reason: 'The hosting adapter cannot verify secret-only updates without restarting workloads.' }] };
@@ -1019,7 +1174,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
       return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The database binding plan belongs to another project or environment.' }] };
     }
-    const blocked = planService.providerPreflight(loaded.document.actions.map(action => action.resource.provider));
+    const blocked = planService.providerPreflight(loaded.document.actions.map(action => action.resource.provider), projectForPreflight, envName);
     if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
     const result = await executor.execute({ planRunId: planId, confirmActions: params.confirmActions,
       currentSpecRevision: params.specRevision, handler: async action => {
@@ -1031,9 +1186,26 @@ export async function executePlanApply(ctx: CommandContext, params: {
       } });
     return { kind: 'executed', envName, result, actionScopedWarnings: [] };
   }
+  if (planScope === 'hosting-prepared-bindings') {
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap)
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'Prepared hosting requires its exact existing environment and isolated metadata plan.' }] };
+    const blocked = planService.providerPreflight([envSpec.hosting.provider], projectForPreflight, envName);
+    if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
+    const encrypted = loaded.document.overrides?.delegatedSecretVarsEncrypted;
+    const managedSecretValues = encrypted ? getSecretStore().decryptObject<Record<string, string>>(encrypted) : undefined;
+    if (managedSecretValues && JSON.stringify(Object.keys(managedSecretValues).sort()) !== JSON.stringify([...(loaded.document.overrides?.delegatedSecretKeys ?? [])].sort()))
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'Accepted prepared runtime input keys changed.' }] };
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
+      handler: (action, execution) => applyPreparedHosting({ ctx, project: projectForPreflight, environmentName: envName, environmentSpec: envSpec, spec, managedSecretValues,
+        action, confirmedActionIds: new Set(params.confirmActions), authorize: () => ctx.repos.runs.findById(execution.applyRunId)?.status === 'running'
+          && new SpecStore().get(project)?.revision === params.specRevision }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Prepared bindings are metadata only; pending first releases are not application convergence.'] };
+  }
   // Identity-only prerequisite stages may create a missing workload, but may
   // never update an existing workload or activate its schedule.
   const serviceIdentityOnly = managedCiBindingsOnly && (planScope === 'hosting-bindings'
+    || Boolean(providerRegistry.getMetadata(envSpec.hosting.provider)?.lifecycle?.hosting?.runtimeIdentityTiming)
+    || Object.values(envSpec.storage ?? {}).some(storage => storage.injectInto.length > 0 && providerRegistry.getMetadata(storage.provider)?.storageRuntimeAccess?.hostingProviders.includes(envSpec.hosting.provider))
     || Object.values(envSpec.services).some(service => service.volume)
     || hasRetainedServiceVolumes(environment));
   const isDeferredIdentityCandidate = (action: PlanAction) => serviceIdentityOnly
@@ -1044,7 +1216,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     if (loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
       return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The reviewed backup policy plan belongs to another project or environment.' }] };
     }
-    const blocked = planService.providerPreflight(loaded.document.actions.map(action => action.resource.provider));
+    const blocked = planService.providerPreflight(loaded.document.actions.map(action => action.resource.provider), projectForPreflight, envName);
     if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
     const result = await executor.execute({
       planRunId: planId, confirmActions: params.confirmActions, currentSpecRevision: params.specRevision,
@@ -1063,7 +1235,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     if (loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
       return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The snapshot plan belongs to a different project or environment.' }] };
     }
-    const blocked = planService.providerPreflight([envSpec.database?.provider ?? 'unconfigured']);
+    const blocked = planService.providerPreflight([envSpec.database?.provider ?? 'unconfigured'], projectForPreflight, envName);
     if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
     const result = await executor.execute({
       planRunId: planId, confirmActions: params.confirmActions, currentSpecRevision: params.specRevision,
@@ -1129,29 +1301,29 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const credentialConnectionProvider = selectedCi
     ? devOpsProviderRegistry.ciProvider(selectedCi.provider)?.connectionProvider : undefined;
   const blocked = secretsOnly
-    ? planService.providerPreflight([envSpec.hosting.provider])
+    ? planService.providerPreflight([envSpec.hosting.provider], projectForPreflight, envName)
     : retainedCleanupOnly
     ? planService.providerPreflight([
         envSpec.hosting.provider,
         ...cleanupProviders,
-      ])
+      ], projectForPreflight, envName)
     : migrationActions.length > 0
-    ? planService.providerPreflight(migrationProviders)
+    ? planService.providerPreflight(migrationProviders, projectForPreflight, envName)
     : workflowPublicationOnly
-    ? planService.providerPreflight(workflowPublicationProviders)
+    ? planService.providerPreflight(workflowPublicationProviders, projectForPreflight, envName)
     : ciCredentialsOnly
     ? planService.providerPreflight(credentialConnectionProvider ? [credentialConnectionProvider]
-      : loaded.document.actions.map(action => action.resource.provider))
+      : loaded.document.actions.map(action => action.resource.provider), projectForPreflight, envName)
     : managedCiBindingsOnly || backupProvisioningOnly
     ? planService.providerPreflight(
         loaded.document.actions
           .filter((action) => action.type !== 'noop')
           .map((action) => action.resource.provider)
-      )
+      , projectForPreflight, envName)
     : [
-        ...planService.preflight(envSpec, envName, spec),
+        ...planService.preflight(envSpec, envName, spec, projectForPreflight),
         ...planService.projectPreflight(projectForPreflight, spec, envName),
-        ...planService.providerPreflight(cleanupProviders),
+        ...planService.providerPreflight(cleanupProviders, projectForPreflight, envName),
       ];
   const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, loaded.document.actions, {
     project: projectForPreflight.name, repositoryUrl: projectForPreflight.gitRemoteUrl,
@@ -1285,7 +1457,10 @@ export async function executePlanApply(ctx: CommandContext, params: {
   }
   const confirmedActionIds = new Set(params.confirmActions);
   const buildDeployBootstrapParams = async () => {
+    const referenceAuthority = await assertDeploymentSecretReferences({ ctx, project: applyProject, spec, environmentName: envName,
+      actions: loaded.document.actions, confirmed: confirmedActionIds });
     let bootstrapParams = specToBootstrapParams(applyProject.name, envName, envSpec, spec.runtime);
+    if (referenceAuthority.creationOnlyServices.length) bootstrapParams.creationOnlyServices = referenceAuthority.creationOnlyServices;
     if (loaded.document.sourceCommitSha) {
       bootstrapParams = {
         ...bootstrapParams,
@@ -1300,76 +1475,37 @@ export async function executePlanApply(ctx: CommandContext, params: {
       bootstrapParams = { ...bootstrapParams, verifyHttpHealth: true };
     }
     const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
-    const queueEnvVars = await resolveQueueEnvVars(applyProject, envSpec, latestEnvironment);
-    if (queueEnvVars) {
-      bootstrapParams = { ...bootstrapParams, queueEnvVars };
-    }
-    const storageServiceEnvVars = await resolveStorageServiceEnvVars(applyProject, envSpec, latestEnvironment);
-    if (storageServiceEnvVars) {
-      bootstrapParams = { ...bootstrapParams, envVarsByService: storageServiceEnvVars };
-    }
-    const database = latestEnvironment && envSpec.database
-      ? ctx.repos.components.findByEnvironmentAndType(latestEnvironment.id, envSpec.database.engine)
-      : null;
-    if (database) {
-      const databaseEnvVars = buildDatabaseEnvVarsFromComponent(database).envVars;
-      const databaseAliasEnvVars = Object.fromEntries(
-        Object.entries(envSpec.services)
-          .map(([serviceName, serviceSpec]) => [
-            serviceName,
-            buildDatabaseAliasEnvVars(databaseEnvVars, serviceSpec.databaseEnvAliases),
-          ])
-          .filter(([, aliases]) => Object.keys(aliases as Record<string, string>).length > 0)
-      ) as Record<string, Record<string, string>>;
-      bootstrapParams = {
-        ...bootstrapParams,
-        envVars: {
-          ...databaseEnvVars,
-          ...(bootstrapParams.envVars ?? {}),
-        },
-        ...(Object.keys(databaseAliasEnvVars).length > 0
-          ? {
-            envVarsByService: Object.fromEntries(
-              Array.from(new Set([
-                ...Object.keys(bootstrapParams.envVarsByService ?? {}),
-                ...Object.keys(databaseAliasEnvVars),
-              ])).map((serviceName) => [
-                serviceName,
-                {
-                  ...(bootstrapParams.envVarsByService?.[serviceName] ?? {}),
-                  ...(databaseAliasEnvVars[serviceName] ?? {}),
-                },
-              ])
-            ),
-          }
-          : {}),
-      };
-    }
-    const cache = latestEnvironment
-      ? ctx.repos.components.findByEnvironmentAndType(latestEnvironment.id, 'redis')
-      : null;
-    if (cache) {
-      bootstrapParams = {
-        ...bootstrapParams,
-        envVars: {
-          ...buildCacheEnvVarsFromComponent(cache).envVars,
-          ...(bootstrapParams.envVars ?? {}),
-        },
-      };
-    }
+    bootstrapParams = await resolveBootstrapRuntimeInputs({ project: applyProject, environment: latestEnvironment, environmentSpec: envSpec, params: bootstrapParams,
+      ...(latestEnvironment?.platformBindings.localPreparedHosting && stringArrayField(asRecord(latestEnvironment.platformBindings.preparedHosting), 'pendingFirstRelease').length
+        ? { managedSecretValues: validatePreparedManagedInputs(spec, envName, delegatedSecretEnvVars) } : {}) });
     return bootstrapParams;
   };
 
   let deployBootstrap: { success: boolean; summary: Record<string, unknown> } | null = null;
   const serviceBootstraps = new Map<string, { success: boolean; summary: Record<string, unknown> }>();
 
-  const ensureServiceBootstrap = async (serviceName: string, requireNewWorkload = false) => {
+  const ensureServiceBootstrap = async (serviceName: string, requireNewWorkload = false, action?: PlanAction, execution?: ActionExecutionContext) => {
     const existing = serviceBootstraps.get(serviceName);
     if (existing) return existing;
     const base = await buildDeployBootstrapParams();
+    const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+    const preparedRelease = environment && stringArrayField(asRecord(environment.platformBindings.preparedHosting), 'pendingFirstRelease').includes(serviceName) && action && execution ? createPreparedDirectReleaseControl({
+      planRunId: planId, action, confirmed: confirmedActionIds.has(action.id),
+      expectedImage: base.envVars?.[`IMAGE_URI_${serviceName.toUpperCase().replace(/[^A-Z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '')}`]?.trim() || base.envVars?.IMAGE_URI?.trim(),
+      load: () => { const fresh = ctx.repos.environments.findById(environment.id); if (!fresh) throw new Error('Prepared environment is unavailable.'); return fresh; },
+      save: (before, bindings) => !!ctx.repos.environments.compareAndSwapPlatformBindings(before.id, before.platformBindings, bindings),
+      authorize: () => {
+        const current = new SpecStore().getForInspection(project);
+        return ctx.repos.runs.findById(execution.applyRunId)?.status === 'running'
+          && isDeepStrictEqual(ctx.repos.runs.findById(planId)?.plan, loaded.run.plan)
+          && current?.revision === params.specRevision && isDeepStrictEqual(current.spec, spec);
+      },
+    }) : undefined;
+    const referenceCreation = base.creationOnlyServices?.includes(serviceName) === true;
     const result = await executeBootstrap({ ...scopeBootstrapParamsToService(base, serviceName),
-      ...(serviceIdentityOnly ? { provisionOnly: true } : {}),
-      ...(requireNewWorkload ? { requireNewWorkload: true } : {}),
+      ...(preparedRelease ? { preparedRelease } : {}),
+      ...(serviceIdentityOnly || referenceCreation ? { provisionOnly: true } : {}),
+      ...(requireNewWorkload || referenceCreation ? { requireNewWorkload: true } : {}),
     });
     serviceBootstraps.set(serviceName, result);
     return result;
@@ -1378,6 +1514,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const ensureDeployBootstrap = async () => {
     if (!deployBootstrap) {
       let bootstrapParams = await buildDeployBootstrapParams();
+      if (bootstrapParams.creationOnlyServices?.length) throw new Error('Initial native references require separate reviewed service creation actions before a whole-environment deployment.');
       bootstrapParams = applyOverridesToBootstrapParams(bootstrapParams, {
         services: overrides?.services,
       });
@@ -1425,21 +1562,45 @@ export async function executePlanApply(ctx: CommandContext, params: {
     const servicesComplete = observed && (observed.completeness?.services === 'complete'
       || observed.completeness?.services === undefined && observed.partial === false);
     const observedServiceIds = observed?.services.filter(service => service.externalId === boundService?.serviceId) ?? [];
+    const desiredInstanceBounds = envSpec.services[action.resource.name]?.instanceBounds;
+    if (capability === 'hosting.service.converge' && action.type === 'update' && desiredInstanceBounds
+      && action.metadata?.workloadCreateRequired !== true) {
+      const actual = observedServiceIds.length === 1 ? observedServiceIds[0].config.instanceBounds : undefined;
+      if (!servicesComplete || !actual) return { success: false, status: 'blocked',
+        message: 'Exact native service instance bounds are unknown; re-plan before changing capacity.' };
+      if ((actual.min !== desiredInstanceBounds.min || actual.max !== desiredInstanceBounds.max)
+        && (action.requiresConfirm !== true || action.billable !== true || !confirmedActionIds.has(action.id))) {
+        return { success: false, status: 'blocked', message: 'Changing service instance bounds requires the persisted billable confirmation and exact confirmed action ID.' };
+      }
+    }
     const deferredIdentityCreation = isDeferredIdentityCandidate(action) && servicesComplete
       && (action.type === 'create' && !boundService?.serviceId && !action.metadata?.externalId
           && observed?.services.some(service => service.name === action.resource.name) === false
         || action.metadata?.workloadCreateRequired === true && typeof boundService?.serviceId === 'string'
           && action.metadata.externalId === boundService.serviceId && observedServiceIds.length === 1
           && observedServiceIds[0].identityOnly === true);
-    if (isDeferredIdentityCandidate(action) && !deferredIdentityCreation) {
-      return { success: false, status: 'blocked', message: 'Identity-only prerequisites cannot update an existing workload. Re-plan after observing its exact identity.' };
+    if (isDeferredIdentityCandidate(action) && (!deferredIdentityCreation || action.requiresConfirm !== true
+      || action.billable !== true || !confirmedActionIds.has(action.id))) {
+      return { success: false, status: 'blocked',
+        message: 'Preparing a first workload requires exact confirmed creation authority and fresh proof of absence or a bound empty workload.' };
     }
     const requireNewWorkload = Boolean(deferredIdentityCreation);
 
+    if (capability === 'hosting.recovery-runtime.mutate') {
+      return applyRecoveryRuntimeAction({ context: { project: applyProject, environment: volumeEnvironment, spec: envSpec,
+        components: volumeEnvironment ? ctx.repos.components.findByEnvironmentId(volumeEnvironment.id) : [], adapterFactory },
+        action, confirmedActionIds, save: (patch) => { if (!volumeEnvironment || !ctx.repos.environments.updatePlatformBindings(volumeEnvironment.id, { ...patch })) throw new Error('Backup preparation intent was not persisted.'); },
+      });
+    }
+    if (capability === 'hosting.runtime-identity.mutate' || capability === 'storage.runtime-access.mutate') {
+      return applyRuntimeAccessAction({ ...await projectRuntimeAccessInput(applyProject, volumeEnvironment, envSpec), action, confirmedActionIds,
+        save: (bindings) => { if (!volumeEnvironment || !ctx.repos.environments.updatePlatformBindings(volumeEnvironment.id, bindings)) throw new Error('Runtime access intent was not persisted.'); },
+      });
+    }
     const volumeSafetyBlock = retainedVolumeHostingBlock(volumeEnvironment, envSpec, action);
     if (volumeSafetyBlock) return { success: false, status: 'blocked', message: volumeSafetyBlock };
     if (capability === 'hosting.volume.mutate') {
-      const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject);
+      const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject, undefined, envName);
       const volumes = (result.adapter as IProviderAdapter | undefined)?.serviceVolumes;
       if (!result.success || result.adapter?.name !== envSpec.hosting.provider || !volumes || !volumeEnvironment) return { success: false, status: 'blocked', message: 'Volume adapter or bound environment unavailable.' };
       return applyServiceVolumeAction({ environment: volumeEnvironment, environmentSpec: envSpec, action, volumes, confirmedActionIds,
@@ -1461,8 +1622,16 @@ export async function executePlanApply(ctx: CommandContext, params: {
       || capability === 'gitlab.ci.rollback' || capability === 'github.applied-spec-hash.sync'
       || capability === 'ci.applied-spec-hash.sync'
     );
+    const preparingAfterWorkloadIdentity = serviceIdentityOnly && deferredIdentityCreation
+      && providerRegistry.getMetadata(envSpec.hosting.provider)?.lifecycle?.hosting?.runtimeIdentityTiming !== 'before-workload'
+      && action.requiresConfirm === true && action.billable === true && confirmedActionIds.has(action.id);
+    if (deployNeedsVolumes && !preparingAfterWorkloadIdentity) {
+      const access = await observeRuntimeAccess(await projectRuntimeAccessInput(applyProject, volumeEnvironment, envSpec));
+      if (planRuntimeAccess(access).length || access.grants.some(grant => grant.waiting)
+        || access.identities.some(identity => identity.observation.state !== 'ready')) return { success: false, status: 'blocked', message: 'Deployment requires verified workload identities and permissions. Re-plan to prepare the missing access.' };
+    }
     if (deployNeedsVolumes && (volumeEnvironment?.platformBindings.serviceVolumes !== undefined || Object.values(envSpec.services).some((s) => s.volume))) {
-      const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject);
+      const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject, undefined, envName);
       const liveVolumes = await observeServiceVolumes({ environment: volumeEnvironment, environmentSpec: envSpec, volumes: (result.adapter as IProviderAdapter | undefined)?.serviceVolumes });
       const pendingVolume = planServiceVolumes({ environment: volumeEnvironment, environmentSpec: envSpec, observed: { serviceVolumes: liveVolumes } as ObservedState }).actions.find((a) => a.type !== 'noop');
       if (pendingVolume) return { success: false, status: 'blocked', message: `Deployment requires verified retained volume attachment: ${pendingVolume.reason}` };
@@ -1645,6 +1814,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
         workflowInputHash,
         workflowContentHash,
         forceRelease,
+        ...(typeof action.metadata?.retryAttemptId === 'string' ? { retryAttemptId: action.metadata.retryAttemptId } : {}),
+        ...(typeof action.metadata?.previousAttemptId === 'string' ? { previousAttemptId: action.metadata.previousAttemptId } : {}),
+        ...(typeof action.metadata?.credentialOperationsHash === 'string' ? { credentialOperationsHash: action.metadata.credentialOperationsHash } : {}),
       });
     }
     if (capability === 'github.collaboration.sync') {
@@ -1748,12 +1920,19 @@ export async function executePlanApply(ctx: CommandContext, params: {
       return applyIosAction({ project: applyProject, envName, environmentSpec: envSpec, action });
     }
     if (capability === 'queue.mutate') {
-      return applyQueueAction({ project: applyProject, envName, environmentSpec: envSpec, action });
+      return applyQueueAction({ project: applyProject, envName, environmentSpec: envSpec, action, confirmedActionIds });
     }
     if (capability === 'storage.mutate') {
       return applyStorageAction({ project: applyProject, envName, environmentSpec: envSpec, action });
     }
+    if (capability === 'hosting.secret-reference.sync') {
+      return applySecretReference({ ctx, project: applyProject, spec, environmentName: envName,
+        action, confirmed: confirmedActionIds, applyRunId: executionContext.applyRunId,
+        review: { actions: loaded.document.actions, planId } });
+    }
     if (capability === 'hosting.delegated-secret.sync') {
+      if (envSpec.secretDestinations?.[action.resource.name])
+        return blockedActionIdentity(action, 'Native secret destinations cannot consume legacy plaintext plan inputs.');
       const key = action.resource.name;
       const value = delegatedSecretEnvVars?.[key];
       const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
@@ -1794,8 +1973,18 @@ export async function executePlanApply(ctx: CommandContext, params: {
         );
       }
 
+      const preparedReleaseBinding = metadata?.preparedReleaseBinding === true;
+      if (preparedReleaseBinding) {
+        const releaseError = await preparedSecretReleaseError({ ctx, project: applyProject, environment: latestEnvironment,
+          environmentSpec: envSpec, services: destinationServices, actions: loaded.document.actions, planId });
+        if (releaseError) return blockedActionIdentity(action, releaseError);
+        const live = (await planService.observeEnvironment(applyProject, latestEnvironment, envSpec, { hostingOnly: true })).observed;
+        const values = liveHashesForSecret(live, destinationServices, key);
+        if (values.hasUnknownDestination || values.state !== 'consistent' || values.hash !== hashEnvValue(value))
+          return blockedActionIdentity(action, 'The accepted managed value was not independently observed on every completed first revision.');
+      }
       const hypervibeOwned = declaredSecret.ownership === 'hypervibe';
-      let bindingOnly = false;
+      let bindingOnly = preparedReleaseBinding;
       let bindingEnvironment = latestEnvironment;
       let immutableContract: {
         expectedValueHash: string;
@@ -1900,7 +2089,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
 
         bindingOnly = liveState.state === 'consistent'
           && liveState.hash === expectedValueHash;
-        if ((metadata?.bindingOnly === true) !== bindingOnly) {
+        if (preparedReleaseBinding && !bindingOnly)
+          return blockedActionIdentity(action, 'The generated value changed before first-release acceptance; this reviewed action cannot write or replace it.');
+        if (!preparedReleaseBinding && (metadata?.bindingOnly === true) !== bindingOnly) {
           return blockedActionIdentity(
             action,
             bindingOnly
@@ -2395,7 +2586,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
           error: 'Resolve or explicitly clean up the retained provider service identity before applying another service create. No hosting mutation was attempted.',
         };
       }
-      const result = await ensureServiceBootstrap(action.resource.name, requireNewWorkload);
+      const result = await ensureServiceBootstrap(action.resource.name, requireNewWorkload, action, executionContext);
       return bootstrapActionResultFromSummary(action, result);
     }
     return {
@@ -2426,13 +2617,14 @@ export async function executePlanApply(ctx: CommandContext, params: {
     && result.success
     && result.applyRunId
   ) {
-    const forced = await ensureDeployBootstrap();
-    if (!forced.success) {
-      result = {
-        ...result,
-        success: false,
-        error: String(forced.summary.error ?? 'Deploy failed'),
-      };
+    try {
+      const forced = await ensureDeployBootstrap();
+      if (!forced.success) result = { ...result, success: false, error: String(forced.summary.error ?? 'Deploy failed') };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Deployment preflight failed.';
+      ctx.repos.runs.updateStatus(result.applyRunId!, 'blocked', message);
+      ctx.repos.runs.addReceipt(result.applyRunId!, { step: 'deployment-preflight', status: 'blocked', result: { message }, timestamp: new Date().toISOString() });
+      result = { ...result, success: false, error: message, receipts: [...result.receipts, { actionId: 'deployment-preflight', status: 'blocked', message }] };
     }
   }
 
@@ -2607,7 +2799,7 @@ async function ensureHostingProject(
     environment = ctx.repos.environments.findById(environment.id) ?? environment;
   }
 
-  const adapterResult = await adapterFactory.getHostingAdapter(project);
+  const adapterResult = await adapterFactory.getHostingAdapter(project, envName);
   if (!adapterResult.success || !adapterResult.adapter) {
     return {
       success: false,
@@ -2726,7 +2918,7 @@ async function ensureHostingEnvironment(
     };
   }
 
-  const adapterResult = await adapterFactory.getHostingAdapter(project);
+  const adapterResult = await adapterFactory.getHostingAdapter(project, envName);
   if (
     !adapterResult.success
     || !adapterResult.adapter
@@ -2932,7 +3124,9 @@ async function applyDomain(
 
     const adapterResult = await ctx.adapterFactory.getProviderAdapter(
       action.resource.provider,
-      project
+      project,
+      undefined,
+      envName
     );
     if (!adapterResult.success || !adapterResult.adapter) {
       return {
@@ -3229,7 +3423,7 @@ async function destroyTaskService(
     };
   }
 
-  const adapterResult = await adapterFactory.getProviderAdapter(action.resource.provider, project);
+  const adapterResult = await adapterFactory.getProviderAdapter(action.resource.provider, project, undefined, envName);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: `${action.resource.provider} adapter unavailable`, error: adapterResult.error };
   }
@@ -3340,7 +3534,7 @@ async function destroyPreviousHostingService(
     };
   }
 
-  const adapterResult = await adapterFactory.getProviderAdapter(action.resource.provider, project);
+  const adapterResult = await adapterFactory.getProviderAdapter(action.resource.provider, project, undefined, envName);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: `${action.resource.provider} adapter unavailable`, error: adapterResult.error };
   }
@@ -3504,7 +3698,7 @@ async function destroyPreviousHostingBoundary(
     };
   }
 
-  const adapterResult = await adapterFactory.getProviderAdapter(action.resource.provider, project);
+  const adapterResult = await adapterFactory.getProviderAdapter(action.resource.provider, project, undefined, envName);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: `${action.resource.provider} adapter unavailable`, error: adapterResult.error };
   }
@@ -3691,7 +3885,7 @@ async function destroyService(
     };
   }
 
-  const adapterResult = await adapterFactory.getHostingAdapter(project);
+  const adapterResult = await adapterFactory.getHostingAdapter(project, envName);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: 'Hosting adapter unavailable', error: adapterResult.error };
   }
@@ -3818,7 +4012,7 @@ async function destroyDatabase(
     };
   }
 
-  const adapterResult = await adapterFactory.getDatabaseAdapter(action.resource.provider, project);
+  const adapterResult = await adapterFactory.getDatabaseAdapter(action.resource.provider, project, environment.name);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: 'Database adapter unavailable', error: adapterResult.error };
   }
@@ -3978,7 +4172,7 @@ async function destroyRetainedDatabase(
     }
   }
 
-  const adapterResult = await adapterFactory.getDatabaseAdapter(provider, project);
+  const adapterResult = await adapterFactory.getDatabaseAdapter(provider, project, environment.name);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, status: 'blocked', message: 'Retained database adapter unavailable', error: adapterResult.error };
   }
@@ -4352,7 +4546,7 @@ async function destroyRetainedResource(
     };
   }
   const collectionKey = contract.collectionKey;
-  const adapterResult = await adapterFactory.getProviderAdapter(provider!, project);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider!, project, undefined, envName);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, status: 'blocked', message: 'Retained provider adapter unavailable', error: adapterResult.error };
   }
@@ -4489,7 +4683,7 @@ async function createDatabase(
     };
   }
 
-  const adapterResult = await adapterFactory.getDatabaseAdapter(action.resource.provider, project);
+  const adapterResult = await adapterFactory.getDatabaseAdapter(action.resource.provider, project, environment.name);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: 'Database adapter unavailable', error: adapterResult.error };
   }
@@ -4524,6 +4718,7 @@ async function createDatabase(
     });
     return {
       success: false,
+      ...(provisioned.receipt.status === 'pending' ? { status: recoverableComponentRetained ? 'pending' as const : 'blocked' as const } : {}),
       message: provisioned.receipt.message,
       error: provisioned.receipt.error,
       data: {

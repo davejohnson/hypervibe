@@ -104,7 +104,7 @@ async function verifyMigrationMaintenance(params: {
     [params.sourceEnvironment, params.sourceSpec] as const,
     [params.targetEnvironment, params.targetSpec] as const,
   ].map(async ([environment, spec]) => {
-    const adapterResult = await adapterFactory.getProviderAdapter(spec.hosting.provider, params.project);
+    const adapterResult = await adapterFactory.getProviderAdapter(spec.hosting.provider, params.project, undefined, environment.name);
     if (!adapterResult.success || !adapterResult.adapter) return null;
     const adapter = adapterResult.adapter as IProviderAdapter;
     await adapter.configureTarget?.({ region: spec.hosting.region });
@@ -166,7 +166,7 @@ async function destroyDatabaseCandidate(params: {
   candidate: Component;
   provider: string;
 }): Promise<boolean> {
-  const adapterResult = await adapterFactory.getDatabaseAdapter(params.provider, params.project);
+  const adapterResult = await adapterFactory.getDatabaseAdapter(params.provider, params.project, params.environment.name);
   if (!adapterResult.success || !adapterResult.adapter) return false;
   const receipt = await adapterResult.adapter.destroy(params.candidate);
   if (!receipt.success) return false;
@@ -277,7 +277,7 @@ async function applyDatabaseMigration(params: {
     }
   }
 
-  const adapterResult = await adapterFactory.getDatabaseAdapter(identity.targetProvider, params.project);
+  const adapterResult = await adapterFactory.getDatabaseAdapter(identity.targetProvider, params.project, targetEnvironment.name);
   if (!adapterResult.success || !adapterResult.adapter || adapterResult.adapter.name !== identity.targetProvider) {
     return { success: false, status: 'blocked', message: 'Target database adapter is unavailable', error: 'No database binding was changed.' };
   }
@@ -559,8 +559,8 @@ async function applyStorageMigration(params: {
     || !exactStringRecord(sourceContext, plannedSourceScope)
   ) return stale(params.action, 'The tracked source bucket identity changed.');
 
-  const sourceAdapterResult = await adapterFactory.getStorageAdapter(identity.sourceProvider, params.project);
-  const targetAdapterResult = await adapterFactory.getStorageAdapter(identity.targetProvider, params.project);
+  const sourceAdapterResult = await adapterFactory.getStorageAdapter(identity.sourceProvider, params.project, sourceEnvironment.name);
+  const targetAdapterResult = await adapterFactory.getStorageAdapter(identity.targetProvider, params.project, targetEnvironment.name);
   if (
     !sourceAdapterResult.success
     || !sourceAdapterResult.adapter
@@ -794,7 +794,7 @@ async function destroyPreviousDatabaseTarget(params: {
     || !previousBindings
   ) return stale(params.action, 'The retained database rollback target changed.');
 
-  const adapterResult = await adapterFactory.getDatabaseAdapter(params.action.resource.provider, params.project);
+  const adapterResult = await adapterFactory.getDatabaseAdapter(params.action.resource.provider, params.project, params.targetEnvironmentName);
   if (!adapterResult.success || !adapterResult.adapter || adapterResult.adapter.name !== params.action.resource.provider) {
     return { success: false, status: 'blocked', message: 'Previous database adapter is unavailable', error: 'The rollback target remains retained.' };
   }
@@ -860,7 +860,7 @@ async function destroyPreviousStorageTarget(params: {
     || previous.externalId !== previousExternalId
   ) return stale(params.action, 'The retained storage rollback target changed.');
 
-  const adapterResult = await adapterFactory.getStorageAdapter(previous.provider, params.project);
+  const adapterResult = await adapterFactory.getStorageAdapter(previous.provider, params.project, environment.name);
   if (!adapterResult.success || !adapterResult.adapter || adapterResult.adapter.name !== previous.provider) {
     return { success: false, status: 'blocked', message: 'Previous storage adapter is unavailable', error: 'The rollback target remains retained.' };
   }

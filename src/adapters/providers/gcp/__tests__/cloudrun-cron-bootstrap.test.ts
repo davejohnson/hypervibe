@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CloudRunAdapter } from '../cloudrun.adapter.js';
+import { preparedRuntimeFixture } from './cloudrun-runtime-fixture.js';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../../domain/entities/service.entity.js';
 import * as crypto from 'node:crypto';
@@ -200,7 +201,7 @@ describe('Cloud Run managed-CI cron bootstrap', () => {
 
   it('creates an exact immutable Job without creating a trigger or executing work', async () => {
     const { adapter, fetchMock } = await fixture();
-    const result = await adapter.deploy(service, environment, {}, { deferDeployment: true, expectedSourceCommitSha: 'a'.repeat(40) });
+    const result = await adapter.deploy(service, preparedRuntimeFixture(environment, 'cron', fetchMock), {}, { deferDeployment: true, expectedSourceCommitSha: 'a'.repeat(40) });
 
     expect(result).toMatchObject({ status: 'configured', externalId: jobId, receipt: { success: true, data: {
       jobName: jobId, imageUri: holdingImage, createdJob: true,
@@ -212,13 +213,13 @@ describe('Cloud Run managed-CI cron bootstrap', () => {
     expect(body.template.template.containers[0].image).toBe(holdingImage);
     expect(body).not.toHaveProperty('startExecutionToken');
     expect(body).not.toHaveProperty('runExecutionToken');
-    expect(fetchMock.mock.calls.filter(([, init]) => (init?.method ?? 'GET') !== 'GET').map(([url]) => String(url)))
+    expect(fetchMock.mock.calls.filter(([url, init]) => (init?.method ?? 'GET') !== 'GET' && !new URL(String(url)).pathname.endsWith(':getIamPolicy')).map(([url]) => String(url)))
       .toEqual(['https://cloudbuild.googleapis.com/v1/projects/gcp-project/builds', `https://run.googleapis.com/v2/projects/gcp-project/locations/us-central1/jobs?jobId=${jobId}`]);
   });
 
   it('hands the real bootstrap binding through emitted CI image update before reviewed activation', async () => {
     const { adapter, fetchMock } = await fixture();
-    const prepared = await adapter.deploy(service, environment, {}, { deferDeployment: true, expectedSourceCommitSha: 'a'.repeat(40) });
+    const prepared = await adapter.deploy(service, preparedRuntimeFixture(environment, 'cron', fetchMock), {}, { deferDeployment: true, expectedSourceCommitSha: 'a'.repeat(40) });
     expect(prepared.receipt.success).toBe(true);
     const bound: Environment = { ...environment, platformBindings: { ...environment.platformBindings, services: { cron: {
       serviceId: prepared.externalId, jobName: prepared.receipt.data!.jobName,
@@ -314,8 +315,8 @@ describe('Cloud Run managed-CI cron bootstrap', () => {
   });
 
   it('retains exact partial creation evidence when the ready read fails', async () => {
-    const { adapter } = await fixture({ readFailureAfterCreate: true });
-    const result = await adapter.deploy(service, environment, {}, { deferDeployment: true, expectedSourceCommitSha: 'a'.repeat(40) });
+    const { adapter, fetchMock } = await fixture({ readFailureAfterCreate: true });
+    const result = await adapter.deploy(service, preparedRuntimeFixture(environment, 'cron', fetchMock), {}, { deferDeployment: true, expectedSourceCommitSha: 'a'.repeat(40) });
     expect(result).toMatchObject({ status: 'failed', externalId: jobId, receipt: { success: false, data: {
       serviceCreateRecovery: { provider: 'cloudrun', operation: 'create', resourceName: jobId, state: 'identified', serviceId: jobId, returnedName: jobId },
     } } });
@@ -323,7 +324,7 @@ describe('Cloud Run managed-CI cron bootstrap', () => {
 
   it('does not adopt a same-name Job that appears before the final create read', async () => {
     const { adapter, fetchMock } = await fixture({ raceAtFinalRead: true });
-    const result = await adapter.deploy(service, environment, {}, { deferDeployment: true, expectedSourceCommitSha: 'a'.repeat(40) });
+    const result = await adapter.deploy(service, preparedRuntimeFixture(environment, 'cron', fetchMock), {}, { deferDeployment: true, expectedSourceCommitSha: 'a'.repeat(40) });
     expect(result.receipt.success).toBe(false);
     expect(result.receipt.error).toMatch(/adoption/i);
     expect(fetchMock.mock.calls.some(([url, init]) => String(url).includes('run.googleapis.com') && (init?.method ?? 'GET') !== 'GET')).toBe(false);
@@ -331,7 +332,7 @@ describe('Cloud Run managed-CI cron bootstrap', () => {
 
   it.each([{ schedulerExists: true }, { schedulerReadUnknown: true }])('stops before building when the fresh trigger namespace is not proven absent %j', async (options) => {
     const { adapter, fetchMock } = await fixture(options);
-    const outcome = await adapter.deploy(service, environment, {}, { deferDeployment: true, expectedSourceCommitSha: 'a'.repeat(40) }).catch(() => null);
+    const outcome = await adapter.deploy(service, preparedRuntimeFixture(environment, 'cron', fetchMock), {}, { deferDeployment: true, expectedSourceCommitSha: 'a'.repeat(40) }).catch(() => null);
     expect(outcome?.receipt.success).not.toBe(true);
     expect(fetchMock.mock.calls.every(([, init]) => (init?.method ?? 'GET') === 'GET')).toBe(true);
   });

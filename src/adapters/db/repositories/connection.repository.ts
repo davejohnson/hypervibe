@@ -142,7 +142,8 @@ export class ConnectionRepository {
     }
 
     if (!scopeHint) {
-      return this.findAllByProvider(provider).find((connection) => connection.status === 'verified') ?? null;
+      return this.findAllByProvider(provider).find((connection) => connection.status === 'verified'
+        && !connection.scope?.includes('#environment=')) ?? null;
     }
 
     const candidates = this.findAllByProvider(provider)
@@ -262,6 +263,18 @@ export class ConnectionRepository {
       return this.updateCredentials(existing.id, input.credentialsEncrypted)!;
     }
     return this.create(input);
+  }
+
+  /** Exact local grant/reference revision; a stale asynchronous response cannot overwrite newer authority. */
+  compareAndSwap(input: CreateConnectionInput, expectedCipher: string | null, status: ConnectionStatus, expectedStatus?: ConnectionStatus | null): Connection | null {
+    return getDb().transaction(() => {
+      const current = this.findByProviderAndScope(input.provider, normalizeConnectionScope(input.scope));
+      if ((current?.credentialsEncrypted ?? null) !== expectedCipher) return null;
+      if (expectedStatus !== undefined && (current?.status ?? null) !== expectedStatus) return null;
+      const saved = this.upsert(input);
+      this.updateStatus(saved.id, status);
+      return this.findById(saved.id);
+    }).immediate();
   }
 
   /**

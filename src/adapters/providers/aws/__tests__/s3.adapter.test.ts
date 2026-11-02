@@ -123,6 +123,15 @@ describe('S3StorageAdapter', () => {
     )).rejects.toThrow(/will not copy an expiring CLI\/SSO session/);
   });
 
+  it('does not export a native session when the profile omits expiry metadata', async () => {
+    const adapter = new S3StorageAdapter(
+      () => ({ s3: { send: vi.fn(), destroy: vi.fn() }, sts: { send: vi.fn(), destroy: vi.fn() } }),
+      async () => ({ accessKeyId: 'A'.repeat(20), secretAccessKey: 's'.repeat(40), sessionToken: 'temporary-without-expiry' })
+    );
+    await adapter.connect({ authMode: 'default' });
+    await expect(adapter.getRuntimeEnv(environment(), { accountId: '123456789012', region }, 'managed-bucket', 'documents')).rejects.toThrow(/will not copy/);
+  });
+
   it('creates a tagged, encrypted, private bucket and returns composite scope', async () => {
     const s3 = { send: vi.fn(async (command: unknown) => {
       if (command instanceof HeadBucketCommand) {

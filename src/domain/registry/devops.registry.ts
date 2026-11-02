@@ -34,6 +34,8 @@ export interface CiLifecyclePort {
     environment: Environment | null;
     dependsOn?: string[];
   }): Promise<CiLifecycleResult>;
+  /** Optional backup credential preparation; ordinary deployment never requests it. */
+  planBackupCredentials?(params: Parameters<CiLifecyclePort['planDeploy']>[0]): Promise<CiLifecycleResult>;
   applyDeploy(params: {
     project: Project;
     spec: ProjectSpec;

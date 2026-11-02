@@ -400,6 +400,7 @@ const migrations: Migration[] = [
     up: '-- Install the shared apply safety invariants after validating historical identities.',
     run: installApplySerialization,
   },
+
 ];
 
 export class SqliteAdapter {
@@ -498,6 +499,7 @@ export class SqliteAdapter {
       this.hardenDatabaseFiles();
     }
   }
+
 
   close(): void {
     try {

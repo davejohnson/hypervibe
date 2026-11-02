@@ -83,14 +83,14 @@ async function fail(operation: string, response: Response): Promise<never> {
   throw new Error(`Pub/Sub ${operation} failed: ${response.status} ${text}`);
 }
 
-export async function listTopics(token: string, gcpProjectId: string): Promise<PubSubTopic[]> {
+export async function listTopics(token: string, gcpProjectId: string, request: typeof fetch = fetch): Promise<PubSubTopic[]> {
   const topics: PubSubTopic[] = [];
   let pageToken: string | undefined;
   const seenPageTokens = new Set<string>();
   do {
     const params = new URLSearchParams({ pageSize: '100' });
     if (pageToken) params.set('pageToken', pageToken);
-    const response = await fetch(`${PUBSUB_API}/projects/${gcpProjectId}/topics?${params}`, {
+    const response = await request(`${PUBSUB_API}/projects/${gcpProjectId}/topics?${params}`, {
       headers: headers(token),
     });
     if (!response.ok) return fail('listTopics', response);
@@ -116,10 +116,11 @@ export async function listTopics(token: string, gcpProjectId: string): Promise<P
 export async function getTopic(
   token: string,
   gcpProjectId: string,
-  topicId: string
+  topicId: string,
+  request: typeof fetch = fetch
 ): Promise<PubSubTopic | null> {
   const expectedName = `projects/${gcpProjectId}/topics/${topicId}`;
-  const response = await fetch(`${PUBSUB_API}/${expectedName}`, {
+  const response = await request(`${PUBSUB_API}/${expectedName}`, {
     headers: headers(token),
   });
   if (response.status === 404) return null;
@@ -131,9 +132,10 @@ export async function ensureTopic(
   token: string,
   gcpProjectId: string,
   topicId: string,
-  labels: Record<string, string>
+  labels: Record<string, string>,
+  request: typeof fetch = fetch
 ): Promise<{ created: boolean }> {
-  const response = await fetch(`${PUBSUB_API}/projects/${gcpProjectId}/topics/${topicId}`, {
+  const response = await request(`${PUBSUB_API}/projects/${gcpProjectId}/topics/${topicId}`, {
     method: 'PUT',
     headers: headers(token),
     body: JSON.stringify({ labels }),
@@ -146,10 +148,11 @@ export async function ensureTopic(
 export async function getSubscription(
   token: string,
   gcpProjectId: string,
-  subscriptionId: string
+  subscriptionId: string,
+  request: typeof fetch = fetch
 ): Promise<PubSubSubscription | null> {
   const expectedName = `projects/${gcpProjectId}/subscriptions/${subscriptionId}`;
-  const response = await fetch(`${PUBSUB_API}/${expectedName}`, {
+  const response = await request(`${PUBSUB_API}/${expectedName}`, {
     headers: headers(token),
   });
   if (response.status === 404) return null;
@@ -162,9 +165,10 @@ export async function ensureSubscription(
   gcpProjectId: string,
   subscriptionId: string,
   topicId: string,
-  options: { ackDeadlineSeconds?: number; labels?: Record<string, string> }
+  options: { ackDeadlineSeconds?: number; labels?: Record<string, string> },
+  request: typeof fetch = fetch
 ): Promise<{ created: boolean }> {
-  const response = await fetch(`${PUBSUB_API}/projects/${gcpProjectId}/subscriptions/${subscriptionId}`, {
+  const response = await request(`${PUBSUB_API}/projects/${gcpProjectId}/subscriptions/${subscriptionId}`, {
     method: 'PUT',
     headers: headers(token),
     body: JSON.stringify({
@@ -182,9 +186,10 @@ export async function patchSubscriptionAckDeadline(
   token: string,
   gcpProjectId: string,
   subscriptionId: string,
-  ackDeadlineSeconds: number
+  ackDeadlineSeconds: number,
+  request: typeof fetch = fetch
 ): Promise<void> {
-  const response = await fetch(
+  const response = await request(
     `${PUBSUB_API}/projects/${gcpProjectId}/subscriptions/${subscriptionId}?updateMask=ackDeadlineSeconds`,
     {
       method: 'PATCH',
@@ -195,16 +200,16 @@ export async function patchSubscriptionAckDeadline(
   if (!response.ok) return fail('patchSubscription', response);
 }
 
-export async function deleteTopic(token: string, gcpProjectId: string, topicId: string): Promise<void> {
-  const response = await fetch(`${PUBSUB_API}/projects/${gcpProjectId}/topics/${topicId}`, {
+export async function deleteTopic(token: string, gcpProjectId: string, topicId: string, request: typeof fetch = fetch): Promise<void> {
+  const response = await request(`${PUBSUB_API}/projects/${gcpProjectId}/topics/${topicId}`, {
     method: 'DELETE',
     headers: headers(token),
   });
   if (!response.ok && response.status !== 404) return fail('deleteTopic', response);
 }
 
-export async function deleteSubscription(token: string, gcpProjectId: string, subscriptionId: string): Promise<void> {
-  const response = await fetch(`${PUBSUB_API}/projects/${gcpProjectId}/subscriptions/${subscriptionId}`, {
+export async function deleteSubscription(token: string, gcpProjectId: string, subscriptionId: string, request: typeof fetch = fetch): Promise<void> {
+  const response = await request(`${PUBSUB_API}/projects/${gcpProjectId}/subscriptions/${subscriptionId}`, {
     method: 'DELETE',
     headers: headers(token),
   });

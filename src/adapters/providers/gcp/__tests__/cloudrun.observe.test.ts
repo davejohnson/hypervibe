@@ -63,6 +63,7 @@ const webService = {
       env: [
         { name: 'DATABASE_URL', value: 'postgres://super-secret' },
         { name: 'SECRET_VALUE', valueSource: { secretKeyRef: { secret: 'secret', version: 'latest' } } },
+        { name: 'PINNED_TOKEN', valueSource: { secretKeyRef: { secret: 'projects/123456789012/secrets/api-token', version: '7' } } },
       ],
       startupProbe: { httpGet: { path: '/healthz' } },
     }],
@@ -228,7 +229,8 @@ describe('CloudRunAdapter.observe', () => {
           egress: 'PRIVATE_RANGES_ONLY',
         },
       },
-      envVarKeys: ['DATABASE_URL', 'SECRET_VALUE'],
+      envVarKeys: ['DATABASE_URL', 'SECRET_VALUE', 'PINNED_TOKEN'],
+      envVarSecretRefs: { PINNED_TOKEN: { provider: 'gcp-secret-manager', resource: 'projects/123456789012/secrets/api-token', version: '7' } },
       status: 'running',
     });
     expect(web?.envVarHashes).toEqual({
@@ -262,6 +264,39 @@ describe('CloudRunAdapter.observe', () => {
     expect(consumer).toMatchObject({ workloadKind: 'worker' });
 
     // Raw env var values must never appear in the observed state.
+    expect(JSON.stringify(observed)).not.toContain('postgres://super-secret');
+  });
+
+  // Native 2026-10-31 read: HTTP 200, DomainMappingList, domains.cloudrun.com/v1,
+  // metadata.selfLink present, items omitted. Google documents this list envelope:
+  // https://docs.cloud.google.com/run/docs/reference/rest/v1/namespaces.domainmappings/list
+  it.each([
+    { label: 'native empty list', domainList: { kind: 'DomainMappingList', apiVersion: 'domains.cloudrun.com/v1', metadata: {} }, complete: true },
+    { label: 'missing envelope', domainList: {}, complete: false },
+    { label: 'wrong list identity', domainList: { kind: 'ServiceList', apiVersion: 'domains.cloudrun.com/v1' }, complete: false },
+    { label: 'explicit null items', domainList: { kind: 'DomainMappingList', apiVersion: 'domains.cloudrun.com/v1', items: null }, complete: false },
+    { label: 'malformed items', domainList: { kind: 'DomainMappingList', apiVersion: 'domains.cloudrun.com/v1', items: {} }, complete: false },
+    { label: 'unreachable location', domainList: { kind: 'DomainMappingList', apiVersion: 'domains.cloudrun.com/v1', unreachable: ['us-central1'] }, complete: false },
+    { label: 'malformed reachability', domainList: { kind: 'DomainMappingList', apiVersion: 'domains.cloudrun.com/v1', unreachable: {} }, complete: false },
+    { label: 'malformed continuation', domainList: { kind: 'DomainMappingList', apiVersion: 'domains.cloudrun.com/v1', metadata: { continue: 7 } }, complete: false },
+  ])('observes bound workloads with $label', async ({ domainList, complete }) => {
+    const adapter = await connectedAdapter();
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      expect(init?.method ?? 'GET').toBe('GET');
+      const url = String(input);
+      if (url.includes('/domainmappings?')) return Response.json(domainList);
+      if (url.endsWith('/services/gcp-project-web:getIamPolicy')) return Response.json({ bindings: [] });
+      if (url.includes('/services?')) return Response.json({ services: [webService] });
+      if (url.includes('/jobs?')) return Response.json({ jobs: [] });
+      throw new Error('Unexpected read');
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const observed = await adapter.observe(environmentWith({ provider: 'cloudrun', projectId: 'gcp-project',
+      environmentId: 'us-central1', services: { web: { serviceId: 'gcp-project-web' } } }));
+    expect(observed.partial).toBe(!complete);
+    expect(observed.completeness?.services).toBe(complete ? 'complete' : 'unknown');
+    expect(observed.services).toHaveLength(1);
+    expect(observed.services[0]).toMatchObject({ name: 'web', externalId: 'gcp-project-web', customDomains: [] });
     expect(JSON.stringify(observed)).not.toContain('postgres://super-secret');
   });
 

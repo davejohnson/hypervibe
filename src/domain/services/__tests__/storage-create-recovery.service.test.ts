@@ -433,10 +433,12 @@ describe('storage create-recovery apply boundary', () => {
     });
     const observe = vi.fn().mockResolvedValue([]);
     const ensureBucket = vi.fn();
-    vi.spyOn(adapterFactory, 'getStorageAdapter').mockResolvedValue({
-      success: true,
-      adapter: fakeStorageAdapter(ensureBucket, observe),
-    } as never);
+    vi.spyOn(adapterFactory, 'getStorageAdapter').mockImplementation(async (provider, selectedProject, selectedEnvironment) => {
+      expect(provider).toBe('railway');
+      expect(selectedProject).toEqual(project);
+      expect(selectedEnvironment).toBe('staging');
+      return { success: true, adapter: fakeStorageAdapter(ensureBucket, observe) } as never;
+    });
 
     const result = await applyStorageAction({
       project, envName: 'staging', environmentSpec, action: recoveryClearAction(),
@@ -486,10 +488,12 @@ describe('storage create-recovery apply boundary', () => {
       name: 'uploads', region: 'sjc', status: 'ready',
     }]);
     const ensureBucket = vi.fn();
-    vi.spyOn(adapterFactory, 'getStorageAdapter').mockResolvedValue({
-      success: true,
-      adapter: fakeStorageAdapter(ensureBucket, observe),
-    } as never);
+    vi.spyOn(adapterFactory, 'getStorageAdapter').mockImplementation(async (provider, selectedProject, selectedEnvironment) => {
+      expect(provider).toBe('railway');
+      expect(selectedProject).toEqual(project);
+      expect(selectedEnvironment).toBe('staging');
+      return { success: true, adapter: fakeStorageAdapter(ensureBucket, observe) } as never;
+    });
 
     const result = await applyStorageAction({
       project, envName: 'staging', environmentSpec, action: recoveryFinalizeAction(),

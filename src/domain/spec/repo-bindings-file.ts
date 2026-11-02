@@ -1,3 +1,4 @@
+import { mergeRecoveryRuntimeBindings, recoveryRuntimeBindings } from '../services/runtime-evidence.js';
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import path from 'path';
 import { repoBindingsFileSchema } from './repo-bindings.schema.js';
@@ -12,6 +13,10 @@ import { databaseCheckpointBindings } from '../services/database-checkpoint.js';
 import { backupPolicyAttempts, mergeBackupPolicyAttempts } from '../services/backup-policy-attempts.js';
 import { projectRecoveryDatabases, recoveryDatabaseBindings } from '../services/recovery-database-bindings.js';
 import type { Component } from '../entities/component.entity.js';
+import { secretContainerBindings } from '../ports/secret-destination-lifecycle.port.js';
+import { isDeepStrictEqual } from 'node:util';
+import { mergeRuntimeAccessBindings, runtimeAccessBindings } from '../services/runtime-access.service.js';
+import { preparedHostingMarkerSchema } from '../ports/hosting-prepared.port.js';
 
 // Bindings are the inverse of the spec's source-of-truth contract: the DB
 // column `environments.platform_bindings` is authoritative (it holds data the
@@ -33,9 +38,14 @@ const BINDINGS_FILE = 'bindings.json';
 const SENSITIVE_KEY_PATTERN = /(^|_)?(secret|token|password|connectionstring|connectionurl|databaseurl|databaseprivateurl|privateurl|privatekey|apikey)($|_)?/i;
 const LOCAL_ONLY_BINDING_KEYS = new Set([
   'delegatedEnvBindings',
+  'recoveryRuntimeSecretInputs',
   'credentialUpdates',
   'runtimeRollouts',
   'delegatedActionsBindings',
+  'preparedDirectReleaseAttempts',
+  'preparedDirectReleaseEvidence',
+  'managedReleaseDispatch',
+  'localPreparedHosting',
   'repositoryVariableOwnership',
 ]);
 
@@ -91,9 +101,21 @@ export function mergeRepoPlatformBindings(
   existing: Record<string, unknown>,
   repoBindings: Record<string, unknown>
 ): Record<string, unknown> {
+  if (Object.hasOwn(repoBindings, 'localPreparedHosting')) {
+    // Older exports included a sanitized receipt. It may identify the same
+    // retained receipt, but must never replace its immutable local authority.
+    if (existing.localPreparedHosting === undefined
+      || !isDeepStrictEqual(repoBindings.localPreparedHosting, existing.localPreparedHosting)
+        && !isDeepStrictEqual(repoBindings.localPreparedHosting, sanitize(existing.localPreparedHosting)))
+      throw new Error('Local holding preparation receipts require matching retained local authority and cannot be imported or replaced.');
+  }
+  if (Object.hasOwn(repoBindings, 'managedReleaseDispatch')) throw new Error('Managed release dispatch recovery is local authority and cannot be imported.');
+  if (Object.hasOwn(repoBindings, 'recoveryRuntimeSecretInputs')) throw new Error('Private recovery inputs are local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'repositoryVariableOwnership')) throw new Error('Repository-variable ownership and recovery state are local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'credentialUpdates')) throw new Error('Credential acceptance and recovery state are local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'runtimeRollouts')) throw new Error('Runtime configuration expectations and activation requirements are local only and cannot be imported.');
+  if (Object.hasOwn(repoBindings, 'preparedDirectReleaseAttempts') || Object.hasOwn(repoBindings, 'preparedDirectReleaseEvidence'))
+    throw new Error('Direct first-release attempts and configuration evidence are local only and cannot be imported.');
   if (existing.recoveryDatabases !== undefined) recoveryDatabaseBindings(existing.recoveryDatabases);
   if (repoBindings.recoveryDatabases !== undefined) recoveryDatabaseBindings(repoBindings.recoveryDatabases);
   const localVolumes = parseServiceVolumeBindings({ platformBindings: existing });
@@ -101,7 +123,24 @@ export function mergeRepoPlatformBindings(
   if (!localVolumes || !incomingVolumes) {
     throw new Error('Malformed retained service-volume bindings; refusing to overwrite recovery state.');
   }
-  const merged: Record<string, unknown> = { ...existing, ...repoBindings };
+  const merged: Record<string, unknown> = { ...existing, ...repoBindings, ...mergeRuntimeAccessBindings(existing, repoBindings) };
+  if (existing.preparedHosting !== undefined || repoBindings.preparedHosting !== undefined) {
+    const local = existing.preparedHosting === undefined ? undefined : preparedHostingMarkerSchema.parse(existing.preparedHosting);
+    const incoming = repoBindings.preparedHosting === undefined ? undefined : preparedHostingMarkerSchema.parse(repoBindings.preparedHosting);
+    if ((existing.localPreparedHosting !== undefined || repoBindings.localPreparedHosting !== undefined) && incoming?.firstReleaseConfigurationDigests !== undefined)
+      throw new Error('Inline first-release configuration expectations are local only and cannot be imported.');
+    if (local && incoming) {
+      if ((['installationId', 'planDigest', 'receiptDigest'] as const).some(key => local[key] !== incoming[key])
+        || local.pendingFirstRelease.some(name => incoming.firstReleaseConfigurationDigests?.[name] !== undefined
+          && local.firstReleaseConfigurationDigests?.[name] !== undefined
+          && incoming.firstReleaseConfigurationDigests[name] !== local.firstReleaseConfigurationDigests[name]))
+        throw new Error('Repository prepared hosting evidence conflicts with retained local authority. Reconcile the reviewed metadata plan.');
+    }
+    // Repository replay cannot complete or reinstate a release. A fresh native
+    // observation and an explicit local metadata action advance this journal.
+    merged.preparedHosting = local ?? incoming;
+  }
+  if (existing.recoveryRuntime !== undefined || repoBindings.recoveryRuntime !== undefined) merged.recoveryRuntime = mergeRecoveryRuntimeBindings(existing.recoveryRuntime, repoBindings.recoveryRuntime);
   if (existing.backupPolicyAttempts !== undefined || repoBindings.backupPolicyAttempts !== undefined) {
     merged.backupPolicyAttempts = mergeBackupPolicyAttempts(existing.backupPolicyAttempts, repoBindings.backupPolicyAttempts);
   }
@@ -112,7 +151,24 @@ export function mergeRepoPlatformBindings(
     );
   }
   for (const [key, repoValue] of Object.entries(repoBindings)) {
-    if (key === 'databaseCheckpoints' || key === 'backupPolicyAttempts') continue;
+    if (key === 'localPreparedHosting') {
+      merged[key] = existing[key];
+      continue;
+    }
+    if (key === 'secretDestinationContainers') {
+      const retained = secretContainerBindings(existing[key]);
+      for (const [name, incoming] of Object.entries(secretContainerBindings(repoValue))) {
+        const previous = retained[name];
+        if (previous && (previous.attemptId !== incoming.attemptId || !isDeepStrictEqual(previous.owner, incoming.owner)
+          || !isDeepStrictEqual(previous.destination, incoming.destination)
+          || previous.state === 'ready' && incoming.state === 'ready' && (previous.resource !== incoming.resource || previous.createTime !== incoming.createTime)))
+          throw new Error(`Repository secret container identity conflicts with retained state for ${name}.`);
+        if (!previous || previous.state !== 'ready') retained[name] = incoming;
+      }
+      merged[key] = retained;
+      continue;
+    }
+    if (key === 'databaseCheckpoints' || key === 'backupPolicyAttempts' || key === 'runtimeIdentities' || key === 'storageRuntimeAccess' || key === 'preparedHosting' || key === 'recoveryRuntime') continue;
     if (key === 'serviceVolumes' && existing[key] !== undefined) {
       const retained = { ...incomingVolumes, ...localVolumes };
       for (const [name, next] of Object.entries(incomingVolumes)) {
@@ -189,6 +245,20 @@ function presentStorageInstanceScopes(platformBindings: Record<string, unknown>)
 
 function sanitizePlatformBindings(raw: Record<string, unknown>): Record<string, unknown> {
   const sanitized = sanitize(raw) as Record<string, unknown>;
+  // Hosted reference-only configuration remains portable for managed CI. Local
+  // inline configuration digests can verify guessed secrets and stay local.
+  if (raw.preparedHosting !== undefined) {
+    const marker = preparedHostingMarkerSchema.parse(raw.preparedHosting);
+    const { firstReleaseConfigurationDigests: _private, ...identity } = marker;
+    sanitized.preparedHosting = raw.localPreparedHosting !== undefined ? identity : marker;
+  }
+  const access = runtimeAccessBindings({ platformBindings: raw });
+  if (!access) throw new Error('Malformed runtime permission bindings cannot be exported safely.');
+  for (const key of ['runtimeIdentities', 'storageRuntimeAccess'] as const) {
+    if (raw[key] !== undefined) sanitized[key] = access[key];
+  }
+  if (raw.secretDestinationContainers !== undefined) sanitized.secretDestinationContainers = secretContainerBindings(raw.secretDestinationContainers);
+  if (raw.recoveryRuntime !== undefined) sanitized.recoveryRuntime = recoveryRuntimeBindings(raw.recoveryRuntime);
   if (raw.recoveryDatabases !== undefined) sanitized.recoveryDatabases = recoveryDatabaseBindings(raw.recoveryDatabases);
   if (raw.backupPolicyAttempts !== undefined) {
     // Strict value-free identities remain recoverable even for secret-shaped names.
@@ -230,8 +300,13 @@ function parseDocument(raw: unknown, file: string, projectName?: string): RepoBi
 
   const normalized: RepoBindingsFile['environments'] = {};
   for (const [envName, value] of Object.entries(parsed.data.environments)) {
+    const platformBindings = sanitizePlatformBindings(value.platformBindings);
+    // Read older exports only so the merge boundary can compare them with
+    // retained local authority. New exports omit this receipt entirely.
+    if (value.platformBindings.localPreparedHosting !== undefined)
+      platformBindings.localPreparedHosting = sanitize(value.platformBindings.localPreparedHosting);
     normalized[envName] = {
-      platformBindings: sanitizePlatformBindings(value.platformBindings),
+      platformBindings,
     };
   }
   return {

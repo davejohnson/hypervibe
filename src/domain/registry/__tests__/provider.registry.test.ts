@@ -82,6 +82,27 @@ function provider(
 }
 
 describe('ProviderRegistry lifecycle capabilities', () => {
+  it.each([
+    ['accountId', 'accountId'], ['absentField'], ['token'], ['connectionString'], ['privateKey'], ['__proto__'], [' bad'],
+  ].map(keys => ({ keys })))('rejects unsafe or invalid verified connection identity metadata $keys', ({ keys }) => {
+    const candidate = provider('invalid-identity-metadata', 'ai');
+    candidate.metadata.credentialsSchema = z.object({ accountId: z.string(), token: z.string(), connectionString: z.string(), privateKey: z.string() });
+    candidate.metadata.credentials = { verifiedIdentityKeys: keys };
+    expect(() => new ProviderRegistry().register(candidate)).toThrow(/verified.*identity/i);
+  });
+
+  it('validates identity fields through effects and object credential alternatives', () => {
+    const candidate = provider('union-identity-metadata', 'ai');
+    candidate.metadata.credentialsSchema = z.preprocess(value => value, z.union([
+      z.object({ authMode: z.literal('default'), accountId: z.string().optional(), profile: z.string().optional() }),
+      z.object({ authMode: z.literal('static'), tenantId: z.string(), subscriptionId: z.string(), token: z.string() }),
+    ]));
+    candidate.metadata.credentials = { verifiedIdentityKeys: ['authMode', 'accountId', 'profile', 'tenantId', 'subscriptionId'] };
+    expect(() => new ProviderRegistry().register(candidate)).not.toThrow();
+    candidate.metadata.credentials.verifiedIdentityKeys!.push('nonexistent');
+    expect(() => new ProviderRegistry().register(candidate)).toThrow(/verified.*identity/i);
+  });
+
   it('rejects contradictory volume support and unsupported claims', () => {
     const candidate = provider('contradictory-volumes', 'deployment');
     Object.assign(candidate.metadata.lifecycle!.hosting!, {

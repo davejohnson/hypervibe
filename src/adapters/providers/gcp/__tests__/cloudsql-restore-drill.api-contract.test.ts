@@ -11,7 +11,9 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as
 const { privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
 const sensitive = 'provider-echoed-secret-value';
 type Scenario = 'rejected' | 'uncertain' | 'operation-failed' | 'wrong-operation' | 'wrong-target' | 'wrong-project'
-  | 'wrong-source' | 'wrong-clone-response' | 'null-absence' | 'label-failed' | 'label-failed-clone-type' | 'password-failed' | 'invalid-credentials';
+  | 'wrong-source' | 'wrong-clone-response' | 'null-absence' | 'label-failed' | 'label-failed-clone-type' | 'password-failed' | 'invalid-credentials'
+  | 'pitr-before-earliest' | 'pitr-after-latest' | 'pitr-unknown' | 'pitr-malformed'
+  | 'gc-replaced' | 'gc-wrong-project' | 'list-warnings' | 'list-duplicates' | 'list-repeat';
 
 /** Reconstructed official REST examples, not recorded responses or live evidence:
  * https://docs.cloud.google.com/sql/docs/postgres/backup-recovery/pitr
@@ -30,6 +32,10 @@ async function execute(scenario: Scenario) {
   let deleteRequested = false;
   let labels: Record<string, string> = {};
   let stdout = '';
+  let listRequests = 0;
+  const expiredName = 'hv-drill-expired-test';
+  const expired = { name: expiredName, project: 'project', region: 'us-central1', createTime: '2020-01-01T00:00:00Z',
+    settings: { userLabels: { 'hypervibe-drill': 'true', 'hypervibe-source': crypto.createHash('sha256').update('primary').digest('hex').slice(0, 16) } } };
   const processFixture = {
     env: {
       HYPERVIBE_DRILL_CONFIG_B64: Buffer.from(JSON.stringify({ projectId: 'project', region: 'us-central1',
@@ -50,7 +56,31 @@ async function execute(scenario: Scenario) {
     if (parsed.hostname === 'oauth2.googleapis.com') return Response.json({ access_token: 'synthetic-token' });
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     calls.push({ method, pathname: parsed.pathname, ...(body ? { body } : {}) });
-    if (parsed.pathname === '/v1/projects/project/instances') return Response.json({ items: [] });
+    if (parsed.pathname === '/v1/projects/project/instances') {
+      listRequests++;
+      if (scenario === 'list-repeat') {
+        if (listRequests > 2) throw new Error('Transport prevents an unbounded pagination loop.');
+        return Response.json({ items: [], nextPageToken: 'same-page' });
+      }
+      if (scenario === 'list-warnings') return Response.json({ items: [], warnings: [{ code: 'REGION_UNREACHABLE', message: sensitive, region: 'us-central1' }] });
+      if (scenario === 'list-duplicates') return Response.json({ items: [expired, expired] });
+      if (scenario === 'gc-replaced') return Response.json({ items: [expired] });
+      if (scenario === 'gc-wrong-project') return Response.json({ items: [{ ...expired, project: 'other-project' }] });
+      return Response.json({ items: [] });
+    }
+    if (parsed.pathname === '/v1/projects/project/instances/primary/getLatestRecoveryTime') {
+      if (scenario === 'pitr-unknown') return Response.json({ error: { message: sensitive } }, { status: 403 });
+      if (scenario === 'pitr-malformed') return Response.json({ kind: 'sql#getLatestRecoveryTime', earliestRecoveryTime: null });
+      const now = Date.now();
+      return Response.json({ kind: 'sql#getLatestRecoveryTime',
+        earliestRecoveryTime: new Date(now - (scenario === 'pitr-before-earliest' ? 5 : 30) * 60_000).toISOString(),
+        latestRecoveryTime: new Date(now - (scenario === 'pitr-after-latest' ? 20 : 2) * 60_000).toISOString() });
+    }
+    if (parsed.pathname === '/v1/projects/project/instances/' + expiredName) {
+      if (method === 'DELETE') return Response.json({ name: 'gc-delete', status: 'PENDING', operationType: 'DELETE', targetId: expiredName, targetProject: 'project' });
+      return Response.json({ ...expired, settings: { userLabels: {} } });
+    }
+    if (parsed.pathname.endsWith('/operations/gc-delete')) throw new Error('An unsafe delete was attempted.');
     if (parsed.pathname === '/v1/projects/project/instances/primary') return Response.json({
       name: scenario === 'wrong-source' ? 'other-primary' : 'primary', project: 'project', region: 'us-central1', connectionName: 'project:us-central1:primary', state: 'RUNNABLE',
       settings: { backupConfiguration: { enabled: true, pointInTimeRecoveryEnabled: true } },
@@ -93,11 +123,35 @@ async function execute(scenario: Scenario) {
   try {
     await new AsyncFunction('crypto', 'fs', 'os', 'path', 'process', 'fetch',
       cloudSqlRestoreDrillScript().replace(/^import .*;$/gm, ''))(crypto, fs, os, path, processFixture, transport);
-    return { calls, summary: await fs.readFile(summaryPath, 'utf8'), stdout, exitCode: processFixture.exitCode };
+    return { calls, listRequests, summary: await fs.readFile(summaryPath, 'utf8'), stdout, exitCode: processFixture.exitCode };
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 }
 
 describe('Cloud SQL emitted restore drill transport boundary', () => {
+  // The official recovery-time endpoint reports an available interval separately
+  // from backupConfiguration. Enabling PITR alone does not establish that the
+  // requested timestamp is recoverable, especially just after source creation.
+  it.each(['pitr-before-earliest', 'pitr-after-latest', 'pitr-unknown', 'pitr-malformed'] as const)(
+    'blocks unavailable or unknown recovery evidence before cloning: %s', async scenario => {
+      const result = await execute(scenario);
+      expect(result.calls.filter(call => ['POST', 'PATCH', 'PUT', 'DELETE'].includes(call.method))).toEqual([]);
+      expect(result.exitCode).toBe(1);
+      expect(result.summary + result.stdout).not.toContain(sensitive);
+    });
+
+  it.each(['gc-replaced', 'gc-wrong-project', 'list-warnings', 'list-duplicates'] as const)(
+    'does not authorize cleanup or a new restore from stale/partial inventory: %s', async scenario => {
+      const result = await execute(scenario);
+      expect(result.calls.filter(call => ['POST', 'PATCH', 'PUT', 'DELETE'].includes(call.method))).toEqual([]);
+      expect(result.exitCode).toBe(1);
+      expect(result.summary + result.stdout).not.toContain(sensitive);
+    });
+
+  it('rejects a repeated inventory token before requesting the same page again', async () => {
+    const result = await execute('list-repeat');
+    expect(result.listRequests).toBe(2);
+    expect(result.calls.filter(call => ['POST', 'PATCH', 'PUT', 'DELETE'].includes(call.method))).toEqual([]);
+  });
   it('does not expose a credential prefix in malformed JSON diagnostics', async () => {
     await expect(execute('invalid-credentials')).rejects.not.toThrow('provider-e');
   });

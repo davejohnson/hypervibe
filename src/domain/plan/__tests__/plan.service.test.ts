@@ -4234,3 +4234,78 @@ describe('PlanService.plan', () => {
     });
   });
 });
+
+describe('runtime prerequisite stage isolation', () => {
+  it.each([false, true])('provisions exact queues before waiting workload permissions without releasing code or carrying secret inputs (CI credential sync: %s)', async ciCredentialSync => {
+    const queuePlanning = await import('../../services/queue-plan.service.js');
+    const managedCi = await import('../../services/managed-ci.service.js');
+    const { CLOUD_PREPARE_PROFILES } = await import('../../services/cloud-prepare.js');
+    const profile = CLOUD_PREPARE_PROFILES.cloudrun;
+    project = new ProjectRepository().update(project.id, { ...(ciCredentialSync ? { gitRemoteUrl: 'https://github.com/example/queue-app' } : {}), policies: { cloudPreparation: { cloudrun: {
+      provider: 'cloudrun', version: profile.version, preparedAt: new Date().toISOString(), gcpProjectId: 'gcp-project',
+      requiredApis: profile.requiredApis, requiredRoles: [...profile.requiredRoles, 'projects/gcp-project/roles/hypervibeRuntimeIdentityV1'],
+    } } } })!;
+    new SpecStore().replace(project, { version: 1, project: project.name, ...(ciCredentialSync ? { gitRemoteUrl: project.gitRemoteUrl } : {}), environments: { staging: {
+      hosting: { provider: 'cloudrun' }, services: { web: {} }, queues: { jobs: {} },
+      ...(ciCredentialSync ? { deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' } } : {}),
+    } } });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: { provider: 'cloudrun', projectId: 'gcp-project', services: { web: { serviceId: 'web' } } } });
+    mockObservingAdapter({ provider: 'cloudrun', observedAt: new Date().toISOString(), projectExists: true,
+      projectId: 'gcp-project', services: [{ name: 'web', externalId: 'web', workloadKind: 'web', config: {}, customDomains: [], envVarKeys: [], envVarHashes: {}, status: 'running' }], databases: [], partial: false, warnings: [],
+      runtimeAccess: { identities: [{ serviceName: 'web', provider: 'cloudrun', mode: 'ensure', observation: { state: 'waiting', reason: 'Exact queue bindings are needed before permission grants.' } }], grants: [] },
+    });
+    vi.spyOn(queuePlanning, 'planQueues').mockResolvedValue({ actions: [{ id: 'queue:jobs', type: 'create',
+      resource: { kind: 'queue', name: 'jobs', provider: 'cloudrun' }, verified: true, reason: 'Queue is confirmed absent.',
+      billable: true, requiresConfirm: true, metadata: { operation: 'queueEnsure', queueName: 'jobs', backend: 'pubsub', providerScope: { projectId: 'gcp-project' } },
+    }], warnings: [] });
+    // Exercise the real planner dependency and saved-stage boundary. The CI
+    // credential observation is synthetic; no CI provider API is under test.
+    const ciPlan = vi.spyOn(managedCi, 'planManagedCiDeploy').mockResolvedValue({ actions: ciCredentialSync ? [{
+      id: 'ci:github-actions:staging:deploy-branch', type: 'update', resource: { kind: 'ci', name: 'deploy-branch:staging', provider: 'github' },
+      verified: true, reason: 'Accepted workflow needs an environment credential refresh.',
+      metadata: { operation: 'githubActionsDeployBranch', workflow: { requiredSecrets: ['GCP_SERVICE_ACCOUNT_JSON'] } },
+    }] : [], warnings: [] });
+    vi.spyOn(managedCi, 'planManagedCiAppliedSpecHash').mockResolvedValue({ actions: [], warnings: [] });
+    const result = await new PlanService().plan(project, 'staging', { includeEnvFile: false, envVarOverrides: { PRIVATE_TOKEN: 'keep-private' } });
+    expect(result).not.toHaveProperty('error');
+    if ('error' in result) throw new Error(result.error);
+    expect(result.scope).toBe('runtime-access');
+    expect(result.actions).toHaveLength(1);
+    expect(result.actions[0]).toMatchObject({ id: 'queue:jobs', requiresConfirm: true, billable: true });
+    expect(ciPlan).toHaveBeenCalledOnce();
+    expect(result.actions[0].dependsOn ?? []).toEqual([]);
+    expect(result.inputRequired).toEqual([]);
+    const loaded = new ConvergeExecutor().loadPlan(result.planRunId);
+    expect(loaded).not.toHaveProperty('error');
+    if ('error' in loaded) throw new Error(loaded.error);
+    expect(loaded.document.overrides).toBeUndefined();
+    expect(JSON.stringify(loaded.document)).not.toContain('keep-private');
+  });
+
+  it('persists only the current backup runtime resource step and defers application secrets and rollout', async () => {
+    const recovery = await import('../../services/recovery-runtime.service.js');
+    const stored = new SpecStore().get(project)!;
+    new SpecStore().replace(project, { ...stored.spec, environments: { ...stored.spec.environments, staging: {
+      ...stored.spec.environments.staging, backups: { mode: 'daily' },
+    } } });
+    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: { provider: 'railway', projectId: 'p', environmentId: 'e' } });
+    vi.spyOn(recovery, 'observeRecoveryRuntime').mockResolvedValue({ provider: 'railway', state: 'action',
+      target: { environment, database: { provider: 'railway', primaryExternalId: 'db', providerScope: { projectId: 'p', environmentId: 'e' }, resourceIdentity: {} },
+        destination: { provider: 'railway', externalId: 'archive', instanceScope: { projectId: 'p', environmentId: 'e' } }, objects: [], runnerImage: `registry.example/helper@sha256:${'a'.repeat(64)}` },
+      step: { component: 'identity', operation: 'create', target: { resourceId: 'exact-runtime' }, description: 'Create the exact backup identity.', requiresConfirm: true },
+    });
+    mockObservingAdapter({ provider: 'railway', observedAt: new Date().toISOString(), projectExists: true, projectId: 'p', environmentId: 'e', services: [], databases: [], storage: [], partial: false, warnings: [] });
+    const result = await new PlanService().plan(project, 'staging', { scope: 'backups', includeEnvFile: false });
+    expect(result).not.toHaveProperty('error');
+    if ('error' in result) throw new Error(result.error);
+    expect(result.scope).toBe('backup-runtime');
+    expect(result.actions).toHaveLength(1);
+    expect(result.actions[0]).toMatchObject({ id: 'recovery-runtime:backup-runtime', metadata: { operation: 'recoveryRuntimePrepare' } });
+    expect(result.inputRequired).toEqual([]);
+    const loaded = new ConvergeExecutor().loadPlan(result.planRunId);
+    expect(loaded).not.toHaveProperty('error');
+    if ('error' in loaded) throw new Error(loaded.error);
+    expect(loaded.document.overrides).toBeUndefined();
+    expect(JSON.stringify(loaded.document)).not.toContain('keep-private');
+  });
+});

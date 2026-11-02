@@ -27,11 +27,9 @@ describe('GCS runtime identity boundary', () => {
       runtimeServiceAccountEmail: runtimePrincipal })).toMatchObject({ runtimeServiceAccountEmail: runtimePrincipal });
   });
 
-  it('uses workload ADC and clears the legacy management-key slot', async () => {
-    const result = await (await adapter()).getRuntimeEnv(environment, { projectId }, 'documents', 'documents', target);
-    expect(result).toEqual({ OBJECT_STORAGE_PROVIDER: 'gcs', OBJECT_STORAGE_BUCKET: 'documents',
-      GOOGLE_CLOUD_PROJECT: projectId, GOOGLE_CLOUD_STORAGE_BUCKET: 'documents', GOOGLE_CLOUD_CREDENTIALS_JSON: '' });
-    expect(JSON.stringify(result)).not.toContain('synthetic-management-key');
+  it('requires an independently verified bucket grant before projecting workload ADC', async () => {
+    await expect((await adapter()).getRuntimeEnv(environment, { projectId }, 'documents', 'documents', target))
+      .rejects.toThrow(/grant|access.*preparation/i);
   });
 
   it.each([

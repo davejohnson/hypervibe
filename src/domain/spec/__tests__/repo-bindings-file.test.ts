@@ -80,6 +80,31 @@ describe('staged service-volume binding merge', () => {
 });
 
 describe('repo bindings delegated metadata', () => {
+
+  it('keeps dispatch recovery local across repository export and rejects imported authority', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-dispatch-bindings-'));
+    execFileSync('git', ['init', '-q', root]);
+    execFileSync('git', ['-C', root, 'remote', 'add', 'origin', 'https://github.com/owner/app.git']);
+    const now = new Date();
+    const project: Project = { id: 'project', name: 'app', gitRemoteUrl: 'https://github.com/owner/app.git', defaultPlatform: 'railway', policies: {}, createdAt: now, updatedAt: now };
+    const journal = { id: 'nonsecret-local-attempt', status: 'attempted' };
+    const environment: Environment = { id: 'env', projectId: project.id, name: 'staging', platformBindings: { provider: 'railway', managedReleaseDispatch: journal }, createdAt: now, updatedAt: now };
+    const disabled = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      const file = writeRepoBindingsForEnvironment(project, environment, root)!;
+      expect(readFileSync(file, 'utf8')).not.toContain('nonsecret-local-attempt');
+      const imported = readRepoBindingsFile(project.name, root)!.document.environments.staging.platformBindings;
+      expect(imported).not.toHaveProperty('managedReleaseDispatch');
+      expect(mergeRepoPlatformBindings(environment.platformBindings, imported).managedReleaseDispatch).toEqual(journal);
+      expect(() => mergeRepoPlatformBindings(environment.platformBindings, { ...imported, managedReleaseDispatch: journal })).toThrow(/local authority/);
+    } finally {
+      if (disabled === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = disabled;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('roundtrips the exact pending schedule and permanent provider UID through export and import', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-cron-bindings-'));
     execFileSync('git', ['init', '-q', root]);
@@ -545,5 +570,71 @@ describe('repo bindings delegated metadata', () => {
       }
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('runtime permission recovery binding merge', () => {
+  const target = { provider: 's3', externalId: 'bucket', context: { accountId: 'account' }, identity: { provider: 'aws', principal: 'runtime-role', source: 'observed', scope: { roleId: 'immutable' } } };
+  const record = { ...target, binding: { id: 'policy', attemptId: 'attempt', evidence: { roleId: 'immutable' } }, pending: { attemptId: 'attempt', operation: 'grant' } };
+  it('preserves a local pending attempt omitted by a stale repository export', () => {
+    const existing = { storageRuntimeAccess: { documents: { web: record } } };
+    expect(mergeRepoPlatformBindings(existing, { storageRuntimeAccess: {} })).toEqual(existing);
+  });
+  it('refuses a replaced principal behind a same-named grant', () => {
+    const existing = { storageRuntimeAccess: { documents: { web: record } } };
+    const replacement = { ...record, identity: { ...record.identity, scope: { roleId: 'replacement' } } };
+    expect(() => mergeRepoPlatformBindings(existing, { storageRuntimeAccess: { documents: { web: replacement } } })).toThrow(/runtime.*conflict/i);
+  });
+  it('does not normalize corrupt permission evidence into an empty set', () => {
+    expect(() => mergeRepoPlatformBindings({ storageRuntimeAccess: null }, {})).toThrow(/runtime/i);
+  });
+  it('keeps old grant retirement and rejects conflicting pending identity attempts on import', () => {
+    const retiring = { ...record, pending: { attemptId: 'retire-attempt', operation: 'revoke' } };
+    const current = { ...record, identity: { ...record.identity, principal: 'new-runtime-role' }, pending: undefined, retiring };
+    const local = { storageRuntimeAccess: { documents: { web: current } } };
+    expect(mergeRepoPlatformBindings(local, { storageRuntimeAccess: { documents: { web: { ...current, retiring: undefined } } } })).toEqual(local);
+    const identity = { provider: 'ecs', evidence: { roleId: 'immutable' }, pending: { attemptId: 'original', step: { operation: 'attach', target: { roleId: 'immutable' }, description: 'Attach runtime identity.', requiresConfirm: true } } };
+    expect(() => mergeRepoPlatformBindings({ runtimeIdentities: { web: identity } }, { runtimeIdentities: { web: { ...identity, pending: { ...identity.pending, attemptId: 'different' } } } })).toThrow(/runtime.*conflict/i);
+  });
+  it.each(['accessKeyId', 'secretAccessKey', 'clientSecret', 'databaseUrl', 'credentials', 'authorization', 'sessionToken'])('rejects credential slot %s in supposedly public runtime coordinates', key => {
+    const unsafe = { runtimeIdentities: { 'token-worker': { provider: 'ecs', evidence: { [key]: 'synthetic-private-value' } } } };
+    expect(() => mergeRepoPlatformBindings(unsafe, {})).toThrow(/runtime/i);
+    expect(() => mergeRepoPlatformBindings({}, unsafe)).toThrow(/runtime/i);
+  });
+  it('rejects credential URLs and multiline private material in public coordinates', () => {
+    for (const value of ['postgresql://user:password@example/db', '-----BEGIN PRIVATE KEY-----\nsecret']) {
+      expect(() => mergeRepoPlatformBindings({ runtimeIdentities: { web: { provider: 'ecs', evidence: { roleId: value } } } }, {})).toThrow(/runtime/i);
+    }
+  });
+  it.each(['secret', 'secretVersion', 'credentialHash'])('rejects private values disguised as a public recovery %s reference', key => {
+    expect(() => mergeRepoPlatformBindings({ recoveryRuntime: { provider: 'cloudrun', evidence: { [key]: 'synthetic-private-value' } } }, {})).toThrow(/recovery/i);
+  });
+  it('preserves a local recovery worker pending attempt and its encrypted private payload against stale public imports', () => {
+    const pending = { attemptId: 'exact-attempt', step: { component: 'database-secret-version', operation: 'write', target: { secret: 'projects/project/secrets/backup', credentialHash: 'a'.repeat(64), priorVersions: '[]' }, description: 'Write the selected database reference.', requiresConfirm: true, privateInputKeys: ['databaseUrl'] } };
+    const binding = { provider: 'cloudrun', evidence: { accountUniqueId: '123456789', secretVersion: 'projects/project/secrets/backup/versions/1' }, pending };
+    const local = { recoveryRuntime: binding, recoveryRuntimeSecretInputs: 'local-encrypted-payload' };
+    expect(mergeRepoPlatformBindings(local, { recoveryRuntime: { ...binding, pending: undefined } })).toEqual(local);
+    expect(mergeRepoPlatformBindings(local, {})).toEqual(local);
+    expect(() => mergeRepoPlatformBindings(local, { recoveryRuntime: { ...binding, evidence: { ...binding.evidence, accountUniqueId: 'replacement' } } })).toThrow(/recovery.*conflict/i);
+    expect(() => mergeRepoPlatformBindings(local, { recoveryRuntimeSecretInputs: 'foreign-encrypted-payload' })).toThrow(/private|local/i);
+  });
+  it('roundtrips secret-shaped logical names and value-free recovery references without exporting private inputs', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'hv-runtime-export-'));
+    execFileSync('git', ['init', '-q', root]);
+    execFileSync('git', ['-C', root, 'remote', 'add', 'origin', 'https://github.com/owner/runtime-export.git']);
+    const now = new Date(); const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    const project: Project = { id: 'project', name: 'runtime-export', gitRemoteUrl: 'https://github.com/owner/runtime-export.git', defaultPlatform: 'ecs', policies: {}, createdAt: now, updatedAt: now };
+    const recoveryRuntime = { provider: 'cloudrun', evidence: { secretVersion: 'projects/project/secrets/backup/versions/1' }, pending: { attemptId: 'attempt', step: { component: 'database-secret-version', operation: 'write', target: { secret: 'projects/project/secrets/backup' }, description: 'Prepare backup reference.', requiresConfirm: true, privateInputKeys: ['databaseUrl'] } } };
+    const environment: Environment = { id: 'environment', projectId: project.id, name: 'staging', createdAt: now, updatedAt: now, platformBindings: { runtimeIdentities: { 'token-worker': { provider: 'ecs', evidence: { roleId: 'immutable' } } }, storageRuntimeAccess: { 'secret-documents': { 'token-worker': record } }, recoveryRuntime, recoveryRuntimeSecretInputs: 'local-encrypted-payload' } };
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      const file = writeRepoBindingsForEnvironment(project, environment, root)!;
+      const contents = readFileSync(file, 'utf8'); expect(contents).not.toContain('local-encrypted-payload');
+      const result = readRepoBindingsFile(project.name, root)!.document.environments.staging.platformBindings;
+      expect(result.runtimeIdentities).toEqual(environment.platformBindings.runtimeIdentities);
+      expect(result.storageRuntimeAccess).toEqual(environment.platformBindings.storageRuntimeAccess);
+      expect(result.recoveryRuntime).toEqual(recoveryRuntime);
+      expect(result.recoveryRuntimeSecretInputs).toBeUndefined();
+    } finally { if (oldDisable === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC; else process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable; rmSync(root, { recursive: true, force: true }); }
   });
 });

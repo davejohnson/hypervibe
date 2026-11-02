@@ -1,4 +1,6 @@
 import { DefaultAzureCredential } from '@azure/identity';
+import { DestinationBudget } from '../secret-destination-http.js';
+import { redactExactValues } from '../../../utils/redact-exact-values.js';
 
 const AZURE_MANAGEMENT_URL = 'https://management.azure.com';
 const AZURE_RESOURCE_API_VERSION = '2024-11-01';
@@ -15,38 +17,100 @@ export type AzureResourceManagerCredentials = {
 } | {
   authMode: 'default';
   subscriptionId: string;
+  tenantId?: string;
   resourceGroup?: string;
+} | {
+  /** Trusted broker callbacks only; this shape is not a user credential schema. */
+  authMode: 'federated';
+  tenantId: string;
+  subscriptionId: string;
+  clientId: string;
+  principalId: string;
+  identityResourceId: string;
+  resourceGroup: string;
+  /** Exact reviewed vault metadata/RBAC reads; never arbitrary cross-group access. */
+  readerVaultIds?: string[];
+  getAccessToken(target: 'resource-manager' | 'container-registry', signal: AbortSignal): Promise<{ token: string; expiresAt: string }>;
 };
 
-type AzureDefaultTokenProvider = () => Promise<string>;
+type AzureDefaultTokenProvider = (tenantId?: string) => Promise<string>;
 
-async function defaultAzureTokenProvider(): Promise<string> {
-  const access = await new DefaultAzureCredential().getToken('https://management.azure.com/.default');
-  if (!access?.token) throw new Error('Azure default credential chain did not return an ARM access token.');
-  return access.token;
+async function defaultAzureTokenProvider(tenantId?: string): Promise<string> {
+  try {
+    const access = await new DefaultAzureCredential({ tenantId }).getToken('https://management.azure.com/.default', { tenantId });
+    if (access?.token) return access.token;
+  } catch { /* Native credential errors may contain credential process output. */ }
+  throw new Error('Azure default credential authentication failed. Verify the intended local sign-in and tenant access.');
 }
 
 export async function resolveAzureDefaultSubscription(
   preferredSubscriptionId?: string,
-  dependencies: { tokenProvider?: AzureDefaultTokenProvider; fetch?: typeof fetch } = {}
-): Promise<{ authMode: 'default'; subscriptionId: string }> {
-  if (preferredSubscriptionId) {
-    if (!/^[0-9a-f-]{36}$/i.test(preferredSubscriptionId)) throw new Error('Azure subscription ID must be a UUID.');
-    return { authMode: 'default', subscriptionId: preferredSubscriptionId };
+  dependencies: { tokenProvider?: AzureDefaultTokenProvider; fetch?: typeof fetch; tenantId?: string } = {}
+): Promise<{ authMode: 'default'; subscriptionId: string; tenantId: string }> {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (preferredSubscriptionId && !uuid.test(preferredSubscriptionId)) throw new Error('Azure subscription ID must be a UUID.');
+  if (dependencies.tenantId && !uuid.test(dependencies.tenantId)) throw new Error('Azure tenant ID must be a UUID.');
+  const token = await (dependencies.tokenProvider ?? defaultAzureTokenProvider)(dependencies.tenantId);
+  const subscriptions: Array<{ subscriptionId: string; tenantId: string }> = [];
+  const seenIds = new Set<string>();
+  const seenPages = new Set<string>();
+  let next: string | null = `${AZURE_MANAGEMENT_URL}/subscriptions${preferredSubscriptionId ? `/${preferredSubscriptionId}` : ''}?api-version=${AZURE_SUBSCRIPTION_API_VERSION}`;
+  for (let page = 0; next && page < 100; page++) {
+    if (seenPages.has(next)) throw new Error('Azure subscription discovery repeated a page.');
+    seenPages.add(next);
+    const response = await (dependencies.fetch ?? fetch)(next, {
+      headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
+      redirect: 'error', signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) throw new AzureResourceManagerError(response.status);
+    let payload: Record<string, unknown>;
+    try {
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error();
+      const chunks: Uint8Array[] = [];
+      let bytes = 0;
+      try {
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          bytes += chunk.value.byteLength;
+          if (bytes > 1_048_576) throw new Error();
+          chunks.push(chunk.value);
+        }
+      } finally { await reader.cancel().catch(() => {}); }
+      payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error();
+    } catch { throw new Error('Azure subscription discovery returned an invalid or oversized response.'); }
+    const entries = preferredSubscriptionId ? [payload] : payload.value;
+    if (!Array.isArray(entries)) throw new Error('Azure subscription discovery omitted its collection.');
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object'
+        || typeof entry.subscriptionId !== 'string' || !uuid.test(entry.subscriptionId)
+        || typeof entry.tenantId !== 'string' || !uuid.test(entry.tenantId)
+        || !['Enabled', 'Warned', 'PastDue', 'Disabled', 'Deleted'].includes(entry.state)) {
+        throw new Error('Azure subscription observation is incomplete.');
+      }
+      const id = entry.subscriptionId.toLowerCase();
+      if (seenIds.has(id)) throw new Error('Azure subscription discovery returned duplicate identities.');
+      seenIds.add(id);
+      if (preferredSubscriptionId && id !== preferredSubscriptionId.toLowerCase()) throw new Error('Azure returned a different subscription identity.');
+      if (dependencies.tenantId && entry.tenantId.toLowerCase() !== dependencies.tenantId.toLowerCase()) throw new Error('Azure subscription belongs to a different tenant.');
+      if (entry.state === 'Enabled') subscriptions.push({ subscriptionId: entry.subscriptionId, tenantId: entry.tenantId });
+    }
+    if (preferredSubscriptionId) next = null;
+    else if (payload.nextLink === undefined || payload.nextLink === null || payload.nextLink === '') next = null;
+    else {
+      if (typeof payload.nextLink !== 'string') throw new Error('Azure subscription pagination is invalid.');
+      const continuation = new URL(payload.nextLink);
+      if (continuation.origin !== AZURE_MANAGEMENT_URL || continuation.pathname !== '/subscriptions'
+        || continuation.username || continuation.password || continuation.hash) {
+        throw new Error('Azure subscription pagination left the authorized collection.');
+      }
+      next = continuation.toString();
+    }
   }
-  const token = await (dependencies.tokenProvider ?? defaultAzureTokenProvider)();
-  const response = await (dependencies.fetch ?? fetch)(
-    `${AZURE_MANAGEMENT_URL}/subscriptions?api-version=2022-12-01`,
-    { headers: { Accept: 'application/json', Authorization: `Bearer ${token}` } }
-  );
-  if (!response.ok) throw new AzureResourceManagerError(response.status);
-  const payload = await response.json() as { value?: Array<{ subscriptionId?: unknown; state?: unknown }> };
-  const subscriptions = (payload.value ?? [])
-    .filter((item) => String(item.state ?? '').toLowerCase() === 'enabled')
-    .flatMap((item) => typeof item.subscriptionId === 'string' && /^[0-9a-f-]{36}$/i.test(item.subscriptionId)
-      ? [item.subscriptionId]
-      : []);
-  if (subscriptions.length === 1) return { authMode: 'default', subscriptionId: subscriptions[0]! };
+  if (next) throw new Error('Azure subscription discovery exceeded its page limit.');
+  if (subscriptions.length === 1) return { authMode: 'default', ...subscriptions[0]! };
   if (subscriptions.length === 0) throw new Error('Azure default credential chain did not expose an enabled subscription.');
   throw new Error('Azure default credential chain can access multiple subscriptions. Reconnect with credentials={"authMode":"default","subscriptionId":"<id>"} to select one explicitly.');
 }
@@ -74,21 +138,29 @@ export interface AzureArmResourceIdentity {
 
 export class AzureResourceManagerClient {
   private accessToken: string | null = null;
+  private accessTokenExpiresAt = Number.POSITIVE_INFINITY;
   private accessTokenPromise: Promise<string> | null = null;
   private readonly defaultCredential: DefaultAzureCredential | null;
 
-  constructor(readonly credentials: AzureResourceManagerCredentials) {
+  constructor(readonly credentials: AzureResourceManagerCredentials, private readonly options: { deadlineMs?: number } = {}) {
     this.defaultCredential = credentials.authMode === 'default'
-      ? new DefaultAzureCredential()
+      ? new DefaultAzureCredential({ tenantId: credentials.tenantId })
       : null;
   }
 
   async verifySubscription(): Promise<void> {
-    await this.request(
+    const observed = await this.request<Record<string, unknown>>(
       'GET',
       `/subscriptions/${encodeURIComponent(this.credentials.subscriptionId)}`,
       AZURE_SUBSCRIPTION_API_VERSION
     );
+    if (this.credentials.authMode === 'default' && (
+      typeof observed?.subscriptionId !== 'string'
+      || observed.subscriptionId.toLowerCase() !== this.credentials.subscriptionId.toLowerCase()
+      || observed.state !== 'Enabled'
+      || (this.credentials.tenantId && (typeof observed.tenantId !== 'string'
+        || observed.tenantId.toLowerCase() !== this.credentials.tenantId.toLowerCase()))
+    )) throw new Error('Azure verification did not match the enabled subscription identity and tenant.');
   }
 
   async verifyResourceGroup(): Promise<void> {
@@ -102,6 +174,20 @@ export class AzureResourceManagerClient {
   }
 
   async servicePrincipalId(): Promise<string> {
+    if (this.credentials.authMode === 'federated') {
+      // The authenticated broker's provider-owned OAuth exchange establishes the
+      // caller. ARM independently checks continuing native identity/authority.
+      // Microsoft-owned access tokens are opaque, never an unverified oid JWT.
+      const expected = this.credentials;
+      const native = await this.request<{ id?: unknown; properties?: { tenantId?: unknown; clientId?: unknown; principalId?: unknown } }>(
+        'GET', expected.identityResourceId, '2024-11-30');
+      const same = (actual: unknown, value: string) => typeof actual === 'string' && actual.toLowerCase() === value.toLowerCase();
+      if (!same(native.id, expected.identityResourceId) || !same(native.properties?.tenantId, expected.tenantId)
+        || !same(native.properties?.clientId, expected.clientId) || !same(native.properties?.principalId, expected.principalId)) {
+        throw new Error('Azure transient identity could not be verified.');
+      }
+      return expected.principalId;
+    }
     const token = await this.getAccessToken();
     try {
       const payload = JSON.parse(
@@ -265,12 +351,21 @@ export class AzureResourceManagerClient {
     apiVersion: string,
     body?: unknown
   ): Promise<T> {
-    const token = await this.getAccessToken();
     const versioned = this.withApiVersion(pathOrUrl, apiVersion);
     const url = versioned.startsWith('https://')
       ? versioned
       : `${AZURE_MANAGEMENT_URL}${versioned}`;
     this.assertManagementUrl(url);
+    if (this.credentials.authMode === 'federated') {
+      this.assertTransientScope(url, method);
+      const result = await this.transientRequest<T>(url, method, body);
+      if (result.operation) {
+        await this.waitForOperation(result.operation, apiVersion);
+        if (method === 'PUT' || method === 'PATCH') return this.request<T>('GET', pathOrUrl, apiVersion);
+      }
+      return result.value;
+    }
+    const token = await this.getAccessToken();
     const response = await fetch(url, {
       method,
       redirect: 'error',
@@ -304,7 +399,7 @@ export class AzureResourceManagerClient {
   }
 
   private async getAccessToken(): Promise<string> {
-    if (this.accessToken) return this.accessToken;
+    if (this.accessToken && this.accessTokenExpiresAt > Date.now() + 60_000) return this.accessToken;
     if (this.accessTokenPromise) return this.accessTokenPromise;
     this.accessTokenPromise = this.requestAccessToken();
     try {
@@ -331,9 +426,13 @@ export class AzureResourceManagerClient {
   }
 
   private async requestAccessToken(scope = 'https://management.azure.com/.default'): Promise<string> {
+    if (this.credentials.authMode === 'federated') throw new Error('Azure transient authorization must use its bounded request.');
     if (this.credentials.authMode === 'default') {
-      const access = await this.defaultCredential!.getToken(scope);
-      if (!access?.token) throw new Error('Azure default credential chain did not return an ARM access token.');
+      let access;
+      try { access = await this.defaultCredential!.getToken(scope, { tenantId: this.credentials.tenantId }); }
+      catch { throw new Error('Azure default credential authentication failed. Verify the intended local sign-in and tenant access.'); }
+      if (!access?.token || !Number.isFinite(access.expiresOnTimestamp) || access.expiresOnTimestamp <= Date.now()) throw new Error('Azure default credential chain did not return a valid ARM access token.');
+      if (scope === 'https://management.azure.com/.default') this.accessTokenExpiresAt = access.expiresOnTimestamp;
       return access.token;
     }
     const form = new URLSearchParams({
@@ -386,6 +485,15 @@ export class AzureResourceManagerClient {
     const url = this.withApiVersion(operationUrl, apiVersion);
     this.assertManagementUrl(url);
     for (let attempt = 1; attempt <= 180; attempt += 1) {
+      if (this.credentials.authMode === 'federated') {
+        this.assertTransientScope(url, 'GET');
+        const { value } = await this.transientRequest<{ status?: unknown; properties?: { provisioningState?: unknown } }>(url, 'GET');
+        const status = String(value?.status ?? value?.properties?.provisioningState ?? '').toLowerCase();
+        if (['succeeded', 'completed'].includes(status)) return;
+        if (['failed', 'canceled', 'cancelled'].includes(status)) throw new Error('Azure Resource Manager operation failed.');
+        if (attempt < 180) await this.delay();
+        continue;
+      }
       const response = await fetch(url, {
         headers: {
           Accept: 'application/json',
@@ -431,12 +539,67 @@ export class AzureResourceManagerClient {
     const url = new URL(value);
     if (
       url.protocol !== 'https:'
-      || url.hostname.toLowerCase() !== 'management.azure.com'
+      || url.host.toLowerCase() !== 'management.azure.com' || url.username || url.password || url.hash
     ) {
       throw new Error(
         'Azure Resource Manager request URL left management.azure.com.'
       );
     }
+  }
+
+  private assertTransientScope(value: string, method: string): void {
+    if (this.credentials.authMode !== 'federated') return;
+    const path = new URL(value).pathname.toLowerCase();
+    const subscription = `/subscriptions/${this.credentials.subscriptionId}`.toLowerCase();
+    const group = `${subscription}/resourceGroups/${this.credentials.resourceGroup}`.toLowerCase();
+    const reviewedReader = method === 'GET' && (this.credentials.readerVaultIds ?? []).some(id => path === id.toLowerCase()
+      || path.startsWith(`${id}/providers/Microsoft.Authorization/roleAssignments/`.toLowerCase()));
+    if (/%|\\/.test(path) || path !== group && !path.startsWith(`${group}/`)
+      && !reviewedReader
+      && !(method === 'GET' && (path === subscription || path.startsWith(`${subscription}/providers/microsoft.app/locations/`)))) {
+      throw new Error('Azure transient request is outside its reviewed scope.');
+    }
+    if (method !== 'GET' && (/\/providers\/microsoft\.(authorization|managedidentity)\//.test(path) || /\/(register|listsecrets|listcredentials)$/.test(path))) {
+      throw new Error('Azure deployment cannot change setup trust or retrieve secret values.');
+    }
+  }
+
+  private async transientRequest<T>(url: string, method: string, body?: unknown): Promise<{ value: T; operation?: string }> {
+    if (this.credentials.authMode !== 'federated') throw new Error('Azure transient authorization is unavailable.');
+    const budget = new DestinationBudget({ deadlineMs: this.options.deadlineMs });
+    try {
+      let access: { token: string; expiresAt: string };
+      try {
+        access = await budget.wait(this.credentials.getAccessToken('resource-manager', budget.signal));
+        if (!access || typeof access.token !== 'string' || !access.token || access.token.length > 65_536 || /[\r\n]/.test(access.token)
+          || typeof access.expiresAt !== 'string' || !Number.isFinite(Date.parse(access.expiresAt)) || Date.parse(access.expiresAt) <= Date.now()) throw new Error();
+      } catch { throw new Error('Azure transient authorization is unavailable.'); }
+      if (budget.signal.aborted) throw new Error('Azure transient authorization is unavailable.');
+      const response = await budget.wait(fetch(url, { method, redirect: 'error', signal: budget.signal,
+        headers: { Accept: 'application/json', Authorization: `Bearer ${access.token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }) }));
+      if (!response.ok || response.redirected) {
+        void response.body?.cancel().catch(() => {});
+        throw new AzureResourceManagerError(response.status);
+      }
+      const operation = response.headers.get('azure-asyncoperation') ?? response.headers.get('operation-location') ?? undefined;
+      if (operation) { this.assertManagementUrl(operation); this.assertTransientScope(operation, 'GET'); }
+      if (response.status === 204) { void response.body?.cancel().catch(() => {}); return { value: undefined as T, operation }; }
+      const reader = response.body?.getReader();
+      if (!reader) return { value: undefined as T, operation };
+      let bytes = 0; const chunks: Uint8Array[] = [];
+      try {
+        for (;;) {
+          const chunk = await budget.wait(reader.read()); if (chunk.done) break;
+          bytes += chunk.value.byteLength; if (bytes > 1_048_576) throw new Error(); chunks.push(chunk.value);
+        }
+        return { value: bytes ? redactExactValues(JSON.parse(Buffer.concat(chunks).toString('utf8')) as T, [access.token]) : undefined as T, operation };
+      } catch { void reader.cancel().catch(() => {}); throw new Error('Azure transient response could not be verified.'); }
+      finally { reader.releaseLock(); }
+    } catch (error) {
+      if (error instanceof AzureResourceManagerError || error instanceof Error && /^Azure transient (authorization is unavailable|response could not be verified)\.$/.test(error.message)) throw error;
+      throw new Error('Azure transient request could not be verified.');
+    } finally { budget.close(); }
   }
 
   private assertContinuationUrl(value: string, initialPath: string): void {

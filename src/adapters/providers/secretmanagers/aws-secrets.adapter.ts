@@ -9,12 +9,6 @@ import {
 import { secretManagerRegistry } from '../../../domain/registry/secretmanager.registry.js';
 import { defaultProvider } from '@aws-sdk/credential-provider-node';
 
-interface AwsResolvedCredentials {
-  accessKeyId: string;
-  secretAccessKey: string;
-  sessionToken?: string;
-}
-
 // AWS Signature V4 signing helper
 async function signRequest(
   method: string,
@@ -150,7 +144,7 @@ export class AwsSecretsAdapter implements ISecretManagerAdapter {
   private credentials: AwsSecretsCredentials | null = null;
 
   constructor(
-    private readonly resolveDefaultCredentials: () => Promise<AwsResolvedCredentials> = defaultProvider()
+    private readonly resolveDefaultCredentials: ReturnType<typeof defaultProvider> = defaultProvider()
   ) {}
 
   async connect(credentials: unknown): Promise<void> {
@@ -158,7 +152,8 @@ export class AwsSecretsAdapter implements ISecretManagerAdapter {
 
     if (!this.credentials.accessKeyId || !this.credentials.secretAccessKey) {
       try {
-        const resolved = await this.resolveDefaultCredentials();
+        const region = this.credentials.region;
+        const resolved = await this.resolveDefaultCredentials({ callerClientConfig: { region: async () => region } });
         this.credentials = {
           ...this.credentials,
           accessKeyId: resolved.accessKeyId,

@@ -57,10 +57,19 @@ identity. Present the concrete proposed resource scope, permission grants,
 billing choice, and cost implications before obtaining the required approval.
 Only the confirmed continuation may perform the corresponding changes.
 
-Use the selected provider's declared bootstrap when available. Hypervibe owns
-its generated project and credential creation. Preserve the preview's exact
-project/account and repository scope. Do not assume a provider supports a
-bootstrap or local setup action merely because another provider does.
+For new AWS, Azure or GCP access, start `hv_cloud_connections` with
+`purpose="connect-cloud"` for the exact app and environment. Follow `nextStep`
+through device approval, browser provider selection and administrator installation.
+The developer may invite the cloud administrator; sign-in alone does not establish
+cloud authority. Review account/project/subscription, resources, permissions and
+cost before installation. No local cloud credentials or manually prepared writer
+identities are required. Report missing hosted prerequisites without substituting
+key uploads or key generation.
+
+Preserve existing connections. GCP `hv_connections action="bootstrap"` creates a
+legacy deployment service-account key and requires explicit user intent. Local
+setup and existing credential references remain available for separately chosen
+local or legacy paths; they are not new Connect Cloud prerequisites.
 
 If the current tool schema and result explicitly offer a local authentication
 recipe, follow its bounded continuation. Reuse valid login, verify the shell

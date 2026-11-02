@@ -7,6 +7,9 @@ export const DEFAULT_HYPERVIBE_CLOUD_BASE_URL = 'https://hypervibe.dev';
 export const HYPERVIBE_CLOUD_CONNECTION_PROVIDER = 'hypervibe-cloud';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+// Initial hosted startup can exceed the polling budget. Keep one bounded POST;
+// a missed acknowledgement still requires inspection, never automatic replay.
+const DEFAULT_START_TIMEOUT_MS = 30_000;
 
 const environmentSchema = z.object({
   id: z.string().min(1),
@@ -21,7 +24,7 @@ const pairingStartSchema = z.object({
   repository: z.string().min(3),
   userCode: z.string().regex(/^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$/),
   verificationUrl: z.string().url(),
-  purpose: z.enum(['provider-connections', 'credential-requests']).optional(),
+  purpose: z.enum(['provider-connections', 'credential-requests', 'secret-destinations', 'deployment-access']).optional(),
   environment: z.string().min(1).max(80).optional(),
 }).strict();
 
@@ -42,7 +45,7 @@ const pairingCompleteSchema = z.object({
   project: z.object({ id: z.string().min(1), name: z.string().min(1) }).strict(),
   skipped: z.number().int().min(0),
   status: z.literal('completed'),
-  purpose: z.enum(['provider-connections', 'credential-requests']).optional(),
+  purpose: z.enum(['provider-connections', 'credential-requests', 'secret-destinations', 'deployment-access']).optional(),
   environment: z.string().min(1).max(80).optional(),
 }).strict().superRefine((value, context) => {
   if (value.applied !== value.credentials.length) {
@@ -136,7 +139,7 @@ export function createHypervibeCloudPairingClient(options: {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   purpose?: 'provider-connections';
-  grant?: { purpose: 'credential-requests'; environment: string };
+  grant?: { purpose: 'credential-requests' | 'secret-destinations' | 'deployment-access'; environment: string };
 } = {}): HypervibeCloudPairingClient {
   if (options.purpose && options.grant) throw new HvError('VALIDATION', 'Select one browser-access purpose.');
   const purpose = options.grant?.purpose ?? options.purpose;
@@ -145,10 +148,12 @@ export function createHypervibeCloudPairingClient(options: {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   const request = createCloudJsonClient(baseUrl, fetchImpl, timeoutMs);
+  const startRequest = createCloudJsonClient(baseUrl, fetchImpl, options.timeoutMs ?? DEFAULT_START_TIMEOUT_MS);
 
   return {
     async start(repository, sourceBranch) {
-      const payload = await request('/api/v1/pairings', { body: {
+      if (purpose === 'deployment-access' && !sourceBranch) throw new HvError('VALIDATION', 'Deployment access requires the exact reviewed source branch.');
+      const payload = await startRequest('/api/v1/pairings', { body: {
         repositoryFullName: repository, ...(purpose ? { purpose } : {}),
         ...(options.grant ? { environment: options.grant.environment } : {}),
         ...(sourceBranch !== undefined ? { sourceBranch: sourceBranchSchema.parse(sourceBranch) } : {}),

@@ -121,7 +121,7 @@ export async function collectProjectDeploymentHealth(params: {
       });
       continue;
     }
-    const resolved = await adapterFactory.getHostingAdapterByName(provider, params.project);
+    const resolved = await adapterFactory.getHostingAdapterByName(provider, params.project, environment.name);
     if (!resolved.success || !resolved.adapter || typeof resolved.adapter.getDeployStatus !== 'function') {
       const reason = resolved.success
         ? `${provider} does not support deployment-status observation.`

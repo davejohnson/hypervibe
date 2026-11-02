@@ -69,7 +69,7 @@ export async function resolveExternalDatabaseUrl(
     return null;
   }
 
-  const adapterResult = await adapterFactory.getProviderAdapter('railway', project);
+  const adapterResult = await adapterFactory.getProviderAdapter('railway', project, undefined, env.name);
   const adapter = adapterResult.success
     ? adapterResult.adapter as unknown as {
       getServiceVariables?: (projectId: string, serviceId: string, environmentId: string) => Promise<Record<string, string>>;
@@ -107,7 +107,7 @@ export async function resolveEnvironmentDatabaseUrl(
   const componentBindings = component?.bindings as Record<string, unknown> | undefined;
   const componentProvider = typeof componentBindings?.provider === 'string' ? componentBindings.provider : undefined;
   if (component && componentProvider && componentProvider !== 'railway') {
-    const adapterResult = await adapterFactory.getDatabaseAdapter(componentProvider, project);
+    const adapterResult = await adapterFactory.getDatabaseAdapter(componentProvider, project, env.name);
     if (adapterResult.success && adapterResult.adapter) {
       const adapterUrl = await adapterResult.adapter.getConnectionUrl(component);
       if (adapterUrl) {
@@ -146,7 +146,7 @@ export async function resolveEnvironmentDatabaseUrl(
     return null;
   }
 
-  const adapterResult = await adapterFactory.getProviderAdapter(bindings.provider, project);
+  const adapterResult = await adapterFactory.getProviderAdapter(bindings.provider, project, undefined, env.name);
   if (!adapterResult.success || !adapterResult.adapter) {
     return null;
   }

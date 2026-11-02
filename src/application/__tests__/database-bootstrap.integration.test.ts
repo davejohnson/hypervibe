@@ -1,20 +1,28 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { SecretStore } from '../../adapters/secrets/secret-store.js';
 import { createCommandContext } from '../context.js';
+import { createCommandRegistry } from '../commands.js';
+import { runWithWorkspaceDirectories } from '../../lib/workspace-context.js';
 import { executePlanApply } from '../apply-plan.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
 import { PlanService } from '../../domain/plan/plan.service.js';
 import { planRunDocumentSchema } from '../../domain/plan/converge.executor.js';
+import { databaseInitializationAttemptSchema } from '../../domain/plan/database-initialization.contract.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import type { EnvironmentTaskOptions } from '../../domain/ports/hosting.port.js';
 import * as backups from '../../domain/services/backup-policy.service.js';
 import * as aliases from '../../domain/services/database-credential-aliases.service.js';
+import * as cloudScope from '../../domain/services/local-cloud-scope.service.js';
+import * as operatorArtifacts from '../../domain/services/operator-artifact.service.js';
+import * as holding from '../../domain/services/local-holding-preparation.service.js';
+import * as operatorApplications from '../../domain/services/operator-application.service.js';
 import '../providers.js';
 import '../../adapters/providers/railway/railway.adapter.js';
 
@@ -106,7 +114,248 @@ afterEach(() => {
   rmSync(directory, { recursive: true, force: true });
 });
 
+async function retainAcknowledgedBootstrap() {
+  runJob.mockImplementationOnce(async (_environment, _service, _command, options: EnvironmentTaskOptions) => {
+    const task = options.declaredTask!.databaseTask!;
+    let state = await task.persist({ version: 1, authorityHash: 'e'.repeat(64), phase: 'create-attempted' });
+    state = await task.persist({ ...state, phase: 'created', taskServiceId: 'owned-task' });
+    state = await task.persist({ ...state, phase: 'configure-attempted', taskInstanceId: 'owned-instance' });
+    state = await task.persist({ ...state, phase: 'configured' });
+    state = await task.persist({ ...state, phase: 'deploy-attempted' });
+    await task.persist({ ...state, phase: 'deployed', deploymentId: 'owned-deployment' });
+    return { jobId: 'owned-deployment', status: 'running', receipt: { success: false } };
+  });
+  const first = await new PlanService().plan(project, 'production');
+  if ('error' in first) throw new Error(first.error);
+  expect(await executePlanApply(ctx, { project, spec, specRevision: revision, planId: first.planRunId,
+    confirmActions: [first.actions[0].id] })).toMatchObject({ kind: 'executed', result: { success: false } });
+}
+
+function retainPendingInitialization() {
+  const component = ctx.repos.components.findByEnvironmentAndType(environment.id, 'postgres')!;
+  const original = databaseInitializationAttemptSchema.parse(component.bindings.freshInitialization);
+  const { completed: _completed, ...retained } = original;
+  // Reconstructed durable snapshot immediately after acknowledged activation,
+  // before native convergence. Keep the exact IDs and private inspection.
+  const pending = databaseInitializationAttemptSchema.parse({ ...retained,
+    progress: { ...original.progress, phase: 'activation-identified' } });
+  ctx.repos.components.updateBindings(component.id, { freshInitialization: pending });
+}
+
 describe('fresh schema bootstrap in the normal plan/apply loop', () => {
+  it.each(['provider-drift', 'operator-prerequisite', 'tracked-dotenv'] as const)(
+    'reaches retained recovery through shared hv_plan despite %s', async scenario => {
+      await retainAcknowledgedBootstrap();
+      if (scenario !== 'tracked-dotenv') spec.environments.production.hosting.provider = 'cloudrun';
+      if (scenario === 'operator-prerequisite') spec.environments.production.operatorArtifacts = {
+        helpers: { provider: 'cloudrun', artifacts: ['holding-v1'], nativeScope: {
+          scopeKind: 'gar-image-publication-v1', projectId: 'synthetic-next-project', region: 'us-central1', packageVersion: '0.1.44',
+        } },
+      };
+      revision = new SpecStore().replace(project, spec).revision;
+      const repository = path.join(directory, 'checkout');
+      execFileSync('git', ['init', '-q', repository]);
+      execFileSync('git', ['-C', repository, 'remote', 'add', 'origin', project.gitRemoteUrl!]);
+      // Frozen task recovery needs no deployment dotenv inputs. The ordinary
+      // deployment guard must still reject this tracked file for new work.
+      const dotenv = path.join(repository, '.env.production'), contents = 'API_TOKEN=synthetic-unread-input\n';
+      writeFileSync(dotenv, contents);
+      execFileSync('git', ['-C', repository, 'add', '.env.production']);
+      const publication = vi.spyOn(operatorArtifacts, 'planOperatorArtifacts');
+      const commands = createCommandRegistry(ctx);
+      const result = await runWithWorkspaceDirectories([repository], () => commands.execute('hv_plan', {
+        project: project.name, env: 'production', scope: 'full',
+      }));
+      expect(result).toMatchObject({ ok: true, data: { scope: 'database-bootstrap', blocked: [] } });
+      expect(result.data).not.toHaveProperty('localEnv');
+      expect(readFileSync(dotenv, 'utf8')).toBe(contents);
+      expect(publication).not.toHaveBeenCalled();
+      expect(runJob).toHaveBeenCalledOnce();
+    });
+
+  it('applies only the exact retained database execution through shared hv_apply after provider drift', async () => {
+    await retainAcknowledgedBootstrap();
+    spec.environments.production.hosting.provider = 'cloudrun';
+    revision = new SpecStore().replace(project, spec).revision;
+    const plan = await new PlanService().plan(project, 'production');
+    if ('error' in plan) throw new Error(plan.error);
+    const saved = ctx.repos.runs.findById(plan.planRunId)!.plan!;
+    const commands = createCommandRegistry(ctx), input = { project: project.name, planId: plan.planRunId,
+      confirmActions: [plan.actions[0].id] };
+    for (const confirmActions of [[], ['unrelated-action']]) {
+      expect(await commands.execute('hv_apply', { ...input, confirmActions }))
+        .toMatchObject({ ok: true, data: { applied: false } });
+      expect(runJob).toHaveBeenCalledOnce();
+    }
+    ctx.repos.runs.updatePlan(plan.planRunId, { ...saved, actions: [{ ...plan.actions[0],
+      metadata: { ...plan.actions[0].metadata, executionId: '11111111-1111-4111-8111-111111111111' } }] });
+    expect(await commands.execute('hv_apply', input)).toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+    expect(runJob).toHaveBeenCalledOnce();
+    ctx.repos.runs.updatePlan(plan.planRunId, { ...saved });
+    expect(await commands.execute('hv_apply', input)).toMatchObject({ ok: true, data: { applied: false } });
+    expect(runJob).toHaveBeenCalledTimes(2);
+    const state = ctx.repos.components.findByEnvironmentAndType(environment.id, 'postgres')!.bindings.databaseBootstrap as any;
+    expect(state.authentication).toMatchObject({ phase: 'complete', deploymentId: 'owned-deployment' });
+    expect(state.consumedAt).toBeUndefined();
+  });
+
+  it('does not replay an uncertain deployment through shared commands after provider drift', async () => {
+    await retainAcknowledgedBootstrap();
+    const plan = await new PlanService().plan(project, 'production');
+    if ('error' in plan) throw new Error(plan.error);
+    const component = ctx.repos.components.findByEnvironmentAndType(environment.id, 'postgres')!;
+    const retained = component.bindings.databaseBootstrap as any;
+    const { deploymentId: _deploymentId, ...unknownAcknowledgment } = retained.authentication;
+    ctx.repos.components.updateBindings(component.id, { databaseBootstrap: { ...retained,
+      authentication: { ...unknownAcknowledgment, phase: 'deploy-attempted' } } });
+    spec.environments.production.hosting.provider = 'cloudrun';
+    revision = new SpecStore().replace(project, spec).revision;
+    const commands = createCommandRegistry(ctx);
+    expect(await commands.execute('hv_plan', { project: project.name, env: 'production' }))
+      .toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+    expect(await commands.execute('hv_apply', { project: project.name, planId: plan.planRunId,
+      confirmActions: [plan.actions[0].id] })).toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+    expect(runJob).toHaveBeenCalledOnce();
+  });
+
+  it('keeps shared command validation for new database work without an acknowledged execution', async () => {
+    const first = await new PlanService().plan(project, 'production');
+    if ('error' in first) throw new Error(first.error);
+    spec.environments.production.hosting.provider = 'cloudrun';
+    revision = new SpecStore().replace(project, spec).revision;
+    const commands = createCommandRegistry(ctx);
+    expect(await commands.execute('hv_plan', { project: project.name, env: 'production' }))
+      .toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+    expect(await commands.execute('hv_apply', { project: project.name, planId: first.planRunId, confirmActions: [first.actions[0].id] }))
+      .toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+    expect(runJob).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['bootstrap', 'credential'], ['bootstrap', 'intent'], ['bootstrap', 'secretRefs'],
+    ['initialization', 'credential'], ['initialization', 'intent'], ['initialization', 'secretRefs'],
+  ] as const)('rejects credential-only %s recovery input %s before admitting a full-scope plan', async (pendingKind, input) => {
+    if (pendingKind === 'bootstrap') await retainAcknowledgedBootstrap();
+    else retainPendingInitialization();
+    // The upstream plan contract rejects credential/intent outside credential
+    // scope, and tracked inputs require their separate adoption/rotation review.
+    // Retaining a database operation cannot silently discard either request.
+    spec = projectSpecSchema.parse({ ...spec, secrets: { API_TOKEN: {
+      ownership: 'delegated', principal: 'user:owner', environments: ['production'],
+      credential: { role: 'application-api', label: 'Application API', purpose: 'Authenticate API requests',
+        kind: 'opaque', source: `file:${path.join(directory, 'must-not-be-read')}` },
+    } } });
+    revision = new SpecStore().replace(project, spec).revision;
+    const before = ctx.repos.runs.findByProjectId(project.id).length;
+    const options = input === 'credential' ? { credential: 'application-api' }
+      : input === 'intent' ? { intent: 'rotate' as const }
+        : { secretRefs: { API_TOKEN: `file:${path.join(directory, 'must-not-be-read')}` } };
+    const result = await new PlanService().plan(project, 'production', { scope: 'full', ...options });
+    expect(result).toEqual({ error: input === 'secretRefs'
+      ? 'Tracked credentials require a reviewed credential adoption or rotation plan.'
+      : 'Credential review inputs require scope=credentials.' });
+    expect(ctx.repos.runs.findByProjectId(project.id)).toHaveLength(before);
+    expect(runJob).toHaveBeenCalledTimes(pendingKind === 'bootstrap' ? 1 : 0);
+  });
+
+  it('keeps pending storage initialization ahead of newly declared operator setup', async () => {
+    retainPendingInitialization();
+    spec.environments.production.operatorApplications = { browser: { provider: 'microsoft-entra',
+      profile: 'hypercloud-connect-v1', originService: 'web', runtimeService: 'web',
+      nativeScope: { tenantId: '11111111-1111-4111-8111-111111111111' } } };
+    revision = new SpecStore().replace(project, spec).revision;
+    const prepare = vi.spyOn(operatorApplications, 'planOperatorApplications')
+      .mockRejectedValue(new Error('operator setup is unavailable'));
+    const result = await new PlanService().plan(project, 'production');
+    expect(result).toMatchObject({ scope: 'database-initialization' });
+    expect(prepare).not.toHaveBeenCalled();
+    expect(runJob).not.toHaveBeenCalled();
+  });
+
+  it('vetoes narrow cloud checks while storage initialization is pending', async () => {
+    retainPendingInitialization();
+    const newScope = vi.spyOn(cloudScope, 'localCloudScopeRequired').mockResolvedValue(true);
+    const result = await new PlanService().plan(project, 'production', { scope: 'secrets' });
+    expect(result).toMatchObject({ error: expect.stringContaining('pending database initialization') });
+    expect(newScope).not.toHaveBeenCalled();
+    expect(runJob).not.toHaveBeenCalled();
+  });
+
+  it.each(['cloud', 'artifacts', 'holding', 'operator'] as const)(
+    'recovers acknowledged database work before newly declared %s preparation', async stage => {
+      await retainAcknowledgedBootstrap();
+      // The retained execution belongs to Railway even when the new desired
+      // deployment is elsewhere. A new bootstrap prerequisite cannot hide the
+      // exact read/cleanup stage mandated by the database recovery contract.
+      const desired = spec.environments.production;
+      desired.hosting.provider = 'cloudrun'; desired.database!.provider = 'cloudsql';
+      let prepare;
+      if (stage === 'cloud') {
+        desired.hosting.scopePreparation = { schemaVersion: 1, authentication: 'local-default',
+          nativeScope: { scopeKind: 'project-allocation', allocationMode: 'create-exclusive-v1',
+            projectId: 'synthetic-next-project', displayName: 'Next project' } };
+        prepare = vi.spyOn(cloudScope, 'planLocalCloudScope');
+      } else if (stage === 'artifacts') {
+        desired.operatorArtifacts = { helpers: { provider: 'cloudrun', artifacts: ['holding-v1'],
+          nativeScope: { scopeKind: 'gar-image-publication-v1', projectId: 'synthetic-next-project',
+            region: 'us-central1', packageVersion: '0.1.44' } } };
+        prepare = vi.spyOn(operatorArtifacts, 'planOperatorArtifacts');
+      } else if (stage === 'holding') {
+        desired.hosting.preparation = { kind: 'holding-v1',
+          image: `us-central1-docker.pkg.dev/synthetic-next-project/helpers/holding@sha256:${'a'.repeat(64)}` };
+        prepare = vi.spyOn(holding, 'planLocalHolding');
+      } else {
+        desired.operatorApplications = { browser: { provider: 'microsoft-entra', profile: 'hypercloud-connect-v1',
+          originService: 'web', runtimeService: 'web', nativeScope: { tenantId: '11111111-1111-4111-8111-111111111111' } } };
+        prepare = vi.spyOn(operatorApplications, 'planOperatorApplications');
+      }
+      prepare.mockRejectedValue(new Error('new provider setup is unavailable'));
+      revision = new SpecStore().replace(project, spec).revision;
+      const recovery = await new PlanService().plan(project, 'production');
+      expect(recovery).toMatchObject({ scope: 'database-bootstrap', blocked: [], actions: [expect.objectContaining({
+        metadata: expect.objectContaining({ mode: 'authenticate' }),
+      })] });
+      expect(prepare).not.toHaveBeenCalled();
+      expect(runJob).toHaveBeenCalledOnce();
+    });
+
+  it('blocks narrow cloud preparation checks while database execution recovery is pending', async () => {
+    await retainAcknowledgedBootstrap();
+    const newScope = vi.spyOn(cloudScope, 'localCloudScopeRequired').mockResolvedValue(true);
+    const result = await new PlanService().plan(project, 'production', { scope: 'secrets' });
+    expect(result).toMatchObject({ error: expect.stringContaining('pending private database bootstrap') });
+    expect(newScope).not.toHaveBeenCalled();
+    expect(runJob).toHaveBeenCalledOnce();
+  });
+
+  it.each(['bootstrap', 'initialization'] as const)('blocks a saved operator action before dispatch while %s recovery is pending', async pendingKind => {
+    if (pendingKind === 'bootstrap') await retainAcknowledgedBootstrap();
+    else retainPendingInitialization();
+    // This is a synthetic, schema-valid saved authorization; the actual
+    // executor and SQLite plan loader must still enforce the live recovery
+    // veto before invoking any operator mutation handler.
+    const proof = { schemaVersion: 1 as const, name: 'browser',
+      installationId: '11111111-1111-4111-8111-111111111111', planDigest: 'f'.repeat(64),
+      provider: 'microsoft-entra' as const, mode: 'prepare' as const };
+    const document = planRunDocumentSchema.parse({ kind: 'hv_plan', scope: 'operator-applications',
+      environmentName: 'production', specRevision: revision, observedFingerprint: null, applicationRegistration: proof,
+      actions: [{ id: 'create-browser', type: 'create', resource: { kind: 'project', provider: 'microsoft-entra', name: 'browser' },
+        verified: true, requiresConfirm: true, reason: 'Reviewed synthetic browser application',
+        metadata: { ...proof, operation: 'operatorApplicationRegistration', nativeActionId: 'create-browser' } }] });
+    const saved = ctx.repos.runs.create({ projectId: project.id, environmentId: environment.id, type: 'plan',
+      plan: document as unknown as Record<string, unknown> });
+    ctx.repos.runs.updateStatus(saved.id, 'succeeded');
+    const applyOperator = vi.spyOn(operatorApplications, 'applyOperatorApplications').mockResolvedValue({ success: true, message: 'Synthetic operator action accepted' });
+    const result = await executePlanApply(ctx, { project, spec, specRevision: revision, planId: saved.id,
+      confirmActions: ['create-browser'] });
+    expect(result).toMatchObject({ kind: 'blocked', applyBlocked: [expect.objectContaining({
+      reason: expect.stringContaining(pendingKind === 'bootstrap' ? 'Private database bootstrap has a retained attempt'
+        : 'Database initialization needs exact readback verification'),
+    })] });
+    expect(applyOperator).not.toHaveBeenCalled();
+    expect(runJob).toHaveBeenCalledTimes(pendingKind === 'bootstrap' ? 1 : 0);
+  });
+
   it.each(['railway', 'cloudsql'])('recovers the frozen host when desired Cloud Run hosting uses %s', async databaseProvider => {
     runJob.mockImplementationOnce(async (_environment, _service, _command, options: EnvironmentTaskOptions) => {
       const task = options.declaredTask!.databaseTask!;

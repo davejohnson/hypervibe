@@ -35,6 +35,8 @@ export interface ObservedService {
     }>;
   }>;
   config: {
+    /** Native automatic service bounds; zero max means no service-level limit. */
+    instanceBounds?: { min: number; max: number };
     startCommand?: string;
     releaseCommand?: string;
     /** Provider-observed sha256 marker for release commands that must not be exposed in metadata. */
@@ -60,6 +62,16 @@ export interface ObservedService {
   envVarKeys: string[];
   /** sha256 hex of each env var value, for drift comparison without exposure. */
   envVarHashes: Record<string, string>;
+  /** Native version metadata, without reading secret payloads. Missing entries
+   * are not evidence that an opaque or mutable provider reference is absent. */
+  envVarSecretRefs?: Record<string, {
+    provider: 'aws-secrets' | 'gcp-secret-manager' | 'azure-key-vault';
+    resource: string;
+    version: string;
+  }>;
+  /** Fresh native identity/ownership proof requires references to be attached with
+   * the application release. This is sequencing evidence, never value equality. */
+  runtimeSecretReferenceActivation?: 'application-release';
   /** Whether configured values were fully resolved by the provider. */
   envVarState?: 'resolved' | 'unknown';
   /** Recorded write metadata cannot prove the provider's current value. */
@@ -250,6 +262,7 @@ export interface ObservedStorage {
 }
 
 export interface ObservedState {
+  runtimeAccess?: import('../services/runtime-access.service.js').RuntimeAccessObservation;
   serviceVolumes?: Record<string, import('./service-volume.port.js').ObservedServiceVolume>;
   provider: string;
   observedAt: string;
@@ -287,6 +300,13 @@ export interface ObservedState {
 
 export interface IObservableHosting {
   observe(environment: Environment, context?: HostingObservationContext): Promise<ObservedState>;
+}
+
+/** Explicit service completeness wins over unrelated resource failures. Older
+ * observations without category evidence still require an entirely known read. */
+export function hasCompleteServiceObservation(observed: ObservedState | null | undefined): observed is ObservedState {
+  return !!observed && (observed.completeness?.services === 'complete'
+    || observed.completeness?.services === undefined && !observed.partial);
 }
 
 /** Value-free declared consumer names; these do not prove live configuration. */
