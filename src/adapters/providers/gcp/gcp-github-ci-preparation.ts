@@ -203,7 +203,7 @@ export function createGcpGithubCiPreparationDriver(options: { fetch?: typeof fet
     const n = names(context.intent);
     const id = operation === 'create-pool' ? n.pool : operation === 'create-provider' ? n.provider : operation === 'create-role' ? n.role : n.account;
     let value;
-    try { value = await client.json(`https://iam.googleapis.com/v1/${id}${operation === 'create-role' ? '?view=FULL' : ''}`); }
+    try { value = await client.json(`https://iam.googleapis.com/v1/${id}`); }
     catch (error) { if (error instanceof DestinationBoundaryError && error.status === 404) return null; throw error; }
     const marker = typeof value.description === 'string' && /^hypervibe:([a-f0-9]{64}):([a-f0-9-]{36})$/.exec(value.description);
     if (value.name !== id || !marker || marker[1] !== n.owner || value.disabled !== undefined && value.disabled !== false) fail();

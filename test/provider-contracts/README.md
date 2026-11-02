@@ -8,6 +8,13 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+`gcp-iam-role-get.test.ts` checks actual serialized IAM role reads against Google's
+GET contract, with the same strict transport used by CI preparation, deployment
+and saved-plan retry tests. The list-only `view` option is rejected; only HTTP 404
+means absence. See [official sources, native counterexample and limits](../../docs/gcp-github-operator-identity.md#exact-iam-role-reads).
+Fixtures reconstruct response behavior and do not constitute a full IAM schema
+validator or live federation test.
+
 Native execution parent names and missing Cloud SQL mounts are covered through
 actual serialized clients, including acknowledged-operation recovery and the
 UID-correlated v1 execution read. See [native evidence and limits](../../docs/connect-cloud-prepared-hosting.md#native-execution-readback).

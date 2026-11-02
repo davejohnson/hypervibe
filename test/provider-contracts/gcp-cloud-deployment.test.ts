@@ -1,3 +1,4 @@
+import { gcpRoleGetContractResponse } from '../../src/test/gcp-iam-role-contract.js';
 import { serviceUsageResponse } from './helpers/gcp-service-usage.js';
 import { describe, expect, it, vi } from 'vitest';
 import { createGcpCloudInstallationDriver } from '../../src/adapters/providers/gcp/gcp-cloud-installation.js';
@@ -54,6 +55,8 @@ function nativeFixture(callLimit = Number.POSITIVE_INFINITY) {
     const url = String(input), parsed = new URL(url), method = init.method ?? 'GET';
     const body = init.body ? JSON.parse(String(init.body)) : undefined;
     calls.push({ url, method, body, authorization: new Headers(init.headers).get('Authorization') ?? undefined });
+    const invalidRoleGet = gcpRoleGetContractResponse(parsed, method, init.body);
+    if (invalidRoleGet) return invalidRoleGet;
     if (calls.length > state.callLimit) throw new Error('Reconstructed transport exceeded its finite phase call budget');
     if (state.deniedPath && parsed.pathname.includes(state.deniedPath)) return new Response(null, { status: 403 });
     const native = decodeURIComponent(parsed.pathname.replace(/^\/v[123]\//, ''));

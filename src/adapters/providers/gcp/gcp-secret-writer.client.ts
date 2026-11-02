@@ -70,7 +70,7 @@ export class GcpSecretWriterClient {
   }
   async role(name: string): Promise<WriterCustomRole | null> {
     try {
-      const result = await this.json(`https://iam.googleapis.com/v1/${name}?view=FULL`);
+      const result = await this.json(`https://iam.googleapis.com/v1/${name}`);
       if (result.name !== name || typeof result.description !== 'string' || !Array.isArray(result.includedPermissions)
         || !result.includedPermissions.every(value => typeof value === 'string') || result.stage !== 'GA'
         || (result.deleted !== undefined && result.deleted !== false)) throw new DestinationBoundaryError('invalid_response');

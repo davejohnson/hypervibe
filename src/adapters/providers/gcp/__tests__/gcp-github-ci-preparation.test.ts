@@ -1,3 +1,4 @@
+import { gcpRoleGetContractResponse } from '../../../../test/gcp-iam-role-contract.js';
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { applyCloudInstallationV1, planCloudInstallationV1, reconcileCloudInstallationV1 } from '../../../../domain/services/cloud-installation-runtime.js';
@@ -35,6 +36,8 @@ function boundary(options: { lose?: string; unknown?: boolean; collision?: boole
   const projectOwner = createHash('sha256').update(JSON.stringify([intent.customerId, intent.appId, intent.environment, intent.nativeScope.projectInstallationId])).digest('hex');
   const request: typeof fetch = async (input, init = {}) => {
     const url = new URL(String(input)), body = init.body ? JSON.parse(String(init.body)) : undefined;
+    const invalidRoleGet = gcpRoleGetContractResponse(url, init.method ?? 'GET', init.body);
+    if (invalidRoleGet) return invalidRoleGet;
     expect(init.redirect).toBe('error');
     expect(new Headers(init.headers).get('authorization')).toBe('Bearer synthetic-local-administrator-token');
     if (url.hostname === 'cloudresourcemanager.googleapis.com' && url.pathname === '/v3/projects/synthetic-project') {

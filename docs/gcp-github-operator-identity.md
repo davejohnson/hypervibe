@@ -128,3 +128,25 @@ keeps that quota prerequisite satisfied, including later disconnection. These
 checks exercise reconstructed native responses, not a live identity installation. The keyless archive backup pipeline
 already consumes the resulting descriptor; helper publication, workflow publication,
 GitHub OIDC execution and a verified retained backup/restore remain separate work.
+
+## Exact IAM role reads
+
+Role inspection must use [`projects.roles.get`](https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.roles/get)
+with the exact role name and an empty body. The `view=FULL` option belongs to
+[`projects.roles.list`](https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.roles/list),
+not GET. A bounded native read on 2026-11-02 returned HTTP 400 with that option
+and HTTP 404 for the same absent role without it. Neither request made a cloud
+change. The failed CI plan saved no installation proposal, so normal replanning
+requires neither a journal repair nor a replacement accepted installation.
+
+The challenged assumption was that GET needs the list option to return role
+permissions. Strict serialized-transport checks failed through the actual secret
+writer, CI preparation and deployment clients; the application/SQLite retry check
+also failed on its second plan. Removing only the invalid query fixes those
+requests while retaining exact ownership/permission verification and treating
+only HTTP 404 as absence. The reconstructed error fixtures are synthetic; the
+native diagnostic established status codes, not a Google error-body shape.
+These regressions run in ordinary `npm test`, including recovery and disconnection
+paths. After the URL-only correction, all 70 focused client/lifecycle checks and
+27 saved-plan CI/retry checks passed; type checking passed. They verify the request correction, not a completed federation installation
+or successful backup execution; those remain separate live acceptance steps.

@@ -1,3 +1,4 @@
+import { gcpRoleGetContractResponse } from '../../test/gcp-iam-role-contract.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -533,7 +534,7 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       expect(JSON.stringify({ reviewed, applied })).not.toContain(token);
     });
 
-  it.each(['github-ci-legacy-binding-conflict', 'github-ci-legacy-binding-stale', 'bound-ci-quota-public-api-disconnect', 'bound-ci-changed-selection', 'bound-ci-quota-public-api', 'bound-ci-read-recovery', 'bound-ci-atomic-bind-failure', 'bound-ci-connection-drift', 'bound-ci', 'bound-ci-public-registry', 'bound-ci-conflict', 'bound-ci-stale', 'bound-ci-lost-ack', 'bound-ci-bind-conflict', 'bound-ci-concurrent-map', 'quota-public-api-parent-read-recovery', 'quota-public-api-parent-read-recovery-drift', 'quota-public-api-parent-read-recovery-binding', 'quota-public-api-parent-drift', 'quota-public-api', 'quota-public-api-lost-ack', 'quota-public-api-binding-conflict', 'quota-public-api-lifetime', 'quota-public-api-denied', 'github-ci-quota-api-partial-revoke', 'github-ci-quota-api', 'normal', 'private-operation-missing-time', 'public-operation-missing-time', 'legacy-binding-repair', 'legacy-binding-source-edit', 'legacy-binding-declaration-removed', 'legacy-binding-stale', 'legacy-binding-conflict', 'legacy-binding-unknown', 'legacy-binding-replaced', 'legacy-api-review', 'legacy-api-pending', 'legacy-api-rejected', 'legacy-api-satisfied', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-disconnected-metadata', 'github-ci-disconnected-metadata-foreign-owner', 'github-ci-legacy-binding-repair', 'github-ci-lost-ack', 'github-ci-rejected-first', 'github-ci-rejected-middle', 'public-registry', 'public-grant-lost-ack', 'public-grant-rejected', 'github-ci-public-registry', 'github-ci-public-registry-prerequisite-drift'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
+  it.each(['bound-ci-role-read-recovery', 'github-ci-legacy-binding-conflict', 'github-ci-legacy-binding-stale', 'bound-ci-quota-public-api-disconnect', 'bound-ci-changed-selection', 'bound-ci-quota-public-api', 'bound-ci-read-recovery', 'bound-ci-atomic-bind-failure', 'bound-ci-connection-drift', 'bound-ci', 'bound-ci-public-registry', 'bound-ci-conflict', 'bound-ci-stale', 'bound-ci-lost-ack', 'bound-ci-bind-conflict', 'bound-ci-concurrent-map', 'quota-public-api-parent-read-recovery', 'quota-public-api-parent-read-recovery-drift', 'quota-public-api-parent-read-recovery-binding', 'quota-public-api-parent-drift', 'quota-public-api', 'quota-public-api-lost-ack', 'quota-public-api-binding-conflict', 'quota-public-api-lifetime', 'quota-public-api-denied', 'github-ci-quota-api-partial-revoke', 'github-ci-quota-api', 'normal', 'private-operation-missing-time', 'public-operation-missing-time', 'legacy-binding-repair', 'legacy-binding-source-edit', 'legacy-binding-declaration-removed', 'legacy-binding-stale', 'legacy-binding-conflict', 'legacy-binding-unknown', 'legacy-binding-replaced', 'legacy-api-review', 'legacy-api-pending', 'legacy-api-rejected', 'legacy-api-satisfied', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-disconnected-metadata', 'github-ci-disconnected-metadata-foreign-owner', 'github-ci-legacy-binding-repair', 'github-ci-lost-ack', 'github-ci-rejected-first', 'github-ci-rejected-middle', 'public-registry', 'public-grant-lost-ack', 'public-grant-rejected', 'github-ci-public-registry', 'github-ci-public-registry-prerequisite-drift'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
     const f = fixture(); const allocated = await f.plan(); if ('error' in allocated) throw new Error(allocated.error);
     expect(await f.apply(allocated.planRunId)).toMatchObject({ kind: 'executed', result: { success: true } });
     const desired = structuredClone(f.desired) as any;
@@ -550,7 +551,7 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
     }
     let quotaPreparationStarted = false, quotaApiEnabled = false, quotaBillingReads = 0;
     const quotaScenario = scenario.includes('quota-');
-    const native = new Map<string, any>(), operations = new Map<string, any>(); let lostCiAck = false; let rejectedCi = false; let denyCiReads = false; let lostDisconnectAck = false;
+    const native = new Map<string, any>(), operations = new Map<string, any>(); let lostCiAck = false; let rejectedCi = false; let denyCiReads = false; let lostDisconnectAck = false; let failedRoleRead = false;
     let registryOperationComplete = !scenario.endsWith('operation-missing-time');
     const unrelated = { role: 'roles/viewer', members: ['user:unrelated@example.invalid'], condition: { title: 'retained', expression: 'true' } };
     const projectPolicy = { version: 3, etag: 'project-etag', bindings: [unrelated] } as any;
@@ -584,6 +585,11 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
         return Response.json(target);
       }
       if (url.host === 'iam.googleapis.com') {
+        if (scenario === 'bound-ci-role-read-recovery' && method === 'GET' && /\/roles\/[^/]+$/.test(url.pathname) && !failedRoleRead) {
+          failedRoleRead = true; return Response.json({ error: { status: 'INVALID_ARGUMENT' } }, { status: 400 });
+        }
+        const invalidRoleGet = gcpRoleGetContractResponse(url, method, init?.body);
+        if (invalidRoleGet) return invalidRoleGet;
         if (denyCiReads && method !== 'POST') return Response.json({}, { status: 403 });
         const name = url.pathname.replace('/v1/', '');
         if (method !== 'POST') return Response.json(operations.get(name) ?? native.get(name) ?? {}, { status: operations.has(name) || native.has(name) ? 200 : 404 });
@@ -914,6 +920,15 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
         githubWorkflow: '.github/workflows/deploy-cloudrun-staging.yml', githubBackupWorkflow: '.github/workflows/hypervibe-backup-staging.yml' });
       f.store.replace(f.project, desired);
       if (scenario === 'bound-ci-conflict') f.ctx.repos.environments.updatePlatformBindings(environment.id, { gcpGithubWorkloadIdentity: 'foreign-existing-descriptor' });
+      if (scenario === 'bound-ci-role-read-recovery') {
+        const failed = await f.plan(); expect(failed).toHaveProperty('error');
+        expect(writes).toEqual(before);
+        expect(f.ctx.repos.environments.findById(environment.id)!.platformBindings).toEqual(preserved);
+        // The failed read aborts before a proposal is saved. Replanning uses
+        // the same desired state and accepted predecessor, with no journal edit.
+        expect(f.ctx.repos.runs.findByProjectId(f.project.id).filter(run => run.type === 'cloud-scope-preparation').map(run => run.id).sort())
+          .toEqual(histories.map(run => run.id).sort());
+      }
       const first = await f.plan();
       if (scenario === 'bound-ci-conflict') {
         expect(first).toHaveProperty('error'); expect(writes).toEqual(before); return;

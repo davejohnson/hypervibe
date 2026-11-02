@@ -310,7 +310,7 @@ export function createGcpCloudDeploymentDriver(options: { fetch?: typeof fetch; 
       return { kind: 'account', id: name, identity: { ...marker, uniqueId: String(value.uniqueId) } };
     }
     if (op === 'create-role') {
-      const value = await read(client, `https://iam.googleapis.com/v1/${name}?view=FULL`); if (!value) return null;
+      const value = await read(client, `https://iam.googleapis.com/v1/${name}`); if (!value) return null;
       const marker = ownerAttempt(context, value, 'role');
       if (value.name !== name || value.stage !== 'GA' || value.deleted !== undefined && value.deleted !== false || !Array.isArray(value.includedPermissions)
         || !isDeepStrictEqual([...value.includedPermissions].sort(), [...rolePermissions[native.role as Role]].sort())) fail();
