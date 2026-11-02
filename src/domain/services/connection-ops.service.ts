@@ -22,7 +22,12 @@ export interface SaveConnectionOutcome {
   };
   dependenciesInstalled?: string[];
   dependencyErrors?: string[];
+  /** A secondary update was verified before the atomic write; do not verify destructively afterward. */
+  verification?: Extract<VerifyConnectionOutcome, { kind: 'verified' }>;
 }
+
+const suppliedStrings = (value: unknown): string[] => typeof value === 'string' ? [value]
+  : value && typeof value === 'object' ? Object.values(value).flatMap(suppliedStrings) : [];
 
 /**
  * Validate, encrypt, and upsert provider credentials for hv_connections.
@@ -38,6 +43,50 @@ export async function saveConnection(
 ): Promise<SaveConnectionOutcome> {
   scope = normalizeConnectionScope(scope) ?? undefined;
   const secretStore = getSecretStore();
+  const registeredProvider = providerRegistry.get(provider);
+  const sourceDetails = {
+    provider, scope: scope || null,
+    ...(options.credentialsSource ? { credentialsSource: options.credentialsSource } : {}),
+    ...(options.credentialsRef ? { credentialsRef: options.credentialsRef } : {}),
+    ...(options.credentialsKey ? { credentialsKey: options.credentialsKey } : {}),
+    ...(options.credentialsMap ? { credentialsMap: options.credentialsMap } : {}),
+    ...(options.credentialsResolution ? { credentialsResolution: options.credentialsResolution } : {}),
+  };
+
+  const updater = registeredProvider?.credentialUpdate;
+  if (updater?.matches(credentials)) {
+    // Never inherit another repository, wildcard, or unverified primary.
+    const existing = connectionRepo.findByProviderAndScope(provider, scope || null);
+    if (!existing || existing.status !== 'verified') return { success: false,
+      error: 'A secondary credential update requires an existing verified connection at this exact provider scope.' };
+    const privateValues = suppliedStrings(credentials);
+    try {
+      const current = secretStore.decryptObject<Record<string, unknown>>(existing.credentialsEncrypted);
+      privateValues.push(...updater.secretKeys.flatMap(key => suppliedStrings(current[key])));
+      const currentValidation = providerRegistry.validateCredentials(provider, current);
+      if (!currentValidation.success || !currentValidation.data || typeof currentValidation.data !== 'object'
+        || Array.isArray(currentValidation.data)) return { success: false, error: 'The existing primary credential shape is invalid. It was preserved.' };
+      const proposed = await updater.prepare({ existing: currentValidation.data as Record<string, unknown>, supplied: credentials, scope: existing.scope });
+      if (!proposed.success) return redactExactValues({ success: false, error: proposed.error }, privateValues);
+      const merged = providerRegistry.validateCredentials(provider, proposed.credentials);
+      if (!merged.success || proposed.credentialKeys.length === 0
+        || proposed.credentialKeys.some(key => !Object.hasOwn(credentials, key))) return { success: false,
+        error: 'The secondary credential update did not preserve a valid connection. Nothing was written.' };
+      const connection = connectionRepo.updateVerifiedCredentialsIfUnchanged(existing, secretStore.encryptObject(merged.data), {
+        action: 'connection.credentials.updated', resourceType: 'connection', resourceId: existing.id,
+        details: redactExactValues({ ...sourceDetails, credentialKeys: proposed.credentialKeys }, privateValues),
+      });
+      if (!connection) return { success: false, error: 'The connection changed during credential verification. Nothing was overwritten; retry against its current identity.' };
+      return redactExactValues({ success: true,
+        connection: { id: connection.id, provider: connection.provider, scope: connection.scope,
+          status: connection.status, createdAt: connection.createdAt },
+        verification: { kind: 'verified', message: proposed.message,
+          data: { updatedCredentialKeys: proposed.credentialKeys } },
+      }, privateValues);
+    } catch {
+      return { success: false, error: 'The secondary credential update could not complete. The existing connection was preserved.' };
+    }
+  }
 
   // Validate credentials using the provider's schema. Secret managers
   // (vault, doppler, 1password, bitwarden, ...) live in their own registry.
@@ -60,27 +109,16 @@ export async function saveConnection(
   });
 
   // Run provider dependency installation if needed
-  const registeredProvider = providerRegistry.get(provider);
   let depsResult: { installed: string[]; errors: string[] } | undefined;
   if (registeredProvider?.ensureDependencies) {
     depsResult = await registeredProvider.ensureDependencies();
   }
 
-  const suppliedStrings = (value: unknown): string[] => typeof value === 'string' ? [value]
-    : value && typeof value === 'object' ? Object.values(value).flatMap(suppliedStrings) : [];
   auditRepo.create({
     action: 'connection.created',
     resourceType: 'connection',
     resourceId: connection.id,
-    details: redactExactValues({
-      provider,
-      scope: scope || null,
-      ...(options.credentialsSource ? { credentialsSource: options.credentialsSource } : {}),
-      ...(options.credentialsRef ? { credentialsRef: options.credentialsRef } : {}),
-      ...(options.credentialsKey ? { credentialsKey: options.credentialsKey } : {}),
-      ...(options.credentialsMap ? { credentialsMap: options.credentialsMap } : {}),
-      ...(options.credentialsResolution ? { credentialsResolution: options.credentialsResolution } : {}),
-    }, suppliedStrings(credentials)),
+    details: redactExactValues(sourceDetails, suppliedStrings(credentials)),
   });
 
   return {

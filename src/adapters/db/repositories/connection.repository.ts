@@ -1,5 +1,7 @@
 import { randomUUID } from 'crypto';
 import { getDb } from '../sqlite.adapter.js';
+import { AuditRepository } from './audit.repository.js';
+import type { CreateAuditEventInput } from '../../../domain/entities/audit.entity.js';
 import {
   normalizeConnectionScope,
   type Connection,
@@ -248,6 +250,24 @@ export class ConnectionRepository {
     `).run(credentialsEncrypted, now, id);
 
     return this.findById(id);
+  }
+
+  /** Preserve a concurrently rotated primary and commit role provenance with its verified value. */
+  updateVerifiedCredentialsIfUnchanged(expected: Connection, credentialsEncrypted: string, audit: CreateAuditEventInput): Connection | null {
+    const db = getDb();
+    return db.transaction(() => {
+      const current = this.findById(expected.id);
+      if (!current || current.provider !== expected.provider || current.scope !== expected.scope
+        || current.status !== 'verified' || current.credentialsEncrypted !== expected.credentialsEncrypted) return null;
+      const now = new Date().toISOString();
+      const result = db.prepare(`UPDATE connections
+        SET credentials_encrypted = ?, last_verified_at = ?, updated_at = ?
+        WHERE id = ? AND status = 'verified' AND credentials_encrypted = ?`)
+        .run(credentialsEncrypted, now, now, expected.id, expected.credentialsEncrypted);
+      if (result.changes !== 1) return null;
+      new AuditRepository().create(audit);
+      return this.findById(expected.id);
+    }).immediate();
   }
 
   /**

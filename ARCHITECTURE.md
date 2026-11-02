@@ -674,6 +674,15 @@ consume.
 
 Secrets never cross output boundaries. Secret values may be accepted through `credentialsRef`, encrypted into plans, or stored as verified connections, but they must not be printed in tool output, committed specs, warnings, logs, receipts, or test snapshots.
 
+A provider may register a narrow secondary-credential update on the existing
+`hv_connections action="add"` path. It requires a verified connection at the
+exact requested scope, privately verifies the supplied role before saving,
+and atomically compares the prior encrypted credential while recording only
+that role's source. A primary credential payload retains complete replacement
+semantics. GitHub implements this for a separate package-read PAT; other
+providers do not implicitly merge incomplete credentials. See
+[package-read connection updates](docs/github-package-read-connection.md).
+
 Railway PostgreSQL observation can report `credentialAlignment` from privately
 compared provider configuration. Issuer URL passwords are compared with
 `POSTGRES_PASSWORD`; each exact bound application's `DATABASE_URL` is compared
