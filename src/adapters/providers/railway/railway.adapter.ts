@@ -92,6 +92,7 @@ import { checkpointIdentityMatches } from '../../../domain/services/database-che
 import { recoveryIdentityStringSchema, recoverySourceIdentitySchema } from '../../../domain/services/recovery-source.js';
 import { railwayDailyBackupPolicy } from './railway-daily-backup.js';
 import { isRailwayPostgresImage, railwayDatabaseReferences, railwayPostgresTemplate, railwayTemplateServices } from './railway-postgres-template.js';
+import { RailwayDatabaseProvisionRecovery } from './railway-database-provision-recovery.js';
 
 // Credentials schema for self-registration
 export const RailwayCredentialsSchema = z.object({
@@ -174,6 +175,8 @@ interface RailwayVolumeInstance {
 export interface RailwayDatabasePersistenceObservation {
   /** Independently observed name used by Railway's variable-reference namespace. */
   serviceName?: string;
+  /** Validated effective PGDATA path; never a database credential or URL. */
+  dataPath?: string;
   persistence: NonNullable<ObservedDatabase['persistence']>;
   volume?: {
     volumeId: string;
@@ -262,6 +265,12 @@ export class RailwayAdapter implements
   readonly name = 'railway';
   readonly registryCredentialLifecycle = createRailwayRegistryCredentialLifecycle(() => this.client);
   readonly railwayCredentialAliases = createRailwayCredentialAliases(() => this.client);
+  readonly railwayDatabaseProvisionRecovery = new RailwayDatabaseProvisionRecovery({
+    client: () => this.client,
+    inspectInstance: (serviceId, environmentId) => this.inspectServiceInstance(serviceId, environmentId),
+    inspectPersistence: (target, options) => this.observeDatabasePersistence(target, options),
+    aliases: this.railwayCredentialAliases,
+  });
   readonly railwayRuntimeEvidence = createRailwayRuntimeEvidence(() => this.client, () => this.credentials);
   readonly railwayDatabaseRotationConfiguration = createRailwayDatabaseRotationConfiguration(() => this.client, this.railwayRuntimeEvidence);
   readonly databaseInitialization = createRailwayDatabaseInitializationInspection(() => this.client, async source => {
@@ -1224,55 +1233,15 @@ export class RailwayAdapter implements
       const attempts = Number.isInteger(configuredAttempts) && configuredAttempts > 0 ? Math.min(configuredAttempts, 300) : 60;
       const delay = Number.isFinite(configuredDelay) && configuredDelay >= 0 ? Math.min(configuredDelay, 5000) : 1000;
       for (let attempt = 0; attempt < attempts; attempt++) {
-        const result = await client.request<{ workflowStatus?: { status?: unknown } }>(gql`
-          query DatabaseTemplateWorkflow($workflowId: String!) { workflowStatus(workflowId: $workflowId) { status } }
-        `, { workflowId });
-        const status = result.workflowStatus?.status;
-        if (status === 'Error') return { component: unresolved(), receipt: { success: false,
-          message: 'Railway database template workflow failed; its recovery identity has been retained.' } };
-        if (!['Complete', 'Running', 'NotFound'].includes(String(status))) throw new Error('Incomplete template workflow observation.');
-        if (status === 'Complete') {
-          const after = await railwayTemplateServices(client, projectId);
-          const created = after.filter(service => !previousIds.has(service.id)
-            && service.templateId === template.templateId && service.templateServiceId === template.serviceKey);
-          if (created.length > 1) throw new Error('Ambiguous database template identity.');
-          const database = created[0];
-          if (database) {
-            const instance = await this.inspectServiceInstance(database.id, environmentId);
-            if (instance.state !== 'present' || instance.sourceImage !== template.image) {
-              throw new Error('Database template instance identity or source was not verified.');
-            }
-            component = { ...empty(), externalId: database.id, bindings: {
-              provider: 'railway', providerScope: scope, resourceKind: 'service', pluginName: database.name,
-              directUrlVariable: template.directUrlVariable,
-              databaseTemplate: { templateId: template.templateId, templateServiceId: template.serviceKey, workflowId },
-            } };
-            railwayDatabaseReferences(database.name, template.directUrlVariable);
-            const persistence = await this.observeDatabasePersistence({ ...scope, serviceId: database.id });
-            if (persistence.persistence.state === 'configured' && persistence.volume) {
-              const { volumeId, mountPath } = persistence.volume;
-              if (mountPath !== template.mountPath) throw new Error('Database template mount differs from the reviewed template.');
-              component.bindings.volumeId = volumeId;
-              component.bindings.volumeTarget = { ...scope, serviceId: database.id, mountPath };
-              // Read raw definitions and provider-rendered values separately.
-              // A working password copy does not prove reference-based wiring.
-              const aliases = await this.railwayCredentialAliases.inspect({ component, environment });
-              const definitions = isRecord(aliases.privateState) && isRecord(aliases.privateState.definitions)
-                ? aliases.privateState.definitions : {};
-              const normalizedReference = (value: string) => value.replace(/\$\{\{\s*([A-Z_][A-Z0-9_]*)\s*\}\}/g, '<$1>');
-              const exactReferences = Object.entries(template.referenceDefinitions).every(([key, expected]) =>
-                typeof definitions[key] === 'string'
-                && normalizedReference(definitions[key]) === normalizedReference(expected));
-              if (aliases.changeNames.length > 0 || !aliases.checkedNames.includes('PGPASSWORD')
-                || !aliases.checkedNames.includes(template.directUrlVariable) || !exactReferences) {
-                throw new Error('Database template credential references have not converged.');
-              }
-              return { component, receipt: { success: true,
-                message: `Created Railway PostgreSQL database (${database.name}) from the official database template and verified its persistent data mount.`,
-                data: { serviceId: database.id, serviceName: database.name, workflowId, templateId: template.templateId } } };
-            }
-          }
+        const verified = await this.railwayDatabaseProvisionRecovery.verify({ environment, component: unresolved() },
+          { template, onCorrelated: value => { component = value; } });
+        if (verified.state === 'ready' || verified.state === 'candidate') {
+          component = { ...empty(), externalId: verified.source.primaryExternalId, bindings: verified.bindings };
+          return { component, receipt: { success: true,
+            message: `Created Railway PostgreSQL database (${component.bindings.pluginName}) from the official database template and verified its persistent data mount.`,
+            data: { serviceId: component.externalId, serviceName: component.bindings.pluginName, workflowId, templateId: template.templateId } } };
         }
+        if (verified.state !== 'pending' && verified.phase !== 'persistence') break;
         if (attempt < attempts - 1) await this.sleep(delay);
       }
       return { component: component.externalId ? component : unresolved(), receipt: { success: false,
@@ -2093,6 +2062,7 @@ export class RailwayAdapter implements
       return {
         ...(typeof response.service.name === 'string' && response.service.name.trim()
           ? { serviceName: response.service.name } : {}),
+        dataPath: normalizedDataPath,
         persistence: {
           state: 'configured',
           configurationFingerprint: hashEnvValue(JSON.stringify({ ...target,

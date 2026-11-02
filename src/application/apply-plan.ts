@@ -1023,11 +1023,11 @@ export async function executePlanApply(ctx: CommandContext, params: {
     if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
     const result = await executor.execute({ planRunId: planId, confirmActions: params.confirmActions,
       currentSpecRevision: params.specRevision, handler: async action => {
-        if (resolvePlanActionAuthority(action)?.capability !== 'database.scope.bind') {
+        if (!['database.scope.bind', 'database.provision.recover', 'database.provision.candidate.bind'].includes(resolvePlanActionAuthority(action)?.capability ?? '')) {
           return { success: false, status: 'blocked', message: 'This stage can only record the reviewed existing database scope.' };
         }
         return applyDatabaseScopeBinding({ ctx, project, environmentName: envName, environmentSpec: envSpec,
-          action, confirmedActionIds: new Set(params.confirmActions) });
+          action, confirmedActionIds: new Set(params.confirmActions), specRevision: params.specRevision });
       } });
     return { kind: 'executed', envName, result, actionScopedWarnings: [] };
   }

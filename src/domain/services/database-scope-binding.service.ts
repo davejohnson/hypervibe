@@ -6,8 +6,110 @@ import { providerRegistry } from '../registry/provider.registry.js';
 import { bindingIdentityFingerprint, providerIdentityScopeMatches } from './binding-identity.js';
 import { resolveBackupTarget, type BackupPolicyContext } from './backup-policy.service.js';
 import { recoveryIdentityStringSchema, recoverySourceIdentitySchema } from './recovery-source.js';
+import { hasPendingDatabaseInitialization } from '../plan/database-initialization.contract.js';
+import { databaseProvisionRecoveryDiagnosticSchema, type DatabaseProvisionRecoveryObservation } from '../ports/database-provision-recovery.port.js';
 
 export const DATABASE_SCOPE_BIND_OPERATION = 'databaseScopeBind';
+export const DATABASE_PROVISION_RECOVERY_OPERATION = 'databaseProvisionRecovery';
+export const DATABASE_PROVISION_CANDIDATE_OPERATION = 'databaseProvisionCandidateBinding';
+const fingerprint = z.string().regex(/^[a-f0-9]{64}$/);
+const provisionMetadata = {
+  componentId: recoveryIdentityStringSchema,
+  source: recoverySourceIdentitySchema,
+  bindingsFingerprint: fingerprint,
+  environmentFingerprint: fingerprint,
+  evidenceFingerprint: fingerprint,
+};
+export const databaseProvisionRecoveryMetadataSchema = z.discriminatedUnion('operation', [
+  z.object({ ...provisionMetadata, operation: z.literal(DATABASE_PROVISION_RECOVERY_OPERATION) }).strict(),
+  z.object({ ...provisionMetadata, operation: z.literal(DATABASE_PROVISION_CANDIDATE_OPERATION), lineage: z.literal('unproven') }).strict(),
+]);
+export const databaseProvisionRecoveryActionId = (provider: string, componentId: string) =>
+  `database-recovery:${encodeURIComponent(provider)}:${encodeURIComponent(componentId)}`;
+export const databaseProvisionCandidateActionId = (provider: string, componentId: string, externalId: string) =>
+  `database-candidate:${encodeURIComponent(provider)}:${encodeURIComponent(componentId)}:${encodeURIComponent(externalId)}`;
+
+export function isDatabaseProvisionRecoveryAction(action: PlanAction): boolean {
+  const parsed = databaseProvisionRecoveryMetadataSchema.safeParse(action.metadata);
+  if (!parsed.success) return false;
+  const registration = providerRegistry.get(action.resource.provider);
+  const keys = registration?.inspection?.selectors.database?.scopeKeys ?? [];
+  return action.type === 'update' && action.resource.kind === 'database' && action.verified === true
+    && action.requiresConfirm === true && action.billable !== true && action.dataBearing !== true
+    && !action.dependsOn?.length && action.id === (parsed.data.operation === DATABASE_PROVISION_CANDIDATE_OPERATION
+      ? databaseProvisionCandidateActionId(action.resource.provider, parsed.data.componentId, parsed.data.source.primaryExternalId)
+      : databaseProvisionRecoveryActionId(action.resource.provider, parsed.data.componentId))
+    && parsed.data.source.provider === action.resource.provider
+    && registration?.metadata.lifecycle?.databaseEngines?.includes(action.resource.name) === true
+    && keys.length > 0 && keys.every(key => Boolean(parsed.data.source.providerScope[key]));
+}
+
+export function provisionRecoveryComponentFingerprint(component: Component): string {
+  return bindingIdentityFingerprint({ id: component.id, environmentId: component.environmentId,
+    type: component.type, externalId: component.externalId, bindings: component.bindings });
+}
+
+/** Incomplete creation remains distinct from ordinary metadata repair. */
+export function currentDatabaseProvisionRecoveryComponent(context: BackupPolicyContext): Component | undefined {
+  if (!context.spec.database || !context.environment) return undefined;
+  const candidates = context.components.filter(component => component.environmentId === context.environment!.id
+    && component.type === context.spec.database!.engine);
+  if (candidates.length !== 1) return undefined;
+  const component = candidates[0];
+  if (component.bindings.provider !== context.spec.database.provider || component.bindings.provisioningIncomplete !== true
+    || component.bindings.retainedCleanup === true || hasPendingDatabaseInitialization(component.bindings)) return undefined;
+  return component;
+}
+
+export async function observeDatabaseProvisionRecovery(context: BackupPolicyContext, component: Component): Promise<DatabaseProvisionRecoveryObservation | undefined> {
+  if (!context.environment) return undefined;
+  try {
+    const result = await context.adapterFactory.getDatabaseAdapter(String(component.bindings.provider), context.project);
+    if (!result.success || !result.adapter || result.adapter.name !== component.bindings.provider
+      || !result.adapter.provisionRecovery) return undefined;
+    const observation = await result.adapter.provisionRecovery.inspect({ environment: context.environment, component });
+    if (observation.state !== 'ready' && observation.state !== 'candidate') {
+      const diagnostic = databaseProvisionRecoveryDiagnosticSchema.safeParse(observation);
+      return diagnostic.success ? diagnostic.data : undefined;
+    }
+    const source = recoverySourceIdentitySchema.safeParse(observation.source);
+    if (!source.success || !fingerprint.safeParse(observation.evidenceFingerprint).success
+      || (component.externalId === null
+        ? observation.state !== 'candidate' || observation.lineage !== 'unproven'
+        : observation.state !== 'ready')
+      || source.data.provider !== component.bindings.provider
+      || component.externalId !== null && component.externalId !== source.data.primaryExternalId
+      || !providerIdentityScopeMatches({ componentBindings: component.bindings,
+        environmentBindings: context.environment.platformBindings, provider: source.data.provider,
+        liveScope: source.data.providerScope })) return undefined;
+    return { ...observation, source: source.data };
+  } catch { return undefined; }
+}
+
+async function planDatabaseProvisionRecovery(context: BackupPolicyContext, component: Component): Promise<{ actions: PlanAction[]; warnings: string[] }> {
+  const observed = await observeDatabaseProvisionRecovery(context, component);
+  if (!observed || (observed.state !== 'ready' && observed.state !== 'candidate')) return { actions: [], warnings: [
+    observed ? `Database provision recovery remains ${observed.state} at ${observed.phase} (${observed.code}); no provider mutation is authorized.`
+      : 'The database provider cannot verify the retained provision attempt. Recovery remains blocked; no new create is authorized.',
+  ] };
+  const candidate = observed.state === 'candidate';
+  const action: PlanAction = { id: candidate
+      ? databaseProvisionCandidateActionId(observed.source.provider, component.id, observed.source.primaryExternalId)
+      : databaseProvisionRecoveryActionId(observed.source.provider, component.id),
+    type: 'update', resource: { kind: 'database', name: component.type, provider: observed.source.provider },
+    verified: true, requiresConfirm: true,
+    reason: candidate
+      ? 'Select and record this exact independently verified database. Workflow lineage is unproven: Railway does not establish that this service came from the retained create attempt. Confirm only if this is the database you want this environment to use. No provider resources or project settings change.'
+      : 'Record the independently verified retained database identity without changing provider resources or project settings.',
+    metadata: { operation: candidate ? DATABASE_PROVISION_CANDIDATE_OPERATION : DATABASE_PROVISION_RECOVERY_OPERATION,
+      ...(candidate ? { lineage: 'unproven' } : {}), componentId: component.id, source: observed.source,
+      bindingsFingerprint: provisionRecoveryComponentFingerprint(component),
+      environmentFingerprint: bindingIdentityFingerprint(context.environment!.platformBindings),
+      evidenceFingerprint: observed.evidenceFingerprint } };
+  return isDatabaseProvisionRecoveryAction(action) ? { actions: [action], warnings: candidate
+    ? ['Workflow lineage is unproven. This is an explicit selection of the reviewed current database, not proof that the original workflow created it.'] : [] }
+    : { actions: [], warnings: [] };
+}
 export const databaseScopeBindingActionId = (provider: string, componentId: string) =>
   `database-scope:${encodeURIComponent(provider)}:${encodeURIComponent(componentId)}`;
 export const databaseRuntimeReferenceSchema = z.object({
@@ -131,6 +233,8 @@ function completeProviderScope(component: Component, scope: Record<string, strin
 }
 
 export async function planDatabaseScopeBinding(context: BackupPolicyContext): Promise<{ actions: PlanAction[]; warnings: string[] }> {
+  const incomplete = currentDatabaseProvisionRecoveryComponent(context);
+  if (incomplete) return planDatabaseProvisionRecovery(context, incomplete);
   const component = currentDatabaseScopeComponent(context);
   if (!component) return { actions: [], warnings: [] };
   const recordedScope = recordedProviderScope(component);
