@@ -1,3 +1,4 @@
+import { gcpAccountPolicyGetContractResponse } from '../../../../test/gcp-iam-policy-contract.js';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -69,6 +70,8 @@ beforeEach(() => {
     const url = new URL(String(input)); const method = init?.method ?? 'GET';
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     calls.push({ url: url.toString(), method, body });
+    const invalidPolicyRead = gcpAccountPolicyGetContractResponse(url, method, init?.body);
+    if (invalidPolicyRead) return invalidPolicyRead;
     if (url.pathname.endsWith(':testIamPermissions')) return Response.json({ permissions: localCallerCanActAs ? ['iam.serviceAccounts.actAs'] : [] });
     if (rejectCommittedVersionRead && method === 'GET' && versions.length > 0 && url.pathname.endsWith(':access')) return Response.json({ error: { code: 403 } }, { status: 403 });
     if (rejectWriteStatus && ['POST', 'PUT'].includes(method) && !url.pathname.endsWith(':getIamPolicy')) return Response.json({ error: { code: rejectWriteStatus, message: 'synthetic-private-password' } }, { status: rejectWriteStatus });
@@ -242,7 +245,7 @@ describe('Cloud Run staged recovery preparation', () => {
     if (observed.state !== 'action') throw new Error('Missing read-only recovery');
     const before = calls.length;
     expect((await staged.runtime.apply({ ...staged, target, mode: 'ensure', step: observed.step })).receipt.success).toBe(true);
-    expect(calls.slice(before).every(call => call.method === 'GET' || call.url.endsWith(':getIamPolicy'))).toBe(true);
+    expect(calls.slice(before).every(call => call.method === 'GET' || new URL(call.url).pathname.endsWith(':getIamPolicy'))).toBe(true);
     expect(calls.filter(call => call.method === 'POST' && call.url.includes('/secrets?secretId='))).toHaveLength(1);
   });
 
@@ -252,7 +255,7 @@ describe('Cloud Run staged recovery preparation', () => {
     secret.name = secret.name.replace(projectNumber, '923456789012');
     calls = [];
     expect(await staged.runtime.inspect({ target, binding: staged.binding, mode: 'ensure' })).toMatchObject({ state: 'unknown' });
-    expect(calls.every(call => call.method === 'GET' || call.url.endsWith(':getIamPolicy'))).toBe(true);
+    expect(calls.every(call => call.method === 'GET' || new URL(call.url).pathname.endsWith(':getIamPolicy'))).toBe(true);
   });
 
   it('preserves a previously recorded project-ID version while observing its numeric native name', async () => {

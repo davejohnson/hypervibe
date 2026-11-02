@@ -27,7 +27,7 @@ export class GcpSecretWriterClient {
     // unbounded response-body path or implicit transport redirect behavior.
     const boundedFetch: typeof fetch = async (url, init = {}) => {
       try {
-        const value = await this.json(String(url), init, init.method === 'POST' && !String(url).endsWith(':getIamPolicy'));
+        const value = await this.json(String(url), init, init.method === 'POST' && !new URL(String(url)).pathname.endsWith(':getIamPolicy'));
         return Response.json(value);
       } catch (error) {
         if (error instanceof DestinationBoundaryError && error.status) return Response.json({}, { status: error.status });
@@ -96,9 +96,9 @@ export class GcpSecretWriterClient {
   }
   async policy(kind: WriterPolicyKind, resource: string): Promise<WriterIamPolicy> {
     const root = policyRoot(kind);
-    const result = ['secret', 'service', 'registry'].includes(kind)
-      ? await this.json(`https://${root}/${resource}:getIamPolicy?options.requestedPolicyVersion=3`)
-      : await this.json(`https://${root}/${resource}:getIamPolicy`, { method: 'POST', body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }) });
+    const result = kind === 'project'
+      ? await this.json(`https://${root}/${resource}:getIamPolicy`, { method: 'POST', body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }) })
+      : await this.json(`https://${root}/${resource}:getIamPolicy?options.requestedPolicyVersion=3`, kind === 'account' ? { method: 'POST' } : {});
     const bindings = result.bindings ?? [];
     if (typeof result.etag !== 'string' || !result.etag || !Array.isArray(bindings)
       || (result.version !== undefined && ![0, 1, 3].includes(result.version as number))) throw new DestinationBoundaryError('invalid_response');

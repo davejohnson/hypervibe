@@ -112,14 +112,14 @@ describe('scoped GCP writer preparation real HTTP and durable boundary', () => {
     expect(JSON.stringify(repository.findById(f.params.project.id))).not.toContain(token);
     expect(readFileSync(join(temp, 'test.db')).includes(Buffer.from(token))).toBe(false);
     expect(repository.findById(f.params.project.id)!.policies.retained).toBe('yes');
-    const writes = f.events.filter(e => e.method === 'POST' && !e.url.endsWith(':getIamPolicy')).length;
+    const writes = f.events.filter(e => e.method === 'POST' && !new URL(e.url).pathname.endsWith(':getIamPolicy')).length;
     expect((await prepare(f)).success).toBe(true);
-    expect(f.events.filter(e => e.method === 'POST' && !e.url.endsWith(':getIamPolicy'))).toHaveLength(writes);
+    expect(f.events.filter(e => e.method === 'POST' && !new URL(e.url).pathname.endsWith(':getIamPolicy'))).toHaveLength(writes);
   });
   it.each(['foreign', 'missingSecret', 'projectMismatch'] as const)('blocks %s before IAM mutations', async mode => {
     const f = fixture(); if (mode === 'projectMismatch') f.cloud.projectId = 'other-project'; else f.cloud[mode] = true;
     const result = await prepare(f); expect(result.success).toBe(false);
-    expect(f.events.filter(e => e.method === 'POST' && !e.url.endsWith(':getIamPolicy'))).toEqual([]);
+    expect(f.events.filter(e => e.method === 'POST' && !new URL(e.url).pathname.endsWith(':getIamPolicy'))).toEqual([]);
   });
   it.each(['iam.googleapis.com', 'iamcredentials.googleapis.com'])('rejects unknown %s state before recording or dispatching preparation work', async api => {
     const f = fixture(); f.cloud.apiState = 'STATE_UNSPECIFIED'; f.cloud.apiStateService = api;
@@ -147,7 +147,7 @@ describe('scoped GCP writer preparation real HTTP and durable boundary', () => {
   it('rechecks source after preflight and rejects revoked authority without mutation', async () => {
     const f = fixture(); f.params.beforeWrite.mockRejectedValue(new Error(token));
     expect(await prepare(f)).toMatchObject({ success: false, failureCode: 'authorization_unconfirmed' });
-    expect(f.events.filter(e => e.method === 'POST' && !e.url.endsWith(':getIamPolicy'))).toEqual([]);
+    expect(f.events.filter(e => e.method === 'POST' && !new URL(e.url).pathname.endsWith(':getIamPolicy'))).toEqual([]);
   });
   it('identifies only the exact secret for the final secret-IAM authority check', async () => {
     const f = fixture(); expect((await prepare(f)).success).toBe(true);

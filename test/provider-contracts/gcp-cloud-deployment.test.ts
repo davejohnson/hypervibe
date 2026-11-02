@@ -1,3 +1,4 @@
+import { gcpAccountPolicyGetContractResponse } from '../../src/test/gcp-iam-policy-contract.js';
 import { gcpRoleGetContractResponse } from '../../src/test/gcp-iam-role-contract.js';
 import { serviceUsageResponse } from './helpers/gcp-service-usage.js';
 import { describe, expect, it, vi } from 'vitest';
@@ -57,6 +58,8 @@ function nativeFixture(callLimit = Number.POSITIVE_INFINITY) {
     calls.push({ url, method, body, authorization: new Headers(init.headers).get('Authorization') ?? undefined });
     const invalidRoleGet = gcpRoleGetContractResponse(parsed, method, init.body);
     if (invalidRoleGet) return invalidRoleGet;
+    const invalidPolicyRead = gcpAccountPolicyGetContractResponse(parsed, method, init.body);
+    if (invalidPolicyRead) return invalidPolicyRead;
     if (calls.length > state.callLimit) throw new Error('Reconstructed transport exceeded its finite phase call budget');
     if (state.deniedPath && parsed.pathname.includes(state.deniedPath)) return new Response(null, { status: 403 });
     const native = decodeURIComponent(parsed.pathname.replace(/^\/v[123]\//, ''));
@@ -177,7 +180,7 @@ describe('native Google prepared deployment installation', () => {
     expect(plan.actions.filter(action => action.metadata.operation === 'create-service')).toHaveLength(1);
     expect(plan.actions.filter(action => action.metadata.operation === 'create-registry')).toHaveLength(1);
     expect(plan.review.permissions).not.toEqual([]);
-    expect(f.calls.every(call => call.method === 'GET' || call.url.endsWith(':getIamPolicy') || call.url.endsWith(':testIamPermissions'))).toBe(true);
+    expect(f.calls.every(call => call.method === 'GET' || new URL(call.url).pathname.endsWith(':getIamPolicy') || call.url.endsWith(':testIamPermissions'))).toBe(true);
     expect(JSON.stringify(plan)).not.toContain('synthetic-admin-token');
   });
   // This compound case reviews 62 actions and exercises the real journal plus
@@ -305,7 +308,7 @@ describe('native Google prepared deployment installation', () => {
     expect(Object.keys(observed.preparation.firstReleaseConfigurationDigests!)).toEqual(['web', 'worker']);
     expect(observed.bindings.services.web.resourceUid).toBe(connection.preparedResources!.workloads[0].lifetimeId);
     expect(observed.bindings.services.web.imageUri).toBe(image);
-    expect(t.f.calls.slice(before).every(call => call.method === 'GET' || call.url.endsWith(':getIamPolicy'))).toBe(true);
+    expect(t.f.calls.slice(before).every(call => call.method === 'GET' || new URL(call.url).pathname.endsWith(':getIamPolicy'))).toBe(true);
   });
   it('preserves exact historical installation proof after a legitimate first application rollout', async () => {
     const t = await setupNative(), ready = await t.apply(), connection = cloudInstallationDeploymentConnectionV1(ready, t.driver);
@@ -318,7 +321,38 @@ describe('native Google prepared deployment installation', () => {
     native.latestCreatedRevision = native.latestReadyRevision = `${item.id}/revisions/app-00002-abc`;
     const before = t.f.calls.length;
     expect((await reconcileCloudInstallationV1({ ...t.shared, installationId: ready.installationId, planDigest: ready.plan.digest })).status).toBe('ready');
-    expect(t.f.calls.slice(before).every(call => call.method === 'GET' || call.url.endsWith(':getIamPolicy'))).toBe(true);
+    expect(t.f.calls.slice(before).every(call => call.method === 'GET' || new URL(call.url).pathname.endsWith(':getIamPolicy'))).toBe(true);
+  });
+  it('verifies installed runtime binding, restart recovery and retention using read-only account policy requests', async () => {
+    const { CloudRunPreparedHosting } = await import('../../src/adapters/providers/gcp/cloudrun-prepared-hosting.js');
+    const { CloudRunInstalledRuntimeIdentities } = await import('../../src/adapters/providers/gcp/cloudrun-installed-runtime.js');
+    const t = await setupNative(), ready = await t.apply(), connection = cloudInstallationDeploymentConnectionV1(ready, t.driver);
+    const environment = { id: 'local-staging', projectId: 'local-project', name: 'staging', createdAt: new Date(), updatedAt: new Date(),
+      platformBindings: { provider: 'cloudrun', projectId: 'customer-project' } };
+    const prepared = await new CloudRunPreparedHosting(() => connection, async () => 'synthetic-token', t.f.request)
+      .inspect({ environment, environmentSpec: spec.environments.staging });
+    expect(prepared.state).toBe('verified'); if (prepared.state !== 'verified') throw new Error('Fixture preparation failed');
+    const runtime = new CloudRunInstalledRuntimeIdentities(() => connection, async () => 'synthetic-token');
+    const request = { mode: 'ensure' as const, environment: { ...environment, platformBindings: { ...prepared.bindings, preparedHosting: prepared.preparation } },
+      environmentSpec: spec.environments.staging, service: { name: 'web', buildConfig: {} } };
+    const before = t.f.calls.length;
+    vi.stubGlobal('fetch', t.f.request);
+    try {
+      const observed = await runtime.inspect(request);
+      const accountReads = t.f.calls.slice(before).filter(call => new URL(call.url).hostname === 'iam.googleapis.com'
+        && new URL(call.url).pathname.endsWith(':getIamPolicy'));
+      expect(accountReads).toHaveLength(1);
+      expect(accountReads[0]).toMatchObject({ method: 'POST', body: undefined });
+      expect(new URL(accountReads[0].url).search).toBe('?options.requestedPolicyVersion=3');
+      expect(observed.state).toBe('action'); if (observed.state !== 'action') return;
+      const applied = await runtime.apply({ ...request, step: observed.step, attemptId: 'synthetic-attempt' });
+      expect(applied.receipt.success).toBe(true);
+      expect(await runtime.inspect({ ...request, binding: applied.binding })).toMatchObject({ state: 'ready' });
+      const pending = { provider: 'cloudrun', evidence: {}, pending: { attemptId: 'synthetic-attempt', step: observed.step } };
+      expect(await runtime.inspect({ ...request, binding: pending })).toMatchObject({ state: 'action', step: { operation: 'recover' } });
+      expect(await runtime.inspect({ ...request, binding: applied.binding, mode: 'destroy' })).toMatchObject({ state: 'ready' });
+      expect(t.f.calls.slice(before).every(call => call.method === 'GET' || new URL(call.url).pathname.endsWith(':getIamPolicy'))).toBe(true);
+    } finally { vi.unstubAllGlobals(); }
   });
   it('preserves independently verified existing collection read authority on the same project', async () => {
     const t = await setupNative(), ready = await t.apply(), connection = cloudInstallationDeploymentConnectionV1(ready, t.driver);

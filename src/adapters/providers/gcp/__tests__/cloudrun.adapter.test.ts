@@ -1449,7 +1449,7 @@ it('refuses to create a release job when neither it nor the existing service has
       const url = String(input);
       const method = init?.method ?? 'GET';
 
-      if (url.endsWith(':getIamPolicy')) {
+      if (new URL(url).pathname.endsWith(':getIamPolicy')) {
         return Response.json({ bindings: [{ role: 'roles/run.invoker', members: ['allUsers'] }] });
       }
       if (url.endsWith(':setIamPolicy')) {
@@ -2604,7 +2604,7 @@ it('refuses to create a release job when neither it nor the existing service has
       const url = String(input);
       const method = init?.method ?? 'GET';
 
-      if (url.endsWith(':getIamPolicy') && method === 'POST') {
+      if (new URL(url).pathname.endsWith(':getIamPolicy') && method === 'POST') {
         iamPolicyReads += 1;
         if (iamPolicyReads === 1) {
           return Response.json({
@@ -2676,7 +2676,7 @@ it('refuses to create a release job when neither it nor the existing service has
       const url = String(input);
       const method = init?.method ?? 'GET';
 
-      if (url.endsWith(':getIamPolicy') && method === 'POST') {
+      if (new URL(url).pathname.endsWith(':getIamPolicy') && method === 'POST') {
         return Response.json({ bindings: [] });
       }
       if (url.endsWith(':setIamPolicy') && method === 'POST') {

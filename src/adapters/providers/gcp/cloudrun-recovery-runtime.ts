@@ -20,7 +20,7 @@ const record = (value: unknown): Record<string, any> => {
   return value as Record<string, any>;
 };
 type Source = Awaited<ReturnType<CloudRunRecoveryRuntime['source']>>;
-type Permission = { component: string; resource: string; role: string; member: string; readUrl: string; readMethod?: string; writeUrl: string; writeMethod: string; rawPolicy?: boolean; description: string };
+type Permission = { component: string; resource: string; role: string; member: string; readUrl: string; readInit?: RequestInit; writeUrl: string; writeMethod: string; rawPolicy?: boolean; description: string };
 
 /** Durable identity/access prerequisites. Every returned frontier is one write. */
 export class CloudRunRecoveryRuntime implements IRecoveryRuntime {
@@ -81,11 +81,11 @@ export class CloudRunRecoveryRuntime implements IRecoveryRuntime {
       } else {
         const permission = this.permissions(source, evidence).find(item => item.component === step.component);
         if (!permission) throw new GcpRuntimeError('Unsupported backup permission operation.');
-        const policy = parseGcpRuntimePolicy(await this.api(permission.readUrl, permission.readMethod ? { method: permission.readMethod, body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }) } : {}));
+        const policy = await this.readPolicy(permission);
         if (hasGcpRuntimeRole(policy, permission.role, permission.member)) throw new GcpRuntimeError('Backup permission changed before its write; reconcile the existing intent.');
         const desired = withGcpRuntimeRole(policy, permission.role, permission.member);
         await write(permission.writeUrl, { method: permission.writeMethod, body: JSON.stringify(permission.rawPolicy ? desired : { policy: desired, updateMask: 'bindings,etag' }) }, true);
-        const observed = parseGcpRuntimePolicy(await this.api(permission.readUrl, permission.readMethod ? { method: permission.readMethod, body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }) } : {}));
+        const observed = await this.readPolicy(permission);
         if (!hasGcpRuntimeRole(observed, permission.role, permission.member)) throw new GcpRuntimeError('Backup permission write has not converged.');
         evidence[`permission:${permission.component}`] = source.targetHash;
       }
@@ -142,7 +142,7 @@ export class CloudRunRecoveryRuntime implements IRecoveryRuntime {
     }
     const permissions = this.permissions(source, evidence);
     for (const permission of permissions.filter(permission => ['deployer-access', 'database-access'].includes(permission.component))) {
-      const policy = parseGcpRuntimePolicy(await this.api(permission.readUrl, permission.readMethod ? { method: permission.readMethod, body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }) } : {}));
+      const policy = await this.readPolicy(permission);
       if (!hasGcpRuntimeRole(policy, permission.role, permission.member)) return action(permission.component, 'grant', { resource: permission.resource, role: permission.role, member: permission.member }, permission.description);
       if (!evidence[`permission:${permission.component}`]) { evidence[`permission:${permission.component}`] = source.targetHash; return recover(permission.component); }
     }
@@ -199,8 +199,7 @@ export class CloudRunRecoveryRuntime implements IRecoveryRuntime {
     evidence.removalState = JSON.stringify([...new Set([...this.removed(evidence), component])].sort());
   }
   private async readPolicy(permission: Permission) {
-    return parseGcpRuntimePolicy(await this.api(permission.readUrl, permission.readMethod
-      ? { method: permission.readMethod, body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }) } : {}));
+    return parseGcpRuntimePolicy(await this.api(permission.readUrl, permission.readInit ?? {}));
   }
   private async noWorkerJobs(source: Source): Promise<void> {
     let pageToken = ''; const seen = new Set<string>();
@@ -447,8 +446,8 @@ export class CloudRunRecoveryRuntime implements IRecoveryRuntime {
       readUrl: `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(name)}/iam?optionsRequestedPolicyVersion=3`,
       writeUrl: `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(name)}/iam`, writeMethod: 'PUT', rawPolicy: true, description });
     return [
-      ...(source.deployerEmail ? [{ component: 'deployer-access', resource: account, role: 'roles/iam.serviceAccountUser', member: `serviceAccount:${source.deployerEmail}`, readUrl: `${IAM}${account}:getIamPolicy`, readMethod: 'POST', writeUrl: `${IAM}${account}:setIamPolicy`, writeMethod: 'POST', description: 'Allow the deploy connection to run only the dedicated backup identity' }] : []),
-      { component: 'database-access', resource: `projects/${source.projectId}`, role: 'roles/cloudsql.client', member, readUrl: `${project}:getIamPolicy`, readMethod: 'POST', writeUrl: `${project}:setIamPolicy`, writeMethod: 'POST', description: 'Allow the backup identity to use the Cloud SQL connector in the selected project' },
+      ...(source.deployerEmail ? [{ component: 'deployer-access', resource: account, role: 'roles/iam.serviceAccountUser', member: `serviceAccount:${source.deployerEmail}`, readUrl: `${IAM}${account}:getIamPolicy?options.requestedPolicyVersion=3`, readInit: { method: 'POST' }, writeUrl: `${IAM}${account}:setIamPolicy`, writeMethod: 'POST', description: 'Allow the deploy connection to run only the dedicated backup identity' }] : []),
+      { component: 'database-access', resource: `projects/${source.projectId}`, role: 'roles/cloudsql.client', member, readUrl: `${project}:getIamPolicy`, readInit: { method: 'POST', body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }) }, writeUrl: `${project}:setIamPolicy`, writeMethod: 'POST', description: 'Allow the backup identity to use the Cloud SQL connector in the selected project' },
       { component: 'database-secret-access', resource: source.secretName, role: 'roles/secretmanager.secretAccessor', member, readUrl: `${SM}${source.secretName}:getIamPolicy?options.requestedPolicyVersion=3`, writeUrl: `${SM}${source.secretName}:setIamPolicy`, writeMethod: 'POST', description: 'Allow the backup identity to read only its selected database credential' },
       bucket('archive-access', source.target.destination.externalId, 'roles/storage.objectUser', 'Allow verified recovery sets and retention only in the backup archive bucket'),
       ...(source.controllerUniqueId && source.deployerEmail ? [{ ...bucket('controller-archive-access', source.target.destination.externalId, 'roles/storage.objectUser', 'Allow the verified backup controller to read and retain recovery sets only in the selected archive bucket'), member: `serviceAccount:${source.deployerEmail}` }] : []),

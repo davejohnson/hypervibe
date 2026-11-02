@@ -15,6 +15,11 @@ means absence. See [official sources, native counterexample and limits](../../do
 Fixtures reconstruct response behavior and do not constitute a full IAM schema
 validator or live federation test.
 
+`gcp-iam-policy-get.test.ts` distinguishes service-account POST/query options from
+Resource Manager POST/body options through the real shared client and bootstrap
+wrapper. Runtime, installed-runtime and backup fixtures enforce the same IAM
+request shape. See [sources, observed regressions and native limits](../../docs/gcp-github-operator-identity.md#service-account-policy-request-options).
+
 Native execution parent names and missing Cloud SQL mounts are covered through
 actual serialized clients, including acknowledged-operation recovery and the
 UID-correlated v1 execution read. See [native evidence and limits](../../docs/connect-cloud-prepared-hosting.md#native-execution-readback).

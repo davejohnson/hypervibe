@@ -217,9 +217,9 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
         throw new GcpRuntimeError('The selected local Google caller lacks verified iam.serviceAccounts.actAs access to this exact runtime identity; no caller grant was inferred.');
       }
     }
-    const read = async (url: string) => parseGcpRuntimePolicy(await this.api(`${url}:getIamPolicy`, token,
+    const sa = parseGcpRuntimePolicy(await this.api(`${saUrl}:getIamPolicy?options.requestedPolicyVersion=3`, token, { method: 'POST' }));
+    const project = parseGcpRuntimePolicy(await this.api(`${projectUrl}:getIamPolicy`, token,
       { method: 'POST', body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }) }));
-    const sa = await read(saUrl); const project = await read(projectUrl);
     return { saUrl, projectUrl, sa, project, ready: (scope.defaultAuthentication || hasGcpRuntimeRole(sa, 'roles/iam.serviceAccountUser', `serviceAccount:${scope.deployEmail}`))
       && (!scope.ciServiceAccountEmail || hasGcpRuntimeRole(sa, 'roles/iam.serviceAccountUser', `serviceAccount:${scope.ciServiceAccountEmail}`))
       && (!scope.cloudsql || hasGcpRuntimeRole(project, 'roles/cloudsql.client', `serviceAccount:${scope.email}`)) };

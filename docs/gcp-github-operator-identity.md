@@ -150,3 +150,32 @@ These regressions run in ordinary `npm test`, including recovery and disconnecti
 paths. After the URL-only correction, all 70 focused client/lifecycle checks and
 27 saved-plan CI/retry checks passed; type checking passed. They verify the request correction, not a completed federation installation
 or successful backup execution; those remain separate live acceptance steps.
+
+## Service-account policy request options
+
+The [service-account policy contract](https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts/getIamPolicy)
+requires POST with an empty body and `options.requestedPolicyVersion=3` in the
+query. Resource Manager project-policy POSTs instead take options in JSON. The
+challenged assumption was that both endpoints share the same request body.
+All five account-policy readers now use the IAM endpoint's documented shape;
+project-policy requests and policy mutation bodies retain their existing shape.
+Recovery uses its existing policy-reading helper for observation, pre-write
+checks, acknowledgement verification and cleanup, without changing saved targets.
+
+Strict serialized requests initially failed in the real bootstrap, secret writer,
+runtime identity and recovery clients. A corrected installed-runtime fixture also
+failed its actual policy-body assertion with the old serialization restored, then
+passed binding, pending recovery and retention after restoring the fix. Synthetic
+version-three policies exercise conditional-binding preservation; the bootstrap
+wrapper also verifies that a query-bearing policy POST never invokes the mutation
+authorization hook. The affected checks passed after the focused fixture rerun,
+as did saved-plan installation/disconnection and type checking. These checks run
+in ordinary `npm test`.
+
+The bounded native comparison on 2026-11-02 returned HTTP 200 for both the old
+body and the documented query against an existing account's empty policy. It
+does not establish native rejection of the old form or conditional-policy
+behavior. This correction follows the official contract; it is separate from
+the role GET's observed HTTP 400 and does not establish live federation or backup
+completion. Hypercloud must consume the corrected package before its hosted
+Google installation path benefits from either fix.

@@ -1,3 +1,4 @@
+import { gcpAccountPolicyGetContractResponse } from '../../test/gcp-iam-policy-contract.js';
 import { gcpRoleGetContractResponse } from '../../test/gcp-iam-role-contract.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -569,6 +570,8 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
         'artifactregistry.repositories.get', 'artifactregistry.repositories.create', 'artifactregistry.repositories.setIamPolicy', 'artifactregistry.repositories.getIamPolicy',
         'iam.workloadIdentityPools.create', 'iam.workloadIdentityPoolProviders.create', 'iam.serviceAccounts.create', 'iam.serviceAccounts.setIamPolicy',
         'iam.roles.create', 'resourcemanager.projects.setIamPolicy'] });
+      const invalidPolicyRead = gcpAccountPolicyGetContractResponse(url, method, init?.body);
+      if (invalidPolicyRead) return invalidPolicyRead;
       if (url.pathname.endsWith(':getIamPolicy')) return Response.json(url.host === 'iam.googleapis.com' ? accountPolicy
         : url.host === 'artifactregistry.googleapis.com' ? (url.pathname.includes('/operator-public:') ? publicPolicy : registryPolicy) : projectPolicy);
       if (url.pathname.endsWith(':setIamPolicy')) {

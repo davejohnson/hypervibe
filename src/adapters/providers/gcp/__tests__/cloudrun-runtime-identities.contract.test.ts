@@ -1,3 +1,4 @@
+import { gcpAccountPolicyGetContractResponse } from '../../../../test/gcp-iam-policy-contract.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { RuntimeIdentityRequest, RuntimeIdentityBinding } from '../../../../domain/ports/runtime-identity.port.js';
 import { CloudRunRuntimeIdentities } from '../cloudrun-runtime-identities.js';
@@ -34,6 +35,8 @@ function fixture() {
   const writes: Array<{ url: string; body: any }> = [];
   const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input); const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+    const invalidPolicyRead = gcpAccountPolicyGetContractResponse(new URL(url), init?.method ?? 'GET', init?.body);
+    if (invalidPolicyRead) return invalidPolicyRead;
     if (url === 'https://cloudresourcemanager.googleapis.com/v3/projects/123456789012') return Response.json({ name: 'projects/123456789012', projectId, state: 'ACTIVE' });
     if (url.includes('secretmanager.googleapis.com')) {
       const path = new URL(url).pathname.slice('/v1/'.length); const name = path.split(':')[0]!;

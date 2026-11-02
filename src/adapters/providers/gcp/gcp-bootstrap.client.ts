@@ -395,10 +395,9 @@ export class GcpBootstrapClient {
     this.assertServiceAccountUniqueId(serviceAccountUniqueId);
     const payload = await this.requestJson(
       `${IAM_BASE}/projects/${encodeURIComponent(projectId)}`
-        + `/serviceAccounts/${serviceAccountUniqueId}:getIamPolicy`,
+        + `/serviceAccounts/${serviceAccountUniqueId}:getIamPolicy?options.requestedPolicyVersion=3`,
       {
         method: 'POST',
-        body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }),
       },
       'runtime service account IAM policy lookup'
     );

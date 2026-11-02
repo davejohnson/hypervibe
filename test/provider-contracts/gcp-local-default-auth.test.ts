@@ -82,7 +82,7 @@ describe('GCP explicit local ADC connections', () => {
         expect(body).toEqual({ permissions: ['iam.serviceAccounts.actAs'] });
         return Response.json(actAs ? { permissions: ['iam.serviceAccounts.actAs'] } : {});
       }
-      if (url.endsWith(':getIamPolicy')) return Response.json({ etag: 'native-policy', bindings: [] });
+      if (new URL(url).pathname.endsWith(':getIamPolicy')) return Response.json({ etag: 'native-policy', bindings: [] });
       if (url.endsWith(':setIamPolicy')) { writes.push(url); return Response.json({ etag: 'unexpected', bindings: [] }); }
       if (init?.method === 'DELETE') { writes.push(url); account = undefined; return Response.json({}); }
       return account ? Response.json(account) : Response.json({}, { status: 404 });

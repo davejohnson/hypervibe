@@ -1,3 +1,4 @@
+import { gcpAccountPolicyGetContractResponse } from '../../../../test/gcp-iam-policy-contract.js';
 import { gcpRoleGetContractResponse } from '../../../../test/gcp-iam-role-contract.js';
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
@@ -38,6 +39,8 @@ function boundary(options: { lose?: string; unknown?: boolean; collision?: boole
     const url = new URL(String(input)), body = init.body ? JSON.parse(String(init.body)) : undefined;
     const invalidRoleGet = gcpRoleGetContractResponse(url, init.method ?? 'GET', init.body);
     if (invalidRoleGet) return invalidRoleGet;
+    const invalidPolicyRead = gcpAccountPolicyGetContractResponse(url, init.method ?? 'GET', init.body);
+    if (invalidPolicyRead) return invalidPolicyRead;
     expect(init.redirect).toBe('error');
     expect(new Headers(init.headers).get('authorization')).toBe('Bearer synthetic-local-administrator-token');
     if (url.hostname === 'cloudresourcemanager.googleapis.com' && url.pathname === '/v3/projects/synthetic-project') {

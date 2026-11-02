@@ -37,8 +37,8 @@ export class CloudRunInstalledRuntimeIdentities implements IRuntimeIdentities {
     if (!account || account.name !== name || account.projectId !== projectId || account.email !== email
       || account.uniqueId !== principal.serviceAccountUniqueId || account.disabled !== undefined && account.disabled !== false
       || account.description !== `hypervibe:deployment:v1:${installed.owner}:${installed.installationId}`) throw new Error();
-    const policy = parseGcpRuntimePolicy(await gcpRuntimeRequest(`https://iam.googleapis.com/v1/${accountResource}:getIamPolicy`, token,
-      { method: 'POST', body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }) }));
+    const policy = parseGcpRuntimePolicy(await gcpRuntimeRequest(`https://iam.googleapis.com/v1/${accountResource}:getIamPolicy?options.requestedPolicyVersion=3`, token,
+      { method: 'POST' }));
     for (const deployer of Object.values(connection.principals)) if (deployer.kind !== 'gcp-service-account'
       || !hasGcpRuntimeRole(policy, 'roles/iam.serviceAccountUser', `serviceAccount:${deployer.serviceAccountEmail}`)) throw new Error();
     const secretRequest = { ...request, environmentSpec: request.environmentSpec ?? { secretDestinations: Object.fromEntries(workload.runtimeSecrets.map(item => [item.key, item.reference])) } as RuntimeIdentityRequest['environmentSpec'] };

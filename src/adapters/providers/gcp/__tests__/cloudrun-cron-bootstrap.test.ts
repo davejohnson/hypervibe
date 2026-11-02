@@ -213,7 +213,7 @@ describe('Cloud Run managed-CI cron bootstrap', () => {
     expect(body.template.template.containers[0].image).toBe(holdingImage);
     expect(body).not.toHaveProperty('startExecutionToken');
     expect(body).not.toHaveProperty('runExecutionToken');
-    expect(fetchMock.mock.calls.filter(([url, init]) => (init?.method ?? 'GET') !== 'GET' && !String(url).endsWith(':getIamPolicy')).map(([url]) => String(url)))
+    expect(fetchMock.mock.calls.filter(([url, init]) => (init?.method ?? 'GET') !== 'GET' && !new URL(String(url)).pathname.endsWith(':getIamPolicy')).map(([url]) => String(url)))
       .toEqual(['https://cloudbuild.googleapis.com/v1/projects/gcp-project/builds', `https://run.googleapis.com/v2/projects/gcp-project/locations/us-central1/jobs?jobId=${jobId}`]);
   });
 

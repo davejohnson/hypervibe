@@ -451,11 +451,9 @@ describe('GcpBootstrapClient', () => {
     };
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
-      if (url === `${resourceUrl}:getIamPolicy`) {
+      if (url === `${resourceUrl}:getIamPolicy?options.requestedPolicyVersion=3`) {
         expect(init?.method).toBe('POST');
-        expect(JSON.parse(String(init?.body))).toEqual({
-          options: { requestedPolicyVersion: 3 },
-        });
+        expect(init?.body).toBeUndefined();
         return Response.json(original);
       }
       if (url === `${resourceUrl}:setIamPolicy`) {
