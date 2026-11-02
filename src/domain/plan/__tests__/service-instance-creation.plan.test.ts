@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { runWithWorkspaceDirectories } from '../../../lib/workspace-context.js';
@@ -16,6 +16,7 @@ import { adapterFactory } from '../../services/adapter.factory.js';
 import { SpecStore } from '../../spec/spec.store.js';
 import { PlanService } from '../plan.service.js';
 
+const recordedEmpty = JSON.parse(readFileSync(new URL('../../../../test/provider-contracts/railway/service-instance/empty-defaults-observation.json', import.meta.url), 'utf8'));
 const keys = ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SG_SITE_URL', 'SG_SCRIPT_NAME', 'SG_SCRIPT_KEY', 'PLANNER_SECRET'];
 
 beforeEach(() => {
@@ -110,6 +111,23 @@ describe('accepted shared hosting service gets an isolated environment instance'
     expect(f.fixture.mutations.map(mutation=>mutation.field)).toEqual(['environmentPatchCommit']);
     expect(f.fixture.variables.get(`production-web/${stagingId}`) ?? {}).toEqual({});
     expect(f.fixture.services.has('staging-Postgres')).toBe(false);
+  });
+
+  it('finalizes the observed native empty defaults after workflow completion without another write', async () => {
+    let fixture: Awaited<ReturnType<typeof railwayHttpFixture>>;
+    const f=await setup(false,{instanceCreationWorkflowStatus:'Running',afterInstanceCreate:()=>{
+      fixture.environments.get(stagingId)!.config.services!['production-web']=structuredClone(recordedEmpty.instanceConfig);
+      (fixture.services.get('production-web')!.instances.get(stagingId)! as any).source=recordedEmpty.source;
+    }});
+    fixture=f.fixture;
+    expect(await f.apply(await f.plan())).toMatchObject({kind:'executed',result:{success:false}});
+    f.fixture.backupWorkflows.set('instance-workflow',{status:'Complete',error:null});
+    const plan=await f.plan();
+    expect(plan.actions[0]).toMatchObject({verified:true,metadata:{operation:'serviceInstanceFinalize'}});
+    const count=f.fixture.mutations.length;
+    expect(await f.apply(plan)).toMatchObject({kind:'executed',result:{success:true}});
+    expect(f.fixture.mutations).toHaveLength(count);
+    expect(f.environments.findById(f.staging.id)!.platformBindings.services).toMatchObject({web:{serviceId:'production-web'}});
   });
 
   it('keeps the acknowledged instance pending while its native workflow runs, then finalizes without writes', async () => {
