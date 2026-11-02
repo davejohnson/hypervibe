@@ -27,6 +27,7 @@ import type {
 } from './railway.adapter.js';
 
 interface RailwayHostingOps {
+  railwayDatabaseProvisionRecovery?: import('../../../domain/ports/database-provision-recovery.port.js').IDatabaseProvisionRecovery;
   railwayDatabaseInitialization?: import('./railway-database-initialization.js').RailwayDatabaseInitialization;
   railwayDatabaseRotationConfiguration?: import('../../../domain/ports/database-credential.port.js').DatabaseCredentialRuntimeConfiguration;
   synchronizeDatabasePasswordIssuer?: (target: { projectId: string; environmentId: string; serviceId: string }, password: string) => Promise<void>;
@@ -463,6 +464,7 @@ export function createRailwayDatabaseAdapter(params: {
 
   const databaseAdapter: IDatabaseAdapter & IDatabaseCheckpointAdapter = {
     name: 'railway',
+    ...(railway.railwayDatabaseProvisionRecovery ? { provisionRecovery: railway.railwayDatabaseProvisionRecovery } : {}),
     ...(railway.railwayDatabaseInitialization ? { freshInitialization: {
       inspect: async (input: Parameters<NonNullable<IDatabaseAdapter['freshInitialization']>['inspect']>[0]) => {
         try { return await railway.railwayDatabaseInitialization!.inspect(initializationTarget(input.environment, input.component)); }

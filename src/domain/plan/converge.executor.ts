@@ -6,7 +6,7 @@ import { databaseCredentialAliasesActionSchema, databaseCredentialAliasesMetadat
   DATABASE_CREDENTIAL_ALIASES_OPERATION } from '../services/database-credential-aliases.service.js';
 import { isDeepStrictEqual } from 'node:util';
 import { API_POLICY_OPERATION } from '../services/api-policy.js';
-import { DATABASE_SCOPE_BIND_OPERATION, isDatabaseScopeBindingAction } from '../services/database-scope-binding.service.js';
+import { DATABASE_SCOPE_BIND_OPERATION, isDatabaseScopeBindingAction, DATABASE_PROVISION_RECOVERY_OPERATION, DATABASE_PROVISION_CANDIDATE_OPERATION, isDatabaseProvisionRecoveryAction } from '../services/database-scope-binding.service.js';
 import { createHash } from 'crypto';
 import { z } from 'zod';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
@@ -356,11 +356,13 @@ export const planRunDocumentSchema = z.object({
     }
     return;
   }
-  if (document.scope !== 'database-bindings' && document.actions.some(action => action.metadata?.operation === DATABASE_SCOPE_BIND_OPERATION)) {
+  if (document.scope !== 'database-bindings' && document.actions.some(action =>
+    action.metadata?.operation === DATABASE_SCOPE_BIND_OPERATION || action.metadata?.operation === DATABASE_PROVISION_RECOVERY_OPERATION
+    || action.metadata?.operation === DATABASE_PROVISION_CANDIDATE_OPERATION)) {
     ctx.addIssue({ code: 'custom', message: 'Database scope binding requires its isolated database-bindings stage.' });
   }
   if (document.scope === 'database-bindings') {
-    if (document.actions.length !== 1 || document.actions.some(action => !isDatabaseScopeBindingAction(action))
+    if (document.actions.length !== 1 || document.actions.some(action => !isDatabaseScopeBindingAction(action) && !isDatabaseProvisionRecoveryAction(action))
       || document.observedFingerprint !== null || document.overrides || document.integrationFingerprints
       || document.sourceCommitSha || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
       ctx.addIssue({ code: 'custom', message: 'Database binding plans contain only one confirmed local scope repair and no rollout inputs.' });
