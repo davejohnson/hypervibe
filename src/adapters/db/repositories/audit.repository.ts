@@ -36,7 +36,7 @@ export class AuditRepository {
     const rows = db.prepare(`
       SELECT * FROM audit_events
       WHERE resource_type = ? AND resource_id = ?
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC, rowid DESC
       LIMIT ?
     `).all(resourceType, resourceId, limit) as Record<string, unknown>[];
     return rows.map((row) => this.mapRow(row));

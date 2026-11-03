@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { createRequire } from 'module';
 import { readBoundedArtifactBody, readReleaseArtifactFilesZip } from './github-artifact.js';
+import { githubPackageReadCredentialUpdate } from './github-credential-update.js';
 import {
   providerRegistry,
   type ProviderInspectionRequest,
@@ -45,6 +46,7 @@ export interface GitHubUser {
 export interface GitHubVerifyResult {
   success: boolean;
   error?: string;
+  id?: number;
   login?: string;
   scopes?: string[];
 }
@@ -275,6 +277,8 @@ export class GitHubAdapter {
       }
       const response = await fetch(`${GITHUB_API_URL}/user`, {
         method: 'GET',
+        redirect: 'error',
+        signal: AbortSignal.timeout(10_000),
         headers: {
           Authorization: `Bearer ${this.credentials.apiToken}`,
           Accept: 'application/vnd.github+json',
@@ -298,7 +302,7 @@ export class GitHubAdapter {
         .split(',')
         .map((scope) => scope.trim())
         .filter(Boolean);
-      return { success: true, login: user.login, ...(scopes.length > 0 ? { scopes } : {}) };
+      return { success: true, login: user.login, ...(typeof user.id === 'number' ? { id: user.id } : {}), ...(scopes.length > 0 ? { scopes } : {}) };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -1479,6 +1483,11 @@ providerRegistry.register({
     adapter.connect(credentials);
     return adapter;
   },
+  credentialUpdate: githubPackageReadCredentialUpdate(async apiToken => {
+    const adapter = new GitHubAdapter();
+    adapter.connect({ apiToken });
+    return adapter.verify();
+  }),
   inspection: {
     resources: ['repository', 'ref', 'branch', 'pages', 'pull-request', 'branch-protection', 'repository-variable'],
     defaultResource: 'repository',

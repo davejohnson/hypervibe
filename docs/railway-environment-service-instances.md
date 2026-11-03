@@ -14,7 +14,7 @@ The expected minimal request is grounded in Railway's official CLI at commit `b6
 - [Environment editing](https://github.com/railwayapp/cli/blob/b62467ef1b5303e3e340283ed96425dcf9612993/src/commands/environment/edit.rs) sends the exact patch through `environmentPatchCommit`. This avoids committing the entire shared staged queue, which the [template application code](https://github.com/railwayapp/cli/blob/b62467ef1b5303e3e340283ed96425dcf9612993/src/controllers/template_apply.rs) explicitly warns can include other work.
 - [Service source connection](https://github.com/railwayapp/cli/blob/b62467ef1b5303e3e340283ed96425dcf9612993/src/commands/service.rs) configures triggers across matching project environments. The GraphQL `serviceConnect` and `serviceDisconnect` mutations have no environment argument.
 
-The pinned Railway SDL independently exposes project-level Service identity, environment-specific ServiceInstances and trigger project/environment/service IDs. Official [environment documentation](https://docs.railway.com/environments) describes isolated configurations. These sources support the expectation that the minimal target patch does not copy another environment's source, variables or storage. They do **not** certify server behavior or default values for the first live apply.
+The pinned Railway SDL independently exposes project-level Service identity, environment-specific ServiceInstances and trigger project/environment/service IDs. Official [environment documentation](https://docs.railway.com/environments) describes isolated configurations. These sources support the expectation that the minimal target patch does not copy another environment's source, variables or storage. They do **not** establish universal server defaults. A subsequent scoped live observation and its narrow compatibility boundary are recorded below.
 
 A registered, query-only diagnostic against the existing Sequence project found a bound production web parent, its production-only source trigger, no web instance or configuration in security, and an exactly empty security staged patch. The earlier duplicate-name failure is consistent with calling global `serviceCreate` at the wrong level. Its persisted failure contains only a string error; it does not prove a typed native rejection or authorize clearing historical uncertainty.
 
@@ -28,7 +28,7 @@ The only native write is:
 {"environmentId":"<accepted target>","patch":{"services":{"<accepted parent UUID>":{"isCreated":true}}}}
 ```
 
-Before dispatch, complete native parent/instance/trigger inventories, empty target configuration and an exactly empty staged patch are required. Unknown, partial, conflicting or foreign state blocks. SQLite stores the intent before the request. An acknowledged native workflow ID is retained even if desired state changes during the request; that receipt alone grants no further authority. Finalization requires native workflow `Complete`, the same parent evidence and a target with no source, trigger, deployment, variables or mounts. Nonempty server defaults currently block rather than being guessed safe.
+Before dispatch, complete native parent/instance/trigger inventories, empty target configuration and an exactly empty staged patch are required. Unknown, partial, conflicting or foreign state blocks. SQLite stores the intent before the request. An acknowledged native workflow ID is retained even if desired state changes during the request; that receipt alone grants no further authority. Finalization requires native workflow `Complete`, the same parent evidence and a target with no source, trigger, deployment, variables or mounts. Only the recorded inactive default profile below and independently documented optional null fields are accepted; unknown or different nonempty settings block rather than being guessed safe.
 
 A lost response remains pending and never automatically repeats the mutation. An acknowledged workflow can be reconciled with a fresh observation-only plan. Unexpected inherited source, uploaded-code deployment, changed desired state or changed accepted identity leaves the intent intact and stops dependent work. There is no global deletion or compensating source mutation.
 
@@ -62,4 +62,27 @@ The optional port is not a claim that these other providers share Railway's pare
 
 Tests remain in normal `npm test` discovery. Real PlanService/application apply and Railway's actual GraphQL client execute against serialized synthetic HTTP responses validated by the pinned SDL. Initial regression observed a duplicate global Service failure; source regressions observed a production trigger being attributed to security and unsafe global source mutation. Retry regressions observed pending work hidden by later stages, and actual command hydration resurrecting a stale recovery marker or rejecting older same-attempt progress. These failures were observed before the corresponding runtime fixes.
 
-The fixtures validate client serialization, scope and lifecycle decisions; they are not live compatibility evidence. The first supported live apply must still establish that Railway creates only the expected empty security instance, returns a completing workflow and leaves production intact. No provider mutation was performed while developing this repair.
+The fixtures validate client serialization, scope and lifecycle decisions; they are not live compatibility evidence. The original repair performed no provider mutation during development. Its later supported first apply created the target instance; read-only verification of that actual outcome is recorded below. Local binding finalization and all later application release steps remain separate operations.
+
+
+## First live empty-instance defaults
+
+On 2026-11-02, the reviewed minimal patch returned a workflow that later reached `Complete`. Registered query-only reads with read-only SQLite found the exact new security instance, source `null`, no latest or active deployment, no target trigger, no configured variables or mounts, and an empty staged patch. The original nonsecret parent/sibling/source/trigger and other-target-service fingerprint still matched. This is evidence for the observed identities and source structure, not every unrelated production setting or runtime byte.
+
+The retained attempt stayed pending because the original validator equated empty with empty build/deploy objects. Railway actually returned:
+
+```json
+{
+  "build": {"builder":"RAILPACK","buildEnvironment":"V3"},
+  "deploy": {
+    "runtime":"V2", "useLegacyStacker":false, "ipv6EgressEnabled":false,
+    "multiRegionConfig":{"us-west2":{"numReplicas":1}}
+  }
+}
+```
+
+The [redacted native observation](../test/provider-contracts/railway/service-instance/empty-defaults-observation.json) keeps these nonsecret values and omits all operational identifiers, credentials, variable names/values, repository names and raw errors. The official CLI's [configuration types](https://github.com/railwayapp/cli/blob/b62467ef1b5303e3e340283ed96425dcf9612993/src/controllers/config/environment.rs) independently distinguish source, commands, credentials and optional configuration. Those types do not establish native defaults; `runtime` and `useLegacyStacker` are admitted only from the actual observed values above.
+
+The parser now accepts that inactive profile, empty containers, and nulls for explicitly documented optional fields. It still requires no source, deployment, trigger, variable or mount. It requires one explicit native scalar replica, or the recorded single-region count when that legacy scalar is null. Different builders, runtimes, region settings, counts, commands, credentials or unknown fields remain unknown. This narrow release does not assume every Railway region uses this profile. No setting is changed to fit the validator. A configuration mismatch now returns a bounded phase code, never rejected values or exception text.
+
+Normal acceptance includes the observed-shape failing/passing regression through PlanService/apply and the real serialized client, observation-only retry without another write, nullable native scalar, and negative configuration cases. A separately compiled repaired registered capability was then exercised read-only against the same retained native target and reported `empty` with the original fingerprint still matching. The query-only guard and read-only SQLite connection prevented mutation; the retained intent remained incomplete and unbound. Live finalization is still pending the ordinary reviewed Hypervibe workflow; the repair does not repeat the patch, recreate the service or clear its intent manually.

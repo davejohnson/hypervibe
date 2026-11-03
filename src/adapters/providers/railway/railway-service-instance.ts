@@ -39,8 +39,55 @@ function emptySourceConfig(value: unknown): boolean {
     ['repo','image','branch'].includes(key) && entry === null);
 }
 
+// Native defaults recorded after an acknowledged empty-instance patch. This is
+// deliberately not a general build/deploy parser: custom or unknown settings
+// cannot establish an empty target. Optional null fields come from the pinned
+// CLI's BuildConfig/DeployConfig, not guessed server defaults.
+const optionalBuildFields = new Set(['buildCommand','dockerfilePath','watchPatterns','nixpacksConfigPath','nixpacksPlan','nixpacksVersion','railpackVersion']);
+const optionalDeployFields = new Set(['startCommand','preDeployCommand','preDeployTimeoutSeconds','healthcheckPath','healthcheckTimeout',
+  'cronSchedule','restartPolicyType','restartPolicyMaxRetries','sleepApplication','registryCredentials','limitOverride',
+  'requiredMountPath','overlapSeconds','drainingSeconds']);
+function emptyBuildConfig(value: unknown): boolean {
+  return structurallyEmpty(value) || record(value) && Object.entries(value).every(([key, entry]) => {
+    if (key === 'builder') return entry === null || entry === 'RAILPACK';
+    if (key === 'buildEnvironment') return entry === null || entry === 'V3';
+    return optionalBuildFields.has(key) && entry === null;
+  });
+}
+function defaultRegionConfig(value: unknown): boolean {
+  return record(value) && Object.keys(value).length === 1 && record(value['us-west2'])
+    && Object.keys(value['us-west2']).length === 1 && value['us-west2'].numReplicas === 1;
+}
+function emptyDeployConfig(value: unknown): boolean {
+  return structurallyEmpty(value) || record(value) && Object.entries(value).every(([key, entry]) => {
+    if (key === 'runtime') return entry === null || entry === 'V2';
+    if (key === 'useLegacyStacker' || key === 'ipv6EgressEnabled') return entry === null || entry === false;
+    if (key === 'multiRegionConfig') return defaultRegionConfig(entry);
+    if (key === 'numReplicas') return entry === null || entry === 1;
+    return optionalDeployFields.has(key) && entry === null;
+  });
+}
+function emptyInstanceConfig(value: Record<string, unknown>, scalarReplicas: unknown): boolean {
+  if (!Object.entries(value).every(([key, entry]) => {
+    if (key === 'isCreated') return entry === true;
+    if (key === 'isDeleted') return entry === false;
+    if (key === 'source') return emptySourceConfig(entry);
+    if (key === 'build') return emptyBuildConfig(entry);
+    if (key === 'deploy') return emptyDeployConfig(entry);
+    if (key === 'configFile') return entry === null;
+    if (['variables','volumeMounts','networking'].includes(key)) return structurallyEmpty(entry);
+    return false;
+  })) return false;
+  const deploy = value.deploy;
+  const regionalCountKnown = record(deploy) && defaultRegionConfig(deploy.multiRegionConfig);
+  // A null native legacy scalar is not an implicit default. The recorded
+  // explicit single-region count can prove one replica independently.
+  return scalarReplicas === 1 || scalarReplicas === null && regionalCountKnown;
+}
+
 export function railwayServiceInstances(getClient: () => GraphQLClient | null): IServiceInstances {
   const observe = async (raw: ServiceInstanceTarget, workflowId?: string): Promise<ServiceInstanceObservation> => {
+    let failureCode = 'instance_scope_or_state_unverified';
     try {
       const target = serviceInstanceTargetSchema.parse(raw);
       const client = getClient();
@@ -56,7 +103,7 @@ export function railwayServiceInstances(getClient: () => GraphQLClient | null): 
           project(id: $projectId) { id }
           service(id: $serviceId) { id projectId name
             repoTriggers(first:100) { edges { node { id projectId environmentId serviceId repository branch } } pageInfo { hasNextPage endCursor } }
-            serviceInstances(first:100) { edges { node { id serviceId environmentId source { image repo }
+            serviceInstances(first:100) { edges { node { id serviceId environmentId numReplicas source { image repo }
               latestDeployment { id } activeDeployments { id }
             } } pageInfo { hasNextPage endCursor } }
           }
@@ -94,9 +141,9 @@ export function railwayServiceInstances(getClient: () => GraphQLClient | null): 
       if (!record(config) || config.services !== undefined && !record(config.services)) throw new Error('config_unknown');
       const instanceConfig = config.services?.[target.serviceId];
       if (targetInstance) {
+        failureCode = 'instance_target_configuration_unverified';
         if (!record(instanceConfig) || Object.keys(targetInstance.source).length
-          || Object.entries(instanceConfig).some(([key, value]) => key === 'isCreated' ? value !== true
-            : key === 'isDeleted' ? value !== false : key === 'source' ? !emptySourceConfig(value) : !structurallyEmpty(value))) throw new Error('target_not_empty');
+          || !emptyInstanceConfig(instanceConfig, nativeTarget.numReplicas)) throw new Error('target_not_empty');
       } else if (instanceConfig !== undefined) throw new Error('target_config_present');
       // Only non-secret identity/source structure enters this fingerprint.
       // Variable values and opaque configuration never enter output or hashes.
@@ -106,7 +153,7 @@ export function railwayServiceInstances(getClient: () => GraphQLClient | null): 
         otherTargetServiceIds: Object.keys(config.services ?? {}).filter(id => id !== target.serviceId).sort(),
       });
       return { state: targetInstance ? 'empty' : 'absent', fingerprint };
-    } catch { return { state: 'unknown', code: 'instance_scope_or_state_unverified' }; }
+    } catch { return { state: 'unknown', code: failureCode }; }
   };
   return {
     resolveTarget(source, target, serviceName) {

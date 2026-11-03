@@ -111,7 +111,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       credentials: z.record(z.string(), z.unknown()).optional().describe('action="add": provider-specific credentials object. Omit for providers supporting native CLI/default authentication. credentialsRef is recommended for explicit credentials, but raw credentials are accepted when intentional.'),
       credentialsRef: z.string().optional().describe('action="add", or action="verify" with runtimeMail: recommended credential reference resolved privately by Hypervibe. Supports env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path for token/JSON files, secret-manager refs like 1password://vault/item#field, or an already-pulled active Stripe Projects environment with stripe-projects://<environment>/<provider>/<service>. The resolved value may be a JSON credentials object or a scalar.'),
       runtimeMail: runtimeMailProbeSchema.optional().describe('action="verify" with an explicit private credentialsRef: validate a fixed sandbox Mail Send request without sending email or saving a connection. Requires sender and a consenting test recipient; does not prove least privilege, sender authorization or live delivery.'),
-      credentialsKey: z.string().optional().describe('action="add": wraps a scalar credentialsRef value under this provider credential key, e.g. apiToken or accessToken. Optional for common single-token providers.'),
+      credentialsKey: z.string().optional().describe('action="add": wraps a scalar credentialsRef value under this provider credential key, e.g. apiToken or accessToken. GitHub packageReadToken alone updates an existing verified exact-scope connection while preserving its primary API credential. Optional for common single-token providers.'),
       credentialsMap: z.record(z.string(), z.string()).optional().describe('action="add": for dotenv or structured secret-manager references, maps provider credential keys to source fields, e.g. {"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}.'),
       scope: z.string().optional().describe('Optional scope for fine-grained tokens (e.g., "owner/repo" for GitHub, "example.com" for Cloudflare). Use "org/*" for wildcard matching. Leave empty for global except action="bootstrap", which derives an exact repository scope from the selected project when omitted and never creates global GCP access.'),
       project: projectField.describe('Hypervibe project name/id for validated context. Required explicitly for action="bootstrap". With no provider, project-only still lists. Omit for an unscoped list. This never changes provider credential scope.'),
@@ -499,7 +499,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         }
 
         // Auto-verify so one call does add + verify.
-        const verified = await verifyConnection(provider, scope);
+        const verified = saved.verification ?? await verifyConnection(provider, scope);
         if (verified.kind !== 'verified') {
           return commandError('PROVIDER_ERROR', verified.error ?? 'Verification failed.', {
             details: { connection: saved.connection, ...setupDetails(provider, guidanceContext) },
