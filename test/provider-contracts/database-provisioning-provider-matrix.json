@@ -41,65 +41,6 @@
       }
     },
     {
-      "provider": "supabase",
-      "model": "managed-database",
-      "provisioningMode": "native-database",
-      "nativeCreate": "POST https://api.supabase.com/v1/projects",
-      "durability": "Each hosted project has a dedicated PostgreSQL instance and provider-managed database disk.",
-      "identity": "project reference with organization identity and region",
-      "completion": "Observe database readiness on the exact project; create acknowledgement alone is insufficient.",
-      "recovery": "Retain exact acknowledged project or unresolved-create state; project deletion deletes its database. Backup entitlement is separate.",
-      "prerequisites": "Authorized organization id and provider-returned slug, available region and plan entitlement.",
-      "coverage": "Pinned OpenAPI create request and serialized rejected-create/no-hosting-fallback checks; disk contents and live recovery unverified.",
-      "officialSources": [
-        "https://supabase.com/docs/reference/api/v1-create-a-project",
-        "https://supabase.com/docs/guides/platform/compute-and-disk"
-      ],
-      "runtimeReferenceBinding": "unsupported",
-      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred.",
-      "freshInitializationRepair": {
-        "implementation": "unsupported",
-        "prerequisites": "No fresh-initialization adapter capability is admitted. Existing managed database identity/storage must be preserved; explicit discard intent does not authorize invoking a different native reset, restore, delete or replacement API.",
-        "nativeOperation": "Unsupported here: Supabase projects own their PostgreSQL instance and managed disk. Project backup/restore operations are not attachment of an empty service volume and are not exposed through this capability.",
-        "officialSources": [
-          "https://supabase.com/docs/guides/platform/compute-and-disk",
-          "https://supabase.com/docs/guides/platform/backups"
-        ],
-        "completion": "No completion can be claimed for this unsupported capability. Native create/restore completion and SQL/application readiness belong to their separately reviewed lifecycle contracts.",
-        "recovery": "Reject this intent before provider mutations and preserve the existing bound resource. Do not fall back to generic hosting, native reset/restore, deletion or replacement; existing backup policy and recovery points remain unchanged."
-      }
-    },
-    {
-      "provider": "neon",
-      "model": "managed-database",
-      "provisioningMode": "native-database",
-      "nativeCreate": "POST https://console.neon.tech/api/v2/projects",
-      "durability": "Branches own database state in durable storage separated from replaceable or suspended compute endpoints.",
-      "identity": "organization, project and branch; endpoint identity is not the durable data identity",
-      "completion": "Wait for the create operations and exact project/endpoint readiness before connection use.",
-      "recovery": "Non-idempotent ambiguous create must retain exact project or unresolved scope; compute suspension is not data deletion. Branch history is not a tested restore.",
-      "prerequisites": "Authorized organization, region and project allowance.",
-      "coverage": "Pinned OpenAPI request and serialized rejected-create/no-hosting-fallback checks; live storage and retention unverified.",
-      "officialSources": [
-        "https://api-docs.neon.tech/reference/createproject",
-        "https://neon.com/docs/introduction/architecture-overview"
-      ],
-      "runtimeReferenceBinding": "unsupported",
-      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred.",
-      "freshInitializationRepair": {
-        "implementation": "unsupported",
-        "prerequisites": "No fresh-initialization adapter capability is admitted. Existing managed database identity/storage must be preserved; explicit discard intent does not authorize invoking a different native reset, restore, delete or replacement API.",
-        "nativeOperation": "Unsupported here: Neon branches own durable data separately from compute. Branch restore and reset-from-parent change branch history/content; neither is a missing service-volume initialization operation.",
-        "officialSources": [
-          "https://neon.com/docs/introduction/architecture-overview",
-          "https://neon.com/docs/manage/branches",
-          "https://api-docs.neon.tech/reference/restoreprojectbranch"
-        ],
-        "completion": "No completion can be claimed for this unsupported capability. Native create/restore completion and SQL/application readiness belong to their separately reviewed lifecycle contracts.",
-        "recovery": "Reject this intent before provider mutations and preserve the existing bound resource. Do not fall back to generic hosting, native reset/restore, deletion or replacement; existing backup policy and recovery points remain unchanged."
-      }
-    },
-    {
       "provider": "cloudsql",
       "model": "managed-database",
       "provisioningMode": "native-database",
@@ -181,64 +122,6 @@
         "officialSources": [
           "https://learn.microsoft.com/en-us/azure/postgresql/backup-restore/concepts-backup-restore",
           "https://learn.microsoft.com/en-us/azure/postgresql/compute-storage/concepts-storage"
-        ],
-        "completion": "No completion can be claimed for this unsupported capability. Native create/restore completion and SQL/application readiness belong to their separately reviewed lifecycle contracts.",
-        "recovery": "Reject this intent before provider mutations and preserve the existing bound resource. Do not fall back to generic hosting, native reset/restore, deletion or replacement; existing backup policy and recovery points remain unchanged."
-      }
-    },
-    {
-      "provider": "fly",
-      "model": "managed-database",
-      "provisioningMode": "native-database",
-      "nativeCreate": "POST https://api.machines.dev/v1/postgres",
-      "durability": "Fly Managed Postgres cluster owns database storage; the adapter requests 10 GiB, not a PostgreSQL app Machine.",
-      "identity": "Organization slug and Managed Postgres cluster id",
-      "completion": "Wait for exact cluster ready with expected organization, name, region and plan before database/user initialization.",
-      "recovery": "MPG cluster survives application deletion. Preserve exact cluster/unresolved-create evidence; do not switch to unmanaged Fly Postgres on failure.",
-      "prerequisites": "Authorized organization, supported MPG plan/region and private network connectivity. Machines MPG API applies to v2 clusters; v1 remains outside this API contract.",
-      "coverage": "Serialized rejected-create/no-hosting-fallback check and existing lifecycle tests; successful live MPG provisioning and restore unverified.",
-      "officialSources": [
-        "https://fly.io/changelog/managed-postgres-machines-api/",
-        "https://fly.io/docs/about/pricing/"
-      ],
-      "runtimeReferenceBinding": "unsupported",
-      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred.",
-      "freshInitializationRepair": {
-        "implementation": "unsupported",
-        "prerequisites": "No fresh-initialization adapter capability is admitted. Existing managed database identity/storage must be preserved; explicit discard intent does not authorize invoking a different native reset, restore, delete or replacement API.",
-        "nativeOperation": "Unsupported here: the registered database adapter uses Managed Postgres clusters. MPG restore creates a new cluster; unmanaged Fly Machines and their attachable volumes are outside this database capability.",
-        "officialSources": [
-          "https://fly.io/docs/flyctl/mpg/",
-          "https://fly.io/changelog/managed-postgres-machines-api/"
-        ],
-        "completion": "No completion can be claimed for this unsupported capability. Native create/restore completion and SQL/application readiness belong to their separately reviewed lifecycle contracts.",
-        "recovery": "Reject this intent before provider mutations and preserve the existing bound resource. Do not fall back to generic hosting, native reset/restore, deletion or replacement; existing backup policy and recovery points remain unchanged."
-      }
-    },
-    {
-      "provider": "digitalocean",
-      "model": "managed-database",
-      "provisioningMode": "native-database",
-      "nativeCreate": "POST https://api.digitalocean.com/v2/databases, engine pg",
-      "durability": "Managed PostgreSQL cluster size includes database disk capacity; the adapter does not provision an App Platform development database or app container.",
-      "identity": "Account UUID, cluster UUID and region",
-      "completion": "Wait for the exact cluster online, then initialize the requested logical database.",
-      "recovery": "Retain exact acknowledged cluster or unresolved-create state; automatic backup product capability is not evidence a particular recovery point exists.",
-      "prerequisites": "Authorized account, managed-database create/read permissions and supported region/size/version.",
-      "coverage": "Serialized rejected-create/no-hosting-fallback check and existing lifecycle tests; successful live provisioning and retained recovery points unverified.",
-      "officialSources": [
-        "https://docs.digitalocean.com/products/databases/postgresql/how-to/create/",
-        "https://docs.digitalocean.com/products/databases/postgresql/reference/api/"
-      ],
-      "runtimeReferenceBinding": "unsupported",
-      "runtimeReferenceEvidence": "This native managed-database adapter does not expose service-variable reference metadata normalization. Its independently reviewed connection URL/runtime projection remains unchanged; no Railway-style variable name is inferred.",
-      "freshInitializationRepair": {
-        "implementation": "unsupported",
-        "prerequisites": "No fresh-initialization adapter capability is admitted. Existing managed database identity/storage must be preserved; explicit discard intent does not authorize invoking a different native reset, restore, delete or replacement API.",
-        "nativeOperation": "Unsupported here: POST /v2/databases with backup_restore creates a new managed database cluster, progressing from creating to online. It is a separate cluster-creation/restore contract, not an empty-volume repair.",
-        "officialSources": [
-          "https://docs.digitalocean.com/reference/api/reference/databases/",
-          "https://docs.digitalocean.com/products/databases/postgresql/how-to/create/"
         ],
         "completion": "No completion can be claimed for this unsupported capability. Native create/restore completion and SQL/application readiness belong to their separately reviewed lifecycle contracts.",
         "recovery": "Reject this intent before provider mutations and preserve the existing bound resource. Do not fall back to generic hosting, native reset/restore, deletion or replacement; existing backup policy and recovery points remain unchanged."

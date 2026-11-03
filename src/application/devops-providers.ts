@@ -8,12 +8,6 @@ import {
   GitHubActionsOperationsAdapter,
   GitHubCodeHostIdentityAdapter,
 } from '../adapters/providers/github/github-devops.adapter.js';
-import {
-  GitLabAdapter,
-  type GitLabCredentials,
-} from '../adapters/providers/gitlab/gitlab.adapter.js';
-import { gitLabCiLifecycle } from '../adapters/providers/gitlab/gitlab-ci.lifecycle.js';
-import { executeGitLabCiRollback } from '../adapters/providers/gitlab/gitlab-ci.rollback.js';
 import { devOpsProviderRegistry } from '../domain/registry/devops.registry.js';
 import {
   applyGitHubActionsAppliedSpecHash,
@@ -74,33 +68,4 @@ devOpsProviderRegistry.registerCiProvider({
       });
     },
   },
-});
-
-devOpsProviderRegistry.registerCodeHost({
-  id: 'gitlab',
-  connectionProvider: 'gitlab',
-  suggestedCiProvider: 'gitlab-ci',
-  create(credentials: unknown) {
-    const adapter = new GitLabAdapter();
-    adapter.connect(credentials as GitLabCredentials);
-    return adapter;
-  },
-  createLifecycle(credentials: unknown) {
-    const adapter = new GitLabAdapter();
-    adapter.connect(credentials as GitLabCredentials);
-    return adapter;
-  },
-});
-
-devOpsProviderRegistry.registerCiProvider({
-  id: 'gitlab-ci',
-  connectionProvider: 'gitlab',
-  compatibleCodeProviders: ['gitlab'],
-  create(credentials: unknown) {
-    const adapter = new GitLabAdapter();
-    adapter.connect(credentials as GitLabCredentials);
-    return adapter;
-  },
-  lifecycle: gitLabCiLifecycle,
-  rollback: executeGitLabCiRollback,
 });

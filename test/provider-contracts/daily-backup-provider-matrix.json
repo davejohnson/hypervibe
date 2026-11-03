@@ -49,27 +49,6 @@
     },
     {
       "resource": "database",
-      "provider": "supabase",
-      "implementation": "unsupported",
-      "reason": "Daily policy observation/configuration is not implemented in this Hypervibe adapter.",
-      "nativeCapability": "Automatic daily backups on eligible paid projects while PITR is disabled",
-      "retentionEvidence": {
-        "kind": "plan-dependent",
-        "proDays": 7,
-        "teamDays": 14,
-        "enterpriseUpToDays": 30
-      },
-      "limitations": [
-        "Free tier does not supply this automatic daily guarantee",
-        "Database backups do not include Storage API objects",
-        "Deleting a project deletes its backups"
-      ],
-      "officialSources": [
-        "https://supabase.com/docs/guides/platform/backups"
-      ]
-    },
-    {
-      "resource": "database",
       "provider": "rds",
       "implementation": "unsupported",
       "reason": "Daily policy observation/configuration is not implemented in this Hypervibe adapter.",
@@ -113,67 +92,6 @@
       ]
     },
     {
-      "resource": "database",
-      "provider": "neon",
-      "implementation": "unsupported",
-      "reason": "Daily policy observation/configuration is not implemented in this Hypervibe adapter.",
-      "nativeCapability": "Native scheduled snapshots can be daily, weekly or monthly on a paid plan",
-      "retentionEvidence": {
-        "kind": "unknown",
-        "note": "Exact scheduled snapshot retention fields/defaults not established in this bounded review; must pin the full official operation schema before implementation"
-      },
-      "limitations": [
-        "Earlier PITR-only provider description is incomplete",
-        "Do not infer retention from project history retention",
-        "Do not silently change plan or authorize cost"
-      ],
-      "officialSources": [
-        "https://api-docs.neon.tech/reference/setsnapshotschedule",
-        "https://api-docs.neon.tech/reference/getsnapshotschedule",
-        "https://neon.com/blog/three-ways-to-use-your-snapshots"
-      ]
-    },
-    {
-      "resource": "database",
-      "provider": "fly",
-      "implementation": "unsupported",
-      "reason": "Daily policy observation/configuration is not implemented in this Hypervibe adapter.",
-      "nativeCapability": "Managed Postgres official staff describes daily full backups, six-hour differential and hourly incremental backups",
-      "retentionEvidence": {
-        "kind": "unknown",
-        "historicalEvidence": "Official staff stated at least ten calendar days on 2025-08-04; current exact guarantee not established by current docs"
-      },
-      "limitations": [
-        "Do not substitute Fly Volume daily snapshots and five-day retention for Managed Postgres",
-        "Dated staff statements establish design evidence, not current per-cluster guarantees"
-      ],
-      "officialSources": [
-        "https://docs.fly.io/postgres",
-        "https://community.fly.io/t/scheduled-backups-in-managed-postgres/25132",
-        "https://community.fly.io/t/help-needed-with-managed-postgres/25549",
-        "https://docs.fly.io/api/machines/postgres-clusters/list-backups",
-        "https://docs.fly.io/api/machines/postgres-clusters/restore-backup-or-point-in-time-to-new-cluster"
-      ]
-    },
-    {
-      "resource": "database",
-      "provider": "digitalocean",
-      "implementation": "unsupported",
-      "reason": "Daily policy observation/configuration is not implemented in this Hypervibe adapter.",
-      "nativeCapability": "Managed PostgreSQL backups automatically run once daily; provider chooses an unchangeable backup time",
-      "retentionEvidence": {
-        "kind": "fixed",
-        "days": 7
-      },
-      "limitations": [
-        "Deleting the cluster deletes its backups",
-        "Do not substitute Droplet backup policy for managed database policy"
-      ],
-      "officialSources": [
-        "https://docs.digitalocean.com/products/databases/postgresql/how-to/restore-from-backups/"
-      ]
-    },
-    {
       "resource": "volume",
       "provider": "railway",
       "implementation": "implemented",
@@ -188,21 +106,6 @@
       "officialSources": [
         "https://docs.railway.com/volumes/backups",
         "https://docs.railway.com/integrations/api/manage-volumes"
-      ]
-    },
-    {
-      "resource": "volume",
-      "provider": "fly",
-      "implementation": "unsupported",
-      "reason": "Current lifecycle does not observe/converge automatic snapshot settings or latest completed snapshot.",
-      "nativeCapability": "Automatic daily snapshots default on; default retention 5 days, configurable from 1 to 60 days. Restore creates a new volume.",
-      "limitations": [
-        "Changing retention affects new snapshots.",
-        "Native snapshots leave a data-loss window since the latest snapshot.",
-        "Snapshot presence does not prove application consistency."
-      ],
-      "officialSources": [
-        "https://docs.fly.io/volumes/snapshots/"
       ]
     },
     {
@@ -254,35 +157,6 @@
         "https://learn.microsoft.com/en-us/azure/backup/azure-file-share-support-matrix",
         "https://learn.microsoft.com/en-us/azure/backup/quick-backup-azure-files-vault-tier-portal",
         "https://learn.microsoft.com/en-us/azure/backup/backup-azure-files-faq"
-      ]
-    },
-    {
-      "resource": "volume",
-      "provider": "digitalocean",
-      "implementation": "unsupported",
-      "reason": "No provider persistent-mount backup target exists for this adapter.",
-      "nativeCapability": "App Platform local filesystems are ephemeral and persistent volumes are unsupported.",
-      "limitations": [
-        "Do not imply App Platform local writes survive deployment.",
-        "DigitalOcean Spaces is mentioned by provider docs but is not a named Hypervibe storage adapter in this inventory."
-      ],
-      "officialSources": [
-        "https://docs.digitalocean.com/products/app-platform/how-to/store-data/"
-      ]
-    },
-    {
-      "resource": "volume",
-      "provider": "vercel",
-      "implementation": "unsupported",
-      "reason": "No persistent-mount backup target for this adapter.",
-      "nativeCapability": "Vercel Functions do not expose a persistent writable filesystem.",
-      "limitations": [
-        "Temporary scratch space is not a recoverable persistent mount.",
-        "Vercel Blob is not a named Hypervibe storage adapter in this inventory."
-      ],
-      "officialSources": [
-        "https://vercel.com/kb/guide/why-does-my-serverless-function-work-locally-but-not-when-deployed",
-        "https://vercel.com/docs/functions/runtimes#file-system-support"
       ]
     },
     {

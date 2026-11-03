@@ -4,7 +4,6 @@ import type { Environment } from '../../../../domain/entities/environment.entity
 import type { Service } from '../../../../domain/entities/service.entity.js';
 import * as crypto from 'node:crypto';
 import { buildCloudRunGitHubActionsSteps } from '../cloudrun-ci.workflow.js';
-import { buildCloudRunPortableRuntime } from '../cloudrun-ci.recipe.js';
 import { extractGitHubScript } from '../../../../domain/services/__tests__/managed-ci-workflow.test-utils.js';
 
 const jobId = 'cron-7e22b6c2dc';
@@ -168,13 +167,12 @@ async function fixture(options: {
   return { adapter, fetchMock };
 }
 
-async function runCi(kind: 'github' | 'portable', fetchImpl: typeof fetch) {
+async function runCi(_kind: 'github', fetchImpl: typeof fetch) {
   const runtimeResources = [{ logicalName: 'cron' as const, workloadKind: 'cron' as const, providerResourceType: 'job' as const, providerResourceId: jobId,
     providerResourceUid: scheduleActivation.jobUid, startCommand: 'npm run cron', healthCheckPath: null }];
   const generated = buildCloudRunGitHubActionsSteps({ environmentName: 'staging', kind: 'staging', branch: 'main', autoDeployOnPush: false,
     serviceNames: ['cron'], providerServiceIds: [], providerJobNames: [jobId], providerScope: { projectId: 'gcp-project', region: 'us-central1' }, providerRegion: 'us-central1', runtimeResources });
-  const script = kind === 'portable' ? buildCloudRunPortableRuntime().replace(/^import .*;\n/gm, '')
-    : extractGitHubScript('jobs:\n  deploy:\n    steps:\n' + generated.steps, 'Deploy image to Cloud Run');
+  const script = extractGitHubScript('jobs:\n  deploy:\n    steps:\n' + generated.steps, 'Deploy image to Cloud Run');
   const credentials = { client_email: 'ci@example.test', private_key: crypto.generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) };
   const env = {
     GCP_SERVICE_ACCOUNT_JSON: JSON.stringify(credentials), GCP_SERVICE_ACCOUNT_JSON_B64: Buffer.from(JSON.stringify(credentials)).toString('base64'),
@@ -245,26 +243,26 @@ describe('Cloud Run managed-CI cron bootstrap', () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith(':run'))).toBe(false);
   });
 
-  it.each(['github', 'portable'] as const)('%s CI rejects a same-name replacement before any Job PATCH', async (kind) => {
+  it.each(['github'] as const)('%s CI rejects a same-name replacement before any Job PATCH', async (kind) => {
     const { fetchMock } = await fixture({ existingImage: holdingImage, changedUid: true });
     await expect(runCi(kind, fetchMock)).rejects.toThrow(/identity|UID/i);
     expect(fetchMock.mock.calls.some(([url, init]) => String(url).includes('run.googleapis.com') && (init?.method ?? 'GET') !== 'GET')).toBe(false);
   });
 
-  it.each(['github', 'portable'] as const)('%s CI updates the bound UID without creating infrastructure', async (kind) => {
+  it.each(['github'] as const)('%s CI updates the bound UID without creating infrastructure', async (kind) => {
     const { fetchMock } = await fixture({ existingImage: holdingImage });
     await runCi(kind, fetchMock);
     expect(fetchMock.mock.calls.filter(([url, init]) => String(url).includes('run.googleapis.com') && (init?.method ?? 'GET') !== 'GET').map(([, init]) => init?.method)).toEqual(['PATCH']);
   });
 
-  it.each(['github', 'portable'] as const)('%s CI rejects changed job runtime identity without any filesystem mounts', async (kind) => {
+  it.each(['github'] as const)('%s CI rejects changed job runtime identity without any filesystem mounts', async (kind) => {
     const { fetchMock } = await fixture({ existingImage: holdingImage, changedPrincipalAfterPatch: true });
     await expect(runCi(kind, fetchMock)).rejects.toThrow(/runtime principal identity/i);
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'PATCH')).toHaveLength(1);
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith(':run'))).toBe(false);
   });
 
-  it.each(['github', 'portable'] as const)('%s CI uses the Job PATCH contract and retains writable metadata', async (kind) => {
+  it.each(['github'] as const)('%s CI uses the Job PATCH contract and retains writable metadata', async (kind) => {
     const { fetchMock } = await fixture({ existingImage: holdingImage, jobMetadata: true });
     await runCi(kind, fetchMock);
     const patch = fetchMock.mock.calls.find(([url, init]) => String(url) === `https://run.googleapis.com/v2/${jobName}` && init?.method === 'PATCH');

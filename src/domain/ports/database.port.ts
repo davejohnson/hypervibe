@@ -179,7 +179,7 @@ export function databaseCreateMayHaveCommitted(error: unknown): boolean {
  * Standard binding keys used for database components
  */
 export interface DatabaseBindings {
-  /** Provider name (e.g., 'supabase', 'cloudsql', 'railway', 'rds') */
+  /** Provider name (e.g., 'cloudsql', 'railway', 'rds') */
   provider: string;
 
   /** External database/instance ID */

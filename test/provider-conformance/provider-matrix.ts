@@ -266,75 +266,6 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     implementationNote:
       'The service-principal-only connection, project-owned resource group/ACR/managed-environment bootstrap, managed-identity Container App lifecycle, phased managed-certificate domain lifecycle, exact-digest CI workflow, and mocked safety contracts are implemented. Promotion requires a successful opt-in live lifecycle run.',
   },
-  {
-    kind: 'hosting',
-    provider: 'digitalocean',
-    vendor: 'DigitalOcean',
-    service: 'App Platform',
-    status: 'ready-for-live',
-    workloadKinds: ['web', 'worker', 'cron'],
-    customDomains: 'managed',
-    domainTrafficProxy: 'supported',
-    maintenance: 'ready-for-live',
-    credentials: digitalOceanCredentials,
-    managedWorkflow: {
-      ...dockerWebManagedWorkflow('deploy-digitalocean-production.yml'),
-      database: { provider: 'digitalocean', engine: 'postgres' },
-      cache: { provider: 'digitalocean', engine: 'redis' },
-    },
-    implementationNote:
-      'The credential schema, App Platform adapter, automatic free Starter registry bootstrap, derived PostgreSQL and Valkey adapters, guidance, mocked lifecycle, exact-SHA CI workflow, exact-app archive/restore maintenance contract, and review-gated full-stack managed-workflow live harness are implemented. Maintenance remains ready-for-live until its opt-in entry/noop/exit scenario passes; provider promotion still requires a successful create/deploy/noop/update/destroy run against an isolated DigitalOcean team.',
-  },
-  {
-    kind: 'hosting',
-    provider: 'vercel',
-    vendor: 'Vercel',
-    service: 'Vercel Projects and Deployments',
-    status: 'ready-for-live',
-    workloadKinds: ['web'],
-    customDomains: 'managed',
-    domainTrafficProxy: 'supported',
-    maintenance: 'ready-for-live',
-    credentials: vercelCredentials,
-    managedWorkflow: {
-      environmentName: 'production',
-      fixtureDirectory: 'test/provider-conformance/fixture-vercel',
-      requiredPaths: [
-        '.hypervibe/spec.json',
-        'api/health.js',
-        'index.html',
-        'package.json',
-      ],
-      workflow: 'deploy-vercel-production.yml',
-      publicUrlProtocols: ['https:'],
-      serviceName: 'web',
-      service: {
-        workloadKind: 'web',
-        healthCheckPath: '/api/health',
-        public: true,
-      },
-    },
-    implementationNote:
-      'The source-less Project lifecycle adapter, personal/team token guidance, mocked safety contracts, exact-ID pause/unpause maintenance contract, native-Git-source guard, exact-file REST deployment workflow, and review-gated managed-workflow live harness are implemented. Maintenance remains ready-for-live until its opt-in entry/noop/exit scenario passes; provider promotion still requires a successful create/deploy/noop/update/destroy run.',
-  },
-  {
-    kind: 'hosting',
-    provider: 'fly',
-    vendor: 'Fly.io',
-    service: 'Fly Apps and Machines',
-    status: 'ready-for-live',
-    workloadKinds: ['web', 'worker'],
-    customDomains: 'managed',
-    domainTrafficProxy: 'supported',
-    maintenance: 'unsupported',
-    credentials: flyCredentials,
-    managedWorkflow: {
-      ...dockerWebManagedWorkflow('deploy-fly-production.yml'),
-      database: { provider: 'fly', engine: 'postgres' },
-    },
-    implementationNote:
-      'The organization-scoped credential schema, one-App-per-service Machines adapter, stopped source-less bootstrap, exact-ID IP/secret/certificate lifecycle, immutable-digest GitHub and portable GitLab workflow contracts, derived Managed Postgres adapter, guidance, and mocked safety contracts are implemented. Promotion requires a successful opt-in live create/deploy/noop/update/domain/destroy run; maintenance and provider-native cron schedules remain unsupported.',
-  },
 ];
 
 export const databaseProviderContracts: DatabaseProviderContract[] = [
@@ -347,30 +278,6 @@ export const databaseProviderContracts: DatabaseProviderContract[] = [
     status: 'ready-for-live',
     credentials: gcpCredentials,
     fixtureHostingProvider: 'cloudrun',
-  },
-  {
-    kind: 'database',
-    provider: 'digitalocean',
-    vendor: 'DigitalOcean',
-    service: 'Managed PostgreSQL',
-    engine: 'postgres',
-    status: 'ready-for-live',
-    credentials: digitalOceanCredentials,
-    fixtureHostingProvider: 'digitalocean',
-    implementationNote:
-      'The derived Managed PostgreSQL adapter, mocked lifecycle safety contract, and review-gated full-stack live profile are implemented. Promotion requires one successful complete live stack run.',
-  },
-  {
-    kind: 'database',
-    provider: 'fly',
-    vendor: 'Fly.io',
-    service: 'Managed Postgres',
-    engine: 'postgres',
-    status: 'ready-for-live',
-    credentials: flyCredentials,
-    fixtureHostingProvider: 'fly',
-    implementationNote:
-      'The derived Managed Postgres cluster/database/schema-admin-user lifecycle and mocked safety contract are implemented. Endpoints remain private to Fly networking; bounded local operations create and re-observe an exact operation-scoped WireGuard peer, use the packaged userspace connector, verify PostgreSQL, and remove the exact peer. Promotion requires a successful complete Fly-hosted live stack run using that path.',
   },
   {
     kind: 'database',
@@ -396,19 +303,6 @@ export const databaseProviderContracts: DatabaseProviderContract[] = [
   },
   {
     kind: 'database',
-    provider: 'supabase',
-    vendor: 'Supabase',
-    service: 'Supabase Postgres',
-    engine: 'postgres',
-    status: 'ready-for-live',
-    credentials: [
-      { field: 'accessToken', environmentVariable: 'HYPERVIBE_TEST_SUPABASE_ACCESS_TOKEN' },
-      { field: 'organizationId', environmentVariable: 'HYPERVIBE_TEST_SUPABASE_ORGANIZATION_ID', optional: true },
-    ],
-    fixtureHostingProvider: 'railway',
-  },
-  {
-    kind: 'database',
     provider: 'azure-postgres',
     vendor: 'Microsoft Azure',
     service: 'Azure Database for PostgreSQL Flexible Server',
@@ -418,18 +312,6 @@ export const databaseProviderContracts: DatabaseProviderContract[] = [
     fixtureHostingProvider: 'azure-container-apps',
     implementationNote:
       'The auth-only connection reuse, deterministic Container Apps resource-group placement, explicit public-network/Azure-services firewall contract, encrypted binding, and mocked lifecycle safety contract are implemented. Promotion requires a successful recent Azure Container Apps plus PostgreSQL full-stack live run.',
-  },
-  {
-    kind: 'database',
-    provider: 'neon',
-    vendor: 'Neon',
-    service: 'Neon Postgres',
-    engine: 'postgres',
-    status: 'ready-for-live',
-    credentials: neonCredentials,
-    fixtureHostingProvider: 'railway',
-    implementationNote:
-      'The registry, credential schema, adapter, guidance, and mocked lifecycle contract are implemented; promotion requires a successful opt-in live create/noop/destroy run.',
   },
 ];
 
@@ -445,18 +327,6 @@ export const cacheProviderContracts: CacheProviderContract[] = [
     fixtureHostingProvider: 'cloudrun',
     implementationNote:
       'The auth-only registry, private-IP Redis AUTH adapter, desired placement drift, existing-network verification, Cloud Run Direct VPC egress, and mocked lifecycle contracts are implemented. Promotion to supported requires a successful recent opt-in live create/noop/update/destroy run.',
-  },
-  {
-    kind: 'cache',
-    provider: 'digitalocean',
-    vendor: 'DigitalOcean',
-    service: 'Managed Valkey/Redis',
-    engine: 'redis',
-    status: 'ready-for-live',
-    credentials: digitalOceanCredentials,
-    fixtureHostingProvider: 'digitalocean',
-    implementationNote:
-      'The derived Managed Valkey adapter, mocked lifecycle safety contract, and review-gated full-stack live profile are implemented. New clusters use the Valkey engine while observation accepts legacy Redis clusters; promotion requires one successful complete live stack run.',
   },
   {
     kind: 'cache',

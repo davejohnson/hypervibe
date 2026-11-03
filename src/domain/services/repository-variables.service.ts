@@ -66,7 +66,7 @@ export function pendingRepositoryVariableEnvironment(projectId: string): string 
 
 function loadAdapter(spec: ProjectSpec): RepositoryConfigurationPort {
   const selection = spec.devops;
-  if (!selection?.ci || selection.code.repository.state !== 'present' || selection.code.repository.management !== 'external') {
+  if (!selection?.ci) {
     throw new Error('Repository variables require an existing externally managed repository and a canonical CI provider.');
   }
   const registration = devOpsProviderRegistry.ciProvider(selection.ci.provider);

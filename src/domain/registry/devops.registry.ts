@@ -1,7 +1,7 @@
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
 import type { PlanAction } from '../plan/plan.types.js';
-import type { CodeHostIdentityPort, CodeRepositoryLifecyclePort, CiOperationsPort, RepositoryConfigurationPort } from '../ports/devops.port.js';
+import type { CodeHostIdentityPort, CiOperationsPort, RepositoryConfigurationPort } from '../ports/devops.port.js';
 import type { EnvironmentSpec, ProjectSpec } from '../spec/spec.schema.js';
 import type { CiRollbackFailure, CiRollbackResult } from '../services/ci-rollback.service.js';
 
@@ -62,8 +62,6 @@ export interface CodeHostRegistration {
   connectionProvider: string;
   suggestedCiProvider?: string;
   create(credentials: unknown): CodeHostIdentityPort;
-  /** Optional explicit repository lifecycle; file ports never bootstrap projects. */
-  createLifecycle?: (credentials: unknown) => CodeRepositoryLifecyclePort;
 }
 
 export interface CiProviderRegistration {

@@ -11,22 +11,15 @@ import type { BranchDeployTarget } from '../../src/domain/ports/ci-deploy.port.j
  */
 const databases = [
   { provider: 'railway', checkpoint: true, drill: false },
-  { provider: 'supabase', checkpoint: false, drill: false },
   { provider: 'cloudsql', checkpoint: false, drill: true },
   { provider: 'rds', checkpoint: false, drill: false },
   { provider: 'azure-postgres', checkpoint: false, drill: false },
-  { provider: 'neon', checkpoint: false, drill: false },
-  { provider: 'fly', checkpoint: false, drill: false },
-  { provider: 'digitalocean', checkpoint: false, drill: false },
 ] as const;
 const hosts = [
   { provider: 'railway', immutableRollback: true },
   { provider: 'cloudrun', immutableRollback: true },
   { provider: 'ecs', immutableRollback: true },
   { provider: 'azure-container-apps', immutableRollback: true },
-  { provider: 'digitalocean', immutableRollback: false },
-  { provider: 'vercel', immutableRollback: false },
-  { provider: 'fly', immutableRollback: true },
 ] as const;
 
 describe('named provider recovery contract coverage', () => {

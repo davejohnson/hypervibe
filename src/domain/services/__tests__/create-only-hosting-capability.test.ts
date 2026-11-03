@@ -5,12 +5,9 @@ import { ProjectRepository } from '../../../adapters/db/repositories/project.rep
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../../adapters/db/repositories/service.repository.js';
 import { RailwayAdapter } from '../../../adapters/providers/railway/railway.adapter.js';
-import { FlyAdapter } from '../../../adapters/providers/fly/fly.adapter.js';
 import { CloudRunAdapter } from '../../../adapters/providers/gcp/cloudrun.adapter.js';
 import { EcsExpressAdapter } from '../../../adapters/providers/aws/ecs-express.adapter.js';
 import { AzureContainerAppsAdapter } from '../../../adapters/providers/azure/azure-container-apps.adapter.js';
-import { DigitalOceanAdapter } from '../../../adapters/providers/digitalocean/digitalocean.adapter.js';
-import { VercelAdapter } from '../../../adapters/providers/vercel/vercel.adapter.js';
 import type { IProviderAdapter, ProviderCapabilities } from '../../ports/provider.port.js';
 import { providerRegistry } from '../../registry/provider.registry.js';
 import { adapterFactory } from '../adapter.factory.js';
@@ -20,11 +17,10 @@ import { DeployOrchestrator } from '../deploy.orchestrator.js';
 // Constructors only; no credentials or provider requests. Deferred deployment
 // allows reconfiguration of an existing workload and is not create-only proof.
 const adapters: Record<string, IProviderAdapter> = {
-  railway: new RailwayAdapter(), fly: new FlyAdapter(), cloudrun: new CloudRunAdapter(),
+  railway: new RailwayAdapter(), cloudrun: new CloudRunAdapter(),
   ecs: new EcsExpressAdapter(), 'azure-container-apps': new AzureContainerAppsAdapter(),
-  digitalocean: new DigitalOceanAdapter(), vercel: new VercelAdapter(),
 };
-const unsupported = ['cloudrun', 'ecs', 'azure-container-apps', 'digitalocean', 'vercel'];
+const unsupported = ['cloudrun', 'ecs', 'azure-container-apps'];
 
 beforeEach(() => {
   vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', 'true');
@@ -48,18 +44,11 @@ function fixture(provider: string, capabilities: ProviderCapabilities = adapters
 describe('creation-only hosting admission', () => {
   it('checks deferred cron activation against every registered hosting workload contract', () => {
     expect(Object.keys(adapters).sort()).toEqual(providerRegistry.namesFor('hosting').sort());
-    const cronProviders = ['railway', 'cloudrun', 'digitalocean'];
+    const cronProviders = ['railway', 'cloudrun'];
     for (const [provider, adapter] of Object.entries(adapters)) {
       expect(providerRegistry.getMetadata(provider)?.lifecycle?.hosting?.workloadKinds.includes('cron'), provider).toBe(cronProviders.includes(provider));
       expect(adapter.capabilities.supportsDeferredCronActivation === true, provider).toBe(provider === 'cloudrun');
       expect(typeof adapter.activateSchedule === 'function', provider).toBe(provider === 'cloudrun');
-    }
-  });
-
-  it('accounts for every named hosting adapter and attests only the implemented Railway/Fly boundary', () => {
-    expect(Object.keys(adapters).sort()).toEqual(providerRegistry.namesFor('hosting').sort());
-    for (const [provider, adapter] of Object.entries(adapters)) {
-      expect(Boolean(adapter.capabilities.supportsCreateOnlyDeploy), provider).toBe(['railway', 'fly'].includes(provider));
     }
   });
 

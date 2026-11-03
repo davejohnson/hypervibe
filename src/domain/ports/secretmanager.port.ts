@@ -1,11 +1,7 @@
 import { z } from 'zod';
 
 export const SECRET_MANAGER_PROVIDERS = [
-  'vault',
   'aws-secrets',
-  'doppler',
-  '1password',
-  'bitwarden',
   'stripe-projects',
 ] as const;
 
@@ -71,7 +67,7 @@ export interface SecretManagerVerifyResult {
  * All secret managers must implement this interface.
  */
 export interface ISecretManagerAdapter {
-  /** Provider name (e.g., 'vault', 'aws-secrets') */
+  /** Provider name (e.g., 'aws-secrets') */
   readonly name: SecretManagerProvider;
 
   /**
@@ -106,17 +102,6 @@ export const SecretRefSchema = z.string().refine(
 );
 
 // Credentials schemas for each provider
-export const VaultCredentialsSchema = z.object({
-  address: z.string().url('Vault address must be a valid URL'),
-  token: z.string().optional(),
-  roleId: z.string().optional(),
-  secretId: z.string().optional(),
-  namespace: z.string().optional(),
-}).refine(
-  (data) => data.token || (data.roleId && data.secretId),
-  'Either token or roleId+secretId is required'
-);
-
 export const AwsSecretsCredentialsSchema = z.object({
   region: z.string().default('us-east-1'),
   accessKeyId: z.string().optional(),
@@ -134,34 +119,10 @@ export const AwsSecretsCredentialsSchema = z.object({
   }
 });
 
-export const OnePasswordCredentialsSchema = z.object({
-  /** 1Password service account token (ops_...) — create one scoped to the vault(s) the project should read. */
-  serviceAccountToken: z.string().min(1, 'Service account token required'),
-});
-
-export const BitwardenCredentialsSchema = z.object({
-  /** Bitwarden Secrets Manager machine account access token. */
-  accessToken: z.string().min(1, 'Machine account access token required'),
-  organizationId: z.string().min(1, 'Organization id required'),
-  /** Self-hosted instances only. */
-  apiUrl: z.string().url().optional(),
-  identityUrl: z.string().url().optional(),
-});
-
-export const DopplerCredentialsSchema = z.object({
-  token: z.string().min(1, 'Service token required'),
-  project: z.string().optional(),
-  config: z.string().optional(),
-});
-
 /** Stripe Projects uses the authenticated local Stripe CLI session. */
 export const StripeProjectsCredentialsSchema = z.object({
   authMode: z.literal('default').default('default'),
 }).strict();
 
-export type VaultCredentials = z.infer<typeof VaultCredentialsSchema>;
 export type AwsSecretsCredentials = z.infer<typeof AwsSecretsCredentialsSchema>;
-export type OnePasswordCredentials = z.infer<typeof OnePasswordCredentialsSchema>;
-export type BitwardenCredentials = z.infer<typeof BitwardenCredentialsSchema>;
-export type DopplerCredentials = z.infer<typeof DopplerCredentialsSchema>;
 export type StripeProjectsCredentials = z.infer<typeof StripeProjectsCredentialsSchema>;

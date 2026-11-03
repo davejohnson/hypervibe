@@ -51,7 +51,6 @@ import {
 } from '../application/apply-plan.js';
 import { cloudflareScopeHintsForDomain } from '../domain/services/domain-scope.js';
 import {
-  githubSpecNeedsOpenAI,
   planGitHubInfrastructure,
   shouldPlanGitHubInfrastructure,
   unresolvedGitHubCheckRuntimeIssues,
@@ -452,9 +451,6 @@ function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
       add('cloudflare', environment, 'GitHub Pages custom-domain DNS', [
         ...cloudflareScopeHintsForDomain(spec.github.pages.customDomain),
       ]);
-    }
-    if (githubSpecNeedsOpenAI(spec.github)) {
-      add('openai', environment, 'AI-backed GitHub automations', repository ? [repository] : []);
     }
   }
 

@@ -12,7 +12,6 @@ import { z } from 'zod';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import type { Run, RunReceipt } from '../entities/run.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
-import { CI_CONFIGURATION_SYNC_OPERATION } from '../services/managed-ci.contract.js';
 import { resolvePlanActionAuthority } from './action-authority.js';
 import type { PlanAction } from './plan.types.js';
 import { isManagedCiCredentialAction } from './plan-stage.js';
@@ -423,10 +422,6 @@ export const planRunDocumentSchema = z.object({
         action.resource.provider === 'github'
           && (action.type === 'create' || action.type === 'update')
           && action.metadata?.operation === 'githubActionsDeployBranch'
-        || action.resource.provider === 'gitlab-ci'
-          && action.type === 'update'
-          && action.resource.name === 'configuration'
-          && action.metadata?.operation === CI_CONFIGURATION_SYNC_OPERATION
       )
     );
     if (document.actions.length === 0 || invalidAction) {

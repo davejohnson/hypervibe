@@ -30,14 +30,6 @@ export const GITHUB_TOKEN_URLS = {
   railwayAppScope: 'https://github.com/settings/tokens/new?scopes=repo&description=Hypervibe%20Railway%20app%20scope',
 } as const;
 
-/** GitLab documents these query parameters for pre-filled personal tokens. */
-export const GITLAB_TOKEN_URLS = {
-  api: 'https://gitlab.com/-/user_settings/personal_access_tokens?name=Hypervibe&description=Manage+GitLab+repository+and+CI+with+Hypervibe&scopes=api',
-  personalTokenDocs: 'https://docs.gitlab.com/user/profile/personal_access_tokens/',
-  projectTokenDocs: 'https://docs.gitlab.com/user/project/settings/project_access_tokens/',
-  deployTokenDocs: 'https://docs.gitlab.com/user/project/deploy_tokens/',
-} as const;
-
 export interface ConnectionGuidance {
   provider: string;
   displayName: string;
@@ -186,15 +178,6 @@ export function credentialFieldsFromSchema(
 }
 
 const GUIDANCE: Record<string, ConnectionGuidance> = {
-  '1password': {
-    provider: '1password',
-    displayName: '1Password',
-    tokenType: '1Password service account token',
-    setupUrl: 'https://www.1password.dev/service-accounts/',
-    permissions: ['Grant the service account access only to the vaults Hypervibe should read.'],
-    credentialExample: 'hv_connections provider="1password" credentialsRef="env:OP_SERVICE_ACCOUNT_TOKEN"',
-    notes: ['The token usually starts with ops_.'],
-  },
   appstoreconnect: {
     provider: 'appstoreconnect',
     displayName: 'App Store Connect',
@@ -382,14 +365,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Client secrets expire. Store the JSON outside the repository, rotate it before expiry, and reconnect from a file, dotenv mapping, or secret-manager reference.',
     ],
   },
-  bitwarden: {
-    provider: 'bitwarden',
-    displayName: 'Bitwarden Secrets Manager',
-    tokenType: 'Bitwarden Secrets Manager machine account access token',
-    setupUrl: 'https://bitwarden.com/help/access-tokens/',
-    permissions: ['Grant the machine account read access to the projects/secrets Hypervibe should resolve.'],
-    credentialExample: 'hv_connections provider="bitwarden" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"accessToken":"BITWARDEN_ACCESS_TOKEN","organizationId":"BITWARDEN_ORGANIZATION_ID"}',
-  },
   cloudflare: {
     provider: 'cloudflare',
     displayName: 'Cloudflare',
@@ -503,57 +478,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     permissions: ['Use a database user with the least privileges required for the intended hv_db query or migration operation.'],
     credentialExample: 'hv_connections provider="database" credentialsRef="dotenv:/absolute/path/.env#DATABASE_URL"',
   },
-  digitalocean: {
-    provider: 'digitalocean',
-    displayName: 'DigitalOcean',
-    tokenType: 'DigitalOcean personal access token (PAT, normally prefixed dop_v1_)',
-    setupUrl: 'https://cloud.digitalocean.com/account/api/tokens',
-    permissions: [
-      'For Managed PostgreSQL and Valkey observation, grant database:read and database:view_credentials on the DigitalOcean team that owns the clusters.',
-      'For Managed PostgreSQL and Valkey lifecycle through hv_plan/hv_apply, also grant database:create, database:update, and database:delete.',
-      'DigitalOcean requires regions:read, sizes:read, and actions:read alongside non-read database scopes so Hypervibe can validate regions/sizes and observe asynchronous actions.',
-      'When DigitalOcean App Platform hosting is enabled, also grant app:read, app:create, app:update, and app:delete; omit those app scopes for a database/cache-only connection.',
-      'For exact-SHA App Platform CI deploys, grant registry:read and registry:update. Also grant registry:create plus account:read so the reviewed project action can create a stable free Starter registry when the team has none.',
-      'App Platform custom-domain attach, observation, certificate status, and detach use the same app:read/app:update permissions; Hypervibe preserves the rest of the current App Spec.',
-    ],
-    credentialExample: 'hv_connections provider="digitalocean" credentialsRef="file:/absolute/path/digitalocean.json"',
-    notes: [
-      'Create the PAT at https://cloud.digitalocean.com/account/api/tokens with Custom Scopes for least privilege. Full Access is a broader fallback, not the recommended default.',
-      'The JSON credential file needs only apiToken for ordinary App Platform use. Hypervibe deterministically reuses an existing team registry, or creates a free Starter registry during the reviewed project action when none exists; CI only reads and uses that registry.',
-      'App placement is desired state, not authentication. Hypervibe uses nyc when environments.<name>.hosting.region is omitted; an agent may declare another App Platform region in the spec.',
-      'DigitalOcean shows a PAT only once. Store it in a dotenv file or secret manager instead of chat; Hypervibe accepts DIGITALOCEAN_TOKEN and HYPERVIBE_DIGITALOCEAN_TOKEN.',
-      'Token scopes cannot be changed after creation, and the token cannot exceed its creator\'s DigitalOcean team role. Create a replacement token if scopes or team access are wrong.',
-    ],
-  },
-  fly: {
-    provider: 'fly',
-    displayName: 'Fly.io',
-    tokenType: 'Fly.io organization-scoped access token plus the exact organization slug',
-    setupUrl: 'https://fly.io/dashboard',
-    setupUrls: [
-      {
-        label: 'Open the Fly.io dashboard, select the organization, then open Tokens',
-        url: 'https://fly.io/dashboard',
-      },
-      {
-        label: 'Review Fly.io token types and organization-token guidance',
-        url: 'https://fly.io/docs/security/tokens/',
-      },
-    ],
-    permissions: [
-      'Create an organization-scoped token for the one Fly.io organization Hypervibe should manage. Hypervibe needs organization access to list/create/delete Apps, create/update Machines, reconcile app secrets and public IPs, manage TLS certificates, push exact-image digests to registry.fly.io, create/observe/delete Managed Postgres clusters, databases, and users, and create/list/remove operation-scoped WireGuard peers for bounded private database access.',
-      'Do not use fly auth token: Fly.io documents that command as a short-lived user token intended for local use.',
-      'Do not use an app deploy token: it is restricted to one existing App and cannot authorize Hypervibe to create the per-service Apps or Managed Postgres clusters declared in desired state.',
-      'Keep organizationSlug scoped to the same organization that issued the token. Hypervibe records the non-secret organization slug beside every durable App and database identity and refuses cross-organization bindings.',
-    ],
-    credentialExample: 'hv_connections provider="fly" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"FLY_API_TOKEN","organizationSlug":"FLY_ORGANIZATION_SLUG"}',
-    notes: [
-      'Fly.io does not publish a documented pre-filled token-template URL. In the dashboard, select the intended organization, open Tokens, create an organization token, and copy its value once into a dotenv file or secret manager.',
-      'The credential contains only apiToken and organizationSlug. App and Managed Postgres placement belongs in environments.<name>.hosting.region; Hypervibe defaults to iad when it is omitted.',
-      'Hypervibe uses the Machines and Managed Postgres HTTP APIs directly. It does not install or invoke flyctl for infrastructure lifecycle operations.',
-      'Fly Managed Postgres endpoints remain private to Fly networking. For each bounded local query, seed, or migration operation, Hypervibe creates a uniquely named WireGuard peer, starts its packaged userspace connector, verifies PostgreSQL through the tunnel, and removes that exact peer afterward. A matching pre-existing peer blocks for manual inspection instead of being silently deleted.',
-    ],
-  },
   elasticache: {
     provider: 'elasticache',
     displayName: 'Amazon ElastiCache',
@@ -607,21 +531,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'ECS Express Mode creates the Fargate service, public HTTPS endpoint, load balancer, security groups, autoscaling, monitoring, and networking components. Hypervibe owns the smaller prerequisite project boundary and exact-digest CI release.',
       'AWS shows a new secret access key only once. Store it outside the repository and rotate it regularly.',
     ],
-  },
-  doppler: {
-    provider: 'doppler',
-    displayName: 'Doppler',
-    tokenType: 'Doppler read-only service token',
-    setupUrl: 'https://dashboard.doppler.com/',
-    setupUrls: [
-      { label: 'Open the Doppler dashboard and select the project config Access tab', url: 'https://dashboard.doppler.com/' },
-      { label: 'Follow the official service-token guide', url: 'https://docs.doppler.com/docs/service-tokens' },
-    ],
-    permissions: [
-      'Create a service token scoped to the project/config Hypervibe should read.',
-    ],
-    credentialExample: 'hv_connections provider="doppler" credentialsRef="env:DOPPLER_TOKEN"',
-    notes: ['Service tokens start with dp.st. and are scoped to a single config.'],
   },
   gcs: {
     provider: 'gcs',
@@ -680,48 +589,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'A read:packages-only token cannot manage repository infrastructure; use it only as packageReadToken.',
       'Fine-grained PAT responses do not expose classic OAuth scopes. Hypervibe verifies identity and discovers missing endpoint permissions during plan/apply.',
       `A classic apiToken remains supported for compatibility and needs repo + workflow (${GITHUB_TOKEN_URLS.api}); security endpoints may also need security_events.`,
-    ],
-  },
-  gitlab: {
-    provider: 'gitlab',
-    displayName: 'GitLab',
-    tokenType: 'GitLab project access token for an existing project, or a personal access token with api for managed project lifecycle; Railway also needs a separate read_registry project deploy token',
-    setupUrl: GITLAB_TOKEN_URLS.api,
-    setupUrls: [
-      { label: 'Create pre-filled GitLab personal access token', url: GITLAB_TOKEN_URLS.api },
-      { label: 'GitLab personal access token guide', url: GITLAB_TOKEN_URLS.personalTokenDocs },
-      { label: 'GitLab project access token guide', url: GITLAB_TOKEN_URLS.projectTokenDocs },
-      { label: 'GitLab deploy token guide', url: GITLAB_TOKEN_URLS.deployTokenDocs },
-    ],
-    permissions: [
-      'For an existing project, grant api and give the token principal Maintainer access. Managed project creation/deletion instead requires a personal access token whose user owns the exact parent namespace (Owner for a group); Hypervibe verifies this before planning either mutation.',
-      'For managed rollback, GitLab Premium or Ultimate must protect each hypervibe-rollback-<environment>-* wildcard so only the exact authenticated token user can create it. Role-wide Maintainer access is rejected because it would let another Maintainer manufacture a privileged rollback ref.',
-      'For Railway private-image pulls, create a project deploy token in the exact project with read_registry only. Store its generated username as registryUsername and token as registryReadToken.',
-    ],
-    credentialExample: 'hv_connections provider="gitlab" scope="https://gitlab.com/group/project" credentialsRef="file:/absolute/path/gitlab-connection.json"',
-    notes: [
-      'The JSON contains apiToken, optional instanceUrl for self-managed GitLab, and registryUsername/registryReadToken for Railway. Keep it outside the repository.',
-      'Choose expiration manually for both tokens and rotate them before expiry; GitLab documents only name, description, and scopes for personal-token template URLs. A GitLab deploy token value is shown only when created.',
-      'For self-managed GitLab, use the same officially documented personal-token path on the declared HTTPS instance and set instanceUrl; do not use the GitLab.com creation link.',
-      'GitLab.com 18.1+ can use the observed hosted Linux runner. Self-managed deploys require one exact locked project runner id, one exact online linux/amd64 manager system id, a dedicated tag, protected-ref-only jobs, and the exact hypervibe-capabilities maintenance-note attestation declared in devops.ci.runner.',
-      'GitLab does not expose executor type or Docker privileged mode through these project APIs. The docker-privileged capability is therefore an operator attestation, not provider proof; protect runner administration and verify its config.toml out of band.',
-      'The exact project deploy-token page is <project web URL>/-/settings/repository under Deploy tokens; availability and placement can vary by GitLab version.',
-    ],
-  },
-  openai: {
-    provider: 'openai',
-    displayName: 'OpenAI API',
-    tokenType: 'OpenAI project API key stored as apiKey (not a ChatGPT subscription or browser session)',
-    setupUrl: 'https://platform.openai.com/api-keys',
-    permissions: [
-      'Create the key in the OpenAI project that should pay for and audit Hypervibe coding automation.',
-      'The project must have access to gpt-5.6-sol and the key must allow model reads plus Responses API writes.',
-      'Scope the key to this project and keep it out of the repository; Hypervibe syncs it only as the OPENAI_API_KEY Actions secret.',
-    ],
-    credentialExample: 'hv_connections provider="openai" scope="owner/repository" credentialsRef="env:OPENAI_API_KEY"',
-    notes: [
-      'OpenAI API billing is separate from ChatGPT plans. Set project budgets and usage limits in the OpenAI Platform before enabling scheduled AI automation.',
-      'The key is never included in specs, plans, logs, snapshots, or workflow files.',
     ],
   },
   local: {
@@ -792,40 +659,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Create the token at https://railway.com/account/tokens and select "No workspace" so it is an account token. Hypervibe verifies with the GraphQL me query, which Railway documents as unusable with workspace or project tokens — workspace-scoped tokens fail verification.',
       'Do NOT use a Project token (from a project\'s settings page): project tokens are scoped to one environment, use a different auth header, and cannot call the account-level API Hypervibe needs.',
       'If multiple workspaces are visible, include workspaceId: credentialsMap={"apiToken":"HYPERVIBE_RAILWAY_TOKEN","workspaceId":"RAILWAY_WORKSPACE_ID"} so projects are created in the right workspace.',
-    ],
-  },
-  vercel: {
-    provider: 'vercel',
-    displayName: 'Vercel',
-    tokenType: 'Vercel personal access token created under the Personal Account and scoped to the intended personal account or Team (new tokens normally use the vcp_ prefix)',
-    setupUrl: 'https://vercel.com/account/settings/tokens',
-    setupUrls: [
-      {
-        label: 'Create or review Vercel personal access tokens',
-        url: 'https://vercel.com/account/settings/tokens',
-      },
-      {
-        label: 'Vercel access-token and Team-scope guidance',
-        url: 'https://vercel.com/kb/guide/how-do-i-use-a-vercel-api-access-token',
-      },
-      {
-        label: 'Vercel roles and extended permissions',
-        url: 'https://vercel.com/docs/rbac/access-roles',
-      },
-    ],
-    permissions: [
-      'For a Team scope, use an Owner or Member token identity, or a Developer/Contributor identity granted Create Project, Full Production Deployment, and Environment Variable Manager permissions for the intended Team.',
-      'Hypervibe needs REST access to read/create/delete Projects, read and upsert/delete Project environment variables, upload deployment files, and create/read production Deployments.',
-      'Declared custom domains additionally require REST access to add, inspect/verify, and remove domains on the exact Project.',
-      'Scope the token to only the intended Vercel Team when possible and include that immutable teamId in the connection JSON; omit teamId only for a personal-account deployment scope.',
-    ],
-    credentialExample: 'hv_connections provider="vercel" credentialsRef="file:/absolute/path/vercel.json"',
-    notes: [
-      'The JSON must contain accessToken and may contain teamId. Find the immutable Team ID under Team Settings -> General; Hypervibe records only a non-secret team:<id> or user:<id> binding.',
-      'VERCEL_ACCESS_TOKEN, VERCEL_TOKEN, and HYPERVIBE_VERCEL_ACCESS_TOKEN are accepted aliases when resolving a scalar accessToken. Use a JSON file or credentialsMap when teamId is required.',
-      'Hypervibe creates source-less Vercel Projects and deploys exact checked-out Git files through the REST API. If a bound Project has a Vercel-native Git link, CI reconciliation blocks until that link is manually disconnected.',
-      'The Vercel hosting slice supports public web projects built by Vercel framework/static auto-detection. It rejects workers, cron jobs, release commands, arbitrary long-lived start commands, and build/Dockerfile overrides it cannot honestly apply.',
-      'Project creation and production deployments may consume metered build/function resources. Hypervibe confirmation-gates service creation and never creates Projects from the managed CI workflow.',
     ],
   },
   sendgrid: {
@@ -934,44 +767,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'The Stripe-managed output must be a regular, non-symlink file inside the linked repository and owner-only on POSIX systems (chmod 600).',
     ],
   },
-  supabase: {
-    provider: 'supabase',
-    displayName: 'Supabase',
-    tokenType: 'Supabase personal access token',
-    setupUrl: 'https://supabase.com/dashboard/account/tokens',
-    permissions: [
-      'Personal access tokens are not permission-scoped: they carry your full account privileges. Your account must be an Owner or Administrator of the target organization to create projects (Developer/Read-only roles cannot).',
-      'Include organizationId when multiple organizations are visible.',
-    ],
-    credentialExample: 'hv_connections provider="supabase" credentialsRef="dotenv:/absolute/path/.env#SUPABASE_ACCESS_TOKEN"',
-  },
-  neon: {
-    provider: 'neon',
-    displayName: 'Neon',
-    tokenType: 'Neon personal API key or organization API key with project create/read/delete access (not a project-scoped organization key)',
-    setupUrl: 'https://console.neon.tech/app/settings/api-keys',
-    permissions: [
-      'Use a personal API key for personal projects, or a personal API key with organizationId / an organization API key for organization projects; the identity must be allowed to create, read, and delete projects in the target account or organization.',
-      'Do not use a project-scoped organization API key: Neon limits it to one existing project and explicitly prevents destructive project operations such as project deletion.',
-    ],
-    credentialExample: 'hv_connections provider="neon" credentialsRef="dotenv:/absolute/path/.env#NEON_API_KEY"',
-    notes: [
-      'organizationId is required when a personal API key should manage organization-owned projects; use credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiKey":"NEON_API_KEY","organizationId":"NEON_ORGANIZATION_ID"} in that case. Omit it for personal projects or when an organization API key already infers the organization.',
-      'regionId is optional and uses Neon region IDs such as aws-us-west-2. The API key token is shown only when created, so store it in a dotenv file or secret manager instead of chat.',
-    ],
-  },
-  vault: {
-    provider: 'vault',
-    displayName: 'HashiCorp Vault',
-    tokenType: 'Vault token or AppRole role_id/secret_id',
-    setupUrl: 'https://developer.hashicorp.com/vault/docs/secrets/kv/kv-v2',
-    permissions: [
-      'read on <mount>/data/<path> and list on <mount>/metadata/<path> for the KV v2 secrets Hypervibe should resolve.',
-      'Add create/update on <mount>/data/<path> if Hypervibe should write secrets, and delete on <mount>/metadata/<path> if it should delete them (deletion removes all versions).',
-      "auth/token/lookup-self is used for verification; it is included in Vault's default policy.",
-    ],
-    credentialExample: 'hv_connections provider="vault" credentialsRef="file:/absolute/path/vault.json"',
-  },
 };
 
 function formLabel(value?: string): string | undefined {
@@ -988,18 +783,6 @@ function githubFormScope(options: ConnectionGuidanceContext): string | undefined
   const scope = formLabel(options.scope ?? parseGitHubRepoFromRemote(options.repositoryUrl) ?? undefined);
   return scope && /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/(?:[A-Za-z0-9_.-]{1,100}|\*)$/.test(scope)
     ? scope : undefined;
-}
-
-function gitlabFormScope(options: ConnectionGuidanceContext): URL | undefined {
-  // Only an explicit provider scope establishes a self-managed instance.
-  const scope = formLabel(options.scope);
-  if (!scope) return undefined;
-  try {
-    const url = new URL(scope);
-    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash
-      || !/^\/(?:[A-Za-z0-9_.-]+\/)+(?:[A-Za-z0-9_.-]+|\*)\/?$/.test(url.pathname)) return undefined;
-    return url;
-  } catch { return undefined; }
 }
 
 /** Resolve only our reviewed form templates; never add guessed provider fields. */
@@ -1022,16 +805,6 @@ export function connectionSetupUrl(
     }
     return url.href;
   }
-  if (template === GITLAB_TOKEN_URLS.api) {
-    const scope = gitlabFormScope(options);
-    const context = scope ? `${scope.host}${scope.pathname.replace(/\/$/, '')}` : project;
-    if (!context) return template;
-    const url = new URL(template);
-    if (scope) url.host = scope.host;
-    url.searchParams.set('name', limitLabel(`Hypervibe GitLab: ${context}`, 128));
-    url.searchParams.set('description', limitLabel(`Hypervibe GitLab repository and CI for ${context}`, 255));
-    return url.href;
-  }
   if ((Object.values(CLOUDFLARE_TOKEN_URLS) as string[]).includes(template)) {
     const scope = formLabel(options.scope);
     const context = scope && /^[A-Za-z0-9*.-]{1,253}$/.test(scope) ? scope : project;
@@ -1052,8 +825,7 @@ export function getConnectionGuidance(
   const guidance = GUIDANCE[provider];
   if (!guidance || !options.scope && !options.project && !options.repositoryUrl && !options.accountId) return guidance;
   const templates = provider === 'github' ? Object.values(GITHUB_TOKEN_URLS)
-    : provider === 'gitlab' ? [GITLAB_TOKEN_URLS.api]
-      : provider === 'cloudflare' ? Object.values(CLOUDFLARE_TOKEN_URLS) : [];
+    : provider === 'cloudflare' ? Object.values(CLOUDFLARE_TOKEN_URLS) : [];
   const replacements = templates.map(template => [template, connectionSetupUrl(template, options)] as const);
   const resolve = (text: string) => replacements.reduce((result, [template, url]) => result.replaceAll(template, url), text);
   return {
@@ -1093,9 +865,6 @@ function credentialExample(
         example = 'hv_connections provider="github" scope="owner/repository" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"NODE_AUTH_TOKEN"}';
       }
       if (options.scope) example = example.replace('scope="owner/repository"', `scope="${options.scope}"`);
-      break;
-    case 'gitlab':
-      if (options.scope) example = example.replace('scope="https://gitlab.com/group/project"', `scope=${JSON.stringify(options.scope)}`);
       break;
     case 'database':
       if (options.scope) example = example.replace('provider="database"', `provider="database" scope="${options.scope}"`);

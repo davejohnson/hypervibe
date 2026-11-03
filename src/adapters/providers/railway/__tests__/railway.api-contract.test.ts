@@ -19,7 +19,6 @@ describe('pinned provider API contract', () => {
     const { scripts } = JSON.parse(readFileSync('package.json', 'utf8'));
     expect(scripts['test:providers:upstream-contracts']).toBe('npm run test:providers:api-contracts');
     expect(scripts['test:providers:api-contracts']).toContain('railway.api-contract.test.ts');
-    expect(scripts['test:providers:api-contracts']).toContain('rest.api-contract.test.ts');
     expect(execFileSync(process.execPath, ['scripts/check-railway-upstream-contract.mjs'], {
       encoding: 'utf8',
     })).toContain('no network access');

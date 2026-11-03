@@ -86,7 +86,6 @@ import {
   planManagedCiAppliedSpecHash,
   planManagedCiDeploy,
 } from '../services/managed-ci.service.js';
-import { planManagedCodeRepository } from '../services/managed-code-repository.service.js';
 import { environmentUsesManagedCi, resolveDevOpsSelection } from '../spec/devops-selection.js';
 import { devOpsProviderRegistry } from '../registry/devops.registry.js';
 import { planIos } from '../services/appstore-plan.service.js';
@@ -1818,68 +1817,6 @@ export class PlanService {
           specSource: specResult.source ?? { kind: 'local' }, observed: null, verified: blocked.length === 0,
           actions, unmanaged: [], warnings: scopedBackupProgram.warnings, inputRequired: [], blocked,
           ...(selectedScope === 'backup-readiness' ? { backupReadiness: readiness } : {}) };
-      }
-    }
-    if (scope !== 'retained-cleanup') {
-      const codeRepository = await planManagedCodeRepository({
-        project: projectForPlan,
-        spec: specResult.spec,
-        environmentName,
-      });
-      if (codeRepository.error) return { error: codeRepository.error };
-      if (codeRepository.stageRequired && codeRepository.action) {
-        const incompatibleInputs = [
-          options?.serviceFilter?.length ? 'services' : null,
-          Object.keys(options?.envVarOverrides ?? {}).length > 0 ? 'envVars' : null,
-          options?.envFile ? 'envFile' : null,
-          options?.includeEnvFile === false ? 'includeEnvFile' : null,
-          Object.keys(options?.secretRefs ?? {}).length > 0 ? 'secretRefs' : null,
-        ].filter((name): name is string => Boolean(name));
-        if (incompatibleInputs.length > 0) {
-          return {
-            error: `Repository lifecycle is an isolated plan stage and does not accept deploy inputs: ${incompatibleInputs.join(', ')}.`,
-          };
-        }
-        const actions = [codeRepository.action];
-        const warnings = [
-          ...(specResult.adopted && specResult.source?.kind === 'repo'
-            ? [`${specResult.source.path} changed outside hypervibe; recorded as revision ${specResult.revision}.`]
-            : []),
-          ...(codeRepository.warning ? [codeRepository.warning] : []),
-        ];
-        const document: PlanRunDocument = {
-          kind: 'hv_plan',
-          scope: 'full',
-          environmentName,
-          specRevision: specResult.revision,
-          observedFingerprint: null,
-          actions,
-          unmanaged: [],
-          warnings,
-        };
-        const lifecycleEnvironment = this.envRepo.findByProjectAndName(project.id, environmentName)
-          ?? this.envRepo.create({ projectId: project.id, name: environmentName });
-        const run = this.runRepo.create({
-          projectId: project.id,
-          environmentId: lifecycleEnvironment.id,
-          type: 'plan',
-          plan: document as unknown as Record<string, unknown>,
-        });
-        this.runRepo.updateStatus(run.id, 'succeeded');
-        return {
-          planRunId: run.id,
-          scope: 'full',
-          specRevision: specResult.revision,
-          specSource: specResult.source ?? { kind: 'local' },
-          environmentName,
-          verified: codeRepository.action.verified,
-          observed: null,
-          actions,
-          unmanaged: [],
-          warnings,
-          inputRequired: [],
-          blocked: [],
-        };
       }
     }
     if (scope === 'full') {

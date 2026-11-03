@@ -22,13 +22,9 @@ describe('database credential alias provider contract', () => {
     expect(rows.filter(row => row[1] === 'Supported to implement').map(row => row[0])).toEqual(['railway']);
     const officialHosts: Record<string, string> = {
       railway: 'docs.railway.com',
-      supabase: 'supabase.com',
       cloudsql: 'docs.cloud.google.com',
       rds: 'docs.aws.amazon.com',
-      neon: 'neon.com',
       'azure-postgres': 'learn.microsoft.com',
-      digitalocean: 'docs.digitalocean.com',
-      fly: 'docs.fly.io',
     };
     for (const [provider, admission, evidence] of rows) {
       expect(admission, provider).toBe(provider === 'railway' ? 'Supported to implement' : 'Unsupported');

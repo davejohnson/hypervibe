@@ -30,8 +30,6 @@ import {
   GITHUB_DELEGATED_SECRET_DESTROY_OPERATION,
   GITHUB_DELEGATED_SECRET_OPERATION,
   isGitHubNativeSettingAction,
-  isGitHubOpenAISecretAction,
-  OPENAI_ACTIONS_SECRET,
 } from '../services/github-infrastructure.service.js';
 import {
   isGitHubPagesAction,
@@ -58,8 +56,6 @@ import { isProviderNativeDeploySourceAction } from '../services/provider-native-
 import { CACHE_OPERATIONS, isCacheAction } from '../services/cache-plan.service.js';
 import {
   GITHUB_ACTIONS_ROLLBACK_OPERATION,
-  GITLAB_CI_ROLLBACK_OPERATION,
-  GITLAB_ROLLBACK_REF_ENSURE_OPERATION,
 } from '../services/ci-rollback.contract.js';
 import {
   DATABASE_RESILIENCE_OPERATIONS,
@@ -90,11 +86,6 @@ import {
   CI_VARIABLE_DELETE_OPERATION,
   CI_VARIABLE_SYNC_OPERATION,
 } from '../services/managed-ci.contract.js';
-import {
-  CODE_REPOSITORY_BINDING_REMOVE_OPERATION,
-  CODE_REPOSITORY_CREATE_OPERATION,
-  CODE_REPOSITORY_DESTROY_OPERATION,
-} from '../services/managed-code-repository.contract.js';
 
 export type PlanMutationCapability =
   | 'database.bootstrap'
@@ -111,8 +102,6 @@ export type PlanMutationCapability =
   | 'domain.registration.mutate'
   | 'github.ci.sync'
   | 'github.ci.rollback'
-  | 'gitlab.rollback-ref.ensure'
-  | 'gitlab.ci.rollback'
   | 'github.ci.release'
   | 'github.applied-spec-hash.sync'
   | 'ci.configuration.sync'
@@ -121,12 +110,8 @@ export type PlanMutationCapability =
   | 'ci.variable.delete'
   | 'ci.binding.remove'
   | 'ci.applied-spec-hash.sync'
-  | 'code.repository.create'
-  | 'code.repository.destroy'
-  | 'code.repository.binding.remove'
   | 'github.collaboration.sync'
   | 'github.infrastructure.sync'
-  | 'github.openai-secret.sync'
   | 'github.delegated-secret.sync'
   | 'github.setting.sync'
   | 'github.pages.sync'
@@ -304,11 +289,6 @@ function metadataBoolean(action: PlanAction, key: string): boolean | undefined {
 function metadataPositiveInteger(action: PlanAction, key: string): number | undefined {
   const value = action.metadata?.[key];
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined;
-}
-
-function metadataPositiveIntegerString(action: PlanAction, key: string): string | undefined {
-  const value = metadataString(action, key);
-  return value && /^[1-9]\d*$/.test(value) ? value : undefined;
 }
 
 function metadataSha256(action: PlanAction, key: string): string | undefined {
@@ -619,49 +599,6 @@ export function resolvePlanActionAuthority(
     return authority(action, 'ci.configuration.sync');
   }
   if (
-    action.metadata?.operation === CODE_REPOSITORY_CREATE_OPERATION
-    && exactResource(action, 'repo')
-    && action.type === 'create'
-    && action.dataBearing === true
-    && action.requiresConfirm === true
-    && action.resource.provider === metadataString(action, 'codeProvider')
-    && action.resource.name === metadataString(action, 'repositoryScope')
-    && metadataString(action, 'repositoryConfigHash')
-    && metadataString(action, 'desiredState') === 'present'
-    && metadataString(action, 'management') === 'managed'
-  ) {
-    return authority(action, 'code.repository.create');
-  }
-  if (
-    action.metadata?.operation === CODE_REPOSITORY_DESTROY_OPERATION
-    && exactResource(action, 'repo')
-    && action.type === 'destroy'
-    && action.dataBearing === true
-    && action.requiresConfirm === true
-    && action.resource.provider === metadataString(action, 'codeProvider')
-    && action.resource.name === metadataString(action, 'repositoryScope')
-    && metadataString(action, 'repositoryId')
-    && metadataString(action, 'instanceScope')
-    && metadataString(action, 'repositoryConfigHash')
-    && metadataString(action, 'desiredState') === 'absent'
-    && metadataString(action, 'management') === 'managed'
-  ) {
-    return authority(action, 'code.repository.destroy');
-  }
-  if (
-    action.metadata?.operation === CODE_REPOSITORY_BINDING_REMOVE_OPERATION
-    && exactResource(action, 'repo')
-    && action.type === 'update'
-    && action.resource.provider === metadataString(action, 'codeProvider')
-    && action.resource.name === metadataString(action, 'repositoryScope')
-    && metadataString(action, 'repositoryId')
-    && metadataString(action, 'instanceScope')
-    && metadataString(action, 'repositoryConfigHash')
-    && metadataString(action, 'desiredState') === 'absent'
-  ) {
-    return authority(action, 'code.repository.binding.remove');
-  }
-  if (
     action.metadata?.operation === CI_VARIABLE_SYNC_OPERATION
     && exactResource(action, 'secret')
     && action.resource.provider === metadataString(action, 'ciProvider')
@@ -736,42 +673,6 @@ export function resolvePlanActionAuthority(
     return authority(action, 'github.ci.rollback');
   }
   if (
-    action.metadata?.operation === GITLAB_ROLLBACK_REF_ENSURE_OPERATION
-    && exactResource(action, 'repo', 'gitlab')
-    && action.type === 'create'
-    && action.resource.name === metadataString(action, 'rollbackRef')
-    && /^hypervibe-rollback-[a-z0-9-]+-[0-9a-f]{12}-[1-9]\d*$/.test(metadataString(action, 'rollbackRef') ?? '')
-    && metadataPositiveIntegerString(action, 'repositoryId')
-    && metadataString(action, 'instanceScope')
-    && metadataString(action, 'repositoryScope')
-    && /^[0-9a-f]{40}$/i.test(metadataString(action, 'targetSha') ?? '')
-    && metadataPositiveIntegerString(action, 'targetJobId')
-    && metadataString(action, 'targetArtifactId') === `${metadataString(action, 'targetJobId')}:.hypervibe-release.json`
-    && metadataPositiveIntegerString(action, 'targetPipelineId')
-    && metadataPositiveIntegerString(action, 'observedLatestPipelineId')
-  ) {
-    return authority(action, 'gitlab.rollback-ref.ensure');
-  }
-  if (
-    action.metadata?.operation === GITLAB_CI_ROLLBACK_OPERATION
-    && exactResource(action, 'ci', 'gitlab-ci')
-    && action.type === 'update'
-    && action.resource.name === `deploy-branch:${metadataString(action, 'environmentName') ?? ''}`
-    && metadataPositiveIntegerString(action, 'repositoryId')
-    && metadataString(action, 'instanceScope')
-    && metadataString(action, 'repositoryScope')
-    && metadataString(action, 'definition')
-    && /^hypervibe-rollback-[a-z0-9-]+-[0-9a-f]{12}-[1-9]\d*$/.test(metadataString(action, 'rollbackRef') ?? '')
-    && /^[0-9a-f]{40}$/i.test(metadataString(action, 'targetSha') ?? '')
-    && metadataPositiveIntegerString(action, 'targetJobId')
-    && metadataString(action, 'targetArtifactId') === `${metadataString(action, 'targetJobId')}:.hypervibe-release.json`
-    && metadataPositiveIntegerString(action, 'targetPipelineId')
-    && metadataPositiveIntegerString(action, 'observedLatestPipelineId')
-    && metadataString(action, 'programHash')
-  ) {
-    return authority(action, 'gitlab.ci.rollback');
-  }
-  if (
     isGitHubActionsAppliedSpecHashAction(action)
     && exactResource(action, 'ci', 'github')
     && action.type === 'update'
@@ -819,16 +720,6 @@ export function resolvePlanActionAuthority(
     )
   ) {
     return authority(action, 'github.infrastructure.sync');
-  }
-  if (
-    isGitHubOpenAISecretAction(action)
-    && exactResource(action, 'secret', 'github')
-    && action.type === 'update'
-    && action.resource.name === OPENAI_ACTIONS_SECRET
-    && metadataString(action, 'secretName') === OPENAI_ACTIONS_SECRET
-    && metadataString(action, 'repository')
-  ) {
-    return authority(action, 'github.openai-secret.sync');
   }
   if (
     isGitHubDelegatedSecretAction(action)

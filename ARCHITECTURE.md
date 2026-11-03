@@ -204,9 +204,34 @@ This access model does not require a hosted Hypervibe control plane, shared
 drift service, or secret relay. API-key transfer may remain an external human
 workflow: the key owner may supply it out of band for the infrastructure owner
 to store through a safe local reference, or both may use an existing shared
-secret manager such as 1Password. Hypervibe records only the delegated slot
+secret manager such as AWS Secrets Manager. Hypervibe records only the delegated slot
 and value-free handoff metadata. An optional hosted one-time handoff is described
 under delegated secrets below; reporting enrollment never grants secret access.
+
+## Provider Scope
+
+Decision (2026-11-03): Hypervibe supports a deliberately small provider set so
+that every supported path can be kept working end to end.
+
+- Hosting, Postgres, volumes, object storage and secrets: Railway, Google Cloud
+  (Cloud Run, Cloud SQL, Memorystore, Cloud Storage, Pub/Sub), AWS (ECS Express,
+  RDS, ElastiCache, S3, Secrets Manager) and Azure (Container Apps, PostgreSQL
+  Flexible Server, Managed Redis, Blob Storage). Railway is expected to be
+  retired later; new shared abstractions should not be shaped around it.
+- Code hosting and CI: GitHub and GitHub Actions.
+- DNS and domains: Cloudflare. Email: SendGrid. Payments: Stripe (including
+  Stripe Projects references). Mobile releases: App Store Connect.
+- Any other service whose integration is "create an API key and put it in an
+  environment variable" (OpenAI, Anthropic, Slack, reCAPTCHA, auth vendors)
+  uses the generic delegated `secrets` contract, not a provider adapter. A
+  dedicated adapter is justified only when Hypervibe must call that service's
+  API itself, for example to register webhooks or verify configuration.
+
+Fly.io, Vercel, DigitalOcean, GitLab/GitLab CI, Neon, Supabase, HashiCorp
+Vault, Doppler, 1Password, Bitwarden and the OpenAI connector were removed.
+Hypervibe never creates or deletes code repositories. A removed provider may be
+re-added only when a real user needs it and the existing supported paths pass
+live end-to-end conformance, recorded as a deliberate change to this section.
 
 ## Provider Boundary
 
@@ -291,8 +316,7 @@ Environment custom domains always require a successful provider-side attachment
 before Hypervibe writes DNS. Hosting providers declare `lifecycle.hosting` and
 their custom-domain support in registry metadata; generic orchestration must not
 infer support from a provider name or deployment category. There is no generic
-CNAME-to-service fallback. Cloud Run, DigitalOcean App Platform, Railway, and
-Vercel implement provider-owned attach, observation, and exact detach contracts.
+CNAME-to-service fallback. Cloud Run and Railway implement provider-owned attach, observation, and exact detach contracts.
 Each successful attachment persists the provider
 domain id, service and environment ids, Cloudflare zone id, and every managed
 DNS record id before it may converge. An observed provider attachment without
@@ -314,9 +338,7 @@ requirements are available is persisted with a known-empty record set so a
 later plan can continue or safely detach it.
 
 Provider certificate flows remain provider-owned. Cloud Run uses native domain
-mappings only in regions where Google exposes that API. DigitalOcean preserves
-the full App Spec while reconciling its domain collection. Vercel uses the exact
-Project-domain identity. Cloud Run declares DNS-only traffic in provider
+mappings only in regions where Google exposes that API. Cloud Run declares DNS-only traffic in provider
 metadata, so generic apply forces its Cloudflare traffic records unproxied even
 if `domainProxy` was requested. GitHub Pages remains the separate project-level
 lifecycle described below.
@@ -365,18 +387,11 @@ The removed hand-built ECS and pre-provisioned Container Apps implementations
 must not be revived. AWS and Azure datastore and secret providers remain
 independent capabilities.
 
-DigitalOcean Container Registry is an account-level hosting prerequisite, not
-a credential field. The explicit DigitalOcean project action reuses the
-deterministically selected existing registry or creates a free Starter registry
-when the account has none. Provider CI only discovers and uses that reviewed
-registry; it must never create registry infrastructure. Environment teardown
-does not delete the shared account registry.
-
 Hosting-provider migrations retain the abandoned provider identity until
 cleanup is provider-confirmed. Every hosting adapter declares its smallest
-complete teardown boundary: Cloud Run and Vercel own individual services,
-Railway owns one environment inside a shared project, and ECS Express, Azure
-Container Apps, and DigitalOcean App Platform own one project/app boundary per
+complete teardown boundary: Cloud Run owns individual services,
+Railway owns one environment inside a shared project, and ECS Express and Azure
+Container Apps own one project/app boundary per
 Hypervibe environment. Planning must use that declaration; generic code must
 never infer deletion scope from a provider name. Project-boundary cleanup
 deletes exact services first and then the owned project. Railway cleanup deletes
@@ -598,10 +613,10 @@ Azure hosting and storage share the same resource-group scope resolver.
 
 | Native resource boundary | New default |
 | --- | --- |
-| Railway environment instances; ECS cluster services; Azure resource-group apps; DigitalOcean app components; Azure account containers | Plain logical name, e.g. `web` or `documents` |
-| ECS clusters; Azure resource groups; DigitalOcean apps | Environment name plus a short project-scope hash |
+| Railway environment instances; ECS cluster services; Azure resource-group apps; Azure account containers | Plain logical name, e.g. `web` or `documents` |
+| ECS clusters; Azure resource groups | Environment name plus a short project-scope hash |
 | Azure managed environment inside its resource group | `runtime` |
-| Cloud Run services/jobs; Pub/Sub topics/subscriptions; Fly apps; Vercel projects; non-Railway datastores; default-namespace S3/GCS buckets and Azure storage accounts | Logical name plus a short scope hash, respecting native limits |
+| Cloud Run services/jobs; Pub/Sub topics/subscriptions; non-Railway datastores; default-namespace S3/GCS buckets and Azure storage accounts | Logical name plus a short scope hash, respecting native limits |
 
 An environment label is not necessarily a provider namespace. Cloud Run and
 Pub/Sub share their connected GCP project between Hypervibe environments, so
@@ -622,9 +637,7 @@ Provider constraints are grounded in the official
 [ECS service API](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_CreateExpressGatewayService.html),
 [Azure naming rules](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/resource-name-rules),
 [Cloud Run deployment contract](https://docs.cloud.google.com/run/docs/deploying),
-[Pub/Sub resource names](https://docs.cloud.google.com/pubsub/docs/pubsub-basics),
-[DigitalOcean app spec](https://docs.digitalocean.com/products/app-platform/reference/app-spec/),
-[Fly app contract](https://fly.io/docs/machines/api/apps-resource/), and
+[Pub/Sub resource names](https://docs.cloud.google.com/pubsub/docs/pubsub-basics), and
 [S3 naming rules](https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html).
 Changing these defaults requires the compatibility/lifecycle tests described
 in `test/provider-contracts/README.md`; offline checks do not establish live
@@ -1176,9 +1189,9 @@ existing image may still require provider bootstrap before CI can target them,
 and receipts must report that honestly.
 
 `deploymentDeferred` means only that Hypervibe did not release new application
-code. It must not imply stale runtime configuration: Cloud Run, Fly.io, ECS
-Express, Azure Container Apps, and DigitalOcean can activate configuration with
-the current image, while providers such as Railway and Vercel can leave the
+code. It must not imply stale runtime configuration: Cloud Run, ECS
+Express, and Azure Container Apps can activate configuration with
+the current image, while providers such as Railway can leave the
 currently selected deployment unchanged. An adapter sets
 `runtimeRolloutRequired` only when its successful mutation has left runtime
 configuration waiting for a later deployment. Generic orchestration must
@@ -1525,7 +1538,7 @@ TestFlight upload, or TestFlight distribution commands.
   nor creates or changes the source environment. Presence does not prove signing
   validity, and these separate reads cannot guarantee unchanged state when a
   later workflow runs. This capability is limited to the existing GitHub Actions
-  iOS path; GitLab CI remains explicitly unsupported for managed iOS releases.
+  iOS path.
 - A successful server deploy writes an artifact whose name and JSON body carry
   the environment, repository, exact full Git SHA, and deployed service set.
   The artifact is emitted only after provider deployment steps succeed.
@@ -1650,7 +1663,7 @@ readable through one lossless compatibility normalization to `github` plus
 
 Code-host and CI provider ids are open registry values. Generic plan/apply,
 hosting, tool, CLI, and MCP code routes through provider capabilities and does
-not branch on GitHub, GitLab, or provider-native API fields. Code identity and
+not branch on GitHub or provider-native API fields. Code identity and
 CI execution identity are separate durable bindings even when one vendor
 supplies both. A CI provider must prove compatibility with the exact bound code
 repository before any configuration, variable, dispatch, or evidence action.
@@ -1664,7 +1677,7 @@ bindings; its target need not be the application repository.
 
 Hosting providers emit provider-neutral, versioned deploy recipes. CI adapters
 render those recipes and operate definitions/runs; hosting code never emits
-GitHub Actions or GitLab CI syntax. The neutral program has typed triggers,
+CI-provider syntax. The neutral program has typed triggers,
 runner requirements, logical variables/secrets, semantic steps, concurrency,
 and release evidence. It has no raw provider-YAML or privileged free-form-shell
 escape hatch. An unknown program/step version or unsupported semantic returns
@@ -1674,9 +1687,7 @@ CI configuration is an observed authority graph, not just a file hash. The CI
 adapter owns whole-root, provider-proven composable-include, or provider-managed
 configuration semantics and must observe all import and transformation layers
 that can alter privileged jobs. Unknown effective configuration blocks secret
-sync, dispatch, and release evidence. The initial GitLab MVP supports only a
-Hypervibe-owned root `.gitlab-ci.yml`; a pre-existing unmanaged root is
-preserved and blocks with review guidance.
+sync, dispatch, and release evidence.
 
 CI variables are observed with provider-native scope, precedence, protection,
 and value visibility (`plaintext`, `redacted`, `omitted`, or `unknown`). Raw
@@ -1690,67 +1701,10 @@ that accept replacement configuration at dispatch time are never used.
 Run, job, pipeline, artifact, and attempt ids are bounded opaque strings scoped
 by provider instance and execution identity. Native queue/pause/cancel behavior
 is normalized but never trusted as the only concurrency gate: every privileged
-job rejects a stale/superseded run immediately before provider mutation. The
-GitLab renderer does this with the short-lived job token and the environment's
-provider deployment history, proving the exact current job/pipeline/SHA and
-that no newer deployment exists before exposing provider credentials to its
-runtime.
+job rejects a stale/superseded run immediately before provider mutation.
 Artifact size and retention are observed capabilities, and release evidence
 includes the exact run, job, attempt, SHA, program fingerprint, and provider
 revision.
-
-GitLab Cloud/self-managed code hosting and GitLab CI are separate registered
-capability sets that may share one verified connection. Self-managed instances
-require an explicit non-secret instance URL and tested version/capability
-range. GitLab projects bind by durable numeric project id first; project path
-and clone URLs are current display/location data. Repository lifecycle is
-explicit under `devops.code.repository`: external is the compatibility default,
-while managed create/delete uses isolated confirmation-gated actions, verifies
-the exact parent namespace or project authority, never adopts a name match, and
-retains the durable binding until exact provider absence is proven. GitLab.com
-scheduled deletion retains that binding through the provider's 30-day
-retention window; self-managed permanent deletion is re-observed before local
-state is removed. Deletion intent is persisted before the first provider call;
-if self-managed GitLab schedules deletion but permanent removal fails, the
-binding is retained and the next separately confirmed destroy retries the exact
-numeric id and full path. Managed creation initializes the declared default branch;
-the resulting default branch and visibility are observed and must converge. If
-GitLab acknowledges the exact project but those settings or clone identities do
-not converge, Hypervibe retains the durable id for recovery and blocks instead
-of retrying creation. In-place repository-setting updates are not part of this
-slice, so later drift blocks explicitly rather than being reported as a noop.
-moving existing local history into that new remote remains separate source
-coordination, not an implicit infrastructure side effect.
-
-GitLab CI renders the registered provider-neutral recipes for Azure Container
-Apps, Cloud Run, DigitalOcean App Platform, ECS Express, Railway, and Vercel.
-CI may build and copy an exact-SHA image, but it mutates only pre-existing bound
-hosting resources and registries; it never bootstraps hosting infrastructure.
-Cloud Run, Azure Container Apps, and ECS Express deploy the registry-returned
-image digest, while provider APIs that accept a tag are pinned to the full Git
-SHA and re-observed with release markers.
-GitLab-hosted runners are accepted only on GitLab.com under the dedicated
-hosted tag, and a project/group runner that can claim that tag blocks secret
-sync. Self-managed execution requires one exact locked project runner id, one
-exact online linux/amd64 manager system id, a dedicated uncontested tag,
-protected-ref-only jobs, and a provider-observed maintenance-note capability
-attestation. GitLab does not expose executor type or privileged-Docker mode in
-these project APIs, so `docker-privileged` remains an explicit operator
-attestation and must not be described as provider-proven.
-
-GitLab rollback selects only an unexpired successful managed release artifact,
-creates a deterministic exact-SHA protected tag, and dispatches a new typed-
-input pipeline. The tag wildcard must allow only the exact authenticated GitLab
-user—not the Maintainer role generally—so another Maintainer cannot manufacture
-a privileged rollback ref. Per-environment `resource_group` serialization,
-forward-deployment protection, disabled rollback retries, and fresh evidence
-observation close deploy races. Teardown first removes managed jobs through one
-reviewed merge request, proves them absent and no relevant job active, deletes
-one exact owned variable per confirmation-gated action, and only then removes
-the local CI binding. These paths remain `ready-for-live`, not `supported`,
-until recent live lifecycle evidence exists for the exact GitLab offering,
-version, runner mode, and hosting recipe. Collaboration, Pages, and advanced
-GitLab features remain separate capabilities.
 
 Deployment ownership is exclusive. Only an explicit `deploy.strategy: "branch"`
 with `deploy.trigger: "native"` may retain a provider-native repository source.
@@ -1819,8 +1773,8 @@ as execution authority, even with confirmation. See
 Managed CI rollback is an explicit operational action over that same exact-SHA
 release boundary. `hv_rollback` must select only unexpired server-release
 evidence emitted by a successful run of the exact managed environment workflow.
-When a provider exposes immutable image evidence (Railway, Cloud Run, ECS Express,
-Azure Container Apps and Fly), the
+When a provider exposes immutable image evidence (Railway, Cloud Run, ECS Express
+and Azure Container Apps), the
 release record includes the exact registry digest; rollback downloads and
 validates it, skips source checkout and image rebuilding, and deploys the
 recorded immutable image URI.
@@ -1939,8 +1893,8 @@ configuration is otherwise correct. Completion receipts distinguish provider
 writes from read-only reconciliation and the local binding update.
 
 The named hosting-provider contract is explicit: Cloud Run implements deferred
-cron activation; Railway and DigitalOcean retain their existing native cron
-paths; Fly, ECS, Azure Container Apps and Vercel do not advertise cron workload
+cron activation; Railway retains its existing native cron
+path; ECS and Azure Container Apps do not advertise cron workload
 support. The initial post-release activation bridge uses GitHub Actions evidence;
 other CI providers remain explicitly unsupported for that bridge. This does not
 expand the separate creation-only deployment capability. Offline transport and
@@ -2076,8 +2030,8 @@ original deployment stopped. Preserve the original deployment acknowledgment and
 record the separately verified activation and patch in the completed receipt.
 Bootstrap and seed consumers validate the same receipt; a latest deployment or
 matching image alone is never replacement authority.
-Existing storage and unknown evidence block. Supabase, Neon,
-Cloud SQL, RDS, Azure PostgreSQL, Fly MPG and DigitalOcean are unsupported for
+Existing storage and unknown evidence block. Cloud SQL,
+RDS and Azure PostgreSQL are unsupported for
 this operation; their managed reset/restore APIs must not be used as fallbacks.
 Discard permission covers only the reviewed old data. Future backups, SQL
 authentication, migrations, seed work and application readiness remain separate.
@@ -2208,7 +2162,7 @@ Ordinary deployment is independent of backup setup and health. `PlanService`
 owns the explicit `hv_plan scope="backups"` stages for schedules, provisioning,
 publication and recovery evidence; omitted/full scope must not select them or
 infer billable archive storage. `executePlanApply`, direct deployment and the
-GitHub/GitLab workflow renderers do not impose backup-readiness gates, including
+GitHub workflow renderers do not impose backup-readiness gates, including
 all-noop bootstrap and retry paths. Status reports backup gaps separately from
 deployment configuration drift. Explicit destructive-operation checkpoints keep
 their isolated planning and exact action confirmation rules above. Native
@@ -2284,14 +2238,8 @@ or unknown observation blocks the next mutation. Migration copy actions carry
 fresh source and target maintenance fingerprints and re-observe both immediately
 before provisioning a candidate target.
 
-The workload port is implemented by Azure Container Apps, DigitalOcean App
-Platform, GCP Cloud Run, Railway, and Vercel. DigitalOcean archives and restores
-only the exact bound app, preserves the complete live App Spec on both writes,
-and verifies a terminal archived state with zero running instances before entry
-succeeds. Every component restoration snapshot is durable before that atomic
-app-level mutation. Vercel pauses and unpauses only the exact bound Project,
-preserves a Project that was already paused, and verifies provider pause state
-on its direct production origins before entry succeeds. Cloudflare supplies the
+The workload port is implemented by Azure Container Apps, GCP Cloud Run, and
+Railway. Cloudflare supplies the
 common public edge and PostgreSQL supplies the provider-independent write
 fence. ECS Express explicitly declares maintenance unsupported until it can
 prove all background and direct-origin workloads are reversibly stopped.

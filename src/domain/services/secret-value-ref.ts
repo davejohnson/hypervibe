@@ -8,7 +8,7 @@ import { HvError } from '../../application/results.js';
 /**
  * Resolve a chat-safe value reference locally: env:NAME,
  * dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a
- * secret-manager ref (1password://..., vault://...). The value never
+ * secret-manager ref (aws-secrets://...). The value never
  * transits the chat transcript.
  */
 export async function resolveSecretValueRef(
@@ -54,7 +54,7 @@ export async function resolveSecretValueRef(
 
   const parsed = parseSecretRef(trimmed);
   if (!parsed) {
-    throw new HvError('VALIDATION', 'Unsupported secretRef. Use env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref like 1password://vault/item#field.');
+    throw new HvError('VALIDATION', 'Unsupported secretRef. Use env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref like aws-secrets://name#key.');
   }
   const resolved = await new SecretResolver().resolveSecret(parsed.raw, context);
   if ('error' in resolved) {

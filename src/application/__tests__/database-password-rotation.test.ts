@@ -24,7 +24,7 @@ beforeEach(() => { dir = mkdtempSync(path.join(tmpdir(), 'hv-db-rotation-')); Sq
 afterEach(() => { vi.restoreAllMocks(); SqliteAdapter.resetInstance(); rmSync(dir, { recursive: true, force: true }); });
 
 async function fixture(provider = 'railway') {
-  const hosting = ({ cloudsql: 'cloudrun', rds: 'ecs', 'azure-postgres': 'azure-container-apps', fly: 'fly', digitalocean: 'digitalocean' } as Record<string, string>)[provider] ?? 'railway';
+  const hosting = ({ cloudsql: 'cloudrun', rds: 'ecs', 'azure-postgres': 'azure-container-apps' } as Record<string, string>)[provider] ?? 'railway';
   const ctx = createCommandContext();
   const project = ctx.repos.projects.create({ name: 'rotation-contract', defaultPlatform: 'railway' });
   const environment = ctx.repos.environments.create({ projectId: project.id, name: 'production', platformBindings: {
@@ -94,7 +94,7 @@ it('does not expose decrypted malformed intent before the apply executor starts'
   expect(f.configuration.synchronize).not.toHaveBeenCalled();
 });
 
-it.each(['railway', 'supabase', 'neon', 'cloudsql', 'rds', 'azure-postgres', 'fly', 'digitalocean'])('composes %s native authentication with complete exact hosting consumers', async provider => {
+it.each(['railway', 'cloudsql', 'rds', 'azure-postgres'])('composes %s native authentication with complete exact hosting consumers', async provider => {
   const f = await composedFixture(provider);
   const plan = await f.plan();
   expect(plan).not.toHaveProperty('error'); if ('error' in plan) return;
@@ -109,7 +109,7 @@ it.each(['railway', 'supabase', 'neon', 'cloudsql', 'rds', 'azure-postgres', 'fl
 });
 
 it.each(['adopt', 'rotate'] as const)('supports provider-generated %s with the exact encrypted value and no repeat reset', async intent => {
-  const f = await composedFixture('fly');
+  const f = await composedFixture('cloudsql');
   f.target.inputMode = 'provider-generated'; let actual = 'old';
   f.lifecycle.readCurrent.mockImplementation(async () => actual);
   f.lifecycle.rotate.mockImplementation(async () => { actual = 'native-generated'; f.setActual(actual); return { state: 'unknown' }; });
@@ -172,53 +172,19 @@ it('does not strand recovery when the native adapter proves it refused the mutat
   expect(await f.plan()).not.toHaveProperty('error');
 });
 
-it.each(['fly', 'digitalocean'])('synchronizes %s write-only consumers from exact declared database projections without claiming current-value proof', async provider => {
-  const f = await composedFixture(provider);
-  vi.mocked(hostingEnv.readHostingEnvVars).mockResolvedValue({ success: true, provider, variables: {}, unresolvedKeys: ['DATABASE_URL', 'POSTGRES_DB_URL'] });
-  vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter: {
-    name: provider, capabilities: { credentialValueEvidence: 'acknowledgement', credentialUpdateActivation: 'deferred' }, observe: async () => f.observed,
-  } as any });
-  const plan = await f.plan(); if ('error' in plan) throw new Error(plan.error);
-  expect(await f.apply(plan.planRunId, plan.actions.map(action => action.id))).toMatchObject({ result: { success: true } });
-  expect(f.synchronize).toHaveBeenCalledTimes(2);
-  for (const [input] of f.synchronize.mock.calls) expect(input.vars).toEqual({ DATABASE_URL: 'postgresql://app:same-intended-replacement@database.internal/railway?application_name=web', POSTGRES_DB_URL: 'postgresql://app:same-intended-replacement@database.internal/railway?application_name=web' });
-  const inventory = await credentialInventory(f.ctx, f.project, 'production');
-  const role = inventory.roles.find(role => role.id === 'role:database-login')!;
-  expect(role.consumers.filter(consumer => consumer.kind === 'hosting').every(consumer => consumer.configuration.comparison === 'unknown')).toBe(true);
-});
-
 it('does not turn a failed read into authority to overwrite a write-only consumer', async () => {
-  const f = await composedFixture('fly');
-  vi.mocked(hostingEnv.readHostingEnvVars).mockResolvedValue({ success: false, provider: 'fly', error: 'Unknown provider read' });
-  vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter: { name: 'fly', capabilities: { credentialValueEvidence: 'acknowledgement' }, observe: async () => f.observed } as any });
+  const f = await composedFixture('cloudsql');
+  vi.mocked(hostingEnv.readHostingEnvVars).mockResolvedValue({ success: false, provider: 'cloudrun', error: 'Unknown provider read' });
+  vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter: { name: 'cloudrun', capabilities: { credentialValueEvidence: 'acknowledgement' }, observe: async () => f.observed } as any });
   expect(await f.plan()).toHaveProperty('error');
   expect(f.lifecycle.rotate).not.toHaveBeenCalled(); expect(f.synchronize).not.toHaveBeenCalled();
 });
 
-it.each(['fly', 'digitalocean'])('retains %s exact accepted configuration evidence for the database consumer rollout', async provider => {
-  const f = await composedFixture(provider);
-  const write = f.synchronize.getMockImplementation()!;
-  f.synchronize.mockImplementation(async args => ({ ...await write(args), data: {
-    configurationUpdated: true, credentialValueEvidence: 'acknowledgement',
-    credentialUpdateActivation: provider === 'fly' ? 'deferred' : 'provider-rollout',
-    ...(provider === 'fly' ? { configurationVersion: args.service.name === 'web' ? 42 : 43 }
-      : { deploymentId: `${args.service.name}-native-new`, deploymentIds: [`${args.service.name}-native-new`] }),
-    runtimeRolloutRequired: true,
-  } }));
-  const plan = await f.plan(); if ('error' in plan) throw new Error(plan.error);
-  expect(await f.apply(plan.planRunId, plan.actions.map(action => action.id))).toMatchObject({ result: { success: true } });
-  const saved = f.ctx.repos.environments.findById(f.environment.id)!;
-  expect(saved.platformBindings.runtimeRollouts).toEqual(expect.arrayContaining(['web', 'worker'].map(service => expect.objectContaining({
-    service, operationId: plan.planRunId, configurationAccepted: 'readback', configurationAcceptedKeys: ['DATABASE_URL', 'POSTGRES_DB_URL'],
-    ...(provider === 'fly' ? { configurationVersion: service === 'web' ? 42 : 43 } : { expectedDeploymentId: `${service}-native-new`, expectedDeploymentIds: [`${service}-native-new`] }),
-  }))));
-});
-
 it('requires explicit uncertain-write retry for opaque consumers without resetting the native password again', async () => {
-  const f = await composedFixture('fly');
-  vi.mocked(hostingEnv.readHostingEnvVars).mockResolvedValue({ success: true, provider: 'fly', variables: {}, unresolvedKeys: ['DATABASE_URL', 'POSTGRES_DB_URL'] });
+  const f = await composedFixture('cloudsql');
+  vi.mocked(hostingEnv.readHostingEnvVars).mockResolvedValue({ success: true, provider: 'cloudrun', variables: {}, unresolvedKeys: ['DATABASE_URL', 'POSTGRES_DB_URL'] });
   vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter: {
-    name: 'fly', capabilities: { credentialValueEvidence: 'acknowledgement', credentialUpdateActivation: 'deferred' }, observe: async () => f.observed,
+    name: 'cloudrun', capabilities: { credentialValueEvidence: 'acknowledgement', credentialUpdateActivation: 'deferred' }, observe: async () => f.observed,
   } as any });
   const write = f.synchronize.getMockImplementation()!; let first = true;
   f.synchronize.mockImplementation(async args => {

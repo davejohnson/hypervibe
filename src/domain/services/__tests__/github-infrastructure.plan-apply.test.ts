@@ -14,7 +14,6 @@ import {
   GitHubAdapter,
   type GitHubPullRequestSummary,
 } from '../../../adapters/providers/github/github.adapter.js';
-import '../../../adapters/providers/openai/openai.adapter.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { executePlanApply } from '../../../application/apply-plan.js';
 import { createToolContext } from '../../../application/context.js';
@@ -32,7 +31,6 @@ import {
   GITHUB_INFRASTRUCTURE_MANIFEST,
   GITHUB_INFRASTRUCTURE_PR_BODY_MARKER,
   GITHUB_INFRASTRUCTURE_PR_TITLE,
-  GITHUB_OPENAI_SECRET_ACTION_ID,
   githubInfrastructureConnectionBlock,
   planGitHubInfrastructure,
 } from '../github-infrastructure.service.js';
@@ -128,22 +126,6 @@ describe('GitHub infrastructure plan/apply', () => {
     vi.useRealTimers();
     SqliteAdapter.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
-  });
-
-  it('plans one file PR first and defers the OpenAI secret stage', async () => {
-    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
-    const result = await planGitHubInfrastructure({ project, spec: spec(), environmentName: 'production' });
-
-    expect(result.actions).toHaveLength(1);
-    expect(result.actions[0]).toMatchObject({
-      id: GITHUB_INFRASTRUCTURE_ACTION_ID,
-      type: 'update',
-      metadata: { branch: GITHUB_INFRASTRUCTURE_BRANCH },
-    });
-    expect(result.actions[0].metadata?.desiredFiles).toEqual(expect.arrayContaining([
-      expect.objectContaining({ path: '.github/workflows/hypervibe-fix.yml' }),
-    ]));
-    expect(result.blocked.find((block) => block.provider === 'openai')).toBeUndefined();
   });
 
   it('marks actual backup workflow file drift as confirmed billable publication work', async () => {
@@ -274,118 +256,6 @@ describe('GitHub infrastructure plan/apply', () => {
       billable: true,
     });
     expect(ready.actions[0].metadata?.blockedReason).toBeUndefined();
-  });
-
-  it('plans action-scoped OpenAI and native settings only after files are merged', async () => {
-    const desiredSpec = spec();
-    const desired = new Map(compileManagedGitHubFiles(
-      desiredSpec.github!,
-      desiredSpec.runtime
-    ).map((file) => [file.path, file.content]));
-    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockImplementation(async (_owner, _repo, filePath) => desired.get(filePath) ?? null);
-    vi.spyOn(GitHubAdapter.prototype, 'listRepositorySecrets').mockResolvedValue([]);
-    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({
-      default_branch: 'main', private: true,
-      security_and_analysis: {
-        dependabot_security_updates: { status: 'disabled' },
-        secret_scanning: { status: 'disabled' },
-        secret_scanning_push_protection: { status: 'disabled' },
-      },
-    });
-    vi.spyOn(GitHubAdapter.prototype, 'getVulnerabilityAlertsEnabled').mockResolvedValue(false);
-    vi.spyOn(GitHubAdapter.prototype, 'getCodeScanningDefaultSetup').mockResolvedValue({ state: 'not-configured' });
-    vi.spyOn(GitHubAdapter.prototype, 'getWorkflowPermissions').mockResolvedValue({
-      default_workflow_permissions: 'read', can_approve_pull_request_reviews: false,
-    });
-    vi.spyOn(GitHubAdapter.prototype, 'listLabels').mockResolvedValue([]);
-    vi.spyOn(GitHubAdapter.prototype, 'getBranchProtection').mockResolvedValue(null);
-
-    const result = await planGitHubInfrastructure({ project, spec: spec(), environmentName: 'production' });
-    expect(result.actions.find((action) => action.id === GITHUB_OPENAI_SECRET_ACTION_ID)?.type).toBe('update');
-    expect(result.blocked.find((block) => block.provider === 'openai')).toMatchObject({
-      policy: 'action-scoped-if-independent-actions',
-      actionIds: [GITHUB_OPENAI_SECRET_ACTION_ID],
-    });
-    expect(result.actions.find((action) => action.id === 'repo:github-code-scanning')).toMatchObject({
-      type: 'update', billable: true, requiresConfirm: true,
-    });
-    expect(result.actions.find((action) => action.id === 'repo:github-actions-pr-permission')?.type).toBe('update');
-  });
-
-  it('applies the OpenAI Actions secret from a repository-only plan using repository metadata authority', async () => {
-    const repositoryProject = new ProjectRepository().create({
-      name: 'repository-openai-secret',
-      gitRemoteUrl: `https://github.com/${REPOSITORY}.git`,
-    });
-    const desiredSpec = projectSpecSchema.parse({
-      version: 1,
-      project: repositoryProject.name,
-      gitRemoteUrl: repositoryProject.gitRemoteUrl,
-      github: {
-        repository: REPOSITORY,
-        canonicalEnvironment: 'repository',
-        collaboration: {
-          issues: { enabled: false, templates: false },
-          pullRequests: { requirePr: false },
-        },
-        actions: {
-          audit: {
-            kind: 'code-audit',
-            schedule: { cron: '17 5 * * *', timezone: 'UTC' },
-            instructions: 'Audit provider claims without modifying the repository.',
-          },
-        },
-      },
-      environments: {},
-    });
-    const stored = new SpecStore().replace(repositoryProject, desiredSpec);
-    const openAI = new ConnectionRepository().create({
-      provider: 'openai',
-      scope: REPOSITORY,
-      credentialsEncrypted: getSecretStore().encryptObject({ apiKey: 'openai-test-key' }),
-    });
-    new ConnectionRepository().updateStatus(openAI.id, 'verified');
-
-    const desiredFiles = new Map(
-      compileManagedGitHubFiles(desiredSpec.github!).map((file) => [file.path, file.content])
-    );
-    vi.spyOn(GitHubAdapter.prototype, 'getFileContent')
-      .mockImplementation(async (_owner, _repo, filePath) => desiredFiles.get(filePath) ?? null);
-    vi.spyOn(GitHubAdapter.prototype, 'listRepositorySecrets').mockResolvedValue([]);
-    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({
-      default_branch: 'main',
-      private: false,
-    });
-    vi.spyOn(GitHubAdapter.prototype, 'listLabels').mockResolvedValue([]);
-    const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
-
-    const planned = await new PlanService().plan(repositoryProject, 'repository');
-    expect(planned).not.toHaveProperty('error');
-    const plan = planned as Exclude<typeof planned, { error: string }>;
-    expect(plan.actions.find((action) => action.id === GITHUB_OPENAI_SECRET_ACTION_ID)).toMatchObject({
-      type: 'update',
-      resource: { kind: 'secret', name: 'OPENAI_API_KEY', provider: 'github' },
-      metadata: { repository: REPOSITORY },
-    });
-
-    const outcome = await executePlanApply(createToolContext(), {
-      project: repositoryProject,
-      spec: stored.spec,
-      specRevision: stored.revision,
-      planId: plan.planRunId,
-      confirmActions: [],
-    });
-
-    expect(outcome).toMatchObject({
-      kind: 'executed',
-      result: {
-        success: true,
-        receipts: expect.arrayContaining([
-          expect.objectContaining({ actionId: GITHUB_OPENAI_SECRET_ACTION_ID, status: 'succeeded' }),
-        ]),
-      },
-    });
-    expect(setSecret).toHaveBeenCalledWith('owner', 'example', 'OPENAI_API_KEY', 'openai-test-key');
   });
 
   it('plans and applies a declared Actions secret through the repository-only lifecycle', async () => {

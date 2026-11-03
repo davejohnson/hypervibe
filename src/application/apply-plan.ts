@@ -59,7 +59,6 @@ import {
 import { applyManagedCiAction } from '../domain/services/managed-ci.service.js';
 import { resolveDevOpsSelection, resolveGitHubActionsSelection } from '../domain/spec/devops-selection.js';
 import { devOpsProviderRegistry } from '../domain/registry/devops.registry.js';
-import { applyManagedCodeRepositoryAction } from '../domain/services/managed-code-repository.service.js';
 import {
   CI_APPLIED_SPEC_SYNC_OPERATION,
   CI_BINDING_REMOVE_OPERATION,
@@ -75,7 +74,6 @@ import {
   applyGitHubInfrastructure,
   applyGitHubDelegatedSecret,
   applyGitHubNativeSetting,
-  applyGitHubOpenAISecret,
   resolveGitHubInfrastructureRepository,
   shouldPlanGitHubDelegatedSecrets,
   shouldPlanGitHubInfrastructure,
@@ -697,21 +695,8 @@ async function executeRepositoryPlanApply(
       };
     }
     if (
-      authority.capability === 'code.repository.create'
-      || authority.capability === 'code.repository.destroy'
-      || authority.capability === 'code.repository.binding.remove'
-    ) {
-      return applyManagedCodeRepositoryAction({
-        project: projectForApply,
-        spec: params.spec,
-        environmentName: params.envName,
-        action,
-      });
-    }
-    if (
       action.resource.name !== expectedRepository
       && authority.capability !== 'github.pages-dns.sync'
-      && authority.capability !== 'github.openai-secret.sync'
       && authority.capability !== 'github.delegated-secret.sync'
     ) {
       return blockedActionIdentity(
@@ -750,18 +735,6 @@ async function executeRepositoryPlanApply(
         }
         return applyGitHubPagesDns({
           spec: params.spec,
-          action,
-        });
-      case 'github.openai-secret.sync':
-        if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
-          return blockedActionIdentity(
-            action,
-            `The reviewed secret destination must be ${expectedRepository ?? 'a configured GitHub repository'}.`
-          );
-        }
-        return applyGitHubOpenAISecret({
-          project: projectForApply,
-          environmentName: params.envName,
           action,
         });
       case 'github.delegated-secret.sync':
@@ -911,16 +884,8 @@ export async function executePlanApply(ctx: CommandContext, params: {
     ? withBackupStorageDefaults(rawEnvironmentSpec) : rawEnvironmentSpec;
   if (!envSpec) {
     if (secretsOnly) return { kind: 'env_missing', envName };
-    const repositoryLifecycleOnly = loaded.document.actions.length > 0
-      && loaded.document.actions.every((action) => {
-        const capability = resolvePlanActionAuthority(action)?.capability;
-        return capability === 'code.repository.create'
-          || capability === 'code.repository.destroy'
-          || capability === 'code.repository.binding.remove';
-      });
     return shouldPlanGitHubInfrastructure(spec, envName)
       || shouldPlanGitHubDelegatedSecrets(spec, envName)
-      || repositoryLifecycleOnly
       ? executeRepositoryPlanApply(ctx, {
           project,
           spec,
@@ -1466,7 +1431,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     const deployNeedsVolumes = (!managedCiBindingsOnly || createsDeferredWorkload) && (
       capability === 'hosting.service.converge' || capability === 'hosting.service.rollback'
       || capability === 'github.ci.release' || capability === 'github.ci.rollback'
-      || capability === 'gitlab.ci.rollback' || capability === 'github.applied-spec-hash.sync'
+      || capability === 'github.applied-spec-hash.sync'
       || capability === 'ci.applied-spec-hash.sync'
     );
     if (deployNeedsVolumes && (volumeEnvironment?.platformBindings.serviceVolumes !== undefined || Object.values(envSpec.services).some((s) => s.volume))) {
@@ -1474,19 +1439,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
       const liveVolumes = await observeServiceVolumes({ environment: volumeEnvironment, environmentSpec: envSpec, volumes: (result.adapter as IProviderAdapter | undefined)?.serviceVolumes });
       const pendingVolume = planServiceVolumes({ environment: volumeEnvironment, environmentSpec: envSpec, observed: { serviceVolumes: liveVolumes } as ObservedState }).actions.find((a) => a.type !== 'noop');
       if (pendingVolume) return { success: false, status: 'blocked', message: `Deployment requires verified retained volume attachment: ${pendingVolume.reason}` };
-    }
-
-    if (
-      capability === 'code.repository.create'
-      || capability === 'code.repository.destroy'
-      || capability === 'code.repository.binding.remove'
-    ) {
-      return applyManagedCodeRepositoryAction({
-        project: applyProject,
-        spec,
-        environmentName: envName,
-        action,
-      });
     }
 
     if (capability.startsWith('maintenance.')) {
@@ -1715,16 +1667,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
         );
       }
       return applyGitHubPagesDns({ spec, action });
-    }
-    if (capability === 'github.openai-secret.sync') {
-      const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
-      if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
-        return blockedActionIdentity(
-          action,
-          `The reviewed secret destination must be ${expectedRepository ?? 'a configured GitHub repository'}.`
-        );
-      }
-      return applyGitHubOpenAISecret({ project: applyProject, environmentName: envName, action });
     }
     if (capability === 'github.delegated-secret.sync') {
       const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
