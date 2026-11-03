@@ -250,10 +250,22 @@ provider combinations, missing recovery prerequisites, and unknown observations
 remain blockers. Do not reconstruct historical evidence from the current desired
 state or replace a retained baseline to make recovery appear possible.
 
-For destruction, use `hv_destroy` or the supported lifecycle plan and require
-the exact consequential confirmations. Preserve dependencies and stop after
-failed or unknown deletion. Report success only when terminal absence is
-verified; a submitted deletion request is not proof that data is gone.
+For live infrastructure teardown, remove the supported resource declarations
+through `hv_spec`, review `hv_plan`, and use `hv_apply` with the exact required
+confirmations. `hv_destroy` deletes local records only; it cannot remove cloud
+resources. Preserve bindings and recovery history until native cleanup is verified.
+Preserve dependencies and stop after failed or unknown deletion. Report success
+only when terminal absence is verified; a submitted deletion request is not proof
+that data is gone.
+
+Temporary test setup includes teardown of every resource created for that test.
+Track workloads, data, backups, images, identities, permissions and external app
+registrations, while preserving pre-existing shared resources. Collection
+disconnection preserves stored secrets and runtime readers; it is not full test
+teardown. Removing a declaration does not imply that every setup capability can
+retire its resources. Report missing retirement support and retained or recoverable
+resources explicitly, and fix unsupported cleanup through Hypervibe before claiming
+the test lifecycle complete.
 
 End with the practical outcome, exact public links where available, and any
 failed, skipped, pending, blocked, unsupported, or untested part. A command never
