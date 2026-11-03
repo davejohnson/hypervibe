@@ -98,6 +98,16 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); SqliteAdapter.resetInstance(); rmSync(root, { recursive: true, force: true }); });
 
 describe('declarative credential collection', () => {
+  it('does not prepare or send an invitation from HTTP200 with an unverified source', async () => {
+    storeGrant();
+    const fixture = setup({ discovery: { source: null, sourceError: { code: 'source_temporarily_unavailable' } } });
+    const result = await fixture.run({ action: 'create', env: 'staging', baseUrl, sourceBranch: 'review/credentials',
+      ownerEmail: 'owner@example.test', fields: [{ key: 'CLIENT_ID' }], confirm: true });
+    expect(result).toMatchObject({ ok: false, error: { code: 'PROVIDER_ERROR' } });
+    expect(fixture.writes()).toEqual([]);
+    expect(savedReview()).toBeUndefined();
+  });
+
   const destination = (secretId: string) => ({ provider: 'gcp-secret-manager', projectId: 'synthetic-project', projectNumber: '123456789012', secretId });
   function directSpec(options: { pinned?: boolean; generated?: boolean; mixed?: boolean } = {}) {
     const file = path.join(root, '.hypervibe/spec.json');

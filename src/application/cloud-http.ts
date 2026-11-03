@@ -14,11 +14,11 @@ export function cloudAccessRejected(error: unknown): boolean {
   return error instanceof CloudHttpError && [401, 403].includes(error.status);
 }
 
-function discard(body: { cancel(): Promise<unknown> } | null | undefined): void {
+export function discard(body: { cancel(): Promise<unknown> } | null | undefined): void {
   try { void body?.cancel().catch(() => undefined); } catch { /* Cleanup cannot extend the deadline. */ }
 }
 
-function withinDeadline<T>(work: () => Promise<T>, signal: AbortSignal): Promise<T> {
+export function withinDeadline<T>(work: () => Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise((resolve, reject) => {
     const abort = () => reject(new Error('Request deadline reached'));
     if (signal.aborted) { abort(); return; }

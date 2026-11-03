@@ -270,3 +270,40 @@ Google/Flow validity. The ordinary `npm test` suite includes them; committed
 acceptance CI and desired acceptance policy run that suite and typechecking.
 Live branch-protection enforcement has not been inspected. Service-specific
 setup instructions inside the form remain follow-up work.
+
+### Source-discovery response budget
+
+Credential field discovery has a 75-second client deadline covering both headers
+and the streamed response body. This is a finite client policy, not a server
+latency guarantee. The hosted source path can make six sequential GitHub requests
+with individual 10-second limits: a scoped installation token, repository and
+branch read, then another scoped token, repository and exact spec read. Local
+source inspection and destination selection follow. A single provider request's
+limit therefore cannot be reused as the entire discovery limit. Ordinary request
+listing, status, creation, reconciliation and revocation retain their 10-second
+limits; mutation timeouts remain unknown outcomes and never trigger replay.
+
+On 2026-11-03, native request metadata recorded one field-discovery GET returning
+HTTP 200 after 15.137944630 seconds, while the deployed client stopped after ten
+seconds. The response body was not retained, and the latency source is unknown.
+The server can return HTTP 200 with `sourceError` and `source: null`, so this
+observation does not establish successful discovery. Tests reconstruct a valid
+response over actual localhost HTTP, delayed at headers and separately at body
+completion; both failed under the old client deadline. Three noncooperative
+transport/cleanup cases also failed before reusing the existing bounded HTTP
+helper. Regressions retain source/schema checks, the 256 KiB limit, redirect
+rejection, exact-token scrubbing and one-dispatch behavior. A command-level case
+proves an HTTP 200 source failure cannot prepare or send an invitation.
+
+This fix does not add a hosted whole-operation deadline, identify the slow
+component, validate the unretained incident body, or establish live email
+compatibility. Multi-call commands can have several bounded reads; their caller
+must not assume one discovery deadline bounds the whole command.
+
+The four affected client/command suites passed 114 checks after the change;
+the two final source-failure fixtures also passed using the hosted service’s
+exact `source_temporarily_unavailable` code. Normal typechecking passed with
+local dependencies. Initial typechecking through a development dependency
+symlink hit an unrelated nonportable inferred fixture type; no runtime or
+fixture weakening was used to resolve that harness-only issue. The private
+package gate repeats these checks after a fresh dependency install.

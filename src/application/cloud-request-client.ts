@@ -1,6 +1,13 @@
 import { z } from 'zod';
 import { HvError } from './results.js';
+import { discard, withinDeadline } from './cloud-http.js';
 import { secretDestinationSchema, runtimeSecretReferenceSchema, type SecretDestination } from '../domain/ports/secret-destination.port.js';
+
+const REQUEST_TIMEOUT_MS = 10_000;
+// Hosted discovery can make six sequential GitHub calls with individual 10s
+// limits, then inspect source locally. This is a finite client policy with
+// headroom, not a server SLA. Writes and ordinary status reads retain 10s.
+const DISCOVERY_TIMEOUT_MS = 75_000;
 
 const uuid = z.string().guid();
 const shortText = z.string().trim().min(1).max(120).regex(/^[^\u0000-\u001f\u007f]+$/);
@@ -68,33 +75,37 @@ const discoverySchema = z.object({
 export type CredentialRequest = z.infer<typeof requestSchema>;
 export function createCloudRequestClient(scope: { baseUrl: string; token: string; projectId: string; environmentId: string }) {
   const collection = `/api/v1/projects/${scope.projectId}/credential-requests`;
-  async function call<S extends z.ZodTypeAny>(schema: S, pathname: string, method = 'GET', body?: unknown, query?: Record<string, string>): Promise<z.output<S>> {
+  async function call<S extends z.ZodTypeAny>(schema: S, pathname: string, method = 'GET', body?: unknown, query?: Record<string, string>, timeoutMs = REQUEST_TIMEOUT_MS): Promise<z.output<S>> {
     const url = new URL(pathname, scope.baseUrl);
     for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     let status: number | undefined;
     try {
-      const response = await fetch(url, {
+      const response = await withinDeadline(() => fetch(url, {
         method, redirect: 'error', signal: controller.signal,
         headers: { accept: 'application/json', 'content-type': 'application/json', authorization: `Bearer ${scope.token}` },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      });
+      }).then(response => {
+        if (controller.signal.aborted) { discard(response.body); throw new Error(); }
+        return response;
+      }), controller.signal);
       status = response.status;
-      if (!response.ok) { await response.body?.cancel(); throw new Error(); }
+      if (!response.ok) { discard(response.body); throw new Error(); }
       const reader = response.body?.getReader();
       if (!reader) throw new Error();
       let size = 0;
       const chunks: Uint8Array[] = [];
       try {
         while (true) {
-          const chunk = await reader.read();
+          const chunk = await withinDeadline(() => reader.read(), controller.signal);
           if (chunk.done) break;
           size += chunk.value.byteLength;
           if (size > 256 * 1024) throw new Error();
           chunks.push(chunk.value);
         }
-      } finally { await reader.cancel().catch(() => {}); }
+      } catch (error) { discard(reader); throw error; }
+      finally { reader.releaseLock(); }
       // Remove exact authentication material even from otherwise-safe strings.
       const raw = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       const scrub = (value: unknown): unknown => typeof value === 'string'
@@ -117,7 +128,7 @@ export function createCloudRequestClient(scope: { baseUrl: string; token: string
   }
   return {
     async fields(branch: string) {
-      const result = await call(discoverySchema, `/api/v1/projects/${scope.projectId}/credential-request-fields`, 'GET', undefined, { environmentId: scope.environmentId, sourceBranch: branch });
+      const result = await call(discoverySchema, `/api/v1/projects/${scope.projectId}/credential-request-fields`, 'GET', undefined, { environmentId: scope.environmentId, sourceBranch: branch }, DISCOVERY_TIMEOUT_MS);
       if (result.sourceError || result.selectedEnvironmentId !== scope.environmentId || !result.source)
         throw new HvError('PROVIDER_ERROR', 'The hosted service could not verify this source. Check the committed branch and update the server if it does not support reviewed credential requests.');
       for (const [key, entry] of Object.entries(result.generatedSecrets ?? {})) {
