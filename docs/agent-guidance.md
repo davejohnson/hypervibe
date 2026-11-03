@@ -137,6 +137,6 @@ OpenCode model-response adherence have not been established by these checks.
 
 Development instructions remain separate: the shortened root `AGENTS.md` links
 to mandatory topic guidance, `CLAUDE.md` imports it, and the
-[migration audit](development-guidance-migration.json) maps all 129 baseline rules
-to preserved text and records two form-guidance additions separately. Consumer installers never copy or rewrite those files in a
-user's application repository.
+[migration audit](development/guidance-migration.json) maps all 129 baseline rules
+to preserved text and records later policy additions separately. Consumer installers
+never copy or rewrite those files in a user's application repository.

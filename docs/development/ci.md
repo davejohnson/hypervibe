@@ -6,12 +6,12 @@ These are normative maintainer rules, complementary to `ARCHITECTURE.md`,
 which remains the infrastructure model's source of truth. Load only the sections
 relevant to the task. Paths in code spans are relative to the repository root.
 
-Related contracts: [CI And Push Deploys](../ARCHITECTURE.md#ci-and-push-deploys), [GitHub infrastructure](github-infrastructure.md), [GitLab integration](gitlab-integration.md), and [API/mobile releases](api-mobile-releases.md).
+Related contracts: [CI And Push Deploys](../../ARCHITECTURE.md#ci-and-push-deploys), [GitHub infrastructure](../github-infrastructure.md), [GitLab integration](../gitlab-integration.md), and [API/mobile releases](../api-mobile-releases.md).
 
 Stable rule IDs preserve the original guidance and are mapped in
-[the migration audit](development-guidance-migration.json). These files are
+[the migration audit](guidance-migration.json). These files are
 for developing Hypervibe; the distributed user workflow lives in
-[`skills/hypervibe`](../skills/hypervibe/SKILL.md).
+[`skills/hypervibe`](../../skills/hypervibe/SKILL.md).
 
 ## DG-056
 
@@ -46,6 +46,10 @@ Treat a project-level generated CI program as one shared multi-environment contr
 For push deploys, `deploy.trigger: "ci"` is the portable default. Provider-native deploys are explicit opt-in and may require provider-specific external app access.
 
 ## DG-103
+
+For a task that explicitly includes CI deployment or deployment verification,
+use the following workflow. A merge-only task or the user's report of a merge
+does not start deployment monitoring.
 
 Dispatch Hypervibe-managed CI deploys only through `hv_ci_trigger`. Inspect them through `hv_ci_status`: list definitions/workflows, then runs, jobs, and bounded log tails as needed, followed by `hv_health` after success. Do not dispatch, monitor, or inspect them with `gh`, code-host connectors/apps, browser/UI inspection, or direct CI/provider APIs; if `hv_ci_trigger` or `hv_ci_status` is blocked, stop and report its connection/error guidance.
 
