@@ -29,15 +29,15 @@ every app owner learn those details.
 
 This applies to all customer-facing pages, local browser handoffs, emails,
 notifications, chat, CLI/MCP explanations, approvals and errors—not only
-onboarding. Keep stable machine contracts and useful, value-free diagnostics
-for authorized agents; do not present those contracts as the human interface.
+onboarding. Keep stable machine contracts and useful diagnostics without secret
+values for authorized agents; do not present those contracts as the human interface.
 
 - **Lead with their goal and next action.** Name the app, environment and
   destination where they affect the decision. Explain what the button does
   now, who acts next and how the person knows they are done. A completion
-  message must say whether to return to their agent, wait, or close the page.
-- **Make the agent do the routine work.** Use supported APIs and choose safe
-  defaults. Ask the person for facts only they know, browser sign-in, externally
+  message must name the next step, or say they are done and can close the page.
+- **Make the agent do the routine work.** Use supported Hypervibe workflows and
+  choose safe defaults. Ask for facts only the person knows, browser sign-in, externally
   owned secrets, or meaningful consent. Do not turn internal setup steps,
   missing automation or recovery bookkeeping into a checklist of user chores.
 - **Use familiar, concrete words.** Prefer “ask someone for this app's API key”
@@ -79,8 +79,9 @@ action support them:
 
 Before shipping, check whether a first-time person can tell what this is for,
 what they need to decide, what to do next and what that action changes. For a
-substantial flow, use the product-design workflow, inspect real mobile and
-desktop screens, and get a separate clarity review. Passing render tests or
+substantial flow, sketch the user's task, choices and next action before coding;
+apply the repository's product-design skill when available, inspect real mobile
+and desktop screens, and get a separate clarity review. Passing render tests or
 shortening sentences does not establish that the experience is understandable.
 
 ## DG-001

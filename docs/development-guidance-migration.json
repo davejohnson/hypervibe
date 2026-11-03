@@ -1340,7 +1340,7 @@
     {
       "sourcePath": "AGENTS.md",
       "destination": "docs/development-guidance-product.md#who-we-build-and-write-for",
-      "destinationSha256": "94186eb944ce19015b8a61709b1de0dd6020147f0e7b9a460639a6bb420bca6e",
+      "destinationSha256": "35273f29b61babc7a9870e0cde9f63a0824f907a776f3b1fe7a3d63515b7a80d",
       "reason": "Explicit user request after confusing cloud and credential-request approvals: make the vibe-coder audience and plain, actionable copy apply to every human-facing surface, preserving exact consent and evidence boundaries."
     }
   ]
