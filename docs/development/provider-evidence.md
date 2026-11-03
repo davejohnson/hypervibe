@@ -6,12 +6,12 @@ These are normative maintainer rules, complementary to `ARCHITECTURE.md`,
 which remains the infrastructure model's source of truth. Load only the sections
 relevant to the task. Paths in code spans are relative to the repository root.
 
-Related contracts: [Pinned provider contracts](../test/provider-contracts/README.md) and [provider conformance](provider-conformance.md).
+Related contracts: [Pinned provider contracts](../../test/provider-contracts/README.md) and [provider conformance](../provider-conformance.md).
 
 Stable rule IDs preserve the original guidance and are mapped in
-[the migration audit](development-guidance-migration.json). These files are
+[the migration audit](guidance-migration.json). These files are
 for developing Hypervibe; the distributed user workflow lives in
-[`skills/hypervibe`](../skills/hypervibe/SKILL.md).
+[`skills/hypervibe`](../../skills/hypervibe/SKILL.md).
 
 ## DG-017
 

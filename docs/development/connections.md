@@ -6,12 +6,12 @@ These are normative maintainer rules, complementary to `ARCHITECTURE.md`,
 which remains the infrastructure model's source of truth. Load only the sections
 relevant to the task. Paths in code spans are relative to the repository root.
 
-Related contracts: [Connections And Secrets](../ARCHITECTURE.md#connections-and-secrets), [Runtime Secrets](../ARCHITECTURE.md#runtime-secrets), and [storage runtime identity](storage-runtime-identity.md).
+Related contracts: [Connections And Secrets](../../ARCHITECTURE.md#connections-and-secrets), [Runtime Secrets](../../ARCHITECTURE.md#runtime-secrets), and [storage runtime identity](../storage-runtime-identity.md).
 
 Stable rule IDs preserve the original guidance and are mapped in
-[the migration audit](development-guidance-migration.json). These files are
+[the migration audit](guidance-migration.json). These files are
 for developing Hypervibe; the distributed user workflow lives in
-[`skills/hypervibe`](../skills/hypervibe/SKILL.md).
+[`skills/hypervibe`](../../skills/hypervibe/SKILL.md).
 
 ## DG-030
 
@@ -33,7 +33,7 @@ Request externally owned credentials from the current plan's eligible input requ
 
 The `hypervibe` CLI is safe to use because it shares Hypervibe state and reconciliation. Direct provider CLIs remain prohibited for infrastructure operations, and MCP agents should use available `hv_*` tools instead of spawning the CLI.
 
-Narrow exception: an explicitly authorized operator may use Railway CLI private SSH in their own terminal for a scoped diagnostic database connection. Follow the [installed recovery guidance](../skills/hypervibe/references/deployment-and-recovery.md#diagnose-inspect-and-adopt). This permits neither public access creation nor infrastructure, key-registration, credential or data changes. Keep CLI authentication separate from recorded Hypervibe connections and never capture credential-bearing output.
+Narrow exception: an explicitly authorized operator may use Railway CLI private SSH in their own terminal for a scoped diagnostic database connection. Follow the [installed recovery guidance](../../skills/hypervibe/references/deployment-and-recovery.md#diagnose-inspect-and-adopt). This permits neither public access creation nor infrastructure, key-registration, credential or data changes. Keep CLI authentication separate from recorded Hypervibe connections and never capture credential-bearing output.
 
 ## DG-052
 
