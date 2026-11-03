@@ -30,7 +30,8 @@ function fixture(fault?: 'lost-ack' | 'forbidden' | 'collision' | 'operation-err
   const selectedIntent = publicRegistry ? { ...intent, nativeScope: { ...intent.nativeScope, scopeKind: 'operator-public-artifact-registry-v1', artifactRepositoryCreateTime: '2026-10-25T00:30:00Z', artifactInstallationId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', artifactAttemptId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', publicArtifactRepository: 'operator-public', publicArtifactRepositoryName: repository } } : intent;
   let policy = { version: 3, etag: 'initial-etag', bindings: [{ role: 'roles/artifactregistry.reader', members: ['user:retained@example.test'] }] };
   let saved: CloudInstallationRecord<LocalCloudScopePreparationIntent> | null = null;
-  let created = false, replace = false, createdAttempt = ''; 
+  let created = false, replace = false, createdAttempt = '', operationGone = false;
+  const operationReads: string[] = [];
   const writes: string[] = [];
   const nativeRepository = () => ({ name: repository, format: 'DOCKER', mode: 'STANDARD_REPOSITORY',
     description: `hypervibe:operator-registry:${owner}:${createdAttempt || saved!.attempts.at(-1)!.id}`,
@@ -77,10 +78,10 @@ function fixture(fault?: 'lost-ack' | 'forbidden' | 'collision' | 'operation-err
       if (fault === 'lost-ack') throw new Error('synthetic-user-token');
       return Response.json({ name: fault === 'wrong-operation' ? 'projects/foreign-project/locations/us-central1/operations/create' : operation });
     }
-    if (url.pathname === '/v1/' + operation) return Response.json({ name: operation, done: true,
+    if (url.pathname === '/v1/' + operation) { operationReads.push(url.href); if (operationGone) return new Response(null, { status: 404 }); return Response.json({ name: operation, done: true,
       ...(fault === 'operation-error' ? { error: { code: 7, message: 'synthetic-user-token' } } : { response: {
         '@type': 'type.googleapis.com/google.devtools.artifactregistry.v1.Repository', ...nativeRepository(),
-        ...(fault === 'operation-missing-time' ? { createTime: undefined } : fault === 'operation-null-time' ? { createTime: null } : fault === 'operation-malformed-time' ? { createTime: 'invalid' } : {}) } }) });
+        ...(fault === 'operation-missing-time' ? { createTime: undefined } : fault === 'operation-null-time' ? { createTime: null } : fault === 'operation-malformed-time' ? { createTime: 'invalid' } : {}) } }) }); }
     throw new Error('Unexpected reconstructed native request');
   };
   const driver = createGcpLocalArtifactRegistryDriver({ fetch: request, public: publicRegistry } as any);
@@ -88,11 +89,11 @@ function fixture(fault?: 'lost-ack' | 'forbidden' | 'collision' | 'operation-err
     authorize: async () => true, store: { read: async () => structuredClone(saved), compareAndSwap: async (_id: string, revision: number | null, next: any) => {
       if ((saved?.revision ?? null) !== revision) return false; saved = structuredClone(next); return true;
     } } };
-  return { writes, saved: () => saved, replace: () => { replace = true; },
+  return { writes, operationReads, expireOperation: () => { operationGone = true; }, saved: () => saved, replace: () => { replace = true; },
     plan: () => planCloudInstallationV1({ ...context, intent: declaredLifetime ? { ...intent, nativeScope: { ...intent.nativeScope, artifactRepositoryCreateTime: '2020-01-01T00:00:00Z' } } : selectedIntent }),
     apply: (confirm = true, selectedActions?: string[]) => applyCloudInstallationV1({ ...context, installationId, planDigest: saved!.plan.digest, ...(selectedActions?.length === 1 ? { onlyActionId: selectedActions[0] } : {}),
       confirmActions: selectedActions ?? (confirm ? publicRegistry ? ['gcp:local-scope:public-artifact-registry', 'gcp:local-scope:public-artifact-reader'] : ['gcp:local-scope:artifact-registry'] : []) }),
-    recover: () => reconcileCloudInstallationV1({ ...context, installationId, planDigest: saved!.plan.digest }), driver };
+    recover: () => reconcileCloudInstallationV1({ ...context, installationId, planDigest: saved!.plan.digest }), driver, context };
 }
 describe('reviewed local image repository preparation', () => {
   it.each([false, true])('retains private creation authority in the final binding; separate public repository=%s', async publicRegistry => {
@@ -111,6 +112,35 @@ describe('reviewed local image repository preparation', () => {
     expect(createGcpLocalProjectAllocationCapability().continuation!.binding(f.saved()!, { region: 'us-central1' }).platformBindings).toEqual(binding.platformBindings);
     expect(f.writes).toHaveLength(before);
   });
+  it.each([false, true])('preserves completed registry ownership after historical operations expire; public=%s', async publicRegistry => {
+    const f = fixture(undefined, false, publicRegistry); await f.plan(); await f.apply();
+    const accepted = structuredClone(f.saved()!); expect(accepted.status).toBe('scope-ready');
+    const writes = [...f.writes]; f.expireOperation(); f.operationReads.length = 0;
+    expect((await f.recover()).status).toBe('scope-ready');
+    expect(f.saved()!.completed).toEqual(accepted.completed);
+    expect(f.operationReads).toEqual([]); expect(f.writes).toEqual(writes);
+    f.replace(); expect((await f.recover()).status).not.toBe('scope-ready'); expect(f.writes).toEqual(writes);
+  });
+
+  it.each(['pending', 'uncertain', 'acknowledged', 'ack-only', 'foreign-proof', 'foreign-attempt', 'malformed-proof', 'missing-proof'] as const)
+    ('keeps incomplete or invalid registry %s proof from bypassing the original operation', async fault => {
+      const f = fixture(); await f.plan(); await f.apply();
+      const accepted = f.saved()!, action = accepted.plan.actions[0], attempt = structuredClone(accepted.attempts[0]);
+      if (['pending', 'uncertain', 'acknowledged'].includes(fault)) attempt.status = fault as 'pending' | 'uncertain' | 'acknowledged';
+      if (fault === 'ack-only') attempt.evidence!.resources = [];
+      if (fault === 'missing-proof') attempt.evidence = undefined;
+      if (fault === 'foreign-proof') attempt.evidence!.resources[0].identity.owner = 'f'.repeat(64);
+      if (fault === 'foreign-attempt') attempt.id = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+      if (fault === 'malformed-proof') attempt.evidence!.native.operationName = 'foreign/operations/invalid';
+      f.expireOperation(); f.operationReads.length = 0;
+      const result = await f.driver.recover({ intent: accepted.intent, action, attempt, attempts: [attempt], completed: {},
+        authentication: f.context.authentication, signal: new AbortController().signal,
+        beforeMutation: async () => { throw Error('No writes'); } });
+      expect(result.state).toBe('unknown');
+      if (['pending', 'uncertain', 'acknowledged', 'ack-only'].includes(fault)) expect(f.operationReads).toHaveLength(1);
+      expect(f.writes).toHaveLength(1);
+    });
+
   it('pins the independent native operation result and repository lifetime contracts', () => {
     const base = new URL('./gcp/artifact-registry/', import.meta.url);
     const source = JSON.parse(readFileSync(new URL('source.json', base), 'utf8'));

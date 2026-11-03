@@ -29,6 +29,7 @@ function boundary(options: { lose?: string; unknown?: boolean; collision?: boole
   const resources = new Map<string, Record<string, unknown>>();
   const operations = new Map<string, Record<string, unknown>>();
   const writes: Array<{ url: string; body: Record<string, any> }> = [];
+  const reads: string[] = [];
   let lossApplied = false;
   const unrelated = { role: 'roles/viewer', members: ['user:existing@example.invalid'], condition: { title: 'existing', expression: 'true' } };
   const projectPolicy: Record<string, any> = { version: 3, etag: 'project-etag-1', bindings: [unrelated] };
@@ -37,6 +38,7 @@ function boundary(options: { lose?: string; unknown?: boolean; collision?: boole
   const projectOwner = createHash('sha256').update(JSON.stringify([intent.customerId, intent.appId, intent.environment, intent.nativeScope.projectInstallationId])).digest('hex');
   const request: typeof fetch = async (input, init = {}) => {
     const url = new URL(String(input)), body = init.body ? JSON.parse(String(init.body)) : undefined;
+    if (!init.method || init.method === 'GET') reads.push(url.href);
     const invalidRoleGet = gcpRoleGetContractResponse(url, init.method ?? 'GET', init.body);
     if (invalidRoleGet) return invalidRoleGet;
     const invalidPolicyRead = gcpAccountPolicyGetContractResponse(url, init.method ?? 'GET', init.body);
@@ -103,7 +105,7 @@ function boundary(options: { lose?: string; unknown?: boolean; collision?: boole
     store: { read: async () => structuredClone(record), compareAndSwap: async (_id: string, expected: number | null, next: CloudInstallationRecord<LocalCloudScopePreparationIntent>) => {
       if (expected !== (record?.revision ?? null)) return false; record = structuredClone(next); return true;
     } } };
-  return { input, writes, resources, projectPolicy, accountPolicy, registryPolicy, resetRecord: () => { record = null; }, record: () => record! };
+  return { input, writes, reads, operations, resources, projectPolicy, accountPolicy, registryPolicy, resetRecord: () => { record = null; }, record: () => record! };
 }
 
 describe('reviewed local GitHub→Google workload identity lifecycle', () => {
@@ -166,6 +168,45 @@ describe('reviewed local GitHub→Google workload identity lifecycle', () => {
     expect(provider.attributeCondition).toContain('environment:staging');
     expect(provider.attributeCondition).not.toContain('pull_request');
   });
+  it('reobserves completed owned identities after historical IAM operations disappear without repeating writes', async () => {
+    // Native 2026-11-03 observation: the retained successful pool/provider LRO
+    // URLs return 404 while both exact owned resources remain ACTIVE (200).
+    const f = boundary(); let record = await planCloudInstallationV1({ ...f.input, intent });
+    for (const action of record.plan.actions) record = await applyCloudInstallationV1({ ...f.input,
+      installationId: intent.installationId, planDigest: record.plan.digest, confirmActions: [action.id], onlyActionId: action.id });
+    expect(record.status).toBe('scope-ready');
+    const accepted = structuredClone(record), before = f.writes.length;
+    f.operations.clear(); f.reads.length = 0;
+    record = await reconcileCloudInstallationV1({ ...f.input, installationId: intent.installationId, planDigest: record.plan.digest });
+    expect(record.status).toBe('scope-ready');
+    expect(record.completed).toEqual(accepted.completed);
+    expect(record.attempts.map(a => ({ id: a.id, status: a.status, evidence: a.evidence })))
+      .toEqual(accepted.attempts.map(a => ({ id: a.id, status: a.status, evidence: a.evidence })));
+    expect(f.reads.some(url => url.includes('/operations/'))).toBe(false);
+    expect(f.writes).toHaveLength(before);
+  });
+
+  it.each(['pending', 'uncertain', 'acknowledged', 'ack-only', 'foreign-proof', 'foreign-attempt', 'malformed-proof', 'missing-proof'] as const)
+    ('never uses %s proof to bypass an unavailable original IAM operation', async fault => {
+      const f = boundary(); const planned = await planCloudInstallationV1({ ...f.input, intent });
+      const action = planned.plan.actions[0];
+      const ready = await applyCloudInstallationV1({ ...f.input, installationId: intent.installationId, planDigest: planned.plan.digest,
+        confirmActions: [action.id], onlyActionId: action.id });
+      const attempt = structuredClone(ready.attempts[0]);
+      if (['pending', 'uncertain', 'acknowledged'].includes(fault)) attempt.status = fault as 'pending' | 'uncertain' | 'acknowledged';
+      if (fault === 'ack-only') attempt.evidence!.resources = [];
+      if (fault === 'missing-proof') attempt.evidence = undefined;
+      if (fault === 'foreign-proof') attempt.evidence!.resources[0].identity.owner = 'f'.repeat(64);
+      if (fault === 'foreign-attempt') attempt.id = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+      if (fault === 'malformed-proof') attempt.evidence!.native.operationName = 'foreign/operations/invalid';
+      f.operations.clear(); f.reads.length = 0;
+      const result = await f.input.driver.recover({ intent, action, attempt, attempts: [attempt], completed: {},
+        authentication: f.input.authentication, signal: new AbortController().signal, beforeMutation: async () => { throw Error('No writes'); } });
+      expect(result.state).toBe('unknown');
+      if (['pending', 'uncertain', 'acknowledged', 'ack-only'].includes(fault)) expect(f.reads.some(url => url.includes('/operations/'))).toBe(true);
+      expect(f.writes).toHaveLength(1);
+    });
+
   it('keeps backup-controller object access out of the project-wide CI role', async () => {
     const f = boundary(); const backup = { ...intent, nativeScope: { ...intent.nativeScope,
       githubBackupWorkflow: '.github/workflows/hypervibe-backup-staging.yml' } };

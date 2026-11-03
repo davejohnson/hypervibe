@@ -268,9 +268,14 @@ export function createGcpLocalArtifactRegistryDriver(options: { fetch?: typeof f
         if (context.action.id === PUBLIC_GRANT) return inspectGrant(client, context, true);
         if (context.attempt.reason === 'identity_mismatch') fail('identity_mismatch');
         const proof = context.attempt.evidence ? parseEvidence(context.attempt.evidence, context.intent) : undefined;
+        if (context.attempt.actionId !== context.action.id || proof && (proof.native.attemptId !== context.attempt.id
+          || proof.native.operation !== context.action.metadata.operation) || context.attempt.status === 'succeeded' && !proof) fail('identity_mismatch');
         let verifiedCreateTime = proof?.resources[0]?.identity.createTime;
         const operationName = proof?.native.operationName as string | undefined;
-        if (operationName) {
+        // Retain the completed operation as history, then verify the exact
+        // repository lifetime afresh. Unresolved/ack-only attempts still poll it.
+        const completedResource = context.attempt.status === 'succeeded' && proof?.resources.length === 1;
+        if (operationName && !completedResource) {
           const result = await client.json(`https://artifactregistry.googleapis.com/v1/${operationName}`);
           if (result.name !== operationName || result.error) fail('not_converged');
           if (result.done !== true) return { state: 'pending' as const, reason: 'not_converged' as const };

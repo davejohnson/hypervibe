@@ -197,3 +197,46 @@ been passing on an unexpected request instead of its intended response. Both
 cases now require the documented account-policy request while preserving project
 policy bodies. All 100 combined legacy preparation, policy and deployment fixture
 checks passed. These additional corrections also change no runtime code.
+
+## Completed operation history
+
+The challenged assumption was that verifying an already completed installation
+must keep reading its original creation operations. On 2026-11-03, a read-only
+native probe returned 200 for the original pool, provider, service account and
+role, with matching ownership markers, but 404 for the retained pool/provider
+operation URLs. This establishes that unavailable operation history did not mean
+those current resources were absent; it does not establish why Google no longer
+returned the operations. No IAM writes were issued during diagnosis.
+
+Recovery now validates a succeeded attempt's full resource evidence against the
+exact installation, action and attempt before treating the operation as durable
+history. It still freshly verifies project, billing, registry, native ownership,
+resource configuration, account UID and every current permission. The original
+operation name and completed evidence remain intact. Missing readiness can be
+re-established from the succeeded attempt through ordinary read-only recovery;
+unknown current resources remain blocked and never authorize recreation.
+Pending, uncertain and acknowledgment-only attempts still query any retained
+original operation, and a 404 there remains unknown. Existing lost-acknowledgment
+recovery without an operation receipt retains its exact ownership checks. Missing, malformed or foreign
+completed proof cannot authorize the completed-history path.
+
+Before the fix, the serialized CI-driver regression and actual application/SQLite
+regression both failed after the operation disappeared. The SQLite case first
+invalidates readiness through a denied native read while retaining the succeeded
+attempt, reproducing the saved incident state. Two private/public registry tests
+failed on the same audited assumption; their native transport is reconstructed.
+The focused group then passed all 20 cases, including missing-proof negatives
+that also failed before correction. Tests assert no repeated mutation and no
+historical operation GET after valid completion. They run in ordinary `npm test`;
+using the new package against the live journal remains a separate verification.
+The complete three affected suites passed all 153 cases, and ordinary type
+checking passed. The committed acceptance workflow runs both commands and the
+desired CI configuration requires `Hypervibe / acceptance`; this local check does
+not establish current branch-protection enforcement or live recovery success.
+
+The adjacent-path audit found exclusive project allocation already uses its
+validated `operationCompleted` proof before fresh lifetime observation. API
+enablement, quota, hosted installation/deployment and image-publication recovery
+already inspect current state. The contradictory local private/public registry
+path was corrected with the same boundary. AWS/Azure mechanisms and all existing
+unresolved-operation semantics remain unchanged.

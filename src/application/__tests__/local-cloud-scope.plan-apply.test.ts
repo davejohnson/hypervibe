@@ -535,7 +535,7 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
       expect(JSON.stringify({ reviewed, applied })).not.toContain(token);
     });
 
-  it.each(['bound-ci-role-read-recovery', 'github-ci-legacy-binding-conflict', 'github-ci-legacy-binding-stale', 'bound-ci-quota-public-api-disconnect', 'bound-ci-changed-selection', 'bound-ci-quota-public-api', 'bound-ci-read-recovery', 'bound-ci-atomic-bind-failure', 'bound-ci-connection-drift', 'bound-ci', 'bound-ci-public-registry', 'bound-ci-conflict', 'bound-ci-stale', 'bound-ci-lost-ack', 'bound-ci-bind-conflict', 'bound-ci-concurrent-map', 'quota-public-api-parent-read-recovery', 'quota-public-api-parent-read-recovery-drift', 'quota-public-api-parent-read-recovery-binding', 'quota-public-api-parent-drift', 'quota-public-api', 'quota-public-api-lost-ack', 'quota-public-api-binding-conflict', 'quota-public-api-lifetime', 'quota-public-api-denied', 'github-ci-quota-api-partial-revoke', 'github-ci-quota-api', 'normal', 'private-operation-missing-time', 'public-operation-missing-time', 'legacy-binding-repair', 'legacy-binding-source-edit', 'legacy-binding-declaration-removed', 'legacy-binding-stale', 'legacy-binding-conflict', 'legacy-binding-unknown', 'legacy-binding-replaced', 'legacy-api-review', 'legacy-api-pending', 'legacy-api-rejected', 'legacy-api-satisfied', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-disconnected-metadata', 'github-ci-disconnected-metadata-foreign-owner', 'github-ci-legacy-binding-repair', 'github-ci-lost-ack', 'github-ci-rejected-first', 'github-ci-rejected-middle', 'public-registry', 'public-grant-lost-ack', 'public-grant-rejected', 'github-ci-public-registry', 'github-ci-public-registry-prerequisite-drift'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
+  it.each(['bound-ci-completed-operation-gone', 'bound-ci-role-read-recovery', 'github-ci-legacy-binding-conflict', 'github-ci-legacy-binding-stale', 'bound-ci-quota-public-api-disconnect', 'bound-ci-changed-selection', 'bound-ci-quota-public-api', 'bound-ci-read-recovery', 'bound-ci-atomic-bind-failure', 'bound-ci-connection-drift', 'bound-ci', 'bound-ci-public-registry', 'bound-ci-conflict', 'bound-ci-stale', 'bound-ci-lost-ack', 'bound-ci-bind-conflict', 'bound-ci-concurrent-map', 'quota-public-api-parent-read-recovery', 'quota-public-api-parent-read-recovery-drift', 'quota-public-api-parent-read-recovery-binding', 'quota-public-api-parent-drift', 'quota-public-api', 'quota-public-api-lost-ack', 'quota-public-api-binding-conflict', 'quota-public-api-lifetime', 'quota-public-api-denied', 'github-ci-quota-api-partial-revoke', 'github-ci-quota-api', 'normal', 'private-operation-missing-time', 'public-operation-missing-time', 'legacy-binding-repair', 'legacy-binding-source-edit', 'legacy-binding-declaration-removed', 'legacy-binding-stale', 'legacy-binding-conflict', 'legacy-binding-unknown', 'legacy-binding-replaced', 'legacy-api-review', 'legacy-api-pending', 'legacy-api-rejected', 'legacy-api-satisfied', 'lost-api-ack', 'unknown-api-state', 'changed-billing-selection', 'conflicting-connection', 'github-ci-disconnect', 'github-ci-disconnected-metadata', 'github-ci-disconnected-metadata-foreign-owner', 'github-ci-legacy-binding-repair', 'github-ci-lost-ack', 'github-ci-rejected-first', 'github-ci-rejected-middle', 'public-registry', 'public-grant-lost-ack', 'public-grant-rejected', 'github-ci-public-registry', 'github-ci-public-registry-prerequisite-drift'] as const)('continues reviewed stages with exact environment isolation and safe recovery: %s', async scenario => {
     const f = fixture(); const allocated = await f.plan(); if ('error' in allocated) throw new Error(allocated.error);
     expect(await f.apply(allocated.planRunId)).toMatchObject({ kind: 'executed', result: { success: true } });
     const desired = structuredClone(f.desired) as any;
@@ -1018,11 +1018,20 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
         expect(await localCloudScopeRequired(f.project, 'staging', f.store.get(f.project)!.spec)).toBe(false);
         expect(writes).toHaveLength(before.length + 10);
       }
-      if (scenario === 'bound-ci-read-recovery') {
+      if (scenario === 'bound-ci-read-recovery' || scenario === 'bound-ci-completed-operation-gone') {
         denyCiReads = true;
         const denied = await f.plan();
         expect(denied).toMatchObject({ scope: 'cloud-scope' });
         denyCiReads = false;
+        if (scenario === 'bound-ci-completed-operation-gone') {
+          const id = (f.ctx.repos.runs.findById(handoff.planRunId)!.plan as any).cloudScope.installationId;
+          const retained = f.ctx.repos.runs.findById(id)!.plan as any;
+          expect(retained.completed['gcp:github-ci:create-pool']).toBeUndefined();
+          expect(retained.attempts.find((attempt: any) => attempt.actionId === 'gcp:github-ci:create-pool'))
+            .toMatchObject({ status: 'succeeded', evidence: { resources: [expect.objectContaining({ kind: 'workloadIdentityPool' })] } });
+          for (const key of operations.keys()) if (key.includes('/workloadIdentityPools/')) operations.delete(key);
+          f.request.mockClear();
+        }
         f.adapters.mockResolvedValue({ success: false, error: 'Stop ordinary hosting observation' } as any);
         const resumed = await f.plan();
         expect('error' in resumed ? resumed.error : resumed.scope).not.toMatch(/Cloud project preparation|cloud-scope/);
@@ -1030,6 +1039,8 @@ describe('local empty cloud project through ordinary spec/plan/apply', () => {
         expect((f.ctx.repos.runs.findById(installationId)!.plan as any).status).toBe('scope-ready');
         expect(f.ctx.repos.environments.findById(environment.id)!.platformBindings).toEqual(after);
         expect(writes).toHaveLength(before.length + 7);
+        if (scenario === 'bound-ci-completed-operation-gone') expect(f.request.mock.calls.some(([input]) =>
+          String(input).includes('iam.googleapis.com') && String(input).includes('/operations/'))).toBe(false);
       }
       return;
     }

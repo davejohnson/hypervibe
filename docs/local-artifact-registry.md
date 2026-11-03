@@ -35,7 +35,7 @@ The existing `hypervibe` image repository name is retained within the new isolat
 project and selected region. A fresh project lifetime and billing association are
 verified before each action. The new repository receives the exact installation and
 attempt ownership marker. Only matching native identity, configuration, owner marker
-and createTime can complete the record; a retained operation must also converge.
+and createTime can complete the record; an unresolved retained operation must also converge.
 Unknown reads, name collisions, replaced lifetimes and failed operations block.
 No IAM policy, public-access grant, image upload or deletion is part of this action.
 Later publication and exact registry permissions remain separately reviewed work.
@@ -122,7 +122,7 @@ with the [pinned official contracts](../test/provider-contracts/gcp/artifact-reg
 This reproduces the observed pending verification; it does not yet establish the
 repository's full GET identity or successful live recovery.
 
-Both private and public repository recovery now validate the original operation
+Both private and public repository recovery for unresolved attempts validate the original operation
 and all required ownership/configuration fields, then obtain a missing timestamp
 from a mandatory fresh repository GET. A supplied timestamp must match that GET;
 previously verified lifetimes remain immutable. [ProtoJSON null semantics](https://protobuf.dev/programming-guides/json/#null-values)
@@ -143,3 +143,28 @@ live branch-protection enforcement was not inspected. Other registry providers
 in the named matrix retain their own operation contracts. The shared GCP driver
 is the only Artifact Registry Repository operation interpreter found in this
 source audit. Live recovery and the public-helper stage remain separate checks.
+
+## Completed operation history
+
+Completed creation proof does not require the provider to retain its original
+operation endpoint forever. The related Google CI installation produced the
+[native counterexample](gcp-github-operator-identity.md#completed-operation-history):
+current owned resources remained readable while their original operation URLs
+returned 404. The audit found the same assumption in private and public registry
+recovery. The registry cases are reconstructed transport regressions, not a
+claim that a live Artifact Registry operation disappeared.
+
+Only a succeeded attempt with full parsed resource proof for the same action,
+installation and attempt skips the historical operation read. A fresh repository
+GET must still match the original owner, attempt marker, configuration and
+creation timestamp. The operation name and accepted proof remain unchanged.
+Pending, uncertain and acknowledgment-only attempts still query any retained
+original operation; unavailable operations stay unknown. Existing lost-acknowledgment
+recovery without an operation receipt retains its exact ownership checks. Missing or foreign completed
+proof cannot authorize this path, and a replaced repository lifetime still blocks.
+No new creation, public grant or manual journal edit is required.
+
+Both completed private/public recovery regressions failed before the correction;
+the missing-proof negative also exposed an invalid terminal-proof assumption.
+Those checks and the unresolved/foreign-proof negatives pass afterward in the
+ordinary `npm test` path. Live use of this correction remains a separate check.

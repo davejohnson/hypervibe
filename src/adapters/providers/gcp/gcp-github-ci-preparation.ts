@@ -355,9 +355,15 @@ export function createGcpGithubCiPreparationDriver(options: { fetch?: typeof fet
     async recover(context) { try {
       driver.parseAction(context.action, context.intent);
       return await withClient(context, async client => {
-        const operationName = context.attempt.evidence?.native.operationName;
-        if (operationName !== undefined) {
-          parseEvidence(context.attempt.evidence, context.intent);
+        const retained = context.attempt.evidence ? parseEvidence(context.attempt.evidence, context.intent) : undefined;
+        if (context.attempt.actionId !== context.action.id || retained && (retained.native.attemptId !== context.attempt.id
+          || retained.native.actionId !== context.action.id) || context.attempt.status === 'succeeded' && !retained) fail('identity_mismatch');
+        // Completed resource proof is durable history; the provider need not
+        // retain its original operation forever. Pending or acknowledgment-only
+        // attempts still poll any retained operation. Fresh ownership checks follow.
+        const completedResource = context.attempt.status === 'succeeded' && retained?.resources.length === 1;
+        const operationName = retained?.native.operationName;
+        if (operationName !== undefined && !completedResource) {
           const operation = await client.json(`https://iam.googleapis.com/v1/${operationName}`);
           if (operation.name !== operationName || operation.error) fail('provider_error');
           if (operation.done !== true) return { state: 'pending' as const, reason: 'not_converged' as const };
