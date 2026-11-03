@@ -25,6 +25,8 @@ import { preparedReleaseAttempts } from './prepared-direct-release.service.js';
 import { recoveryRuntimeBindings } from './runtime-evidence.js';
 import { manualBackupRecordsSchema } from './manual-backup.service.js';
 import { secretContainerBindings } from '../ports/secret-destination-lifecycle.port.js';
+import { operatorRetirementOutcomeSchema } from '../ports/operator-retirement.port.js';
+import { runtimeCoordinateSchema, runtimeCoordinatesSchema } from '../../lib/value-free-coordinates.js';
 type Registration = CloudInstallationRecord<OperatorApplicationIntent>;
 const route = z.object({ intent: z.object({ applicationProvider: z.string() }).passthrough() }).passthrough();
 export const operatorApplicationUnavailable = () => new Error('Operator application registration requires its verified native origin, exact owner/source and retained operation. Preserve uncertain attempts and inspect status for any supported, separately reviewed restart. No credential replay is authorized.');
@@ -218,6 +220,28 @@ async function context(project: Project, environment: Environment, name: string,
         && (readOnly ? input.phase !== 'mutate' : await current(project, fresh, name, intent));
     } };
 }
+/** Project recorded completion only. Never return the provider's raw native
+ * payload or reinterpret provider retention as permanent erasure. */
+function retirementSummary(record: Registration) {
+  if (record.intent.mode !== 'retire') return undefined;
+  try {
+    const resourcesSchema = z.array(z.object({ kind: runtimeCoordinateSchema, id: runtimeCoordinateSchema }).strict()).max(300);
+    const outcomes = record.plan.actions.flatMap(action => {
+      const evidence = record.completed[action.id];
+      if (!evidence) return [];
+      const outcome = operatorRetirementOutcomeSchema.parse(evidence.native.retirement);
+      const retained = outcome.retained.map(item => ({ ...item,
+        kind: runtimeCoordinateSchema.parse(item.kind), id: runtimeCoordinateSchema.parse(item.id),
+        identity: runtimeCoordinatesSchema.parse(item.identity) }));
+      return [{ actionId: runtimeCoordinateSchema.parse(action.id),
+        resources: resourcesSchema.parse(evidence.resources.map(({ kind, id }) => ({ kind, id }))),
+        outcome: outcome.outcome, retained }];
+    });
+    return { complete: record.status === 'retired', outcomes };
+  } catch { throw new OperatorRetirementSelectionError('Recorded retirement outcomes could not be safely verified. Preserve the existing record and inspect its supported recovery; no new deletion was authorized.'); }
+}
+export type OperatorRetirementSummary = NonNullable<ReturnType<typeof retirementSummary>>;
+
 function projection(record: Registration, name: string, mode: OperatorApplicationPlan['mode'], retryActions?: OperatorApplicationPlan['retryActions']) {
   const applicationRegistration: OperatorApplicationPlan = { schemaVersion: 1, name, installationId: record.installationId,
     planDigest: record.plan.digest, provider: record.intent.applicationProvider, mode, ...(retryActions ? { retryActions } : {}) };
@@ -239,7 +263,8 @@ function projection(record: Registration, name: string, mode: OperatorApplicatio
   return { applicationRegistration, actions };
 }
 function projected(record: Registration, name: string, mode: OperatorApplicationPlan['mode'], environment: Environment, retryActions?: OperatorApplicationPlan['retryActions']) {
-  return { ...projection(record, name, mode, retryActions), environment, review: record.plan.review,
+  const retirement = retirementSummary(record);
+  return { ...projection(record, name, mode, retryActions), environment, review: record.plan.review, ...(retirement ? { retirement } : {}),
     warnings: [...record.plan.review.warnings, 'Operator application setup or retirement does not authorize customer installation, repository access or application deployment.'] };
 }
 function names(project: Project, environment: Environment) {
@@ -397,9 +422,11 @@ export async function applyOperatorApplications(input: { project: Project; envir
       ? await target.driver.operatorApplication.pendingBrowser(updated) : undefined;
     const success = updated.status === 'retired' || updated.status === 'scope-ready' || updated.status === 'pending' && !updated.reason && !!updated.completed[input.action.id];
     const historical = updated.intent.predecessor ? historicalRegistrations(updated, await store.findByScope()) : [];
+    const retirement = retirementSummary(updated);
     return { success, ...(success ? {} : { status: updated.status === 'pending' ? 'pending' as const : 'blocked' as const }),
       message: success ? updated.intent.mode === 'retire' ? 'Verified the exact operator retirement action; retained native data and history remain recorded.' : 'Verified the exact operator registration action; customer access and deployment remain separate.' : operatorApplicationUnavailable().message,
       data: { installationId: updated.installationId, status: updated.status, ...(updated.reason ? { reason: updated.reason } : {}),
+        ...(retirement ? { retirement } : {}),
         ...(historical.length ? { historicalRegistrations: historical } : {}),
         ...(browserHandoff ? { browserHandoff } : {}),
         ...(updated.status === 'scope-ready' ? { receipts: providerRegistry.getOperatorApplication(proof.provider)!.receipts(updated) } : {}) } };
@@ -420,7 +447,9 @@ export async function inspectOperatorApplications(project: Project, environmentN
     const browserHandoff = target?.driver.operatorApplication?.pendingBrowser && await current(project, environment, name, record.intent)
       ? await target.driver.operatorApplication.pendingBrowser(record) : undefined;
     const restart = restartGuidance(record, environment, history);
+    const retirement = retirementSummary(record);
     registrations.push({ name, installationId: record.installationId, status: record.status, verified,
+      ...(retirement ? { retirement } : {}),
       ...(record.intent.predecessor ? { historicalRegistrations: historicalRegistrations(record, history) } : {}),
       ...(restart ? { restart } : {}),
       ...(browserHandoff ? { browserHandoff } : {}),

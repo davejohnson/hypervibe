@@ -1,5 +1,5 @@
 import { manualBackupFingerprint, planManualBackup } from '../services/manual-backup.service.js';
-import { operatorApplicationWorkRequired, operatorRetirementPlanFailure, planOperatorApplicationRetirement, planOperatorApplications, operatorApplicationUnavailable, operatorOutputPrerequisiteKeys } from '../services/operator-application.service.js';
+import { operatorApplicationWorkRequired, operatorRetirementPlanFailure, planOperatorApplicationRetirement, planOperatorApplications, operatorApplicationUnavailable, operatorOutputPrerequisiteKeys, type OperatorRetirementSummary } from '../services/operator-application.service.js';
 import { CloudInstallationError } from '../services/cloud-installation-runtime.js';
 import { observeRecoveryRuntime, planRecoveryRuntime } from '../services/recovery-runtime.service.js';
 import { observeRuntimeAccess, planRuntimeAccess, projectRuntimeAccessInput, runtimeAccessBindings } from '../services/runtime-access.service.js';
@@ -206,6 +206,7 @@ export interface PlanOptions {
 }
 
 export interface EnvironmentPlan {
+  retirement?: OperatorRetirementSummary;
   cloudScopeReview?: CloudInstallationReview;
   databaseConsumers?: DatabaseConsumerReadiness[];
   credentialReview?: { role: string; label: string; purpose: string; intent: 'adopt' | 'rotate'; source?: string; identity?: Record<string, unknown>; validation: import('../registry/credential-validation.registry.js').CredentialValidation; targets: Array<Record<string, unknown>> };
@@ -1925,6 +1926,7 @@ export class PlanService {
         this.runRepo.updateStatus(run.id, 'succeeded');
         return { planRunId: run.id, scope: 'operator-applications', specRevision: specResult.revision, environmentName,
           verified: true, observed: null, actions: registration.actions, cloudScopeReview: registration.review,
+          ...(registration.retirement ? { retirement: registration.retirement } : {}),
           unmanaged: [], warnings: registration.warnings, inputRequired: [], blocked: [] };
       } catch (error) { return { error: operatorRetirementPlanFailure(error) }; }
     }
@@ -2001,6 +2003,7 @@ export class PlanService {
         this.runRepo.updateStatus(run.id, 'succeeded');
         return { planRunId: run.id, scope: 'operator-applications', specRevision: specResult.revision, environmentName,
           verified: true, observed: null, actions: registration.actions, cloudScopeReview: registration.review,
+          ...(registration.retirement ? { retirement: registration.retirement } : {}),
           unmanaged: [], warnings: registration.warnings, inputRequired: [], blocked: [] };
       }
     } catch (error) {

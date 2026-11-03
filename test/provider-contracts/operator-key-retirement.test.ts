@@ -119,6 +119,14 @@ describe.each(providers)('%s exact completed operator key retirement', provider 
     const result = await executePlanApply(f.app, { project: f.project, spec: current.spec, specRevision: current.revision,
       planId: planned.data.planId, confirmActions: planned.data.actions.map((a: any) => a.id) });
     expect(result).toMatchObject({ kind: 'executed', result: { success: true } }); expect(setup).not.toHaveBeenCalled();
+    const summary = { complete: true, outcomes: [expect.objectContaining({ outcome: 'removed', retained: [] })] };
+    expect(result).toMatchObject({ kind: 'executed', result: { receipts: [{ data: { retirement: summary } }] } });
+    const requests = f.requests.length;
+    const status: any = await commands.execute('hv_status', { project: f.project.name, env: 'test' });
+    const repeated: any = await commands.execute('hv_plan', { project: f.project.name, env: 'test' });
+    expect(status.data.registrations[0].retirement).toEqual(summary);
+    expect(repeated.data.retirement).toEqual(status.data.registrations[0].retirement);
+    expect(f.requests).toHaveLength(requests);
     expect(f.requests.filter(r => r.method === 'DELETE')).toHaveLength(1); expect(await f.store.read(f.prior.installationId)).toEqual(f.prior);
   });
   it('uses the registered retirement capability and parses persisted records without setup custody', async () => {

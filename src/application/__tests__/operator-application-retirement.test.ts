@@ -83,6 +83,74 @@ describe('completed operator application retirement', () => {
     expect(await f.store.read(f.record.installationId)).toEqual(f.record);expect(f.creation).not.toHaveBeenCalled();
     expect(JSON.stringify(leaf)).toContain('deletion-scheduled');expect(JSON.stringify(leaf)).not.toContain('synthetic-transient-graph-token');
   });
+  it('shows the same recorded native retirement outcomes in plan, apply and status without extra provider reads', async () => {
+    const f = await fixture(), planned: any = await f.plan();
+    expect.soft(planned.data.retirement).toEqual({ complete: false, outcomes: [] });
+    const applied: any = await f.apply(planned);
+    const outcomes = [
+      { actionId: planned.data.actions[0].id, resources: [{ kind: 'federation', id: f.native.ficId }], outcome: 'removed', retained: [] },
+      { actionId: planned.data.actions[1].id, resources: [{ kind: 'application', id: f.native.applicationId }], outcome: 'deletion-scheduled',
+        retained: [{ kind: 'application', id: f.native.applicationId, reason: 'provider-retention', identity: {
+          tenantId: f.native.tenantId, applicationId: f.native.applicationId, clientId: f.native.appId,
+          createdDateTime: expect.any(String), deletedDateTime: '2026-11-03T23:00:00Z', documentedRecoveryWindowDays: '30',
+        } }] },
+    ];
+    const summary = { complete: true, outcomes };
+    expect.soft(applied.result.receipts.at(-1).data.retirement).toEqual(summary);
+    const reads = f.reads.length;
+    const status: any = await f.commands.execute('hv_status', { project: f.project.name, env: 'test' });
+    expect.soft(status.data.registrations[0].retirement).toEqual(summary);
+    expect.soft(status.hint).not.toMatch(/setup needs/i);
+    expect.soft(status.hint).toMatch(/retain|recoverable/i);
+    const repeated: any = await f.plan();
+    expect.soft(repeated.data.retirement).toEqual(summary);
+    expect(f.reads).toHaveLength(reads);
+    expect(JSON.stringify([applied, status, repeated])).not.toContain('synthetic-transient-graph-token');
+  });
+  it.each(['credential-field', 'private-url', 'extra-outcome-field'])('blocks %s in a provider retirement projection without exposing it', async invalid => {
+    const f = await fixture(); await f.apply(await f.plan());
+    const capability = providerRegistry.getOperatorApplication('microsoft-entra')!, parse = capability.parseRecord;
+    const canary = 'retirement-projection-private-value';
+    vi.spyOn(capability, 'parseRecord').mockImplementation(value => {
+      const record = parse(value);
+      if (record.status === 'retired') {
+        const outcome: any = Object.values(record.completed).find((entry: any) => entry.native.operation === 'remove-application')!.native.retirement;
+        if (invalid === 'credential-field') outcome.retained[0].identity.credentials = canary;
+        if (invalid === 'private-url') outcome.retained[0].identity.applicationId = `postgresql://user:${canary}@private/database`;
+        if (invalid === 'extra-outcome-field') outcome.providerResponse = { secret: canary };
+      }
+      return record;
+    });
+    const reads = f.reads.length;
+    const status: any = await f.commands.execute('hv_status', { project: f.project.name, env: 'test' });
+    const plan: any = await f.plan();
+    expect(status.ok).toBe(false); expect(plan.ok).toBe(false);
+    expect(JSON.stringify([status, plan])).not.toContain(canary);
+    expect(f.reads).toHaveLength(reads);
+  });
+  it('keeps unverified deletion out of partial completion and excludes unrelated provider payloads', async () => {
+    const f = await fixture(), planned: any = await f.plan(); f.lost = 'application';
+    const applied: any = await f.apply(planned);
+    expect(applied.result.receipts.at(-1).data.retirement).toEqual({ complete: false, outcomes: [
+      { actionId: planned.data.actions[0].id, resources: [{ kind: 'federation', id: f.native.ficId }], outcome: 'removed', retained: [] },
+    ] });
+    f.lost = undefined;
+    const recovered: any = await f.plan(); expect(recovered.data.retirement.complete).toBe(true);
+    const capability = providerRegistry.getOperatorApplication('microsoft-entra')!, parse = capability.parseRecord;
+    const canary = 'unselected-private-provider-payload';
+    vi.spyOn(capability, 'parseRecord').mockImplementation(value => {
+      const record = parse(value);
+      if (record.status === 'retired') for (const evidence of Object.values(record.completed)) evidence.native.unrelatedProviderPayload = canary;
+      return record;
+    });
+    const reads = f.reads.length;
+    const status: any = await f.commands.execute('hv_status', { project: f.project.name, env: 'test' });
+    expect(status.ok).toBe(true);
+    expect(status.data.registrations[0].retirement).toEqual(recovered.data.retirement);
+    expect(JSON.stringify(status)).not.toContain(canary);
+    expect(f.reads).toHaveLength(reads);
+    expect(f.deletes).toEqual(['federation', 'application']);
+  });
   it('blocks an unremoved runtime consumer before Graph observation',async()=>{
     const f=await fixture();const changed=structuredClone(f.spec);changed.environments.test.services.web={};new SpecStore().replace(f.project,changed);const before=f.reads.length;
     const plan:any=await f.plan();expect(plan.ok).toBe(false);expect(plan.error.message).toMatch(/consumer|runtime|service/i);expect(f.reads.length).toBe(before);expect(f.deletes).toEqual([]);

@@ -59,6 +59,15 @@ is retained with the documented normal 30-day recovery window. No exact
 If both active and deleted observations are absent/unknown, the operation stays
 unresolved. Prior completed retirement remains immutable after retention expires.
 
+Plan, apply receipts and status expose the same recorded retirement summary:
+completed action/resource IDs, removal outcome and retained native identities.
+Pending attempts are not reported as completed deletion. Entra application
+soft-deletion includes its saved deletion time and documented recovery window;
+this does not claim an exact purge deadline. The projection accepts only the
+closed outcome shape and value-free coordinates, never raw provider responses.
+Reading a terminal summary makes no new provider calls. Status distinguishes
+completed retirement from unfinished application setup.
+
 ## Verification and remaining work
 
 Normal CI includes real command/SQLite/Graph cases for lost responses, denied

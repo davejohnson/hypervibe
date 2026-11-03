@@ -994,6 +994,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           ...(result.webhookReadiness ? { webhookReadiness: result.webhookReadiness } : {}),
           scope: result.scope,
           ...(result.cloudScopeReview ? { cloudScopeReview: result.cloudScopeReview } : {}),
+          ...(result.retirement ? { retirement: result.retirement } : {}),
           ...(result.backupCoverage ? { backupCoverage: result.backupCoverage } : {}),
           ...(result.backupReadiness ? { backupReadiness: result.backupReadiness } : {}),
           ...(result.emailSenderReadiness ? { emailSenderReadiness: result.emailSenderReadiness } : {}),
@@ -1063,9 +1064,18 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         next: ['hv_plan'],
       });
       const operatorApplications = await inspectOperatorApplications(project, inspectionEnvironment, inspectionSpec?.spec);
-      if (operatorApplications && !operatorApplications.verified) return commandSuccess(operatorApplications, {
-        hint: 'Operator application setup needs its exact saved plan or read-only recovery. Runtime readiness is not established.', next: ['hv_plan'],
-      });
+      if (operatorApplications && !operatorApplications.verified) {
+        const retirements = operatorApplications.registrations.map(item => item.retirement as import('../domain/services/operator-application.service.js').OperatorRetirementSummary | undefined);
+        const complete = retirements.length > 0 && retirements.every(item => item?.complete === true);
+        const retained = retirements.some(item => item?.outcomes.some(outcome => outcome.retained.length > 0));
+        return commandSuccess(operatorApplications, {
+          hint: complete ? retained
+            ? 'Retirement is complete. Some resources remain retained or recoverable; review the recorded outcomes and recovery details.'
+            : 'Retirement is complete. The recorded outcomes identify the removed resources.'
+            : retirements.some(Boolean) ? 'Review the recorded retirement outcomes and any remaining setup or recovery in hv_plan.'
+            : 'Operator application setup needs its exact saved plan or read-only recovery. Runtime readiness is not established.', next: ['hv_plan'],
+        });
+      }
       const specResult = specStore.get(project);
       if (!specResult) {
         return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { hint: 'Define one with hv_spec.' });
