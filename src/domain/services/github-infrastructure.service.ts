@@ -1760,15 +1760,16 @@ async function planBackupRepositoryPublication(params: {
     blockedReason = 'github_backup_publication_observation_unknown';
     warnings.push('Backup publication observations are incomplete; no repository change is authorized.');
   }
+  if (!drift.length && !blockedReason) return { ...empty, actions: [], warnings };
   const action = infrastructureAction({ repository: params.repository, files: compiled.files,
-    type: drift.length || blockedReason ? 'update' : 'noop', verified, drift,
+    type: 'update', verified, drift,
     backupEnvironment: environment, backupWorkflowPublicationRequired: drift.length > 0,
     ...(retiredManagedFiles ? { retiredManagedFiles } : {}),
     billable: !blockedReason && drift.length > 0 && compiled.files.length > 0,
     requiresConfirm: !blockedReason && drift.length > 0,
     ...(blockedReason ? { blockedReason } : {}),
   });
-  return { ...empty, actions: blockedReason || drift.length ? [action] : [], warnings };
+  return { ...empty, actions: [action], warnings };
 }
 
 export async function planGitHubInfrastructure(params: {

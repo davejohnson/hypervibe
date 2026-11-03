@@ -173,9 +173,12 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     if ('error' in resumed) throw new Error(resumed.error);
     const resumedDocument = ctx.repos.runs.findById(resumed.planRunId)!.plan as Record<string, any>;
     // Identity/alias repair resumes the same deployment input contract regardless
-    // of optional backup policy; missing recovery proof stays diagnostic.
+    // of optional backup policy; backup health belongs to explicit diagnostics.
     expect(resumed.scope).toBe('full');
-    if (backupMode === 'daily') expect(resumed.backupReadiness?.ready).toBe(false);
+    expect(resumed).not.toHaveProperty('backupReadiness');
+    expect(resumed).not.toHaveProperty('backupCoverage');
+    expect(resumedDocument).not.toHaveProperty('backupReadiness');
+    expect(resumedDocument).not.toHaveProperty('backupCoverage');
     expect(getSecretStore().decryptObject(resumedDocument.overrides.envVarsEncrypted)).toEqual({ FEATURE_FLAG: 'reviewed' });
     if (input === 'missing') {
       expect(resumed.inputRequired).toContainEqual(expect.objectContaining({ key: 'ANTHROPIC_API_KEY' }));

@@ -77,12 +77,6 @@ function reviewedTarget(
   };
 }
 
-it('requires a reviewed workflow migration for the shared backup receipt consumer', () => {
-  // Revision 5 workflows reject current v2 backup health receipts. Their v1-only
-  // success gate must not remain locked as current after installing this fix.
-  expect(GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION).toBe(7);
-});
-
 function executeDockerfileStep(workflowContent: string, directory: string): string {
   fs.writeFileSync(path.join(directory, 'package.json'), '{}');
   fs.writeFileSync(path.join(directory, 'requirements.txt'), '');
@@ -149,7 +143,8 @@ describe('github tools', () => {
     expect(githubActionsServerProgramFingerprint(input)).toBe(githubActionsServerProgramFingerprint({ ...input, target: { ...targets[0], api: undefined } }));
   });
 
-  it('executes one reviewed Railway workflow for web, worker and cron', async () => {
+  it.each(['omitted', 'daily', 'disabled'] as const)(
+    'executes reviewed migrations and Railway web, worker and cron deployment with %s backups', async backupMode => {
     const project = new ProjectRepository().create({ name: 'multi-service', defaultPlatform: 'railway' });
     new EnvironmentRepository().create({
       projectId: project.id,
@@ -173,6 +168,9 @@ describe('github tools', () => {
         staging: {
           hosting: { provider: 'railway' },
           deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+          migrations: { mode: 'tool', runInDeploy: true, command: 'node migrate.cjs' },
+          ...(backupMode === 'omitted' ? {} : { backups: backupMode === 'daily'
+            ? { mode: 'daily' } : { mode: 'disabled', reason: 'Disposable application data' } }),
           envVars: {
             SEED_CLIENT_TEST_DATA: 'true',
             CARE_PLAN_AI_REQUEST_TIMEOUT_MS: '30000',
@@ -187,8 +185,19 @@ describe('github tools', () => {
     });
     new SpecStore().replace(project, spec);
     const { targets, migration } = resolveBranchDeployTargets(project);
-    const workflow = buildBranchDeployWorkflow('railway', targets[0]!, migration);
     const target = targets[0]!;
+    // Owner contract: backup intent and obsolete policy metadata cannot add a
+    // release prerequisite. Compare complete generated programs, then execute
+    // their migration and provider steps below without backup files or helpers.
+    const legacyTarget = { ...target, ...(backupMode === 'omitted' ? {} : {
+      backupPolicy: { mode: backupMode, credentialNames: ['RAILWAY_API_TOKEN'] },
+    }) };
+    const workflow = buildBranchDeployWorkflow('railway', legacyTarget, migration);
+    const unmanaged = structuredClone(spec);
+    delete unmanaged.environments.staging.backups;
+    new SpecStore().replace(project, unmanaged);
+    const baseline = resolveBranchDeployTargets(project);
+    expect(workflow).toEqual(buildBranchDeployWorkflow('railway', baseline.targets[0]!, baseline.migration));
     for (const file of [{ path: workflow.path, content: workflow.content }, ...(workflow.companionFiles ?? [])]
       .filter((candidate) => /\.ya?ml$/.test(candidate.path))) {
       const document = parseDocument(file.content, { uniqueKeys: true });
@@ -204,6 +213,7 @@ describe('github tools', () => {
       'Prepare release evidence validator',
       'Verify reviewed release target',
       'Deployment safety gate: verify Hypervibe reconciliation',
+      'Run migrations',
       'Deploy image to Railway',
       'Write server release evidence',
     ]) {
@@ -238,6 +248,15 @@ describe('github tools', () => {
       'RUN --mount=type=secret,id=npm_token,required=false if [ -f /run/secrets/npm_token ]; then export NODE_AUTH_TOKEN="$(cat /run/secrets/npm_token)"; fi; npm ci --omit=dev'
     );
     expect(dockerfile).toContain('CMD ["sh", "-lc", "npm start"]');
+
+    fs.writeFileSync(path.join(tempDir, 'migrate.cjs'),
+      "require('node:fs').writeFileSync('migration-result.json', JSON.stringify({ database: process.env.DATABASE_URL }));\n");
+    execFileSync('bash', ['-eu', '-c', extractWorkflowShell(workflow.content, 'Run migrations')], {
+      cwd: tempDir,
+      env: { PATH: process.env.PATH, DATABASE_URL: 'postgres://synthetic/app' },
+    });
+    expect(JSON.parse(fs.readFileSync(path.join(tempDir, 'migration-result.json'), 'utf8')))
+      .toEqual({ database: 'postgres://synthetic/app' });
 
     const validator = installReleaseEvidenceValidator(workflow.content, tempDir);
     expect(workflow.content.match(/name: Prepare release evidence validator/g)).toHaveLength(1);

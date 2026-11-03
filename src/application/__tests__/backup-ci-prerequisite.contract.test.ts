@@ -238,6 +238,9 @@ describe('backup activation through CI credentials and canonical repository publ
       requiresConfirm: true, metadata: expect.objectContaining({ backupEnvironment: 'production', desiredFiles: [] }),
     })] });
     expect(result.actions[0].billable).not.toBe(true);
+    // A pending repository change is not a completed backup/restore assessment.
+    expect(result).not.toHaveProperty('backupReadiness');
+    expect(ctx.repos.runs.findById(result.planRunId)!.plan).not.toHaveProperty('backupReadiness');
     expect(planRunDocumentSchema.safeParse(ctx.repos.runs.findById(result.planRunId)!.plan).success).toBe(true);
     expect(PlanService.prototype.observeEnvironment).not.toHaveBeenCalled();
     f.files.set('.github/hypervibe/manifest.json', JSON.stringify({ version: 1, managedBy: 'hypervibe', files: [] }));
