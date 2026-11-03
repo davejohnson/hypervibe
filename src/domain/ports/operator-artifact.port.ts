@@ -1,12 +1,15 @@
 import { z } from 'zod';
 import type { PlanAction } from '../plan/plan.types.js';
+import { operatorRetirementDeclarationSchema } from './operator-retirement.port.js';
 
 export const operatorArtifactDeclarationSchema = z.object({
   provider: z.string().min(1).max(100),
   nativeScope: z.record(z.string().min(1).max(100), z.string().min(1).max(2048)),
   artifacts: z.array(z.enum(['aws-collection-template-v1', 'aws-deployment-template-v1', 'holding-v1', 'backup-runner-v1', 'application-candidate-v1'])).min(1).max(4),
   refreshFrom: z.object({ installationId: z.string().guid(), planDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
-}).strict().refine(value => new Set(value.artifacts).size === value.artifacts.length, 'Select each artifact once.');
+  retirement: operatorRetirementDeclarationSchema.optional(),
+}).strict().refine(value => new Set(value.artifacts).size === value.artifacts.length, 'Select each artifact once.')
+  .refine(value => !(value.refreshFrom && value.retirement), 'Refresh and retirement are separate reviews.');
 export function parseOperatorArtifactDeclarationV1(value: unknown) { return operatorArtifactDeclarationSchema.parse(value); }
 export const OPERATOR_ARTIFACT_OPERATION = 'operatorArtifactPublication';
 export const operatorArtifactPlanSchema = z.object({ schemaVersion: z.literal(1), name: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),

@@ -1849,6 +1849,13 @@ export class PlanService {
       return { error: `Project "${project.name}" has no spec. Set one with hv_spec.` };
     }
     const scope = options?.scope ?? 'full';
+    const operatorDesired = specResult.spec.environments[environmentName];
+    // Persist explicit intent without interpreting retirement as new setup.
+    // Provider retirement drivers and their exact plan projections are separate
+    // capabilities; until installed this path cannot prepare dependencies.
+    if (scope === 'full' && [...Object.values(operatorDesired?.operatorApplications ?? {}),
+      ...Object.values(operatorDesired?.operatorArtifacts ?? {})].some(item => item.retirement))
+      return { error: 'Operator retirement is not yet supported for these registrations or publications. The request is saved; no setup or deletion is authorized. Existing resources and history are preserved.' };
     if (scope === 'backups') {
       if (options?.serviceFilter !== undefined || options?.envVarOverrides !== undefined || options?.envFile !== undefined
         || options?.secretRefs !== undefined || options?.includeEnvFile === true) {

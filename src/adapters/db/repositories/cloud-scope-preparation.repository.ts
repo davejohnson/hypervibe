@@ -131,7 +131,8 @@ export class CloudScopePreparationRepository<T extends JournalRecord> {
       if (!anyRow && history.length >= HISTORY_LIMIT) throw historyFull();
       const current = anyRow ? this.fromRow(anyRow) : undefined;
       if (current && current.revision !== expectedRevision) return false;
-      if (current && (!isDeepStrictEqual(current.intent, next.intent) || !isDeepStrictEqual(current.plan, next.plan)
+      if (current && (current.status === 'retired' && next.status !== 'retired'
+        || !isDeepStrictEqual(current.intent, next.intent) || !isDeepStrictEqual(current.plan, next.plan)
         || next.attempts.length < current.attempts.length
         || current.attempts.some((attempt, index) => !retainsAttempt(attempt, next.attempts[index]))
         || Object.entries(current.completed ?? {}).some(([key, proof]) => !isDeepStrictEqual(next.completed?.[key], proof)
@@ -155,11 +156,11 @@ export class CloudScopePreparationRepository<T extends JournalRecord> {
       const prior = ancestors(next);
       if (next.intent.predecessor && expectedRevision === null) {
         const parent = history.find(item => item.installationId === next.intent.predecessor!.installationId);
-        if (!parent || parent.status !== 'scope-ready' && !this.policy?.allowHistoricalPredecessor?.(parent, next)) return false;
+        if (!parent || parent.status === 'retired' || parent.status !== 'scope-ready' && !this.policy?.allowHistoricalPredecessor?.(parent, next)) return false;
       }
       if (history.some(record => record.installationId !== installationId && (record.attempts.length > 0 || Object.keys(record.completed ?? {}).length > 0)
         && !prior.has(record.installationId) && !ancestors(record).has(installationId))) return false;
-      const status = next.status === 'scope-ready' ? 'succeeded' : next.status === 'blocked' ? 'blocked' : 'pending';
+      const status = ['scope-ready', 'retired'].includes(next.status) ? 'succeeded' : next.status === 'blocked' ? 'blocked' : 'pending';
       const serialized = JSON.stringify(next);
       if (!current) {
         db.prepare('INSERT INTO runs (id, project_id, environment_id, type, status, plan, receipts, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')

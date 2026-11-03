@@ -3,6 +3,7 @@ import type { PlanAction } from '../plan/plan.types.js';
 import { OPERATOR_APPLICATION_PROVIDERS, type CloudInstallationDriver, type CloudInstallationRecord, type OperatorApplicationAuthentication, type OperatorApplicationIntent } from './cloud-installation.port.js';
 import type { CloudDeploymentRuntimeIdentityV1 } from './cloud-deployment.port.js';
 import { operatorOutputRolesSchema } from './operator-output.port.js';
+import { operatorRetirementDeclarationSchema } from './operator-retirement.port.js';
 
 const name = z.string().regex(/^[a-z][a-z0-9-]{0,62}$/);
 export const operatorApplicationDeclarationSchema = z.object({
@@ -11,7 +12,8 @@ export const operatorApplicationDeclarationSchema = z.object({
   nativeScope: z.record(z.string().min(1).max(100), z.string().min(1).max(2048)),
   outputs: operatorOutputRolesSchema.optional(),
   restartFrom: z.object({ installationId: z.string().guid(), planDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
-}).strict();
+  retirement: operatorRetirementDeclarationSchema.optional(),
+}).strict().refine(value => !(value.restartFrom && value.retirement), 'Restart and retirement are separate reviews.');
 export type OperatorApplicationDeclaration = z.infer<typeof operatorApplicationDeclarationSchema>;
 export interface OperatorApplicationLocalContext {
   projectId: string; environmentId: string; installationId: string; intentDigest: string;

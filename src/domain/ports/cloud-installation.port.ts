@@ -3,6 +3,7 @@ import type { SecretDestination } from './secret-destination.port.js';
 import type { CloudDeploymentConnectionV1, CloudDeploymentPreparedResourcesV1, CloudDeploymentSessionRequestV1, CloudDeploymentSessionV1, CloudDeploymentTopologyV1,
   CloudDeploymentReleaseTargetV1, CloudDeploymentReleaseTargetRequestV1 } from './cloud-deployment.port.js';
 import type { ProjectSpec } from '../spec/spec.schema.js';
+import type { OperatorRetirementIntent } from './operator-retirement.port.js';
 
 /** Reviewed roster, not a claim of live compatibility. */
 export const CLOUD_INSTALLATION_PROVIDERS = ['aws', 'azure', 'gcp'] as const;
@@ -69,7 +70,9 @@ export interface LocalCloudScopePreparationIntent extends Omit<CloudInstallation
   installed?: never;
 }
 /** Operator release assets are a separate local actor, never hosted setup authority. */
-export interface OperatorArtifactIntent extends Omit<LocalCloudScopePreparationIntent, 'execution' | 'hostingProvider'> {
+export interface OperatorArtifactIntent extends Omit<LocalCloudScopePreparationIntent, 'execution' | 'hostingProvider' | 'mode'> {
+  mode: 'connect' | 'retire';
+  retirement?: OperatorRetirementIntent;
   execution: { kind: 'operator-artifact-publisher'; authentication: 'aws-session' | 'google-user-adc' };
   artifactProvider: string;
   artifacts: string[];
@@ -90,7 +93,9 @@ export interface OperatorArtifactCapability {
   refreshScope?(record: CloudInstallationRecord<OperatorArtifactIntent>, declaration: Record<string, string>, artifacts: string[]): Record<string, string>;
   receipts(record: CloudInstallationRecord<OperatorArtifactIntent>): Array<Record<string, string>>;
 }
-export interface OperatorApplicationIntent extends Omit<LocalCloudScopePreparationIntent, 'execution' | 'hostingProvider' | 'provider'> {
+export interface OperatorApplicationIntent extends Omit<LocalCloudScopePreparationIntent, 'execution' | 'hostingProvider' | 'provider' | 'mode'> {
+  mode: 'connect' | 'retire';
+  retirement?: OperatorRetirementIntent;
   outputs?: import('./operator-output.port.js').OperatorOutputSelection;
   execution: { kind: 'operator-application'; authentication: 'local-operator' };
   provider: OperatorApplicationProvider;
@@ -230,6 +235,8 @@ export interface CloudInstallationSetupCapability {
   assertStage(input: { setup: CloudInstallationSetupReviewV1; record: CloudInstallationRecord; history: CloudInstallationRecord[] }): void;
 }
 export interface CloudInstallationDriver<I extends CloudInstallationExecutableIntent = CloudInstallationIntent> {
+  /** Local completed-resource retirement only; never hosted disconnect authority. */
+  readonly operatorRetirement?: { schemaVersion: 1 };
   /** Hosted setup only; absent means an exact single-plan review, never future authority. */
   readonly setup?: CloudInstallationSetupCapability;
   /** Local allocation or explicitly registered, predecessor-bound continuation. */
@@ -299,7 +306,7 @@ export interface CloudInstallationRecord<I extends CloudInstallationExecutableIn
   revision: number;
   intent: I;
   plan: { digest: string; actions: CloudInstallationAction[]; review: CloudInstallationReview; blockedReason?: CloudInstallationReason };
-  status: 'review-required' | 'pending' | 'blocked' | 'scope-ready' | 'ready' | 'disconnected';
+  status: 'review-required' | 'pending' | 'blocked' | 'scope-ready' | 'ready' | 'disconnected' | 'retired';
   attempts: CloudInstallationAttempt[];
   completed: Record<string, CloudInstallationEvidence>;
   reason?: CloudInstallationReason;

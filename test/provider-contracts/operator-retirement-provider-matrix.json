@@ -1,0 +1,202 @@
+{
+  "schemaVersion": 1,
+  "status": "provider-design-reviewed; shared-foundation-only",
+  "sourceCommit": "2f029c9f9683a88320d05b16c27eb28d3d6edcc2",
+  "evidenceDate": "2026-11-03",
+  "liveRetirementVerified": false,
+  "operatorApplicationsRoster": [
+    "microsoft-entra",
+    "github-app",
+    "google-oauth",
+    "google-recaptcha",
+    "sendgrid"
+  ],
+  "registeredArtifactProviders": [
+    "s3",
+    "cloudrun"
+  ],
+  "cloudRoster": [
+    "aws",
+    "azure",
+    "gcp"
+  ],
+  "providers": [
+    {
+      "id": "google-oauth",
+      "kind": "operator-application",
+      "implementation": "missing-completed-retirement",
+      "nativeMethod": "reviewed owner-authenticated Google Auth Platform Clients browser handoff",
+      "identity": [
+        "projectNumber",
+        "clientId",
+        "reviewed owner/project",
+        "accepted registration digest"
+      ],
+      "retention": "Google documents deleted-client restoration for 30 days; no immediate-erasure claim",
+      "unsupportedSubstitute": "IAM projects.locations.oauthClients belongs to Workforce Identity Federation/IAP, not the imported Google browser web client",
+      "recovery": "Retain browser attempt and exact client; reject token failure/public lookup as deletion proof; remain pending when exact owner-view verification is unavailable",
+      "sources": [
+        "https://support.google.com/cloud/answer/15549257?hl=en",
+        "https://docs.cloud.google.com/iam/docs/workforce-oauth-app"
+      ]
+    },
+    {
+      "id": "github-app",
+      "kind": "operator-application",
+      "implementation": "missing-completed-retirement",
+      "nativeMethod": "reviewed owner-settings registration deletion; API installation deletion is a different effect",
+      "identity": [
+        "appId",
+        "ownerId",
+        "slug",
+        "createdAt",
+        "complete current installation IDs/account IDs"
+      ],
+      "retention": "Registration deletion uninstalls from all accounts; unexpected consumers block narrow test cleanup",
+      "recovery": "No documented registration-delete endpoint found in the reviewed API surface; do not invent one. Auth failures/anonymous 404 do not prove deletion. Keep the older unfinished registration unresolved until separately evidenced.",
+      "sources": [
+        "https://docs.github.com/en/apps/maintaining-github-apps/deleting-a-github-app",
+        "https://docs.github.com/en/rest/apps/apps#delete-an-installation-for-the-authenticated-app"
+      ]
+    },
+    {
+      "id": "microsoft-entra",
+      "kind": "operator-application",
+      "implementation": "missing-completed-retirement",
+      "nativeMethod": [
+        "DELETE /applications/{object-id}/federatedIdentityCredentials/{credential-id}",
+        "DELETE /applications/{object-id}"
+      ],
+      "identity": [
+        "tenantId",
+        "applicationObjectId",
+        "clientId",
+        "federatedIdentityId",
+        "accepted issuer/subject/audience"
+      ],
+      "retention": "Application deletion retains a deleted object for 30 days. Optional permanent deleted-item deletion is a different, explicitly destructive action.",
+      "recovery": "204 is acknowledgment; re-observe exact active/deleted identities. Do not infer service-principal or unrelated identity cleanup.",
+      "sources": [
+        "https://learn.microsoft.com/en-us/graph/api/federatedidentitycredential-delete?view=graph-rest-1.0",
+        "https://learn.microsoft.com/en-us/graph/api/application-delete?view=graph-rest-1.0",
+        "https://learn.microsoft.com/en-us/graph/api/directory-deleteditems-delete?view=graph-rest-1.0"
+      ]
+    },
+    {
+      "id": "google-recaptcha",
+      "kind": "operator-application",
+      "implementation": "missing-completed-retirement",
+      "nativeMethod": "DELETE https://recaptchaenterprise.googleapis.com/v1/projects/{project}/keys/{key}; empty body",
+      "identity": [
+        "projectNumber",
+        "exact key resource name",
+        "accepted creation and domain restriction evidence"
+      ],
+      "retention": "No restore or conditional-delete guarantee inferred from this API contract",
+      "recovery": "Empty-object acknowledgment plus exact authorized metadata absence; preserve prior production key and API consumers",
+      "sources": [
+        "https://docs.cloud.google.com/recaptcha/docs/reference/rest/v1/projects.keys/delete"
+      ]
+    },
+    {
+      "id": "sendgrid",
+      "kind": "operator-application",
+      "implementation": "failure-compensation-only; missing completed-key retirement",
+      "nativeMethod": "DELETE /v3/api_keys/{api_key_id}",
+      "identity": [
+        "accountId",
+        "optional subuser/account scope",
+        "apiKeyId",
+        "accepted name/scopes evidence"
+      ],
+      "retention": "Revocation has a short provider propagation delay; shared account/sender/domain/management key are excluded",
+      "recovery": "Exact-key metadata absence after acknowledged or uncertain deletion; no test email or key-value output",
+      "sources": [
+        "https://www.twilio.com/docs/sendgrid/api-reference/api-keys/delete-api-keys"
+      ]
+    },
+    {
+      "id": "aws",
+      "kind": "cloud-parent-and-artifacts",
+      "registeredArtifactProvider": "s3",
+      "implementation": "publication exists; completed retirement missing",
+      "nativeMethod": "exact CloudFormation stack/resource and S3 version-aware retirement; never account closure",
+      "identity": [
+        "accountId",
+        "region",
+        "stackId",
+        "recorded native resources",
+        "bucket ownership",
+        "object key/versionId"
+      ],
+      "retention": "DELETE_COMPLETE may retain bucket, objects or snapshots according to reviewed policy; retained items remain obligations",
+      "recovery": "Exact stack operation and retained resource inventory; no inference that parent deletion erased children",
+      "peerDesign": "/private/tmp/hv-artifact-retirement-contract-20261103",
+      "sources": [
+        "https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-attribute-deletionpolicy.html",
+        "https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-console-delete-stack.html"
+      ]
+    },
+    {
+      "id": "gcp",
+      "kind": "cloud-parent-and-artifacts",
+      "registeredArtifactProvider": "cloudrun",
+      "implementation": "publication/project allocation exists; completed retirement missing",
+      "nativeMethod": "Artifact Registry exact versions/repositories; separate explicit CRM v3 parent-project deletion",
+      "identity": [
+        "projectNumber",
+        "project creation proof",
+        "parent",
+        "repository native identity",
+        "immutable image digest"
+      ],
+      "retention": "Project DELETE_REQUESTED is not permanent erasure; 30-day recovery window and potentially earlier child loss. Preserve child retention evidence.",
+      "recovery": "Exact LRO and native target observations; parent shutdown only after exclusive-scope review and external dependencies complete",
+      "peerDesign": "/private/tmp/hv-artifact-retirement-contract-20261103",
+      "sources": [
+        "https://docs.cloud.google.com/resource-manager/reference/rest/v3/projects/delete",
+        "https://docs.cloud.google.com/resource-manager/docs/delete-restore-projects"
+      ],
+      "repositoryOwnership": "Artifact Registry repository/grants use the original local-scope creation journal; publication records authorize only their exact published content."
+    },
+    {
+      "id": "azure",
+      "kind": "cloud-parent-and-artifacts",
+      "registeredArtifactProvider": null,
+      "implementation": "no operator publication facet; preserve existing ACA/storage lifecycles",
+      "nativeMethod": "optional exact owned resource-group deletion through its existing capability; no tenant/subscription deletion",
+      "identity": [
+        "tenantId",
+        "subscriptionId",
+        "resourceGroup native scope",
+        "creation/deployment lifetime evidence",
+        "complete reviewed resource inventory"
+      ],
+      "retention": "Resource-group deletion does not establish cleanup of external Entra apps or protected/soft-deleted Key Vault data",
+      "recovery": "Follow native async deletion and fresh exact readback; do not remove locks or purge protection implicitly",
+      "sources": [
+        "https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/delete-resource-group",
+        "https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/lock-resources"
+      ]
+    },
+    {
+      "id": "gcs",
+      "kind": "ordinary-backup-storage",
+      "implementation": "separate existing storage teardown requires version/soft-delete contract review",
+      "nativeMethod": "exact object-generation and bucket retirement, not an operator publication installation",
+      "identity": [
+        "projectNumber",
+        "bucket ownership/lifetime",
+        "object generation",
+        "retained task-produced archive receipt"
+      ],
+      "retention": "Soft-deleted generations/buckets can remain after active GET404; retain exact recovery and hard-delete timing evidence",
+      "recovery": "Active absence and permanent deletion are separate outcomes",
+      "peerDesign": "/private/tmp/hv-artifact-retirement-contract-20261103",
+      "sources": [
+        "https://docs.cloud.google.com/storage/docs/soft-delete",
+        "https://docs.cloud.google.com/storage/docs/json_api/v1/objects/delete"
+      ]
+    }
+  ]
+}

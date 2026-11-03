@@ -6,6 +6,7 @@ import { hasExactPlanActionConfirmationAuthority } from '../plan/action-confirma
 import { secretDestinationSchema, secretDestinationIdentity } from '../ports/secret-destination.port.js';
 import { cloudDeploymentTopologySchema, parseCloudDeploymentConnectionV1 } from './cloud-deployment-authentication.js';
 import { operatorOutputSelectionSchema } from '../ports/operator-output.port.js';
+import { operatorRetirementIntentSchema, operatorRetirementOutcomeSchema } from '../ports/operator-retirement.port.js';
 import {
   CLOUD_INSTALLATION_PROVIDERS, OPERATOR_APPLICATION_PROVIDERS, CLOUD_INSTALLATION_SECRET_PROVIDERS, CLOUD_INSTALLATION_REASONS, CloudInstallationBoundaryError, type CloudInstallationAction, type CloudInstallationApplyInput,
   type CloudInstallationContext, type CloudInstallationDriver, type CloudInstallationEvidence,
@@ -48,10 +49,12 @@ const localIntentSchema = intentSchema.omit({ hostIdentity: true, purpose: true,
     specRevision: z.number().int().positive(), specDigest: intentSchema.shape.source.shape.specDigest }).strict(),
 }).strict();
 const artifactIntentSchema = localIntentSchema.omit({ execution: true, hostingProvider: true }).extend({
+  mode: z.enum(['connect', 'retire']), retirement: operatorRetirementIntentSchema.optional(),
   execution: z.object({ kind: z.literal('operator-artifact-publisher'), authentication: z.enum(['aws-session', 'google-user-adc']) }).strict(),
   artifactProvider: text, artifacts: z.array(z.enum(['aws-collection-template-v1', 'aws-deployment-template-v1', 'holding-v1', 'backup-runner-v1', 'application-candidate-v1'])).min(1).max(4),
 }).strict();
 const applicationIntentSchema = localIntentSchema.omit({ execution: true, hostingProvider: true, provider: true }).extend({
+  mode: z.enum(['connect', 'retire']), retirement: operatorRetirementIntentSchema.optional(),
   execution: z.object({ kind: z.literal('operator-application'), authentication: z.literal('local-operator') }).strict(),
   provider: z.enum(OPERATOR_APPLICATION_PROVIDERS), applicationProvider: z.enum(OPERATOR_APPLICATION_PROVIDERS),
   outputs: operatorOutputSelectionSchema.optional(),
@@ -65,6 +68,9 @@ function artifactIntent(intent: CloudInstallationExecutableIntent): intent is Op
 }
 function applicationIntent(intent: CloudInstallationExecutableIntent): intent is OperatorApplicationIntent {
   return 'execution' in intent && intent.execution.kind === 'operator-application';
+}
+function retirementIntent(intent: CloudInstallationExecutableIntent): intent is (OperatorApplicationIntent | OperatorArtifactIntent) & { mode: 'retire'; retirement: NonNullable<OperatorApplicationIntent['retirement']> } {
+  return (applicationIntent(intent) || artifactIntent(intent)) && intent.mode === 'retire';
 }
 const actionSchema = z.object({ id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9:_.\/-]{0,255}$/).refine(value => !['constructor', 'prototype', '__proto__'].includes(value)), type: z.enum(['create', 'update', 'replace', 'destroy', 'noop']),
   resource: z.object({ kind: z.enum(['project', 'environment', 'service', 'volume', 'database', 'cache', 'storage', 'retained-resource', 'load-balancer', 'domain',
@@ -81,7 +87,7 @@ const attemptSchema = z.object({ id: z.string().guid(), actionId: text, status: 
   startedAt: z.string().datetime(), updatedAt: z.string().datetime(), evidence: evidenceSchema.optional(), externalUrl: z.string().url().max(16384).optional(), reason: reasonSchema.optional() }).strict();
 const recordSchema = z.object({ schemaVersion: z.literal(1), installationId: z.string().guid(), revision: z.number().int().nonnegative(), intent: z.unknown(),
   plan: z.object({ digest: z.string().regex(/^[a-f0-9]{64}$/), actions: z.array(actionSchema).min(1).max(300), review: reviewSchema, blockedReason: reasonSchema.optional() }).strict(),
-  status: z.enum(['review-required', 'pending', 'blocked', 'scope-ready', 'ready', 'disconnected']), attempts: z.array(attemptSchema).max(3000), completed: z.record(z.string(), evidenceSchema), reason: reasonSchema.optional() }).strict();
+  status: z.enum(['review-required', 'pending', 'blocked', 'scope-ready', 'ready', 'disconnected', 'retired']), attempts: z.array(attemptSchema).max(3000), completed: z.record(z.string(), evidenceSchema), reason: reasonSchema.optional() }).strict();
 
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
@@ -127,6 +133,13 @@ export function parseCloudInstallationIntentV1<I extends CloudInstallationExecut
     if (isLocal !== Boolean(driver.localScopePreparation) || isArtifact !== Boolean(driver.artifactPublication)
       || isApplication !== Boolean(driver.operatorApplication) || actor !== undefined && !isLocal && !isArtifact && !isApplication) throw new Error();
     const parsed = (isApplication ? applicationIntentSchema.parse(value) : isArtifact ? artifactIntentSchema.parse(value) : isLocal ? localIntentSchema.parse(value) : intentSchema.parse(value)) as I;
+    if (retirementIntent(parsed)) {
+      const selected = parsed.retirement;
+      if (driver.operatorRetirement?.schemaVersion !== 1 || !selected || !parsed.predecessor
+        || canonical(parsed.predecessor) !== canonical(selected.from)
+        || !selected.targets.some(item => canonical({ installationId: item.installationId, planDigest: item.planDigest }) === canonical(selected.from))
+        || new Set(selected.targets.map(item => item.installationId)).size !== selected.targets.length) throw new Error();
+    } else if ((applicationIntent(parsed) || artifactIntent(parsed)) && parsed.retirement) throw new Error();
     if (applicationIntent(parsed)) {
       if (!driver.scopePreparation || driver.deployment || parsed.provider !== driver.provider || parsed.provider !== parsed.applicationProvider
         || parsed.applicationProvider !== driver.operatorApplication?.providerName || parsed.predecessor?.installationId === parsed.installationId) throw new Error();
@@ -183,13 +196,13 @@ function parseActions<I extends CloudInstallationExecutableIntent = CloudInstall
     }
     if (artifactIntent(intent) && actions.some(action => action.metadata.execution !== 'api'
       || !['scope', 'identity', 'trust', 'verification'].includes(action.metadata.category)
-      || !['create', 'update', 'noop'].includes(action.type))) throw new Error();
-    if (applicationIntent(intent) && actions.some(action => !['create', 'update', 'noop'].includes(action.type)
+      || !(retirementIntent(intent) ? ['destroy', 'update', 'noop'] : ['create', 'update', 'noop']).includes(action.type))) throw new Error();
+    if (applicationIntent(intent) && actions.some(action => !(retirementIntent(intent) ? ['destroy', 'update', 'noop'] : ['create', 'update', 'noop']).includes(action.type)
       || !['scope', 'identity', 'trust', 'verification', 'secret-container'].includes(action.metadata.category))) throw new Error();
     for (const action of actions) {
       if (action.resource.provider !== intent.provider || (!action.verified && !blockedReason) || (action.type !== 'noop' && action.requiresConfirm !== true)) throw new Error();
       if (intent.mode === 'disconnect' && action.type !== 'noop' && (action.metadata.category !== 'trust' || !['update', 'destroy'].includes(action.type))) throw new Error();
-      if (intent.mode !== 'disconnect' && ['destroy', 'replace'].includes(action.type)) throw new Error();
+      if (intent.mode !== 'disconnect' && !retirementIntent(intent) && ['destroy', 'replace'].includes(action.type)) throw new Error();
       if (['migrate', 'connect-existing'].includes(intent.mode) && action.metadata.category === 'secret-container' && action.type !== 'noop') throw new Error();
       if (intent.stage === 'scope-preparation' && !applicationIntent(intent) && action.metadata.category === 'secret-container') throw new Error();
       if (intent.purpose === 'deployment' && action.metadata.category === 'secret-container') throw new Error();
@@ -205,9 +218,11 @@ export function parseCloudInstallationRecordV1<I extends CloudInstallationExecut
   return contract(() => {
     const raw = recordSchema.parse(value);
     const parsed: CloudInstallationRecord<I> = { ...raw, intent: parseCloudInstallationIntentV1(raw.intent, driver) };
+    if (parsed.status === 'retired' && !retirementIntent(parsed.intent)
+      || retirementIntent(parsed.intent) && ['scope-ready', 'ready', 'disconnected'].includes(parsed.status)) throw new Error();
     parsed.plan.actions = parseActions(parsed.plan.actions, parsed.intent, driver, parsed.plan.blockedReason);
     if (parsed.installationId !== parsed.intent.installationId || parsed.plan.digest !== digest(parsed.intent, parsed.plan.actions, parsed.plan.review, parsed.plan.blockedReason)) throw new Error();
-    if (parsed.plan.blockedReason && ['scope-ready', 'ready', 'disconnected'].includes(parsed.status)) throw new Error();
+    if (parsed.plan.blockedReason && ['scope-ready', 'ready', 'disconnected', 'retired'].includes(parsed.status)) throw new Error();
     if (parsed.status === 'scope-ready' && parsed.intent.stage !== 'scope-preparation'
       || parsed.intent.stage === 'scope-preparation' && (parsed.status === 'ready' || parsed.status === 'disconnected' && parsed.intent.mode !== 'disconnect')) throw new Error();
     const ids = new Set(parsed.plan.actions.map(action => action.id));
@@ -222,8 +237,16 @@ export function parseCloudInstallationRecordV1<I extends CloudInstallationExecut
     for (const [id, evidence] of Object.entries(parsed.completed)) {
       if (!ids.has(id)) throw new Error();
       parsed.completed[id] = parseEvidence(evidence, parsed.intent, driver);
+      if (retirementIntent(parsed.intent)) {
+        const outcome = operatorRetirementOutcomeSchema.parse(parsed.completed[id].native.retirement);
+        if (parsed.intent.retirement.data === 'delete-owned' && outcome.retained.some(item => item.reason === 'data-retention')) throw new Error();
+      }
     }
-    if (['scope-ready', 'ready', 'disconnected'].includes(parsed.status) && ids.size !== Object.keys(parsed.completed).length) throw new Error();
+    if (['scope-ready', 'ready', 'disconnected', 'retired'].includes(parsed.status) && ids.size !== Object.keys(parsed.completed).length) throw new Error();
+    if (parsed.status === 'retired' && (parsed.reason || [...ids].some(id => {
+      const last = parsed.attempts.filter(attempt => attempt.actionId === id).at(-1);
+      return last && (last.status !== 'succeeded' || canonical(last.evidence) !== canonical(parsed.completed[id]));
+    }))) throw new Error();
     if (parsed.status === 'scope-ready') {
       const resolved = driver.scopePreparation!.resolvedScope(parsed);
       strings.parse(localIntent(parsed.intent) ? resolved : driver.parseScope(resolved));
@@ -330,12 +353,42 @@ async function bounded<T>(context: Pick<CloudInstallationContext, 'signal' | 'ti
     Promise.resolve().then(() => work(signal)).then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
   });
 }
+async function verifyRetirement<I extends CloudInstallationExecutableIntent>(context: CloudInstallationContext<I>, intent: I): Promise<void> {
+  if (!retirementIntent(intent)) {
+    if ((applicationIntent(intent) || artifactIntent(intent)) && intent.predecessor
+      && (await read(context, intent.predecessor.installationId))?.status === 'retired') throw new CloudInstallationError('scope_mismatch');
+    return;
+  }
+  const ancestors = new Map<string, CloudInstallationRecord<I>>();
+  let reference: { installationId: string; planDigest: string } | undefined = intent.predecessor;
+  while (reference) {
+    if (ancestors.size >= 20 || ancestors.has(reference.installationId) || reference.installationId === intent.installationId)
+      throw new CloudInstallationError('scope_mismatch');
+    const previous = await read(context, reference.installationId);
+    if (!previous || previous.plan.digest !== reference.planDigest || retirementIntent(previous.intent)
+      || !applicationIntent(previous.intent) && !artifactIntent(previous.intent)) throw new CloudInstallationError('scope_mismatch');
+    for (const key of ['customerId', 'appId', 'environment', 'provider', 'execution'] as const)
+      if (canonical(previous.intent[key]) !== canonical(intent[key])) throw new CloudInstallationError('scope_mismatch');
+    if (previous.intent.source.repository !== intent.source.repository) throw new CloudInstallationError('scope_mismatch');
+    ancestors.set(previous.installationId, previous); reference = previous.intent.predecessor;
+  }
+  const predecessor = ancestors.get(intent.retirement.from.installationId);
+  if (!predecessor || canonical(predecessor.intent.nativeScope) !== canonical(intent.nativeScope)) throw new CloudInstallationError('scope_mismatch');
+  for (const target of intent.retirement.targets) {
+    const prior = ancestors.get(target.installationId);
+    const evidence = prior && historicalInstallationEvidence(prior);
+    if (!prior || prior.plan.digest !== target.planDigest || !evidence
+      || createHash('sha256').update(canonical(evidence)).digest('hex') !== target.evidenceDigest)
+      throw new CloudInstallationError('scope_mismatch');
+  }
+}
 async function authorized<T, I extends CloudInstallationExecutableIntent>(context: CloudInstallationContext<I>, intent: I,
   phase: 'plan' | 'inspect' | 'mutate' | 'recover', planDigest: string | undefined, actionId: string | undefined,
   work: (input: CloudInstallationProviderContext<I>) => Promise<T>, completed: Readonly<Record<string, CloudInstallationEvidence>> = {}, lineage: string[] = [],
   attempts: CloudInstallationRecord['attempts'] = []): Promise<T> {
   return bounded(context, async signal => {
     if (!await context.authorize({ intent: structuredClone(intent), phase, planDigest, actionId })) throw new CloudInstallationError('authorization_revoked');
+    await verifyRetirement(context, intent);
     if (applicationIntent(intent)) {
       if (!context.driver.operatorApplication || !('kind' in context.authentication) || context.authentication.kind !== 'operator-application'
         || 'host' in context.authentication) throw new CloudInstallationError('authorization_expired');
@@ -383,6 +436,7 @@ async function read<I extends CloudInstallationExecutableIntent = CloudInstallat
 /** Historical success is evidence of finished effects, never current readiness.
  * Call only with a provider-validated record; do not repair its completed map. */
 export function historicalInstallationEvidence(record: CloudInstallationRecord<CloudInstallationExecutableIntent>) {
+  if (retirementIntent(record.intent)) return undefined;
   const evidence: typeof record.completed = {};
   for (const action of record.plan.actions) {
     const attempt = record.attempts.filter(item => item.actionId === action.id).at(-1);
@@ -427,7 +481,7 @@ async function execute<I extends CloudInstallationExecutableIntent = CloudInstal
   if (input.onlyActionId && (!(localIntent(record.intent) && (input.driver.localScopePreparation?.continuation || input.driver.localScopePreparation?.preparation)
     || artifactIntent(record.intent) && input.driver.artifactPublication || applicationIntent(record.intent) && input.driver.operatorApplication)
     || !record.plan.actions.some(action => action.id === input.onlyActionId))) throw new CloudInstallationError('invalid_contract');
-  if (record.status === 'disconnected') {
+  if (record.status === 'disconnected' || record.status === 'retired') {
     // A terminal removal receipt is historical evidence. Requiring the removed
     // customer trust to read it would make successful disconnection unrecoverable.
     const completed = record;
@@ -550,7 +604,7 @@ async function execute<I extends CloudInstallationExecutableIntent = CloudInstal
   }
   if (record.plan.blockedReason) return stop('blocked', record.plan.blockedReason);
   if (ordered.some(action => !record!.completed[action.id])) return update({ ...record, status: 'pending', reason: undefined });
-  return update({ ...record, status: record.intent.mode === 'disconnect' ? 'disconnected' : record.intent.stage === 'scope-preparation' ? 'scope-ready' : 'ready', reason: undefined });
+  return update({ ...record, status: retirementIntent(record.intent) ? 'retired' : record.intent.mode === 'disconnect' ? 'disconnected' : record.intent.stage === 'scope-preparation' ? 'scope-ready' : 'ready', reason: undefined });
 }
 export function applyCloudInstallationV1<I extends CloudInstallationExecutableIntent = CloudInstallationIntent>(input: CloudInstallationApplyInput<I>): Promise<CloudInstallationRecord<I>> { return execute(input, false); }
 export function reconcileCloudInstallationV1<I extends CloudInstallationExecutableIntent = CloudInstallationIntent>(input: CloudInstallationContext<I> & { installationId: string; planDigest: string; onlyActionId?: string }): Promise<CloudInstallationRecord<I>> {

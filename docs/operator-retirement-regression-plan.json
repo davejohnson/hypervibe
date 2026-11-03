@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "status": "shared-foundation-implemented; provider-regressions-and-live-cleanup-pending",
+  "normalGate": "ordinary npm test plus typecheck for TypeScript changes; no opt-in-only cleanup contract",
+  "counterexample": "A completed dedicated test registration/publication remains native after declaration removal or collection disconnect; existing compensation is not normal retirement.",
+  "cases": [
+    {
+      "id": "explicit-intent",
+      "boundary": "actual hv_spec -> hv_plan with SQLite and registered capabilities",
+      "expected": "Omission yields zero mutations; exact retirement is reachable and never plans registration/upload/deployment. Wrong predecessor, provider, repository or environment rejects."
+    },
+    {
+      "id": "completed-versus-partial",
+      "boundary": "actual installation journal and command planner",
+      "expected": "Validated historical completion survives a stale readiness read. Pending/uncertain creation, lost browser registration and malformed evidence cannot be bypassed into deletion."
+    },
+    {
+      "id": "native-lifetime",
+      "boundary": "real provider client with independently reconstructed serialized contracts",
+      "expected": "Same name with changed UID/project/account/tenant/version is rejected. Exact already-absent identity is idempotent only under documented authorized absence semantics."
+    },
+    {
+      "id": "delete-body-and-options",
+      "boundary": "real serialized provider requests",
+      "expected": "Exact DELETE path/body and supported preconditions only; CAPTCHA/Graph empty body, SendGrid exact key ID; no invented etag or force/purge defaults."
+    },
+    {
+      "id": "dependency-frontier",
+      "boundary": "saved plan -> actual apply executor",
+      "expected": "Active consumers or unknown inventories block. Failed/pending consumer removal prevents key/image/data deletion. Cleanup authority and source outlive dependent cleanup."
+    },
+    {
+      "id": "one-dispatch-and-restart",
+      "boundary": "write-ahead SQLite attempts and provider transport",
+      "expected": "Lost acknowledgment, timeout, process restart and local CAS failure preserve the exact target/operation and do not send a second DELETE. Definite rejected retry uses existing exact confirmation."
+    },
+    {
+      "id": "retention-outcomes",
+      "boundary": "real serialized observations plus SQLite receipt/binding update",
+      "expected": "GCS soft deletion, Entra deleted item, GCP DELETE_REQUESTED and AWS Retain are not permanent erasure. Tombstones survive active binding removal and parent cleanup."
+    },
+    {
+      "id": "browser-limits",
+      "boundary": "actual local handoff HTTP/browser and callback/status",
+      "expected": "Reviewed app/client identity, origin/nonce/CSRF/current owner authority remain fixed. Invalid provider destinations, auth failure, anonymous404 and user ack alone cannot invent verified native deletion."
+    },
+    {
+      "id": "cross-provider-roster",
+      "boundary": "actual provider registry",
+      "expected": "All five operator applications and AWS/GCP artifact capabilities reviewed; Azure publication is explicitly unsupported. New capabilities cannot silently omit retirement classification."
+    },
+    {
+      "id": "no-resurrection",
+      "boundary": "plan/inspect/apply/source readiness/runtime references/retired record reload",
+      "expected": "Retirement cannot satisfy setup/image/reference readiness or trigger recreation. Older hosted v1 response shapes remain unchanged; unsupported older local clients fail closed."
+    },
+    {
+      "id": "shared-and-foreign-preservation",
+      "boundary": "multi-environment/provider fixtures through normal commands",
+      "expected": "Preserve shared sender/account/management connection/repository, foreign GitHub installations, unrelated permissions and unknown resources. Exact map CAS preserves concurrent unrelated state."
+    },
+    {
+      "id": "parent-scope",
+      "boundary": "reviewed local cloud scope planner and real serialized project/group/stack clients",
+      "expected": "Require original parent lifetime plus exclusive whole-scope review; preserve billing account/subscription/tenant. Unknown child inventory blocks narrow cleanup; no implicit lock removal/retention weakening."
+    },
+    {
+      "id": "secret-output",
+      "boundary": "MCP/CLI output and persisted receipts on success/error",
+      "expected": "No runtime credentials, provider echo bodies, browser tokens or secret values appear; safe IDs, dispositions and classified incomplete outcomes remain useful."
+    },
+    {
+      "id": "disposable-live",
+      "boundary": "separately approved actual provider accounts and browser handoffs",
+      "expected": "Review -> stop consumers -> retire exact test targets -> verify active absence/retained state -> restart readback without repeated effects. Offline passes remain ready-for-live, not proof of complete native teardown."
+    }
+  ],
+  "implementationFilesToAudit": [
+    "src/domain/ports/operator-application.port.ts",
+    "src/domain/ports/operator-artifact.port.ts",
+    "src/domain/ports/cloud-installation.port.ts",
+    "src/domain/services/cloud-installation-runtime.ts",
+    "src/domain/services/operator-application.service.ts",
+    "src/domain/services/operator-artifact.service.ts",
+    "src/domain/services/operator-image-update.service.ts",
+    "src/domain/plan/plan.service.ts and exact apply metadata validation",
+    "registered provider adapters and ordinary provider-roster tests",
+    "shared hv_spec/hv_plan metadata, CLI/MCP results and installed lifecycle guidance"
+  ],
+  "sharedFoundation": {
+    "tests": [
+      "src/domain/services/__tests__/operator-retirement-contract.test.ts",
+      "src/application/__tests__/operator-retirement-command.test.ts"
+    ],
+    "boundary": "strict declarations; real command/CLI/MCP unsupported admission; SQLite retirement/history/one-dispatch recovery; no production retirement driver",
+    "liveVerified": false
+  }
+}
