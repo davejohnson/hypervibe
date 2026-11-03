@@ -8,6 +8,11 @@ The installed user workflow is [skills/hypervibe/SKILL.md](skills/hypervibe/SKIL
 Consumers must receive guidance through their installed skill, MCP instructions,
 tool descriptions, and contextual results; they do not inherit this file.
 
+For every user-facing page, email, prompt, tool result, approval and error, read
+[Who we build and write for](docs/development-guidance-product.md#who-we-build-and-write-for).
+Our customer can describe the app they want; they should not need to learn cloud
+administration or our internal terminology to use Hypervibe.
+
 ## Working method
 
 - Keep changes scoped to the requested outcome. Prefer extending or deleting an

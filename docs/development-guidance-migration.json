@@ -1336,6 +1336,12 @@
       "destination": "docs/development-guidance-product.md#dg-005",
       "destinationSha256": "3b3b49b7bf70f7505d69eecd16e4e12256163866003ce46d334685d50ea9ed5c",
       "reason": "User-requested removal of repeated technical setup questions: reuse existing authorization for exact unchanged reviewed effects, including narrow IAM, while preserving exact machine confirmation, separate authority, changed-effect review and unknown-write recovery."
+    },
+    {
+      "sourcePath": "AGENTS.md",
+      "destination": "docs/development-guidance-product.md#who-we-build-and-write-for",
+      "destinationSha256": "94186eb944ce19015b8a61709b1de0dd6020147f0e7b9a460639a6bb420bca6e",
+      "reason": "Explicit user request after confusing cloud and credential-request approvals: make the vibe-coder audience and plain, actionable copy apply to every human-facing surface, preserving exact consent and evidence boundaries."
     }
   ]
 }

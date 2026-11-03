@@ -13,6 +13,76 @@ Stable rule IDs preserve the original guidance and are mapped in
 for developing Hypervibe; the distributed user workflow lives in
 [`skills/hypervibe`](../skills/hypervibe/SKILL.md).
 
+## Who we build and write for
+
+Our primary customer is a **vibe coder**: someone building an app with a coding
+agent who knows the outcome they want, but may have no experience with cloud
+administration, deployment tools or security terminology. They should not need
+to understand IAM, service accounts, federation, credential requests or our
+internal states to connect and run their app. Write with respect for their
+judgment; make the task clear without patronizing them.
+
+The app builder, person paying for hosting, cloud administrator and person
+providing a secret may be different people. Address the person taking the
+current action. An administrator can inspect exact permissions without making
+every app owner learn those details.
+
+This applies to all customer-facing pages, local browser handoffs, emails,
+notifications, chat, CLI/MCP explanations, approvals and errors—not only
+onboarding. Keep stable machine contracts and useful, value-free diagnostics
+for authorized agents; do not present those contracts as the human interface.
+
+- **Lead with their goal and next action.** Name the app, environment and
+  destination where they affect the decision. Explain what the button does
+  now, who acts next and how the person knows they are done. A completion
+  message must say whether to return to their agent, wait, or close the page.
+- **Make the agent do the routine work.** Use supported APIs and choose safe
+  defaults. Ask the person for facts only they know, browser sign-in, externally
+  owned secrets, or meaningful consent. Do not turn internal setup steps,
+  missing automation or recovery bookkeeping into a checklist of user chores.
+- **Use familiar, concrete words.** Prefer “ask someone for this app's API key”
+  to “manage credential requests.” Name an API key or password when that is
+  what is needed; explain “secret” as private app configuration when necessary.
+  Avoid “principal,” “scope,” “provision,” “reconcile” and similar terms in
+  primary copy unless the person needs the term to make this decision.
+- **Design the choice, not a wall of explanation.** Give each step one clear
+  primary action. Present alternatives, such as signing in yourself or inviting
+  an administrator, as alternatives. Put exact IAM resources, internal IDs,
+  revisions and setup-step counts in optional details unless an identifier is
+  needed to distinguish the destination or verify consent. Keep material costs,
+  access, recipients and consequences visible beside the action.
+- **Explain errors from evidence.** Say what Hypervibe could not do, what
+  remains saved or incomplete, and the next supported action. Do not blame the
+  person's account for a failure in Hypervibe's hosted access. Do not turn an
+  unknown result into “permission denied,” “nothing happened” or “try again.”
+  A refresh, retry or administrator invitation must be safe and relevant to the
+  observed failure; internal reason codes alone are not useful instructions.
+- **Make handoffs self-contained.** Invitations say who is asking, which app
+  and environment need help, what is requested, and where to act. A person
+  opening an email or deep link should not need the coding conversation.
+  Never include secret values in this context.
+- **Simplify without changing the truth.** Keep real authorization boundaries,
+  cost implications and uncertainty. Use existing approval for unchanged
+  authorized work; do not ask again merely because an IAM step appears.
+  Plain language is not permission to widen access, hide spending, bypass a
+  required approval, or claim deployment from sign-in or successful setup.
+
+Examples of the intended direction, used only when the underlying state and
+action support them:
+
+| Internal framing | Customer-facing framing |
+| --- | --- |
+| “Manage credential requests?” | “Let your coding agent request secrets” followed by what it can ask for and from whom. |
+| “Installation needs attention. Check its recorded result.” | “Cloud setup hasn't finished” with the supported progress or recovery action beside it. |
+| “Source required” | “Cloud setup is complete. Return to your coding agent to finish connecting this environment.” |
+| “Administrator invitation” | “Sam asked you to connect Google Cloud for Sequence's staging environment.” |
+
+Before shipping, check whether a first-time person can tell what this is for,
+what they need to decide, what to do next and what that action changes. For a
+substantial flow, use the product-design workflow, inspect real mobile and
+desktop screens, and get a separate clarity review. Passing render tests or
+shortening sentences does not establish that the experience is understandable.
+
 ## DG-001
 
 When the user must complete a web form, lead with a direct clickable form URL. Pre-fill every officially supported non-secret field whose value is known or can be safely inferred: name, description, owner/account, repository/project, expiry, and the permissions needed for the task. Use meaningful, consistent Hypervibe labels identifying the credential's purpose and known scope. Preserve the complete query string from tool-provided links; never shorten it to a dashboard URL or replace an available direct link with a click-by-click navigation checklist. Use documented parameter names and URL-encode values; never invent unsupported parameters or put secrets in URLs. Briefly identify fields that still require manual input, review, or consent.
