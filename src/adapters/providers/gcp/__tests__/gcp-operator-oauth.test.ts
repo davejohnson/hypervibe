@@ -52,6 +52,28 @@ describe('Google operator owner-selected confidential web configuration', () => 
     const custody = new OperatorCredentialCustody({ ...local, provider: 'google-oauth' });
     return { ctx, capability: capability!, intent, context, custody, file, journal };
   }
+  it('reviews the selected operator app audience separately from imported client configuration', async () => {
+    // Google Audience documentation: cloud-platform is outside the identity-only
+    // Testing exception. A valid client JSON does not establish tester eligibility.
+    // https://support.google.com/cloud/answer/15549945?hl=en
+    const f = await fixture(), network = vi.spyOn(globalThis, 'fetch');
+    const plan = await planCloudInstallationV1({ ...f.context, intent: f.intent });
+    const warnings = plan.plan.review.warnings.join('\n');
+    expect(warnings).toContain('https://console.cloud.google.com/auth/audience?project=operator-project');
+    expect(warnings).toContain('Testing');
+    expect(warnings).toMatch(/test users/i);
+    expect(warnings).toMatch(/invited cloud administrators/i);
+    expect(warnings).toMatch(/selected Google account/i);
+    expect(warnings).toMatch(/operator.*shared/i);
+    expect(warnings).toMatch(/customer.*create.*client/i);
+    expect(warnings).toMatch(/production audience.*verification/i);
+    expect(warnings).toMatch(/browser authorization exchange.*required/i);
+    expect(warnings).not.toContain(secret);
+    const audience = new URL(warnings.match(/https:\/\/console\.cloud\.google\.com\/auth\/audience\?[^\s.]+/)![0]);
+    expect([...audience.searchParams]).toEqual([['project', 'operator-project']]);
+    expect(f.custody.read()).toBeNull();
+    expect(network).not.toHaveBeenCalled();
+  });
   it('reviews the public client identity and imports privately through the persisted lifecycle without claiming native verification', async () => {
     const f = await fixture(), network = vi.spyOn(globalThis, 'fetch');
     const plan = await planCloudInstallationV1({ ...f.context, intent: f.intent });

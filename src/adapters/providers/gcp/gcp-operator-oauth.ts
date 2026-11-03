@@ -106,6 +106,8 @@ export function createGoogleOperatorOAuthDriver(local?: OperatorApplicationLocal
       return { actions: [action(context.intent, config.client_id, configurationCommitment)], review: {
         resources: [{ kind: 'owner-supplied-oauth-client', name: config.client_id, scope: n.projectId }], permissions: [], costs: [],
         warnings: [`Google requires the owner to create a standard Web application client in https://console.cloud.google.com/auth/clients?project=${n.projectId}.`,
+          `Review Audience at https://console.cloud.google.com/auth/audience?project=${n.projectId}. An external app in Testing allows only listed Test users to authorize this cloud access. Add the approved Google accounts, including invited cloud administrators. Check the selected Google account when sign-in is denied. The hosted app requests cloud-platform access, so Google's identity-only exception does not apply.`,
+          'This operator-owned shared OAuth app serves customer connections; customers do not create their own client. Production customer onboarding needs an appropriate production audience and Google verification where applicable. Preserve Testing for a test deployment; publishing the app is a separate decision.',
           `The reviewed callback is ${n.callback}. Imported JSON is owner-supplied configuration, not native ownership or redirect proof.`,
           'This step stores the client secret encrypted locally. Separately reviewed native delivery and a real browser authorization exchange are required; no cloud client-creation API is called.'] } };
     },

@@ -90,6 +90,28 @@ async function makeClient() {
 }
 
 describe('hv_connections', () => {
+  it('describes Google operator audience prerequisites without claiming browser or customer setup is complete', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Describe must stay local'));
+    const db = SqliteAdapter.getInstance().getDb(), before = db.prepare('select total_changes() as count').get();
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_connections', { action: 'describe', provider: 'google-oauth' });
+      expect(result.ok).toBe(true);
+      expect(result.data.provider.setupHelpUrls ?? []).toContainEqual(expect.objectContaining({ url: 'https://console.cloud.google.com/auth/clients' }));
+      expect(result.data.provider.setupHelpUrls ?? []).toContainEqual(expect.objectContaining({ url: 'https://console.cloud.google.com/auth/audience' }));
+      const notes = result.data.connectionSetup.notes.join('\n');
+      expect(notes).toMatch(/Testing.*test users/i);
+      expect(notes).toMatch(/invited cloud administrators/i);
+      expect(notes).toMatch(/selected Google account/i);
+      expect(notes).toMatch(/operator.*shared/i);
+      expect(notes).toMatch(/customer.*create.*client/i);
+      expect(notes).toMatch(/production audience.*verification/i);
+      expect(notes).toMatch(/browser exchange remains unverified/i);
+      expect(new ConnectionRepository().findAll()).toEqual([]);
+      expect(db.prepare('select total_changes() as count').get()).toEqual(before);
+      expect(fetch).not.toHaveBeenCalled();
+    } finally { await t.close(); }
+  });
   it.each(['catalog', 'describe'])('%s uses a fresh repository Git remote only for form labels, without creating project or credential scope', async mode => {
     const previousCwd = process.cwd();
     process.chdir(tempDir);

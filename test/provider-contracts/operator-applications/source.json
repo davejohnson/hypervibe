@@ -113,10 +113,13 @@
     },
     {
       "provider": "google-oauth",
-      "documentation": "https://developers.google.com/identity/protocols/oauth2/resources/best-practices#manual-creation-and-configuration-of-oauth-clients",
-      "reviewedAt": "2026-10-27",
-      "contract": "Standard OAuth clients require manual Console creation/configuration and acknowledgement. No programmatic client-creation implementation is claimed.",
-      "limit": "Imported owner-selected configuration is not verified native authority or redirect proof."
+      "documentation": [
+        "https://developers.google.com/identity/protocols/oauth2/resources/best-practices#manual-creation-and-configuration-of-oauth-clients",
+        "https://support.google.com/cloud/answer/15549945?hl=en"
+      ],
+      "reviewedAt": "2026-11-03",
+      "contract": "Standard OAuth clients require manual Console creation/configuration and acknowledgement. No programmatic client-creation implementation is claimed. External Testing apps requesting cloud-platform require listed test users; the identity-only exception does not apply. The operator owns this shared app, and production audience/verification is a separate readiness requirement.",
+      "limit": "Imported owner-selected configuration is not verified native authority or redirect proof. Setup guidance does not read the native audience or tester list and does not authorize publishing the app."
     },
     {
       "provider": "microsoft-entra",

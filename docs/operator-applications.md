@@ -64,6 +64,37 @@ outputs are bound. Completed matching registrations allow ordinary deployment
 inputs again; they do not claim that application release or customer authorization
 has succeeded.
 
+## Google shared-app audience
+
+Google client JSON import alone does not establish who may authorize the app.
+The operator configures the shared Google OAuth app; customers do not create
+their own client. Its saved review now links to **Audience** in the selected
+project, alongside the exact client and callback. The shared `hv_connections`
+description gives the same prerequisite to CLI and MCP callers.
+
+For an external app in **Testing**, add the approved Google accounts, including
+invited cloud administrators, to **Test users**. Hypercloud requests
+`cloud-platform`, which falls outside Google's identity-only exception. See
+[Google's audience contract](https://support.google.com/cloud/answer/15549945?hl=en).
+Production onboarding needs the appropriate production audience and verification
+where applicable; a test setup does not authorize publishing the app.
+
+The challenged assumption was that client creation/import instructions were a
+complete browser handoff. Two regressions failed on missing audience guidance:
+the real persisted installation review and `hv_connections describe` over MCP.
+They run in ordinary `npm test`. They establish the returned instructions and
+unchanged private-import boundary, not a native tester-list read or successful
+OAuth exchange. A reported testing-app access denial is consistent with missing
+test access; confirm the selected account and actual list before assigning that
+cause. Import receipts remain configuration-only; browser proof comes from the
+actual authorization exchange.
+
+In the approved disposable walkthrough on 2026-11-03, the owner reported adding
+the test account; the browser then showed External/Testing with that account
+listed. The subsequent Google callback succeeded and displayed the cloud-scope
+selection page. This verifies that browser exchange, not installation authority
+or a completed customer installation. The original tester list was not observed.
+
 ## Authority and private handoff
 
 An expired GitHub browser-only attempt can be followed by an explicitly reviewed

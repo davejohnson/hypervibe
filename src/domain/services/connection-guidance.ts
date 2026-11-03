@@ -447,10 +447,16 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     provider: 'google-oauth', displayName: 'Google OAuth operator application',
     tokenType: 'Owner-selected private web-client JSON; no retained administrator token',
     setupUrl: 'https://console.cloud.google.com/auth/clients',
+    setupUrls: [
+      { label: 'Create or review the shared Google web client in the selected project', url: 'https://console.cloud.google.com/auth/clients' },
+      { label: 'Review the shared Google app audience and test users in the selected project', url: 'https://console.cloud.google.com/auth/audience' },
+    ],
     permissions: ['The owner must be authorized to configure the standard Google OAuth client in the selected project. Importing its private JSON does not prove native ownership, consent, or a working browser callback.'],
     credentialExample: 'hv_connections provider="google-oauth" action="describe"',
     notes: [
       'Google requires manual standard OAuth client creation and terms acknowledgement. The agent prepares the exact selected project and verified HTTPS callback ending /cloud-authorizations/gcp; the owner completes that Console step.',
+      'An external app in Testing allows only listed Test users to authorize this cloud access. Under Audience > Test users, add approved Google accounts, including invited cloud administrators. Check the selected Google account when sign-in is denied. The hosted app requests cloud-platform access, so the identity-only exception does not apply. The saved operator review links to Audience in the exact project.',
+      'This operator-owned shared OAuth app serves customer connections; customers do not create their own client. Production customer onboarding needs an appropriate production audience and Google verification where applicable. Preserve Testing for a test deployment; publishing the app is a separate decision.',
       'Use operatorApplications through hv_spec, hv_plan and hv_apply with nativeScope.projectId and a private file: credentialsRef to the downloaded JSON. Never paste the client secret into chat or create a persistent operator connection. Private import and native Secret Manager delivery are separately reviewed; browser exchange remains unverified until tested.',
     ],
   },
