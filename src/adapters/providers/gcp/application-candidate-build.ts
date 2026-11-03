@@ -8,6 +8,7 @@ import { Readable } from 'node:stream';
 import { z } from 'zod';
 import { normalizeGitRemoteIdentity } from '../../../lib/git-remote.js';
 import { githubPackagePullSource } from '../github/package-pull.js';
+import { OperatorArtifactPreparationError, type OperatorArtifactPreparationFailure } from '../../../domain/ports/operator-artifact.port.js';
 import { isolatedDockerEnvironment, runOperatorCommand, type OperatorCommand, type OperatorCommandOptions } from './operator-image-build.js';
 
 function fail(): never { throw new Error('The exact application candidate or its private build credential could not be verified.'); }
@@ -86,9 +87,15 @@ export async function prepareApplicationCandidate(nativeScope: Record<string,str
   const candidateBuildId=randomUUID(),builder=`hv-candidate-${candidateBuildId}`,tag=`hypervibe-application-candidate:${candidateBuildId}`;
   let container: string | undefined, token='',builderAttempted=false,buildAttempted=false,succeeded=false;
   let prepared:Record<string,string>|undefined,source:Record<string,string>|undefined;
+  let phase:OperatorArtifactPreparationFailure['phase']='source-verification';
+  let failureReason:OperatorArtifactPreparationFailure['reason']='verification-failed';
+  const checkedCommand:OperatorCommand=async(program,args,commandOptions)=>{
+    failureReason='verification-failed';
+    try{return await command(program,args,commandOptions);}catch{failureReason='command-failed';throw new Error('Local preparation command failed.');}
+  };
   const secret=path.join(directory,'npm-token');
   try {
-    const git=(args:string[])=>command('git',['-C',root,...args],options);
+    const git=(args:string[])=>checkedCommand('git',['-C',root,...args],options);
     if((await git(['rev-parse','--verify','HEAD'])).trim()!==commit || (await git(['status','--porcelain=v1','--untracked-files=normal'])).trim()
       || normalizeGitRemoteIdentity((await git(['remote','get-url','origin'])).trim())!==nativeScope.sourceRepository) fail();
     const entries=(await git(['ls-tree','-rz',commit])).split('\0').filter(Boolean).map(line=>{
@@ -98,8 +105,9 @@ export async function prepareApplicationCandidate(nativeScope: Record<string,str
       return {name,mode:match[1],oid:match[2]};
     });
     if(!entries.length||entries.length>5000||!entries.some(e=>e.name==='Dockerfile')||!entries.some(e=>e.name==='package-lock.json'))fail();
+    phase='source-snapshot';
     const archive=path.join(directory,'source.tar'); await git(['archive','--format=tar','--output',archive,commit]); mkdirSync(context,{mode:0o700});
-    await command('tar',['-xf',archive,'-C',context],options);
+    await checkedCommand('tar',['-xf',archive,'-C',context],options);
     let total=0;const manifest: Record<string,{sha256:string;mode:string}>={};
     for(const entry of entries.sort((a,b)=>a.name<b.name?-1:a.name>b.name?1:0)) {
       const file=path.join(context,entry.name),stat=statSync(file);total+=stat.size;if(!stat.isFile()||total>512*1024*1024)fail();
@@ -107,28 +115,35 @@ export async function prepareApplicationCandidate(nativeScope: Record<string,str
       manifest[entry.name]={sha256:sha(bytes),mode:entry.mode};
     }
     source={...nativeScope,candidateBuildId,sourceManifestSha256:sha(JSON.stringify(manifest)),dockerfileSha256:manifest.Dockerfile.sha256,dependencyLockSha256:manifest['package-lock.json'].sha256};
+    phase='credential-selection';
     const credential=githubPackagePullSource({githubRepo:nativeScope.sourceRepository.slice('github.com/'.length),requireExactScope:true});
     if(!credential||credential.credentialKey!=='packageReadToken'||credential.token.length<16||credential.token.length>16384||/[\r\n\0]/.test(credential.token))fail();token=credential.token;
     writeFileSync(secret,token,{mode:0o600,flag:'wx'});
     // The selected secret cannot already be present in the reviewed context.
+    phase='credential-scan';
     for(const entry of entries)if(readFileSync(path.join(context,entry.name)).includes(Buffer.from(token)))fail();
-    builderAttempted=true;
-    const created=(await command('docker',['buildx','create','--name',builder,'--driver','docker-container','--driver-opt','memory=4g,cpu-quota=200000,cpu-period=100000'],options)).trim();
+    phase='builder-creation';builderAttempted=true;
+    const created=(await checkedCommand('docker',['buildx','create','--name',builder,'--driver','docker-container','--driver-opt','memory=4g,cpu-quota=200000,cpu-period=100000'],options)).trim();
     if(created!==builder)fail();buildAttempted=true;
-    const output=await command('docker',['buildx','build','--builder',builder,'--load','--platform','linux/amd64','--progress','plain','--secret',`id=npm_token,src=${secret}`,
+    phase='image-build';
+    const output=await checkedCommand('docker',['buildx','build','--builder',builder,'--load','--platform','linux/amd64','--progress','plain','--secret',`id=npm_token,src=${secret}`,
       ...Object.entries(applicationCandidateLabels(source)).flatMap(([key,value])=>['--label',`${key}=${value}`]),'--tag',tag,'--file',path.join(context,'Dockerfile'),context],options);
     rmSync(secret);if(output.includes(token))fail();
-    const image=await inspectApplicationCandidate(tag,source,command,options);
-    const inspect=await command('docker',['image','inspect',image],options);if(inspect.includes(token))fail();
-    const saved=path.join(directory,'image.tar');await command('docker',['image','save','--output',saved,image],options);
-    const members=(await command('tar',['-tf',saved],options)).trim().split('\n');if(!members.length||members.length>1024)fail();
+    phase='image-verification';
+    const image=await inspectApplicationCandidate(tag,source,checkedCommand,options);
+    const inspect=await checkedCommand('docker',['image','inspect',image],options);if(inspect.includes(token))fail();
+    phase='image-archive';
+    const saved=path.join(directory,'image.tar');await checkedCommand('docker',['image','save','--output',saved,image],options);
+    const members=(await checkedCommand('tar',['-tf',saved],options)).trim().split('\n');if(!members.length||members.length>1024)fail();
     for(const member of members) {if(!/^[A-Za-z0-9_./-]+$/.test(member)||member.startsWith('/')||member.split('/').includes('..'))fail();
       if(!member.endsWith('/'))await scanTarEntry(saved,member,Buffer.from(token),options);}
-    container=(await command('docker',['create','--network','none','--platform','linux/amd64','--entrypoint','true',image],options)).trim();
+    phase='filesystem-scan';
+    container=(await checkedCommand('docker',['create','--network','none','--platform','linux/amd64','--entrypoint','true',image],options)).trim();
     if(!/^[a-f0-9]{64}$/.test(container))fail();
-    const filesystem=path.join(directory,'filesystem.tar');await command('docker',['export','--output',filesystem,container],options);
+    const filesystem=path.join(directory,'filesystem.tar');await checkedCommand('docker',['export','--output',filesystem,container],options);
     await scan(createReadStream(filesystem),Buffer.from(token),false,signal);
-    await command('docker',['rm',container],options);container=undefined;
+    phase='cleanup';
+    await checkedCommand('docker',['rm',container],options);container=undefined;
     prepared={...source,candidateImageId:image,credentialScan:'verified',builderCleanup:'verified'};succeeded=true;
   } catch {succeeded=false;} finally {
     // Never retain a secret mount, source snapshot or rejected image/cache after
@@ -164,9 +179,10 @@ export async function prepareApplicationCandidate(nativeScope: Record<string,str
     if(!cleanupComplete) {
       for(const file of ['context','source.tar','image.tar','filesystem.tar'])rmSync(path.join(directory,file),{recursive:true,force:true});
       writeFileSync(path.join(directory,'cleanup.json'),JSON.stringify({status:'incomplete',builder,tag,buildAttempted,succeeded,container:container??null}),{mode:0o600});
-      throw new Error(`Application candidate cleanup is incomplete. Preserve the owned recovery record at ${path.join(directory,'cleanup.json')}; no publication is authorized.`);
+      throw new OperatorArtifactPreparationError({phase:succeeded?'cleanup':phase,reason:succeeded?'cleanup-unverified':failureReason,
+        cleanup:'unverified',recoveryDirectory:path.basename(directory)});
     }
     rmSync(directory,{recursive:true,force:true});
   }
-  if(!succeeded||!prepared)return fail();return prepared;
+  if(!succeeded||!prepared)throw new OperatorArtifactPreparationError({phase,reason:failureReason,cleanup:'verified'});return prepared;
 }

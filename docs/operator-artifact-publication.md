@@ -342,6 +342,28 @@ removed. These checks do not claim protection against malicious source making
 network requests or transforming a token: selecting the source commit is code
 execution authority.
 
+Local preparation errors now preserve the entered phase (source, saved package
+access, local builder, build, image checks or cleanup) and a closed reason through
+the existing `hv_plan` error result. Unknown exceptions still use the generic
+boundary. These diagnostics never include command output, credentials, native
+exception messages or arbitrary paths. Incomplete cleanup stays blocked and
+identifies only the validated generated temporary-directory name containing the
+existing `cleanup.json`; it cannot become permission to retry or publish.
+
+The challenged assumption was that one generic publication error gave the coding
+agent enough information to investigate a local preparation failure. The product
+contract requires an evidence-based next action without secret values. Actual
+child-process failures at source copying, builder creation and image building,
+plus the SQLite plan boundary, produced five failing assertions before this fix.
+The regressions now preserve those phases, reject unsafe diagnostic fields, and
+keep cleanup uncertainty separate from the earlier failure. Docker effects in
+these tests are synthetic; the original live failure's cause remains unknown.
+AWS template and public helper publication retain their existing error behavior;
+this optional local-candidate diagnostic does not expand either provider's API
+contract. The tests run in normal `npm test`, referenced by both the committed
+acceptance workflow and desired required-check configuration; live enforcement
+was not inspected.
+
 Builder removal acknowledgment and observed cleanup are separate facts. A local
 2026-10-30 application build completed its credential scans, then reported
 incomplete cleanup; Docker's independent event history recorded deletion of its

@@ -15,6 +15,7 @@ import { planCredentialLifecycle, pendingCredentialUpdate } from '../services/cr
 import { planDatabaseCredentialAliases } from '../services/database-credential-aliases.service.js';
 import { planSecretContainers } from '../services/secret-container-setup.js';
 import { operatorArtifactWorkRequired, planOperatorArtifacts } from '../services/operator-artifact.service.js';
+import { operatorArtifactPreparationMessage } from '../ports/operator-artifact.port.js';
 import { operatorImageUpdateSelection, verifyOperatorImageUpdate } from '../services/operator-image-update.service.js';
 import { localCloudScopeRequired, planLocalCloudScope } from '../services/local-cloud-scope.service.js';
 import { localHoldingWorkRequired, planLocalHolding } from '../services/local-holding-preparation.service.js';
@@ -1971,7 +1972,8 @@ export class PlanService {
             environmentName, verified: true, observed: null, actions: prepared.actions, cloudScopeReview: prepared.review,
             unmanaged: [], warnings: prepared.warnings, inputRequired: [], blocked: [] };
         }
-      } catch { return { error: 'Operator artifacts could not be verified. Preserve saved native operations and receipts; no repeated publication or replacement target is authorized.' }; }
+      } catch (error) { return { error: operatorArtifactPreparationMessage(error)
+        ?? 'Operator artifacts could not be verified. Preserve saved native operations and receipts; no repeated publication or replacement target is authorized.' }; }
     }
     try {
       if (scope !== 'full' && await localHoldingWorkRequired(project, environmentName, specResult.spec))

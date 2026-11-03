@@ -11,6 +11,8 @@ import { SpecStore } from '../../domain/spec/spec.store.js';
 import { PlanService } from '../../domain/plan/plan.service.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import { providerRegistry } from '../../domain/registry/provider.registry.js';
+import { prepareOperatorImages, runOperatorCommand } from '../../adapters/providers/gcp/operator-image-build.js';
+import { OperatorArtifactPreparationError } from '../../domain/ports/operator-artifact.port.js';
 
 // SQLite, ordinary spec/plan/apply and provider driver are real. Only local
 // Docker/ADC preparation and serialized native responses are synthetic.
@@ -48,6 +50,34 @@ describe('reviewed private candidate publication through application and SQLite'
     expect(receipts).toHaveLength(1);expect(receipts[0]).toMatchObject({kind:'application-candidate-v1',authenticatedPull:'verified',sourceCommit:f.native.intent.nativeScope.sourceCommit});
     expect(JSON.stringify(receipts)).toContain('@sha256:');expect(JSON.stringify(journal)).not.toContain('synthetic-short-lived-token');
     expect(f.prepare).toHaveBeenCalledTimes(1);expect(f.unrelated).not.toHaveBeenCalled();
+  });
+  it('carries a real local command failure through plan without exposing command output or creating a publication',async()=>{
+    const f=fixture();let dispatched=false;
+    f.prepare.mockImplementation((scope,artifacts,source)=>prepareOperatorImages({...scope,sourceRepository:source.repository},artifacts,async()=>{
+      dispatched=true;return runOperatorCommand(process.execPath,['-e',"process.stderr.write('synthetic-private-command-output');process.exit(23)"]);
+    }));
+    const result=await f.plan();expect(dispatched).toBe(true);
+    expect(result).toMatchObject({error:expect.stringContaining('source-verification')});
+    expect(result).toMatchObject({error:expect.stringContaining('command-failed')});
+    expect(result).toMatchObject({error:expect.stringContaining('coding agent')});
+    expect(JSON.stringify(result)).not.toContain('synthetic-private-command-output');expect(f.native.writes).toEqual([]);
+  });
+  it('keeps cleanup unverified in plan while ignoring an arbitrary exception message',async()=>{
+    const f=fixture(),error=new OperatorArtifactPreparationError({phase:'image-build',reason:'command-failed',cleanup:'unverified',recoveryDirectory:'hypervibe-candidate-Abc123'});
+    error.message='private provider response';f.prepare.mockRejectedValue(error);
+    const result=await f.plan();expect(result).toMatchObject({error:expect.stringContaining('cleanup is incomplete')});
+    expect(result).toMatchObject({error:expect.stringContaining('hypervibe-candidate-Abc123/cleanup.json')});
+    expect(result).toMatchObject({error:expect.stringContaining('phase=image-build')});
+    expect(JSON.stringify(result)).not.toContain('private provider response');expect(f.native.writes).toEqual([]);
+  });
+  it.each(['unknown','invalid-phase','invalid-recovery-directory'] as const)('keeps %s exceptions behind the generic plan boundary',async fault=>{
+    const f=fixture(),error=fault==='unknown'?new Error('private-provider-token')
+      :new OperatorArtifactPreparationError({phase:'cleanup',reason:'cleanup-unverified',cleanup:'unverified',recoveryDirectory:'hypervibe-candidate-Abc123'});
+    if(fault==='invalid-phase')Object.assign(error,{phase:'private-provider-token'});
+    if(fault==='invalid-recovery-directory')Object.assign(error,{recoveryDirectory:'/private-provider-token/cleanup.json'});
+    f.prepare.mockRejectedValue(error);const result=await f.plan();
+    expect(result).toMatchObject({error:expect.stringContaining('Operator artifacts could not be verified')});
+    expect(JSON.stringify(result)).not.toContain('private-provider-token');expect(f.native.writes).toEqual([]);
   });
   it('recovers a lost push across restart/declaration removal without rebuilding or resubmitting',async()=>{
     const f=fixture(true);f.native.options.absentAfterPush=true;const p=await f.plan();if('error'in p)throw new Error(p.error);

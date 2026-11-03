@@ -84,6 +84,24 @@ async function candidate(options: { dirty?: boolean; wrongOrigin?: boolean; leak
   return {root,scope,command,commands,preparedArchive:()=>preparedArchive,secretFile:()=>secretFile,context:()=>context};
 }
 describe('private application candidate build boundary',()=>{
+  // The child process really exits unsuccessfully. Docker effects remain
+  // synthetic; the expected diagnostic comes from the entered operation,
+  // never the untrusted stdout/stderr text.
+  it.each(['source-snapshot','builder-creation','image-build'] as const)('reports the entered %s phase after a real child-command failure',async phase=>{
+    const f=await candidate();let injected=false,error:unknown;
+    try {await prepareOperatorImages(f.scope,['application-candidate-v1'],async(program,args,options)=>{
+      const matches=phase==='source-snapshot'?program==='git'&&args.includes('archive')
+        :program==='docker'&&args[0]==='buildx'&&args[1]===(phase==='builder-creation'?'create':'build');
+      if(matches){injected=true;if(program==='docker')await f.command(program,args,options);
+        return runOperatorCommand(process.execPath,['-e',`process.stdout.write('${token}');process.stderr.write('native-private-detail');process.exit(19)`],options);}
+      return f.command(program,args,options);
+    },f.root);}catch(value){error=value;}
+    expect(injected).toBe(true);
+    expect(error).toMatchObject({phase,reason:'command-failed',cleanup:'verified'});
+    expect(String(error)).not.toContain(token);expect(String(error)).not.toContain('native-private-detail');
+    expect(JSON.stringify(error)).not.toContain(token);expect(JSON.stringify(error)).not.toContain('native-private-detail');
+    expect(f.commands.some(args=>['login','push','pull'].includes(args[0]))).toBe(false);
+  });
   it('builds the exact committed snapshot with a temporary secret and verified source/image evidence, without publication',async()=>{
     const f=await candidate(); const result=await prepareOperatorImages(f.scope,['application-candidate-v1'],f.command,f.root);
     expect(result).toMatchObject({sourceCommit:f.scope.sourceCommit,sourceRepository:f.scope.sourceRepository,candidateImageId:'sha256:'+'a'.repeat(64),credentialScan:'verified',
@@ -110,14 +128,27 @@ describe('private application candidate build boundary',()=>{
       if(program==='docker'&&args[0]==='buildx'&&args[1]==='create')builder=args[args.indexOf('--name')+1];
       if(program==='docker'&&args[0]==='buildx'&&args[1]==='build')tag=args[args.indexOf('--tag')+1];
       return runOperatorCommand(program,args,options);
-    },f.root)).rejects.toThrow('The exact application candidate or its private build credential could not be verified.');
+    },f.root)).rejects.toThrow('phase=image-archive');
     expect(builder).toMatch(/^hv-candidate-/);expect(tag).toMatch(/^hypervibe-application-candidate:/);
     for(const args of [['image','ls','--filter',`reference=${tag}`,'--quiet'],['container','ls','--all','--filter',`name=^buildx_buildkit_${builder}0$`,'--format','{{.ID}}'],['volume','ls','--filter',`name=^buildx_buildkit_${builder}0_state$`,'--format','{{.Name}}']])expect((await runOperatorCommand('docker',args)).trim()).toBe('');
     if(process.env.HYPERVIBE_CANDIDATE_SMOKE_RECEIPT)writeFileSync(process.env.HYPERVIBE_CANDIDATE_SMOKE_RECEIPT+'.rejected.json',JSON.stringify({status:'passed',copiedSyntheticCredential:'rejected',builder,tag,imageAndBuilderAndCacheAbsent:true,providerCalls:0,publication:'not-performed'},null,2)+'\n',{mode:0o600});
   },240000);
   it.each(['dirty','wrongOrigin'] as const)('rejects %s before build/credential access',async fault=>{
-    const f=await candidate({[fault]:true}); await expect(prepareOperatorImages(f.scope,['application-candidate-v1'],f.command,f.root)).rejects.toThrow();
+    const f=await candidate({[fault]:true}); await expect(prepareOperatorImages(f.scope,['application-candidate-v1'],f.command,f.root)).rejects.toMatchObject({phase:'source-verification',reason:'verification-failed',cleanup:'verified'});
     expect(f.commands).toEqual([]); expect(packageCredentials.githubPackagePullSource).not.toHaveBeenCalled();
+  });
+  it('identifies missing saved package access without claiming a provider permission rejection',async()=>{
+    const f=await candidate();vi.mocked(packageCredentials.githubPackagePullSource).mockReturnValue(null);
+    await expect(prepareOperatorImages(f.scope,['application-candidate-v1'],f.command,f.root)).rejects.toMatchObject({phase:'credential-selection',reason:'verification-failed',cleanup:'verified'});
+    expect(f.commands).toEqual([]);
+  });
+  it('preserves the failed build phase while keeping unknown cleanup blocked',async()=>{
+    const f=await candidate({lostBuildAck:true,cleanupFailure:true});let error:unknown;
+    try{await prepareOperatorImages(f.scope,['application-candidate-v1'],f.command,f.root);}catch(value){error=value;}
+    expect(error).toMatchObject({phase:'image-build',reason:'command-failed',cleanup:'unverified'});
+    expect(String(error)).toContain('cleanup is incomplete');
+    const directory=path.join(tmpdir(),(error as {recoveryDirectory:string}).recoveryDirectory);temporary.push(directory);
+    expect(JSON.parse(readFileSync(path.join(directory,'cleanup.json'),'utf8'))).toMatchObject({status:'incomplete',buildAttempted:true,succeeded:false});
   });
   it.each(['layer','filesystem','output'] as const)('rejects a credential copied into %s and removes temporary secret/context',async leak=>{
     const f=await candidate({leak}); let error: unknown;
@@ -141,7 +172,8 @@ describe('private application candidate build boundary',()=>{
     const f=await candidate({cleanupFailure:true});let error:unknown;
     try{await prepareOperatorImages(f.scope,['application-candidate-v1'],f.command,f.root);}catch(value){error=value;}
     expect(String(error)).toContain('cleanup is incomplete');expect(String(error)).not.toContain(token);
-    const receiptPath=String(error).match(/at (.+\/cleanup\.json);/)![1];temporary.push(path.dirname(receiptPath));
+    expect(error).toMatchObject({phase:'cleanup',reason:'cleanup-unverified',cleanup:'unverified'});
+    const receiptPath=path.join(tmpdir(),(error as {recoveryDirectory:string}).recoveryDirectory,'cleanup.json');temporary.push(path.dirname(receiptPath));
     const receipt=JSON.parse(readFileSync(receiptPath,'utf8'));expect(receipt).toMatchObject({status:'incomplete',buildAttempted:true,succeeded:true});
     expect(JSON.stringify(receipt)).not.toContain(token);expect(statSync(receiptPath).mode&0o777).toBe(0o600);
     expect(existsSync(f.secretFile())).toBe(false);expect(existsSync(f.context())).toBe(false);
@@ -184,7 +216,7 @@ describe('private application candidate build boundary',()=>{
     const f=await candidate({cleanupRemaining});let error:unknown;
     try{await prepareOperatorImages(f.scope,['application-candidate-v1'],f.command,f.root);}catch(value){error=value;}
     expect(String(error)).toContain('cleanup is incomplete');
-    const receiptPath=String(error).match(/at (.+\/cleanup\.json);/)![1];temporary.push(path.dirname(receiptPath));
+    const receiptPath=path.join(tmpdir(),(error as {recoveryDirectory:string}).recoveryDirectory,'cleanup.json');temporary.push(path.dirname(receiptPath));
     expect(JSON.parse(readFileSync(receiptPath,'utf8'))).toMatchObject({status:'incomplete',succeeded:true});
     expect(existsSync(f.secretFile())).toBe(false);expect(existsSync(f.context())).toBe(false);
   });
