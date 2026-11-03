@@ -7,12 +7,12 @@ import { ConnectionRepository } from '../../db/repositories/connection.repositor
 import { getSecretStore } from '../../secrets/secret-store.js';
 import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
 import { CloudInstallationBoundaryError, type CloudInstallationAction, type CloudInstallationDriver,
-  type CloudInstallationEvidence, type CloudInstallationProviderContext, type OperatorApplicationIntent } from '../../../domain/ports/cloud-installation.port.js';
-import type { OperatorApplicationCapability } from '../../../domain/ports/operator-application.port.js';
+  type CloudInstallationEvidence, type CloudInstallationProviderContext, type CloudInstallationRecord, type CloudInstallationAttempt, type OperatorApplicationIntent } from '../../../domain/ports/cloud-installation.port.js';
+import type { OperatorApplicationCapability, OperatorApplicationLocalContext } from '../../../domain/ports/operator-application.port.js';
 import { OperatorCredentialCustody } from '../../../domain/services/operator-credential-custody.js';
 import { operatorOutputReceipts, withOperatorOutputDelivery } from '../../../domain/services/operator-output-delivery.js';
-import { parseCloudInstallationRecordV1 } from '../../../domain/services/cloud-installation-runtime.js';
-import { DestinationBoundaryError, DestinationBudget } from '../secret-destination-http.js';
+import { parseCloudInstallationRecordV1, historicalInstallationEvidence } from '../../../domain/services/cloud-installation-runtime.js';
+import { DestinationBoundaryError, DestinationBudget, destinationJson } from '../secret-destination-http.js';
 import { SendGridAdapter } from './sendgrid.adapter.js';
 import { verifySendGridRuntimeMail } from './sendgrid-runtime-mail.js';
 
@@ -213,20 +213,16 @@ export function createSendGridOperatorCapability(): OperatorApplicationCapabilit
     parseDeclaration({ name, declaration, origin }) {
       if (declaration.provider !== PROVIDER || declaration.profile !== 'hypercloud-connect-v1') fail();
       return scopeSchema.parse({ ...selectionSchema.parse(declaration.nativeScope), name, origin });
-    }, parseRecord: value => parseCloudInstallationRecordV1(value, withOperatorOutputDelivery(createSendGridOperatorDriver(), undefined, dependencies)),
+    }, parseRecord: value => parseCloudInstallationRecordV1(value, (value as CloudInstallationRecord<Intent>)?.intent?.mode === 'retire'
+      ? createSendGridRetirementDriver() : withOperatorOutputDelivery(createSendGridOperatorDriver(), undefined, dependencies)),
+    retirement: { async create(value, context, targets) {
+      const n = scopeSchema.parse(value);
+      return { driver: createSendGridRetirementDriver({ targets }), authentication: sendGridAuthentication(n, context) };
+    } },
     async create(value, context) {
       if (!context) fail('not_installed');
       const n = scopeSchema.parse(value), custody = new OperatorCredentialCustody({ ...context, provider: PROVIDER });
-      const credentials = () => {
-        const row = new ConnectionRepository().findById(n.connectionId), project = new ProjectRepository().findById(context.projectId),
-          environment = new EnvironmentRepository().findById(context.environmentId);
-        if (!project || !environment || environment.projectId !== project.id || !row?.scope
-          || !getProjectScopeHints(project, environment.name).includes(row.scope) || row.provider !== PROVIDER || row.status !== 'verified') fail('authorization_expired');
-        const value = getSecretStore().decryptObject<{ apiKey?: unknown }>(row.credentialsEncrypted).apiKey;
-        if (typeof value !== 'string' || !value || /[\r\n\0]/.test(value)) fail('authorization_expired'); return value;
-      };
-      return { driver: withOperatorOutputDelivery(createSendGridOperatorDriver({ custody }), context, dependencies),
-        authentication: { kind: 'operator-application', administrator: { async getAccessToken(scope, signal) { if (scope !== ROOT || signal.aborted) fail('authorization_expired'); return credentials(); } } } };
+      return { driver: withOperatorOutputDelivery(createSendGridOperatorDriver({ custody }), context, dependencies), authentication: sendGridAuthentication(n, context) };
     }, receipts(record) {
       const n = settings(record.intent), e = parseEvidence(record.completed[n.actionId], record.intent), delivered = operatorOutputReceipts(record.completed, record.intent);
       if (record.status !== 'scope-ready' || e.native.phase !== 'captured' || record.intent.outputs?.destinations.length !== 1 || record.intent.outputs.destinations[0].role !== 'api-key'
@@ -234,4 +230,133 @@ export function createSendGridOperatorCapability(): OperatorApplicationCapabilit
       return [{ provider: PROVIDER, ...e.resources[0].identity, permission: 'mail.send', privateCredential: 'delivered', actualDelivery: 'unverified' }, ...delivered];
     },
   };
+}
+
+/** Exact completed-key retirement. Normal setup and encrypted output custody are
+ * deliberately separate; this driver never retrieves or sends a credential. */
+export function createSendGridRetirementDriver(options: { fetch?: typeof fetch; targets?: CloudInstallationRecord<Intent>[] } = {}): CloudInstallationDriver<Intent> {
+  const setup = withOperatorOutputDelivery(createSendGridOperatorDriver(), undefined, intent => [settings(intent).actionId]);
+  const targetSchema = z.object({ sourceInstallationId: uuid, identity: identitySchema }).strict();
+  type Target = z.infer<typeof targetSchema>;
+  const retained = options.targets?.map(raw => parseCloudInstallationRecordV1(raw, setup));
+  function target(value: unknown, intent: Intent): Target {
+    const t = targetSchema.parse(value), n = scopeSchema.parse(intent.nativeScope);
+    if (intent.mode !== 'retire' || intent.retirement?.resources !== 'delete-owned' || intent.retirement.data !== 'retain'
+      || !intent.retirement.targets.some(v => v.installationId === t.sourceInstallationId)
+      || t.identity.accountId !== n.accountId || t.identity.origin !== n.origin || t.identity.sender !== n.sender
+      || t.identity.sandbox !== 'validated') fail();
+    return t;
+  }
+  function targets(intent: Intent): Target[] {
+    if (!retained || retained.length !== intent.retirement?.targets.length) fail();
+    return intent.retirement.targets.map(reference => {
+      const r = retained.find(r => r.installationId === reference.installationId), historical = r && historicalInstallationEvidence(r);
+      if (!r || !historical || r.intent.mode !== 'connect' || r.plan.digest !== reference.planDigest
+        || canonicalJsonSha256(historical) !== reference.evidenceDigest || !isDeepStrictEqual(r.intent.nativeScope, intent.nativeScope)
+        || r.intent.appId !== intent.appId || r.intent.customerId !== intent.customerId || r.intent.environment !== intent.environment
+        || r.intent.source.repository !== intent.source.repository) fail();
+      const e = parseEvidence(historical[settings(r.intent).actionId], r.intent);
+      if (e.native.phase !== 'captured') fail();
+      return target({ sourceInstallationId: r.installationId, identity: e.resources[0].identity }, intent);
+    });
+  }
+  function action(t: Target, intent: Intent): CloudInstallationAction {
+    return { id: `${PROVIDER}:${intent.nativeScope.name}:retire:${t.sourceInstallationId}`, type: 'destroy',
+      resource: { kind: 'secret', provider: PROVIDER, name: t.identity.apiKeyId }, verified: true, requiresConfirm: true, dataBearing: true,
+      reason: 'Revoke only the retained dedicated email key. Preserve the account, sender, management credential, unrelated keys and separately managed secret containers.',
+      metadata: { operation: 'retire-runtime-mail-key', category: 'identity', execution: 'api', native: t } };
+  }
+  function parseAction(value: unknown, intent: Intent) {
+    if (intent.mode !== 'retire') return setup.parseAction(value, intent);
+    const t = target((value as CloudInstallationAction)?.metadata?.native, intent), expected = action(t, intent);
+    if (!isDeepStrictEqual(value, expected) || retained && !targets(intent).some(v => isDeepStrictEqual(v, t))) fail(); return expected;
+  }
+  const removedSchema = z.object({ resources: z.array(z.object({ kind: z.literal('runtime-mail-key'), id: nativeId, identity: identitySchema }).strict()).length(1),
+    native: z.object({ operation: z.literal('retire-runtime-mail-key'), installationId: uuid, sourceInstallationId: uuid,
+      retirement: z.object({ outcome: z.literal('removed'), retained: z.tuple([]) }).strict() }).strict() }).strict();
+  function evidence(value: unknown, intent: Intent): CloudInstallationEvidence {
+    if (intent.mode !== 'retire') return setup.parseEvidence(value, intent);
+    const e = removedSchema.parse(value), t = target({ sourceInstallationId: e.native.sourceInstallationId, identity: e.resources[0].identity }, intent);
+    if (e.native.installationId !== intent.installationId || e.resources[0].id !== t.identity.apiKeyId
+      || retained && !targets(intent).some(v => isDeepStrictEqual(v, t))) fail(); return e;
+  }
+  function removed(t: Target, intent: Intent) { return evidence({ resources: [{ kind: 'runtime-mail-key', id: t.identity.apiKeyId, identity: t.identity }],
+    native: { operation: 'retire-runtime-mail-key', installationId: intent.installationId, sourceInstallationId: t.sourceInstallationId, retirement: { outcome: 'removed', retained: [] } } }, intent); }
+  async function client<T>(context: Context, mutation: boolean, work: (call: (method: 'GET' | 'DELETE', path: string) => Promise<any>) => Promise<T>): Promise<T> {
+    targets(context.intent); const n = scopeSchema.parse(context.intent.nativeScope), budget = new DestinationBudget({ signal: context.signal, deadlineMs: 30_000 });
+    try {
+      if (!context.authentication.administrator) fail('authorization_expired');
+      const token = await budget.wait(context.authentication.administrator.getAccessToken(ROOT, budget.signal));
+      if (!token || token.length > 65_536 || /[\r\n\0]/.test(token)) fail('authorization_expired');
+      const call = async (method: 'GET' | 'DELETE', endpoint: string) => {
+        if (!['/user/username', '/scopes'].includes(endpoint) && !/^\/api_keys\/[A-Za-z0-9_-]{1,200}$/.test(endpoint)
+          || method === 'DELETE' && !targets(context.intent).some(t => endpoint === `/api_keys/${t.identity.apiKeyId}`)) fail();
+        const request: typeof fetch = async (url, init) => {
+          const response = await budget.wait((options.fetch ?? fetch)(url, init));
+          if (response.redirected) { void response.body?.cancel().catch(() => {}); throw new DestinationBoundaryError('invalid_response'); }
+          if (response.ok && response.status !== (method === 'DELETE' ? 204 : 200)) { void response.body?.cancel().catch(() => {}); throw new DestinationBoundaryError('invalid_response'); }
+          // Reuse the bounded JSON reader without inventing a DELETE body.
+          if (response.status === 204) { void response.body?.cancel().catch(() => {}); return Response.json({}); } return response;
+        };
+        const value = await destinationJson(request, budget, `${ROOT}/v3${endpoint}`, token, { method });
+        if (JSON.stringify(value).includes(token)) fail('identity_mismatch'); return value;
+      };
+      const account = z.object({ user_id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER) }).passthrough().parse(await call('GET', '/user/username'));
+      if (String(account.user_id) !== n.accountId) fail();
+      const scopes = z.object({ scopes: z.array(z.string()) }).passthrough().parse(await call('GET', '/scopes')).scopes;
+      if (!['api_keys.read', 'user.username.read', ...(mutation ? ['api_keys.delete'] : [])].every(s => scopes.includes(s))) fail('insufficient_permissions');
+      return await work(call);
+    } finally { budget.close(); }
+  }
+  async function present(call: (method: 'GET' | 'DELETE', path: string) => Promise<any>, t: Target) {
+    let response;
+    try { response = await call('GET', `/api_keys/${t.identity.apiKeyId}`); }
+    catch (error) { if (error instanceof DestinationBoundaryError && error.status === 404) return false; throw error; }
+    const key = z.object({ api_key_id: nativeId, name: z.string(), scopes: z.array(z.string()) }).passthrough()
+      .parse(Array.isArray(response.result) ? response.result.length === 1 ? response.result[0] : null : response);
+    if (key.api_key_id !== t.identity.apiKeyId || key.name !== t.identity.name || !sendOnlyScopes(key.scopes)) fail('ownership_mismatch'); return true;
+  }
+  async function inspect(context: Context & { action: CloudInstallationAction; attempt?: CloudInstallationAttempt }) {
+    parseAction(context.action, context.intent); const t = target(context.action.metadata.native, context.intent);
+    return client(context, false, async call => !await present(call, t) ? { state: 'satisfied' as const, evidence: removed(t, context.intent) }
+      : context.attempt || context.attempts?.some(a => a.actionId === context.action.id && a.status !== 'rejected')
+        ? { state: 'pending' as const, reason: 'not_converged' as const } : { state: 'action-required' as const });
+  }
+  const driver: CloudInstallationDriver<Intent> = { provider: PROVIDER, operatorApplication: { providerName: PROVIDER }, operatorRetirement: { schemaVersion: 1 }, scopePreparation: setup.scopePreparation,
+    parseScope: value => scopeSchema.parse(value), parseAction, parseEvidence: evidence,
+    async plan(context) {
+      const selected = targets(context.intent);
+      await client(context, true, async call => { for (const t of selected) await present(call, t); });
+      return { actions: selected.map(t => action(t, context.intent)), review: {
+        resources: selected.map(t => ({ kind: 'runtime-mail-key', name: t.identity.apiKeyId, scope: t.identity.accountId })),
+        permissions: [{ principal: 'Existing scoped SendGrid management connection', scope: context.intent.nativeScope.accountId, actions: ['api_keys.read', 'api_keys.delete', 'user.username.read'], purpose: 'installation-verification' }],
+        costs: [{ resource: 'Dedicated email key', description: 'Revokes this key; it does not cancel the shared SendGrid account or plan. Separately retained secret storage remains billed.', pricingUrl: 'https://www.twilio.com/en-us/sendgrid/pricing' }],
+        warnings: ['Mail using this key stops after SendGrid revocation propagation. No test mail is sent.', 'Delete has no atomic lifetime precondition; external concurrent key changes cannot be excluded.', 'Shared sender/domain, management key, unrelated keys, delivered secret versions and containers remain unchanged.'] } };
+    },
+    async inspect(context) { try { return await inspect(context); } catch (error) { return { state: 'unknown', reason: reason(error) }; } },
+    async recover(context) { try { return await inspect(context); } catch (error) { return { state: 'unknown', reason: reason(error) }; } },
+    async mutate(context) {
+      let started = false;
+      try { parseAction(context.action, context.intent); const t = target(context.action.metadata.native, context.intent);
+        return await client(context, true, async call => {
+          if (!await present(call, t)) return { state: 'acknowledged' as const, evidence: removed(t, context.intent) };
+          await context.beforeMutation(); started = true; await call('DELETE', `/api_keys/${t.identity.apiKeyId}`);
+          return { state: 'acknowledged' as const };
+        });
+      } catch (error) { return { state: !started || error instanceof DestinationBoundaryError && [400, 401, 403, 404, 422].includes(error.status ?? 0) ? 'rejected' : 'uncertain', reason: reason(error) }; }
+    }, connections: () => [],
+  };
+  return driver;
+}
+
+function sendGridAuthentication(n: z.infer<typeof scopeSchema>, context: OperatorApplicationLocalContext) {
+  const credentials = () => {
+    const row = new ConnectionRepository().findById(n.connectionId), project = new ProjectRepository().findById(context.projectId),
+      environment = new EnvironmentRepository().findById(context.environmentId);
+    if (!project || !environment || environment.projectId !== project.id || !row?.scope
+      || !getProjectScopeHints(project, environment.name).includes(row.scope) || row.provider !== PROVIDER || row.status !== 'verified') fail('authorization_expired');
+    const value = getSecretStore().decryptObject<{ apiKey?: unknown }>(row.credentialsEncrypted).apiKey;
+    if (typeof value !== 'string' || !value || /[\r\n\0]/.test(value)) fail('authorization_expired'); return value;
+  };
+  return { kind: 'operator-application' as const, administrator: { async getAccessToken(scope: string, signal: AbortSignal) { if (scope !== ROOT || signal.aborted) fail('authorization_expired'); return credentials(); } } };
 }
