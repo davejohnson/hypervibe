@@ -40,7 +40,12 @@ describe('AWS operator artifacts through actual SDK transport and shared journal
       predecessor: { installationId: record.installationId, planDigest: record.plan.digest }, source: { ...f.intent.source, specRevision: 2 } };
     const unrelated = { Sid: 'ExistingGuard', Effect: 'Deny', Principal: '*', Action: 's3:DeleteBucket', Resource: `arn:aws:s3:::${f.stack().bucket}` };
     f.setPolicy({ ...f.policy(), Statement: [...f.policy().Statement, unrelated] });
-    f.resetRecord(); record = await planCloudInstallationV1({ ...f.input, intent: next });
+    const parent = structuredClone(record);
+    record = await planCloudInstallationV1({ ...f.input, intent: next });
+    // The journal contract addresses registrations by ID. Refresh keeps its
+    // predecessor available, as the real SQLite regression below also proves.
+    expect(await f.input.store.read(parent.installationId)).toEqual(parent);
+    expect(await f.input.store.read(record.installationId)).toEqual(record);
     expect(record.plan.actions.slice(0, 2).every(action => action.type === 'noop')).toBe(true);
     const before = f.writes.length;
     for (const action of record.plan.actions) record = await applyCloudInstallationV1({ ...f.input, installationId: record.installationId,

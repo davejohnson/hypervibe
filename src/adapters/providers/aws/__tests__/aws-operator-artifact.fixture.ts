@@ -15,7 +15,7 @@ export function awsOperatorArtifactBoundary(options: { lost?: 'stack' | 'object'
   const intent: OperatorArtifactIntent = { schemaVersion: 1, installationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', customerId: 'customer', appId: 'app', environment: 'staging',
     provider: 'aws', artifactProvider: 's3', execution: { kind: 'operator-artifact-publisher', authentication: 'aws-session' }, mode: 'connect', stage: 'scope-preparation', keys: [],
     artifacts, nativeScope: scope, source: { kind: 'local-spec', repository: 'github.com/acme/operator', specRevision: 1, specDigest: 'a'.repeat(64) } };
-  let saved: CloudInstallationRecord<OperatorArtifactIntent> | null = null;
+  const records = new Map<string, CloudInstallationRecord<OperatorArtifactIntent>>();
   let stack: any, template: any, policy: any, lost = false, readsDenied = false;
   const objects = new Map<string, { body: string; version: string; metadata: Record<string, string>; digest: string }>();
   const writes: string[] = [], requests: any[] = [];
@@ -91,7 +91,9 @@ export function awsOperatorArtifactBoundary(options: { lost?: 'stack' | 'object'
   const driver = createAwsOperatorArtifactDriver({ requestHandler: handler, fetch: anonymous });
   const input = { driver, authentication: { kind: 'operator-artifact-publisher' as const, awsSession: { getCredentials: async () => ({ accessKeyId: 'ASIASYNTHETICPUBLISHER',
     secretAccessKey: 'synthetic-session-secret', sessionToken: 'synthetic-session-token', expiration: new Date(Date.now() + 900000) }) } }, authorize: async () => true,
-    store: { read: async () => structuredClone(saved), compareAndSwap: async (_id: string, revision: number | null, next: CloudInstallationRecord<OperatorArtifactIntent>) => {
+    store: { read: async (id: string) => structuredClone(records.get(id) ?? null), compareAndSwap: async (id: string, revision: number | null, next: CloudInstallationRecord<OperatorArtifactIntent>) => {
+      const saved = records.get(id);
+      expect(next.installationId).toBe(id);
       if (revision !== (saved?.revision ?? null)) return false;
       for (const previous of saved?.attempts ?? []) {
         if (!previous.evidence) continue;
@@ -100,8 +102,8 @@ export function awsOperatorArtifactBoundary(options: { lost?: 'stack' | 'object'
         for (const [key,value] of Object.entries(previous.evidence.native)) expect(current!.native[key]).toEqual(value);
         for (const [index,value] of previous.evidence.resources.entries()) expect(current!.resources[index]).toEqual(value);
       }
-      saved = structuredClone(next); return true;
+      records.set(id, structuredClone(next)); return true;
     } } };
-  return { intent, input, setCaller: (value: Caller) => { caller = value; }, setReadsDenied: (value: boolean) => { readsDenied = value; }, writes, objects, requests, capability, policy: () => policy, setPolicy: (value: any) => { policy = value; }, resetRecord: () => { saved = null; }, stack: () => stack };
+  return { intent, input, setCaller: (value: Caller) => { caller = value; }, setReadsDenied: (value: boolean) => { readsDenied = value; }, writes, objects, requests, capability, policy: () => policy, setPolicy: (value: any) => { policy = value; }, stack: () => stack };
 }
 
