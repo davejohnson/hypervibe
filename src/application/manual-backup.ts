@@ -11,6 +11,12 @@ import type { Receipt } from '../domain/ports/provider.port.js';
 import { managedRecoveryTaskCheckpointSchema } from '../domain/ports/managed-recovery-task.port.js';
 import { manualBackupRecordsSchema, manualBackupRecordSchema, planManualBackup } from '../domain/services/manual-backup.service.js';
 import { executeLocalManagedBackup } from './managed-backup.js';
+import { RecoveryDiagnosticError, recoveryDiagnosticSchema } from '../domain/ports/recovery-diagnostics.port.js';
+
+function diagnosticData(value: unknown): Record<string, unknown> | undefined {
+  const parsed = recoveryDiagnosticSchema.safeParse(value);
+  return parsed.success ? { diagnostic: parsed.data } : undefined;
+}
 
 /** The generic executor holds the environment lock; complete-binding CAS also
  * refuses concurrent writes from other processes or stale callback closures. */
@@ -76,18 +82,22 @@ export async function applyManualBackup(input: { ctx: CommandContext; project: P
         persist: async checkpoint => save({ ...record, checkpoint: managedRecoveryTaskCheckpointSchema.parse(checkpoint) }).checkpoint! } });
     if (result.status !== 'healthy' || result.setId !== record.executionId || record.checkpoint?.phase !== 'complete'
       || record.checkpoint.terminal?.status !== 'succeeded')
-      return { success: false, status: 'pending', message: 'The backup, isolated logical restore or native cleanup is not yet verified. Retain this request for recovery.' };
+      return { success: false, status: 'pending', message: 'The backup, isolated logical restore or native cleanup is not yet verified. Retain this request for recovery.',
+        data: diagnosticData(result.diagnostic) };
     save({ ...record, complete: true });
     return { success: true, message: 'The exact backup and isolated logical restore are verified; its temporary job is removed and all prior archives remain.',
       data: { executionId: record.executionId, restoreVerified: true, cleanupVerified: true, retainedArchivesPreserved: true } };
-  } catch {
+  } catch (error) {
+    // Only the closed recovery contract may cross the receipt boundary. Provider
+    // text and arbitrary diagnostic-shaped objects remain private.
+    const diagnostic = error instanceof RecoveryDiagnosticError ? diagnosticData(error.diagnostic) : undefined;
     try {
       const retained = manualBackupRecordsSchema.parse(input.ctx.repos.environments.findById(input.environmentId)?.platformBindings.manualRecovery ?? {})[String(input.action.metadata?.requestId)];
       if (retained?.checkpoint?.phase === 'complete' && retained.checkpoint.terminal?.status === 'failed')
-        return { success: false, message: 'The backup helper failed and its temporary resources were removed. This request will not run again; preserve partial archives and review a new request only after fixing the failure.', data: { cleanupVerified: true } };
+        return { success: false, message: 'The backup helper failed and its temporary resources were removed. This request will not run again; preserve partial archives and review a new request only after fixing the failure.', data: { cleanupVerified: true, ...diagnostic } };
     } catch { /* Preserve malformed or unavailable evidence; never infer absence. */ }
     return { success: false, status: attempted ? 'pending' : 'blocked', message: attempted
       ? 'This manual backup remains recorded and incomplete. Re-plan this same request to inspect its exact progress; do not issue another backup.'
-      : 'The exact manual backup authority could not be verified. No new execution is authorized.' };
+      : 'The exact manual backup authority could not be verified. No new execution is authorized.', data: diagnostic };
   }
 }

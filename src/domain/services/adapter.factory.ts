@@ -67,7 +67,7 @@ export class AdapterFactory {
       'deployment',
       project ? getProjectScopeHints(project) : undefined,
       environment
-    ), project, environment);
+    ), project, environment, providerName);
   }
 
   /**
@@ -149,14 +149,18 @@ export class AdapterFactory {
       undefined,
       scopeHints ?? (project ? getProjectScopeHints(project) : undefined),
       environment
-    ), project, environment);
+    ), project, environment, providerName);
   }
 
-  private async withLocalPreparation<T>(result: AdapterResult<T>, project?: Project, environmentName?: string): Promise<AdapterResult<T>> {
+  private async withLocalPreparation<T>(result: AdapterResult<T>, project?: Project, environmentName?: string, providerName?: string): Promise<AdapterResult<T>> {
     if (!result.success || !result.adapter || !project || !environmentName) return result;
+    // The retained receipt authorizes hosting, not another provider's database,
+    // storage or account connection in the same environment.
+    const adapter = result.adapter as T & Pick<IHostingAdapter, 'name'> & Partial<Pick<IHostingAdapter, 'configureLocalPreparedHosting'>>;
+    const metadata = providerName ? providerRegistry.getMetadata(providerName) : undefined;
+    if (metadata && adapter.name === providerName && metadata.category !== 'deployment') return result;
     const environments = new EnvironmentRepository(), environment = environments.findByProjectAndName(project.id, environmentName);
     if (!environment?.platformBindings.localPreparedHosting) return result;
-    const adapter = result.adapter as T & Pick<IHostingAdapter, 'name'> & Partial<Pick<IHostingAdapter, 'configureLocalPreparedHosting'>>;
     try {
       if (!providerRegistry.getHoldingPreparation(adapter.name) || !adapter.configureLocalPreparedHosting) throw new Error();
       const load = async () => {

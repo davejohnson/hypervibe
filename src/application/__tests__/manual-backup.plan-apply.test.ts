@@ -27,6 +27,7 @@ import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { planRunDocumentSchema } from '../../domain/plan/converge.executor.js';
 import { mergeRepoPlatformBindings } from '../../domain/spec/repo-bindings-file.js';
 import * as targets from '../../domain/services/managed-backup-target.service.js';
+import { recoveryFailure } from '../../domain/ports/recovery-diagnostics.port.js';
 
 // User requirement: a manually deployed app can review one local backup and
 // isolated logical restore without publishing another project's root spec.
@@ -145,6 +146,55 @@ describe('one-use local backup authority', () => {
     const again = await f.plan(); await f.apply(again.data.planId, ['manual-backup:once-before-live']);
     expect(f.execute.mock.calls[1][0].lifecycle.state).toEqual(pending['once-before-live'].checkpoint);
     expect(f.execute.mock.calls[1][0].executionId).toBe(f.execute.mock.calls[0][0].executionId);
+  });
+  it('preserves the closed preflight diagnosis through the actual apply result without exposing provider text', async () => {
+    const f = readyFixture();
+    f.execute.mockRejectedValueOnce(recoveryFailure('credentials', 'authorization', undefined,
+      { mutationAttempted: false }, 'postgres://private-value-must-not-escape'));
+    const planned = await f.plan();
+    const result: any = await f.registry.get('hv_apply')!.execute({ project: f.project.name, planId: planned.data.planId,
+      confirmActions: ['manual-backup:once-before-live'] });
+    expect(result.data.receipts).toMatchObject([{ status: 'pending', data: { diagnostic: {
+      stage: 'credentials', category: 'authorization', task: { mutationAttempted: false },
+    } } }]);
+    const retained: any = f.ctx.repos.environments.findById(f.environment.id)!.platformBindings.manualRecovery;
+    expect(retained['once-before-live'].checkpoint).toBeUndefined();
+    expect(retained['once-before-live'].complete).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('private-value');
+    expect(JSON.stringify(f.ctx.repos.runs.findById(result.data.applyRunId)?.receipts)).not.toContain('private-value');
+  });
+  it('preserves a validated nonhealthy local result diagnostic and ignores arbitrary thrown diagnostic text', async () => {
+    const f = readyFixture();
+    f.execute.mockResolvedValueOnce({ version: 2, environment: f.environment.name, status: 'unknown', reasonCodes: ['cleanup-unverified'],
+      counts: { applied: 1, skipped: 0 }, diagnostic: { stage: 'restore-cleanup', category: 'cleanup', localCleanupFailed: true } });
+    const planned = await f.plan();
+    const first: any = await f.registry.get('hv_apply')!.execute({ project: f.project.name, planId: planned.data.planId,
+      confirmActions: ['manual-backup:once-before-live'] });
+    expect(first.data.receipts[0]).toMatchObject({ status: 'pending', data: { diagnostic: { stage: 'restore-cleanup', category: 'cleanup', localCleanupFailed: true } } });
+    f.execute.mockRejectedValueOnce(Object.assign(Error('private-password'), { diagnostic: { stage: 'private-stage', category: 'private-category' } }));
+    const again = await f.plan();
+    const second: any = await f.registry.get('hv_apply')!.execute({ project: f.project.name, planId: again.data.planId,
+      confirmActions: ['manual-backup:once-before-live'] });
+    expect(JSON.stringify(second)).not.toMatch(/private-password|private-stage|private-category/);
+    expect(second.data.receipts[0].status).toBe('pending');
+  });
+  it('continues a reserved preflight failure under the same request with no prior native checkpoint', async () => {
+    const f = readyFixture();
+    f.execute.mockRejectedValueOnce(recoveryFailure('credentials', 'unknown', undefined, { mutationAttempted: false }));
+    const first = await f.plan();
+    await f.apply(first.data.planId, ['manual-backup:once-before-live']);
+    const prior: any = f.ctx.repos.environments.findById(f.environment.id)!.platformBindings.manualRecovery;
+    expect(prior['once-before-live'].checkpoint).toBeUndefined();
+    const next = await f.plan();
+    const nextAction = (f.ctx.repos.runs.findById(next.data.planId)!.plan as any).actions[0];
+    expect(nextAction.metadata.recordHash).toBe(canonicalJsonSha256(prior['once-before-live']));
+    expect(nextAction.metadata.executionId).toBe(prior['once-before-live'].executionId);
+    await f.apply(next.data.planId, ['manual-backup:once-before-live']);
+    expect(f.execute.mock.calls[1][0].lifecycle.state).toBeUndefined();
+    expect(f.execute.mock.calls[1][0].executionId).toBe(prior['once-before-live'].executionId);
+    expect((f.ctx.repos.environments.findById(f.environment.id)!.platformBindings.manualRecovery as any)['once-before-live'].complete).toBe(true);
+    const done = await f.plan(); await f.apply(done.data.planId);
+    expect(f.execute).toHaveBeenCalledTimes(2); // The first call never reached native progress.
   });
   it.each(['before-provider', 'during-callback'])('refuses a concurrent binding overwrite %s', async when => {
     const f = readyFixture(); const first = await f.plan();

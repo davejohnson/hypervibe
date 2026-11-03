@@ -100,3 +100,28 @@ synthetic SQL restore and provider observations. It does not claim a live SQL re
 Normal acceptance is declared by `.hypervibe/spec.json` (`acceptance`, `npm test`
 and typecheck) and emitted in `.github/workflows/hypervibe-acceptance.yml`.
 This review verifies repository configuration, not live branch-protection enforcement.
+
+## Prepared-host connection resolution and safe failure details
+
+A retained hosting receipt governs the hosting adapter only. Resolving a registered
+non-hosting database or storage adapter in that environment must retain its exact
+connection scope without attempting to use that hosting receipt. The generic
+factory now bypasses hosting preparation only when the requested and returned
+provider names agree and registered metadata identifies a non-deployment category;
+unknown or mismatched hosting adapters retain the previous fail-closed path.
+
+A real disposable GCP attempt reserved its one-use request and stopped before
+recording a native checkpoint. The original apply receipt lost the closed diagnostic
+from the local executor. The shared apply handler now preserves only validated
+recovery stages, categories, numeric status and finite task facts; raw provider
+messages and arbitrary diagnostic-shaped errors remain excluded. Diagnostics do not
+authorize retry, establish absence, or replace native cleanup proof.
+
+Counterexamples were observed before either runtime correction: six registered
+AWS/Azure/GCP database/storage adapters failed generic resolution beside retained
+hosting, and two actual command/SQLite receipt cases discarded valid diagnostics.
+The tests also cover invalid hosting proof, mismatched adapter identities, no-checkpoint
+same-request continuation and output privacy. These checks are in the normal
+`npm test` path. Their synthetic factories do not establish live provider execution;
+the original pending request still requires a fresh supported plan and exact native
+verification before claiming backup or restore completion.
