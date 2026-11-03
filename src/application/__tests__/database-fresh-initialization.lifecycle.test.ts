@@ -378,7 +378,7 @@ describe('explicit fresh database initialization lifecycle', () => {
       expect(f.http.mutations).toEqual([]);
     });
 
-  it('preserves an unresolved old backup-policy attempt and requires ordinary backup review after empty initialization', async () => {
+  it('preserves an unresolved old backup-policy attempt for explicit backup review after empty initialization', async () => {
     const f = await fixture(); f.declare();
     const backupAttempt = { 'backup-policy:database:railway:postgres': {
       source: { provider: 'railway', primaryExternalId: f.component.externalId,
@@ -393,10 +393,19 @@ describe('explicit fresh database initialization lifecycle', () => {
     expect(planned.scope).toBe('database-initialization');
     expect(await f.apply(planned)).toMatchObject({ kind: 'executed', result: { success: true } });
     expect(ctx.repos.environments.findById(f.environment.id)!.platformBindings.backupPolicyAttempts).toEqual(backupAttempt);
+    const mutations = f.http.mutations.length;
     const after = await f.plan();
     expect(after.scope).not.toBe('database-initialization');
-    expect(after.warnings.join(' ')).toMatch(/previous daily backup policy write|unresolved daily backup/i);
+    expect(after).not.toHaveProperty('backupCoverage');
     expect(after.actions.some(action => action.metadata?.operation === 'databaseFreshInitialize')).toBe(false);
+    expect(after.actions.some(action => action.metadata?.operation === 'dailyBackupConfigure')).toBe(false);
+    const backupReview = await new PlanService().plan(f.project, 'production', { scope: 'backups' });
+    if ('error' in backupReview) throw new Error(backupReview.error);
+    expect(backupReview.warnings.join(' ')).toMatch(/previous daily backup policy write|unresolved daily backup/i);
+    expect(backupReview.actions.some(action => action.metadata?.operation === 'dailyBackupConfigure')).toBe(false);
+    expect(ctx.repos.environments.findById(f.environment.id)!.platformBindings.backupPolicyAttempts).toEqual(backupAttempt);
+    expect(f.http.mutations).toHaveLength(mutations);
+    expect(f.http.contractErrors).toEqual([]);
   });
 
 });

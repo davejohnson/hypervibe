@@ -10,6 +10,22 @@ export function managedBackupFilePaths(environment: string): [string, string] {
   return [`.github/hypervibe/backups-${environment}.json`, `.github/workflows/hypervibe-backup-${environment}.yml`];
 }
 
+/** Both paths are observed: null binds confirmed absence, never unknown state. */
+export type BackupRetirementFile = { path: string; hash: string | null };
+
+export function parseBackupRetirementFiles(value: unknown, environment: string): BackupRetirementFile[] | undefined {
+  const paths = managedBackupFilePaths(environment);
+  if (!Array.isArray(value) || value.length !== paths.length) return undefined;
+  const files: BackupRetirementFile[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || !paths.includes(item.path)
+      || (item.hash !== null && (typeof item.hash !== 'string' || !/^[a-f0-9]{64}$/.test(item.hash)))
+      || files.some(file => file.path === item.path)) return undefined;
+    files.push({ path: item.path, hash: item.hash });
+  }
+  return files;
+}
+
 export function isManagedBackupFilePath(path: string): boolean {
   return /^\.github\/hypervibe\/backups-[a-zA-Z0-9][a-zA-Z0-9_-]{0,100}\.json$/.test(path)
     || /^\.github\/workflows\/hypervibe-backup-[a-zA-Z0-9][a-zA-Z0-9_-]{0,100}\.yml$/.test(path);
