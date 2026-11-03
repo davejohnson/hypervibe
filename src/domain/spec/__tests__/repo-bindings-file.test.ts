@@ -15,6 +15,40 @@ import {
   writeRepoBindingsForEnvironment,
 } from '../repo-bindings-file.js';
 
+describe('local storage deletion recovery export', () => {
+  const marker = { operation: 'delete', resourceName: 'documents', target: 'active', snapshot: {
+    provider: 'gcs', externalId: 'bucket', instanceScope: { projectId: 'cloud-project' },
+    nativeIdentity: { generation: '101', metageneration: '1', projectNumber: '123' },
+    phase: 'uncertain', nextStep: 0, attemptedAt: '2026-11-03T12:00:00.000Z',
+    steps: [{ kind: 'bucket', name: 'bucket', generation: '101', metageneration: '1' }],
+    requestedAt: '2026-11-03T12:00:00.000Z', retention: { policySeconds: '604800', resources: [] },
+  } };
+  it('preserves local deletion recovery and rejects a repository attempt to supply or replace it', () => {
+    const local = { storageCreateRecovery: { documents: marker }, storageDeletionReceipts: { documents: [] } };
+    expect(mergeRepoPlatformBindings(local, {})).toEqual(local);
+    expect(() => mergeRepoPlatformBindings({}, { storageCreateRecovery: { documents: marker } })).toThrow(/deletion|local|recovery/i);
+    expect(() => mergeRepoPlatformBindings(local, { storageDeletionReceipts: {} })).toThrow(/deletion|local/i);
+  });
+  it('omits pending deletion and its receipts while retaining portable create recovery', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'hv-storage-delete-export-'));
+    execFileSync('git', ['init', '-q', root]);
+    execFileSync('git', ['-C', root, 'remote', 'add', 'origin', 'https://github.com/owner/delete-export.git']);
+    const now = new Date(), oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    const project: Project = { id: 'project', name: 'delete-export', gitRemoteUrl: 'https://github.com/owner/delete-export.git', defaultPlatform: 'cloudrun', policies: {}, createdAt: now, updatedAt: now };
+    const create = { operation: 'create', provider: 'gcs', resourceName: 'new-documents', providerScope: { projectId: 'cloud-project' }, state: 'unresolved' };
+    const environment: Environment = { id: 'env', projectId: project.id, name: 'test', createdAt: now, updatedAt: now,
+      platformBindings: { storageCreateRecovery: { documents: marker, 'new-documents': create }, storageDeletionReceipts: { documents: [] } } };
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      const file = writeRepoBindingsForEnvironment(project, environment, root)!;
+      const bindings = JSON.parse(readFileSync(file, 'utf8')).environments.test.platformBindings;
+      expect(bindings.storageCreateRecovery).toEqual({ 'new-documents': create });
+      expect(bindings.storageDeletionReceipts).toBeUndefined();
+      expect(mergeRepoPlatformBindings(environment.platformBindings, bindings).storageCreateRecovery).toEqual(environment.platformBindings.storageCreateRecovery);
+    } finally { if (oldDisable === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC; else process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable; rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
 describe('staged service-volume binding merge', () => {
   const target = { projectId: 'project', environmentId: 'staging', serviceId: 'web', mountPath: '/data', instanceScope: { region: 'west' } };
   const staged = (components: Record<string, ServiceVolumeComponentBinding>): ServiceVolumeBinding => ({ provider: 'test-host', target, state: 'staged', components });

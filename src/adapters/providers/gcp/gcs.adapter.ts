@@ -17,7 +17,10 @@ import type {
   StorageObjectRevision,
   StorageObservationTarget,
   StorageRuntimeTarget,
+  StorageDestroyOptions,
+  StorageDeletionSnapshot,
 } from '../../../domain/ports/storage.port.js';
+import { storageDeletionEvidenceSchema, storageDeletionSnapshotSchema } from '../../../domain/ports/storage.port.js';
 import { GcsRuntimeAccess } from './gcs-runtime-access.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
 import {
@@ -85,6 +88,30 @@ interface GcsBucket {
   location?: string;
   labels?: Record<string, string>;
 }
+
+const nativeNumber = z.string().regex(/^\d+$/);
+const nativeTime = z.string().datetime({ offset: true });
+const deletionBucketSchema = z.object({
+  name: z.string().min(1), generation: nativeNumber, metageneration: nativeNumber,
+  projectNumber: nativeNumber, timeCreated: nativeTime,
+  labels: z.record(z.string(), z.string()),
+  softDeletePolicy: z.object({ retentionDurationSeconds: nativeNumber }).passthrough().optional(),
+  softDeleteTime: nativeTime.optional(), hardDeleteTime: nativeTime.optional(),
+}).passthrough();
+type DeletionBucket = z.infer<typeof deletionBucketSchema>;
+const deletionObjectSchema = z.object({
+  name: z.string().min(1), size: nativeNumber, generation: nativeNumber, metageneration: nativeNumber,
+  temporaryHold: z.boolean().optional(), eventBasedHold: z.boolean().optional(),
+  retentionExpirationTime: nativeTime.optional(),
+  retention: z.object({ retainUntilTime: nativeTime, mode: z.enum(['Locked', 'Unlocked']) }).passthrough().optional(),
+  softDeleteTime: nativeTime.optional(), hardDeleteTime: nativeTime.optional(),
+  restoreToken: z.string().uuid().optional(),
+}).passthrough();
+type DeletionObject = z.infer<typeof deletionObjectSchema>;
+const deletionListSchema = z.object({
+  kind: z.literal('storage#objects'), items: z.array(deletionObjectSchema).optional(),
+  nextPageToken: z.string().min(1).optional(), prefixes: z.array(z.string()).max(0).optional(),
+}).passthrough();
 
 interface GcsObject {
   name?: string;
@@ -277,7 +304,10 @@ class GcsObjectClient implements StorageObjectClient {
   async remove(key: string, revision?: StorageObjectRevision): Promise<void> {
     if (revision?.etag || revision?.versionId || revision?.lastModified) throw new Error('GCS deletion requires a native generation.');
     const conditions = new URLSearchParams();
-    if (revision?.generation) conditions.set('ifGenerationMatch', revision.generation);
+    if (revision?.generation) {
+      conditions.set('generation', revision.generation);
+      conditions.set('ifGenerationMatch', revision.generation);
+    }
     if (revision?.metageneration) conditions.set('ifMetagenerationMatch', revision.metageneration);
     const response = await this.authorized(`${STORAGE_API}/storage/v1/b/${encodeURIComponent(this.bucket)}/o/${encodeURIComponent(key)}?${conditions}`, { method: 'DELETE' });
     if (!response.ok && response.status !== 404) throw await responseError(response);
@@ -309,6 +339,8 @@ export class GcsStorageAdapter implements IStorageAdapter {
     supportsUsageObservation: true,
     supportsObjectTransfer: true,
     usesWorkloadIdentity: true,
+    supportsDeletionRecovery: true,
+    supportsConditionalObjectDeletionRetry: true,
   };
 
   private credentials: GcsStorageCredentials | null = null;
@@ -644,33 +676,281 @@ export class GcsStorageAdapter implements IStorageAdapter {
     return new GcsObjectClient(externalId, this.request, () => this.accessToken(), this.mediaRequest);
   }
 
-  async destroyBucket(environment: Environment, context: StorageContext, externalId: string): Promise<Receipt> {
+  async destroyBucket(environment: Environment, context: StorageContext, externalId: string, options?: StorageDestroyOptions): Promise<Receipt> {
     try {
       await this.assertContext(context);
-      const bucket = await this.getBucket(externalId);
-      if (!bucket) return { success: true, message: `Google Cloud Storage bucket "${externalId}" is already absent` };
-      if (bucket.labels?.[ENVIRONMENT_LABEL] !== environment.id) {
-        throw new Error(`Google Cloud Storage bucket ${externalId} is not owned by this Hypervibe environment.`);
-      }
-      const transfer = await this.openObjectTransfer(environment, context, externalId);
-      try {
-        for (const object of await transfer.list()) {
-          const response = await this.authorized(
-            `${STORAGE_API}/storage/v1/b/${encodeURIComponent(externalId)}/o/${encodeURIComponent(object.key)}`,
-            { method: 'DELETE' }
-          );
-          if (!response.ok && response.status !== 404) throw await responseError(response);
+      if (!options?.persistRecovery) throw new Error('GCS bucket deletion requires durable recovery identity from the storage lifecycle.');
+      let snapshot: StorageDeletionSnapshot;
+      let retrying = false;
+      if (options.recovery) {
+        snapshot = storageDeletionSnapshotSchema.parse(options.recovery);
+        if (snapshot.provider !== this.name || snapshot.externalId !== externalId
+          || JSON.stringify(Object.entries(snapshot.instanceScope).sort()) !== JSON.stringify(Object.entries(context).sort())) throw new Error('The retained deletion scope does not match this bucket.');
+        if (snapshot.phase !== 'ready') {
+          const step = snapshot.steps[snapshot.nextStep];
+          // An uncertain bucket has no generation-match DELETE condition. Its
+          // same-name replacement risk is not resolved by object retry rules.
+          if (step.kind === 'bucket' && snapshot.phase === 'uncertain') return await this.verifyDeletionCompletion(snapshot);
+          const present = await this.observeRetryTarget(snapshot);
+          if (present) {
+            if (!options.retryAttempt) {
+              await options.persistRecovery(storageDeletionSnapshotSchema.parse({ ...snapshot, retryObservedAt: new Date().toISOString() }));
+              return { success: false, message: `The prior deletion remains ${snapshot.phase}. The exact target is still present; run hv_plan to review a separate conditional retry.`,
+                data: { storageDeletionContinuation: true } };
+            }
+            if (!options.allowMutation || !snapshot.retryObservedAt) throw new Error('A conditional deletion retry requires a fresh reviewed plan and native presence observation.');
+            retrying = true;
+          } else {
+            if (step.kind === 'bucket') return await this.verifyDeletionCompletion(snapshot);
+            const next = await this.verifyDeletedObject(snapshot);
+            await options.persistRecovery(next);
+            return this.deletionContinuation();
+          }
         }
-      } finally {
-        transfer.destroy();
+      } else {
+        if (!options.allowMutation) return this.deletionContinuation();
+        const observed = await this.getBucket(externalId);
+        if (!observed) throw new Error('The bucket is not active, but its prior deletion and retained data are unverified. No deletion was sent.');
+        const bucket = deletionBucketSchema.parse(observed);
+        if (bucket.labels[ENVIRONMENT_LABEL] !== environment.id) throw new Error(`Google Cloud Storage bucket ${externalId} is not owned by this Hypervibe environment.`);
+        await this.verifyDeletionProject(context, bucket);
+        const versions = await this.deletionObjects(externalId, false);
+        // Disabled policy does not prove old retained data is absent. Its native
+        // invalidArgument/400 remains unsupported inventory, before any write.
+        const retained = await this.deletionObjects(externalId, true);
+        if (versions.length + retained.length > 20_000) throw new Error('The complete deletion inventory exceeds the supported bounded size.');
+        if (versions.some(object => object.temporaryHold || object.eventBasedHold
+          || Date.parse(object.retentionExpirationTime ?? '') > Date.now()
+          || Date.parse(object.retention?.retainUntilTime ?? '') > Date.now())) throw new Error('Object holds or native retention protect this bucket. No holds or retention policy were changed.');
+        snapshot = storageDeletionSnapshotSchema.parse({ provider: this.name, externalId, instanceScope: context,
+          nativeIdentity: { generation: bucket.generation, metageneration: bucket.metageneration,
+            projectNumber: bucket.projectNumber, timeCreated: bucket.timeCreated },
+          requestedAt: new Date().toISOString(), phase: 'ready', nextStep: 0,
+          steps: [...versions.map(item => ({ kind: 'object', name: item.name, generation: item.generation, metageneration: item.metageneration })),
+            { kind: 'bucket', name: externalId, generation: bucket.generation, metageneration: bucket.metageneration }],
+          retention: { policySeconds: bucket.softDeletePolicy?.retentionDurationSeconds ?? '0', resources: retained.map(item => this.retainedObject(item)) } });
+        await options.persistRecovery(snapshot);
       }
-      const response = await this.authorized(`${STORAGE_API}/storage/v1/b/${encodeURIComponent(externalId)}`, { method: 'DELETE' });
-      if (!response.ok && response.status !== 404) throw await responseError(response);
-      if (await this.getBucket(externalId)) throw new Error(`Google Cloud Storage bucket ${externalId} deletion is not yet observable.`);
-      return { success: true, message: `Deleted Google Cloud Storage bucket "${externalId}" and all objects` };
+      if (!options.allowMutation) return this.deletionContinuation();
+      while (snapshot.phase === 'ready' || retrying) {
+        const retryDispatch = retrying;
+        const bucket = this.deletionBucketIdentity(snapshot);
+        const step = snapshot.steps[snapshot.nextStep];
+        await this.assertDeletionBucketUnchanged(bucket);
+        let resources = snapshot.retention.resources;
+        if (step.kind === 'bucket') {
+          // Never sweep a concurrent write into the original selected program.
+          if ((await this.deletionObjects(externalId, false)).length) throw new Error('Live or noncurrent objects remain or were written during cleanup. The exact original deletion program was retained; no new objects were deleted.');
+          resources = this.mergeRetainedObjects(resources, (await this.deletionObjects(externalId, true)).map(item => this.retainedObject(item)));
+          await this.assertDeletionBucketUnchanged(bucket);
+        }
+        const priorAttempts = retrying ? [...snapshot.priorAttempts ?? [], { step: snapshot.nextStep, attemptedAt: snapshot.attemptedAt!,
+          outcome: snapshot.phase, ...(snapshot.rejectionStatus ? { rejectionStatus: snapshot.rejectionStatus } : {}) }] : snapshot.priorAttempts;
+        const { attemptedAt: _attemptedAt, retryObservedAt: _retryObservedAt, rejectionStatus: _rejectionStatus, ...dispatch } = snapshot;
+        snapshot = storageDeletionSnapshotSchema.parse({ ...dispatch, phase: 'uncertain', attemptedAt: new Date().toISOString(),
+          ...(priorAttempts ? { priorAttempts } : {}),
+          retention: { ...snapshot.retention, resources } });
+        await options.persistRecovery(snapshot);
+        retrying = false;
+        await this.assertDeletionBucketUnchanged(bucket);
+        const params = new URLSearchParams({ ifMetagenerationMatch: step.metageneration });
+        if (step.kind === 'object') { params.set('generation', step.generation); params.set('ifGenerationMatch', step.generation); }
+        const path = `${STORAGE_API}/storage/v1/b/${encodeURIComponent(externalId)}`
+          + (step.kind === 'object' ? `/o/${encodeURIComponent(step.name)}` : '');
+        const response = await this.authorized(`${path}?${params}`, { method: 'DELETE' });
+        if (response.status === 403 || response.status === 412) {
+          await options.persistRecovery(storageDeletionSnapshotSchema.parse({ ...snapshot, phase: 'rejected', rejectionStatus: response.status }));
+        }
+        if (!response.ok && response.status !== 404) throw await responseError(response);
+        if (step.kind === 'bucket') return await this.verifyDeletionCompletion(snapshot);
+        snapshot = await this.verifyDeletedObject(snapshot);
+        await options.persistRecovery(snapshot);
+        if (retryDispatch) return this.deletionContinuation();
+      }
+      throw new Error('Deletion progress is unresolved; no additional delete was sent.');
     } catch (error) {
       return { success: false, message: `Failed to delete Google Cloud Storage bucket "${externalId}"`, error: errorMessage(error) };
     }
+  }
+
+  private deletionContinuation(): Receipt {
+    return { success: false, message: 'Deletion is paused. Run hv_plan to review the remaining exact deletions.',
+      data: { storageDeletionContinuation: true } };
+  }
+
+  /** Native exact presence permits review, not automatic retry authorization. */
+  private async observeRetryTarget(snapshot: StorageDeletionSnapshot): Promise<boolean> {
+    const step = snapshot.steps[snapshot.nextStep];
+    if (step.kind === 'bucket') {
+      const active = await this.getBucket(snapshot.externalId);
+      if (!active) return false;
+      if (!this.sameDeletionBucket(this.deletionBucketIdentity(snapshot), deletionBucketSchema.parse(active))) throw new Error('The original bucket lifetime or metadata changed; no retry was sent.');
+      return true;
+    }
+    await this.assertDeletionBucketUnchanged(this.deletionBucketIdentity(snapshot));
+    const response = await this.authorized(`${STORAGE_API}/storage/v1/b/${encodeURIComponent(snapshot.externalId)}/o/${encodeURIComponent(step.name)}?${new URLSearchParams({ generation: step.generation })}`);
+    if (response.status === 404) return false;
+    if (!response.ok) throw await responseError(response);
+    const object = deletionObjectSchema.parse(await response.json());
+    if (object.name !== step.name || object.generation !== step.generation || object.metageneration !== step.metageneration
+      || object.softDeleteTime || object.hardDeleteTime || object.temporaryHold || object.eventBasedHold
+      || Date.parse(object.retentionExpirationTime ?? '') > Date.now()
+      || Date.parse(object.retention?.retainUntilTime ?? '') > Date.now()) throw new Error('The original object generation, metadata, or retention changed; no retry was sent.');
+    await this.assertDeletionBucketUnchanged(this.deletionBucketIdentity(snapshot));
+    return true;
+  }
+
+  private deletionBucketIdentity(snapshot: StorageDeletionSnapshot): DeletionBucket {
+    const identity = z.object({ generation: nativeNumber, metageneration: nativeNumber,
+      projectNumber: nativeNumber, timeCreated: nativeTime }).strict().parse(snapshot.nativeIdentity);
+    return { ...identity, name: snapshot.externalId, labels: {} };
+  }
+
+  private retainedObject(item: DeletionObject): StorageDeletionSnapshot['retention']['resources'][number] {
+    if (!item.softDeleteTime || !item.hardDeleteTime) throw new Error('Native object retention metadata is incomplete.');
+    return { kind: 'object', name: item.name, generation: item.generation, metageneration: item.metageneration,
+      softDeleteTime: item.softDeleteTime, hardDeleteTime: item.hardDeleteTime,
+      ...(item.restoreToken ? { restoreToken: item.restoreToken } : {}) };
+  }
+
+  private mergeRetainedObjects(previous: StorageDeletionSnapshot['retention']['resources'], next: StorageDeletionSnapshot['retention']['resources']) {
+    const records = new Map(previous.map(item => [JSON.stringify([item.name, item.generation, item.restoreToken ?? '']), item]));
+    for (const item of next) {
+      const key = JSON.stringify([item.name, item.generation, item.restoreToken ?? '']);
+      const old = records.get(key);
+      if (old && JSON.stringify(old) !== JSON.stringify(item)) throw new Error('Previously observed native retention changed; preserve its evidence for inspection.');
+      records.set(key, item);
+    }
+    return [...records.values()];
+  }
+
+  /** Exact metadata-only GETs settle an uncertain child without replaying it. */
+  private async verifyDeletedObject(snapshot: StorageDeletionSnapshot): Promise<StorageDeletionSnapshot> {
+    const step = snapshot.steps[snapshot.nextStep];
+    await this.assertDeletionBucketUnchanged(this.deletionBucketIdentity(snapshot));
+    const path = `${STORAGE_API}/storage/v1/b/${encodeURIComponent(snapshot.externalId)}/o/${encodeURIComponent(step.name)}`;
+    const params = new URLSearchParams({ generation: step.generation });
+    const active = await this.authorized(`${path}?${params}`);
+    if (active.status !== 404) {
+      if (!active.ok) throw await responseError(active);
+      throw new Error('The attempted object generation is still active. Its prior deletion is unresolved; no delete was replayed.');
+    }
+    params.set('softDeleted', 'true');
+    const retained = await this.authorized(`${path}?${params}`);
+    let resources = snapshot.retention.resources;
+    if (retained.ok) {
+      const object = deletionObjectSchema.parse(await retained.json());
+      if (object.name !== step.name || object.generation !== step.generation || object.metageneration !== step.metageneration) throw new Error('Deleted object identity could not be verified.');
+      resources = this.mergeRetainedObjects(resources, [this.retainedObject(object)]);
+    } else {
+      const earliestExpiry = Date.parse(snapshot.attemptedAt!) + Number(snapshot.retention.policySeconds) * 1000;
+      if (retained.status !== 404 || !Number.isSafeInteger(Number(snapshot.retention.policySeconds)) || Date.now() < earliestExpiry) throw await responseError(retained);
+    }
+    await this.assertDeletionBucketUnchanged(this.deletionBucketIdentity(snapshot));
+    const { attemptedAt: _attemptedAt, retryObservedAt: _retryObservedAt, rejectionStatus: _rejectionStatus, ...ready } = snapshot;
+    return storageDeletionSnapshotSchema.parse({ ...ready, phase: 'ready', nextStep: snapshot.nextStep + 1,
+      retention: { ...snapshot.retention, resources } });
+  }
+
+  /** Both first completion and restart use these metadata-only native reads. */
+  private async verifyDeletionCompletion(snapshot: StorageDeletionSnapshot): Promise<Receipt> {
+    const externalId = snapshot.externalId;
+    const identity = z.object({ generation: nativeNumber, metageneration: nativeNumber,
+      projectNumber: nativeNumber, timeCreated: nativeTime }).strict().parse(snapshot.nativeIdentity);
+    const expected = { ...identity, name: externalId, labels: {} };
+    const active = await this.getBucket(externalId);
+    if (active) {
+      const current = deletionBucketSchema.parse(active);
+      throw new Error(this.sameDeletionBucket(expected, current, false)
+        ? 'The original bucket is still active. Its prior deletion is unresolved; recovery did not send another delete.'
+        : 'A different bucket now uses this name. It was preserved; recovery did not send a delete.');
+    }
+    const response = await this.authorized(`${STORAGE_API}/storage/v1/b/${encodeURIComponent(externalId)}?${new URLSearchParams({ generation: identity.generation, softDeleted: 'true' })}`);
+    let retainedBucket: DeletionBucket | undefined;
+    if (response.ok) {
+      retainedBucket = deletionBucketSchema.parse(await response.json());
+      if (!this.sameDeletionBucket(expected, retainedBucket, false) || !retainedBucket.softDeleteTime || !retainedBucket.hardDeleteTime
+        || snapshot.retention.resources.some(item => Date.parse(item.hardDeleteTime) > Date.parse(retainedBucket!.hardDeleteTime!))) {
+        throw new Error('The exact deleted bucket generation and retention deadline could not be verified.');
+      }
+    } else {
+      const earliestExpiry = Math.max(Date.parse(snapshot.attemptedAt!) + Number(snapshot.retention.policySeconds) * 1000,
+        ...snapshot.retention.resources.map(item => Date.parse(item.hardDeleteTime)));
+      if (response.status !== 404 || !Number.isSafeInteger(Number(snapshot.retention.policySeconds)) || Date.now() < earliestExpiry) throw await responseError(response);
+      // Exact active and soft-deleted GET absence is native metadata evidence.
+      // Elapsed retention time alone is never accepted as erasure proof.
+    }
+    const evidence = storageDeletionEvidenceSchema.parse({ provider: this.name, externalId, instanceScope: snapshot.instanceScope,
+      nativeIdentity: identity, observedAt: new Date().toISOString(), activeState: 'absent',
+      deletedObjects: snapshot.steps.filter(step => step.kind === 'object').map(({ name, generation, metageneration }) => ({ name, generation, metageneration })),
+      ...(snapshot.priorAttempts ? { priorAttempts: snapshot.priorAttempts } : {}),
+      retention: { state: retainedBucket ? 'recoverable' : 'not-observed', resources: retainedBucket ? [
+        { kind: 'bucket', name: externalId, generation: retainedBucket.generation,
+          softDeleteTime: retainedBucket.softDeleteTime, hardDeleteTime: retainedBucket.hardDeleteTime },
+        ...snapshot.retention.resources,
+      ] : [] } });
+    return { success: true, message: retainedBucket
+      ? `Removed Google Cloud Storage bucket "${externalId}" from active use. Google retains the recoverable bucket until ${retainedBucket.hardDeleteTime}; retained objects have their own recorded deadlines.`
+      : `Google Cloud Storage bucket "${externalId}" is absent from active and soft-deleted metadata.`,
+      data: { storageDeletion: evidence } };
+  }
+
+  private sameDeletionBucket(left: DeletionBucket, right: DeletionBucket, metadata = true): boolean {
+    return left.name === right.name && left.generation === right.generation
+      && left.projectNumber === right.projectNumber && left.timeCreated === right.timeCreated
+      && (!metadata || left.metageneration === right.metageneration);
+  }
+
+  private async assertDeletionBucketUnchanged(expected: DeletionBucket): Promise<void> {
+    const current = deletionBucketSchema.parse(await this.getBucket(expected.name));
+    if (!this.sameDeletionBucket(expected, current)) throw new Error('The bucket lifetime or metadata changed during cleanup; no further deletion was sent.');
+  }
+
+  private async verifyDeletionProject(context: StorageContext, bucket: DeletionBucket): Promise<void> {
+    const schema = z.object({ kind: z.literal('storage#buckets'), items: z.array(deletionBucketSchema).optional(),
+      nextPageToken: z.string().min(1).optional(), unreachable: z.array(z.string()).max(0).optional() }).passthrough();
+    const tokens = new Set<string>();
+    let pageToken: string | undefined, matched = false;
+    do {
+      const params = new URLSearchParams({ project: context.projectId, prefix: bucket.name, maxResults: '100', returnPartialSuccess: 'false' });
+      if (pageToken) params.set('pageToken', pageToken);
+      const response = await this.authorized(`${STORAGE_API}/storage/v1/b?${params}`);
+      if (!response.ok) throw await responseError(response);
+      const body = schema.parse(await response.json());
+      for (const item of body.items ?? []) if (item.name === bucket.name) {
+        if (matched || !this.sameDeletionBucket(bucket, item)) throw new Error('The exact bucket project or lifetime is ambiguous.');
+        matched = true;
+      }
+      pageToken = body.nextPageToken;
+      if (pageToken && (tokens.has(pageToken) || tokens.size >= 100)) throw new Error('Bucket project inventory is incomplete.');
+      if (pageToken) tokens.add(pageToken);
+    } while (pageToken);
+    if (!matched) throw new Error('The bucket was not verified in the connected project; no deletion was sent.');
+  }
+
+  private async deletionObjects(bucket: string, softDeleted: boolean): Promise<DeletionObject[]> {
+    const objects: DeletionObject[] = [], tokens = new Set<string>(), identities = new Set<string>();
+    let pageToken: string | undefined;
+    do {
+      const params = new URLSearchParams({ [softDeleted ? 'softDeleted' : 'versions']: 'true', maxResults: '1000' });
+      if (pageToken) params.set('pageToken', pageToken);
+      const response = await this.authorized(`${STORAGE_API}/storage/v1/b/${encodeURIComponent(bucket)}/o?${params}`);
+      if (!response.ok) throw await responseError(response);
+      const body = deletionListSchema.parse(await response.json());
+      for (const item of body.items ?? []) {
+        const identity = JSON.stringify([item.name, item.generation, item.restoreToken ?? '']);
+        if (identities.has(identity) || objects.length >= 20_000 || !Number.isSafeInteger(Number(item.size))
+          || (softDeleted && (!item.softDeleteTime || !item.hardDeleteTime || Date.parse(item.hardDeleteTime) < Date.parse(item.softDeleteTime)))
+          || (!softDeleted && (item.softDeleteTime || item.hardDeleteTime))) {
+          throw new Error('Object generation or retention inventory is incomplete or inconsistent.');
+        }
+        identities.add(identity); objects.push(item);
+      }
+      pageToken = body.nextPageToken;
+      if (pageToken && (tokens.has(pageToken) || tokens.size >= 1000)) throw new Error('Object generation inventory pagination did not complete.');
+      if (pageToken) tokens.add(pageToken);
+    } while (pageToken);
+    return objects;
   }
 
   private connectedCredentials(): GcsStorageCredentials {

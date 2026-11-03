@@ -1,4 +1,6 @@
 import { runtimeAccessBindings, runtimeAccessReady } from './runtime-access.service.js';
+import { isDeepStrictEqual } from 'node:util';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import type { Environment } from '../entities/environment.entity.js';
@@ -8,7 +10,13 @@ import type { IProviderAdapter, Receipt } from '../ports/provider.port.js';
 import {
   createStorageCreateRecovery,
   parseStorageCreateRecovery,
-  parseStorageCreateRecoveryMap,
+  storageDeletionEvidenceSchema,
+  storageDeletionReceiptsSchema,
+  storageRecoveryMapSchema,
+  storageDeletionRecoverySchema,
+  type StorageDeletionRecovery,
+  type StorageDestroyOptions,
+  type IStorageAdapter,
   type StorageContext,
   type StorageCreateRecovery,
   type StorageRuntimeTarget,
@@ -28,6 +36,9 @@ export const STORAGE_OPERATIONS = {
   wire: 'storageWire',
   unwire: 'storageUnwire',
   destroy: 'storageDestroy',
+  recoverDeletion: 'storageDeletionRecover',
+  continueDeletion: 'storageDeletionContinue',
+  retryDeletion: 'storageDeletionRetry',
 } as const;
 
 const STORAGE_OPERATION_SET = new Set<string>(Object.values(STORAGE_OPERATIONS));
@@ -63,6 +74,7 @@ type StorageCreateRecoveryState = {
   malformed: boolean;
   raw: Record<string, unknown>;
   parsed: Record<string, StorageCreateRecovery>;
+  deletions: Record<string, StorageDeletionRecovery>;
 };
 
 function storageCreateRecoveryState(
@@ -70,16 +82,18 @@ function storageCreateRecoveryState(
 ): StorageCreateRecoveryState {
   const value = environment?.platformBindings.storageCreateRecovery;
   if (value === undefined) {
-    return { present: false, malformed: false, raw: {}, parsed: {} };
+    return { present: false, malformed: false, raw: {}, parsed: {}, deletions: {} };
   }
   const raw = asRecord(value);
   if (!raw) {
-    return { present: true, malformed: true, raw: {}, parsed: {} };
+    return { present: true, malformed: true, raw: {}, parsed: {}, deletions: {} };
   }
-  const parsed = parseStorageCreateRecoveryMap(raw);
-  return parsed
-    ? { present: true, malformed: false, raw, parsed }
-    : { present: true, malformed: true, raw, parsed: {} };
+  const parsed = storageRecoveryMapSchema.safeParse(raw);
+  return parsed.success
+    ? { present: true, malformed: false, raw,
+      parsed: Object.fromEntries(Object.entries(parsed.data).filter((entry): entry is [string, StorageCreateRecovery] => entry[1].operation === 'create')),
+      deletions: Object.fromEntries(Object.entries(parsed.data).filter((entry): entry is [string, StorageDeletionRecovery] => entry[1].operation === 'delete')) }
+    : { present: true, malformed: true, raw, parsed: {}, deletions: {} };
 }
 
 function storageContext(value: unknown): StorageContext | undefined {
@@ -238,9 +252,161 @@ export function parseStorageProviderContexts(environment: Pick<Environment, 'pla
   return (asRecord(environment?.platformBindings.storageProviders) ?? {}) as Record<string, StorageContext>;
 }
 
+/** Share validation across ordinary deletion and migration candidate/rollback
+ * cleanup. Callers persist this metadata with their matching reference removal. */
+export function storageDeletionReceiptUpdate(input: {
+  history: unknown; name: string; provider: string; externalId: string; context: StorageContext; receipt: Receipt;
+}) {
+  const history = storageDeletionReceiptsSchema.parse(input.history ?? {});
+  if (!input.receipt.success) throw new Error('Incomplete deletion cannot clear its retained reference.');
+  const raw = input.receipt.data?.storageDeletion;
+  if (raw === undefined) return { history, evidence: undefined };
+  const evidence = storageDeletionEvidenceSchema.parse(raw);
+  if (evidence.provider !== input.provider || evidence.externalId !== input.externalId
+    || !scopesMatch(evidence.instanceScope, input.context)) throw new Error('Storage deletion evidence does not match the exact target.');
+  const existing = history[input.name] ?? [];
+  return { history: { ...history, [input.name]: existing.some(item => isDeepStrictEqual(item, evidence))
+    ? existing : [...existing, evidence] }, evidence };
+}
+
+function storageDeletionReference(environment: Environment, name: string, target: StorageDeletionRecovery['target']) {
+  const bindings = parseStorageBindings(environment), contexts = parseStorageProviderContexts(environment);
+  const binding = bindings[name];
+  const candidate = asRecord(asRecord(asRecord(environment.platformBindings.dataMigrationCandidates)?.storage)?.[name]);
+  const selected = target === 'active' ? binding : target === 'previous' ? binding?.previousTarget : candidate;
+  if (!selected || typeof selected.provider !== 'string' || typeof selected.externalId !== 'string') return undefined;
+  const root = environment.platformBindings;
+  const fallback = typeof root.projectId === 'string' && typeof root.environmentId === 'string'
+    ? { projectId: root.projectId, environmentId: root.environmentId } : undefined;
+  const context = storageContext(target === 'candidate' ? candidate?.context : selected.instanceScope)
+    ?? contexts[selected.provider] ?? fallback;
+  return { provider: selected.provider, externalId: selected.externalId, context,
+    migrationId: target === 'candidate' ? candidate?.migrationId : target === 'previous' ? binding?.dataMigration?.id : undefined,
+    record: target === 'previous' ? binding : selected };
+}
+
+/** Existing storage lifecycle frontier, shared by ordinary and migration cleanup.
+ * The marker precedes every native DELETE. It never authorizes uncertain replay. */
+export async function destroyTrackedStorage(input: {
+  environmentId: string; name: string; target: StorageDeletionRecovery['target']; migrationId?: string;
+  adapter: IStorageAdapter; externalId: string; context: StorageContext; allowMutation?: boolean; retryAttempt?: boolean;
+}): Promise<{ success: boolean; status?: 'blocked' | 'pending'; message: string; error?: string; data?: Record<string, unknown> }> {
+  const blocked = (message: string, data?: Record<string, unknown>) => ({ success: false, status: 'blocked' as const, message, ...(data ? { data } : {}) });
+  const before = envRepo.findById(input.environmentId);
+  if (!before) return blocked('The storage environment is no longer available.');
+  const reference = storageDeletionReference(before, input.name, input.target);
+  if (!reference || reference.provider !== input.adapter.name || reference.externalId !== input.externalId
+    || !scopesMatch(reference.context, input.context) || reference.migrationId !== input.migrationId) return blocked('The exact storage reference or effective provider context changed.');
+  const recoveryState = storageCreateRecoveryState(before);
+  if (recoveryState.malformed || recoveryState.parsed[input.name]
+    || !storageDeletionReceiptsSchema.safeParse(before.platformBindings.storageDeletionReceipts ?? {}).success) return blocked('Storage recovery evidence must be resolved before cleanup.');
+  let marker = recoveryState.deletions[input.name];
+  const markerMatches = (value: StorageDeletionRecovery) => value.target === input.target && value.migrationId === input.migrationId
+    && value.snapshot.provider === input.adapter.name && value.snapshot.externalId === input.externalId
+    && scopesMatch(value.snapshot.instanceScope, input.context);
+  if (marker && (!markerMatches(marker) || !input.adapter.capabilities?.supportsDeletionRecovery)) return blocked('The retained deletion requires its original supported provider recovery path.');
+  const permissionsClear = (environment: Environment) => {
+    if (input.target !== 'active') return true;
+    const access = runtimeAccessBindings(environment);
+    return Boolean(access && !Object.keys(access.storageRuntimeAccess[input.name] ?? {}).length);
+  };
+  const allowMutation = marker ? input.allowMutation === true : true;
+  let retryAvailable = input.retryAttempt === true;
+  if (allowMutation && !permissionsClear(before)) return blocked('Reconcile retained bucket permissions before deleting this storage.');
+  const options: StorageDestroyOptions = {
+    recovery: marker?.snapshot,
+    allowMutation,
+    retryAttempt: input.retryAttempt,
+    persistRecovery: async snapshot => {
+      const nextMarker = storageDeletionRecoverySchema.parse({ operation: 'delete', resourceName: input.name,
+        target: input.target, ...(input.migrationId ? { migrationId: input.migrationId } : {}), snapshot });
+      if (!markerMatches(nextMarker)) throw new Error('Deletion progress does not match the reviewed storage target.');
+      if (marker) {
+        const previous = marker.snapshot;
+        const immutable = (value: typeof snapshot) => ({ provider: value.provider, externalId: value.externalId,
+          instanceScope: value.instanceScope, nativeIdentity: value.nativeIdentity, requestedAt: value.requestedAt,
+          steps: value.steps, policySeconds: value.retention.policySeconds });
+        const dispatch = !options.retryAttempt && previous.phase === 'ready' && snapshot.phase === 'uncertain' && previous.nextStep === snapshot.nextStep;
+        const observed = previous.phase !== 'ready' && snapshot.phase === 'ready' && previous.nextStep + 1 === snapshot.nextStep;
+        const sameAttempt = previous.nextStep === snapshot.nextStep && previous.attemptedAt === snapshot.attemptedAt;
+        const rejected = previous.phase === 'uncertain' && snapshot.phase === 'rejected' && sameAttempt && options.allowMutation;
+        const presence = previous.phase !== 'ready' && previous.phase === snapshot.phase && sameAttempt
+          && previous.rejectionStatus === snapshot.rejectionStatus && Boolean(snapshot.retryObservedAt);
+        const retry = retryAvailable && options.allowMutation && deletionRetryReady(previous)
+          && snapshot.phase === 'uncertain' && previous.nextStep === snapshot.nextStep && !snapshot.retryObservedAt
+          && (previous.phase === 'rejected' || input.adapter.capabilities.supportsConditionalObjectDeletionRetry === true);
+        const expectedPrior = retry ? [...previous.priorAttempts ?? [], { step: previous.nextStep, attemptedAt: previous.attemptedAt!,
+          outcome: previous.phase, ...(previous.rejectionStatus ? { rejectionStatus: previous.rejectionStatus } : {}) }] : previous.priorAttempts;
+        if (!isDeepStrictEqual(immutable(previous), immutable(snapshot)) || !(dispatch || observed || rejected || presence || retry)
+          || dispatch && !options.allowMutation || !isDeepStrictEqual(snapshot.priorAttempts, expectedPrior)
+          || previous.retention.resources.some(item => !snapshot.retention.resources.some(next => isDeepStrictEqual(next, item)))) {
+          throw new Error('Deletion progress cannot replace its original identities or replay an uncertain step.');
+        }
+        if (retry) retryAvailable = false;
+      } else if (snapshot.phase !== 'ready' || snapshot.nextStep !== 0) throw new Error('Deletion must save its selected identities before the first attempt.');
+      const latest = envRepo.findById(input.environmentId);
+      const current = storageCreateRecoveryState(latest);
+      if (!latest || !isDeepStrictEqual(storageDeletionReference(latest, input.name, input.target), reference)
+        || current.malformed || current.parsed[input.name] || !isDeepStrictEqual(current.deletions[input.name], marker)) throw new Error('Storage identity or recovery changed before deletion dispatch.');
+      if (snapshot.phase === 'uncertain' && !snapshot.retryObservedAt && options.allowMutation && !permissionsClear(latest)) throw new Error('Reconcile retained bucket permissions before continuing deletion.');
+      const next = { ...latest.platformBindings, storageCreateRecovery: { ...current.raw, [input.name]: nextMarker } };
+      if (!envRepo.compareAndSwapPlatformBindings(latest.id, latest.platformBindings, next)) throw new Error('Deletion progress could not be saved; no further deletion was dispatched.');
+      marker = nextMarker;
+    },
+  };
+  let receipt: Receipt;
+  try {
+    receipt = input.adapter.capabilities?.supportsDeletionRecovery
+      ? await input.adapter.destroyBucket(before, input.context, input.externalId, options)
+      : await input.adapter.destroyBucket(before, input.context, input.externalId);
+  } catch { return blocked('Storage deletion outcome is unknown. Its reference and recovery evidence were retained.'); }
+  if (!receipt.success) return { ...receipt,
+    ...(receipt.data?.storageDeletionContinuation === true ? { status: 'pending' as const } : {}) };
+  let validated: ReturnType<typeof storageDeletionReceiptUpdate>;
+  try {
+    validated = storageDeletionReceiptUpdate({ history: before.platformBindings.storageDeletionReceipts,
+      name: input.name, provider: input.adapter.name, externalId: input.externalId, context: input.context, receipt });
+    if (marker && (!validated.evidence || !isDeepStrictEqual(validated.evidence.nativeIdentity, marker.snapshot.nativeIdentity)
+      || !isDeepStrictEqual(validated.evidence.priorAttempts, marker.snapshot.priorAttempts)
+      || !isDeepStrictEqual(validated.evidence.deletedObjects, marker.snapshot.steps.filter(step => step.kind === 'object')
+        .map(({ name, generation, metageneration }) => ({ name, generation, metageneration })))
+      || marker.snapshot.phase === 'ready' || marker.snapshot.steps[marker.snapshot.nextStep].kind !== 'bucket')) throw new Error('Deletion completion does not match its selected identities and previous attempts.');
+  } catch { return blocked('Storage deletion returned incomplete or mismatched evidence; its reference was retained.'); }
+  const data = validated.evidence ? { storageDeletion: validated.evidence } : receipt.data;
+  try {
+    const latest = envRepo.findById(input.environmentId);
+    if (!latest) return blocked('Storage deletion finished, but its local evidence could not be retained.', data);
+    const state = storageCreateRecoveryState(latest);
+    if (state.malformed || !isDeepStrictEqual(state.deletions[input.name], marker)
+      || !isDeepStrictEqual(storageDeletionReference(latest, input.name, input.target), reference)) return blocked('The storage reference changed during cleanup; its current reference and recovery evidence were preserved.', data);
+    const update = storageDeletionReceiptUpdate({ history: latest.platformBindings.storageDeletionReceipts,
+      name: input.name, provider: input.adapter.name, externalId: input.externalId, context: input.context, receipt });
+    const next: Record<string, unknown> = { ...latest.platformBindings,
+      ...(update.evidence ? { storageDeletionReceipts: update.history } : {}) };
+    if (input.target === 'candidate') {
+      const root = asRecord(latest.platformBindings.dataMigrationCandidates) ?? {};
+      const candidates = { ...(asRecord(root.storage) ?? {}) }; delete candidates[input.name];
+      next.dataMigrationCandidates = { ...root, storage: candidates };
+    } else {
+      const storage = { ...(asRecord(latest.platformBindings.storage) ?? {}) };
+      if (input.target === 'active') delete storage[input.name];
+      else { const binding = { ...asRecord(storage[input.name]) }; delete binding.previousTarget; storage[input.name] = binding; }
+      next.storage = storage;
+    }
+    if (marker) { const recoveries = { ...state.raw }; delete recoveries[input.name]; next.storageCreateRecovery = Object.keys(recoveries).length ? recoveries : undefined; }
+    if (!envRepo.compareAndSwapPlatformBindings(latest.id, latest.platformBindings, next)) return blocked('Saving the storage deletion receipt failed; its reference and recovery evidence were retained.', data);
+    return { success: true, message: receipt.message, data };
+  } catch { return blocked('Saving the storage deletion receipt failed; inspect retained recovery evidence before continuing.', data); }
+}
+
 export function storageEnvKeys(name: string): string[] {
   void name;
   return [...S3_STORAGE_RUNTIME_ENV_KEYS];
+}
+
+function deletionRetryReady(snapshot: StorageDeletionRecovery['snapshot']): boolean {
+  return Boolean(snapshot.retryObservedAt && (snapshot.phase === 'rejected'
+    || snapshot.phase === 'uncertain' && snapshot.steps[snapshot.nextStep].kind === 'object'));
 }
 
 function action(params: {
@@ -253,7 +419,7 @@ function action(params: {
     resource: { kind: 'storage', name: params.name, provider: params.provider },
     verified: params.verified,
     reason: params.reason,
-    ...(params.operation === STORAGE_OPERATIONS.destroy ? { dataBearing: true } : {}),
+    ...(params.operation === STORAGE_OPERATIONS.destroy || params.operation === STORAGE_OPERATIONS.continueDeletion || params.operation === STORAGE_OPERATIONS.retryDeletion ? { dataBearing: true } : {}),
     ...(params.requiresConfirm ? { requiresConfirm: true } : {}),
     ...(params.billable ? { billable: true } : {}),
     ...(params.dependsOn ? { dependsOn: params.dependsOn } : {}),
@@ -273,6 +439,24 @@ export function planStorage(params: {
   const warnings: string[] = [];
   const unmanaged: Array<{ kind: 'storage'; name: string; detail?: string }> = [];
   const recoveries = storageCreateRecoveryState(params.environment);
+
+  if (!recoveries.malformed && Object.keys(recoveries.deletions).length) {
+    for (const [name, marker] of Object.entries(recoveries.deletions)) {
+      const retry = deletionRetryReady(marker.snapshot);
+      actions.push(action({
+      id: `storage:${name}:${retry ? 'deletion-retry' : 'deletion-recovery'}`, type: retry || marker.snapshot.phase === 'ready' ? 'destroy' : 'update', name, provider: marker.snapshot.provider,
+      operation: retry ? STORAGE_OPERATIONS.retryDeletion : marker.snapshot.phase === 'ready' ? STORAGE_OPERATIONS.continueDeletion : STORAGE_OPERATIONS.recoverDeletion,
+      requiresConfirm: retry || marker.snapshot.phase === 'ready', verified: false,
+      reason: retry ? `Explicitly retry the prior ${marker.snapshot.phase} deletion of the same exact ${marker.snapshot.steps[marker.snapshot.nextStep].kind} for storage "${name}" using its original native preconditions`
+        : marker.snapshot.phase === 'ready'
+        ? `Delete the remaining ${marker.snapshot.steps.length - marker.snapshot.nextStep} exact selected targets for storage "${name}"`
+        : `Check the previous deletion of storage "${name}" without sending another delete`,
+      metadata: { recoverySha256: canonicalJsonSha256(marker) },
+    }));
+    }
+    warnings.push('Uncertain deletion recovery only reads its exact prior target. Continuing remaining unattempted deletions requires this fresh plan.');
+    return { actions, warnings, unmanaged };
+  }
 
   if (recoveries.malformed) {
     const actionNames = new Set<string>([
@@ -738,12 +922,17 @@ function persist(
   storageProviders: Record<string, StorageContext>,
   storageCreateRecovery?: Record<string, StorageCreateRecovery> | null
 ): void {
+  const deletionRecovery = storageCreateRecoveryState(envRepo.findById(environment.id)).deletions;
+  if (storageCreateRecovery && Object.keys(storageCreateRecovery).some(name => deletionRecovery[name])) {
+    throw new Error('A pending storage deletion cannot be overwritten by create recovery.');
+  }
+  const recovery = { ...storageCreateRecovery, ...deletionRecovery };
   envRepo.updatePlatformBindings(environment.id, {
     storage,
     storageProviders,
     ...(storageCreateRecovery !== undefined ? {
-      storageCreateRecovery: storageCreateRecovery && Object.keys(storageCreateRecovery).length > 0
-        ? storageCreateRecovery
+      storageCreateRecovery: Object.keys(recovery).length > 0
+        ? recovery
         : undefined,
     } : {}),
   });
@@ -758,11 +947,11 @@ function persistStorageCreateRecovery(
     const latest = envRepo.findById(environmentId);
     if (!latest) return `Environment ${environmentId} is missing; storage create-recovery state could not be retained.`;
     const current = storageCreateRecoveryState(latest);
-    if (current.malformed) {
+    if (current.malformed || current.deletions[storageName]) {
       return 'Existing storage create-recovery state is malformed; Hypervibe refused to overwrite evidence of a possibly committed create.';
     }
     const updated = envRepo.updatePlatformBindings(environmentId, {
-      storageCreateRecovery: { ...current.parsed, [storageName]: recovery },
+      storageCreateRecovery: { ...current.raw, [storageName]: recovery },
     });
     return updated
       ? undefined
@@ -835,6 +1024,22 @@ export async function applyStorageAction(params: {
     : '';
   const operation = String(params.action.metadata?.operation ?? '');
   const recoveryState = storageCreateRecoveryState(environment);
+  if (operation === STORAGE_OPERATIONS.recoverDeletion || operation === STORAGE_OPERATIONS.continueDeletion || operation === STORAGE_OPERATIONS.retryDeletion) {
+    const marker = recoveryState.deletions[name];
+    const continuation = operation === STORAGE_OPERATIONS.continueDeletion;
+    const retry = operation === STORAGE_OPERATIONS.retryDeletion;
+    if (recoveryState.malformed || !marker || params.action.type !== (continuation || retry ? 'destroy' : 'update')
+      || (retry ? !deletionRetryReady(marker.snapshot) : continuation ? marker.snapshot.phase !== 'ready' : marker.snapshot.phase === 'ready')
+      || (continuation || retry) && !params.action.requiresConfirm
+      || params.action.resource.provider !== marker.snapshot.provider || params.action.resource.name !== name
+      || params.action.metadata?.recoverySha256 !== canonicalJsonSha256(marker)) return { success: false, status: 'blocked', message: 'Storage deletion recovery identity changed. Re-run hv_plan.' };
+    const resolved = await adapterFactory.getStorageAdapter(marker.snapshot.provider, params.project, params.envName);
+    if (!resolved.success || !resolved.adapter) return { success: false, status: 'blocked', message: 'The original storage adapter is unavailable for read-only recovery.' };
+    if (retry && marker.snapshot.phase === 'uncertain' && !resolved.adapter.capabilities.supportsConditionalObjectDeletionRetry) return { success: false, status: 'blocked', message: 'This provider has no supported exact conditional deletion retry.' };
+    return destroyTrackedStorage({ environmentId: environment.id, name, target: marker.target, migrationId: marker.migrationId,
+      adapter: resolved.adapter, externalId: marker.snapshot.externalId, context: marker.snapshot.instanceScope, allowMutation: continuation || retry, retryAttempt: retry });
+  }
+  if (Object.keys(recoveryState.deletions).length) return { success: false, status: 'blocked', message: 'Read-only storage deletion recovery must finish before another storage action. Re-run hv_plan.' };
   if (operation === STORAGE_OPERATIONS.clearCreateRecovery) {
     const retainedRecovery = recoveryState.parsed[name];
     const plannedRecovery = parseStorageCreateRecovery(params.action.metadata?.storageCreateRecovery);
@@ -915,8 +1120,8 @@ export async function applyStorageAction(params: {
     const remainingRecoveries = { ...latestState.parsed };
     delete remainingRecoveries[name];
     const updated = envRepo.updatePlatformBindings(latest.id, {
-      storageCreateRecovery: Object.keys(remainingRecoveries).length > 0
-        ? remainingRecoveries
+      storageCreateRecovery: Object.keys({ ...remainingRecoveries, ...latestState.deletions }).length > 0
+        ? { ...remainingRecoveries, ...latestState.deletions }
         : undefined,
     });
     if (!updated) {
@@ -1316,11 +1521,8 @@ export async function applyStorageAction(params: {
   if (!binding || !context) return { success: false, message: `Storage binding/context missing for "${name}"` };
 
   if (operation === STORAGE_OPERATIONS.destroy) {
-    const access = runtimeAccessBindings(environment);
-    if (!access || Object.keys(access.storageRuntimeAccess[name] ?? {}).length) return { success: false, status: 'blocked', message: 'Reconcile retained bucket permissions before deleting this storage.' };
-    const receipt = await adapter.destroyBucket(environment, context, binding.externalId);
-    if (receipt.success) { const next = { ...bindings }; delete next[name]; persist(environment, next, contexts); }
-    return { success: receipt.success, message: receipt.message, error: receipt.error, data: receipt.data };
+    return destroyTrackedStorage({ environmentId: environment.id, name, target: 'active', adapter,
+      externalId: binding.externalId, context });
   }
 
   const serviceName = String(params.action.metadata?.serviceName ?? '');

@@ -1062,6 +1062,23 @@ export function resolvePlanActionAuthority(
     if (!identity && exactResource(action, 'storage') && action.resource.name === action.metadata?.storageName) return authority(action, 'storage.runtime-access.mutate');
     return null;
   }
+  if ([STORAGE_OPERATIONS.recoverDeletion, STORAGE_OPERATIONS.continueDeletion, STORAGE_OPERATIONS.retryDeletion]
+    .some(operation => operation === action.metadata?.operation)) {
+    const operation = action.metadata!.operation;
+    const recovery = operation === STORAGE_OPERATIONS.recoverDeletion;
+    const name = metadataString(action, 'storageName');
+    const suffix = operation === STORAGE_OPERATIONS.retryDeletion ? 'deletion-retry' : 'deletion-recovery';
+    // The storage handler revalidates this hash against the complete retained
+    // marker and permits no provider write for the recovery operation.
+    if (!name || !exactResource(action, 'storage') || !action.resource.provider?.trim()
+      || action.resource.name !== name || action.id !== `storage:${name}:${suffix}`
+      || typeof action.metadata?.recoverySha256 !== 'string' || !/^[a-f0-9]{64}$/.test(action.metadata.recoverySha256)
+      || Object.keys(action.metadata ?? {}).sort().join(',') !== 'operation,recoverySha256,storageName'
+      || action.billable === true
+      || (recovery ? action.type !== 'update' || action.requiresConfirm === true || action.dataBearing === true
+        : action.type !== 'destroy' || action.requiresConfirm !== true || action.dataBearing !== true)) return null;
+    return authority(action, 'storage.mutate');
+  }
   if (
     isStorageAction(action)
     && exactResource(action, 'storage')

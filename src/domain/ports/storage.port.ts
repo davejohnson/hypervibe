@@ -1,5 +1,6 @@
 import type { Readable } from 'node:stream';
 import { z } from 'zod';
+import { runtimeCoordinateSchema, runtimeCoordinatesSchema } from '../../lib/value-free-coordinates.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Receipt, VerifyResult } from './provider.port.js';
 import type { ObservedStorage } from './observe.port.js';
@@ -15,6 +16,10 @@ export interface StorageCapabilities {
   recoveryCredentialScope?: 'bucket';
   /** Runtime projection needs the selected host's provider-owned workload identity. */
   usesWorkloadIdentity?: boolean;
+  /** Persists exact native steps before deletion; uncertain steps resume by reads only. */
+  supportsDeletionRecovery?: boolean;
+  /** Native exact object generation + preconditions make an explicit retry safe. */
+  supportsConditionalObjectDeletionRetry?: boolean;
 }
 
 export interface StorageRuntimeTarget {
@@ -67,6 +72,93 @@ export interface StorageObjectClient {
  * environment ids, or a cloud account/project plus region).
  */
 export type StorageContext = Record<string, string>;
+
+/** Nonsecret native deletion facts, retained separately from active bindings.
+ * This optional receipt does not claim permanent physical erasure. Providers
+ * that cannot observe native retention must not manufacture this evidence. */
+const deletionCoordinate = runtimeCoordinateSchema.refine(value => value.length <= 2048);
+const deletionScope = runtimeCoordinatesSchema
+  .refine(value => Object.keys(value).length > 0 && Object.keys(value).length <= 32);
+const nativeRetentionResourceSchema = z.object({
+  kind: z.enum(['bucket', 'object']),
+  name: deletionCoordinate,
+  generation: z.string().regex(/^\d+$/),
+  metageneration: z.string().regex(/^\d+$/).optional(),
+  softDeleteTime: z.string().datetime({ offset: true }),
+  hardDeleteTime: z.string().datetime({ offset: true }),
+  restoreToken: z.string().uuid().optional(),
+}).strict().refine(value => Date.parse(value.hardDeleteTime) >= Date.parse(value.softDeleteTime),
+  'Native retention dates are inconsistent.');
+const deletionPriorAttemptSchema = z.object({ step: z.number().int().nonnegative(),
+  attemptedAt: z.string().datetime({ offset: true }), outcome: z.enum(['uncertain', 'rejected']),
+  rejectionStatus: z.union([z.literal(403), z.literal(412)]).optional(),
+}).strict().refine(value => (value.outcome === 'rejected') === Boolean(value.rejectionStatus));
+
+export const storageDeletionEvidenceSchema = z.object({
+  provider: deletionCoordinate,
+  externalId: deletionCoordinate,
+  instanceScope: deletionScope,
+  nativeIdentity: deletionScope,
+  observedAt: z.string().datetime({ offset: true }),
+  activeState: z.literal('absent'),
+  deletedObjects: z.array(z.object({ name: deletionCoordinate, generation: z.string().regex(/^\d+$/),
+    metageneration: z.string().regex(/^\d+$/) }).strict()).max(20_000).optional(),
+  priorAttempts: z.array(deletionPriorAttemptSchema).max(100).optional(),
+  retention: z.object({
+    state: z.enum(['not-observed', 'recoverable']),
+    resources: z.array(nativeRetentionResourceSchema).max(20_001),
+  }).strict(),
+}).strict().superRefine((value, ctx) => {
+  if ((value.retention.state === 'recoverable') !== (value.retention.resources.length > 0)) {
+    ctx.addIssue({ code: 'custom', path: ['retention'], message: 'Retention outcome and native observations disagree.' });
+  }
+});
+
+export type StorageDeletionEvidence = z.infer<typeof storageDeletionEvidenceSchema>;
+export const storageDeletionReceiptsSchema = z.record(z.string().min(1), z.array(storageDeletionEvidenceSchema));
+
+export const storageDeletionSnapshotSchema = z.object({
+  provider: deletionCoordinate, externalId: deletionCoordinate, instanceScope: deletionScope,
+  nativeIdentity: deletionScope, requestedAt: z.string().datetime({ offset: true }),
+  /** Immutable selected native identities. The final step removes the container. */
+  steps: z.array(z.object({ kind: z.enum(['object', 'bucket']), name: deletionCoordinate,
+    generation: z.string().regex(/^\d+$/), metageneration: z.string().regex(/^\d+$/) }).strict()).min(1).max(20_001),
+  nextStep: z.number().int().nonnegative(), phase: z.enum(['ready', 'uncertain', 'rejected']),
+  attemptedAt: z.string().datetime({ offset: true }).optional(),
+  rejectionStatus: z.union([z.literal(403), z.literal(412)]).optional(),
+  retryObservedAt: z.string().datetime({ offset: true }).optional(),
+  priorAttempts: z.array(deletionPriorAttemptSchema).max(100).optional(),
+  retention: z.object({ policySeconds: z.string().regex(/^\d+$/),
+    resources: z.array(nativeRetentionResourceSchema).max(20_000) }).strict(),
+}).strict().superRefine((value, ctx) => {
+  const last = value.steps.at(-1)!;
+  if (value.nextStep >= value.steps.length || last.kind !== 'bucket' || last.name !== value.externalId
+    || last.generation !== value.nativeIdentity.generation || last.metageneration !== value.nativeIdentity.metageneration
+    || value.steps.slice(0, -1).some(step => step.kind !== 'object')
+    || new Set(value.steps.map(step => JSON.stringify([step.kind, step.name, step.generation]))).size !== value.steps.length
+    || (value.phase !== 'ready') !== Boolean(value.attemptedAt)
+    || (value.phase === 'rejected') !== Boolean(value.rejectionStatus)
+    || value.phase === 'ready' && Boolean(value.retryObservedAt)
+    || value.priorAttempts?.some(attempt => attempt.step > value.nextStep)) {
+    ctx.addIssue({ code: 'custom', message: 'Deletion progress must address one exact remaining native step.' });
+  }
+});
+export type StorageDeletionSnapshot = z.infer<typeof storageDeletionSnapshotSchema>;
+export interface StorageDestroyOptions {
+  recovery?: StorageDeletionSnapshot;
+  /** Only an active exact apply may dispatch previously unattempted steps. */
+  allowMutation: boolean;
+  /** One separately reviewed retry; never permission for automatic resubmission. */
+  retryAttempt?: boolean;
+  /** Must commit before every DELETE dispatch. Throwing prevents that mutation. */
+  persistRecovery(snapshot: StorageDeletionSnapshot): Promise<void>;
+}
+export const storageDeletionRecoverySchema = z.object({
+  operation: z.literal('delete'), resourceName: deletionCoordinate,
+  target: z.enum(['active', 'candidate', 'previous']), migrationId: deletionCoordinate.optional(),
+  snapshot: storageDeletionSnapshotSchema,
+}).strict().refine(value => value.target === 'active' ? value.migrationId === undefined : Boolean(value.migrationId));
+export type StorageDeletionRecovery = z.infer<typeof storageDeletionRecoverySchema>;
 
 /** Read an already-authorized binding in native provider scope, without local discovery tags. */
 export interface StorageObservationTarget { externalId: string }
@@ -180,6 +272,13 @@ export function parseStorageCreateRecoveryMap(
   return parsed.success ? parsed.data : null;
 }
 
+/** Historical wire key remains storageCreateRecovery. Its strict operation
+ * discriminator now admits deletion too; old create-only clients reject it.
+ * Existing create-only parsers above deliberately retain their old behavior. */
+export const storageRecoveryMapSchema = z.record(z.string().min(1),
+  z.union([storageCreateRecoverySchema, storageDeletionRecoverySchema]))
+  .refine(value => Object.entries(value).every(([name, record]) => record.resourceName === name));
+
 export interface StorageCredentials {
   bucket: string;
   endpoint: string;
@@ -237,7 +336,7 @@ export interface IStorageAdapter {
    * their native APIs here; S3-compatible adapters may rely on credentials.
    */
   openObjectTransfer?(environment: Environment, context: StorageContext, externalId: string): Promise<StorageObjectClient>;
-  destroyBucket(environment: Environment, context: StorageContext, externalId: string): Promise<Receipt>;
+  destroyBucket(environment: Environment, context: StorageContext, externalId: string, options?: StorageDestroyOptions): Promise<Receipt>;
 }
 
 /** Runtime proof for every method required by the production storage contract. */

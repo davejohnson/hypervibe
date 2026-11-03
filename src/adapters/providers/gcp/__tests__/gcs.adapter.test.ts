@@ -304,7 +304,8 @@ describe('GcsStorageAdapter', () => {
     const result = await adapter.destroyBucket(
       environment(),
       { projectId: 'cloud-project', environmentId: 'environment-1' },
-      'managed'
+      'managed',
+      { allowMutation: true, persistRecovery: async () => undefined }
     );
 
     expect(result).toMatchObject({ success: false });
@@ -349,31 +350,7 @@ describe('GcsStorageAdapter', () => {
       && String(init.body).includes('"metadata":{"source":"migration"}'))).toBe(true);
   });
 
-  it('empties an owned bucket before confirmed deletion', async () => {
-    let bucketReads = 0;
-    const request = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
-      if (url.endsWith('/storage/v1/b/managed') && !init?.method) {
-        bucketReads += 1;
-        return bucketReads === 1
-          ? json({ name: 'managed', labels: { hypervibe_environment_id: 'environment-1' } })
-          : json({ error: { message: 'missing' } }, 404);
-      }
-      if (url.includes('/storage/v1/b/managed/o?') && !init?.method) {
-        return json({ items: [{ name: 'a.pdf', size: '3' }] });
-      }
-      if (init?.method === 'DELETE') return new Response(null, { status: 204 });
-      throw new Error(`unexpected request ${init?.method ?? 'GET'} ${url}`);
-    });
-    const adapter = new GcsStorageAdapter({
-      fetch: request as typeof fetch,
-      tokenProvider: async () => ({ token: 'token', email: 'service@example.com' }),
-    });
-    await adapter.connect({ projectId: 'cloud-project', credentials: serviceAccount });
-
-    await expect(adapter.destroyBucket(
-      environment(), { projectId: 'cloud-project', environmentId: 'environment-1' }, 'managed'
-    )).resolves.toMatchObject({ success: true });
-    expect(request.mock.calls.filter(([, init]) => init?.method === 'DELETE')).toHaveLength(2);
-  });
+  // Destructive behavior now uses the independent native versioning/retention
+  // state machine in gcs-teardown.contract.test.ts. A name-only fixture cannot
+  // establish complete generations, bucket lifetime, or retained-data absence.
 });

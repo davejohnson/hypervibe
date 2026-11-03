@@ -8,6 +8,13 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+`storage-deletion-recovery.test.ts` covers all four registered storage adapters
+against the optional [GCS teardown and retained-evidence contract](../../docs/gcs-storage-teardown.md).
+Native serialized generation/retention tests, real SQLite ordinary/migration
+callers, restart without DELETE replay, and local-only repository recovery tests
+run in normal acceptance. Disabled-policy retention inventory remains an explicit
+unsupported state; these reconstructed fixtures are not live cleanup evidence.
+
 `manual-recovery-provider-roster.test.ts` covers every registered hosting provider
 against the [durable one-use recovery contract](../../docs/manual-recovery-task-evidence.md).
 Cloud Run serialized create/run/cleanup and actual local command/SQLite/archive

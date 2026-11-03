@@ -20,6 +20,7 @@ import { secretContainerBindings } from '../ports/secret-destination-lifecycle.p
 import { isDeepStrictEqual } from 'node:util';
 import { mergeRuntimeAccessBindings, runtimeAccessBindings } from '../services/runtime-access.service.js';
 import { preparedHostingMarkerSchema } from '../ports/hosting-prepared.port.js';
+import { storageRecoveryMapSchema, parseStorageCreateRecoveryMap } from '../ports/storage.port.js';
 
 // Bindings are the inverse of the spec's source-of-truth contract: the DB
 // column `environments.platform_bindings` is authoritative (it holds data the
@@ -52,6 +53,7 @@ const LOCAL_ONLY_BINDING_KEYS = new Set([
   'localPreparedHosting',
   'repositoryVariableOwnership',
   'serviceInstanceCreateHistory',
+  'storageDeletionReceipts',
 ]);
 
 function bindingsPath(root: string): string {
@@ -118,6 +120,15 @@ export function mergeRepoPlatformBindings(
   if (Object.hasOwn(repoBindings, 'manualRecovery')) throw new Error('Manual backup operation authority is local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'recoveryRuntimeSecretInputs')) throw new Error('Private recovery inputs are local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'serviceInstanceCreateHistory')) throw new Error('Service instance attempt history is private local evidence and cannot be imported.');
+  if (Object.hasOwn(repoBindings, 'storageDeletionReceipts')) throw new Error('Storage deletion receipts are local native evidence and cannot be imported.');
+  const localStorageRecovery = storageRecoveryMapSchema.parse(existing.storageCreateRecovery ?? {});
+  if (repoBindings.storageCreateRecovery !== undefined && !parseStorageCreateRecoveryMap(repoBindings.storageCreateRecovery)) {
+    throw new Error('Storage deletion recovery is local only; repository recovery must contain valid create records.');
+  }
+  const deletionRecovery = Object.fromEntries(Object.entries(localStorageRecovery).filter(([, value]) => value.operation === 'delete'));
+  if (Object.keys(deletionRecovery).some(name => Object.hasOwn(asRecord(repoBindings.storageCreateRecovery) ?? {}, name))) {
+    throw new Error('Repository recovery cannot replace a pending local storage deletion.');
+  }
   if (Object.hasOwn(repoBindings, 'repositoryVariableOwnership')) throw new Error('Repository-variable ownership and recovery state are local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'credentialUpdates')) throw new Error('Credential acceptance and recovery state are local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'runtimeRollouts')) throw new Error('Runtime configuration expectations and activation requirements are local only and cannot be imported.');
@@ -131,6 +142,9 @@ export function mergeRepoPlatformBindings(
     throw new Error('Malformed retained service-volume bindings; refusing to overwrite recovery state.');
   }
   const merged: Record<string, unknown> = { ...existing, ...repoBindings, ...mergeRuntimeAccessBindings(existing, repoBindings) };
+  if (Object.keys(deletionRecovery).length) merged.storageCreateRecovery = {
+    ...(asRecord(merged.storageCreateRecovery) ?? {}), ...deletionRecovery,
+  };
   if (existing.preparedHosting !== undefined || repoBindings.preparedHosting !== undefined) {
     const local = existing.preparedHosting === undefined ? undefined : preparedHostingMarkerSchema.parse(existing.preparedHosting);
     const incoming = repoBindings.preparedHosting === undefined ? undefined : preparedHostingMarkerSchema.parse(repoBindings.preparedHosting);
@@ -176,6 +190,7 @@ export function mergeRepoPlatformBindings(
   }
   for (const [key, repoValue] of Object.entries(repoBindings)) {
     if (key === 'serviceInstanceCreates') continue;
+    if (key === 'storageCreateRecovery' && Object.keys(deletionRecovery).length) continue;
     if (key === 'localPreparedHosting') {
       merged[key] = existing[key];
       continue;
@@ -318,6 +333,13 @@ function presentStorageInstanceScopes(platformBindings: Record<string, unknown>)
 
 function sanitizePlatformBindings(raw: Record<string, unknown>): Record<string, unknown> {
   const sanitized = sanitize(raw) as Record<string, unknown>;
+  if (raw.storageCreateRecovery !== undefined) {
+    const recoveries = storageRecoveryMapSchema.parse(raw.storageCreateRecovery);
+    const portable = { ...(asRecord(sanitized.storageCreateRecovery) ?? {}) };
+    for (const [name, value] of Object.entries(recoveries)) if (value.operation === 'delete') delete portable[name];
+    if (Object.keys(portable).length) sanitized.storageCreateRecovery = portable;
+    else delete sanitized.storageCreateRecovery;
+  }
   // Hosted reference-only configuration remains portable for managed CI. Local
   // inline configuration digests can verify guessed secrets and stay local.
   if (raw.preparedHosting !== undefined) {

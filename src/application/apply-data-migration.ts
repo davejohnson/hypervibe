@@ -23,9 +23,11 @@ import {
 import {
   parseStorageBindings,
   parseStorageProviderContexts,
+  destroyTrackedStorage,
   type StorageBinding,
 } from '../domain/services/storage-plan.service.js';
 import type { StorageContext } from '../domain/ports/storage.port.js';
+import { storageDeletionReceiptsSchema, storageRecoveryMapSchema } from '../domain/ports/storage.port.js';
 import type { CommandContext } from './context.js';
 import { observeEnvironmentMaintenance } from '../domain/services/environment-maintenance.service.js';
 import type { IProviderAdapter } from '../domain/ports/provider.port.js';
@@ -473,7 +475,7 @@ async function applyDatabaseMigration(params: {
 }
 
 function storageCandidates(environment: Environment): Record<string, StorageCandidate> {
-  return (asRecord(asRecord(environment.platformBindings.dataMigrationCandidates)?.storage) ?? {}) as Record<string, StorageCandidate>;
+  return { ...(asRecord(asRecord(environment.platformBindings.dataMigrationCandidates)?.storage) ?? {}) } as Record<string, StorageCandidate>;
 }
 
 function persistStorageState(params: {
@@ -518,6 +520,23 @@ async function applyStorageMigration(params: {
   const targetEnvironment = params.ctx.repos.environments.findByProjectAndName(params.project.id, params.targetEnvironmentName);
   const sourceEnvironment = params.ctx.repos.environments.findByProjectAndName(params.project.id, identity.sourceEnvironmentName);
   if (!targetEnvironment || !sourceEnvironment) return stale(params.action, 'The source or target environment is not tracked locally.');
+  const recovery = storageRecoveryMapSchema.safeParse(targetEnvironment.platformBindings.storageCreateRecovery ?? {});
+  if (!recovery.success || Object.entries(recovery.data).some(([name, marker]) => name !== storageName || marker.operation !== 'delete' || marker.target !== 'candidate')) {
+    return stale(params.action, 'Storage recovery must finish before migration can continue.');
+  }
+  if (!storageDeletionReceiptsSchema.safeParse(targetEnvironment.platformBindings.storageDeletionReceipts ?? {}).success) {
+    return stale(params.action, 'Retained storage deletion evidence is malformed.');
+  }
+  const pendingDeletion = recovery.data[storageName];
+  if (pendingDeletion?.operation === 'delete') {
+    const resolved = await adapterFactory.getStorageAdapter(pendingDeletion.snapshot.provider, params.project, targetEnvironment.name);
+    if (!resolved.success || !resolved.adapter) return stale(params.action, 'The original candidate cleanup adapter is unavailable.');
+    const recovered = await destroyTrackedStorage({ environmentId: targetEnvironment.id, name: storageName,
+      target: 'candidate', migrationId: identity.migrationId, adapter: resolved.adapter,
+      externalId: pendingDeletion.snapshot.externalId, context: pendingDeletion.snapshot.instanceScope });
+    return { ...recovered, success: false, status: recovered.success || recovered.status === 'pending' ? 'pending' : 'blocked',
+      message: recovered.success ? 'Recovered prior candidate deletion. Re-run hv_plan before continuing the migration.' : recovered.message };
+  }
   const maintenanceFailure = await verifyMigrationMaintenance({
     project: params.project,
     sourceEnvironment,
@@ -579,12 +598,13 @@ async function applyStorageMigration(params: {
     if (lingering.migrationId !== identity.migrationId || lingering.provider !== identity.targetProvider) {
       return stale(params.action, 'A retained storage candidate belongs to another migration.');
     }
-    const removed = await targetAdapter.destroyBucket(targetEnvironment, lingering.context, lingering.externalId);
-    if (!removed.success) {
-      return { success: false, status: 'blocked', message: 'A previous storage migration candidate still requires cleanup', error: `Candidate ${lingering.externalId} is retained.` };
-    }
-    delete candidates[storageName];
-    persistStorageState({ ctx: params.ctx, environment: targetEnvironment, bindings, contexts, candidates });
+    const removed = await destroyTrackedStorage({ environmentId: targetEnvironment.id, name: storageName,
+      target: 'candidate', migrationId: identity.migrationId, adapter: targetAdapter,
+      externalId: lingering.externalId, context: lingering.context });
+    return { success: false, status: removed.success ? 'pending' : 'blocked',
+      message: removed.success ? 'Previous migration candidate cleanup is complete. Re-run hv_plan before creating a new candidate.'
+        : 'A previous storage migration candidate still requires cleanup',
+      error: removed.success ? undefined : removed.error ?? removed.message, data: removed.data };
   }
 
   let targetContext = contexts[identity.targetProvider];
@@ -643,22 +663,18 @@ async function applyStorageMigration(params: {
     // if provider cleanup fails its exact id remains tracked for the next run.
   }
   if (!transfer) {
-    const removed = await targetAdapter.destroyBucket(targetEnvironment, targetContext, candidate.externalId);
-    if (removed.success) delete candidates[storageName];
-    persistStorageState({
-      ctx: params.ctx,
-      environment: targetEnvironment,
-      bindings,
-      contexts: { ...contexts, [identity.targetProvider]: targetContext },
-      candidates,
-    });
+    const removed = await destroyTrackedStorage({ environmentId: targetEnvironment.id, name: storageName,
+      target: 'candidate', migrationId: identity.migrationId, adapter: targetAdapter,
+      externalId: candidate.externalId, context: targetContext });
+    const retained = removed.success;
     return {
       success: false,
-      status: removed.success ? undefined : 'blocked',
+      status: retained ? undefined : 'blocked',
       message: 'Object storage transfer or verification failed',
-      error: removed.success
-        ? 'The fresh target was removed and no active storage binding changed.'
+      error: retained
+        ? `No active storage binding changed. ${removed.message}`
         : `Candidate ${candidate.externalId} is retained for cleanup before retry.`,
+      ...(retained ? { data: removed.data } : {}),
     };
   }
 
@@ -680,25 +696,18 @@ async function applyStorageMigration(params: {
       || latestTargetBinding.updatedAt !== reviewedTargetBinding.updatedAt
     : Boolean(latestTargetBinding);
   if (sourceChanged || targetChanged || !latestTargetEnvironment) {
-    const removed = await targetAdapter.destroyBucket(targetEnvironment, targetContext, candidate.externalId);
-    if (latestTargetEnvironment) {
-      const latestCandidates = storageCandidates(latestTargetEnvironment);
-      if (removed.success) delete latestCandidates[storageName];
-      persistStorageState({
-        ctx: params.ctx,
-        environment: latestTargetEnvironment,
-        bindings: latestTargetBindings,
-        contexts: parseStorageProviderContexts(latestTargetEnvironment),
-        candidates: latestCandidates,
-      });
-    }
+    const removed = await destroyTrackedStorage({ environmentId: targetEnvironment.id, name: storageName,
+      target: 'candidate', migrationId: identity.migrationId, adapter: targetAdapter,
+      externalId: candidate.externalId, context: targetContext });
+    const retained = removed.success;
     return {
       success: false,
       status: 'blocked',
       message: 'Storage bindings changed during the migration',
-      error: removed.success
-        ? 'The fresh target was removed; re-run hv_plan against the current source and target identities.'
+      error: retained
+        ? `${removed.message} Re-run hv_plan against the current source and target identities.`
         : `Candidate ${candidate.externalId} is retained for cleanup before replanning.`,
+      ...(retained ? { data: removed.data } : {}),
     };
   }
 
@@ -831,6 +840,13 @@ async function destroyPreviousStorageTarget(params: {
   }
   const environment = params.ctx.repos.environments.findByProjectAndName(params.project.id, params.targetEnvironmentName);
   if (!environment) return stale(params.action, 'The target environment is not tracked locally.');
+  const recovery = storageRecoveryMapSchema.safeParse(environment.platformBindings.storageCreateRecovery ?? {});
+  if (!recovery.success || Object.entries(recovery.data).some(([name, marker]) => name !== storageName || marker.operation !== 'delete' || marker.target !== 'previous')) {
+    return stale(params.action, 'Storage recovery must finish before rollback-target cleanup can continue.');
+  }
+  if (!storageDeletionReceiptsSchema.safeParse(environment.platformBindings.storageDeletionReceipts ?? {}).success) {
+    return stale(params.action, 'Retained storage deletion evidence is malformed.');
+  }
   const bindings = parseStorageBindings(environment);
   const contexts = parseStorageProviderContexts(environment);
   const binding = bindings[storageName];
@@ -843,6 +859,7 @@ async function destroyPreviousStorageTarget(params: {
     && stringField(marker, 'id') === identity.migrationId
     && stringField(marker, 'fromEnvironment') === identity.sourceEnvironmentName
     && !previous
+    && !recovery.data[storageName]
   ) {
     return {
       success: true,
@@ -864,20 +881,8 @@ async function destroyPreviousStorageTarget(params: {
   if (!adapterResult.success || !adapterResult.adapter || adapterResult.adapter.name !== previous.provider) {
     return { success: false, status: 'blocked', message: 'Previous storage adapter is unavailable', error: 'The rollback target remains retained.' };
   }
-  const receipt = await adapterResult.adapter.destroyBucket(environment, context, previous.externalId);
-  if (!receipt.success) {
-    return { success: false, message: 'Could not delete the previous storage target', error: 'The rollback target remains retained.' };
-  }
-  const nextBinding = { ...binding };
-  delete nextBinding.previousTarget;
-  persistStorageState({
-    ctx: params.ctx,
-    environment,
-    bindings: { ...bindings, [storageName]: nextBinding },
-    contexts,
-    candidates: storageCandidates(environment),
-  });
-  return { success: true, message: `Deleted previous ${previous.provider} storage target ${previous.externalId}` };
+  return destroyTrackedStorage({ environmentId: environment.id, name: storageName, target: 'previous',
+    migrationId: identity.migrationId, adapter: adapterResult.adapter, externalId: previous.externalId, context });
 }
 
 export async function applyDataMigrationAction(params: {
