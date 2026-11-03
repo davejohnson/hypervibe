@@ -79,6 +79,7 @@
     "@aws-sdk/client-sts": "^3.1106.0",
     "@aws-sdk/credential-provider-node": "^3.972.80",
     "@azure/identity": "4.13.2",
+    "@azure/msal-node": "7.1.1",
     "@azure/storage-blob": "^12.33.0",
     "@google-cloud/cloud-sql-connector": "1.10.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
@@ -123,6 +124,7 @@
     "node": ">=22.0.0"
   },
   "bundleDependencies": [
-    "@azure/identity"
+    "@azure/identity",
+    "@azure/msal-node"
   ]
 }
