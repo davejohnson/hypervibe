@@ -157,7 +157,7 @@ export interface CloudInstallationEvidence {
 }
 export const CLOUD_INSTALLATION_REASONS = ['provider_error', 'insufficient_permissions', 'identity_mismatch',
   'ownership_mismatch', 'create_ownership_unverified', 'not_converged', 'not_installed', 'authorization_expired',
-  'authorization_revoked', 'timeout', 'cancelled', 'confirmation_required', 'retry_confirmation_required', 'billing_assignment_unverified'] as const;
+  'authorization_revoked', 'host_identity_access_unverified', 'writer_impersonation_unverified', 'writer_permissions_unverified', 'timeout', 'cancelled', 'confirmation_required', 'retry_confirmation_required', 'billing_assignment_unverified'] as const;
 export type CloudInstallationReason = typeof CLOUD_INSTALLATION_REASONS[number];
 /** Closed provider outcome; raw native exception messages never cross the hosted boundary. */
 export class CloudInstallationBoundaryError extends Error {

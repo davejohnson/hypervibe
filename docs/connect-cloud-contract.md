@@ -423,3 +423,56 @@ that the already completed write is not repeated. Pending, uncertain or rejected
 latest attempts never gain automatic retry authority from this approval.
 All regressions are in ordinary `npm test` discovery and the committed acceptance
 workflow runs that command; this does not assert live branch-protection settings.
+
+### Initial hosted writer access can take time to become effective
+
+An acknowledged IAM grant is not immediate proof that a newly installed writer
+can authenticate and reach its secret targets. Google's [access-change contract](https://docs.cloud.google.com/iam/docs/access-change-propagation)
+explains that policy changes are eventually consistent, typically within two
+minutes but sometimes seven minutes or longer. The [token endpoint](https://docs.cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken)
+checks `iam.serviceAccounts.getAccessToken` on the dedicated service account;
+[secret permission inspection](https://docs.cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/testIamPermissions)
+uses the resulting writer identity. Neither failure establishes that the signed-in
+administrator lacked installation authority. Permission inspection is a readiness
+hint, not replacement authorization: actual secret operations still enforce IAM.
+
+The native GCP walkthrough on 2026-11-03 independently recorded every setup
+resource and grant as complete, two denied final checks soon after installation,
+and a later successful **Check installation** on the same retained attempt. No
+resource creation or permission grant repeated. This is consistent with propagation;
+the earlier HTTP failure stage was not retained, so its precise cause is unproven.
+
+Initial GCP final verification now retains a pending result for at most ten
+minutes from the first recorded verification attempt. This is a bounded product
+wait budget, not a Google timing guarantee. Rechecks do not extend it. Three closed
+reasons distinguish hosted account inspection, writer impersonation and writer
+permission inspection; raw provider messages and tokens are excluded. Collection
+remains unavailable until verification succeeds. After the budget, access remains
+blocked and needs investigation; a later read-only successful check can still
+complete that exact attempt. There is no automatic retry of setup effects.
+Changed or missing grants, changed identities, malformed responses and previously
+verified access that is later denied never become initial-propagation success.
+Actual missing administrator permissions remain a separate installation denial.
+On successful recovery, the attempt's obsolete current failure reason is cleared;
+prior rejected attempts and their identities remain in history.
+
+The shared lifecycle accepts a provider's pending verification observation for
+an existing rejected verification attempt, without authorizing another mutation.
+It does not change rejection/retry rules for identity, trust or data actions.
+
+| Provider | Existing verification and recovery | Effect of this change |
+| --- | --- | --- |
+| AWS | A retained console stack attempt is verified using temporary STS writer credentials, exact stack/template/resources and role policies. Failed reads remain unknown; the stack is not recreated. | Existing native behavior retained; shared successful-attempt stale-reason cleanup applies. AWS has no separate `verification` action or borrowed GCP wait timer. |
+| Azure | Exact retained identity/vault/role/federation/grant checks precede a value-free federated destination observation. Its final verification is a noop, with no write retry. | Existing native behavior retained; no GCP timer or GCP credential assumption is applied. |
+| GCP | Exact grants are re-observed before hosted-account inspection, short-lived writer impersonation and target permission inspection. | Bounded initial pending/recheck and stage-specific neutral reasons; native setup requests and permissions are unchanged. |
+
+`test/provider-contracts/gcp-cloud-installation.test.ts` reproduces the three
+denial stages through serialized HTTP and the real durable hosted lifecycle.
+Five initial regressions failed before the fix; an additional malformed-permission
+counterexample also failed before its correction. Coverage includes serialized
+restart, no duplicate setup writes, the original wait deadline, preserved
+identities, legacy rejected recovery, revocation, real administrator preflight
+rejection and secret-safe output. All cases are in ordinary Vitest discovery;
+`hypervibe-acceptance.yml` and the desired acceptance check both run `npm test`.
+This does not claim live branch-protection enforcement or complete AWS/Azure/GCP
+contributor, deployment and disconnection walkthroughs.

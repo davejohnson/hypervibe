@@ -464,15 +464,23 @@ async function execute<I extends CloudInstallationExecutableIntent = CloudInstal
     } catch (error) { return stop(attempt ? 'pending' : 'blocked', reason(error)); }
     if (observation.state === 'satisfied') {
       const evidence = parseEvidence(observation.evidence, record.intent, input.driver);
-      const attempts = record.attempts.map(item => item.id === attempt?.id ? { ...item, status: 'succeeded' as const, updatedAt: new Date().toISOString(), evidence } : item);
+      const attempts = record.attempts.map(item => item.id === attempt?.id ? { ...item, status: 'succeeded' as const, reason: undefined, updatedAt: new Date().toISOString(), evidence } : item);
       await update({ ...record, status: 'pending', reason: undefined, attempts, completed: { ...record.completed, [action.id]: evidence } });
       continue;
     }
     // A durable success becoming missing/unknown is drift, never permission to recreate.
     if (Object.hasOwn(record.completed, action.id)) {
       const completed = { ...record.completed }; delete completed[action.id];
-      await update({ ...record, completed, status: 'blocked', reason: 'identity_mismatch' });
+      await update({ ...record, completed, status: 'blocked',
+        reason: action.metadata.category === 'verification' && 'reason' in observation ? observation.reason : 'identity_mismatch' });
       return record;
+    }
+    // A retained verification attempt is rechecked without repeating setup.
+    // Provider-owned bounded waiting also applies to a legacy rejected check;
+    // it cannot authorize a retry of identity, trust or data-bearing effects.
+    if (attempt && action.metadata.category === 'verification') {
+      if (observation.state === 'pending') return stop('pending', observation.reason);
+      if (observation.state === 'conflict') return stop('blocked', observation.reason);
     }
     if (attempt && attempt.status !== 'rejected') {
       if (observation.state === 'rejected') {
@@ -537,7 +545,7 @@ async function execute<I extends CloudInstallationExecutableIntent = CloudInstal
     catch (error) { return stop('pending', reason(error)); }
     if (observation.state !== 'satisfied') return stop(observation.state === 'conflict' ? 'blocked' : 'pending', 'reason' in observation ? observation.reason : 'not_converged');
     const evidence = parseEvidence(observation.evidence, record.intent, input.driver);
-    await update({ ...record, attempts: record.attempts.map(item => item.id === nextAttempt.id ? { ...item, status: 'succeeded' as const, evidence,
+    await update({ ...record, attempts: record.attempts.map(item => item.id === nextAttempt.id ? { ...item, status: 'succeeded' as const, reason: undefined, evidence,
       updatedAt: new Date().toISOString() } : item), completed: { ...record.completed, [action.id]: evidence }, reason: undefined });
   }
   if (record.plan.blockedReason) return stop('blocked', record.plan.blockedReason);

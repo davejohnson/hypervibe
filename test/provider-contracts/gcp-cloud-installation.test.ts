@@ -1,5 +1,5 @@
 import { serviceUsageResponse } from './helpers/gcp-service-usage.js';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createGcpCloudInstallationDriver } from '../../src/adapters/providers/gcp/gcp-cloud-installation.js';
 import type { CloudInstallationIntent, CloudInstallationProviderContext, CloudInstallationAction } from '../../src/domain/ports/cloud-installation.port.js';
 import { planCloudInstallationV1, applyCloudInstallationV1, reconcileCloudInstallationV1 } from '../../src/application/hosted/cloud-installation.js';
@@ -28,7 +28,7 @@ const context = (input = intent): CloudInstallationProviderContext => ({
     host: { verifyIdentity: async () => input.hostIdentity, getIdToken: async () => 'synthetic-id-token', getAccessToken: async () => 'synthetic-host-access' },
   },
 });
-function transport(options: { denyPermissions?: boolean; loseCreateAck?: boolean; servicesDisabled?: boolean } = {}) {
+function transport(options: { denyPermissions?: boolean; loseCreateAck?: boolean; servicesDisabled?: boolean; verificationDenied?: 'host' | 'impersonation' | 'writer'; malformedWriterPermissions?: boolean } = {}) {
   const calls: Array<{ url: string; method: string; body?: any }> = [];
   const objects = new Map<string, any>();
   const policies = new Map<string, any>();
@@ -40,6 +40,11 @@ function transport(options: { denyPermissions?: boolean; loseCreateAck?: boolean
     expect(init.redirect).toBe('error');
     expect(['Bearer synthetic-admin-access', 'Bearer synthetic-host-access', 'Bearer synthetic-writer-access']).toContain(new Headers(init.headers).get('authorization'));
     const path = url.pathname;
+    const authorization = new Headers(init.headers).get('authorization');
+    if (options.verificationDenied === 'host' && authorization === 'Bearer synthetic-host-access' && method === 'GET')
+      return Response.json({ error: { message: 'UNSAFE_native_echo' } }, { status: 403 });
+    if (options.verificationDenied === 'impersonation' && path.endsWith(':generateAccessToken'))
+      return Response.json({ error: { message: 'UNSAFE_native_echo' } }, { status: 403 });
     if (path === '/v3/projects:search') return Response.json({ projects: [{
       name: 'projects/123456789012', projectId: 'customer-sequence', displayName: 'Sequence', state: 'ACTIVE',
       createTime: '2025-01-01T00:00:00Z', updateTime: '2025-01-01T00:00:00Z',
@@ -58,7 +63,7 @@ function transport(options: { denyPermissions?: boolean; loseCreateAck?: boolean
       'secretmanager.secrets.setIamPolicy', 'serviceusage.services.get', 'serviceusage.services.enable',
     ] });
     if (path.endsWith(':generateAccessToken')) return Response.json({ accessToken: 'synthetic-writer-access', expireTime: new Date(Date.now() + 900_000).toISOString() });
-    if (path.includes('/secrets/') && path.endsWith(':testIamPermissions')) return Response.json({ permissions: [
+    if (path.includes('/secrets/') && path.endsWith(':testIamPermissions')) return Response.json({ permissions: options.malformedWriterPermissions ? 'invalid-native-shape' : options.verificationDenied === 'writer' ? [] : [
       'secretmanager.secrets.get', 'secretmanager.versions.add', 'secretmanager.versions.list',
     ] });
     if (path.includes('/services/')) {
@@ -190,6 +195,126 @@ describe('GCP hosted installation through serialized transport', () => {
     expect(removed.status).toBe('disconnected');
     expect(api.calls.some(call => call.method === 'DELETE')).toBe(false);
     for (const policy of api.policies.values()) expect(policy.bindings).toHaveLength(1);
+  });
+
+  it.each([
+    ['host', 'host_identity_access_unverified'],
+    ['impersonation', 'writer_impersonation_unverified'],
+    ['writer', 'writer_permissions_unverified'],
+  ] as const)('keeps initial %s verification pending and rechecks after restart without repeating setup', async (stage, expectedReason) => {
+    // Google IAM grants are eventually consistent. Native incident: setup grants
+    // succeeded, final verification rejected, a later read-only check succeeded.
+    const options = { verificationDenied: stage as 'host' | 'impersonation' | 'writer' | undefined };
+    const api = transport(options); const driver = createGcpCloudInstallationDriver({ fetch: api.request });
+    let record: CloudInstallationRecord | null = null;
+    const store = { read: async () => structuredClone(record),
+      compareAndSwap: async (_id: string, revision: number | null, next: CloudInstallationRecord) => {
+        if ((record?.revision ?? null) !== revision) return false; record = JSON.parse(JSON.stringify(next)); return true;
+      } };
+    const shared = { driver, store, authentication: context().authentication, authorize: async () => true };
+    const plan = await planCloudInstallationV1({ ...shared, intent });
+    const pending = await applyCloudInstallationV1({ ...shared, installationId: plan.installationId, planDigest: plan.plan.digest,
+      confirmActions: plan.plan.actions.map(action => action.id) });
+    expect(pending).toMatchObject({ status: 'pending', reason: expectedReason });
+    expect(driver.connections(pending)).toEqual([]);
+    expect(pending.completed).not.toHaveProperty('gcp:verify');
+    const writes = () => api.calls.filter(call => call.method !== 'GET' && !/:getIamPolicy|:testIamPermissions|:generateAccessToken/.test(call.url));
+    const before = writes().length;
+    const restarted = { ...shared, driver: createGcpCloudInstallationDriver({ fetch: api.request }) };
+    expect(await reconcileCloudInstallationV1({ ...restarted, installationId: plan.installationId, planDigest: plan.plan.digest }))
+      .toMatchObject({ status: 'pending', reason: expectedReason });
+    expect(writes()).toHaveLength(before);
+    options.verificationDenied = undefined;
+    const ready = await reconcileCloudInstallationV1({ ...restarted, installationId: plan.installationId, planDigest: plan.plan.digest });
+    expect(ready.status).toBe('ready');
+    expect(ready.attempts.map(item => item.id)).toEqual(pending.attempts.map(item => item.id));
+    expect(ready.attempts.at(-1)).toMatchObject({ actionId: 'gcp:verify', status: 'succeeded' });
+    expect(ready.attempts.at(-1)?.reason).toBeUndefined();
+    expect(writes()).toHaveLength(before);
+    expect(JSON.stringify(ready)).not.toMatch(/synthetic-(?:admin|host|writer)-access|UNSAFE_native_echo/);
+  });
+
+  it('bounds waiting from the original attempt and never reopens verified access after revocation', async () => {
+    const options = { verificationDenied: 'impersonation' as 'impersonation' | undefined };
+    const api = transport(options); const driver = createGcpCloudInstallationDriver({ fetch: api.request });
+    let record: CloudInstallationRecord | null = null;
+    const store = { read: async () => structuredClone(record), compareAndSwap: async (_id: string, revision: number | null, next: CloudInstallationRecord) => {
+      if ((record?.revision ?? null) !== revision) return false; record = structuredClone(next); return true;
+    } };
+    const shared = { driver, store, authentication: context().authentication, authorize: async () => true };
+    const plan = await planCloudInstallationV1({ ...shared, intent });
+    const pending = await applyCloudInstallationV1({ ...shared, installationId: plan.installationId, planDigest: plan.plan.digest,
+      confirmActions: plan.plan.actions.map(action => action.id) });
+    const firstTime = Date.parse(pending.attempts.at(-1)!.startedAt);
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(firstTime + 600_001);
+    try {
+      const blocked = await reconcileCloudInstallationV1({ ...shared, installationId: plan.installationId, planDigest: plan.plan.digest });
+      expect(blocked).toMatchObject({ status: 'blocked', reason: 'writer_impersonation_unverified' });
+      expect(blocked.attempts.at(-1)).toEqual(pending.attempts.at(-1));
+      expect(blocked.attempts.map(item => item.id)).toEqual(pending.attempts.map(item => item.id));
+    } finally { clock.mockRestore(); }
+    options.verificationDenied = undefined;
+    const ready = await reconcileCloudInstallationV1({ ...shared, installationId: plan.installationId, planDigest: plan.plan.digest });
+    expect(ready.status).toBe('ready');
+    options.verificationDenied = 'impersonation';
+    const revoked = await reconcileCloudInstallationV1({ ...shared, installationId: plan.installationId, planDigest: plan.plan.digest });
+    expect(revoked).toMatchObject({ status: 'blocked', reason: 'writer_impersonation_unverified' });
+    expect(driver.connections(revoked)).toEqual([]);
+    const stillRevoked = await reconcileCloudInstallationV1({ ...shared, installationId: plan.installationId, planDigest: plan.plan.digest });
+    expect(stillRevoked).toMatchObject({ status: 'blocked', reason: 'writer_impersonation_unverified' });
+  });
+
+  it.each(['revoked-grant', 'malformed-permissions'] as const)('does not interpret %s as access propagation', async failure => {
+    const options = { verificationDenied: 'host' as 'host' | undefined, malformedWriterPermissions: false };
+    const api = transport(options); const driver = createGcpCloudInstallationDriver({ fetch: api.request });
+    let record: CloudInstallationRecord | null = null;
+    const store = { read: async () => structuredClone(record), compareAndSwap: async (_id: string, revision: number | null, next: CloudInstallationRecord) => {
+      if ((record?.revision ?? null) !== revision) return false; record = structuredClone(next); return true;
+    } };
+    const shared = { driver, store, authentication: context().authentication, authorize: async () => true };
+    const plan = await planCloudInstallationV1({ ...shared, intent });
+    await applyCloudInstallationV1({ ...shared, installationId: plan.installationId, planDigest: plan.plan.digest,
+      confirmActions: plan.plan.actions.map(action => action.id) });
+    const writes = () => api.calls.filter(call => call.method !== 'GET' && !/:getIamPolicy|:testIamPermissions|:generateAccessToken/.test(call.url));
+    const before = writes().length;
+    options.verificationDenied = undefined;
+    if (failure === 'revoked-grant') {
+      for (const [path, policy] of api.policies) if (path.includes('/serviceAccounts/'))
+        policy.bindings = policy.bindings.filter((binding: { role: string }) => binding.role === 'roles/viewer');
+      const result = await reconcileCloudInstallationV1({ ...shared, installationId: plan.installationId, planDigest: plan.plan.digest });
+      expect(result).toMatchObject({ status: 'blocked', reason: 'identity_mismatch' });
+    } else {
+      options.malformedWriterPermissions = true;
+      const action = plan.plan.actions.find(item => item.id === 'gcp:verify')!;
+      const current = (await store.read())!;
+      expect(await driver.recover({ ...context(), completed: current.completed, attempts: current.attempts,
+        action, attempt: current.attempts.at(-1)! })).toEqual({ state: 'unknown', reason: 'provider_error' });
+    }
+    expect(writes()).toHaveLength(before);
+  });
+
+  it('rechecks legacy rejected verification without issuing a new attempt and clears its stale reason on success', async () => {
+    const options = { verificationDenied: undefined as 'host' | undefined };
+    const api = transport(options); const driver = createGcpCloudInstallationDriver({ fetch: api.request });
+    let record: CloudInstallationRecord | null = null;
+    const store = { read: async () => structuredClone(record), compareAndSwap: async (_id: string, revision: number | null, next: CloudInstallationRecord) => {
+      if ((record?.revision ?? null) !== revision) return false; record = structuredClone(next); return true;
+    } };
+    const shared = { driver, store, authentication: context().authentication, authorize: async () => true };
+    const plan = await planCloudInstallationV1({ ...shared, intent });
+    const ready = await applyCloudInstallationV1({ ...shared, installationId: plan.installationId, planDigest: plan.plan.digest,
+      confirmActions: plan.plan.actions.map(action => action.id) });
+    record = structuredClone(ready); delete record.completed['gcp:verify'];
+    record.status = 'blocked'; record.reason = 'insufficient_permissions';
+    record.attempts.at(-1)!.status = 'rejected'; record.attempts.at(-1)!.reason = 'insufficient_permissions'; delete record.attempts.at(-1)!.evidence;
+    options.verificationDenied = 'host';
+    expect(await reconcileCloudInstallationV1({ ...shared, installationId: plan.installationId, planDigest: plan.plan.digest }))
+      .toMatchObject({ status: 'pending', reason: 'host_identity_access_unverified' });
+    options.verificationDenied = undefined;
+    const recovered = await reconcileCloudInstallationV1({ ...shared, installationId: plan.installationId, planDigest: plan.plan.digest });
+    expect(recovered.status).toBe('ready');
+    expect(recovered.attempts.at(-1)?.reason).toBeUndefined();
+    expect(recovered.attempts.map(item => item.id)).toEqual(ready.attempts.map(item => item.id));
   });
 
   it('rejects a forged disconnection targeting an unrelated IAM grant', async () => {

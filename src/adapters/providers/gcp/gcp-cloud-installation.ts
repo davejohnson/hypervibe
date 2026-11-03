@@ -444,24 +444,42 @@ export function createGcpCloudInstallationDriver(options: { fetch?: typeof fetch
     return { role: n.roles[role], member, policyKind, policyResource, resources,
       native: { role: n.roles[role], member, policyKind, policyResource } };
   }
+  // A successful IAM set/read does not establish immediate token/data access.
+  // Google documents eventual propagation (normally two minutes, sometimes seven
+  // or longer). This ten-minute product wait budget is not a provider guarantee.
+  // It never renews on restart/retry, and never applies after verified access.
+  function waitingForInitialWriterAccess(context: ActionContext): boolean {
+    const attempts = [...(context.attempts ?? []), ...(context.attempt ? [context.attempt] : [])]
+      .filter(item => item.actionId === context.action.id);
+    if (context.completed[context.action.id] || attempts.some(item => item.status === 'succeeded')) return false;
+    const earliest = Math.min(...attempts.map(item => Date.parse(item.startedAt)));
+    return Number.isFinite(earliest) && earliest <= Date.now() && Date.now() - earliest < 600_000;
+  }
   async function verifyWriter(context: ActionContext): Promise<CloudInstallationObservation> {
     const n = names(context.intent); const budget = new DestinationBudget({ signal: context.signal, deadlineMs: 30_000 });
+    let accessReason: CloudInstallationReason = 'host_identity_access_unverified';
     try {
       const writer = completedResource(context, 'gcp:account', 'serviceAccount');
       const hostToken = await budget.wait(context.authentication.host.getAccessToken(budget.signal));
       const accountValue = await destinationJson(request, budget, `https://iam.googleapis.com/v1/${writer.id}`, hostToken);
       if (accountValue.name !== writer.id || accountValue.uniqueId !== writer.identity.uniqueId) throw new InstallationError('identity_mismatch');
+      accessReason = 'writer_impersonation_unverified';
       const minted = await destinationJson(request, budget, `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${n.email}:generateAccessToken`, hostToken,
         { method: 'POST', body: JSON.stringify({ scope: [SCOPE], lifetime: '900s' }) });
       const expires = typeof minted.expireTime === 'string' ? Date.parse(minted.expireTime) : NaN;
       if (typeof minted.accessToken !== 'string' || !Number.isFinite(expires) || expires <= Date.now() || expires > Date.now() + 960_000) throw new InstallationError('provider_error');
+      accessReason = 'writer_permissions_unverified';
       for (const resource of Object.values(n.secrets)) {
         const result = await destinationJson(request, budget, `https://secretmanager.googleapis.com/v1/${resource}:testIamPermissions`, minted.accessToken,
           { method: 'POST', body: JSON.stringify({ permissions: permissions.writer }) });
-        const actual = result.permissions;
-        if (!Array.isArray(actual) || !permissions.writer.every(permission => actual.includes(permission))) throw new InstallationError('insufficient_permissions');
+        const actual = result.permissions === undefined ? [] : result.permissions;
+        if (!Array.isArray(actual) || actual.some(permission => typeof permission !== 'string')) throw new InstallationError('provider_error');
+        if (!permissions.writer.every(permission => actual.includes(permission))) throw new InstallationError('insufficient_permissions');
       }
       return { state: 'satisfied', evidence: evidence(context, [writer]) };
+    } catch (error) {
+      if (reason(error) !== 'insufficient_permissions') throw error;
+      return { state: waitingForInitialWriterAccess(context) ? 'pending' : 'conflict', reason: accessReason };
     } finally { budget.close(); }
   }
   const driver: CloudInstallationDriver = {
@@ -564,7 +582,8 @@ export function createGcpCloudInstallationDriver(options: { fetch?: typeof fetch
           } else if (op === 'verify-writer') {
             await context.beforeMutation();
             const verified = await verifyWriter(context);
-            if (verified.state !== 'satisfied') throw new InstallationError('not_converged');
+            if (verified.state !== 'satisfied') return { state: verified.state === 'pending' ? 'uncertain' as const : 'rejected' as const,
+              reason: 'reason' in verified ? verified.reason : 'not_converged' as const };
             return { state: 'acknowledged' as const, evidence: verified.evidence };
           }
           const observed = await observe(client, context);
