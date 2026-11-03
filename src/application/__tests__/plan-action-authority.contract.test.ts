@@ -595,7 +595,14 @@ const authorized: AuthorizedCase[] = [
       },
     }),
   })),
-  ...Object.values(STORAGE_OPERATIONS).map((operation): AuthorizedCase => ({
+  // Durable deletion actions carry retained-journal proof and use their own
+  // read-only/confirmed-action envelopes. Their real planner output is covered
+  // with SQLite restart and native transport in storage-deletion-evidence.service.test.ts.
+  ...Object.values(STORAGE_OPERATIONS).filter(operation => ![
+    STORAGE_OPERATIONS.recoverDeletion,
+    STORAGE_OPERATIONS.continueDeletion,
+    STORAGE_OPERATIONS.retryDeletion,
+  ].some(deletionOperation => deletionOperation === operation)).map((operation): AuthorizedCase => ({
     label: operation,
     capability: 'storage.mutate',
     action: action({

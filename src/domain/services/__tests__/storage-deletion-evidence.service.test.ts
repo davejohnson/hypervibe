@@ -10,6 +10,19 @@ import { adapterFactory } from '../adapter.factory.js';
 import { applyStorageAction, parseStorageBindings, planStorage } from '../storage-plan.service.js';
 import { gcsTeardownFixture, bucketPath } from '../../../adapters/providers/gcp/__tests__/gcs-teardown.fixture.js';
 import { parseStorageCreateRecoveryMap } from '../../ports/storage.port.js';
+import { resolvePlanActionAuthority } from '../../plan/action-authority.js';
+import type { PlanAction } from '../../plan/plan.types.js';
+
+function expectExactDeletionAuthority(action: PlanAction) {
+  expect(resolvePlanActionAuthority(action)).toEqual({
+    actionId: action.id, capability: 'storage.mutate',
+    operation: action.metadata!.operation, resource: action.resource,
+  });
+  expect(resolvePlanActionAuthority({ ...action, resource: { ...action.resource, kind: 'database' } })).toBeNull();
+  expect(resolvePlanActionAuthority({ ...action, id: `${action.id}:other` })).toBeNull();
+  expect(resolvePlanActionAuthority({ ...action, metadata: { ...action.metadata, recoverySha256: undefined } })).toBeNull();
+  expect(resolvePlanActionAuthority({ ...action, requiresConfirm: action.type === 'update' })).toBeNull();
+}
 
 let directory: string;
 beforeEach(() => { directory = mkdtempSync(join(tmpdir(), 'hv-storage-delete-evidence-'));
@@ -53,16 +66,19 @@ describe('storage deletion receipt persistence and binding removal', () => {
     vi.mocked(adapterFactory.getStorageAdapter).mockResolvedValue({ success: true, adapter: await native.createAdapter() });
     const observation = planStorage({ environment: f.read(), environmentSpec: spec, observed: null }).actions[0];
     expect(observation.type).toBe('update');
+    expectExactDeletionAuthority(observation);
     const start = native.calls.length;
     expect(await applyStorageAction({ project: f.project, envName: 'test', environmentSpec: spec, action: observation })).toMatchObject({ success: false, status: 'pending' });
     expect(native.calls.slice(start).every(call => call.method === 'GET')).toBe(true);
     const retry = planStorage({ environment: f.read(), environmentSpec: spec, observed: null }).actions[0];
     expect(retry).toMatchObject({ type: 'destroy', requiresConfirm: true, metadata: { operation: 'storageDeletionRetry' } });
+    expectExactDeletionAuthority(retry);
     expect(retry.reason).toMatch(outcome === 'uncertain' ? /uncertain/i : /rejected/i);
     expect(await applyStorageAction({ project: f.project, envName: 'test', environmentSpec: spec, action: retry })).toMatchObject({ success: false, status: 'pending' });
     expect(native.calls.filter(call => call.method === 'DELETE' && (call.url.searchParams.get('generation') === '20' || call.url.pathname === bucketPath))).toEqual([]);
     const continuation = planStorage({ environment: f.read(), environmentSpec: spec, observed: null }).actions[0];
     expect(continuation).toMatchObject({ type: 'destroy', requiresConfirm: true, metadata: { operation: 'storageDeletionContinue' } });
+    expectExactDeletionAuthority(continuation);
     expect(await applyStorageAction({ project: f.project, envName: 'test', environmentSpec: spec, action: continuation })).toMatchObject({ success: true });
     expect(f.read().platformBindings.storageDeletionReceipts).toMatchObject({ documents: [{ priorAttempts: [
       expect.objectContaining({ step: 0, outcome: outcome === 'uncertain' ? 'uncertain' : 'rejected',
