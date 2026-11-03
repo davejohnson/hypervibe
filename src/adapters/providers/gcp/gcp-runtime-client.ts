@@ -24,9 +24,18 @@ export function gcpRuntimeError(error: unknown): string {
   return error instanceof GcpRuntimeError ? error.message : 'Google runtime access could not be verified; no additional work was authorized.';
 }
 
-export async function gcpRuntimeRequest(url: string, token: string, init: RequestInit = {}, request: typeof fetch = fetch): Promise<unknown | null> {
+export async function gcpRuntimeRequest(url: string, token: string, init: RequestInit = {}, request: typeof fetch = fetch,
+  regionalExecution?: { region: string; projectNumber: string; executionId: string }): Promise<unknown | null> {
   const parsed = new URL(url);
-  if (parsed.protocol !== 'https:' || !['iam.googleapis.com', 'cloudresourcemanager.googleapis.com', 'run.googleapis.com', 'storage.googleapis.com', 'sqladmin.googleapis.com', 'secretmanager.googleapis.com', 'artifactregistry.googleapis.com', 'compute.googleapis.com', 'pubsub.googleapis.com'].includes(parsed.hostname)
+  // Regional V1 access is only the exact immutable Execution read requested by
+  // a caller with verified scope. It never admits regional mutations or lists.
+  const regionalRead = regionalExecution !== undefined
+    && /^[a-z]+-[a-z]+[0-9]+$/.test(regionalExecution.region)
+    && /^[1-9][0-9]*$/.test(regionalExecution.projectNumber)
+    && /^[a-zA-Z0-9_-]+$/.test(regionalExecution.executionId)
+    && url === `https://${regionalExecution.region}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${regionalExecution.projectNumber}/executions/${regionalExecution.executionId}`
+    && (init.method === undefined || init.method === 'GET') && init.body === undefined;
+  if (parsed.protocol !== 'https:' || !(regionalExecution ? regionalRead : ['iam.googleapis.com', 'cloudresourcemanager.googleapis.com', 'run.googleapis.com', 'storage.googleapis.com', 'sqladmin.googleapis.com', 'secretmanager.googleapis.com', 'artifactregistry.googleapis.com', 'compute.googleapis.com', 'pubsub.googleapis.com'].includes(parsed.hostname))
     || parsed.username || parsed.password || parsed.hash) throw new GcpRuntimeError('Invalid Google runtime API destination.');
   const budget = new DestinationBudget({ signal: init.signal ?? undefined, deadlineMs: 15_000 });
   try {

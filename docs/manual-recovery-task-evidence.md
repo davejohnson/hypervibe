@@ -125,3 +125,41 @@ same-request continuation and output privacy. These checks are in the normal
 `npm test` path. Their synthetic factories do not establish live provider execution;
 the original pending request still requires a fresh supported plan and exact native
 verification before claiming backup or restore completion.
+
+
+## Native Task secret aliases
+
+The previous verifier assumed a Task repeats the Job and Execution's canonical
+Secret Manager reference. Redacted native metadata captured on 2026-11-03
+falsified that assumption: the same successful execution retained the numeric
+project secret and immutable version, while its Task used `secret-alias-1`.
+The same UID-verified V1 Execution carried the exact mapping in
+`run.googleapis.com/secrets`; the Task itself had no mapping. Google documents
+this compatibility mapping in [job secret configuration](https://docs.cloud.google.com/run/docs/configuring/jobs/secrets),
+and the [V1 execution read](https://docs.cloud.google.com/run/docs/reference/rest/v1/namespaces.executions/get)
+is a read-only operation. These observations contain no secret values.
+
+Both durable and existing scheduled execution verification now consult that exact
+V1 Execution only when the Task reference differs. The freshly verified runtime
+secret supplies the numeric namespace after the existing CRM, bucket and
+same-project secret checks. Execution UID/name/namespace and its sole controlling
+Job UID/name must agree with the retained V2 identities. Duplicate or malformed
+mappings, another secret/version, denied reads, and any other template difference
+remain unknown. No alias is inferred from its spelling or position. The regional
+HTTP exception admits only the explicitly scoped execution GET, with no body,
+query, alternative destination or mutation. Direct canonical references need no
+additional request. Desired templates, durable authority hashes and native job
+protocol remain unchanged.
+
+The actual transport regression failed before the fix for both durable and legacy
+paths; denied mapping reads also exposed a misleading failed-task label despite
+unresolved proof. Durable uncertainty now remains `running` with an unsuccessful
+receipt and unverified cleanup; this means unresolved retained work, not native
+process liveness. A proved terminal failure remains failed even if cleanup is
+still unknown.
+Tests resume from retained progress after a denied read without another create or
+run, and reject changed identity, mapping, secret version and resource limits.
+These reconstructed transports use recorded native transformations and synthetic
+identities. They run in normal acceptance and establish parser/recovery behavior;
+completion of the retained live attempt and cleanup remain separate acceptance
+steps. The seven-provider capability matrix above is unchanged.

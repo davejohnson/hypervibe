@@ -59,6 +59,8 @@ let job: any;
 let execution: any;
 let task: any;
 let shortParentNames = false;
+let taskSecretAlias = false;
+let aliasFault: 'denied' | 'execution-uid' | 'execution-name' | 'job-uid' | 'job-name' | 'controller' | 'namespace' | 'missing' | 'duplicate' | 'target' | 'version' | 'template' | undefined;
 let jobFault: 'failed' | 'lost-run' | 'retained-delete' | 'wrong-operation' | 'missing-task-status' | 'wrong-task-identity' | 'stale-generation' | 'wrong-execution-parent' | 'wrong-task-parent' | 'wrong-cleanup-parent' | undefined;
 let durableFault: 'lost-create' | 'create-job-read' | 'run-job-read' | 'lost-run' | 'lost-execution-delete' | 'lost-job-delete' | 'retained-execution-delete' | undefined;
 let nativeOperations: Map<string, any>;
@@ -67,7 +69,7 @@ let preparedTaskBinding: RecoveryRuntimeBinding | undefined;
 beforeEach(() => {
   target = { environment: { id: envId, projectId: 'local-project', name: 'staging', createdAt: new Date(), updatedAt: new Date(), platformBindings: { provider: 'cloudrun', projectId, environmentId: region, services: {} } }, database: { provider: 'cloudsql', primaryExternalId: instance, providerScope: { projectId, region }, resourceIdentity: { instanceId: instance } }, destination: { provider: 'gcs', externalId: 'sequence-archive', instanceScope: { projectId } }, objects: [{ name: 'media', identity: { provider: 'gcs', externalId: 'sequence-media', instanceScope: { projectId } } }], runnerImage, privateInputFingerprints: { databaseUrl: credentialHash } };
   sa = undefined; secret = undefined; versions = []; policies = new Map(); calls = []; loseVersionResponse = false; rejectWriteStatus = undefined; rejectCommittedVersionRead = false;
-  shortParentNames = false; job = undefined; execution = undefined; task = undefined; jobFault = undefined; localCallerCanActAs = true; bucketProjectNumber = projectNumber; ciAccountUniqueId = ciIdentity.serviceAccountUniqueId; loseDeleteResponse = false; retainDelete = false; loseArchivePolicyResponse = false;
+  shortParentNames = false; taskSecretAlias = false; aliasFault = undefined; job = undefined; execution = undefined; task = undefined; jobFault = undefined; localCallerCanActAs = true; bucketProjectNumber = projectNumber; ciAccountUniqueId = ciIdentity.serviceAccountUniqueId; loseDeleteResponse = false; retainDelete = false; loseArchivePolicyResponse = false;
   durableFault = undefined; nativeOperations = new Map(); preparedTaskBinding = undefined;
   sql = { name: instance, project: projectId, region, connectionName: `${projectId}:${region}:${instance}`, databaseVersion: 'POSTGRES_17', state: 'RUNNABLE', settings: { ipConfiguration: { ipv4Enabled: true, authorizedNetworks: [] } }, ipAddresses: [{ type: 'PRIMARY', ipAddress: '203.0.113.20' }] };
   vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -79,6 +81,20 @@ beforeEach(() => {
     if (url.pathname.endsWith(':testIamPermissions')) return Response.json({ permissions: localCallerCanActAs ? ['iam.serviceAccounts.actAs'] : [] });
     if (rejectCommittedVersionRead && method === 'GET' && versions.length > 0 && url.pathname.endsWith(':access')) return Response.json({ error: { code: 403 } }, { status: 403 });
     if (rejectWriteStatus && ['POST', 'PUT'].includes(method) && !url.pathname.endsWith(':getIamPolicy')) return Response.json({ error: { code: rejectWriteStatus, message: 'synthetic-private-password' } }, { status: rejectWriteStatus });
+    if (url.hostname === `${region}-run.googleapis.com`) {
+      if (method !== 'GET' || url.pathname !== `/apis/run.googleapis.com/v1/namespaces/${projectNumber}/executions/one` || url.search) throw new Error('Unexpected regional execution request');
+      if (aliasFault === 'denied') return Response.json({ error: { code: 403 } }, { status: 403 });
+      // Reconstructed from recorded Google V1 Execution metadata (2026-11-03),
+      // independently of the V2 submitted template. V2 Task alone has no map.
+      const entry = `secret-alias-1:${aliasFault === 'target' ? `projects/${projectNumber}/secrets/another-secret` : secret.name}`;
+      return Response.json({ kind: 'Execution', apiVersion: 'run.googleapis.com/v1', metadata: {
+        name: aliasFault === 'execution-name' ? 'other' : 'one', namespace: aliasFault === 'namespace' ? '999999999999' : projectNumber,
+        uid: aliasFault === 'execution-uid' ? 'another-execution' : execution.uid,
+        ownerReferences: [{ kind: 'Job', apiVersion: 'serving.knative.dev/v1', name: aliasFault === 'job-name' ? 'other' : job.name.split('/').at(-1),
+          uid: aliasFault === 'job-uid' ? 'another-job' : job.uid, controller: aliasFault !== 'controller' }],
+        annotations: aliasFault === 'missing' ? {} : { 'run.googleapis.com/secrets': aliasFault === 'duplicate' ? `${entry},${entry}` : entry },
+      } });
+    }
     if (url.hostname === 'run.googleapis.com') {
       if (method === 'GET' && url.pathname.endsWith('/jobs')) return Response.json({ jobs: job ? [job] : [] });
       const operation = (kind: string, response: any) => {
@@ -100,10 +116,15 @@ beforeEach(() => {
       }
       if (method === 'POST' && url.pathname.endsWith(':run')) {
         execution = { name: `${job.name}/executions/one`, uid: '33333333-3333-4333-8333-333333333333', job: shortParentNames ? job.name.split('/').at(-1) : job.name, labels: job.labels, template: job.template.template, taskCount: 1, succeededCount: jobFault === 'failed' ? 0 : 1, ...(jobFault === 'failed' ? { failedCount: 1 } : {}), conditions: [{ type: 'Completed', state: jobFault === 'failed' ? 'CONDITION_FAILED' : 'CONDITION_SUCCEEDED' }], completionTime: '2026-10-24T12:00:00Z', etag: 'execution-etag' };
-        task = { name: `${execution.name}/tasks/0`, uid: '44444444-4444-4444-8444-444444444444', execution: shortParentNames ? execution.name.split('/').at(-1) : execution.name, job: shortParentNames ? job.name.split('/').at(-1) : job.name, completionTime: execution.completionTime, ...job.template.template, serviceAccount: jobFault === 'wrong-task-identity' ? `deploy@${projectId}.iam.gserviceaccount.com` : job.template.template.serviceAccount, lastAttemptResult: { ...(jobFault !== 'missing-task-status' ? { status: {} } : {}), ...(jobFault === 'failed' ? { exitCode: 1 } : {}) } };
+        task = { name: `${execution.name}/tasks/0`, uid: '44444444-4444-4444-8444-444444444444', execution: shortParentNames ? execution.name.split('/').at(-1) : execution.name, job: shortParentNames ? job.name.split('/').at(-1) : job.name, completionTime: execution.completionTime, ...structuredClone(job.template.template), serviceAccount: jobFault === 'wrong-task-identity' ? `deploy@${projectId}.iam.gserviceaccount.com` : job.template.template.serviceAccount, lastAttemptResult: { ...(jobFault !== 'missing-task-status' ? { status: {} } : {}), ...(jobFault === 'failed' ? { exitCode: 1 } : {}) } };
         // The recorded native Task also omits uid; scope comes from the full
         // task path under the exact UID-verified Execution, never a short name.
         if (shortParentNames) delete task.uid;
+        if (taskSecretAlias) {
+          task.containers[0].env[1].valueSource.secretKeyRef.secret = 'secret-alias-1';
+          if (aliasFault === 'version') task.containers[0].env[1].valueSource.secretKeyRef.version = '2';
+          if (aliasFault === 'template') task.containers[0].resources.limits.cpu = '4';
+        }
         if (jobFault === 'wrong-execution-parent') execution.job = job.name.replace(projectId, 'other-project');
         if (jobFault === 'wrong-task-parent') task.execution = execution.name.replace(projectId, 'other-project');
         if (jobFault === 'lost-run' || durableFault === 'lost-run') throw new Error('Lost execution response, credential could be echoed by a provider');
@@ -206,6 +227,50 @@ describe('Cloud Run private recovery job transport', () => {
         variableReferences: [], variables: { HYPERVIBE_BACKUP_CONFIG: JSON.stringify(config) }, ...(lifecycle ? { lifecycle } : {}) } });
   }
 
+  it.each([false, true])('verifies the native Task secret alias using the exact V1 execution map (durable=%s)', async durable => {
+    taskSecretAlias = true; shortParentNames = true;
+    let state: any;
+    const persist = async (next: any) => state = structuredClone(next);
+    const result = await execute(durable ? { persist } : undefined);
+    expect(result.receipt.success).toBe(true);
+    expect(result.status).toBe('completed');
+    if (durable) expect(state.phase).toBe('complete');
+    const reads = calls.filter(call => new URL(call.url).hostname === `${region}-run.googleapis.com`);
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toMatchObject({ method: 'GET', body: undefined });
+    expect(calls.filter(call => call.url.endsWith(':run'))).toHaveLength(1);
+    expect(calls.filter(call => call.method === 'DELETE' && call.url.includes('run.googleapis.com'))).toHaveLength(2);
+  });
+
+  it('resumes alias proof after denied read without another create or run', async () => {
+    taskSecretAlias = true; aliasFault = 'denied';
+    let state: any;
+    const persist = async (next: any) => state = structuredClone(next);
+    const first = await execute({ persist });
+    expect(first).toMatchObject({ status: 'running', receipt: { success: false }, diagnostic: { category: 'unknown' } });
+    expect(state.phase).toBe('running');
+    expect(calls.filter(call => call.method === 'DELETE')).toHaveLength(0);
+    aliasFault = undefined;
+    expect((await execute({ state, persist })).receipt.success).toBe(true);
+    expect(state.phase).toBe('complete');
+    expect(calls.filter(call => call.method === 'POST' && call.url.includes('/jobs?'))).toHaveLength(1);
+    expect(calls.filter(call => call.url.endsWith(':run'))).toHaveLength(1);
+  });
+
+  it.each(['execution-uid', 'execution-name', 'job-uid', 'job-name', 'controller', 'namespace', 'missing', 'duplicate', 'target', 'version', 'template'] as const)(
+    'keeps Task alias proof %s unknown without cleanup or repeat execution', async fault => {
+      taskSecretAlias = true; aliasFault = fault;
+      let state: any;
+      const persist = async (next: any) => state = structuredClone(next);
+      const result = await execute({ persist });
+      expect(result).toMatchObject({ status: 'running', receipt: { success: false }, diagnostic: { category: 'unknown' } });
+      expect(state.phase).toBe('running');
+      const writes = calls.filter(call => call.method !== 'GET' && call.url.includes('run.googleapis.com')).length;
+      expect((await execute({ state, persist })).receipt.success).toBe(false);
+      expect(calls.filter(call => call.method !== 'GET' && call.url.includes('run.googleapis.com'))).toHaveLength(writes);
+      expect(calls.filter(call => call.method === 'DELETE')).toHaveLength(0);
+    });
+
   it('persists private recovery intent before the first native job write', async () => {
     const persist = vi.fn(async () => { throw new Error('Synthetic durable storage failure'); });
     const result = await execute({ persist });
@@ -219,6 +284,7 @@ describe('Cloud Run private recovery job transport', () => {
     const persist = async (next: any) => { state = JSON.parse(JSON.stringify(next)); history.push(state); return state; };
     const first = await execute({ persist });
     expect(first.receipt.success).toBe(true);
+    expect(calls.some(call => new URL(call.url).hostname === `${region}-run.googleapis.com`)).toBe(false);
     expect(state?.phase).toBe('complete');
     expect(history.map(item => item.phase)).toContain('run-attempted');
     expect(history.map(item => item.phase)).toContain('delete-execution-attempted');
@@ -342,6 +408,15 @@ describe('Cloud Run private recovery job transport', () => {
     expect((await execute({ persist })).receipt.success).toBe(false);
     expect(state?.phase).not.toBe('complete');
     expect(calls.filter(call => call.method === 'DELETE' && call.url.includes('run.googleapis.com'))).toHaveLength(0);
+  });
+
+  it('preserves proved terminal failure while its cleanup remains unknown', async () => {
+    let state: any;
+    const persist = async (next: any) => state = structuredClone(next);
+    jobFault = 'failed'; durableFault = 'retained-execution-delete';
+    const result = await execute({ persist });
+    expect(state).toMatchObject({ phase: 'delete-execution-attempted', terminal: { status: 'failed' } });
+    expect(result).toMatchObject({ status: 'failed', receipt: { success: false }, diagnostic: { task: { cleanupVerified: false } } });
   });
 
   it('records terminal task failure separately from verified cleanup and never reruns that request', async () => {

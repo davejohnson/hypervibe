@@ -5,6 +5,29 @@ import { gcpRuntimeRequest } from '../gcp-runtime-client.js';
 // The runtime contract still requires bounded, value-free unknown outcomes.
 afterEach(() => vi.useRealTimers());
 describe('Google runtime HTTP boundary', () => {
+  const regionalScope = { region: 'us-central1', projectNumber: '123456789012', executionId: 'backup-one' };
+  const regionalUrl = 'https://us-central1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/123456789012/executions/backup-one';
+  it('admits only an explicitly scoped regional execution read', async () => {
+    const request = vi.fn<typeof fetch>(async () => Response.json({ kind: 'Execution' }));
+    await expect(gcpRuntimeRequest(regionalUrl, 'synthetic-token', {}, request, regionalScope)).resolves.toEqual({ kind: 'Execution' });
+    expect(request).toHaveBeenCalledOnce();
+    await expect(gcpRuntimeRequest(regionalUrl, 'synthetic-token', {}, request)).rejects.toThrow('Invalid Google runtime API destination');
+    expect(request).toHaveBeenCalledOnce();
+  });
+  it.each([
+    [regionalUrl.replace('us-central1-', 'us-west1-'), {}],
+    ['https://run.googleapis.com/v2/projects/other', {}],
+    [regionalUrl.replace('/executions/', '/jobs/'), {}],
+    [regionalUrl.replace('123456789012', '999999999999'), {}],
+    [regionalUrl.replace('backup-one', 'backup-other'), {}],
+    [regionalUrl + '?alt=json', {}], [regionalUrl + '#fragment', {}],
+    [regionalUrl, { method: 'POST' }], [regionalUrl, { method: 'DELETE' }],
+    [regionalUrl, { body: '{}' }],
+  ] as const)('rejects other regional destinations or writes before transport %s %j', async (url, init) => {
+    const request = vi.fn<typeof fetch>(async () => Response.json({}));
+    await expect(gcpRuntimeRequest(url, 'synthetic-token', init, request, regionalScope)).rejects.toThrow('Invalid Google runtime API destination');
+    expect(request).not.toHaveBeenCalled();
+  });
   it('bounds a body that stalls after headers without requiring abort cooperation', async () => {
     vi.useFakeTimers(); let outcome = 'pending';
     const request = vi.fn<typeof fetch>(async () => new Response(new ReadableStream({ pull: () => new Promise(() => {}) })));

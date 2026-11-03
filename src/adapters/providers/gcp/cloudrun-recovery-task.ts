@@ -106,6 +106,46 @@ export async function runCloudRunRecoveryTask(input: {
           { name: 'HYPERVIBE_BACKUP_DATABASE_URL', valueSource: { secretKeyRef: secret } },
         ] }] };
     const body = { labels, template: { labels, taskCount: 1, parallelism: 1, template: taskTemplate } };
+    async function taskTemplateVerified(task: Record<string, any>, current: Record<string, any>, jobUid: string): Promise<boolean> {
+      const observed = template(task), expected = template(taskTemplate);
+      if (same(observed, expected)) return true;
+      // The freshly verified runtime secret is canonical and same-project:
+      // verifyExecution proves CRM project number, bucket ownership and secret.
+      // Never derive hosting scope from an arbitrary caller-provided reference.
+      const projectNumber = /^projects\/([1-9][0-9]*)\/secrets\/[a-zA-Z0-9_-]+$/.exec(secret.secret)?.[1];
+      const executionId = current.name?.split('/').at(-1);
+      if (!projectNumber || !nonempty(executionId) || !nonempty(current.uid) || !nonempty(jobUid)
+        || !cloudRunTaskBelongsToExecution(task, current.name, name)) return false;
+      const normalized = structuredClone(observed);
+      const entries = Array.isArray(normalized.container.env)
+        ? normalized.container.env.filter((entry: any) => entry?.name === 'HYPERVIBE_BACKUP_DATABASE_URL') : [];
+      const reference = entries.length === 1 ? entries[0]?.valueSource?.secretKeyRef : undefined;
+      const alias = reference?.secret;
+      if (typeof alias !== 'string' || !/^[a-zA-Z0-9_-]{1,255}$/.test(alias) || reference.version !== secret.version) return false;
+      reference.secret = secret.secret;
+      // An alias cannot explain any other image, identity, environment, secret
+      // version or resource difference. Compare the complete projected template.
+      if (!same(normalized, expected)) return false;
+      const scope = { region, projectNumber, executionId };
+      const value = record(await gcpRuntimeRequest(
+        `https://${region}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${projectNumber}/executions/${executionId}`,
+        token ?? await input.dependencies.token(), {}, input.dependencies.request, scope));
+      const metadata = value.metadata, owners = metadata?.ownerReferences;
+      const annotation = metadata?.annotations?.['run.googleapis.com/secrets'];
+      if (value.kind !== 'Execution' || value.apiVersion !== 'run.googleapis.com/v1'
+        || metadata?.name !== executionId || metadata.namespace !== projectNumber || metadata.uid !== current.uid
+        || !Array.isArray(owners) || owners.length !== 1 || owners[0]?.kind !== 'Job'
+        || owners[0].name !== jobId || owners[0].uid !== jobUid || owners[0].controller !== true
+        || typeof annotation !== 'string' || annotation.length > 8192) return false;
+      const mappings = new Map<string, string>();
+      for (const entry of annotation.split(',')) {
+        const match = /^([a-zA-Z0-9_-]{1,255}):(projects\/[1-9][0-9]*\/secrets\/[a-zA-Z0-9_-]+)$/.exec(entry);
+        if (!match || mappings.has(match[1]!)) return false;
+        mappings.set(match[1]!, match[2]!);
+      }
+      return mappings.get(alias) === secret.secret;
+    }
+
     if (options.lifecycle) {
       const lifecycle = options.lifecycle;
       const authorityHash = canonicalJsonSha256({ environmentId: input.environment.id, prepared, name, body });
@@ -196,7 +236,7 @@ export async function runCloudRunRecoveryTask(input: {
               if (!Array.isArray(response.tasks) || response.tasks.length !== 1 || response.nextPageToken) throw new GcpRuntimeError('Recovery task inventory is ambiguous.');
               const task = record(response.tasks[0]), attempt = record(task.lastAttemptResult), status = record(attempt.status);
               if (!cloudRunTaskBelongsToExecution(task, current.name, name) || !nonempty(task.completionTime) || task.reconciling === true
-                || (task.index ?? 0) !== 0 || (task.retried ?? 0) !== 0 || !same(template(task), template(taskTemplate))
+                || (task.index ?? 0) !== 0 || (task.retried ?? 0) !== 0 || !await taskTemplateVerified(task, current, state!.coordinates.jobUid!)
                 || (status.code ?? 0) !== 0 || (attempt.exitCode ?? 0) !== 0 || (attempt.termSignal ?? 0) !== 0
                 || !Array.isArray(task.containers) || task.containers.length !== 1 || task.containers[0].image !== options.expectedImage) throw new GcpRuntimeError('Recovery helper exit is unverified.');
               await save('terminal', {}, { status: 'succeeded', exitCode: 0 }); break;
@@ -238,8 +278,10 @@ export async function runCloudRunRecoveryTask(input: {
       } catch {
         // Persistence failure must never fall through to the legacy finally
         // cleanup. Its last durable phase is the sole restart authority.
+        // Running means unresolved retained work, not a fresh native liveness
+        // claim; preserve a proved terminal failure even if cleanup is unknown.
         const uncertainAttempt = attempted || Boolean(state);
-        return { jobId: state?.coordinates.executionName ?? state?.coordinates.jobName ?? '', status: 'failed', runner: 'cloudrun-job', mutationAttempted: uncertainAttempt,
+        return { jobId: state?.coordinates.executionName ?? state?.coordinates.jobName ?? '', status: state?.terminal?.status === 'failed' ? 'failed' : 'running', runner: 'cloudrun-job', mutationAttempted: uncertainAttempt,
           durationMs: Date.now() - startedAt, cleanupWarning: 'The exact recovery attempt remains pending; reconcile retained evidence before continuing.',
           diagnostic: { stage, category: 'unknown', task: { mutationAttempted: uncertainAttempt, cleanupVerified: false } },
           receipt: { success: false, message: 'Recovery progress or cleanup remains unverified; no uncertain write was repeated.', data: { cleanupVerified: false, applied: null, skipped: 0 } } };
@@ -283,7 +325,7 @@ export async function runCloudRunRecoveryTask(input: {
     // Native tasks can omit uid. Their full name under the exact UID-verified
     // execution is required; no task-level mutation uses a missing UID.
     if (!cloudRunTaskBelongsToExecution(task, executionName, name) || !nonempty(task.completionTime)
-      || task.reconciling === true || (task.index ?? 0) !== 0 || (task.retried ?? 0) !== 0 || !same(template(task), template(taskTemplate))
+      || task.reconciling === true || (task.index ?? 0) !== 0 || (task.retried ?? 0) !== 0 || !await taskTemplateVerified(task, execution, ownedJob.uid)
       || (status.code ?? 0) !== 0 || (attempt.exitCode ?? 0) !== 0 || (attempt.termSignal ?? 0) !== 0
       || !Array.isArray(task.containers) || task.containers.length !== 1 || task.containers[0].image !== options.expectedImage) throw new GcpRuntimeError('Cloud Run recovery task did not report the exact successful helper exit.');
     succeeded = true;
