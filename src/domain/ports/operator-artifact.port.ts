@@ -2,13 +2,40 @@ import { z } from 'zod';
 import type { PlanAction } from '../plan/plan.types.js';
 import { operatorRetirementDeclarationSchema } from './operator-retirement.port.js';
 
+export const OPERATOR_BUILD_REPORTED_MARKERS = ['npm-E401','npm-E403','npm-E404','npm-EINTEGRITY','disk-full','typescript-error','build-command-failed','image-metadata-failed','registry-rate-limit'] as const;
+export type OperatorBuildReportedMarker = typeof OPERATOR_BUILD_REPORTED_MARKERS[number];
+const commandFailureSchema = z.object({
+  kind: z.enum(['spawn','exit','abort','output-limit']),
+  exitCode: z.number().int().min(1).max(0xffffffff).optional(),
+  reported: z.array(z.enum(OPERATOR_BUILD_REPORTED_MARKERS)).min(1).max(OPERATOR_BUILD_REPORTED_MARKERS.length)
+    .refine(values=>new Set(values).size===values.length).optional(),
+  dockerfileLine: z.number().int().min(1).max(100000).optional(),
+}).strict().refine(value => value.exitCode === undefined || value.kind === 'exit');
+export type OperatorArtifactCommandFailure = z.infer<typeof commandFailureSchema>;
+/** Native command lifecycle facts only; never copy an Error message or output. */
+export class OperatorArtifactCommandError extends Error {
+  readonly commandFailure: OperatorArtifactCommandFailure;
+  constructor(input: OperatorArtifactCommandFailure) {
+    const value = commandFailureSchema.parse(input);
+    super(`Operator artifact command failed (${value.kind}${value.exitCode === undefined ? '' : `, exitCode=${value.exitCode}`}).`);
+    this.name='OperatorArtifactCommandError'; this.commandFailure=value;
+  }
+}
+export function operatorArtifactCommandFailure(error: unknown): OperatorArtifactCommandFailure | undefined {
+  if (!(error instanceof OperatorArtifactCommandError)) return undefined;
+  const parsed=commandFailureSchema.safeParse(error.commandFailure);
+  return parsed.success ? parsed.data : undefined;
+}
+
 const preparationFailureSchema = z.object({
   phase: z.enum(['source-verification','source-snapshot','credential-selection','credential-scan','builder-creation','image-build','image-verification','image-archive','filesystem-scan','cleanup']),
   reason: z.enum(['command-failed','verification-failed','cleanup-unverified']),
   cleanup: z.enum(['verified','unverified']),
+  commandFailure: commandFailureSchema.optional(),
   recoveryDirectory: z.string().regex(/^hypervibe-candidate-[A-Za-z0-9]{6}$/).optional(),
 }).strict().refine(value => value.cleanup === 'unverified' ? Boolean(value.recoveryDirectory) : !value.recoveryDirectory)
-  .refine(value => value.reason !== 'cleanup-unverified' || value.phase === 'cleanup' && value.cleanup === 'unverified');
+  .refine(value => value.reason !== 'cleanup-unverified' || value.phase === 'cleanup' && value.cleanup === 'unverified')
+  .refine(value => !value.commandFailure || value.reason === 'command-failed');
 export type OperatorArtifactPreparationFailure = z.infer<typeof preparationFailureSchema>;
 const preparationPhaseText: Record<OperatorArtifactPreparationFailure['phase'], string> = {
   'source-verification':'checking the reviewed source', 'source-snapshot':'copying the reviewed source for the build',
@@ -22,24 +49,33 @@ function preparationMessage(value: OperatorArtifactPreparationFailure): string {
     ? `Local build cleanup is incomplete. Preserve ${value.recoveryDirectory}/cleanup.json in the system temporary folder. Ask your coding agent to inspect that saved cleanup record before another build.`
     : value.phase === 'credential-selection' ? 'Ask your coding agent to check the saved package-read connection for this repository before another hv_plan.'
     : 'Ask your coding agent to diagnose this local preparation step before using hv_plan to prepare the image again.';
-  return `App preparation stopped while ${preparationPhaseText[value.phase]} (phase=${value.phase}, reason=${value.reason}, cleanup=${value.cleanup}). ${next} This preparation did not upload or deploy an image.`;
+  const command = value.commandFailure ? `, command=${value.commandFailure.kind}${value.commandFailure.exitCode === undefined ? '' : `, exitCode=${value.commandFailure.exitCode}`}` : '';
+  const reportedText:Record<OperatorBuildReportedMarker,string>={'npm-E401':'npm E401','npm-E403':'npm E403','npm-E404':'npm E404','npm-EINTEGRITY':'npm EINTEGRITY',
+    'disk-full':'no space left','typescript-error':'a TypeScript compiler error','build-command-failed':'a failed build command',
+    'image-metadata-failed':'an image metadata lookup failure','registry-rate-limit':'a registry rate-limit response'};
+  const reported = [...(value.commandFailure?.reported?.map(marker=>reportedText[marker])??[]),
+    ...(value.commandFailure?.dockerfileLine ? [`Dockerfile line ${value.commandFailure.dockerfileLine}`] : [])];
+  const observation = reported.length ? ` Build reported ${reported.join(', ')}. These are observed messages, not a verified cause.` : '';
+  return `App preparation stopped while ${preparationPhaseText[value.phase]} (phase=${value.phase}, reason=${value.reason}, cleanup=${value.cleanup}${command}).${observation} ${next} This preparation did not upload or deploy an image.`;
 }
 /** Local preparation only: no native output, credentials or arbitrary paths. */
 export class OperatorArtifactPreparationError extends Error {
   readonly phase: OperatorArtifactPreparationFailure['phase'];
   readonly reason: OperatorArtifactPreparationFailure['reason'];
   readonly cleanup: OperatorArtifactPreparationFailure['cleanup'];
+  readonly commandFailure?: OperatorArtifactCommandFailure;
   readonly recoveryDirectory?: string;
   constructor(input: OperatorArtifactPreparationFailure) {
     const value = preparationFailureSchema.parse(input);
     super(preparationMessage(value)); this.name = 'OperatorArtifactPreparationError';
-    this.phase=value.phase; this.reason=value.reason; this.cleanup=value.cleanup; this.recoveryDirectory=value.recoveryDirectory;
+    this.phase=value.phase; this.reason=value.reason; this.cleanup=value.cleanup; this.recoveryDirectory=value.recoveryDirectory; this.commandFailure=value.commandFailure;
   }
 }
 export function operatorArtifactPreparationMessage(error: unknown): string | undefined {
   if (!(error instanceof OperatorArtifactPreparationError)) return undefined;
   const parsed = preparationFailureSchema.safeParse({phase:error.phase,reason:error.reason,cleanup:error.cleanup,
-    ...(error.recoveryDirectory ? {recoveryDirectory:error.recoveryDirectory} : {})});
+    ...(error.recoveryDirectory ? {recoveryDirectory:error.recoveryDirectory} : {}),
+    ...(error.commandFailure ? {commandFailure:error.commandFailure} : {})});
   return parsed.success ? preparationMessage(parsed.data) : undefined;
 }
 

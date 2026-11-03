@@ -59,15 +59,19 @@ describe('reviewed private candidate publication through application and SQLite'
     const result=await f.plan();expect(dispatched).toBe(true);
     expect(result).toMatchObject({error:expect.stringContaining('source-verification')});
     expect(result).toMatchObject({error:expect.stringContaining('command-failed')});
+    expect(result).toMatchObject({error:expect.stringContaining('command=exit, exitCode=23')});
     expect(result).toMatchObject({error:expect.stringContaining('coding agent')});
     expect(JSON.stringify(result)).not.toContain('synthetic-private-command-output');expect(f.native.writes).toEqual([]);
   });
   it('keeps cleanup unverified in plan while ignoring an arbitrary exception message',async()=>{
-    const f=fixture(),error=new OperatorArtifactPreparationError({phase:'image-build',reason:'command-failed',cleanup:'unverified',recoveryDirectory:'hypervibe-candidate-Abc123'});
+    const f=fixture(),error=new OperatorArtifactPreparationError({phase:'image-build',reason:'command-failed',cleanup:'unverified',recoveryDirectory:'hypervibe-candidate-Abc123',
+      commandFailure:{kind:'exit',exitCode:1,reported:['npm-E403'],dockerfileLine:5}});
     error.message='private provider response';f.prepare.mockRejectedValue(error);
     const result=await f.plan();expect(result).toMatchObject({error:expect.stringContaining('cleanup is incomplete')});
     expect(result).toMatchObject({error:expect.stringContaining('hypervibe-candidate-Abc123/cleanup.json')});
     expect(result).toMatchObject({error:expect.stringContaining('phase=image-build')});
+    expect(result).toMatchObject({error:expect.stringContaining('npm E403')});
+    expect(result).toMatchObject({error:expect.stringContaining('not a verified cause')});
     expect(JSON.stringify(result)).not.toContain('private provider response');expect(f.native.writes).toEqual([]);
   });
   it.each(['unknown','invalid-phase','invalid-recovery-directory'] as const)('keeps %s exceptions behind the generic plan boundary',async fault=>{

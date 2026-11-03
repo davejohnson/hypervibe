@@ -8,7 +8,7 @@ import { Readable } from 'node:stream';
 import { z } from 'zod';
 import { normalizeGitRemoteIdentity } from '../../../lib/git-remote.js';
 import { githubPackagePullSource } from '../github/package-pull.js';
-import { OperatorArtifactPreparationError, type OperatorArtifactPreparationFailure } from '../../../domain/ports/operator-artifact.port.js';
+import { OperatorArtifactPreparationError, operatorArtifactCommandFailure, type OperatorArtifactPreparationFailure } from '../../../domain/ports/operator-artifact.port.js';
 import { isolatedDockerEnvironment, runOperatorCommand, type OperatorCommand, type OperatorCommandOptions } from './operator-image-build.js';
 
 function fail(): never { throw new Error('The exact application candidate or its private build credential could not be verified.'); }
@@ -39,6 +39,49 @@ export async function inspectApplicationCandidate(image: string, scope: Record<s
   if(value.Os!=='linux'||value.Architecture!=='amd64'||typeof size!=='number'||!Number.isSafeInteger(size)||size<0||size>4*1024*1024*1024
     ||user==='root'||!/^([a-z_][a-z0-9_-]*|[1-9][0-9]*)$/i.test(user))fail();
   return value.Id;
+}
+
+async function candidateImageAbsent(tag: string, command: OperatorCommand, options: OperatorCommandOptions) {
+  // Docker documents an exact repository:tag argument and an empty successful
+  // list for no match. An inspect error alone never establishes absence.
+  for(const selector of [[tag],['--filter',`label=dev.hypervibe.candidate-build=${tag.split(':')[1]}`]]) {
+    const value=await command('docker',['image','ls','--all','--no-trunc','--format','{{.ID}}',...selector],options);
+    if(value==='')continue;
+    const ids=value.replace(/\n$/,'').split('\n');
+    if(ids.length!==1||!/^sha256:[a-f0-9]{64}$/.test(ids[0]))fail();
+    return false;
+  }
+  return true;
+}
+async function candidateBuilderAbsent(builder: string, command: OperatorCommand, options: OperatorCommandOptions) {
+  const names=(await command('docker',['buildx','ls','--format','{{.Builder.Name}}'],options)).trim().split('\n');
+  return !names.some(name=>!name||!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)||name===builder)
+    && (await command('docker',['container','ls','--all','--filter',`name=^buildx_buildkit_${builder}0$`,'--format','{{.ID}}'],options))===''
+    && (await command('docker',['volume','ls','--filter',`name=^buildx_buildkit_${builder}0_state$`,'--format','{{.Name}}'],options))==='';
+}
+const candidateCleanupRecordSchema=z.object({status:z.literal('incomplete'),
+  builder:z.string().regex(/^hv-candidate-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/),
+  tag:z.string(),buildAttempted:z.boolean(),succeeded:z.boolean(),container:z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+}).strict().refine(value=>value.tag===`hypervibe-application-candidate:${value.builder.slice('hv-candidate-'.length)}`
+  &&(!value.succeeded||value.buildAttempted));
+
+/** Reobserve a retained cleanup record without deleting, building, rewriting
+ * its history or granting retry/publication authority. Use its original isolated
+ * Docker configuration through options.env. The caller may save this new result. */
+export async function observeApplicationCandidateCleanup(record: unknown, command: OperatorCommand=runOperatorCommand,
+  options: OperatorCommandOptions={}):Promise<{cleanup:'verified'|'unverified'}> {
+  const parsed=candidateCleanupRecordSchema.safeParse(record);if(!parsed.success)return {cleanup:'unverified'};
+  const config=options.env?.DOCKER_CONFIG;
+  if(typeof config!=='string'||!path.isAbsolute(config)||path.basename(config)!=='docker'
+    ||!/^hypervibe-candidate-[A-Za-z0-9]{6}$/.test(path.basename(path.dirname(config))))return {cleanup:'unverified'};
+  options={...options,signal:options.signal?AbortSignal.any([options.signal,AbortSignal.timeout(30_000)]):AbortSignal.timeout(30_000)};
+  const value=parsed.data;
+  try {
+    if(!await candidateBuilderAbsent(value.builder,command,options))return {cleanup:'unverified'};
+    if(value.container&&(await command('docker',['container','ls','--all','--no-trunc','--filter',`id=${value.container}`,'--format','{{.ID}}'],options))!=='')return {cleanup:'unverified'};
+    if(value.buildAttempted&&!value.succeeded&&!await candidateImageAbsent(value.tag,command,options))return {cleanup:'unverified'};
+    return {cleanup:'verified'};
+  }catch{return {cleanup:'unverified'};}
 }
 
 /** Stream bytes; no archive entry or command output containing the credential is
@@ -89,9 +132,10 @@ export async function prepareApplicationCandidate(nativeScope: Record<string,str
   let prepared:Record<string,string>|undefined,source:Record<string,string>|undefined;
   let phase:OperatorArtifactPreparationFailure['phase']='source-verification';
   let failureReason:OperatorArtifactPreparationFailure['reason']='verification-failed';
+  let commandFailure:OperatorArtifactPreparationFailure['commandFailure'];
   const checkedCommand:OperatorCommand=async(program,args,commandOptions)=>{
-    failureReason='verification-failed';
-    try{return await command(program,args,commandOptions);}catch{failureReason='command-failed';throw new Error('Local preparation command failed.');}
+    failureReason='verification-failed';commandFailure=undefined;
+    try{return await command(program,args,commandOptions);}catch(error){failureReason='command-failed';commandFailure=operatorArtifactCommandFailure(error);throw new Error('Local preparation command failed.');}
   };
   const secret=path.join(directory,'npm-token');
   try {
@@ -127,7 +171,8 @@ export async function prepareApplicationCandidate(nativeScope: Record<string,str
     if(created!==builder)fail();buildAttempted=true;
     phase='image-build';
     const output=await checkedCommand('docker',['buildx','build','--builder',builder,'--load','--platform','linux/amd64','--progress','plain','--secret',`id=npm_token,src=${secret}`,
-      ...Object.entries(applicationCandidateLabels(source)).flatMap(([key,value])=>['--label',`${key}=${value}`]),'--tag',tag,'--file',path.join(context,'Dockerfile'),context],options);
+      ...Object.entries(applicationCandidateLabels(source)).flatMap(([key,value])=>['--label',`${key}=${value}`]),'--tag',tag,'--file',path.join(context,'Dockerfile'),context],
+      {...options,dockerfileLineCount:readFileSync(path.join(context,'Dockerfile'),'utf8').split('\n').length});
     rmSync(secret);if(output.includes(token))fail();
     phase='image-verification';
     const image=await inspectApplicationCandidate(tag,source,checkedCommand,options);
@@ -154,8 +199,10 @@ export async function prepareApplicationCandidate(nativeScope: Record<string,str
     if(!succeeded&&buildAttempted&&source)try{
       await ownedCandidateImage(tag,source,command,cleanupOptions);
       await command('docker',['image','rm',tag],cleanupOptions);
-    }catch{ // Missing or unknown local image identity cannot authorize deleting any other image.
-      cleanupComplete=false;
+      if(!await candidateImageAbsent(tag,command,cleanupOptions))cleanupComplete=false;
+    }catch{ // A failed build may never have produced an image. Only an exact
+      // successful inventory proves absence; unknown identity never permits deletion.
+      try{if(!await candidateImageAbsent(tag,command,cleanupOptions))cleanupComplete=false;}catch{cleanupComplete=false;}
     }
     if(builderAttempted) {
       // A lost removal acknowledgment is not proof that the builder remains.
@@ -169,10 +216,7 @@ export async function prepareApplicationCandidate(nativeScope: Record<string,str
         // Suspension may expire all existing timers simultaneously. Readback
         // gets its own bounded phase and cannot authorize another deletion.
         const observationOptions={env,signal:AbortSignal.timeout(30_000)};
-        const names=(await command('docker',['buildx','ls','--format','{{.Builder.Name}}'],observationOptions)).trim().split('\n');
-        if(names.some(name=>!name||!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)||name===builder)
-          ||(await command('docker',['container','ls','--all','--filter',`name=^buildx_buildkit_${builder}0$`,'--format','{{.ID}}'],observationOptions)).trim()
-          ||(await command('docker',['volume','ls','--filter',`name=^buildx_buildkit_${builder}0_state$`,'--format','{{.Name}}'],observationOptions)).trim())cleanupComplete=false;
+        if(!await candidateBuilderAbsent(builder,command,observationOptions))cleanupComplete=false;
       }catch{cleanupComplete=false;}
     }
     token='';
@@ -180,9 +224,9 @@ export async function prepareApplicationCandidate(nativeScope: Record<string,str
       for(const file of ['context','source.tar','image.tar','filesystem.tar'])rmSync(path.join(directory,file),{recursive:true,force:true});
       writeFileSync(path.join(directory,'cleanup.json'),JSON.stringify({status:'incomplete',builder,tag,buildAttempted,succeeded,container:container??null}),{mode:0o600});
       throw new OperatorArtifactPreparationError({phase:succeeded?'cleanup':phase,reason:succeeded?'cleanup-unverified':failureReason,
-        cleanup:'unverified',recoveryDirectory:path.basename(directory)});
+        cleanup:'unverified',recoveryDirectory:path.basename(directory),...(!succeeded&&commandFailure?{commandFailure}:{})});
     }
     rmSync(directory,{recursive:true,force:true});
   }
-  if(!succeeded||!prepared)throw new OperatorArtifactPreparationError({phase,reason:failureReason,cleanup:'verified'});return prepared;
+  if(!succeeded||!prepared)throw new OperatorArtifactPreparationError({phase,reason:failureReason,cleanup:'verified',...(commandFailure?{commandFailure}:{})});return prepared;
 }

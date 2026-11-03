@@ -27,7 +27,7 @@ async function candidate(options: { dirty?: boolean; wrongOrigin?: boolean; leak
   vi.spyOn(packageCredentials,'githubPackagePullSource').mockImplementation(({githubRepo} = {}) => {
     expect(githubRepo).toBe('acme/operator'); return {connectionId:'verified-test-connection',credentialKey:'packageReadToken',username:'operator',token};
   });
-  let labels: Record<string,string> = {}, secretFile = '', context = '', preparedArchive=false; const commands: string[][] = [];
+  let labels: Record<string,string> = {}, secretFile = '', context = '', preparedArchive=false,imageRemoved=false; const commands: string[][] = [];
   const command: OperatorCommand = async (program,args,opts) => {
     if(program !== 'docker') return runOperatorCommand(program,args,opts);
     commands.push(args); expect(JSON.stringify({args,env:opts?.env})).not.toContain(token);
@@ -40,9 +40,11 @@ async function candidate(options: { dirty?: boolean; wrongOrigin?: boolean; leak
       return 'default\n'+(options.cleanupRemaining==='builder'?created[created.indexOf('--name')+1]+'\n':'');
     }
     if(args[0] === 'container' || args[0] === 'volume')return options.cleanupRemaining===args[0]?'retained-owned-resource\n':'';
-    if(args[0] === 'image' && args[1] === 'rm')return '';
+    if(args[0] === 'image' && args[1] === 'rm'){imageRemoved=true;return '';}
+    if(args[0] === 'image' && args[1] === 'ls')return imageRemoved?'':'sha256:'+'a'.repeat(64)+'\n';
     if(args[0] === 'buildx' && args[1] === 'build') {
       context = args.at(-1)!; secretFile = args[args.indexOf('--secret')+1].split(',src=')[1];
+      expect(opts?.dockerfileLineCount).toBe(readFileSync(path.join(context,'Dockerfile'),'utf8').split('\n').length);
       expect(args).toEqual(expect.arrayContaining(['build','--load','--platform','linux/amd64']));
       expect(readFileSync(secretFile,'utf8')).toBe(token); expect(statSync(secretFile).mode & 0o777).toBe(0o600);
       expect(secretFile.startsWith(context + path.sep)).toBe(false); expect(existsSync(path.join(context,'.env'))).toBe(false);
@@ -84,6 +86,26 @@ async function candidate(options: { dirty?: boolean; wrongOrigin?: boolean; leak
   return {root,scope,command,commands,preparedArchive:()=>preparedArchive,secretFile:()=>secretFile,context:()=>context};
 }
 describe('private application candidate build boundary',()=>{
+  it.each([false,true])('checks exact tag and attempt-label images after a failed build (untagged image remains: %s)',async untagged=>{
+    const f=await candidate();let error:unknown,listed=false,labelListed=false;
+    try {await prepareOperatorImages(f.scope,['application-candidate-v1'],async(program,args,options)=>{
+      if(program==='docker'&&args[0]==='buildx'&&args[1]==='build') {
+        await f.command(program,args,options);
+        return runOperatorCommand(process.execPath,['-e','process.exit(23)'],options);
+      }
+      if(program==='docker'&&args[0]==='image'&&args[1]==='inspect')throw new Error('No such image');
+      if(program==='docker'&&args[0]==='image'&&args[1]==='ls') {
+        if(args.includes('--filter')){labelListed=true;expect(args).toEqual(['image','ls','--all','--no-trunc','--format','{{.ID}}','--filter',expect.stringMatching(/^label=dev.hypervibe.candidate-build=[a-f0-9-]{36}$/)]);return untagged?'sha256:'+'c'.repeat(64)+'\n':'';}
+        listed=true;expect(args).toEqual(['image','ls','--all','--no-trunc','--format','{{.ID}}',expect.stringMatching(/^hypervibe-application-candidate:[a-f0-9-]{36}$/)]);return '';
+      }
+      return f.command(program,args,options);
+    },f.root);}catch(value){error=value;}
+    if((error as {recoveryDirectory?:string})?.recoveryDirectory)temporary.push(path.join(tmpdir(),(error as {recoveryDirectory:string}).recoveryDirectory));
+    expect(error).toMatchObject({phase:'image-build',reason:'command-failed',cleanup:untagged?'unverified':'verified',commandFailure:{kind:'exit',exitCode:23}});
+    expect(listed).toBe(true);expect(labelListed).toBe(true);
+    expect(f.commands.some(args=>args[0]==='image'&&args[1]==='rm')).toBe(false);
+    expect(existsSync(f.secretFile())).toBe(false);expect(existsSync(f.context())).toBe(false);
+  });
   // The child process really exits unsuccessfully. Docker effects remain
   // synthetic; the expected diagnostic comes from the entered operation,
   // never the untrusted stdout/stderr text.
@@ -97,7 +119,7 @@ describe('private application candidate build boundary',()=>{
       return f.command(program,args,options);
     },f.root);}catch(value){error=value;}
     expect(injected).toBe(true);
-    expect(error).toMatchObject({phase,reason:'command-failed',cleanup:'verified'});
+    expect(error).toMatchObject({phase,reason:'command-failed',cleanup:'verified',commandFailure:{kind:'exit',exitCode:19}});
     expect(String(error)).not.toContain(token);expect(String(error)).not.toContain('native-private-detail');
     expect(JSON.stringify(error)).not.toContain(token);expect(JSON.stringify(error)).not.toContain('native-private-detail');
     expect(f.commands.some(args=>['login','push','pull'].includes(args[0]))).toBe(false);
@@ -149,6 +171,27 @@ describe('private application candidate build boundary',()=>{
     expect(String(error)).toContain('cleanup is incomplete');
     const directory=path.join(tmpdir(),(error as {recoveryDirectory:string}).recoveryDirectory);temporary.push(directory);
     expect(JSON.parse(readFileSync(path.join(directory,'cleanup.json'),'utf8'))).toMatchObject({status:'incomplete',buildAttempted:true,succeeded:false});
+  });
+  it('preserves an unrelated image at the candidate tag when ownership inspection fails',async()=>{
+    const f=await candidate();let error:unknown;
+    try{await prepareOperatorImages(f.scope,['application-candidate-v1'],async(program,args,options)=>{
+      if(program==='docker'&&args[0]==='image'&&args[1]==='inspect')return JSON.stringify([{Id:'sha256:'+'c'.repeat(64),Os:'linux',Architecture:'amd64',Size:1024,Config:{User:'node',Labels:{}}}]);
+      if(program==='docker'&&args[0]==='image'&&args[1]==='ls')return 'sha256:'+'c'.repeat(64)+'\n';
+      return f.command(program,args,options);
+    },f.root);}catch(value){error=value;}
+    expect(error).toMatchObject({phase:'image-verification',cleanup:'unverified'});
+    temporary.push(path.join(tmpdir(),(error as {recoveryDirectory:string}).recoveryDirectory));
+    expect(f.commands.some(args=>args[0]==='image'&&args[1]==='rm')).toBe(false);
+  });
+  it('does not infer all attempt images are gone from a successful tagged-image removal',async()=>{
+    const f=await candidate({lostBuildAck:true});let error:unknown;
+    try{await prepareOperatorImages(f.scope,['application-candidate-v1'],async(program,args,options)=>{
+      if(program==='docker'&&args[0]==='image'&&args[1]==='ls'&&args.includes('--filter'))return 'sha256:'+'d'.repeat(64)+'\n';
+      return f.command(program,args,options);
+    },f.root);}catch(value){error=value;}
+    if((error as {recoveryDirectory?:string})?.recoveryDirectory)temporary.push(path.join(tmpdir(),(error as {recoveryDirectory:string}).recoveryDirectory));
+    expect(error).toMatchObject({phase:'image-build',cleanup:'unverified'});
+    expect(f.commands.filter(args=>args[0]==='image'&&args[1]==='rm')).toHaveLength(1);
   });
   it.each(['layer','filesystem','output'] as const)('rejects a credential copied into %s and removes temporary secret/context',async leak=>{
     const f=await candidate({leak}); let error: unknown;

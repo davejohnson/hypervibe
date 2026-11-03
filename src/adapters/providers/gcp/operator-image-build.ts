@@ -6,24 +6,73 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+import { OperatorArtifactCommandError, OPERATOR_BUILD_REPORTED_MARKERS, type OperatorBuildReportedMarker } from '../../../domain/ports/operator-artifact.port.js';
 
-export interface OperatorCommandOptions { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; signal?: AbortSignal }
+export interface OperatorCommandOptions { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; signal?: AbortSignal;
+  /** Number of lines in the reviewed archived Dockerfile, for bounded diagnostic headers only. */
+  dockerfileLineCount?: number }
 export type OperatorCommand = (program: string, args: string[], options?: OperatorCommandOptions) => Promise<string>;
+/** Transient, bounded stderr recognition for BuildKit only. A marker describes
+ * emitted text, never establishes its cause or grants retry authority. */
+function buildReportedMarkers(lineCount?:number) {
+  const reported=new Set<OperatorBuildReportedMarker>(); let carry='',dropping=false,dockerfileLine:number|undefined;
+  const maximum=typeof lineCount==='number'&&Number.isInteger(lineCount)&&lineCount>0&&lineCount<=100000?lineCount:undefined;
+  function observe(raw:string) {
+    const line=raw.replace(/\r$/,'').replace(/\x1b\[[0-9;]{0,32}m/g,'').replace(/^#[0-9]{1,6} (?:[0-9]{1,8}(?:\.[0-9]{1,9})? )?/,'');
+    if(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(line))return;
+    const npm=/^npm (?:ERR!|error) code (E401|E403|E404|EINTEGRITY|ENOSPC)$/.exec(line);
+    if(npm)reported.add(npm[1]==='ENOSPC'?'disk-full':`npm-${npm[1]}` as OperatorBuildReportedMarker);
+    if(/^(?:[A-Za-z0-9_./-]+\.(?:[cm]?ts|tsx)\([1-9][0-9]*,[1-9][0-9]*\): )?error TS[1-9][0-9]{3,4}: .+$/.test(line))reported.add('typescript-error');
+    if(/^(?:ERROR|error): (?:failed to build: )?(?:failed to solve: )?process "[^\r\n]+" did not complete successfully: exit code: [1-9][0-9]{0,2}$/.test(line))reported.add('build-command-failed');
+    if(/^(?:ERROR|error): (?:failed to build: )?failed to solve: [^\r\n]+: no space left on device$/.test(line))reported.add('disk-full');
+    if(/^(?:ERROR|error): (?:failed to build: )?failed to solve: [^\r\n]*failed to resolve source metadata for [^\r\n]+$/.test(line)) {
+      reported.add('image-metadata-failed');
+      if(/(?:429 Too Many Requests|toomanyrequests: [^\r\n]+)$/.test(line))reported.add('registry-rate-limit');
+    }
+    const header=/^Dockerfile:([1-9][0-9]{0,5})$/.exec(line);
+    if(header&&maximum!==undefined&&Number(header[1])<=maximum)dockerfileLine=Number(header[1]);
+  }
+  function fragment(value:string,end:boolean) {
+    if(!dropping&&carry.length+value.length<=4096)carry+=value;
+    else {carry='';dropping=true;}
+    if(end){if(!dropping)observe(carry);carry='';dropping=false;}
+  }
+  return {
+    push(chunk:Buffer){const value=chunk.toString('utf8');let start=0,next:number;
+      while((next=value.indexOf('\n',start))!==-1){fragment(value.slice(start,next),true);start=next+1;}
+      if(start<value.length)fragment(value.slice(start),false);},
+    finish(){if(carry&&!dropping)observe(carry);carry='';dropping=false;},
+    details(){const markers=OPERATOR_BUILD_REPORTED_MARKERS.filter(marker=>reported.has(marker));
+      return {...(markers.length?{reported:markers}:{}),...(dockerfileLine?{dockerfileLine}:{})};},
+  };
+}
 /** No shell, bounded captured output, no native output or credential echo on errors. */
 export const runOperatorCommand: OperatorCommand = async (program, args, options = {}) => {
-  if (options.signal?.aborted) throw new Error('Operator artifact command cancelled.');
+  if (options.signal?.aborted) throw new OperatorArtifactCommandError({kind:'abort'});
   return new Promise<string>((resolve, reject) => {
     // Commands without input need only EOF. An unused writable pipe can fail
     // after a fast child exits and incorrectly discard its successful result.
-    const child = spawn(program, args, { cwd: options.cwd, env: options.env,
-      stdio: [options.input ? 'pipe' : 'ignore', 'pipe', 'pipe'], signal: options.signal });
-    const output: Buffer[] = []; let bytes = 0;
-    const consume = (chunk: Buffer) => { bytes += chunk.length; if (bytes > 64 * 1024 * 1024) child.kill('SIGTERM'); else output.push(chunk); };
+    let child: ReturnType<typeof spawn>;
+    try { child = spawn(program, args, { cwd: options.cwd, env: options.env,
+      stdio: [options.input ? 'pipe' : 'ignore', 'pipe', 'pipe'], signal: options.signal }); }
+    catch { reject(new OperatorArtifactCommandError({kind:options.signal?.aborted?'abort':'spawn'})); return; }
+    const output: Buffer[] = []; let bytes = 0, limitExceeded = false;
+    const diagnostic=program==='docker'&&args[0]==='buildx'&&args[1]==='build'?buildReportedMarkers(options.dockerfileLineCount):undefined;
+    const exceedsLimit = () => { if (bytes <= 64 * 1024 * 1024) return false;
+      if (!limitExceeded) { limitExceeded=true; child.kill('SIGTERM'); } return true; };
+    const consume = (chunk: Buffer) => { bytes += chunk.length; if (!exceedsLimit()) output.push(chunk); };
     child.stdout!.on('data', consume);
     // Drain but never expose stderr, even when it contains a native token echo.
-    child.stderr!.on('data', (chunk: Buffer) => { bytes += chunk.length; if (bytes > 64 * 1024 * 1024) child.kill('SIGTERM'); });
-    child.once('error', () => reject(new Error('Operator artifact command failed.')));
-    child.once('close', code => code === 0 && bytes <= 64 * 1024 * 1024 ? resolve(Buffer.concat(output).toString('utf8')) : reject(new Error('Operator artifact command failed.')));
+    child.stderr!.on('data', (chunk: Buffer) => { bytes += chunk.length; if(!exceedsLimit())diagnostic?.push(chunk); });
+    child.once('error', () => reject(new OperatorArtifactCommandError({kind:limitExceeded?'output-limit':options.signal?.aborted?'abort':'spawn',...diagnostic?.details()})));
+    child.once('close', code => {
+      if(!limitExceeded&&!options.signal?.aborted)diagnostic?.finish();
+      const details=diagnostic?.details();
+      if (limitExceeded) reject(new OperatorArtifactCommandError({kind:'output-limit',...details}));
+      else if (options.signal?.aborted) reject(new OperatorArtifactCommandError({kind:'abort',...details}));
+      else if (code === 0) resolve(Buffer.concat(output).toString('utf8'));
+      else reject(new OperatorArtifactCommandError({kind:'exit', ...(code !== null && Number.isInteger(code) && code > 0 && code <= 0xffffffff ? {exitCode:code} : {}),...details}));
+    });
     child.stdin?.on('error', () => reject(new Error('Operator artifact command failed.')));
     child.stdin?.end(options.input);
   });

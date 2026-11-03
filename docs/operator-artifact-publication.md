@@ -350,6 +350,46 @@ exception messages or arbitrary paths. Incomplete cleanup stays blocked and
 identifies only the validated generated temporary-directory name containing the
 existing `cleanup.json`; it cannot become permission to retry or publish.
 
+The local command boundary additionally reports only its closed lifecycle outcome
+(`spawn`, `exit`, `abort`, or `output-limit`) and a native nonzero exit code when
+available. Only for `docker buildx build`, a bounded transient stderr parser can
+also report finite markers for selected npm error codes, disk-full text, TypeScript
+errors, failed build commands, image metadata or registry rate-limit messages. A
+Dockerfile line is included only when it falls within the reviewed archived file.
+No raw lines, paths, package names or messages are retained or printed. These are
+reported messages, not verified causes; source code itself can emit such text.
+Real child-process tests cover these outcomes and secret echoes, and the SQLite
+plan test checks that safe fields reach the existing preparation error. Neither
+these observations nor an exit code authorize retry or establish the build cause.
+
+A 2026-11-03 failed build exposed a separate cleanup assumption: image inspection
+failure was treated as incomplete cleanup even if no image was ever loaded. Fresh
+read-only Docker queries using its original isolated configuration confirmed the
+exact tag, unique attempt-label inventory (including untagged images), builder,
+container and cache volume were all absent. Its removed builder no longer provided
+build history, so the original build failure remains undiagnosed.
+
+Failed-build cleanup now accepts only successful empty inventories for both the
+exact image tag and unique attempt label, even after image removal acknowledges
+success. Docker documents the
+[exact repository-and-tag list and empty no-match result](https://docs.docker.com/reference/cli/docker/image/ls/).
+An untagged image, malformed/ambiguous inventory, denied read or timeout still
+blocks cleanup; it never authorizes deletion of an image whose ownership failed.
+The exported `observeApplicationCandidateCleanup` helper reuses these checks with
+the retained record and its original isolated `DOCKER_CONFIG`. It only reads local
+Docker metadata. The caller must correlate that configuration with the original
+record; the helper validates its generated path shape, not historical provenance.
+A caller can save a separate current-absence receipt while keeping
+the historical `cleanup.json` unchanged; this helper does not build, delete, retry,
+publish, or grant new execution authority. A successfully scanned image may remain
+intentionally retained after its builder cleanup.
+
+The missing-image and untagged-load counterexamples failed before the fix. Normal
+CI now exercises them with real child failure plus reconstructed serialized Docker
+responses, retains unrelated-image and unknown-read negatives, and tests the
+read-only helper. This is local preparation evidence, not a successful app rebuild
+or cloud deployment.
+
 The challenged assumption was that one generic publication error gave the coding
 agent enough information to investigate a local preparation failure. The product
 contract requires an evidence-based next action without secret values. Actual
