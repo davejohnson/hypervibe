@@ -53,7 +53,7 @@ describe('explicit runtime-access scope', () => {
       if (observation === 'unknown' || observation === 'waiting') return { state: observation, reason: 'Synthetic unknown runtime ownership' };
       return { state: 'action' as const, step: { operation: 'attach' as const, target: { nativeId: 'native-web', phase: 'ownership-metadata' }, description: 'Repair exact workload ownership metadata', requiresConfirm: true } };
     });
-    const applyIdentity = vi.fn(async () => {
+    const applyIdentity = vi.fn(async (_input?: unknown) => {
       expect((ctx.repos.environments.findById(environment.id)!.platformBindings.runtimeIdentities as any).web.pending.attemptId).toBeTruthy();
       writes.push('runtime:web'); repaired = true;
       return { receipt: { success: true, message: 'Synthetic exact metadata repair verified' }, binding: { provider, evidence: { nativeId: 'native-web' } } };
@@ -108,6 +108,82 @@ describe('explicit runtime-access scope', () => {
     expect((after.runtimeIdentities as any).worker).toEqual((before.runtimeIdentities as any).worker);
     expect(after.services).toEqual(before.services); expect(after.appliedSpecHash).toBe(before.appliedSpecHash);
     expect(f.hosting).not.toHaveBeenCalled(); expect(f.observeEnvironment).not.toHaveBeenCalled(); expect(f.artifactPlan).not.toHaveBeenCalled();
+  });
+  it('reaches a separately reviewed retained identity retirement after its service was removed, without deployment or artifact preparation', async () => {
+    const f = fixture(); const current = f.store.get(f.project)!;
+    const spec = structuredClone(current.spec); delete spec.environments.staging!.services.web;
+    f.store.replace(f.project, spec);
+    const bindings = structuredClone(f.environment.platformBindings) as any;
+    delete bindings.services.web;
+    bindings.runtimeIdentities.web = { provider: 'cloudrun', evidence: { nativeId: 'retained-web', releaseJobUid: 'retained-release-job' } };
+    f.ctx.repos.environments.updatePlatformBindings(f.environment.id, bindings);
+    f.inspect.mockImplementation(async (input: any) => {
+      expect(input.mode).toBe('destroy'); expect(input.binding.evidence.releaseJobUid).toBe('retained-release-job');
+      return { state: 'action', step: { operation: 'attach', target: { phase: 'release-job-delete', workloadUid: 'retained-release-job' },
+        description: 'Delete the exact retained migration job before removing runtime access', requiresConfirm: true } } as any;
+    });
+    const planned: any = await f.plan();
+    expect(planned.ok, JSON.stringify(planned)).toBe(true);
+    expect(planned.data.scope).toBe('runtime-access'); expect(planned.data.actions.map((a: any) => a.id)).toEqual(['runtime-identity:web']);
+    expect(await f.apply(planned.data.planId)).not.toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(f.writes).toEqual([]);
+    expect(await f.apply(planned.data.planId, ['runtime-identity:web'])).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(f.inspect.mock.calls.every(([input]: any) => input.mode === 'destroy')).toBe(true);
+    expect(f.writes).toEqual(['runtime:web']);
+    const after = f.ctx.repos.environments.findById(f.environment.id)!.platformBindings as any;
+    expect(after.services).toEqual(bindings.services); expect(after.runtimeIdentities.worker).toEqual(bindings.runtimeIdentities.worker);
+    expect(f.hosting).not.toHaveBeenCalled(); expect(f.artifactPlan).not.toHaveBeenCalled(); expect(f.applicationPlan).not.toHaveBeenCalled();
+  });
+  it.each(['name-only', 'missing-proof', 'provider-mismatch', 'still-bound'])('rejects a removed-service selector with %s before provider observation', async problem => {
+    const f = fixture(), spec = structuredClone(f.store.get(f.project)!.spec);
+    delete spec.environments.staging!.services.web; f.store.replace(f.project, spec);
+    const bindings = structuredClone(f.environment.platformBindings) as any;
+    if (problem !== 'still-bound') delete bindings.services.web;
+    if (problem !== 'name-only') bindings.runtimeIdentities.web = { provider: problem === 'provider-mismatch' ? 'ecs' : 'cloudrun',
+      evidence: problem === 'missing-proof' ? {} : { nativeId: 'retained-web' } };
+    f.ctx.repos.environments.updatePlatformBindings(f.environment.id, bindings);
+    const result: any = await f.plan(); expect(result.ok).toBe(false);
+    expect(f.inspect).not.toHaveBeenCalled(); expect(f.writes).toEqual([]);
+  });
+  it('rejects a changed retained identity when applying a saved retirement plan', async () => {
+    const f = fixture(), spec = structuredClone(f.store.get(f.project)!.spec);
+    delete spec.environments.staging!.services.web; f.store.replace(f.project, spec);
+    const bindings = structuredClone(f.environment.platformBindings) as any; delete bindings.services.web;
+    bindings.runtimeIdentities.web = { provider: 'cloudrun', evidence: { nativeId: 'retained-web' } };
+    f.ctx.repos.environments.updatePlatformBindings(f.environment.id, bindings);
+    const planned: any = await f.plan(); expect(planned.ok).toBe(true);
+    bindings.runtimeIdentities.web.evidence.nativeId = 'replacement'; f.ctx.repos.environments.updatePlatformBindings(f.environment.id, bindings);
+    expect(await f.apply(planned.data.planId, ['runtime-identity:web'])).not.toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(f.writes).toEqual([]); expect(f.applyIdentity).not.toHaveBeenCalled();
+  });
+  it('never exposes a create action for a removed service in retirement scope', async () => {
+    const f = fixture(), spec = structuredClone(f.store.get(f.project)!.spec);
+    delete spec.environments.staging!.services.web; f.store.replace(f.project, spec);
+    const bindings = structuredClone(f.environment.platformBindings) as any; delete bindings.services.web;
+    bindings.runtimeIdentities.web = { provider: 'cloudrun', evidence: { nativeId: 'retained-web' } };
+    f.ctx.repos.environments.updatePlatformBindings(f.environment.id, bindings);
+    f.inspect.mockResolvedValue({ state: 'action', step: { operation: 'create', target: { nativeId: 'unreviewed' }, description: 'Invalid creation', requiresConfirm: true } } as any);
+    const planned: any = await f.plan();
+    expect(planned.ok && !planned.data.blocked.length && planned.data.actions.some((a: any) => a.verified)).toBe(false);
+    if (planned.ok) await f.apply(planned.data.planId, ['runtime-identity:web']);
+    expect(f.writes).toEqual([]);
+  });
+  it('finishes two reviewed retirements while preserving the first successful local removal', async () => {
+    const f = fixture(), spec = structuredClone(f.store.get(f.project)!.spec);
+    spec.environments.staging!.services = {}; f.store.replace(f.project, spec);
+    const bindings = structuredClone(f.environment.platformBindings) as any;
+    bindings.services = {};
+    bindings.runtimeIdentities = Object.fromEntries(['web', 'worker'].map(name => [name, { provider: 'cloudrun', evidence: { nativeId: `retained-${name}` } }]));
+    f.ctx.repos.environments.updatePlatformBindings(f.environment.id, bindings);
+    f.inspect.mockImplementation(async (input: any) => {
+      expect(input.mode).toBe('destroy');
+      return { state: 'action', step: { operation: 'destroy', target: { nativeId: input.binding.evidence.nativeId }, description: 'Retire exact identity', requiresConfirm: true } } as any;
+    });
+    f.applyIdentity.mockImplementation(async (input: any) => { f.writes.push(`retire:${input.service.name}`); return { receipt: { success: true, message: 'Exact absence verified' } } as any; });
+    const planned: any = await f.plan({ services: ['web', 'worker'] }); expect(planned.ok).toBe(true);
+    expect(await f.apply(planned.data.planId, ['runtime-identity:web', 'runtime-identity:worker'])).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(f.writes).toEqual(['retire:web', 'retire:worker']);
+    expect(f.ctx.repos.environments.findById(f.environment.id)!.platformBindings.runtimeIdentities).toEqual({});
   });
   it.each([{ services: undefined }, { services: [] }, { services: ['web', 'web'] }, { services: ['missing'] },
     { envVars: {} }, { envFile: '' }, { secretRefs: {} }, { includeEnvFile: true }, { credential: 'database' }, { intent: 'adopt' }])('rejects invalid selection or deployment input %j before observation', async extra => {

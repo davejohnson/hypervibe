@@ -35,6 +35,11 @@ create-operation restart recovery, and separately confirmed intent-only job adop
 through the actual local SQLite/plan/apply boundary. See the [evidence and provider
 limits](../../docs/connect-cloud-prepared-hosting.md#migration-job-acknowledgment-and-explicit-adoption).
 
+`cloudrun-release-job-retirement.contract.test.ts` exercises exact completed-job
+retirement through serialized transport and the shared runtime-access frontier.
+`runtime-access-scope.test.ts` covers actual command/SQLite/apply reachability
+after service removal. See [ownership, pagination, retry and live limits](../../docs/connect-cloud-prepared-hosting.md#migration-job-retirement-after-service-removal).
+
 Incomplete database creation uses the optional capability reviewed in
 `database-provisioning-provider-matrix.json`. Normal acceptance checks the entire
 database registry, reconstructed Cloud SQL operation transport, and real SQLite

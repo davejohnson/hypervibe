@@ -104,6 +104,8 @@ export async function observeRuntimeAccess(input: Input): Promise<RuntimeAccessO
           ? { state: 'waiting', reason: 'Revoke the retained bucket grants before removing this workload identity.' }
           : needsWorkload ? { state: 'waiting', reason: 'Bind the exact workload before preparing its runtime identity.' }
             : identityObservation(await hosting.runtimeIdentities.inspect({ environment, environmentSpec, service, binding, mode, acknowledgedUpdate: input.acknowledgedUpdates?.[serviceName] }));
+        if (mode === 'destroy' && observation.state === 'action' && observation.step.operation === 'create')
+          observation = { state: 'unknown', reason: 'Retiring runtime access cannot create or adopt a replacement identity.' };
         if (binding?.pending && observation.state === 'action' && observation.step.operation !== 'recover') observation = { state: 'waiting', reason: 'The original runtime identity attempt must be independently recovered before another write.' };
         result.identities.push({ provider: environmentSpec.hosting.provider, serviceName, mode, binding, observation });
         if (observation.state === 'ready' && observation.identity) identities.set(serviceName, observation.identity);

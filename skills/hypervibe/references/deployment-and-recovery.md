@@ -102,6 +102,14 @@ verifying its exact prerequisite, plan only the workloads still awaiting update.
 Missing or conflicting ownership evidence is not permission to adopt a resource
 by name, replace its identity or edit provider metadata directly.
 
+After a service has been removed, this same runtime-access scope can select its
+retained native identity to review remaining cleanup. For a prepared Cloud Run
+service, Hypervibe can review its separately recorded migration job before
+retiring the runtime account. Stop release producers first, then use the exact
+returned confirmation IDs. Active or unknown job executions block deletion;
+an interrupted delete requires read-only reconciliation, never a second delete.
+This does not remove databases, backups, stored secrets or the cloud project.
+
 The existing environment policy and reviewed deployment bindings determine the
 release path. Portable managed CI is the normal push-deploy path where
 implemented. Do not change deploy-source settings or workflow content outside

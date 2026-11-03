@@ -3,7 +3,7 @@ import { manualBackupFingerprint, planManualBackup } from '../domain/services/ma
 import { applyOperatorApplications, operatorApplicationUnavailable } from '../domain/services/operator-application.service.js';
 import { operatorImageUpdateSelection, verifyOperatorImageUpdate } from '../domain/services/operator-image-update.service.js';
 import { applyRecoveryRuntimeAction } from '../domain/services/recovery-runtime.service.js';
-import { applyRuntimeAccessAction, observeRuntimeAccess, planRuntimeAccess, projectRuntimeAccessInput } from '../domain/services/runtime-access.service.js';
+import { applyRuntimeAccessAction, observeRuntimeAccess, planRuntimeAccess, projectRuntimeAccessInput, runtimeAccessActionService } from '../domain/services/runtime-access.service.js';
 import { applyCredentialLifecycle, pendingCredentialUpdate } from '../domain/services/credential-lifecycle.service.js';
 import { applyServiceInstanceAction } from '../domain/services/service-instance.service.js';
 import { applyRepositoryVariable, isRepositoryVariableAction, pendingRepositoryVariableEnvironment, repositoryVariablesEnvironment } from '../domain/services/repository-variables.service.js';
@@ -1041,7 +1041,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     const fingerprint = runtimeAccessScopeFingerprint(environment, envSpec, services);
     const blocked = (reason: string): PlanApplyOutcome => ({ kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason }] });
     if (!environment || !fingerprint || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap)
-      return blocked('Selected runtime access requires exact existing workloads and cannot run deployment or bootstrap.');
+      return blocked('Selected runtime access requires exact workloads or retained identities and cannot run deployment or bootstrap.');
     if (fingerprint !== loaded.document.observedFingerprint) return blocked('Selected workload bindings or retained runtime access changed; re-plan before mutation.');
     const connectionBlocks = planService.providerPreflight([envSpec.hosting.provider, ...loaded.document.actions.map(action => action.resource.provider)], projectForPreflight, envName);
     if (connectionBlocks.length) return { kind: 'blocked', applyBlocked: connectionBlocks };
@@ -1060,7 +1060,10 @@ export async function executePlanApply(ctx: CommandContext, params: {
         if (!['hosting.runtime-identity.mutate', 'storage.runtime-access.mutate'].includes(String(capability)))
           return { success: false, status: 'blocked', message: 'This selected runtime stage cannot execute unrelated actions.' };
         const current = ctx.repos.environments.findById(environment.id);
-        if (!runtimeAccessScopeFingerprint(current, envSpec, services) || !isDeepStrictEqual(current!.platformBindings, expectedBindings))
+        const selected = runtimeAccessActionService(action);
+        // Earlier own retirements may have removed another selected identity.
+        // The rolling full snapshot still protects every unrelated record.
+        if (!selected || !services.includes(selected) || !runtimeAccessScopeFingerprint(current, envSpec, [selected]) || !isDeepStrictEqual(current!.platformBindings, expectedBindings))
           return { success: false, status: 'blocked', message: 'Selected workload bindings became unavailable.' };
         return applyRuntimeAccessAction({ ...await projectRuntimeAccessInput(projectForPreflight, current, envSpec, undefined, services),
           action, confirmedActionIds: new Set(params.confirmActions),

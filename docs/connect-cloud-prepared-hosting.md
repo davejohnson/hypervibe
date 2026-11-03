@@ -751,6 +751,64 @@ checks and TypeScript pass. These are reconstructed transport checks in normal
 `npm test`; they establish the request and persistence contract, while the live
 metadata repair and remaining worker rollout still require native verification.
 
+### Migration-job retirement after service removal
+
+Ordinary service removal does not itself authorize deletion of a separate release
+job. The existing `runtime-access` frontier now reviews that job after the service
+is absent, before its secret/queue grants and runtime account can be retired.
+Use `hv_plan` with `scope: "runtime-access"`, `services: ["web"]` and
+`includeEnvFile: false`, then apply only the exact confirmed saved action.
+The selector must have either an existing workload or a same-provider retained
+native identity after both desired service and current binding are removed.
+The latter always invokes the provider in destroy mode; identity creation is
+rejected. Saved selection fingerprints, environment reservation, spec checks and
+complete-binding CAS still apply. Unrelated artifact preparation is not needed.
+
+The challenged assumption was that service deletion also handled its separately
+bound migration job. A second counterexample came from the saved test-host
+metadata: an account created before the first migration had no `releaseJobResource`
+in its runtime evidence. Dropping the service binding could therefore hide that
+job from account cleanup. The fix uses the matching completed first-release
+attempt, historical evidence and installation marker to retain the exact job UID.
+It does not infer ownership from a job name or compare historical images with
+later legitimate release configuration. Name-only legacy jobs remain unknown.
+
+Native review checks the retained job lifetime, current runtime principal and
+opaque etag, then reads the bounded complete execution inventory (up to 20 pages
+of 100). Active, reconciling, malformed, denied or incomplete reads block cleanup.
+Short native execution-parent IDs use the existing full-child-scope verifier.
+The confirmed DELETE has the fresh etag and no body. Only subsequent native 404
+establishes absence. An uncertain delete retains its intent and can only read
+back; a definite API rejection allows a separately confirmed new attempt.
+Database contents, retained backups, deployment receipts and unrelated bindings
+are preserved. Job deletion is not account deletion: its successful receipt
+retains the identity for the next reviewed permission/account frontier.
+
+Official evidence (read 2026-11-03): [jobs.delete](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs/delete)
+defines the etag query, empty body and operation response;
+[executions.list](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs.executions/list)
+defines pagination; [Job](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs)
+defines stable resource UID; [managing jobs](https://docs.cloud.google.com/run/docs/managing/jobs)
+states that deleting a job terminates active executions. The APIs do not promise
+an atomic inventory-and-delete transaction against a concurrent `jobs.run`.
+Stop other release producers before cleanup; the exact action discloses the
+remaining external-administrator race rather than promising zero cancellation.
+
+Provider review: Cloud Run alone implements this completed migration-job
+frontier. Azure Container Apps, ECS, DigitalOcean, Fly, Railway and Vercel keep
+their existing native teardown behavior; no auxiliary-job cleanup support is
+inferred for them. The shared selected runtime scope only reaches an already
+registered provider capability and its own destroy-mode contract.
+
+Observed RED→GREEN checks exercise serialized Cloud Run transport, actual shared
+plan/apply confirmation and pending-intent handling, and command/SQLite saved
+retirement scope. Coverage includes changed UID/etag, active and paginated
+executions, old evidence shape, lost acknowledgment, denied readback, missing
+confirmation, changed retained identity and forbidden create effects. Tests are
+in ordinary `npm test`. These are reconstructed transport and local lifecycle
+checks, not a live deletion. No test-host resources were deleted for this fix;
+full project, registration, archive-version and artifact cleanup remain separate.
+
 ### Completed first releases remain historical
 
 The labels-only repair was subsequently verified live: the original labels

@@ -8,6 +8,8 @@ import { cloudRunJobUpdateBody } from './cloudrun-job-request.js';
 import { desiredRuntimeQueues, parseRuntimeQueues, readRuntimeQueuePolicies, serializeRuntimeQueues, unionRuntimeQueues, type GcpRuntimeQueue } from './gcp-runtime-queues.js';
 import { hasRuntimeSecretConsumers, desiredRuntimeSecrets, parseRuntimeSecrets, readRuntimeSecretPolicies, serializeRuntimeSecrets, unionRuntimeSecrets, type GcpRuntimeSecret } from './gcp-runtime-secrets.js';
 import { parseGcpGithubWorkloadIdentity } from './gcp-github-workload-identity.js';
+import { preparedDirectReleaseAttemptSchema, preparedDirectReleaseEvidenceSchema, preparedHostingMarkerSchema } from '../../../domain/ports/hosting-prepared.port.js';
+import { cloudRunExecutionBelongsToJob } from './cloudrun-resource-identity.js';
 
 interface Scope { projectId: string; region: string; deployEmail?: string; defaultAuthentication?: boolean }
 const IAM = 'https://iam.googleapis.com/v1';
@@ -157,7 +159,13 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
     if (retained !== undefined && (!retained.startsWith(prefix) || !/^[a-z][a-z0-9-]{0,62}$/.test(retained.slice(prefix.length)))) {
       throw new GcpRuntimeError('The retained Cloud Run release job belongs to a different or invalid native scope.');
     }
-    if (name === undefined) return retained;
+    if (name === undefined) {
+      if (retained || request.mode !== 'destroy') return retained;
+      // Identities can predate the first migration. Service removal retains the
+      // completed release journal even when it removes the service binding.
+      const release = (request.environment.platformBindings.preparedDirectReleaseAttempts as Record<string, any> | undefined)?.[request.service.name];
+      return release?.releaseTask || release?.target?.releaseCommandHash ? this.releaseJobOwnership(request, scope).resource : undefined;
+    }
     if (!/^[a-z][a-z0-9-]{0,62}$/.test(name)) throw new GcpRuntimeError('The bound Cloud Run release job has an invalid resource identity.');
     const resource = prefix + name;
     if (retained && retained !== resource) throw new GcpRuntimeError('The bound release job differs from its retained runtime identity scope.');
@@ -172,6 +180,67 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
     const workload = await this.api(`https://run.googleapis.com/v2/${selected.resource}`, token) as Record<string, any> | null;
     if (workload && workload.name !== selected.resource) throw new GcpRuntimeError('Runtime activation returned a different workload identity.');
     return { scope: selected, workload };
+  }
+
+  /** The completed release journal supplies lifetime authority, not a name or
+   * current image comparison. Later releases may legitimately update this job. */
+  private releaseJobOwnership(request: RuntimeIdentityRequest, scope: ReturnType<CloudRunRuntimeIdentities['coordinates']>) {
+    const marker = preparedHostingMarkerSchema.parse(request.environment.platformBindings.preparedHosting);
+    const release = preparedDirectReleaseAttemptSchema.parse((request.environment.platformBindings.preparedDirectReleaseAttempts as Record<string, unknown> | undefined)?.[request.service.name]);
+    const evidence = preparedDirectReleaseEvidenceSchema.parse((request.environment.platformBindings.preparedDirectReleaseEvidence as Record<string, unknown> | undefined)?.[request.service.name]);
+    const target = release.target; const task = release.releaseTask;
+    if (request.mode !== 'destroy' || request.environment.platformBindings.provider !== 'cloudrun'
+      || request.environment.platformBindings.projectId !== scope.projectId || request.environment.platformBindings.environmentId !== scope.region
+      || release.status !== 'completed' || !release.rolloutAttempted || !target.releaseCommandHash || task?.phase !== 'completed'
+      || release.actionId !== `service:${request.service.name}` || target.workload !== request.service.name
+      || target.provider !== 'cloudrun' || target.projectId !== scope.projectId || target.environmentId !== scope.region
+      || `projects/${scope.projectId}/locations/${scope.region}/services/${target.resourceId}` !== scope.resource
+      || marker.pendingFirstRelease.includes(request.service.name) || marker.installationId !== target.installationId
+      || marker.planDigest !== target.planDigest || marker.receiptDigest !== target.receiptDigest
+      || evidence.attemptId !== release.id || canonical(evidence.target) !== canonical(target)
+      || !task.jobName.startsWith(`projects/${scope.projectId}/locations/${scope.region}/jobs/`)
+      || !/^[a-z][a-z0-9-]{0,62}$/.test(task.jobName.split('/').at(-1)!) || !task.jobUid) {
+      throw new GcpRuntimeError('Release-job cleanup requires the exact completed native release and its retained job lifetime; a name alone does not authorize deletion.');
+    }
+    const boundName = (request.environment.platformBindings.services as Record<string, { releaseJobName?: string }> | undefined)?.[request.service.name]?.releaseJobName;
+    if (request.binding?.evidence.releaseJobResource !== undefined && request.binding.evidence.releaseJobResource !== task.jobName
+      || boundName !== undefined && `projects/${scope.projectId}/locations/${scope.region}/jobs/${boundName}` !== task.jobName) {
+      throw new GcpRuntimeError('The release-job binding differs from its completed native release lifetime.');
+    }
+    return { resource: task.jobName, uid: task.jobUid, releaseAttemptId: release.id };
+  }
+
+  private async releaseJobDeletionStep(request: RuntimeIdentityRequest, scope: ReturnType<CloudRunRuntimeIdentities['coordinates']>, job: Record<string, any>, uniqueId: string, token: string): Promise<RuntimeIdentityStep> {
+    const owned = this.releaseJobOwnership(request, scope);
+    if (job.name !== owned.resource || job.uid !== owned.uid || typeof job.etag !== 'string' || !job.etag
+      || job.reconciling === true || !/^[1-9]\d*$/.test(String(job.generation)) || job.generation !== job.observedGeneration
+      || job.terminalCondition?.state !== 'CONDITION_SUCCEEDED' || job.template?.template?.serviceAccount !== scope.email) {
+      throw new GcpRuntimeError('The retained release job is replaced, changing, or uses an unverified runtime identity.');
+    }
+    let pageToken = ''; const pages = new Set<string>(); const executions = new Set<string>();
+    for (let page = 0; ; page++) {
+      if (page >= 20 || pages.has(pageToken)) throw new GcpRuntimeError('The complete release-job execution inventory could not be verified.');
+      pages.add(pageToken);
+      const result = await this.api(`https://run.googleapis.com/v2/${owned.resource}/executions?pageSize=100${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`, token) as Record<string, any> | null;
+      if (!result || (result.executions !== undefined && !Array.isArray(result.executions))
+        || result.nextPageToken !== undefined && typeof result.nextPageToken !== 'string') throw new GcpRuntimeError('Release-job executions returned incomplete native evidence.');
+      for (const execution of result.executions ?? []) {
+        const terminal = execution?.conditions?.filter((condition: any) => condition?.type === 'Completed');
+        if (!execution || !cloudRunExecutionBelongsToJob(execution, owned.resource)
+          || typeof execution.uid !== 'string' || !execution.uid || execution.reconciling === true
+          || executions.has(execution.name) || execution.runningCount !== undefined && execution.runningCount !== 0
+          || !Number.isFinite(Date.parse(execution.completionTime)) || !Array.isArray(terminal) || terminal.length !== 1
+          || !['CONDITION_SUCCEEDED', 'CONDITION_FAILED'].includes(terminal[0].state)) {
+          throw new GcpRuntimeError('A release-job execution is active or its terminal identity is unknown; cleanup will not cancel it.');
+        }
+        executions.add(execution.name);
+      }
+      pageToken = result.nextPageToken ?? '';
+      if (!pageToken) break;
+    }
+    return { ...this.step(scope, 'attach', uniqueId), target: { ...this.step(scope, 'attach', uniqueId).target,
+      phase: 'release-job-delete', workloadResource: owned.resource, workloadUid: owned.uid, workloadEtag: job.etag, releaseAttemptId: owned.releaseAttemptId },
+      description: `Delete the completed migration job ${owned.resource} after its app service is gone; preserve the database, backups and runtime permissions until job absence is verified. Stop other release producers before applying: Google can terminate an execution started concurrently after the final check.` };
   }
 
   private step(scope: ReturnType<CloudRunRuntimeIdentities['coordinates']>, operation: RuntimeIdentityStep['operation'], uniqueId?: string): RuntimeIdentityStep {
@@ -268,7 +337,12 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
       }
       if (request.mode === 'destroy') {
         if (!request.binding) return { state: 'ready' };
-        if (workload || releaseWorkload) return { state: 'waiting', reason: 'Remove the bound workload and release job before their runtime identity.' };
+        if (workload) return { state: 'waiting', reason: 'Remove the bound workload before its release job and runtime identity.' };
+        if (releaseWorkload) {
+          if (!account) throw new GcpRuntimeError('The retained release job has no verified owned runtime identity.');
+          this.owned(request, scope, account);
+          return { state: 'action', step: await this.releaseJobDeletionStep(request, scope, releaseWorkload, account.uniqueId, token) };
+        }
         if (!account) {
           if (!request.binding.evidence.uniqueId) throw new GcpRuntimeError('Runtime account deletion cannot finalize without its recorded immutable identity.');
           return { state: 'action', step: this.step(scope, 'destroy', request.binding.evidence.uniqueId) };
@@ -343,6 +417,7 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
   async apply(request: RuntimeIdentityRequest & { step: RuntimeIdentityStep; attemptId: string }) {
     let mutationAttempted = false;
     let createAcknowledged = false;
+    let releaseDeleteAcknowledged = false;
     try {
       if (!attempt(request.attemptId)) throw new GcpRuntimeError('Google runtime identity requires its exact persisted attempt.');
       if (request.binding?.pending?.attemptId !== request.attemptId || canonical(request.binding.pending.step) !== canonical(request.step)) {
@@ -359,6 +434,15 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
         }
         if (!account) throw new GcpRuntimeError('The pending runtime identity is not observable; retain the exact attempt for reconciliation.');
         const binding = this.owned(request, scope, account);
+        if (request.step.target.phase === 'release-job-delete') {
+          const owned = this.releaseJobOwnership(request, scope);
+          if (workload || releaseWorkload || request.step.target.recoverOperation !== 'attach'
+            || request.step.target.workloadResource !== owned.resource || request.step.target.workloadUid !== owned.uid
+            || request.step.target.releaseAttemptId !== owned.releaseAttemptId || request.step.target.uniqueId !== account.uniqueId) {
+            throw new GcpRuntimeError('The exact release-job deletion is not yet verified; retain its attempt without repeating the delete.');
+          }
+          return { receipt: { success: true, message: 'Verified absence of the exact release job after its recorded deletion; runtime identity and permissions remain.' }, binding };
+        }
         if (request.step.target.phase === 'secrets') {
           const desired = parseRuntimeSecrets(request.step.target.readerGrants);
           const previous = parseRuntimeSecrets(request.step.target.previousReaderGrants);
@@ -403,6 +487,18 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
       if (!account && request.step.operation === 'destroy') return { receipt: { success: true, message: 'The exact recorded runtime account and workload are already absent.' }, binding: undefined };
       if (!account) throw new GcpRuntimeError('The exact owned runtime identity disappeared before mutation.');
       const binding = this.owned(request, scope, account);
+      if (request.step.operation === 'attach' && request.step.target.phase === 'release-job-delete') {
+        const before = await this.read(request);
+        if (before.workload || !before.releaseWorkload || !before.account
+          || canonical(await this.releaseJobDeletionStep(request, scope, before.releaseWorkload, before.account.uniqueId, token)) !== canonical(request.step)) {
+          throw new GcpRuntimeError('The reviewed release-job deletion changed before mutation.');
+        }
+        mutationAttempted = true;
+        await this.api(`https://run.googleapis.com/v2/${request.step.target.workloadResource}?etag=${encodeURIComponent(request.step.target.workloadEtag!)}`, token, { method: 'DELETE' });
+        releaseDeleteAcknowledged = true;
+        if (await this.api(`https://run.googleapis.com/v2/${request.step.target.workloadResource}`, token)) throw new GcpRuntimeError('Release-job deletion is pending; retain this exact attempt for read-only reconciliation.');
+        return { receipt: { success: true, message: 'Deleted the exact completed migration job and verified its absence; runtime identity and permissions remain.' }, binding };
+      }
       if (request.step.operation === 'attach' && request.step.target.phase === 'secrets') {
         const desired = parseRuntimeSecrets(request.step.target.readerGrants);
         const previous = parseRuntimeSecrets(request.step.target.previousReaderGrants);
@@ -527,7 +623,9 @@ export class CloudRunRuntimeIdentities implements IRuntimeIdentities {
       if (await this.account(scope, token, account.uniqueId)) throw new GcpRuntimeError('Runtime service account deletion is not yet observable.');
       return { receipt: { success: true, message: 'Deleted the exact owned Google runtime identity and verified its absence.' } };
     } catch (error) {
-      const mutationRejected = request.step.operation === 'create' && mutationAttempted && !createAcknowledged && error instanceof GcpRuntimeError
+      const mutationRejected = (request.step.operation === 'create' && !createAcknowledged
+        || request.step.operation === 'attach' && request.step.target.phase === 'release-job-delete' && !releaseDeleteAcknowledged)
+        && mutationAttempted && error instanceof GcpRuntimeError
         && error.status !== undefined && [400, 401, 403, 409, 412].includes(error.status);
       return { receipt: { success: false, message: 'Google runtime identity action did not converge.', error: gcpRuntimeError(error), data: { mutationAttempted, ...(mutationRejected ? { mutationRejected: true } : {}) } } };
     }

@@ -558,7 +558,7 @@ describe('Cloud Run service-owned runtime identities', () => {
     expect(f.writes).toHaveLength(1);
   });
 
-  it('retains a bound release job as a deletion prerequisite after the local hosting binding is removed', async () => {
+  it('keeps a name-only legacy release job unknown after the local hosting binding is removed', async () => {
     const f = fixture();
     const resource = `projects/${projectId}/locations/us-central1/jobs/release`;
     const input = { ...request, environment: { ...request.environment, platformBindings: { ...request.environment.platformBindings,
@@ -568,7 +568,7 @@ describe('Cloud Run service-owned runtime identities', () => {
       name: `projects/${projectId}/serviceAccounts/runtime-legacy@${projectId}.iam.gserviceaccount.com`, uniqueId: '123456789012345678901',
       attemptId, workloadResource: `projects/${projectId}/locations/us-central1/services/web`, releaseJobResource: resource } };
     f.setReleaseWorkload({ name: resource, uid: 'release-uid', template: { template: { serviceAccount: binding.evidence.email } } });
-    expect(await f.driver.inspect({ ...request, mode: 'destroy', binding })).toMatchObject({ state: 'waiting' });
+    expect(await f.driver.inspect({ ...request, mode: 'destroy', binding })).toMatchObject({ state: 'unknown' });
     expect(f.writes).toHaveLength(0);
     // The retained resource is scope-bound even when all local hosting records are gone.
     expect(await f.driver.inspect({ ...input, mode: 'destroy', binding: { ...binding, evidence: { ...binding.evidence,

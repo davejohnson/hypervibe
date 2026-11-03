@@ -165,20 +165,25 @@ import {
   parseEnvironmentMaintenanceBinding,
 } from '../services/environment-maintenance.service.js';
 
-/** Bind a selected runtime stage to existing native workloads and their retained
- * access records. Provider action evidence remains the native mutation authority. */
+/** Bind a selected runtime stage to existing workloads, or an exact retained
+ * identity retiring after workload removal. Provider evidence remains authority. */
 export function runtimeAccessScopeFingerprint(environment: Environment | null, spec: EnvironmentSpec | undefined, services: readonly string[] | undefined): string | undefined {
   if (!environment || !spec || !services?.length || new Set(services).size !== services.length
     || environment.platformBindings.provider !== spec.hosting.provider) return undefined;
   const bindings = environment.platformBindings.services as Record<string, { serviceId?: unknown }> | undefined;
   const retained = runtimeAccessBindings(environment);
-  if (!bindings || !retained || services.some(name => !spec.services[name] || typeof bindings[name]?.serviceId !== 'string'
-    || !(bindings[name].serviceId as string).trim()
-    || Object.entries(bindings).some(([other, binding]) => other !== name && binding.serviceId === bindings[name].serviceId))) return undefined;
+  if (!retained || services.some(name => {
+    if (!spec.services[name]) {
+      const identity = retained.runtimeIdentities[name];
+      return Boolean(bindings && Object.hasOwn(bindings, name)) || !identity || identity.provider !== spec.hosting.provider || !Object.keys(identity.evidence).length;
+    }
+    return !bindings || typeof bindings[name]?.serviceId !== 'string' || !(bindings[name].serviceId as string).trim()
+      || Object.entries(bindings).some(([other, binding]) => other !== name && binding.serviceId === bindings[name].serviceId);
+  })) return undefined;
   return canonicalJsonSha256({ projectId: environment.projectId, environmentId: environment.id, provider: spec.hosting.provider,
     nativeProject: environment.platformBindings.projectId ?? null, nativeEnvironment: environment.platformBindings.environmentId ?? null,
     providerScope: environment.platformBindings.providerScope ?? null,
-    services: Object.fromEntries([...services].sort().map(name => [name, { binding: bindings[name],
+    services: Object.fromEntries([...services].sort().map(name => [name, { binding: bindings?.[name] ?? null, ...(!spec.services[name] ? { retiring: true } : {}),
       identity: retained.runtimeIdentities[name] ?? null,
       grants: Object.fromEntries(Object.entries(retained.storageRuntimeAccess).filter(([, records]) => records[name]).map(([storage, records]) => [storage, records[name]])) }])) });
 }
@@ -1802,7 +1807,7 @@ export class PlanService {
     const environment = this.envRepo.findByProjectAndName(project.id, environmentName);
     const desired = specResult.spec.environments[environmentName];
     const fingerprint = runtimeAccessScopeFingerprint(environment, desired, options.serviceFilter);
-    if (!fingerprint) return { error: 'scope="runtime-access" requires unique nonempty services with exact existing workload bindings and valid retained access state.' };
+    if (!fingerprint) return { error: 'scope="runtime-access" requires unique services with exact workload bindings, or retained native identities after workload removal, and valid access state.' };
     const services = [...options.serviceFilter!].sort();
     const observed = await observeRuntimeAccess(await projectRuntimeAccessInput(project, environment, desired, undefined, services));
     const actions = planRuntimeAccess(observed);
@@ -1811,7 +1816,7 @@ export class PlanService {
       || observed.grants.some(item => item.waiting || item.observation.state === 'unknown')
       || services.some(name => !observed.identities.some(item => item.serviceName === name) && !observed.grants.some(item => item.serviceName === name)))
       blocked.push({ provider: 'hypervibe', policy: 'hard', reason: 'Selected runtime access is unknown or awaiting an exact prerequisite. Preserve retained attempts and resolve their readback before mutation.' });
-    const warnings = ['This plan changes only the selected existing workloads\' runtime identity or permissions. It does not deploy application code or prepare unrelated cloud setup.'];
+    const warnings = ['This plan changes only the selected workloads\' runtime access or retires their retained resources after workload removal. It does not deploy application code or prepare unrelated cloud setup.'];
     const document: PlanRunDocument = { kind: 'hv_plan', scope: 'runtime-access', environmentName, specRevision: specResult.revision,
       observedFingerprint: fingerprint, actions, overrides: { services }, warnings };
     planRunDocumentSchema.parse(document);
