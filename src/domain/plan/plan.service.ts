@@ -2810,7 +2810,7 @@ export class PlanService {
           && action.verified && !action.metadata?.blockedReason)
       : [];
     const namespaceBindingStage = namespacePrerequisites.length > 0;
-    const serviceInstancePrerequisites = actions.filter(action => ['serviceInstanceCreate','serviceInstanceFinalize'].includes(String(action.metadata?.operation)));
+    const serviceInstancePrerequisites = actions.filter(action => ['serviceInstanceCreate','serviceInstanceFinalize','serviceInstanceFinalizeRecovery'].includes(String(action.metadata?.operation)));
     const instanceIdentityStage = serviceInstancePrerequisites.length > 0;
     const ciBindingPrerequisites = namespaceBindingStage ? namespacePrerequisites : instanceIdentityStage ? serviceInstancePrerequisites : managedCiEnabled || volumeIdentityStage
       ? ciProjectBootstrapStage ? [projectAction!] : actions.filter(action => isManagedCiBindingRoot(action)

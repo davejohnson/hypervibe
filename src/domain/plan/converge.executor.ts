@@ -174,7 +174,7 @@ export function isManagedCiBindingRoot(action: PlanAction): boolean {
     && action.type !== 'destroy'
     && (
       (action.resource.kind === 'project' || action.resource.kind === 'environment')
-      || (action.resource.kind === 'service' && (action.type === 'create' || action.type === 'replace' || action.metadata?.workloadCreateRequired === true || action.metadata?.operation === 'serviceInstanceFinalize'))
+      || (action.resource.kind === 'service' && (action.type === 'create' || action.type === 'replace' || action.metadata?.workloadCreateRequired === true || ['serviceInstanceFinalize','serviceInstanceFinalizeRecovery'].includes(String(action.metadata?.operation))))
     );
 }
 

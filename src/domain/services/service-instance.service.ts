@@ -7,14 +7,19 @@ import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { PlanAction } from '../plan/plan.types.js';
 import { parseHostingBindings, hostingServiceCreateRecoverySchema } from '../ports/hosting.port.js';
-import { serviceInstanceIntentSchema, serviceInstanceIntentsSchema, type IServiceInstances, type ServiceInstanceIntent } from '../ports/service-instance.port.js';
+import { serviceInstanceIntentSchema, serviceInstanceIntentsSchema, serviceInstanceRecoveryReviewSchema, type IServiceInstances, type ServiceInstanceIntent } from '../ports/service-instance.port.js';
 import { adapterFactory } from './adapter.factory.js';
 import { SpecStore } from '../spec/spec.store.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import { serviceInstanceHistory, serviceInstanceIntentFingerprint, serviceInstanceRecoveryReview } from './service-instance-recovery.js';
 
 export const serviceInstanceActionSchema = serviceInstanceIntentSchema.extend({
-  operation: z.enum(['serviceInstanceCreate', 'serviceInstanceFinalize']),
-}).strict();
+  operation: z.enum(['serviceInstanceCreate', 'serviceInstanceFinalize', 'serviceInstanceFinalizeRecovery']),
+  recoveryReview: serviceInstanceRecoveryReviewSchema.optional(),
+}).strict().refine(value => (value.operation === 'serviceInstanceFinalizeRecovery') === Boolean(value.recoveryReview)
+  && (!value.recoveryApproval || value.operation === 'serviceInstanceFinalizeRecovery' && value.completed === true
+    && value.recoveryApproval.archiveId === value.recoveryReview?.archiveId
+    && value.recoveryApproval.activeMarkerSha256 === value.recoveryReview?.activeMarkerSha256));
 function pending(environment: Environment): Record<string, ServiceInstanceIntent> {
   return serviceInstanceIntentsSchema.parse(environment.platformBindings.serviceInstanceCreates ?? {});
 }
@@ -99,6 +104,22 @@ export async function planServiceInstances(params: {
       || previous.sourceBindingSha256 !== sourceBindingSha256 || canonicalJsonSha256(previous.target) !== canonicalJsonSha256(target))) {
       block('service_instance_parent_changed', 'Retained instance creation belongs to a different parent or environment; no retry is authorized.'); continue;
     }
+    let recoveryReview: z.infer<typeof serviceInstanceRecoveryReviewSchema> | undefined;
+    try {
+      if (previous && prior) {
+        if (previous.completed || previous.recoveryApproval) throw new Error('new_recovery_after_completion');
+        recoveryReview = serviceInstanceRecoveryReview(serviceInstanceHistory(environment.platformBindings.serviceInstanceCreateHistory), previous, action.resource.name, prior.digest);
+      } else if (previous?.recoveryApproval) {
+        if (!previous.completed) throw new Error('incomplete_recovery_receipt');
+        recoveryReview = serviceInstanceRecoveryReviewSchema.parse({archiveId:previous.recoveryApproval.archiveId,activeMarkerSha256:previous.recoveryApproval.activeMarkerSha256});
+        const receipts = serviceInstanceHistory(environment.platformBindings.serviceInstanceCreateHistory).filter(entry =>
+          entry.record.disposition === 'operator-confirmed-unresolved-rearchive'
+          && entry.record.serviceName === action.resource.name
+          && canonicalJsonSha256(entry.record.target) === canonicalJsonSha256(target)
+          && canonicalJsonSha256(entry.record.approval) === canonicalJsonSha256(previous.recoveryApproval));
+        if (receipts.length !== 1 || previous.recoveryApproval.intentSha256 !== serviceInstanceIntentFingerprint(previous)) throw new Error('recovery_receipt_unverified');
+      }
+    } catch { block('service_instance_recovery_conflict', 'An active or completed recovery lacks exact private scope and approval evidence; ordinary finalization is blocked.'); continue; }
     if (previous && !previous.workflowId) { block('service_instance_acknowledgement_missing', 'The instance create acknowledgement was lost. Retained intent requires explicit recovery; no automatic retry or adoption.'); continue; }
     const live = await driver.observe(target, previous?.workflowId);
     if (live.state === 'unknown' || previous && live.state !== 'empty'
@@ -111,14 +132,19 @@ export async function planServiceInstances(params: {
       sourceEnvironmentLocalId: source.id, sourceBindingSha256, nativeFingerprint: live.fingerprint,
       ...(previous?.workflowId ? { workflowId: previous.workflowId } : {}),
       ...(previous?.priorCreateRecoverySha256 || prior ? { priorCreateRecoverySha256:previous?.priorCreateRecoverySha256 ?? prior!.digest } : {}),
-      ...(previous?.completed ? {completed:true as const} : {}) };
+      ...(previous?.completed ? {completed:true as const} : {}),
+      ...(previous?.recoveryApproval ? {recoveryApproval:previous.recoveryApproval} : {}) };
     action.type = previous ? 'update' : 'create';
     action.verified = true; action.requiresConfirm = true;
     action.billable = !previous;
     action.reason = previous ? `Record the verified empty ${action.resource.name} instance in this environment; no provider mutation`
       : `Create only this environment's empty ${action.resource.name} instance under accepted service ${target.serviceId}; preserve other environments`;
     if (prior) action.reason += '. Preserve the earlier global create attempt as unresolved private history; this operation does not prove its outcome or authorize retry or cleanup';
-    action.metadata = { operation: previous ? 'serviceInstanceFinalize' : 'serviceInstanceCreate', ...intent };
+    if (recoveryReview) action.reason = previous?.completed
+      ? 'Finish exporting the exact approved instance recovery receipt; no provider mutation or additional archival'
+      : 'With exact confirmation, preserve the CURRENT unresolved create marker as a new private uncertain-origin receipt and record the verified empty instance; no provider mutation, historical outcome claim, retry or cleanup';
+    action.metadata = { operation: recoveryReview ? 'serviceInstanceFinalizeRecovery' : previous ? 'serviceInstanceFinalize' : 'serviceInstanceCreate',
+      ...intent, ...(recoveryReview ? {recoveryReview} : {}) };
     // This operation creates no workload or database wiring. The inherited
     // ordinary-bootstrap database-create edge belongs to a later fresh plan.
     // Preserve namespace and every other safety prerequisite.
@@ -130,42 +156,82 @@ export async function planServiceInstances(params: {
 
 export async function applyServiceInstanceAction(params: {
   project: Project; environment: Environment; action: PlanAction;
-  driver: IServiceInstances; confirmedActionIds: ReadonlySet<string>; specRevision: number;
+  driver: IServiceInstances; confirmedActionIds: ReadonlySet<string>; specRevision: number; planId: string;
 }): Promise<{ success: boolean; status?: 'blocked'; message: string }> {
   const { project, environment, action, driver } = params;
   const block = (message: string) => ({ success: false, status: 'blocked' as const, message });
   if (!isServiceInstanceAction(action) || !params.confirmedActionIds.has(action.id)) return block('Exact service instance action confirmation is required.');
-  const { operation, ...intent } = serviceInstanceActionSchema.parse(action.metadata);
+  const { operation, recoveryReview, ...intent } = serviceInstanceActionSchema.parse(action.metadata);
   let retainedIntent = intent;
   const repo = new EnvironmentRepository();
   const persist = (current: Environment, bindings: Record<string, unknown>) => {
     if (!repo.replacePlatformBindingsIfUnchanged(current, bindings)) throw new Error('concurrent_binding_change');
   };
-  const initialPending = pending(repo.findById(environment.id)!)[action.resource.name];
+  const initialEnvironment = repo.findById(environment.id)!;
+  const initialPending = pending(initialEnvironment)[action.resource.name];
+  const approval = recoveryReview ? intent.recoveryApproval ?? { ...recoveryReview, planId:params.planId,
+    actionId:action.id, intentSha256:serviceInstanceIntentFingerprint(intent) } : undefined;
+  const matchingReceipt = (current: Environment) => {
+    if (!approval || approval.intentSha256 !== serviceInstanceIntentFingerprint(intent)) return false;
+    const records = serviceInstanceHistory(current.platformBindings.serviceInstanceCreateHistory).filter(entry =>
+      entry.record.disposition === 'operator-confirmed-unresolved-rearchive'
+      && entry.record.serviceName === action.resource.name
+      && canonicalJsonSha256(entry.record.target) === canonicalJsonSha256(intent.target)
+      && canonicalJsonSha256(entry.record.approval) === canonicalJsonSha256(approval));
+    return records.length === 1;
+  };
+  let settledReplay = false;
+  try { settledReplay = !initialPending && operation === 'serviceInstanceFinalizeRecovery' && matchingReceipt(initialEnvironment); }
+  catch { return block('Private instance recovery approval could not be verified.'); }
   const withoutCompletion = (value: ServiceInstanceIntent) => {
-    const { completed: _done, workflowId: _workflow, ...base } = value; return base;
+    const { completed: _done, workflowId: _workflow, recoveryApproval: _approval, ...base } = value; return base;
   };
   const exportOnly = initialPending?.completed === true
     && canonicalJsonSha256(withoutCompletion(initialPending)) === canonicalJsonSha256(withoutCompletion(intent));
   if (exportOnly) retainedIntent = initialPending;
-  const check = (expectedPending: boolean) => {
+  if (operation !== 'serviceInstanceFinalizeRecovery' && initialPending?.recoveryApproval) return block('Ordinary finalization cannot reuse a recovery approval.');
+  if (operation === 'serviceInstanceFinalizeRecovery' && (exportOnly || settledReplay)) {
+    try {
+      if (!matchingReceipt(initialEnvironment) || exportOnly && canonicalJsonSha256(initialPending.recoveryApproval) !== canonicalJsonSha256(approval))
+        return block('Exact committed recovery approval is required.');
+    } catch { return block('Private instance recovery approval could not be verified.'); }
+  }
+  const check = (expectedPending: boolean, reviewedRecovery = false) => {
     if (new SpecStore().getForInspection(project)?.revision !== params.specRevision) throw new Error('desired_state_changed');
     const current = repo.findById(environment.id), source = repo.findById(intent.sourceEnvironmentLocalId);
     if (!current || !source || current.projectId !== project.id || source.projectId !== project.id
       || bindingFingerprint(source, action.resource.name) !== intent.sourceBindingSha256
       || canonicalJsonSha256(driver.resolveTarget(source, current, action.resource.name)) !== canonicalJsonSha256(intent.target)) throw new Error('authority_changed');
     const retained = pending(current);
-    if (expectedPending ? canonicalJsonSha256(core(retained[action.resource.name])) !== canonicalJsonSha256(core(retainedIntent))
+    if (expectedPending ? !retained[action.resource.name] || canonicalJsonSha256(core(retained[action.resource.name])) !== canonicalJsonSha256(core(retainedIntent))
       : retained[action.resource.name] !== undefined) throw new Error('intent_changed');
     const bound = parseHostingBindings(current).services?.[action.resource.name]?.serviceId;
-    if (bound && !(retained[action.resource.name]?.completed && bound === intent.target.serviceId)) throw new Error('bound_identity_changed');
+    if (bound && !((retained[action.resource.name]?.completed || settledReplay) && bound === intent.target.serviceId)) throw new Error('bound_identity_changed');
+    if (retained[action.resource.name]?.recoveryApproval && !matchingReceipt(current)) throw new Error('recovery_receipt_changed');
     const prior = priorRecovery(current, action.resource.name, intent.target, intent.provider);
-    if (expectedPending ? prior !== undefined : prior?.digest !== intent.priorCreateRecoverySha256) throw new Error('prior_attempt_changed');
+    if (settledReplay) {
+      if (prior || bound !== intent.target.serviceId || !matchingReceipt(current)) throw new Error('recovery_receipt_changed');
+    } else if (reviewedRecovery) {
+      if (!prior || !recoveryReview || !approval || retained[action.resource.name]?.completed) throw new Error('reviewed_recovery_missing');
+      const fresh = serviceInstanceRecoveryReview(serviceInstanceHistory(current.platformBindings.serviceInstanceCreateHistory), retainedIntent, action.resource.name, prior.digest);
+      if (canonicalJsonSha256(fresh) !== canonicalJsonSha256(recoveryReview)) throw new Error('reviewed_recovery_changed');
+    } else if (expectedPending ? prior !== undefined : prior?.digest !== intent.priorCreateRecoverySha256) throw new Error('prior_attempt_changed');
     return { current, retained };
   };
   const finalize = () => getDb().transaction(() => {
+    if (operation === 'serviceInstanceFinalizeRecovery' && !exportOnly) {
+      const {current} = check(true, true);
+      const prior = priorRecovery(current, action.resource.name, intent.target, intent.provider)!;
+      const recoveries = {...parseHostingBindings(current).serviceCreateRecovery};
+      delete recoveries[action.resource.name];
+      const history = serviceInstanceHistory(current.platformBindings.serviceInstanceCreateHistory);
+      persist(current, {...current.platformBindings, serviceCreateRecovery:recoveries,
+        serviceInstanceCreateHistory:[...history.map(({record: _record, ...entry})=>entry), {id:randomUUID(),digest:prior.digest,
+          recordEncrypted:getSecretStore().encryptObject({marker:prior.marker,target:intent.target,serviceName:action.resource.name,
+            disposition:'operator-confirmed-unresolved-rearchive',approval})}]});
+    }
     const { current, retained } = check(true);
-    retainedIntent = { ...retainedIntent, completed:true };
+    retainedIntent = { ...retainedIntent, completed:true, ...(approval ? {recoveryApproval:approval} : {}) };
     persist(current, { ...current.platformBindings, serviceInstanceCreates: { ...retained, [action.resource.name]:retainedIntent },
       services: { ...parseHostingBindings(current).services, [action.resource.name]: { serviceId: intent.target.serviceId } } });
   }).immediate();
@@ -181,12 +247,18 @@ export async function applyServiceInstanceAction(params: {
     }).immediate();
   };
   try {
-    check(exportOnly || operation === 'serviceInstanceFinalize');
-    if (operation === 'serviceInstanceFinalize' && !intent.workflowId || operation === 'serviceInstanceCreate' && intent.workflowId) return block('Instance action has inconsistent workflow evidence.');
+    check(!settledReplay && (exportOnly || operation !== 'serviceInstanceCreate'), operation === 'serviceInstanceFinalizeRecovery' && !exportOnly && !settledReplay);
+    if (operation !== 'serviceInstanceCreate' && !intent.workflowId || operation === 'serviceInstanceCreate' && intent.workflowId) return block('Instance action has inconsistent workflow evidence.');
     const live = await driver.observe(intent.target, retainedIntent.workflowId);
     if (live.state === 'unknown' || live.fingerprint !== intent.nativeFingerprint
-      || live.state !== (exportOnly || operation === 'serviceInstanceFinalize' ? 'empty' : 'absent')) return block('Fresh native instance evidence differs from the reviewed plan.');
-    if (exportOnly || operation === 'serviceInstanceFinalize') {
+      || live.state !== (exportOnly || operation !== 'serviceInstanceCreate' ? 'empty' : 'absent')) return block('Fresh native instance evidence differs from the reviewed plan.');
+    if (settledReplay) {
+      check(false);
+      repo.syncRepoBindingsForId(environment.id);
+      check(false);
+      return {success:true,message:'Exact approved instance recovery was already committed; export refreshed without provider mutations.'};
+    }
+    if (exportOnly || operation !== 'serviceInstanceCreate') {
       finalize();
       exportAndFinish();
       return { success: true, message: 'Verified empty environment instance recorded without provider mutations.' };

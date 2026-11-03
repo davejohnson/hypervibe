@@ -76,6 +76,17 @@ async function setup(database = false, options: Parameters<typeof railwayHttpFix
   return { fixture, environments, production, staging, project, plan, apply };
 }
 
+async function reappearedRecovery() {
+  const f=await setup(false,{instanceCreationWorkflowStatus:'Running'});
+  const marker={provider:'railway',operation:'create',resourceName:'web',providerScope:{projectId,environmentId:stagingId},state:'unresolved'};
+  f.environments.updatePlatformBindings(f.staging.id,{serviceCreateRecovery:{web:marker}});
+  const stale=structuredClone(f.environments.findById(f.staging.id)!.platformBindings);
+  await f.apply(await f.plan());
+  f.fixture.backupWorkflows.set('instance-workflow',{status:'Complete',error:null});
+  f.environments.updatePlatformBindings(f.staging.id,{serviceCreateRecovery:{web:marker}});
+  return {...f,marker,stale};
+}
+
 // Independent expected behavior: Railway official CLI b62467ef environment/new.rs
 // retains shared Service IDs and creates target ServiceInstances using isCreated.
 // Synthetic responses validate that contract; they do not prove live defaults.
@@ -190,6 +201,181 @@ describe('accepted shared hosting service gets an isolated environment instance'
     expect(f.fixture.mutations.map(m=>m.field)).toEqual(['environmentPatchCommit']);
     expect(f.environments.findById(f.staging.id)!.platformBindings.services).toBeUndefined();
     expect(f.environments.findById(f.staging.id)!.platformBindings.serviceInstanceCreates).toHaveProperty('web');
+  });
+
+  it('never presents ordinary finalization as verified while a local recovery marker is active', async () => {
+    const f=await setup(false,{instanceCreationWorkflowStatus:'Running'});
+    const marker={provider:'railway',operation:'create',resourceName:'web',providerScope:{projectId,environmentId:stagingId},state:'unresolved'};
+    f.environments.updatePlatformBindings(f.staging.id,{serviceCreateRecovery:{web:marker}});
+    expect(await f.apply(await f.plan())).toMatchObject({kind:'executed',result:{success:false}});
+    expect(f.environments.findById(f.staging.id)!.platformBindings.serviceCreateRecovery).toEqual({});
+    // Models an older client restoring its stale export into authoritative local
+    // state. Same content cannot prove which attempt/writer produced this marker.
+    f.environments.updatePlatformBindings(f.staging.id,{serviceCreateRecovery:{web:marker}});
+    f.fixture.backupWorkflows.set('instance-workflow',{status:'Complete',error:null});
+    const plan=await f.plan();
+    expect(plan.actions[0]).not.toMatchObject({verified:true,metadata:{operation:'serviceInstanceFinalize'}});
+    expect(f.environments.findById(f.staging.id)!.platformBindings.serviceCreateRecovery).toEqual({web:marker});
+    expect(f.fixture.mutations.map(m=>m.field)).toEqual(['environmentPatchCommit']);
+  });
+
+  it('requires distinct confirmed recovery before preserving the current unresolved marker and finalizing',async()=>{
+    const f=await reappearedRecovery();const plan=await f.plan();
+    expect(plan.actions[0]).toMatchObject({verified:true,requiresConfirm:true,metadata:{operation:'serviceInstanceFinalizeRecovery',
+      recoveryReview:{archiveId:expect.any(String),activeMarkerSha256:expect.stringMatching(/^[a-f0-9]{64}$/)}}});
+    const before=f.environments.findById(f.staging.id)!.platformBindings;
+    const spec=new SpecStore().get(f.project)!;
+    const unconfirmed=await executePlanApply(createToolContext(),{project:f.project,spec:spec.spec,specRevision:spec.revision,planId:plan.planRunId,confirmActions:[]});
+    expect(unconfirmed).not.toMatchObject({kind:'executed',result:{success:true}});
+    expect(f.environments.findById(f.staging.id)!.platformBindings).toEqual(before);
+    const reviewed=await f.plan();const count=f.fixture.mutations.length;
+    expect(await f.apply(reviewed)).toMatchObject({kind:'executed',result:{success:true}});
+    const after=f.environments.findById(f.staging.id)!.platformBindings;
+    expect(after.serviceCreateRecovery).toEqual({});expect(after.services).toMatchObject({web:{serviceId:'production-web'}});
+    const history=after.serviceInstanceCreateHistory as Array<{recordEncrypted:string}>;
+    expect(history).toHaveLength(2);expect(history[0]).toEqual((before.serviceInstanceCreateHistory as unknown[])[0]);
+    expect(getSecretStore().decryptObject(history[1].recordEncrypted)).toMatchObject({marker:f.marker,
+      disposition:'operator-confirmed-unresolved-rearchive',approval:{planId:reviewed.planRunId,actionId:'service:web'}});
+    expect(f.fixture.mutations).toHaveLength(count);
+  });
+
+  it.each(['target','service','disposition'])('does not offer recovery using a same-digest archive with wrong %s',async field=>{
+    const f=await reappearedRecovery();const current=f.environments.findById(f.staging.id)!;
+    const history=structuredClone(current.platformBindings.serviceInstanceCreateHistory) as Array<{recordEncrypted:string}>;
+    const record=getSecretStore().decryptObject<any>(history[0].recordEncrypted);
+    if(field==='target')record.target.serviceId='other-parent';
+    if(field==='service')record.serviceName='other-service';
+    if(field==='disposition')record.disposition='other-purpose';
+    history[0].recordEncrypted=getSecretStore().encryptObject(record);
+    f.environments.updatePlatformBindings(f.staging.id,{serviceInstanceCreateHistory:history});
+    const plan=await f.plan();expect(plan.actions[0].verified).toBe(false);
+    expect(await f.apply(plan)).not.toMatchObject({kind:'executed',result:{success:true}});
+    expect(f.environments.findById(f.staging.id)!.platformBindings.serviceCreateRecovery).toEqual({web:f.marker});
+  });
+
+  it('rejects ordinary-finalize substitution and preserves a concurrently changed recovery marker',async()=>{
+    const f=await reappearedRecovery();const plan=await f.plan();
+    const runRepo=new RunRepository();const stored=runRepo.findById(plan.planRunId)!.plan!;
+    const altered=structuredClone(stored) as any;
+    delete altered.actions[0].metadata.recoveryReview;altered.actions[0].metadata.operation='serviceInstanceFinalize';
+    runRepo.updatePlan(plan.planRunId,altered);
+    expect(await f.apply(plan)).not.toMatchObject({kind:'executed',result:{success:true}});
+    const fresh=await f.plan();const changed={...f.marker,providerScope:{projectId,environmentId:'different-environment'}};
+    f.environments.updatePlatformBindings(f.staging.id,{serviceCreateRecovery:{web:changed}});
+    expect(await f.apply(fresh)).not.toMatchObject({kind:'executed',result:{success:true}});
+    expect(f.environments.findById(f.staging.id)!.platformBindings.serviceCreateRecovery).toEqual({web:changed});
+    expect(f.environments.findById(f.staging.id)!.platformBindings.serviceInstanceCreateHistory).toHaveLength(1);
+  });
+
+  it('rechecks the active recovery after native reads and preserves a concurrent same-scope change',async()=>{
+    const f=await reappearedRecovery();const plan=await f.plan();
+    const driver=f.fixture.adapter.serviceInstances!;const observe=driver.observe.bind(driver);
+    const changed={...f.marker,returnedName:'new-authoritative-attempt'};
+    vi.spyOn(driver,'observe').mockImplementation(async(...args)=>{
+      const result=await observe(...args);
+      f.environments.updatePlatformBindings(f.staging.id,{serviceCreateRecovery:{web:changed}});
+      return result;
+    });
+    const count=f.fixture.mutations.length;
+    expect(await f.apply(plan)).toMatchObject({kind:'executed',result:{success:false}});
+    expect(f.environments.findById(f.staging.id)!.platformBindings.serviceCreateRecovery).toEqual({web:changed});
+    expect(f.environments.findById(f.staging.id)!.platformBindings.serviceInstanceCreateHistory).toHaveLength(1);
+    expect(f.fixture.mutations).toHaveLength(count);
+  });
+
+  it('rolls back archival and marker removal when the same-transaction binding commit fails',async()=>{
+    const f=await reappearedRecovery();const plan=await f.plan();const before=f.environments.findById(f.staging.id)!.platformBindings;
+    const replace=EnvironmentRepository.prototype.replacePlatformBindingsIfUnchanged;
+    vi.spyOn(EnvironmentRepository.prototype,'replacePlatformBindingsIfUnchanged').mockImplementation(function(this:EnvironmentRepository,current,bindings){
+      if((bindings.serviceInstanceCreates as any)?.web?.completed)throw new Error('Synthetic final binding failure');
+      return replace.call(this,current,bindings);
+    });
+    const count=f.fixture.mutations.length;
+    expect(await f.apply(plan)).toMatchObject({kind:'executed',result:{success:false}});
+    expect(f.environments.findById(f.staging.id)!.platformBindings).toEqual(before);
+    expect(f.fixture.mutations).toHaveLength(count);
+  });
+
+  it('retries committed recovery export through actual context without duplicate archival or provider writes',async()=>{
+    const f=await reappearedRecovery();const plan=await f.plan();
+    const original=(EnvironmentRepository.prototype as any).syncRepoBindings;let failed=false;
+    vi.spyOn(EnvironmentRepository.prototype as any,'syncRepoBindings').mockImplementation(function(this:EnvironmentRepository,e:any){
+      if(!failed&&e.platformBindings.serviceInstanceCreates?.web?.completed){failed=true;throw new Error('Synthetic export failure');}
+      return original.call(this,e);
+    });
+    expect(await f.apply(plan)).toMatchObject({kind:'executed',result:{success:false}});expect(failed).toBe(true);
+    const committed=f.environments.findById(f.staging.id)!.platformBindings;
+    expect(committed.serviceInstanceCreates).toMatchObject({web:{completed:true,recoveryApproval:{planId:plan.planRunId,actionId:'service:web'}}});
+    expect(committed.serviceInstanceCreateHistory).toHaveLength(2);
+    const root=mkdtempSync(path.join(tmpdir(),'hypervibe-rearchive-hydrate-'));
+    try{
+      mkdirSync(path.join(root,'.git'));mkdirSync(path.join(root,'.hypervibe'));
+      writeFileSync(path.join(root,'.hypervibe','spec.json'),JSON.stringify(new SpecStore().get(f.project)!.spec));
+      writeFileSync(path.join(root,'.hypervibe','bindings.json'),JSON.stringify({version:1,project:f.project.name,environments:{staging:{platformBindings:f.stale}}}));
+      vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC','false');
+      await runWithWorkspaceDirectories([root],async()=>{
+        createToolContext().resolveProjectOrThrow({project:f.project.name});
+        const count=f.fixture.mutations.length;
+        expect(await f.apply(plan)).toMatchObject({kind:'executed',result:{success:true}});
+        expect(f.fixture.mutations).toHaveLength(count);
+        expect(f.environments.findById(f.staging.id)!.platformBindings.serviceInstanceCreateHistory).toEqual(committed.serviceInstanceCreateHistory);
+      });
+    }finally{rmSync(root,{recursive:true,force:true});}
+  });
+
+  it('replays a lost successful recovery response only with its exact private approval receipt', async()=>{
+    const f=await reappearedRecovery();const plan=await f.plan();
+    const addReceipt=RunRepository.prototype.addReceipt;let responseLost=false;
+    vi.spyOn(RunRepository.prototype,'addReceipt').mockImplementation(function(this:RunRepository,id,receipt){
+      if(!responseLost&&receipt.step==='service:web'&&receipt.status==='success'){
+        responseLost=true;throw new Error('Synthetic loss after binding commit before action receipt');
+      }
+      return addReceipt.call(this,id,receipt);
+    });
+    expect(await f.apply(plan)).toMatchObject({kind:'executed',result:{success:false}});
+    expect(responseLost).toBe(true);
+    const completed=f.environments.findById(f.staging.id)!.platformBindings;
+    expect(completed.serviceInstanceCreates).toEqual({});
+    const count=f.fixture.mutations.length;
+    expect(await f.apply(plan)).toMatchObject({kind:'executed',result:{success:true}});
+    expect(f.environments.findById(f.staging.id)!.platformBindings.serviceInstanceCreateHistory).toEqual(completed.serviceInstanceCreateHistory);
+    expect(f.fixture.mutations).toHaveLength(count);
+    // A fresh, same-shaped authoritative recovery is still a veto.
+    f.environments.updatePlatformBindings(f.staging.id,{serviceCreateRecovery:{web:f.marker}});
+    expect(await f.apply(plan)).not.toMatchObject({kind:'executed',result:{success:true}});
+    expect(f.environments.findById(f.staging.id)!.platformBindings.serviceCreateRecovery).toEqual({web:f.marker});
+  });
+
+  it('blocks stale file hydration after the approved completed marker clears',async()=>{
+    const f=await reappearedRecovery();const plan=await f.plan();
+    expect(await f.apply(plan)).toMatchObject({kind:'executed',result:{success:true}});
+    const before=f.environments.findById(f.staging.id)!.platformBindings;
+    const root=mkdtempSync(path.join(tmpdir(),'hypervibe-completed-recovery-hydrate-'));
+    try {
+      mkdirSync(path.join(root,'.git'));mkdirSync(path.join(root,'.hypervibe'));
+      writeFileSync(path.join(root,'.hypervibe','spec.json'),JSON.stringify(new SpecStore().get(f.project)!.spec));
+      writeFileSync(path.join(root,'.hypervibe','bindings.json'),JSON.stringify({version:1,project:f.project.name,environments:{staging:{platformBindings:f.stale}}}));
+      vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC','false');
+      await runWithWorkspaceDirectories([root],async()=>{
+        expect(()=>createToolContext().resolveProjectOrThrow({project:f.project.name})).toThrow(/completed private instance recovery/);
+      });
+      expect(f.environments.findById(f.staging.id)!.platformBindings).toEqual(before);
+    }finally {rmSync(root,{recursive:true,force:true});}
+  });
+
+  it('replans a committed recovery export without changing the original approval or appending history',async()=>{
+    const f=await reappearedRecovery();const originalPlan=await f.plan();
+    const original=(EnvironmentRepository.prototype as any).syncRepoBindings;let failed=false;
+    vi.spyOn(EnvironmentRepository.prototype as any,'syncRepoBindings').mockImplementation(function(this:EnvironmentRepository,e:any){
+      if(!failed&&e.platformBindings.serviceInstanceCreates?.web?.completed){failed=true;throw new Error('Synthetic export failure');}
+      return original.call(this,e);
+    });
+    expect(await f.apply(originalPlan)).toMatchObject({kind:'executed',result:{success:false}});
+    const before=f.environments.findById(f.staging.id)!.platformBindings;
+    const next=await f.plan();expect(next.actions[0]).toMatchObject({verified:true,metadata:{operation:'serviceInstanceFinalizeRecovery',
+      recoveryApproval:{planId:originalPlan.planRunId,actionId:'service:web'}}});
+    expect(await f.apply(next)).toMatchObject({kind:'executed',result:{success:true}});
+    expect(f.environments.findById(f.staging.id)!.platformBindings.serviceInstanceCreateHistory).toEqual(before.serviceInstanceCreateHistory);
   });
 
   it('preserves an earlier uncertain global create privately while reviewing a distinct instance operation', async () => {

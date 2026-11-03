@@ -1444,7 +1444,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
       if (!result.success || result.adapter?.name !== envSpec.hosting.provider || !result.adapter.serviceInstances || !volumeEnvironment)
         return { success: false, status: 'blocked', message: 'Scoped service instance capability or environment unavailable.' };
       return applyServiceInstanceAction({ project: applyProject, environment: volumeEnvironment, action,
-        driver: result.adapter.serviceInstances, confirmedActionIds, specRevision: params.specRevision });
+        driver: result.adapter.serviceInstances, confirmedActionIds, specRevision: params.specRevision, planId });
     }
     if (capability === 'hosting.volume.mutate') {
       const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject);

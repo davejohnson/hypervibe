@@ -7,6 +7,12 @@ export const serviceInstanceTargetSchema = z.object({
   projectId: identity, environmentId: identity, serviceId: identity, sourceEnvironmentId: identity,
 }).strict().refine(value => value.environmentId !== value.sourceEnvironmentId);
 export type ServiceInstanceTarget = z.infer<typeof serviceInstanceTargetSchema>;
+export const serviceInstanceRecoveryReviewSchema = z.object({
+  archiveId: identity, activeMarkerSha256: digest,
+}).strict();
+export const serviceInstanceRecoveryApprovalSchema = serviceInstanceRecoveryReviewSchema.extend({
+  planId: identity, actionId: identity, intentSha256: digest,
+}).strict();
 export const serviceInstanceIntentSchema = z.object({
   version: z.literal(1), provider: identity, target: serviceInstanceTargetSchema,
   sourceEnvironmentLocalId: identity, sourceBindingSha256: digest,
@@ -14,6 +20,7 @@ export const serviceInstanceIntentSchema = z.object({
   workflowId: z.string().min(1).max(1024).regex(/^[A-Za-z0-9_./:-]+$/).optional(),
   priorCreateRecoverySha256: digest.optional(),
   completed: z.literal(true).optional(),
+  recoveryApproval: serviceInstanceRecoveryApprovalSchema.optional(),
 }).strict();
 export type ServiceInstanceIntent = z.infer<typeof serviceInstanceIntentSchema>;
 export const serviceInstanceIntentsSchema = z.record(z.string().min(1), serviceInstanceIntentSchema);
