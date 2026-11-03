@@ -7214,7 +7214,7 @@ providerRegistry.register({
         preparedResources: 'installer-receipt-v1',
         runtimeIdentityTiming: 'before-workload',
         recoveryRuntime: { databaseProviders: ['cloudsql'], storageProviders: ['gcs'], status: 'ready-for-live' },
-        recoveryTasks: { variableMode: 'references', execution: 'temporary-workload', status: 'ready-for-live', databaseProviders: ['cloudsql'] },
+        recoveryTasks: { durableProgress: true, variableMode: 'references', execution: 'temporary-workload', status: 'ready-for-live', databaseProviders: ['cloudsql'] },
         serviceVolumes: { workloadKinds: ['web', 'worker'], retention: 'retain-only', attachmentTiming: 'service-update' },
         customDomains: 'managed',
         domainTrafficProxy: 'dns-only',

@@ -1653,6 +1653,8 @@ export const environmentSpecSchema = z.object({
   /** Optional backup intent. Ordinary deployments never require this policy or recovery evidence. */
   backups: z.discriminatedUnion('mode', [
     z.object({ mode: z.literal('daily'),
+      /** One-use local backup and isolated logical restore; selected only by scope=backups. */
+      run: z.object({ id: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/) }).strict().optional(),
       destination: z.string().regex(/^[a-z][a-z0-9-]{0,60}$/).optional(),
       /** Published Hypervibe helper artifact; a mutable tag cannot authorize recovery work. */
       runnerImage: z.string().regex(/^[^@\s]+@sha256:[a-f0-9]{64}$/).optional(),

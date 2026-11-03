@@ -1,3 +1,5 @@
+import type { ManagedRecoveryTaskLifecycle } from '../domain/ports/managed-recovery-task.port.js';
+import type { IProviderAdapter } from '../domain/ports/provider.port.js';
 import { recoveryAutomationSchema, recoveryRuntimeBindingSchema } from '../domain/ports/recovery-runtime.port.js';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
@@ -17,7 +19,7 @@ import { resolveBackupStrategy, withBackupStorageDefaults } from '../domain/serv
 import { parseStorageBindings } from '../domain/services/storage-plan.service.js';
 import { compileBackupWorkflow } from '../domain/services/backup-workflow.service.js';
 import { createRecoverySet } from '../domain/services/recovery-set.service.js';
-import { applyManagedRecoveryRetention, observeManagedRecoverySet, recordRecoveryExecution } from '../domain/services/recovery-set-health.service.js';
+import { applyManagedRecoveryRetention, observeManagedRecoverySet, recordRecoveryExecution, observeRecoveryExecution } from '../domain/services/recovery-set-health.service.js';
 import { recoveryDatabaseBindings } from '../domain/services/recovery-database-bindings.js';
 import { recoverySourceIdentityMatches, recoverySourceIdentitySchema } from '../domain/services/recovery-source.js';
 import { RecoveryDiagnosticError, recoveryDiagnosticSchema, recoveryFailure, type RecoveryDiagnostic } from '../domain/ports/recovery-diagnostics.port.js';
@@ -116,7 +118,20 @@ export async function verifyManagedBackupAuthority(params: {
 export async function executeManagedBackup(params: {
   target: ManagedBackupTarget; environment: Environment; operation: 'backup' | 'health'; repository: string; runId: string;
   credentials: NodeJS.ProcessEnv;
-}) {
+}) { return executeManagedBackupCore({ ...params, authority: 'scheduled' }); }
+
+/** Called only by the confirmed local saved-plan handler, with current connections.
+ * No automation credentials, provider keys or application values enter the helper. */
+export async function executeLocalManagedBackup(params: {
+  target: ManagedBackupTarget; environment: Environment; executionId: string; databaseComponent: Component;
+  adapter: (provider: string) => Promise<IProviderAdapter>; lifecycle: ManagedRecoveryTaskLifecycle; beforeCompletion: (jobId: string) => void | Promise<void>;
+}) { return executeManagedBackupCore({ ...params, authority: 'local', operation: 'backup' }); }
+
+type ExecutionInput = { target: ManagedBackupTarget; environment: Environment; operation: 'backup' | 'health' } & (
+  { authority: 'scheduled'; repository: string; runId: string; credentials: NodeJS.ProcessEnv }
+  | { authority: 'local'; executionId: string; databaseComponent: Component;
+      adapter: (provider: string) => Promise<IProviderAdapter>; lifecycle: ManagedRecoveryTaskLifecycle; beforeCompletion: (jobId: string) => void | Promise<void> });
+async function executeManagedBackupCore(params: ExecutionInput) {
   let stage: RecoveryDiagnostic['stage'] = 'task-preflight';
   let mutationAttempted = false;
   let taskFacts: RecoveryDiagnostic['task'];
@@ -126,11 +141,20 @@ export async function executeManagedBackup(params: {
     if (target.database && !supportsManagedRecoveryDatabase(target.hosting.provider, target.database.source.provider)) {
       throw recoveryFailure(stage, 'unsupported', undefined, undefined, 'Private recovery execution is unsupported for the selected database provider.');
     }
-    verifyRecoveryAutomation(target, environment);
+    if (params.authority === 'scheduled') verifyRecoveryAutomation(target, environment);
+    else if (!target.database || !target.executionTarget || target.automation
+      || !providerRegistry.getMetadata(target.hosting.provider)?.lifecycle?.hosting?.recoveryTasks?.durableProgress)
+      throw recoveryFailure(stage, 'unsupported');
     const adapters = new Map<string, unknown>();
     async function adapter(provider: string) {
       try {
         if (adapters.has(provider)) return adapters.get(provider);
+        if (params.authority === 'local') {
+          const result = await params.adapter(provider);
+          if (result.name !== provider) throw new Error('The current local connection differs.');
+          if (provider === target.hosting.provider) await (result as unknown as IHostingAdapter).configureTarget?.({ region: target.hosting.region });
+          adapters.set(provider, result); return result;
+        }
         const identity = target.automation?.[provider];
         const keys = managedBackupCredentialKeys(provider);
         if (!identity && !keys) throw new Error('Recovery credential mapping is absent.');
@@ -142,7 +166,7 @@ export async function executeManagedBackup(params: {
           throw new Error('Recovery requires durable credentials for automation.');
         }
         const result = await providerRegistry.createAdapter(provider, credentials);
-        if (provider === target.hosting.provider) await (result as IHostingAdapter).configureTarget?.({ region: target.hosting.region });
+        if (provider === target.hosting.provider) await (result as unknown as IHostingAdapter).configureTarget?.({ region: target.hosting.region });
         adapters.set(provider, result); return result;
       } catch (error) { throw recoveryFailure('credentials', 'unknown', error); }
     }
@@ -154,11 +178,14 @@ export async function executeManagedBackup(params: {
       stage = 'source-observation';
       try {
         const selected = target.database;
-        const rows = recoveryDatabaseBindings(environment.platformBindings.recoveryDatabases)
+        const rows = (params.authority === 'local' ? [{ componentId: params.databaseComponent.id, provider: params.databaseComponent.bindings.provider,
+          externalId: params.databaseComponent.externalId, engine: params.databaseComponent.type, resourceKind: params.databaseComponent.bindings.resourceKind }]
+          : recoveryDatabaseBindings(environment.platformBindings.recoveryDatabases))
           .filter(row => row.componentId === selected.componentId && row.provider === selected.source.provider
             && row.externalId === selected.source.primaryExternalId);
         if (rows.length !== 1) throw new Error('Source binding differs.');
         const row = rows[0], now = new Date();
+        if (typeof row.provider !== 'string') throw new Error('Source provider binding is invalid.');
         const component: Component = { id: row.componentId, environmentId: environment.id, type: row.engine,
           externalId: row.externalId, bindings: { provider: row.provider, providerScope: selected.source.providerScope,
             ...(row.resourceKind === undefined ? {} : { resourceKind: row.resourceKind }) }, createdAt: now, updatedAt: now };
@@ -183,7 +210,7 @@ export async function executeManagedBackup(params: {
     try {
       if (params.operation === 'backup') {
         stage = 'input';
-        const setId = managedRecoveryExecutionId(params.repository, params.runId);
+        const setId = params.authority === 'local' ? z.string().uuid().parse(params.executionId) : managedRecoveryExecutionId(params.repository, params.runId);
         let jobId: string;
         if (target.database) {
           stage = 'task-preflight';
@@ -226,12 +253,13 @@ export async function executeManagedBackup(params: {
             buildConfig: { workloadKind: 'worker' }, envVarSpec: {}, createdAt: now, updatedAt: now },
           'node /opt/hypervibe/dist/ci/backup-runner.js', { timeoutMs: 45 * 60_000, managedRecoveryTask: {
             variableMode: 'references', sweep: false, expectedImage: target.runnerImage, executionId: setId,
+            ...(params.authority === 'local' ? { lifecycle: params.lifecycle } : {}),
             databaseSource: target.database.source,
             ...(native ? { executionTarget: native } : {}),
             variableReferences: native ? [] : [{ sourceServiceId: target.database.source.primaryExternalId, variableName: 'DATABASE_URL', targetName: 'HYPERVIBE_BACKUP_DATABASE_URL' }],
             variables: { HYPERVIBE_BACKUP_CONFIG: JSON.stringify(config) },
             selectedSecretValues: native ? {} : { HYPERVIBE_BACKUP_STORAGE_CREDENTIALS_JSON: JSON.stringify(archiveCredentials), HYPERVIBE_BACKUP_OBJECTS_CREDENTIALS_JSON: JSON.stringify(objectCredentials) },
-            ...(params.credentials.IMAGE_REGISTRY_USERNAME && params.credentials.IMAGE_REGISTRY_TOKEN
+            ...(params.authority === 'scheduled' && params.credentials.IMAGE_REGISTRY_USERNAME && params.credentials.IMAGE_REGISTRY_TOKEN
               ? { registryCredentials: { username: params.credentials.IMAGE_REGISTRY_USERNAME, token: params.credentials.IMAGE_REGISTRY_TOKEN } } : {}),
           } });
           mutationAttempted = result.mutationAttempted !== false;
@@ -265,10 +293,18 @@ export async function executeManagedBackup(params: {
           mutationAttempted = true;
           await createRecoverySet({ runId: setId, project: target.project, environment: target.environment,
             contractHash: managedBackupTargetHash(target), destination: target.destination.identity, archive, objects });
+          if (params.authority !== 'scheduled') throw recoveryFailure(stage, 'unsupported');
           jobId = `github-run-${params.runId}`;
         }
         stage = 'completion-record';
-        await recordRecoveryExecution({ archive, target, setId, jobId });
+        if (params.authority === 'local') await params.beforeCompletion(jobId);
+        await recordRecoveryExecution({ archive, target, setId, jobId, ...(params.authority === 'local' ? { beforeWrite: () => params.beforeCompletion(jobId) } : {}) });
+        if (params.authority === 'local') {
+          const evidence = await observeRecoveryExecution({ archive, target, setId, jobId });
+          operationReceipt = { version: 2, environment: target.environment, status: 'healthy', reasonCodes: [],
+            counts: { applied: 1, skipped: 0 }, ...evidence };
+          return operationReceipt;
+        }
         stage = 'retention';
         const retained = await applyManagedRecoveryRetention({ archive, target });
         if (!retained.success) {

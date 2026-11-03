@@ -71,6 +71,8 @@ export interface HostingCapabilities {
  * image; providers validate references and current source identity before writes.
  * A successful result must prove terminal execution and owned cleanup. */
 export interface ManagedRecoveryTaskOptions {
+  /** Durable controller progress; omitted by the unchanged scheduled consumer. */
+  lifecycle?: import('./managed-recovery-task.port.js').ManagedRecoveryTaskLifecycle;
   variableMode: 'references';
   sweep: false;
   expectedImage: string;

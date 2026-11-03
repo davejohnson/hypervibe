@@ -8,6 +8,12 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+`manual-recovery-provider-roster.test.ts` covers every registered hosting provider
+against the [durable one-use recovery contract](../../docs/manual-recovery-task-evidence.md).
+Cloud Run serialized create/run/cleanup and actual local command/SQLite/archive
+consumer tests run in normal acceptance. These offline checks do not establish a
+live restore or support on providers whose durable capability is absent.
+
 `gcp-iam-role-get.test.ts` checks actual serialized IAM role reads against Google's
 GET contract, with the same strict transport used by CI preparation, deployment
 and saved-plan retry tests. The list-only `view` option is rejected; only HTTP 404

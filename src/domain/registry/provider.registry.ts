@@ -235,6 +235,8 @@ export interface ProviderMetadata {
       };
       /** A separate immutable recovery helper with exact private source references. */
       recoveryTasks?: {
+        /** Restart-safe create/run/cleanup journals, independently reviewed per provider. */
+        durableProgress?: true;
         variableMode: 'references';
         execution: 'temporary-workload';
         status: 'ready-for-live';

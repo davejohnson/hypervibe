@@ -1,3 +1,4 @@
+import { manualBackupActionValid, MANUAL_BACKUP_OPERATION } from '../services/manual-backup.service.js';
 import { isRecoveryRuntimeAction } from '../services/recovery-runtime.service.js';
 import { recoveryRuntimeStepSchema } from '../ports/recovery-runtime.port.js';
 import { isRuntimeAccessAction, RUNTIME_ACCESS_OPERATIONS } from '../services/runtime-access.service.js';
@@ -122,6 +123,7 @@ export type PlanMutationCapability =
   | 'backup-policy.configure'
   | 'api.policy.accept'
   | 'hosting.recovery-runtime.mutate'
+  | 'hosting.manual-backup.execute'
   | 'hosting.volume.mutate'
   | 'hosting.environment.ensure'
   | 'domain.registration.mutate'
@@ -1041,6 +1043,10 @@ export function resolvePlanActionAuthority(
       return authority(action, 'storage.migration-target.destroy');
     }
     return null;
+  }
+  if (action.metadata?.operation === MANUAL_BACKUP_OPERATION) {
+    return action.verified && action.type === 'update' && manualBackupActionValid(action)
+      ? authority(action, 'hosting.manual-backup.execute') : null;
   }
   if (isRecoveryRuntimeAction(action)) {
     if (action.type !== 'update' || !action.verified || action.metadata?.blockedReason || !exactResource(action, 'service') || action.resource.name !== 'backup-runtime'

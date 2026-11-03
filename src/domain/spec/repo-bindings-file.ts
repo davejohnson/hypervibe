@@ -43,6 +43,7 @@ const SENSITIVE_KEY_PATTERN = /(^|_)?(secret|token|password|connectionstring|con
 const LOCAL_ONLY_BINDING_KEYS = new Set([
   'delegatedEnvBindings',
   'recoveryRuntimeSecretInputs',
+  'manualRecovery',
   'credentialUpdates',
   'runtimeRollouts',
   'delegatedActionsBindings',
@@ -115,6 +116,7 @@ export function mergeRepoPlatformBindings(
       throw new Error('Local holding preparation receipts require matching retained local authority and cannot be imported or replaced.');
   }
   if (Object.hasOwn(repoBindings, 'managedReleaseDispatch')) throw new Error('Managed release dispatch recovery is local authority and cannot be imported.');
+  if (Object.hasOwn(repoBindings, 'manualRecovery')) throw new Error('Manual backup operation authority is local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'recoveryRuntimeSecretInputs')) throw new Error('Private recovery inputs are local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'serviceInstanceCreateHistory')) throw new Error('Service instance attempt history is private local evidence and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'repositoryVariableOwnership')) throw new Error('Repository-variable ownership and recovery state are local only and cannot be imported.');

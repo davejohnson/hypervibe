@@ -1,3 +1,4 @@
+import { manualBackupActionValid, MANUAL_BACKUP_OPERATION } from '../services/manual-backup.service.js';
 import { OPERATOR_APPLICATION_OPERATION, isOperatorApplicationAction, operatorApplicationPlanSchema } from '../ports/operator-application.port.js';
 import { isRecoveryRuntimeAction } from '../services/recovery-runtime.service.js';
 import { isRuntimeAccessAction, runtimeAccessActionService } from '../services/runtime-access.service.js';
@@ -256,6 +257,7 @@ export const planRunDocumentSchema = z.object({
     'service-volumes',
     'runtime-access',
     'backup-runtime',
+    'backup-run',
     'database-checkpoint',
     'database-credential-aliases',
     'database-bindings',
@@ -575,6 +577,15 @@ export const planRunDocumentSchema = z.object({
       || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
       ctx.addIssue({ code: 'custom', message: 'database-checkpoint plans must contain only the independent checkpoint action and no runtime or cross-environment inputs.' });
     }
+    return;
+  }
+  if (document.scope === 'backup-run') {
+    const action = document.actions[0];
+    if (document.actions.length !== 1 || document.overrides || document.sourceCommitSha || document.inputRequired?.length
+      || document.integrationFingerprints || document.lockEnvironmentIds?.length || !/^[a-f0-9]{64}$/.test(document.observedFingerprint ?? '')
+      || action?.metadata?.operation !== MANUAL_BACKUP_OPERATION
+      || (action.verified ? !manualBackupActionValid(action) : action.metadata?.blockedReason !== 'manual_backup_unverified'))
+      ctx.addIssue({ code: 'custom', message: 'Manual backup plans require one exact isolated operation and no deployment or credential inputs.' });
     return;
   }
   if (document.scope === 'backup-runtime') {

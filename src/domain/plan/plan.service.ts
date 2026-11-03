@@ -1,3 +1,4 @@
+import { manualBackupFingerprint, planManualBackup } from '../services/manual-backup.service.js';
 import { operatorApplicationWorkRequired, planOperatorApplications, operatorApplicationUnavailable, operatorOutputPrerequisiteKeys } from '../services/operator-application.service.js';
 import { CloudInstallationError } from '../services/cloud-installation-runtime.js';
 import { observeRecoveryRuntime, planRecoveryRuntime } from '../services/recovery-runtime.service.js';
@@ -210,7 +211,7 @@ export interface EnvironmentPlan {
   webhookReadiness?: WebhookReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
-  scope: 'full' | 'credentials' | 'secrets' | 'database-credential-aliases' | 'secret-destinations' | 'cloud-scope' | 'operator-artifacts' | 'operator-applications' | 'hosting-preparation' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'hosting-prepared-bindings' | 'service-volumes' | 'runtime-access' | 'backup-runtime' | 'database-checkpoint' | 'database-bindings' | 'database-initialization' | 'database-provisioning-recovery' | 'database-bootstrap' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
+  scope: 'full' | 'credentials' | 'secrets' | 'database-credential-aliases' | 'secret-destinations' | 'cloud-scope' | 'operator-artifacts' | 'operator-applications' | 'hosting-preparation' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'hosting-prepared-bindings' | 'service-volumes' | 'runtime-access' | 'backup-runtime' | 'backup-run' | 'database-checkpoint' | 'database-bindings' | 'database-initialization' | 'database-provisioning-recovery' | 'database-bootstrap' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
   backupReadiness?: BackupReadiness;
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
@@ -1777,6 +1778,23 @@ export class PlanService {
     } catch (error) { return { error: error instanceof Error ? error.message : 'Secret containers could not be verified.' }; }
   }
 
+  private async planManualBackupScope(project: Project, environmentName: string, specResult: SpecResult): Promise<EnvironmentPlan | { error: string }> {
+    const environment = this.envRepo.findByProjectAndName(project.id, environmentName);
+    const desired = specResult.spec.environments[environmentName];
+    if (!environment || !desired) return { error: 'Prepare and bind the existing backup runtime before requesting a manual backup.' };
+    const context = { project, environment, spec: desired, components: this.componentRepo.findByEnvironmentId(environment.id), adapterFactory };
+    const { action } = await planManualBackup(context);
+    const blocked = this.providerPreflight([desired.hosting.provider, desired.database?.provider, desired.storage?.[desired.backups?.mode === 'daily' ? desired.backups.destination ?? 'backup-archive' : '']?.provider].filter((value): value is string => Boolean(value)), project, environmentName);
+    const warnings = ['One-use backup with an isolated logical SQL restore and exact temporary-job cleanup. Existing archives and native backup policies remain unchanged. This does not certify Cloud SQL PITR or application compatibility, or activate a schedule.'];
+    const document: PlanRunDocument = { kind: 'hv_plan', scope: 'backup-run', environmentName, specRevision: specResult.revision,
+      observedFingerprint: manualBackupFingerprint(context)!, actions: [action], warnings };
+    planRunDocumentSchema.parse(document);
+    const run = this.runRepo.create({ projectId: project.id, environmentId: environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
+    this.runRepo.updateStatus(run.id, 'succeeded');
+    return { planRunId: run.id, scope: 'backup-run', specRevision: specResult.revision, specSource: specResult.source ?? { kind: 'local' },
+      environmentName, verified: action.verified && !blocked.length, observed: null, actions: [action], unmanaged: [], warnings, inputRequired: [], blocked };
+  }
+
   private async planRuntimeAccessScope(project: Project, environmentName: string, specResult: SpecResult, options: PlanOptions): Promise<EnvironmentPlan | { error: string }> {
     if (options.envVarOverrides !== undefined || options.envFile !== undefined || options.secretRefs !== undefined
       || options.includeEnvFile === true || options.credential !== undefined || options.intent !== undefined)
@@ -1855,6 +1873,9 @@ export class PlanService {
       if (options?.credential || options?.intent) return { error: 'Credential review inputs require scope=credentials.' };
       if (Object.keys(options?.secretRefs ?? {}).some(key => specResult.spec.secrets[key]?.credential)) return { error: 'Tracked credentials require a reviewed credential adoption or rotation plan.' };
     }
+    if (scope === 'backups' && specResult.spec.environments[environmentName]?.backups?.mode === 'daily'
+      && specResult.spec.environments[environmentName].backups.run)
+      return this.planManualBackupScope(projectWithSpecGitRemoteUrl(project, specResult.spec), environmentName, specResult);
     if (scope === 'runtime-access') {
       const providerValidation = firstProviderSpecValidationFailure(specResult.spec);
       if (providerValidation) return { error: providerValidation.message };

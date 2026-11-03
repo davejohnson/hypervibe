@@ -60,11 +60,15 @@ let execution: any;
 let task: any;
 let shortParentNames = false;
 let jobFault: 'failed' | 'lost-run' | 'retained-delete' | 'wrong-operation' | 'missing-task-status' | 'wrong-task-identity' | 'stale-generation' | 'wrong-execution-parent' | 'wrong-task-parent' | 'wrong-cleanup-parent' | undefined;
+let durableFault: 'lost-create' | 'create-job-read' | 'run-job-read' | 'lost-run' | 'lost-execution-delete' | 'lost-job-delete' | 'retained-execution-delete' | undefined;
+let nativeOperations: Map<string, any>;
+let preparedTaskBinding: RecoveryRuntimeBinding | undefined;
 
 beforeEach(() => {
   target = { environment: { id: envId, projectId: 'local-project', name: 'staging', createdAt: new Date(), updatedAt: new Date(), platformBindings: { provider: 'cloudrun', projectId, environmentId: region, services: {} } }, database: { provider: 'cloudsql', primaryExternalId: instance, providerScope: { projectId, region }, resourceIdentity: { instanceId: instance } }, destination: { provider: 'gcs', externalId: 'sequence-archive', instanceScope: { projectId } }, objects: [{ name: 'media', identity: { provider: 'gcs', externalId: 'sequence-media', instanceScope: { projectId } } }], runnerImage, privateInputFingerprints: { databaseUrl: credentialHash } };
   sa = undefined; secret = undefined; versions = []; policies = new Map(); calls = []; loseVersionResponse = false; rejectWriteStatus = undefined; rejectCommittedVersionRead = false;
   shortParentNames = false; job = undefined; execution = undefined; task = undefined; jobFault = undefined; localCallerCanActAs = true; bucketProjectNumber = projectNumber; ciAccountUniqueId = ciIdentity.serviceAccountUniqueId; loseDeleteResponse = false; retainDelete = false; loseArchivePolicyResponse = false;
+  durableFault = undefined; nativeOperations = new Map(); preparedTaskBinding = undefined;
   sql = { name: instance, project: projectId, region, connectionName: `${projectId}:${region}:${instance}`, databaseVersion: 'POSTGRES_17', state: 'RUNNABLE', settings: { ipConfiguration: { ipv4Enabled: true, authorizedNetworks: [] } }, ipAddresses: [{ type: 'PRIMARY', ipAddress: '203.0.113.20' }] };
   vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input)); const method = init?.method ?? 'GET';
@@ -77,10 +81,22 @@ beforeEach(() => {
     if (rejectWriteStatus && ['POST', 'PUT'].includes(method) && !url.pathname.endsWith(':getIamPolicy')) return Response.json({ error: { code: rejectWriteStatus, message: 'synthetic-private-password' } }, { status: rejectWriteStatus });
     if (url.hostname === 'run.googleapis.com') {
       if (method === 'GET' && url.pathname.endsWith('/jobs')) return Response.json({ jobs: job ? [job] : [] });
-      const operation = (kind: string, response: any) => Response.json({ name: `projects/${jobFault === 'wrong-operation' ? 'another-project' : projectId}/locations/${region}/operations/${kind}`, done: true, response });
+      const operation = (kind: string, response: any) => {
+        const value = { name: `projects/${jobFault === 'wrong-operation' ? 'another-project' : projectId}/locations/${region}/operations/${kind}`, done: true, response };
+        nativeOperations.set(value.name, structuredClone(value));
+        return Response.json(durableFault === `${kind}-read` ? { name: value.name, done: false } : value);
+      };
+      if (method === 'GET' && url.pathname.includes('/operations/')) {
+        const key = url.pathname.slice(4);
+        if (durableFault === `${key.split('/').at(-1)}-read`) { durableFault = undefined; throw new Error('Synthetic lost operation read'); }
+        const value = nativeOperations.get(key);
+        return value ? Response.json(value) : Response.json({ error: { code: 404 } }, { status: 404 });
+      }
       if (method === 'POST' && url.pathname.endsWith('/jobs')) {
         job = { ...body, name: `projects/${projectId}/locations/${region}/jobs/${url.searchParams.get('jobId')}`, uid: '22222222-2222-4222-8222-222222222222', etag: 'job-etag', generation: '1', observedGeneration: jobFault === 'stale-generation' ? '0' : '1', terminalCondition: { state: 'CONDITION_SUCCEEDED' } };
-        return operation('create-job', job);
+        const response = operation('create-job', job);
+        if (durableFault === 'lost-create') throw new Error('Synthetic lost create acknowledgment');
+        return response;
       }
       if (method === 'POST' && url.pathname.endsWith(':run')) {
         execution = { name: `${job.name}/executions/one`, uid: '33333333-3333-4333-8333-333333333333', job: shortParentNames ? job.name.split('/').at(-1) : job.name, labels: job.labels, template: job.template.template, taskCount: 1, succeededCount: jobFault === 'failed' ? 0 : 1, ...(jobFault === 'failed' ? { failedCount: 1 } : {}), conditions: [{ type: 'Completed', state: jobFault === 'failed' ? 'CONDITION_FAILED' : 'CONDITION_SUCCEEDED' }], completionTime: '2026-10-24T12:00:00Z', etag: 'execution-etag' };
@@ -90,7 +106,7 @@ beforeEach(() => {
         if (shortParentNames) delete task.uid;
         if (jobFault === 'wrong-execution-parent') execution.job = job.name.replace(projectId, 'other-project');
         if (jobFault === 'wrong-task-parent') task.execution = execution.name.replace(projectId, 'other-project');
-        if (jobFault === 'lost-run') throw new Error('Lost execution response, credential could be echoed by a provider');
+        if (jobFault === 'lost-run' || durableFault === 'lost-run') throw new Error('Lost execution response, credential could be echoed by a provider');
         return operation('run-job', execution);
       }
       if (url.pathname.endsWith('/tasks')) {
@@ -98,11 +114,16 @@ beforeEach(() => {
         return Response.json({ tasks: [task] });
       }
       if (url.pathname.includes('/executions/')) {
-        if (method === 'DELETE') { const previous = execution; execution = undefined; return operation('delete-execution', previous); }
+        if (method === 'DELETE') {
+          const previous = execution; if (durableFault !== 'retained-execution-delete') execution = undefined;
+          if (durableFault === 'lost-execution-delete' || durableFault === 'retained-execution-delete') throw new Error('Synthetic uncertain execution delete');
+          return operation('delete-execution', previous);
+        }
         return execution ? Response.json(execution) : Response.json({ error: { code: 404 } }, { status: 404 });
       }
       if (method === 'DELETE') {
         const previous = job; if (jobFault !== 'retained-delete') job = undefined;
+        if (durableFault === 'lost-job-delete') throw new Error('Synthetic lost job delete');
         return operation('delete-job', previous);
       }
       return job ? Response.json(job) : Response.json({ error: { code: 404 } }, { status: 404 });
@@ -161,8 +182,8 @@ beforeEach(() => {
 });
 
 describe('Cloud Run private recovery job transport', () => {
-  async function execute() {
-    const runtime = driver(); let binding: RecoveryRuntimeBinding | undefined; let executionTarget: any;
+  async function execute(lifecycle?: { state?: any; persist: (next: any) => Promise<any> }) {
+    const runtime = driver(); let binding = preparedTaskBinding; let executionTarget: any;
     for (let index = 0; index < 12; index++) {
       const observed = await runtime.inspect({ target, binding, mode: 'ensure' });
       if (observed.state === 'ready') { executionTarget = observed.executionTarget; break; }
@@ -173,6 +194,7 @@ describe('Cloud Run private recovery job transport', () => {
       if (!result.receipt.success) throw new Error(JSON.stringify(result));
       binding = result.binding;
     }
+    preparedTaskBinding = binding;
     const executionId = '55555555-5555-4555-8555-555555555555';
     const config = { version: 1, operation: 'recovery-set', project: 'sequence', environment: 'staging', runId: executionId, contractHash: 'a'.repeat(64), database: { source: target.database }, destination: target.destination, archiveBucket: target.destination.externalId,
       objects: target.objects.map(object => ({ ...object, bucket: object.identity.externalId })), nativeAccess: executionTarget.worker };
@@ -181,8 +203,159 @@ describe('Cloud Run private recovery job transport', () => {
     Object.assign(adapter, { accessToken: 'synthetic-deployer-token', tokenExpiry: new Date(Date.now() + 60_000) });
     const now = new Date();
     return adapter.runJob(target.environment, { id: 'backup', projectId: 'local-project', name: 'backup', buildConfig: { builder: 'dockerfile' }, envVarSpec: {}, createdAt: now, updatedAt: now }, 'node /opt/hypervibe/dist/ci/backup-runner.js', { timeoutMs: 100, pollIntervalMs: 1, managedRecoveryTask: { variableMode: 'references', sweep: false, executionId, expectedImage: runnerImage, databaseSource: target.database, executionTarget,
-        variableReferences: [], variables: { HYPERVIBE_BACKUP_CONFIG: JSON.stringify(config) } } });
+        variableReferences: [], variables: { HYPERVIBE_BACKUP_CONFIG: JSON.stringify(config) }, ...(lifecycle ? { lifecycle } : {}) } });
   }
+
+  it('persists private recovery intent before the first native job write', async () => {
+    const persist = vi.fn(async () => { throw new Error('Synthetic durable storage failure'); });
+    const result = await execute({ persist });
+    expect(persist).toHaveBeenCalled();
+    expect(result.receipt.success).toBe(false);
+    expect(calls.filter(call => call.url.includes('run.googleapis.com') && call.method !== 'GET')).toEqual([]);
+  });
+
+  it('retains all native recovery phases and makes a completed restart mutation-free', async () => {
+    let state: any; const history: any[] = [];
+    const persist = async (next: any) => { state = JSON.parse(JSON.stringify(next)); history.push(state); return state; };
+    const first = await execute({ persist });
+    expect(first.receipt.success).toBe(true);
+    expect(state?.phase).toBe('complete');
+    expect(history.map(item => item.phase)).toContain('run-attempted');
+    expect(history.map(item => item.phase)).toContain('delete-execution-attempted');
+    expect(JSON.stringify(state)).not.toMatch(/synthetic-private-password|synthetic-deployer-token/);
+    const writes = calls.filter(call => call.url.includes('run.googleapis.com') && call.method !== 'GET').length;
+    const second = await execute({ state, persist });
+    expect(second.receipt.success).toBe(true);
+    expect(calls.filter(call => call.url.includes('run.googleapis.com') && call.method !== 'GET')).toHaveLength(writes);
+  });
+
+  it.each(['lost-create', 'lost-run'] as const)('never repeats %s after restarting from the durable attempt', async fault => {
+    let state: any;
+    const persist = async (next: any) => state = JSON.parse(JSON.stringify(next));
+    durableFault = fault;
+    expect((await execute({ persist })).receipt.success).toBe(false);
+    expect(state.phase).toBe(fault === 'lost-create' ? 'create-attempted' : 'run-attempted');
+    const writes = calls.filter(call => call.url.includes('run.googleapis.com') && call.method !== 'GET').length;
+    durableFault = undefined;
+    const restarted = await execute({ state, persist });
+    expect(restarted.receipt.success).toBe(false);
+    expect(restarted.mutationAttempted).toBe(true); // Retained unknown effect, never a cumulative zero-write claim.
+    expect(restarted.receipt.data?.cleanupVerified).toBe(false);
+    expect(calls.filter(call => call.url.includes('run.googleapis.com') && call.method !== 'GET')).toHaveLength(writes);
+    expect(job).toBeDefined();
+  });
+
+  it.each(['create-job-read', 'run-job-read'] as const)('recovers the retained %s operation without another native request', async fault => {
+    let state: any;
+    const persist = async (next: any) => state = JSON.parse(JSON.stringify(next));
+    durableFault = fault;
+    expect((await execute({ persist })).receipt.success).toBe(false);
+    expect(state.coordinates[fault === 'create-job-read' ? 'createOperation' : 'runOperation']).toMatch(/\/operations\//);
+    const restarted = await execute({ state, persist });
+    expect(restarted.receipt.success).toBe(true);
+    expect(calls.filter(call => call.method === 'POST' && call.url.includes('run.googleapis.com') && call.url.includes('/jobs?'))).toHaveLength(1);
+    expect(calls.filter(call => call.method === 'POST' && call.url.endsWith(':run'))).toHaveLength(1);
+    expect(state.phase).toBe('complete');
+  });
+
+  it.each(['lost-execution-delete', 'lost-job-delete'] as const)('proves absence after %s without repeating the DELETE', async fault => {
+    let state: any;
+    const persist = async (next: any) => state = JSON.parse(JSON.stringify(next));
+    durableFault = fault;
+    expect((await execute({ persist })).receipt.success).toBe(false);
+    expect(state.phase).toBe(fault === 'lost-execution-delete' ? 'delete-execution-attempted' : 'delete-job-attempted');
+    durableFault = undefined;
+    expect((await execute({ state, persist })).receipt.success).toBe(true);
+    expect(calls.filter(call => call.method === 'DELETE' && call.url.includes('/executions/'))).toHaveLength(1);
+    expect(calls.filter(call => call.method === 'DELETE' && call.url.includes('run.googleapis.com') && !call.url.includes('/executions/'))).toHaveLength(1);
+  });
+
+  it('leaves an uncertain still-present execution pending without deleting its parent', async () => {
+    let state: any;
+    const persist = async (next: any) => state = JSON.parse(JSON.stringify(next));
+    durableFault = 'retained-execution-delete';
+    expect((await execute({ persist })).receipt.success).toBe(false);
+    const writes = calls.filter(call => call.url.includes('run.googleapis.com') && call.method !== 'GET').length;
+    durableFault = undefined;
+    expect((await execute({ state, persist })).receipt.success).toBe(false);
+    expect(state.phase).toBe('delete-execution-attempted');
+    expect(calls.filter(call => call.url.includes('run.googleapis.com') && call.method !== 'GET')).toHaveLength(writes);
+    expect(job).toBeDefined(); expect(execution).toBeDefined();
+  });
+
+  it.each(['created', 'running', 'terminal'] as const)('stops on a lost %s persistence acknowledgment and resumes only the retained phase', async phase => {
+    let state: any; let fail = true;
+    const persist = async (next: any) => {
+      state = JSON.parse(JSON.stringify(next));
+      if (next.phase === phase && fail) { fail = false; throw new Error('Synthetic acknowledgment lost after durable commit'); }
+      return state;
+    };
+    expect((await execute({ persist })).receipt.success).toBe(false);
+    expect(state.phase).toBe(phase);
+    expect(calls.filter(call => call.method === 'DELETE' && call.url.includes('run.googleapis.com'))).toHaveLength(0);
+    if (phase === 'created') expect(calls.filter(call => call.method === 'POST' && call.url.endsWith(':run'))).toHaveLength(0);
+    expect((await execute({ state, persist })).receipt.success).toBe(true);
+    expect(calls.filter(call => call.method === 'POST' && call.url.endsWith(':run'))).toHaveLength(1);
+  });
+
+  it('rejects changed durable native authority before writes and preserves an unrelated archive', async () => {
+    let state: any;
+    const persist = async (next: any) => state = JSON.parse(JSON.stringify(next));
+    durableFault = 'run-job-read';
+    await execute({ persist });
+    const writes = calls.filter(call => call.url.includes('run.googleapis.com') && call.method !== 'GET').length;
+    const original = structuredClone(state);
+    expect((await execute({ state: { ...state, authorityHash: 'f'.repeat(64) }, persist })).receipt.success).toBe(false);
+    expect(state).toEqual(original);
+    expect(calls.filter(call => call.url.includes('run.googleapis.com') && call.method !== 'GET')).toHaveLength(writes);
+    expect(calls.some(call => call.method === 'DELETE' && call.url.includes('storage.googleapis.com'))).toBe(false);
+  });
+
+  it('rejects a backward phase carrying a retained run operation instead of running the job twice', async () => {
+    let state: any;
+    const persist = async (next: any) => state = JSON.parse(JSON.stringify(next));
+    durableFault = 'run-job-read';
+    expect((await execute({ persist })).receipt.success).toBe(false);
+    expect(state.phase).toBe('run-attempted');
+    expect(state.coordinates.runOperation).toBeDefined();
+    const writes = calls.filter(call => call.url.includes('run.googleapis.com') && call.method !== 'GET').length;
+    expect((await execute({ state: { ...state, phase: 'created' }, persist })).receipt.success).toBe(false);
+    expect(calls.filter(call => call.url.includes('run.googleapis.com') && call.method !== 'GET')).toHaveLength(writes);
+  });
+
+  it.each(['job', 'execution'] as const)('refuses a replaced native %s UID on restart without cleanup or another run', async replaced => {
+    let state: any;
+    const persist = async (next: any) => state = JSON.parse(JSON.stringify(next));
+    durableFault = 'run-job-read';
+    expect((await execute({ persist })).receipt.success).toBe(false);
+    if (replaced === 'job') job.uid = 'different-job-lifetime';
+    else execution.uid = 'different-execution-lifetime';
+    const writes = calls.filter(call => call.url.includes('run.googleapis.com') && call.method !== 'GET').length;
+    expect((await execute({ state, persist })).receipt.success).toBe(false);
+    expect(calls.filter(call => call.url.includes('run.googleapis.com') && call.method !== 'GET')).toHaveLength(writes);
+  });
+
+  it.each(['wrong-operation', 'missing-task-status', 'wrong-task-identity', 'stale-generation', 'wrong-execution-parent', 'wrong-task-parent', 'wrong-cleanup-parent'] as const)('keeps durable %s evidence unverified and does not clean up an unverified task', async fault => {
+    let state: any;
+    const persist = async (next: any) => state = JSON.parse(JSON.stringify(next));
+    jobFault = fault;
+    expect((await execute({ persist })).receipt.success).toBe(false);
+    expect(state?.phase).not.toBe('complete');
+    expect(calls.filter(call => call.method === 'DELETE' && call.url.includes('run.googleapis.com'))).toHaveLength(0);
+  });
+
+  it('records terminal task failure separately from verified cleanup and never reruns that request', async () => {
+    let state: any;
+    const persist = async (next: any) => state = JSON.parse(JSON.stringify(next));
+    jobFault = 'failed';
+    const first = await execute({ persist });
+    expect(first.receipt).toMatchObject({ success: false, data: { cleanupVerified: true } });
+    expect(state).toMatchObject({ phase: 'complete', terminal: { status: 'failed' } });
+    const writes = calls.filter(call => call.url.includes('run.googleapis.com') && call.method !== 'GET').length;
+    expect((await execute({ state, persist })).receipt.success).toBe(false);
+    expect(calls.filter(call => call.url.includes('run.googleapis.com') && call.method !== 'GET')).toHaveLength(writes);
+    expect(job).toBeUndefined(); expect(execution).toBeUndefined();
+  });
 
   it('verifies scoped recovery executions and tasks with short native parent references', async () => {
     shortParentNames = true;

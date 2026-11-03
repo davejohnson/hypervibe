@@ -137,7 +137,7 @@ async function completedInventory(input: Context): Promise<{ sets: CompleteExecu
 }
 
 /** Controller attestation only: invoke AFTER the exact provider job is terminal and temporary resources are absent. */
-export async function recordRecoveryExecution(input: Context & { setId: string; jobId: string; completedAt?: string }) {
+export async function recordRecoveryExecution(input: Context & { setId: string; jobId: string; completedAt?: string; beforeWrite?: () => void | Promise<void> }) {
   const now = input.now ?? new Date();
   const observed = await inspectSet({ ...input, now, requireExecution: false });
   if (!observed) throw new Error('No complete recovery set matches the current execution contract.');
@@ -150,9 +150,17 @@ export async function recordRecoveryExecution(input: Context & { setId: string; 
     return { applied: 0, skipped: 1 };
   }
   const bytes = Buffer.from(JSON.stringify(marker));
+  await input.beforeWrite?.();
   await input.archive.put(key, { body: Readable.from([bytes]), size: bytes.length, contentType: 'application/json' }, { ifAbsent: true });
   if (!same(recoveryExecutionSchema.parse(await readRecoveryJson(input.archive, key)), marker)) throw new Error('Execution cleanup marker read-back failed.');
   return { applied: 1, skipped: 0 };
+}
+
+/** Exact retained set verification for a one-use local operation; no retention or mutations. */
+export async function observeRecoveryExecution(input: Context & { setId: string; jobId?: string }) {
+  const observed = await inspectSet({ ...input, requireExecution: true });
+  if (!observed || input.jobId !== undefined && observed.execution.jobId !== input.jobId) throw new Error('The exact completed recovery set or cleanup attestation is unavailable.');
+  return { setId: observed.manifest.setId, completedAt: observed.execution.completedAt };
 }
 
 export async function observeManagedRecoverySet(input: Context): Promise<ManagedRecoveryObservation> {

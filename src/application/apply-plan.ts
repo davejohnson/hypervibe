@@ -1,3 +1,5 @@
+import { applyManualBackup } from './manual-backup.js';
+import { manualBackupFingerprint, planManualBackup } from '../domain/services/manual-backup.service.js';
 import { applyOperatorApplications, operatorApplicationUnavailable } from '../domain/services/operator-application.service.js';
 import { operatorImageUpdateSelection, verifyOperatorImageUpdate } from '../domain/services/operator-image-update.service.js';
 import { applyRecoveryRuntimeAction } from '../domain/services/recovery-runtime.service.js';
@@ -1013,6 +1015,25 @@ export async function executePlanApply(ctx: CommandContext, params: {
             : undefined,
         })
       : { kind: 'env_missing', envName };
+  }
+
+  if (planScope === 'backup-run') {
+    const blocked = (reason: string): PlanApplyOutcome => ({ kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason }] });
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap)
+      return blocked('A manual backup requires its exact existing environment and cannot run deployment or bootstrap.');
+    const context = { project: projectForPreflight, environment, spec: envSpec,
+      components: ctx.repos.components.findByEnvironmentId(environment.id), adapterFactory: ctx.adapterFactory };
+    const fingerprint = manualBackupFingerprint(context);
+    if (fingerprint !== loaded.document.observedFingerprint) return blocked('The reviewed backup bindings changed; re-plan the same request.');
+    const fresh = await planManualBackup(context);
+    if (!fresh.action.verified || !isDeepStrictEqual(fresh.action, loaded.document.actions[0]))
+      return blocked('The exact source, runtime or retained backup evidence changed; re-plan without replaying writes.');
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision,
+      confirmActions: params.confirmActions, freshObservedFingerprint: fingerprint,
+      handler: action => resolvePlanActionAuthority(action)?.capability === 'hosting.manual-backup.execute'
+        ? applyManualBackup({ ctx, project: projectForPreflight, environmentId: environment.id, spec: envSpec, specRevision: params.specRevision, action, confirmed: new Set(params.confirmActions) })
+        : Promise.resolve({ success: false, message: 'Only the exact reviewed manual backup operation is authorized.' }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['This verifies an isolated logical restore and exact job cleanup. It does not test Cloud SQL PITR or application compatibility, change prior archives, or activate a schedule.'] };
   }
 
   if (planScope === 'runtime-access' && loaded.document.overrides?.services !== undefined) {

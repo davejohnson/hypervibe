@@ -45,6 +45,26 @@ confirmations; preserving native snapshots and accepted backup programs does not
 authorize new resources. Explicit destructive-operation checkpoints retain their
 separate prerequisite and confirmation rules.
 
+For a one-time backup of an existing prepared Cloud Run/Cloud SQL/GCS environment,
+set a new named `backups.run: { "id": "before-live-check" }` with `hv_spec` while
+keeping its daily backup configuration, destination and immutable helper. Then use
+`hv_plan scope="backups"` and apply the exact saved action. This uses the current
+verified local cloud connection; it does not require a GitHub workflow or change
+repository source authority. The worker receives its existing native identity and
+immutable secret reference, never the coding session's credentials. The review
+covers one temporary job, archive writes, an isolated logical SQL restore and
+verified job cleanup. Existing archives are preserved; no schedule is activated.
+
+If interrupted, re-plan the same request id. Hypervibe retains exact progress and
+never repeats an uncertain create or run. Missing cloud acknowledgment can require
+further investigation; do not change the request id to escape a pending operation.
+Once completed, the same request becomes a verified no-op. A new backup requires
+a new reviewed id. An independently verified failed helper with completed native
+cleanup remains failed; a new request may be reviewed after fixing its cause.
+Removing the request never deletes archives or its local recovery history. Native
+PITR and application compatibility remain separate checks. Other hosting providers
+do not yet implement this restart-safe local path.
+
 Ordinary repository changes preserve existing backup programs and never publish
 a new one. Plan backup publication for the environment whose backups are
 requested, even when the canonical GitHub environment differs or has backups

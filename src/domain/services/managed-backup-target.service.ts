@@ -78,7 +78,7 @@ export function objectRecoverySourceIdentity(identity: ObjectRecoveryIdentity) {
     providerScope: { storageScopeHash: canonicalJsonSha256(objectRecoveryIdentitySchema.parse(identity).instanceScope) }, resourceIdentity: {} });
 }
 
-export async function resolveManagedBackupTarget(context: BackupPolicyContext, options: { allowUnpreparedRuntime?: boolean } = {}): Promise<
+export async function resolveManagedBackupTarget(context: BackupPolicyContext, options: { allowUnpreparedRuntime?: boolean; localAuthority?: boolean } = {}): Promise<
   { state: 'ready'; target: ManagedBackupTarget; contractHash: string; providerCredentialNames: string[] }
   | { state: 'blocked'; issues: string[] }
 > {
@@ -143,7 +143,7 @@ export async function resolveManagedBackupTarget(context: BackupPolicyContext, o
   }
   const credentialNames = new Set<string>();
   const automation: NonNullable<ManagedBackupTarget['automation']> = {};
-  for (const provider of providers) {
+  for (const provider of options.localAuthority ? [] : providers) {
     try {
       const selected = providerRegistry.getMetadata(provider)?.credentials?.automationAuthentication?.(environment);
       if (selected) {

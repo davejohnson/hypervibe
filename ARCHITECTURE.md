@@ -2360,6 +2360,15 @@ apply and emitted-workflow regressions, plus
 boundaries in ordinary `npm test`. They use synthetic provider observations;
 passing them does not establish a live deployment or tested provider recovery.
 
+An explicit `backups.run.id` on an existing prepared environment selects a one-use
+local backup and isolated logical restore through the `backup-run` saved plan.
+Its permanent local request record, exact native checkpoint and compare-and-swap
+callbacks keep uncertain create/run/cleanup effects recoverable without replay.
+It uses current local connection authority and preserves all prior archives;
+it neither borrows scheduled GitHub authority nor activates or weakens that path.
+Only providers advertising the reviewed durable task capability are admitted.
+See [the shared contract and evidence](docs/manual-recovery-task-evidence.md).
+
 Recurring managed backup diagnostics use the shared recovery diagnostic port:
 closed stage/category codes cross worker, provider, application and controller
 boundaries without raw errors. An execution-bound worker marker supplies failure
