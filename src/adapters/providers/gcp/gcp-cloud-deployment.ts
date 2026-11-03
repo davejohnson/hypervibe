@@ -234,10 +234,10 @@ export function createGcpCloudDeploymentDriver(options: { fetch?: typeof fetch; 
     // Project-only Cloud Asset queries exclude ancestor policies. Until the
     // complete ancestry can be independently verified, this path is no-org only.
     if (result.parent !== undefined && result.parent !== '') fail('insufficient_permissions');
-    await scopeAuthority(client, s, await client.policy('project', `projects/${s.projectNumber}`), intent.hostIdentity.serviceAccountEmail);
+    await scopeAuthority(client, s, await client.policy('project', `projects/${s.projectNumber}`), intent.hostIdentity.serviceAccountEmail, intent.hostIdentity);
     return proofSchema.parse({ id: result.name, lifetimeId: result.createTime });
   }
-  async function scopeAuthority(client: GcpSecretWriterClient, s: ReturnType<typeof settings>, policy: WriterIamPolicy, host: string) {
+  async function scopeAuthority(client: GcpSecretWriterClient, s: ReturnType<typeof settings>, policy: WriterIamPolicy, host: string, hostProject: { projectId: string; projectNumber: string }) {
     const controlled = new Set([host, ...Object.keys(s.accounts).map(s.email)]);
     for (const binding of policy.bindings) for (const member of binding.members) {
       // Group/principal-set membership cannot be established from this policy.
@@ -246,6 +246,16 @@ export function createGcpCloudDeploymentDriver(options: { fetch?: typeof fetch; 
         && !member.startsWith('deleted:serviceAccount:')) fail('insufficient_permissions');
       if (!member.startsWith('serviceAccount:') || !controlled.has(member.slice('serviceAccount:'.length))) continue;
       if (binding.condition || ![`serviceAccount:${host}`, `serviceAccount:${s.email('provision')}`, `serviceAccount:${s.email('release')}`].includes(member)) fail('insufficient_permissions');
+      // The host may run its own database in this same project. Preserve only
+      // this independently observed connector permission set; it grants neither
+      // deployment mutation nor token issuance and is never given to deployers.
+      if (binding.role === 'roles/cloudsql.client' && member === `serviceAccount:${host}`
+        && hostProject.projectId === s.projectId && hostProject.projectNumber === s.projectNumber
+        && host.endsWith(`@${s.projectId}.iam.gserviceaccount.com`)) {
+        const role = await client.role(binding.role);
+        if (!role || !isDeepStrictEqual([...role.includedPermissions].sort(), ['cloudsql.instances.connect', 'cloudsql.instances.get'])) fail('insufficient_permissions');
+        continue;
+      }
       // Existing collection verifiers may retain a separate read-only custom
       // role. Inspect actual permissions; never infer safety from its name.
       if (!binding.role.startsWith(`projects/${s.projectId}/roles/`)) fail('insufficient_permissions');
@@ -494,7 +504,7 @@ export function createGcpCloudDeploymentDriver(options: { fetch?: typeof fetch; 
       // A collection connection may retain a separate verifier role. Apply the
       // same native permission proof to this fresh policy read as at planning.
       const projectPolicy = expected[0].policyKind === 'project';
-      if (projectPolicy) await scopeAuthority(client, s, policy, connection.hostIdentity.serviceAccountEmail);
+      if (projectPolicy) await scopeAuthority(client, s, policy, connection.hostIdentity.serviceAccountEmail, connection.hostIdentity);
       for (const grant of expected) if (!policy.bindings.some(binding => binding.role === grant.role && !binding.condition && binding.members.includes(String(grant.member)))) fail('authorization_revoked');
       for (const binding of policy.bindings) for (const member of binding.members) {
         const universal = member === 'allUsers' || member === 'allAuthenticatedUsers';

@@ -83,3 +83,35 @@ cron/release commands and broader datastore/storage topology are explicit unsupp
 cases. No passing fixture or prepared resource proves application health or live support.
 New-project billing has separate [versioned assignment evidence](connect-cloud-gcp-billing-assignment.md)
 and an explicit concurrent-change limitation; old unversioned billing plans remain blocked.
+
+## Existing host database connectivity in the same project
+
+The assumption that every predefined project role on the hosted broker grants
+unreviewed deployment power was too broad. A read-only native diagnostic reproduced
+the selected-project review refusal after project and IAM-policy reads: the host's
+only project role was `roles/cloudsql.client`. Google's
+[Cloud SQL role reference](https://docs.cloud.google.com/iam/docs/roles-permissions/cloudsql#cloudsql.client)
+and an independently read `roles.get` response on 2026-11-03 identify exactly
+`cloudsql.instances.connect` and `cloudsql.instances.get`. These provide runtime
+connectivity/metadata access, not IAM mutation, deployment changes, or token issuance.
+Database authentication remains separate; this is not proof of unrestricted SQL access.
+
+The exception preserves only an **existing** unconditional grant to the exact verified
+host in its own matching project ID and number. Every planning/verification/session
+policy observation freshly reads the role and requires that exact permission set.
+It adds no role, copies no permission to provision/release/runtime identities, and
+never admits arbitrary predefined roles. Other-project, changed permissions,
+conditional/denied/missing role evidence and deployer-principal grants still block.
+Existing no-organization/group-ambiguity restrictions are unchanged. AWS and Azure
+retain their own reviewed authority contracts; this Google role has no analogue
+added to either provider.
+
+The actual shared installer/serialized-transport regression first failed at planning,
+then passed plan, install and session issuance while preserving the original grant.
+A later role-permission change prevents another token issuance. The public metadata
+fixture is recorded; surrounding accounts and HTTP responses are reconstructed.
+The live web exception itself had no application payload in Cloud Logging, so the
+matching installed-driver failure is strong causal evidence, not a captured browser
+stack. No live installation, deployment, IAM change or cleanup was performed by
+these diagnostics or tests. Live compatibility still requires the reviewed release
+and user walkthrough.

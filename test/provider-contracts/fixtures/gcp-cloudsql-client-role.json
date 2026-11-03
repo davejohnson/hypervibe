@@ -1,0 +1,14 @@
+{
+  "source": "https://docs.cloud.google.com/iam/docs/roles-permissions/cloudsql#cloudsql.client",
+  "endpoint": "GET https://iam.googleapis.com/v1/roles/cloudsql.client",
+  "observedAt": "2026-11-03T22:42:25.350Z",
+  "evidence": "Allowlisted public metadata from a read-only native response; no account-specific data.",
+  "role": {
+    "name": "roles/cloudsql.client",
+    "stage": "GA",
+    "includedPermissions": [
+      "cloudsql.instances.connect",
+      "cloudsql.instances.get"
+    ]
+  }
+}

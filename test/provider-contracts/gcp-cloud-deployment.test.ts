@@ -1,3 +1,4 @@
+import cloudSqlClientRole from './fixtures/gcp-cloudsql-client-role.json' with { type: 'json' };
 import { gcpAccountPolicyGetContractResponse } from '../../src/test/gcp-iam-policy-contract.js';
 import { gcpRoleGetContractResponse } from '../../src/test/gcp-iam-role-contract.js';
 import { serviceUsageResponse } from './helpers/gcp-service-usage.js';
@@ -137,15 +138,18 @@ function nativeFixture(callLimit = Number.POSITIVE_INFINITY) {
 const authentication = { administrator: { getAccessToken: async () => 'synthetic-admin-token' },
   host: { verifyIdentity: async () => intent.hostIdentity, getAccessToken: async () => 'synthetic-host-token',
     getIdToken: async () => { throw new Error('No Google web identity exchange is needed'); } } };
-async function setupNative(callLimit?: number) {
+async function setupNative(callLimit?: number, options?: { intent: CloudInstallationIntent; prepare(f: ReturnType<typeof nativeFixture>): void }) {
   const f = nativeFixture(callLimit), driver = createGcpCloudInstallationDriver({ fetch: f.request, holdingImage: image });
+  options?.prepare(f);
+  const selectedIntent = options?.intent ?? intent;
+  const selectedAuthentication = { ...authentication, host: { ...authentication.host, verifyIdentity: async () => selectedIntent.hostIdentity } };
   const records = new Map<string, CloudInstallationRecord>();
   const store = { read: async (id: string) => structuredClone(records.get(id) ?? null),
     compareAndSwap: async (id: string, revision: number | null, next: CloudInstallationRecord) => {
       if ((records.get(id)?.revision ?? null) !== revision) return false; records.set(id, structuredClone(next)); return true;
     } };
-  const shared = { driver, store, authentication, authorize: async () => true };
-  const prepared = prepareCloudDeploymentIntentV1(spec, intent, driver), plan = await planCloudInstallationV1({ ...shared, intent: prepared });
+  const shared = { driver, store, authentication: selectedAuthentication, authorize: async () => true };
+  const prepared = prepareCloudDeploymentIntentV1(spec, selectedIntent, driver), plan = await planCloudInstallationV1({ ...shared, intent: prepared });
   const apply = () => applyCloudInstallationV1({ ...shared, installationId: plan.installationId, planDigest: plan.plan.digest,
     confirmActions: plan.plan.actions.map(action => action.id) });
   return { f, driver, shared, plan, apply };
@@ -365,6 +369,55 @@ describe('native Google prepared deployment installation', () => {
       authorize: async () => true, signal: AbortSignal.timeout(5000) });
     expect(session.kind).toBe('gcp-impersonation');
     expect(t.f.calls.slice(before).some(call => call.url.endsWith(':setIamPolicy'))).toBe(false);
+  });
+  // Role permissions independently observed from IAM roles.get on 2026-11-03;
+  // the account/project are synthetic, and transport responses are reconstructed.
+  const hostDatabasePermissions = cloudSqlClientRole.role.includedPermissions;
+  const colocatedIntent: CloudInstallationIntent = { ...intent, hostIdentity: { ...intent.hostIdentity,
+    projectId: 'customer-project', projectNumber: '123456789012', serviceAccountEmail: 'host@customer-project.iam.gserviceaccount.com' } };
+  function hostDatabasePolicy(f: ReturnType<typeof nativeFixture>, selected = colocatedIntent, permissions = hostDatabasePermissions) {
+    f.resources.set('roles/cloudsql.client', { name: 'roles/cloudsql.client', description: 'Provides connectivity access to Cloud SQL instances.',
+      stage: 'GA', includedPermissions: permissions });
+    f.policies.set('projects/123456789012', { etag: 'existing-host-runtime', version: 3, bindings: [{ role: 'roles/cloudsql.client',
+      members: [`serviceAccount:${selected.hostIdentity.serviceAccountEmail}`] }] });
+  }
+  it('preserves independently verified host database connectivity through planning, installation and issuance', async () => {
+    const t = await setupNative(undefined, { intent: colocatedIntent, prepare: f => hostDatabasePolicy(f) });
+    expect(t.f.calls.some(call => call.url === 'https://iam.googleapis.com/v1/roles/cloudsql.client' && call.method === 'GET')).toBe(true);
+    expect(t.plan.plan.actions.some(action => JSON.stringify(action).includes('cloudsql'))).toBe(false);
+    const ready = await t.apply(); expect(ready.status).toBe('ready');
+    const binding = { role: 'roles/cloudsql.client', members: [`serviceAccount:${colocatedIntent.hostIdentity.serviceAccountEmail}`] };
+    expect(t.f.policies.get('projects/123456789012').bindings).toContainEqual(binding);
+    const connection = cloudInstallationDeploymentConnectionV1(ready, t.driver), before = t.f.calls.length;
+    const session = await issueCloudDeploymentSessionV1({ connection, driver: t.driver, capability: 'release',
+      authentication: { host: t.shared.authentication.host }, authorize: async () => true, signal: AbortSignal.timeout(5000) });
+    expect(session.kind).toBe('gcp-impersonation');
+    expect(t.f.calls.slice(before).some(call => call.url.endsWith(':setIamPolicy'))).toBe(false);
+    t.f.resources.get('roles/cloudsql.client').includedPermissions.push('cloudsql.instances.update');
+    const issued = t.f.state.issued;
+    await expect(issueCloudDeploymentSessionV1({ connection, driver: t.driver, capability: 'release',
+      authentication: { host: t.shared.authentication.host }, authorize: async () => true, signal: AbortSignal.timeout(5000) })).rejects.toThrow();
+    expect(t.f.state.issued).toBe(issued);
+  });
+  it.each(['other-project', 'wrong-project-number', 'extra-permission', 'wrong-role', 'conditional', 'missing-role', 'denied-role', 'deployer'])('blocks unverified host database authority: %s', async variant => {
+    const f = nativeFixture(), selected = variant === 'other-project' ? intent : variant === 'wrong-project-number'
+      ? { ...colocatedIntent, hostIdentity: { ...colocatedIntent.hostIdentity, projectNumber: '999999999999' } } : colocatedIntent;
+    hostDatabasePolicy(f, selected, variant === 'extra-permission' ? [...hostDatabasePermissions, 'iam.serviceAccounts.getAccessToken'] : hostDatabasePermissions);
+    const binding = f.policies.get('projects/123456789012').bindings[0];
+    if (variant === 'wrong-role') binding.role = 'roles/cloudsql.admin';
+    if (variant === 'conditional') binding.condition = { title: 'unknown', expression: 'true' };
+    if (variant === 'missing-role') f.resources.delete('roles/cloudsql.client');
+    if (variant === 'denied-role') f.state.deniedPath = '/roles/cloudsql.client';
+    const driver = createGcpCloudInstallationDriver({ fetch: f.request, holdingImage: image });
+    const prepared = prepareCloudDeploymentIntentV1(spec, selected, driver);
+    if (variant === 'deployer') {
+      f.policies.delete('projects/123456789012');
+      const baseline = await driver.plan({ intent: prepared, authentication, signal: AbortSignal.timeout(1000), completed: {}, beforeMutation: async () => {} });
+      const principal = baseline.actions.find(action => action.id === 'gcp:deployment:grant:scope:provision')!.metadata.native.member;
+      f.policies.set('projects/123456789012', { etag: 'wrong-principal', version: 3, bindings: [{ role: 'roles/cloudsql.client', members: [principal] }] });
+    }
+    await expect(driver.plan({ intent: prepared, authentication, signal: AbortSignal.timeout(1000), completed: {}, beforeMutation: async () => {} })).rejects.toThrow();
+    expect(f.calls.some(call => call.method !== 'GET' && !/:(getIamPolicy|testIamPermissions)$/.test(new URL(call.url).pathname))).toBe(false);
   });
   it('pins existing secret container lifetime at review before any runtime reader grant', async () => {
     const t = await setupNative();
