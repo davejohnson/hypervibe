@@ -44,11 +44,6 @@ Use the normal `hv_spec` → `hv_plan` → `hv_apply` → `hv_status` workflow.
 4. Deploy the application, then verify its actual mounted path, permissions,
    read/write behavior, and persistence across redeployment separately.
 
-Fly has an additional ordering constraint: bind an empty app namespace, create
-the disk, then create its first Machine using the acknowledged disk ID. Only
-then can managed CI publish a workflow targeting that Machine. Adding a disk
-to an existing diskless Machine is blocked; no implicit replacement is allowed.
-
 ## Retention and recovery
 
 This first version is **retain-only**. Omission from the spec does not delete or
@@ -84,12 +79,9 @@ ownership evidence, not manual removal of the marker and blind retry.
 | Host | Filesystem path and initial constraints |
 | --- | --- |
 | Railway | Native volume; web only, known single-instance configuration. Capacity follows account defaults. |
-| Fly | Encrypted 1 GB native volume; web/worker, one Machine, attached at Machine creation; no replication. |
 | Azure Container Apps | Dedicated Standard_LRS StorageV2 account, classic SMB share with 5 GiB quota, environment registration and app attachment; web only. |
 | ECS Express | Encrypted regional EFS, access point, dedicated network permissions and task-definition attachment; web only; metered storage/throughput/transfer. |
 | Cloud Run | Dedicated VPC/subnet and BASIC_HDD Filestore, **1024 GiB minimum provisioned capacity**, then NFS attachment; web/worker. |
-| DigitalOcean App Platform | Rejected explicitly: this hosting product has no persistent mount support. |
-| Vercel Functions | Rejected explicitly: sandbox Drives are not mounts for the Functions hosting product. |
 
 Cloud Run's selected `<region>-a` zone must be independently observed as UP in
 the configured region before Filestore creation. Conflicting existing VPC/cache

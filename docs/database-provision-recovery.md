@@ -84,13 +84,9 @@ repeating the metadata commit or any provider mutation.
 | Database provider | Retained provision verification |
 | --- | --- |
 | Railway | Exact retained-ID recovery and explicit current-candidate selection implemented for these acknowledged PostgreSQL template attempts; live application of either path unverified. |
-| Supabase | Unsupported capability. |
-| Neon | Unsupported capability. |
 | Google Cloud SQL | Unsupported capability. |
 | Amazon RDS | Unsupported capability. |
 | Azure PostgreSQL | Unsupported capability. |
-| Fly Managed Postgres | Unsupported capability. |
-| DigitalOcean Managed PostgreSQL | Unsupported capability. |
 
 An unsupported capability preserves the blocker. It does not authorize generic
 adoption, another create, or a provider-specific workaround.

@@ -10,7 +10,7 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 The [repository-variable contract](github/repository-variables/README.md) pins
 GitHub's numeric repository identity and Actions variable endpoints. The named
-CI-provider comparison explicitly leaves GitLab unsupported for this facet.
+CI-provider comparison covers GitHub Actions, the only registered CI provider.
 Normal acceptance exercises complete bounded inventory, serialized create/update
 acknowledgements, exact stale checks, explicit zero-write adoption, durable
 uncertain-outcome reconciliation, inspection and value-free command responses.
@@ -179,8 +179,6 @@ API definitions.
 | Contract | Pinned source | Executed coverage |
 | --- | --- | --- |
 | Railway | Full schema from official CLI commit `f60f3a77b980c47f1136909fbd9a443e29a2b95f` | Static adapter query validation; real `graphql-request` serialization, GraphQL input coercion and response execution; project/environment creation; unsuffixed staging web/PostgreSQL/Redis beside production; isolated second-environment bucket creation through shared plan/apply, scoped deletion and noop replan; variables, domains, volumes, delete/retry, pagination, unknown reads and uncertain writes |
-| Supabase v1 | Official OpenAPI commit `26585dd4a4d6db8910a595214c9f6e8fdd206768` | Organization response and project-create request validation through the adapter's HTTP transport; ID/slug distinction; negative project-response fixture validation |
-| Neon v2 | Official release OpenAPI snapshot, content hash in `source.json` | Real serialized project-create body/query validation; organization scope; negative input validation |
 | SendGrid v3 webhooks | Official OpenAPI commit `fb95a935c87b79f7f982ac34bd37adab1f697dbc` (selected operations) | Event Webhook exact-ID settings reads, signing PATCH serialization and unique URL discovery; Inbound Parse exact-hostname reads/PATCH requests, exact-ID policy reads, missing/null evidence and canonical P-256 key validation; shared signing/key lifecycle uses reconstructed transport and synthetic hosting observations |
 | SendGrid v3 Email Logs | Exact `tsg_logs_v3.json` at the same official commit, pinned separately as `sendgrid/email-logs.openapi.json` | Full event-name union through the real adapter, safe search/timeline projection, strict account scope, request/body budgets and value-free failure metadata; see [Email Logs](sendgrid-email-logs.md). Separate bounded live account search and same-ID detail succeeded; this does not validate complete response schemas or certify other scopes/accounts. |
 
@@ -191,9 +189,7 @@ operations and the transitive closure of their component references, including
 response schemas. No requiredness or field types were rewritten.
 
 Pinning a test schema does **not** freeze a hosted API. Railway `/graphql/v2`
-does not select the historical CLI schema revision. Supabase `/v1` and Neon
-`/v2` select major API versions, not immutable server builds. In particular,
-Neon's release schema URL is mutable; tests consume only its checked-in snapshot.
+does not select the historical CLI schema revision.
 
 ## Evidence boundary
 
@@ -207,7 +203,6 @@ imply implemented Hypervibe support:
 | CI provider | Native contract and prerequisites | Hypervibe boundary |
 | --- | --- | --- |
 | `github-actions` | An existing repository environment has a durable numeric ID and case-insensitive name. [Jobs without deployments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/control-deployments#using-environments-without-deployments) can access its secrets while retaining reviewers, wait timers and branch restrictions; custom protection-app rules are incompatible. Reads require environment/secret metadata access. | Alternate build environment implemented for the existing managed iOS path. Exact identity, complete required-key presence and enabled custom rules are observed before publication and rechecked at apply. Unknown state or identity replacement blocks; no source writes, secret retrieval or recovery by same-name recreation. Offline contract coverage only. |
-| `gitlab-ci` | [Environment-scoped variables](https://docs.gitlab.com/ci/environments/#limit-the-environment-scope-of-a-cicd-variable) use exact or wildcard scope matching. These variables are not a GitHub environment identity/protection contract. | Managed iOS releases and this selector are unsupported; the registered lifecycle explicitly rejects this CI combination before workflow generation. No GitLab adapter or live compatibility is claimed. |
 
 `github/build-credentials/` pins the official environment, environment-secret
 and enabled protection-rule endpoints. The real adapter's reconstructed HTTP
@@ -278,8 +273,6 @@ body. Creation receives a deliberate HTTP 400 after inspection: these tests
 do not claim a successful database connection or full REST lifecycle. OpenAPI
 validation checks referenced shapes, required fields, types, enums, bounds and
 patterns; it does not enforce string formats or every vendor semantic rule.
-Neon's optional `org_id` additionally has a semantic assertion preserving the
-configured organization; schema validity alone cannot prove correct ownership.
 
 The pinned SendGrid `ParseSetting` schema does not declare `security_policy`,
 so successful schema validation does not constrain that field. Its string policy
@@ -349,14 +342,13 @@ defaults without accepting them as successful write acknowledgement. These
 regressions run under ordinary `npm test`; they establish a contract defect,
 not which field caused a particular live validation error or live GCP readiness.
 
-Retained service-volume tests additionally exercise Fly, ECS Express/EFS,
+Retained service-volume tests additionally exercise ECS Express/EFS,
 Azure Container Apps/classic Azure Files, and Cloud Run/Filestore through real
 clients with synthetic HTTP/SDK transport. Their fixtures cite official API
 documentation; unlike Railway, they do not execute a pinned provider schema.
 Shared SQLite lifecycle tests cover per-component intent, acknowledged identity,
-confirmation, delayed/unknown observations and mutation-free convergence. Fly
-also exercises app → disk → first Machine through the real plan/apply boundary.
-Generated GitHub and portable deployment scripts are executed to check mount
+confirmation, delayed/unknown observations and mutation-free convergence.
+Generated GitHub deployment scripts are executed to check mount
 preservation and reject provider-observed configuration loss. These checks do
 not prove live permissions, networking, filesystem I/O, regional availability,
 durability or billing. See [service volumes](../../docs/service-volumes.md).

@@ -2,7 +2,7 @@
 
 Hypervibe reports requested daily backup coverage for an environment's databases,
 persistent service volumes and object buckets independently from deployment.
-Ordinary planning, direct apply and generated GitHub/GitLab releases do not
+Ordinary planning, direct apply and generated GitHub releases do not
 require backup setup, an archive bucket, a recovery point or a tested restore.
 Read coverage and recovery health through `hv_status` or an explicit
 `hv_plan scope="backups"`. Ordinary plans do not run recurring-backup health
@@ -276,9 +276,8 @@ helper digest and a reviewed regeneration of the backup workflow together.
 Updating the local MCP runtime alone does not update the scheduled controller
 or worker. Exact workflow-authority checks reject mixed compiler/helper output.
 
-Generated GitHub and GitLab deployment workflows do not run backup health gates
-or require backup helper credentials before migrations or rollout. GitLab daily
-recovery execution remains unsupported and is reported as a backup coverage gap.
+Generated GitHub deployment workflows do not run backup health gates
+or require backup helper credentials before migrations or rollout.
 Verified immutable code rollback keeps its existing separate evidence path.
 
 The helper image must be built and published before setup. Merging the managed
@@ -305,11 +304,7 @@ native product limitation. No row certifies a live backup or restore.
 | Railway | [Daily volume schedules](https://docs.railway.com/volumes/backups) coexist with weekly/monthly schedules and have a native six-day retention window. PITR is separate. | Observe the exact database volume instance; add daily while preserving other schedules. Missing observed retention remains unknown. |
 | Cloud SQL | [Standard daily backups](https://docs.cloud.google.com/sql/docs/postgres/backup-recovery/backups) have count-based retention; [Enhanced Backup and DR](https://docs.cloud.google.com/sql/docs/postgres/backup-recovery/backup-options) is a separate control plane. | Standard daily policy observation and additive enablement. Preserve existing retention, windows and PITR. Legacy explicit backup/PITR policy keeps its meaning. |
 | RDS | [Automated daily backups](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_WorkingWithAutomatedBackups.BackupRetention.html) retain one to 35 days when enabled. Moving retention between zero and nonzero can interrupt service. | Unsupported by this adapter capability; no implicit retention change. |
-| Supabase | [Eligible paid projects](https://supabase.com/docs/guides/platform/backups) receive daily backups while PITR is disabled. Enabling PITR stops daily backups. Database backups exclude Storage objects. | Unsupported by this adapter capability; no plan upgrade or PITR change. |
 | Azure PostgreSQL | [Flexible Server backups](https://learn.microsoft.com/en-us/azure/postgresql/backup-restore/concepts-backup-restore) have daily cadence and configurable retention. New snapshots can pause while data is unchanged. | Unsupported by this adapter capability. Snapshot age alone cannot prove a missed backup for an idle database. |
-| Neon | Paid plans offer [scheduled branch snapshots](https://api-docs.neon.tech/reference/setsnapshotschedule), observed through the [schedule API](https://api-docs.neon.tech/reference/getsnapshotschedule). These are distinct from PITR history; exact schedule retention was not established in this review. | Unsupported by this adapter capability; no paid-plan assumption. |
-| Fly Managed Postgres | Official staff described [daily full backups](https://community.fly.io/t/scheduled-backups-in-managed-postgres/25132); the current API lists [cluster backups](https://docs.fly.io/api/machines/postgres-clusters/list-backups). Exact current retention remains unverified. These are separate from Fly Volume snapshots. | Unsupported by this adapter capability; no volume-retention assumption. |
-| DigitalOcean Managed PostgreSQL | [Daily backups](https://docs.digitalocean.com/products/databases/postgresql/how-to/restore-from-backups/) retain seven days; deleting the cluster deletes its backups. | Unsupported by this adapter capability; native automatic policy is not observed Hypervibe coverage. |
 
 Daily intent does not automatically enable PITR, HA or a paid
 provider tier. Some native products combine daily snapshots with continuous
@@ -321,12 +316,9 @@ interchangeable or disabling stronger protection to match a label.
 | Hosting provider and backing store | Native evidence and limits | Hypervibe daily-policy coverage |
 | --- | --- | --- |
 | Railway volume | [Native schedules](https://docs.railway.com/volumes/backups) include daily backups retained six days. Wiping the volume also removes its backups; this is not an independent off-provider copy. | Daily schedule observation and additive configuration for the exact bound volume. |
-| Fly Volume | [Automatic daily snapshots](https://docs.fly.io/volumes/snapshots/) default to five-day retention, configurable from one to sixty days. | Unsupported by this adapter capability. Native defaults are not verified Hypervibe coverage. |
 | ECS Express / regional EFS | [AWS Backup](https://docs.aws.amazon.com/efs/latest/ug/awsbackup.html) offers daily automatic backups with a default 35-day window. API-created regional EFS does not enable these automatically; Hypervibe creates that class through the API. | Unsupported by this adapter capability. |
 | Cloud Run / BASIC_HDD Filestore | [Standard backups](https://docs.cloud.google.com/filestore/docs/backups) support this tier; native enhanced scheduling excludes Basic. Google documents [scheduler/function automation](https://docs.cloud.google.com/filestore/docs/schedule-backups-cloud-scheduler). | Unsupported by this adapter capability; no automatic tier upgrade or scheduler creation. |
 | Azure Container Apps / SMB Azure Files | [Azure Backup](https://learn.microsoft.com/en-us/azure/backup/quick-backup-azure-files-vault-tier-portal) supports daily schedules. Snapshot tier stays with the source; vaulted backup copies data to a vault. [Region/protocol limits](https://learn.microsoft.com/en-us/azure/backup/azure-file-share-support-matrix) apply. | Unsupported by this adapter capability. |
-| DigitalOcean App Platform | [Persistent mounts are not supported by App Platform](https://docs.digitalocean.com/products/app-platform/how-to/store-data/). Local files are ephemeral. | No mount target; requested persistent volumes remain unsupported. External databases/buckets have their own coverage. |
-| Vercel Functions | [Functions lack a persistent writable filesystem](https://vercel.com/kb/guide/why-does-my-serverless-function-work-locally-but-not-when-deployed). | No mount target; requested persistent volumes remain unsupported. External databases/buckets have their own coverage. |
 
 ### Object storage
 

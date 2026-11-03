@@ -29,7 +29,7 @@ native database destination, not a raw variable injected into every workload.
 Review uses `hv_plan scope="credentials" credential=<role> intent="rotate"`,
 then exact action IDs through `hv_apply`. `intent="adopt"` verifies and records
 existing values without resetting credentials or synchronizing different values.
-Fly, DigitalOcean and RDS-managed master credentials retain provider-generated
+RDS-managed master credentials retain provider-generated
 ownership and recover the exact current replacement after an uncertain response.
 No production
 rotation was performed or authorized by this implementation work.
@@ -92,9 +92,9 @@ retirement. A successful deployment status alone is insufficient.
 
 Traffic-only retirement evidence keeps credential rollout requirements pending,
 including when native or managed CI receipts identify the exact new deployment.
-The current Cloud Run service, ECS Express, DigitalOcean App Platform and Vercel
+The current Cloud Run service and ECS Express
 observers report traffic coverage; they cannot clear this requirement until an
-instance-retirement capability is available. Cloud Run jobs, Fly Machines and
+instance-retirement capability is available. Cloud Run jobs and
 Azure revision/replica observations retain their existing instance evidence.
 Railway retains its scoped active-deployment inventory contract. None of these
 observations independently proves application SQL authentication.

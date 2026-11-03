@@ -7,7 +7,7 @@ ownership of the generated infrastructure described below.
 
 Hypervibe can manage repository collaboration, checks, autofix, pull-request
 review, code audit, dependency maintenance, and security settings as desired
-state. GitHub and OpenAI connections are optional: without them you can still
+state. A GitHub connection and the `OPENAI_API_KEY` secret are optional: without them you can still
 edit/read the spec, inspect local state and history, use the desktop companion,
 and manage every independently connected provider.
 
@@ -286,26 +286,25 @@ For least privilege, a fine-grained repository token can still be supplied as
 `apiToken`, with a separate classic `read:packages` PAT as
 `packageReadToken`. See [GitHub's PAT guide](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens).
 
-## Connect OpenAI (only for AI automations)
+## Provide the OpenAI key (only for AI automations)
 
-Credential type: an OpenAI project API key. A ChatGPT subscription is not an
-API credential and API usage is billed separately. Create a project-scoped key
-at [OpenAI API keys](https://platform.openai.com/api-keys). The project needs
-access to `gpt-5.6-sol`; a restricted key must allow model reads and Responses
-API writes. Set a project budget/usage limit before enabling scheduled work.
+Autofix, pull-request review and code-audit automations read `OPENAI_API_KEY`
+from GitHub Actions. Treat it like any other API key: create a project-scoped
+key at [OpenAI API keys](https://platform.openai.com/api-keys) (a ChatGPT
+subscription is not an API credential), set a project budget, and declare it as
+a delegated secret delivered to the repository:
 
-```bash
-export OPENAI_API_KEY='sk-proj-...'
+```json
+"secrets": {
+  "OPENAI_API_KEY": { "principal": "repository owner", "githubActions": { "repository": true } }
+}
 ```
 
-```text
-hv_connections provider="openai" scope="OWNER/REPOSITORY" credentialsRef="env:OPENAI_API_KEY"
-```
-
-Hypervibe syncs the value only into the repository's `OPENAI_API_KEY` Actions
-secret. It never appears in specs, plans, logs, receipts, snapshots, workflow
-files, or the desktop cache. The Codex job receives no GitHub write token; a
-separate job publishes its artifact or draft pull request.
+Supply the value when planning, for example
+`hv_plan secretRefs={"OPENAI_API_KEY":"env:OPENAI_API_KEY"}`. Planning blocks
+those automations until the secret is declared. The value never appears in
+specs, plans, logs, receipts, snapshots or workflow files, and the Codex job
+receives no GitHub write token.
 
 ## Allow autofix pull requests
 
