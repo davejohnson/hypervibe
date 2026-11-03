@@ -1899,11 +1899,9 @@ export async function planGitHubInfrastructure(params: {
     ...taskPrerequisites.warnings,
   ];
   let verified = taskPrerequisites.verified;
-  // Backup setup has a separate explicit lifecycle, even when its target is ready.
-  // Ordinary deployment reconciliation must neither observe other providers nor
-  // require publication of their recurring programs before recording its hash.
+  // Preserve independent backup programs by path. Their contents are neither
+  // desired repository writes nor prerequisites for unrelated reconciliation.
   const deferredBackupPaths = new Set(Object.keys(params.spec.environments).flatMap(managedBackupFilePaths));
-  const backupFiles: ManagedGitHubFile[] = [];
   const preservedManifestPaths: string[] = [];
   let backupPreservationBlockedReason: string | undefined;
   {
@@ -1914,19 +1912,15 @@ export async function planGitHubInfrastructure(params: {
           if (!isManagedBackupFilePath(filePath)) continue;
           deferredBackupPaths.add(filePath);
           preservedManifestPaths.push(filePath);
-          const current = await adapterResult.adapter.getFileContent(parts.owner, parts.repo, filePath);
-          if (current !== null) backupFiles.push({ path: filePath, content: current, hash: sha256(current) });
         }
       }
     } catch {
       verified = false;
       backupPreservationBlockedReason = 'github_backup_preservation_observation_unknown';
-      warnings.push('Existing managed backup files could not be observed safely; repository changes are deferred to preserve them.');
+      warnings.push('The managed repository manifest could not be observed safely; repository changes are deferred to preserve existing ownership.');
     }
-    files = compileManagedGitHubFiles(githubSpec, params.spec.runtime, [...restoreDrills.files, ...backupFiles]);
-    const preservedFiles = new Map(backupFiles.map(file => [file.path, file]));
     files = files.map(file => file.path === GITHUB_INFRASTRUCTURE_MANIFEST
-      ? managedManifestFile(file.content, [...parseManifest(file.content), ...preservedManifestPaths]) : preservedFiles.get(file.path) ?? file);
+      ? managedManifestFile(file.content, [...parseManifest(file.content), ...preservedManifestPaths]) : file);
   }
   const drift: string[] = [];
   for (const file of files) {

@@ -187,6 +187,7 @@ describe('selected-environment repository reconciliation with unrelated incomple
     if (!['unknown-credentials', 'ready', 'explicit-ready'].includes(state)) ctx.repos.environments.updatePlatformBindings(production.id, { storage: {} });
     const originalProduction = ctx.repos.environments.findById(production.id)!.platformBindings;
     const writes: Array<{ method: string; route: string }> = [];
+    const backupFileReads: string[] = [];
     const deleteAttempts: string[] = [];
     let secondDeleteFailed = false;
     let applyStarted = false;
@@ -226,6 +227,7 @@ describe('selected-environment repository reconciliation with unrelated incomple
       if (method === 'GET' && route === `${root}/environments/production/secrets`) return ['ready', 'explicit-ready'].includes(state) ? json({ total_count: 1, secrets: [{ name: 'RAILWAY_API_TOKEN' }] }) : json({ message: 'Denied' }, 403);
       if (method === 'GET' && route.startsWith(`${root}/contents/`)) {
         const file = decodeURIComponent(route.slice(`${root}/contents/`.length));
+        if (/\/backups-|\/hypervibe-backup-/.test(file)) backupFileReads.push(file);
         if (applyStarted && state === 'explicit-disabled-unknown-apply-read' && file === '.github/workflows/hypervibe-backup-production.yml') return json({ message: 'Observation denied after review.' }, 403);
         if (file === '.github/hypervibe/backups-production.json' && state === 'unknown-backup-file') return json({ message: 'Denied' }, 403);
         if (file === GITHUB_INFRASTRUCTURE_MANIFEST && state === 'unknown-manifest') return json({ message: 'Denied' }, 403);
@@ -348,10 +350,6 @@ describe('selected-environment repository reconciliation with unrelated incomple
       return;
     }
     expect.soft(observe).not.toHaveBeenCalled();
-    if (previousProgram && state === 'omitted') {
-      const desired = repositoryPlan.actions[0].metadata?.desiredFiles as Array<{ path: string; content: string }>;
-      for (const previous of previousBackups.files) expect.soft(desired.find(file => file.path === previous.path)?.content).toBe(previous.content);
-    }
     const hashPlan = await planGitHubActionsAppliedSpecHash({ project, spec: stored.spec, environmentName: 'staging',
       environmentSpec: stored.spec.environments.staging, environment: staging,
       dependsOn: repositoryPlan.actions.filter(action => action.type !== 'noop').map(action => action.id) });
@@ -363,7 +361,7 @@ describe('selected-environment repository reconciliation with unrelated incomple
     vi.spyOn(PlanService.prototype, 'observeEnvironment').mockResolvedValue({ observed: null, warnings: [] });
     const outcome = state === 'absent-manifest' ? undefined : await executePlanApply(ctx, { project, spec: stored.spec, specRevision: stored.revision,
       planId: plan.id, confirmActions: [] });
-    if (['unknown-manifest', 'malformed-manifest', 'unknown-backup-file'].includes(state)) {
+    if (['unknown-manifest', 'malformed-manifest'].includes(state)) {
       expect(outcome).toMatchObject({ kind: 'executed', result: { success: false } });
       expect(repositoryPlan.actions.find(action => action.id === GITHUB_INFRASTRUCTURE_ACTION_ID)?.metadata?.blockedReason).toBeDefined();
       expect(writes).toEqual([]);
@@ -372,6 +370,7 @@ describe('selected-environment repository reconciliation with unrelated incomple
       expect(configureDaily).not.toHaveBeenCalled();
       return;
     }
+    expect.soft(backupFileReads).toEqual([]);
     if (state === 'absent-manifest') {
       // Provider-confirmed absence permits a new repository proposal, but never
       // creates a backup program whose production target remains incomplete.
@@ -399,11 +398,12 @@ describe('selected-environment repository reconciliation with unrelated incomple
     expect(ctx.repos.environments.findById(production.id)!.platformBindings).toEqual(originalProduction);
     expect(files).toEqual(originalFiles);
     const desired = repositoryPlan.actions.find(action => action.id === GITHUB_INFRASTRUCTURE_ACTION_ID)?.metadata?.desiredFiles as Array<{ path: string; content: string }>;
+    // Preserving an independent program needs no content read or desired
+    // rewrite, even when the provider denies those reads.
+    expect(desired.some(file => /\/backups-|\/hypervibe-backup-/.test(file.path))).toBe(false);
     for (const previous of previousBackups.files) {
-      expect(desired.find(file => file.path === previous.path)?.content).toBe(originalFiles.get(previous.path));
       expect(JSON.parse(desired.find(file => file.path === GITHUB_INFRASTRUCTURE_MANIFEST)!.content).files).toContain(previous.path);
     }
-    if (!previousProgram) expect(desired.some(file => /backup-production|backups-production/.test(file.path))).toBe(false);
   });
   it.each(['updated', 'removed', 'newly-managed', 'newly-managed-retired-environment'] as const)(
     'preserves the current reviewed backup program during repository publication and retry (%s)', async state => {
