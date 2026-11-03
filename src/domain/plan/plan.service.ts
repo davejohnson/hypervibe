@@ -1,5 +1,5 @@
 import { manualBackupFingerprint, planManualBackup } from '../services/manual-backup.service.js';
-import { operatorApplicationWorkRequired, planOperatorApplications, operatorApplicationUnavailable, operatorOutputPrerequisiteKeys } from '../services/operator-application.service.js';
+import { operatorApplicationWorkRequired, operatorRetirementPlanFailure, planOperatorApplicationRetirement, planOperatorApplications, operatorApplicationUnavailable, operatorOutputPrerequisiteKeys } from '../services/operator-application.service.js';
 import { CloudInstallationError } from '../services/cloud-installation-runtime.js';
 import { observeRecoveryRuntime, planRecoveryRuntime } from '../services/recovery-runtime.service.js';
 import { observeRuntimeAccess, planRuntimeAccess, projectRuntimeAccessInput, runtimeAccessBindings } from '../services/runtime-access.service.js';
@@ -1853,8 +1853,8 @@ export class PlanService {
     // Persist explicit intent without interpreting retirement as new setup.
     // Provider retirement drivers and their exact plan projections are separate
     // capabilities; until installed this path cannot prepare dependencies.
-    if (scope === 'full' && [...Object.values(operatorDesired?.operatorApplications ?? {}),
-      ...Object.values(operatorDesired?.operatorArtifacts ?? {})].some(item => item.retirement))
+    if (scope === 'full' && (Object.values(operatorDesired?.operatorArtifacts ?? {}).some(item => item.retirement)
+      || Object.values(operatorDesired?.operatorApplications ?? {}).some(item => item.retirement && !providerRegistry.getOperatorApplication(item.provider)?.retirement)))
       return { error: 'Operator retirement is not yet supported for these registrations or publications. The request is saved; no setup or deletion is authorized. Existing resources and history are preserved.' };
     if (scope === 'backups') {
       if (options?.serviceFilter !== undefined || options?.envVarOverrides !== undefined || options?.envFile !== undefined
@@ -1912,6 +1912,21 @@ export class PlanService {
       return await planDatabaseFreshInitialization({ project: projectWithSpecGitRemoteUrl(project, specResult.spec),
         spec: specResult.spec, revision: specResult.revision, environmentName, options })
         ?? { error: 'The retained database initialization could not be reconciled.' };
+    }
+    if (scope === 'full' && Object.values(operatorDesired?.operatorApplications ?? {}).some(item => item.retirement)) {
+      try {
+        const registration = await planOperatorApplicationRetirement({ project, environmentName, specResult, options });
+        if (!registration) return { error: 'The explicit operator retirement review is unavailable.' };
+        const document: PlanRunDocument = { kind: 'hv_plan', scope: 'operator-applications', environmentName,
+          specRevision: specResult.revision, observedFingerprint: null, actions: registration.actions,
+          applicationRegistration: registration.applicationRegistration, warnings: registration.warnings };
+        planRunDocumentSchema.parse(document);
+        const run = this.runRepo.create({ projectId: project.id, environmentId: registration.environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
+        this.runRepo.updateStatus(run.id, 'succeeded');
+        return { planRunId: run.id, scope: 'operator-applications', specRevision: specResult.revision, environmentName,
+          verified: true, observed: null, actions: registration.actions, cloudScopeReview: registration.review,
+          unmanaged: [], warnings: registration.warnings, inputRequired: [], blocked: [] };
+      } catch (error) { return { error: operatorRetirementPlanFailure(error) }; }
     }
     try {
       if (scope !== 'full' && await localCloudScopeRequired(project, environmentName, specResult.spec)) {

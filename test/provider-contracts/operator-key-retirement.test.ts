@@ -1,3 +1,9 @@
+import '../../src/application/providers.js';
+import { CommandRegistry } from '../../src/application/commands.js';
+import { registerCoreTools } from '../../src/tools/core.tools.js';
+import { executePlanApply } from '../../src/application/apply-plan.js';
+import { SpecStore } from '../../src/domain/spec/spec.store.js';
+import { providerRegistry } from '../../src/domain/registry/provider.registry.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -35,6 +41,12 @@ async function fixture(provider: typeof providers[number], capabilityPath = fals
     mode: 'connect', stage: 'scope-preparation', keys: [], execution: { kind: 'operator-application', authentication: 'local-operator' },
     nativeScope: provider === 'sendgrid' ? { connectionId: connection.id, accountId: mail.accountId, sender: 'operator@example.test', recipient: 'consenting@example.test', name: 'mail', origin: 'https://operator.example.test' }
       : { projectId: captcha.projectId, projectNumber: captcha.projectNumber, name: 'captcha', origin: 'https://operator.example.test' } };
+  const declaration = { provider, profile: 'hypercloud-connect-v1', originService: 'web', runtimeService: 'web',
+    nativeScope: Object.fromEntries(Object.entries(intent.nativeScope).filter(([key]) => !['name', 'origin'].includes(key))) };
+  const originalSpec = new SpecStore().replace(project, { version: 1, project: project.name, gitRemoteUrl: project.gitRemoteUrl,
+    environments: { test: { hosting: { provider: 'cloudrun' }, services: {}, operatorApplications: { key: declaration } } } });
+  intent.source.specRevision = originalSpec.revision; intent.source.specDigest = canonicalJsonSha256(originalSpec.spec);
+  intent.selection = { declarationDigest: canonicalJsonSha256(declaration) };
   const custody = new OperatorCredentialCustody({ projectId: project.id, environmentId: environment.id, installationId: intent.installationId, intentDigest: canonicalJsonSha256(intent), provider });
   let retiring = false, deleted = false, deny = false, lost = false, lostKeeps = false, deniedDelete = false, deniedAfterDelete = false, missingRead = false, wrongScope = false, malformedDelete = false;
   const requests: Array<{ method: string; path: string; body: unknown }> = [];
@@ -88,12 +100,27 @@ async function fixture(provider: typeof providers[number], capabilityPath = fals
   const plan = () => planCloudInstallationV1({ ...context(), intent: next });
   const apply = (r: CloudInstallationRecord<OperatorApplicationIntent>, confirmActions = r.plan.actions.map(a => a.id)) => applyCloudInstallationV1({ ...context(), installationId: r.installationId, planDigest: r.plan.digest, confirmActions });
   const recover = (r: CloudInstallationRecord<OperatorApplicationIntent>) => reconcileCloudInstallationV1({ ...context(), installationId: r.installationId, planDigest: r.plan.digest });
-  return { provider, prior, next, plan, apply, recover, context, store, requests, mail, captcha, custody,
+  return { provider, prior, next, plan, apply, recover, context, store, requests, mail, captcha, custody, app, project, environment, originalSpec, declaration,
     controls: { deny: (v = true) => { deny = v; }, lost: (keep = false) => { lost = true; lostKeeps = keep; }, denyDelete: (v = true) => { deniedDelete = v; }, denyAfterDelete: () => { deniedAfterDelete = true; }, absent: () => { deleted = true; mail.keys.delete('new-test-key-1'); }, missingRead: () => { missingRead = true; }, wrongScope: () => { wrongScope = true; }, malformedDelete: () => { malformedDelete = true; } },
     restart: () => { SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(path.join(directory, 'state.db')).migrate(); },
   };
 }
 describe.each(providers)('%s exact completed operator key retirement', provider => {
+  it('reaches the exact retirement through registered hv_spec, saved hv_plan and hv_apply without setup custody', async () => {
+    const f = await fixture(provider, true), commands = new CommandRegistry(); registerCoreTools(commands, f.app);
+    const capability = providerRegistry.getOperatorApplication(provider)!;
+    const setup = vi.spyOn(capability, 'create').mockRejectedValue(new Error('Setup is not retirement'));
+    const declaration = { ...f.declaration, retirement: { from: { installationId: f.prior.installationId, planDigest: f.prior.plan.digest }, resources: 'delete-owned', data: 'retain' } };
+    const spec = structuredClone(f.originalSpec.spec); spec.environments.test.operatorApplications = { key: declaration as any };
+    const written = await commands.execute('hv_spec', { project: f.project.name, spec, replace: true }); expect(written.ok, JSON.stringify(written)).toBe(true);
+    const planned: any = await commands.execute('hv_plan', { project: f.project.name, env: 'test' }); expect(planned.ok, JSON.stringify(planned)).toBe(true);
+    expect(planned.data.scope).toBe('operator-applications'); expect(planned.data.actions.map((a: any) => a.type)).toEqual(['destroy']);
+    const current = new SpecStore().get(f.project)!;
+    const result = await executePlanApply(f.app, { project: f.project, spec: current.spec, specRevision: current.revision,
+      planId: planned.data.planId, confirmActions: planned.data.actions.map((a: any) => a.id) });
+    expect(result).toMatchObject({ kind: 'executed', result: { success: true } }); expect(setup).not.toHaveBeenCalled();
+    expect(f.requests.filter(r => r.method === 'DELETE')).toHaveLength(1); expect(await f.store.read(f.prior.installationId)).toEqual(f.prior);
+  });
   it('uses the registered retirement capability and parses persisted records without setup custody', async () => {
     const f = await fixture(provider, true), plan = await f.plan(); const done = await f.apply(plan);
     const cap = provider === 'sendgrid' ? createSendGridOperatorCapability() : createGcpOperatorRecaptchaCapability();

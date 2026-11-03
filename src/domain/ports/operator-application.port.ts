@@ -34,12 +34,20 @@ export interface OperatorApplicationCapability {
     runtimeIdentity: CloudDeploymentRuntimeIdentityV1['principal'] }): Record<string, string> | Promise<Record<string, string>>;
   parseRecord(value: unknown): CloudInstallationRecord<OperatorApplicationIntent>;
   create(scope: Record<string, string>, context?: OperatorApplicationLocalContext): Promise<{ driver: CloudInstallationDriver<OperatorApplicationIntent>; authentication: OperatorApplicationAuthentication }>;
+  /** Separate from setup/output custody. Targets are parsed, completed records
+   * from this exact journal, selected by the explicit retirement declaration. */
+  retirement?: {
+    create(scope: Record<string, string>, context: OperatorApplicationLocalContext,
+      targets: CloudInstallationRecord<OperatorApplicationIntent>[]): Promise<{
+        driver: CloudInstallationDriver<OperatorApplicationIntent>; authentication: OperatorApplicationAuthentication;
+      }>;
+  };
   receipts(record: CloudInstallationRecord<OperatorApplicationIntent>): Array<Record<string, string>>;
 }
 export const OPERATOR_APPLICATION_OPERATION = 'operatorApplicationRegistration';
 export const operatorApplicationPlanSchema = z.object({ schemaVersion: z.literal(1), name,
   installationId: z.string().guid(), planDigest: z.string().regex(/^[a-f0-9]{64}$/), provider: z.enum(OPERATOR_APPLICATION_PROVIDERS),
-  mode: z.enum(['prepare', 'recover', 'verified']),
+  mode: z.enum(['prepare', 'recover', 'verified', 'retire']),
   retryActions: z.array(z.object({ actionId: z.string().min(1), attemptId: z.string().guid() }).strict()).min(1).max(1).optional(),
 }).strict();
 export type OperatorApplicationPlan = z.infer<typeof operatorApplicationPlanSchema>;
@@ -50,5 +58,6 @@ export function isOperatorApplicationAction(action: PlanAction): boolean {
   const parsed = operatorApplicationActionMetadataSchema.safeParse(action.metadata);
   return parsed.success && action.id === parsed.data.nativeActionId && action.verified
     && (parsed.data.mode === 'prepare' ? ['create', 'update', 'noop'].includes(action.type) && (action.type === 'noop' || action.requiresConfirm === true)
+      : parsed.data.mode === 'retire' ? ['destroy', 'update', 'noop'].includes(action.type) && (action.type === 'noop' || action.requiresConfirm === true)
       : parsed.data.mode === 'recover' && action.type === 'update' && !action.requiresConfirm && !action.billable);
 }

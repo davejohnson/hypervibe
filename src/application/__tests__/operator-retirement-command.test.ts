@@ -15,7 +15,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpCommandRegistrar } from '../../interfaces/mcp/adapter.js';
 
-// Real command/CLI/MCP + SQLite boundary. No production retirement driver is
+// Real command/CLI/MCP + SQLite boundary. Unsupported provider retirement is
 // installed yet: a declaration must be retained but must never become setup.
 describe('operator retirement command admission', () => {
   let directory: string;

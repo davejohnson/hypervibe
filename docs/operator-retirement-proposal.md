@@ -1,7 +1,10 @@
 # Completed operator setup retirement — contract and staged implementation
 
 Shared declaration/journal foundation based on `2f029c9f9683a88320d05b16c27eb28d3d6edcc2`.
-Production provider retirement drivers and plan projection are not implemented.
+The shared application plan projection and narrow Microsoft Entra, SendGrid and
+reCAPTCHA retirement drivers now have offline command/SQLite/transport coverage.
+Native retirement is untested. Browser registrations, artifact publication, parent
+scope and output-secret retirement remain separate gaps. See [implementation evidence](operator-application-retirement.md).
 No provider writes, new browser sessions or remote changes were made.
 
 ## Outcome and boundary
@@ -20,7 +23,8 @@ operator application/artifact intents only connect, their projected plans only
 prepare/recover/verify, and omitted completed declarations emit no delete.
 SendGrid's exact-key deletion is compensation for an incomplete key transaction,
 not a normal completed-key retirement path. These are confirmed source gaps;
-the boundary checks below implement only the shared foundation, not provider teardown.
+the initial boundary checks implemented the shared foundation; the later application
+slice adds the three scoped provider paths identified above.
 
 The five external registrations below are **one-time Hypercloud operator-hosting
 setup**, not prerequisites that every new customer must create. AWS/Azure/GCP
@@ -143,8 +147,8 @@ Deleting a customer's resources or data needs an explicit retirement review.
 | Azure publications | No registered operator-artifact publication capability today | Declare unsupported for this facet; do not invent ACR publication support to claim three-provider parity. Existing ACA/ACR or storage lifecycle uses its own exact bindings. |
 | GCS backups | Existing storage teardown and exact task-produced generation receipts | Not an operator artifact registration. Versioned and soft-deleted objects need independent retained outcomes even when ordinary GET returns 404 or bucket deletion succeeds. |
 
-Provider APIs and limits above are design evidence, **not implemented or live-tested
-retirement support**. The linked machine matrix records evidence for all named
+Provider APIs and limits above are design evidence. Only the three application
+paths identified above are implemented/offline verified; none is live-tested. The linked machine matrix records evidence for all named
 providers; shared roster tests must fail when a new registered provider is omitted.
 
 ## Dedicated parent test scope

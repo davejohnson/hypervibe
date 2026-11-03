@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "status": "provider-design-reviewed; shared-foundation-only",
-  "sourceCommit": "2f029c9f9683a88320d05b16c27eb28d3d6edcc2",
+  "status": "staged implementation: Entra/SendGrid/reCAPTCHA command paths offline verified; remaining provider retirement gaps explicit",
+  "reviewBaseCommit": "2f029c9f9683a88320d05b16c27eb28d3d6edcc2",
   "evidenceDate": "2026-11-03",
   "liveRetirementVerified": false,
   "operatorApplicationsRoster": [
@@ -62,7 +62,7 @@
     {
       "id": "microsoft-entra",
       "kind": "operator-application",
-      "implementation": "missing-completed-retirement",
+      "implementation": "implemented exact-target driver and shared spec/plan/apply path; offline contract verification only; native retirement untested",
       "nativeMethod": [
         "DELETE /applications/{object-id}/federatedIdentityCredentials/{credential-id}",
         "DELETE /applications/{object-id}"
@@ -72,20 +72,27 @@
         "applicationObjectId",
         "clientId",
         "federatedIdentityId",
-        "accepted issuer/subject/audience"
+        "accepted issuer/subject/audience",
+        "createdDateTime",
+        "accepted ownership/attempt tags",
+        "complete current reviewed owner IDs"
       ],
-      "retention": "Application deletion retains a deleted object for 30 days. Optional permanent deleted-item deletion is a different, explicitly destructive action.",
-      "recovery": "204 is acknowledgment; re-observe exact active/deleted identities. Do not infer service-principal or unrelated identity cleanup.",
+      "retention": "Observed deletedDateTime and documented normal 30-day recovery window, no computed hard-delete deadline or permanent-erasure claim. No purge.",
+      "recovery": "Exact active/deleted object correlation; uncertain DELETE is observation-only. Home-tenant service principals block this initial path because their cascading removal lacks accepted lifecycle authority; foreign-tenant principals are not inventoried or removed.",
       "sources": [
         "https://learn.microsoft.com/en-us/graph/api/federatedidentitycredential-delete?view=graph-rest-1.0",
         "https://learn.microsoft.com/en-us/graph/api/application-delete?view=graph-rest-1.0",
-        "https://learn.microsoft.com/en-us/graph/api/directory-deleteditems-delete?view=graph-rest-1.0"
+        "https://learn.microsoft.com/en-us/graph/api/directory-deleteditems-delete?view=graph-rest-1.0",
+        "https://learn.microsoft.com/en-us/graph/api/directory-deleteditems-get?view=graph-rest-1.0",
+        "https://learn.microsoft.com/en-us/graph/api/application-list-owners?view=graph-rest-1.0",
+        "https://learn.microsoft.com/en-us/entra/identity-platform/app-objects-and-service-principals",
+        "https://learn.microsoft.com/en-us/graph/api/serviceprincipal-list?view=graph-rest-1.0"
       ]
     },
     {
       "id": "google-recaptcha",
       "kind": "operator-application",
-      "implementation": "missing-completed-retirement",
+      "implementation": "implemented exact-target driver and shared spec/plan/apply path; offline contract verification only; native retirement untested",
       "nativeMethod": "DELETE https://recaptchaenterprise.googleapis.com/v1/projects/{project}/keys/{key}; empty body",
       "identity": [
         "projectNumber",
@@ -101,7 +108,7 @@
     {
       "id": "sendgrid",
       "kind": "operator-application",
-      "implementation": "failure-compensation-only; missing completed-key retirement",
+      "implementation": "implemented exact-target driver and shared spec/plan/apply path; offline contract verification only; native retirement untested",
       "nativeMethod": "DELETE /v3/api_keys/{api_key_id}",
       "identity": [
         "accountId",

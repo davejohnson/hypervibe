@@ -1,3 +1,4 @@
+import { createEntraOperatorRetirementDriver } from './entra-operator-retirement.js';
 import { DefaultAzureCredential } from '@azure/identity';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
@@ -15,14 +16,14 @@ type Intent = OperatorApplicationIntent;
 type Context = CloudInstallationProviderContext<Intent>;
 type ActionContext = Context & { action: CloudInstallationAction; attempt?: CloudInstallationAttempt };
 function fail(reason: ConstructorParameters<typeof CloudInstallationBoundaryError>[0] = 'identity_mismatch'): never { throw new CloudInstallationBoundaryError(reason); }
-function settings(intent: Intent) {
+export function entraOperatorSettings(intent: Intent) {
   if (intent.applicationProvider !== 'microsoft-entra' || intent.provider !== 'microsoft-entra') fail();
   const n = scopeSchema.parse(intent.nativeScope), owner = canonicalJsonSha256([intent.customerId, intent.appId, intent.environment, intent.installationId]);
   return { ...n, owner, displayName: `Hypercloud ${n.name}`, redirectUri: `${n.origin}/cloud-authorizations/azure`,
     appAction: `microsoft-entra:${n.name}:application`, ficAction: `microsoft-entra:${n.name}:federation`, ficName: `hypervibe-${owner.slice(0, 32)}` };
 }
 function actions(intent: Intent): CloudInstallationAction[] {
-  const n = settings(intent);
+  const n = entraOperatorSettings(intent);
   return [{ id: n.appAction, type: 'create', resource: { kind: 'project', provider: 'microsoft-entra', name: n.displayName },
     verified: true, requiresConfirm: true, reason: 'Create only the reviewed multi-tenant browser application; do not issue a client secret.',
     metadata: { operation: 'application', category: 'identity', execution: 'api', native: {} } },
@@ -34,8 +35,8 @@ const evidenceSchema = z.object({ resources: z.array(z.object({ kind: z.enum(['a
   identity: z.object({ tenantId: uuid, applicationId: uuid, clientId: uuid, createdDateTime: z.string().datetime({ offset: true }),
     owner: z.string().regex(/^[a-f0-9]{64}$/), origin: text, googleSubject: text, attemptId: uuid }).strict() }).strict()).length(1),
   native: z.object({ operation: z.enum(['application', 'federation']), installationId: uuid, attemptId: uuid }).strict() }).strict();
-function parseEvidence(value: unknown, intent: Intent): CloudInstallationEvidence {
-  const e = evidenceSchema.parse(value), n = settings(intent), resource = e.resources[0], identity = resource.identity;
+export function entraOperatorEvidence(value: unknown, intent: Intent): CloudInstallationEvidence {
+  const e = evidenceSchema.parse(value), n = entraOperatorSettings(intent), resource = e.resources[0], identity = resource.identity;
   if (e.native.installationId !== intent.installationId || e.native.attemptId !== identity.attemptId || e.native.operation !== resource.kind
     || identity.tenantId !== n.tenantId || identity.owner !== n.owner || identity.origin !== n.origin || identity.googleSubject !== n.googleSubject
     || resource.kind === 'application' && resource.id !== identity.applicationId) fail();
@@ -44,7 +45,7 @@ function parseEvidence(value: unknown, intent: Intent): CloudInstallationEvidenc
 function reason(error: unknown) { return error instanceof CloudInstallationBoundaryError ? error.reason : error instanceof DestinationBoundaryError
   ? error.status === 403 ? 'insufficient_permissions' as const : error.status === 401 ? 'authorization_expired' as const : 'provider_error' as const : 'provider_error' as const; }
 const fields = 'id,appId,displayName,createdDateTime,signInAudience,web,tags,passwordCredentials,keyCredentials,requiredResourceAccess';
-function sameApplicationCreationTime(observed: string, retained: string): boolean {
+export function sameApplicationCreationTime(observed: string, retained: string): boolean {
   if (observed === retained) return true;
   // Native Graph create ACKs include fractional seconds while both list and
   // exact-ID reads can return only the UTC second. Preserve the ACK verbatim;
@@ -54,7 +55,7 @@ function sameApplicationCreationTime(observed: string, retained: string): boolea
 }
 export function createEntraOperatorApplicationDriver(options: { fetch?: typeof fetch } = {}): CloudInstallationDriver<Intent> {
   async function withClient<T>(context: Context, work: (read: (path: string, body?: unknown) => Promise<Record<string, any>>) => Promise<T>) {
-    const n = settings(context.intent), budget = new DestinationBudget({ signal: context.signal, deadlineMs: 30_000 });
+    const n = entraOperatorSettings(context.intent), budget = new DestinationBudget({ signal: context.signal, deadlineMs: 30_000 });
     try {
       if (!context.authentication.administrator) fail('authorization_expired');
       const token = await budget.wait(context.authentication.administrator.getAccessToken('https://graph.microsoft.com/.default', budget.signal));
@@ -88,14 +89,14 @@ export function createEntraOperatorApplicationDriver(options: { fetch?: typeof f
     if (next) fail('not_converged'); return values;
   }
   function verifyApplication(value: any, context: Context, attempt: CloudInstallationAttempt, expected?: CloudInstallationEvidence) {
-    const n = settings(context.intent);
+    const n = entraOperatorSettings(context.intent);
     const id = uuid.parse(value.id), clientId = uuid.parse(value.appId), createdDateTime = z.string().datetime({ offset: true }).parse(value.createdDateTime);
     if (value.displayName !== n.displayName || value.signInAudience !== 'AzureADMultipleOrgs'
       || !isDeepStrictEqual(value.web?.redirectUris, [n.redirectUri])
       || value.web?.implicitGrantSettings?.enableAccessTokenIssuance !== false || value.web?.implicitGrantSettings?.enableIdTokenIssuance !== false
       || !isDeepStrictEqual(value.passwordCredentials, []) || !isDeepStrictEqual(value.keyCredentials, []) || !isDeepStrictEqual(value.requiredResourceAccess, [])
       || !isDeepStrictEqual(value.tags?.slice().sort(), [`hypervibe:owner:${n.owner}`, `hypervibe:attempt:${attempt.id}`].sort())) fail('ownership_mismatch');
-    const evidence = parseEvidence({ resources: [{ kind: 'application', id, identity: { tenantId: n.tenantId, applicationId: id, clientId, createdDateTime,
+    const evidence = entraOperatorEvidence({ resources: [{ kind: 'application', id, identity: { tenantId: n.tenantId, applicationId: id, clientId, createdDateTime,
       owner: n.owner, origin: n.origin, googleSubject: n.googleSubject, attemptId: attempt.id } }],
       native: { operation: 'application', installationId: context.intent.installationId, attemptId: attempt.id } }, context.intent);
     if (expected) {
@@ -110,11 +111,11 @@ export function createEntraOperatorApplicationDriver(options: { fetch?: typeof f
     return evidence;
   }
   async function application(context: Context, call: (path: string) => Promise<Record<string, any>>) {
-    const n = settings(context.intent), attempt = context.attempts?.filter(value => value.actionId === n.appAction).at(-1);
+    const n = entraOperatorSettings(context.intent), attempt = context.attempts?.filter(value => value.actionId === n.appAction).at(-1);
     const acknowledged = attempt && ['acknowledged', 'succeeded'].includes(attempt.status) ? attempt.evidence : undefined;
     const evidence = context.completed[n.appAction] ?? acknowledged;
     if (evidence) {
-      const retained = parseEvidence(evidence, context.intent);
+      const retained = entraOperatorEvidence(evidence, context.intent);
       if (!attempt || retained.resources[0].kind !== 'application' || retained.native.attemptId !== attempt.id) fail();
       return verifyApplication(await call(`applications/${retained.resources[0].id}?$select=${fields}`), context, attempt, retained);
     }
@@ -126,15 +127,15 @@ export function createEntraOperatorApplicationDriver(options: { fetch?: typeof f
     return verifyApplication(matches[0], context, attempt);
   }
   function verifyFederation(value: any, context: Context, app: CloudInstallationEvidence, attempt: CloudInstallationAttempt) {
-    const n = settings(context.intent), id = uuid.parse(value.id);
+    const n = entraOperatorSettings(context.intent), id = uuid.parse(value.id);
     if (value.name !== n.ficName || value.description !== `hypervibe:${n.owner}:${attempt.id}` || value.issuer !== 'https://accounts.google.com'
       || value.subject !== n.googleSubject || !isDeepStrictEqual(value.audiences, ['api://AzureADTokenExchange'])) fail('ownership_mismatch');
-    return parseEvidence({ resources: [{ kind: 'federation', id, identity: { ...app.resources[0].identity, attemptId: attempt.id } }],
+    return entraOperatorEvidence({ resources: [{ kind: 'federation', id, identity: { ...app.resources[0].identity, attemptId: attempt.id } }],
       native: { operation: 'federation', installationId: context.intent.installationId, attemptId: attempt.id } }, context.intent);
   }
   async function inspect(context: ActionContext) {
     return withClient(context, async call => {
-      const n = settings(context.intent), app = await application(context, call), attempt = context.attempt ?? context.attempts?.filter(value => value.actionId === context.action.id).at(-1);
+      const n = entraOperatorSettings(context.intent), app = await application(context, call), attempt = context.attempt ?? context.attempts?.filter(value => value.actionId === context.action.id).at(-1);
       if (context.action.id === n.appAction) return app ? { state: 'satisfied' as const, evidence: app }
         : attempt && attempt.status !== 'rejected' ? { state: 'pending' as const, reason: 'not_converged' as const } : { state: 'action-required' as const };
       if (context.action.id !== n.ficAction || !app) fail('not_installed');
@@ -149,12 +150,12 @@ export function createEntraOperatorApplicationDriver(options: { fetch?: typeof f
   }
   const driver: CloudInstallationDriver<Intent> = {
     provider: 'microsoft-entra', operatorApplication: { providerName: 'microsoft-entra' },
-    scopePreparation: { resolvedScope: record => record.intent.nativeScope, reviewResources: record => [{ kind: 'application', name: settings(record.intent).displayName, scope: record.intent.nativeScope.tenantId }] },
-    parseScope: value => scopeSchema.parse(value), parseEvidence,
+    scopePreparation: { resolvedScope: record => record.intent.nativeScope, reviewResources: record => [{ kind: 'application', name: entraOperatorSettings(record.intent).displayName, scope: record.intent.nativeScope.tenantId }] },
+    parseScope: value => scopeSchema.parse(value), parseEvidence: entraOperatorEvidence,
     parseAction(value, intent) { const found = actions(intent).find(action => isDeepStrictEqual(action, value)); if (!found) fail(); return found; },
     async plan(context) {
       try { await withClient(context, call => application(context, call)); } catch (error) { throw new CloudInstallationBoundaryError(reason(error)); }
-      const n = settings(context.intent);
+      const n = entraOperatorSettings(context.intent);
       return { actions: actions(context.intent), review: { resources: [{ kind: 'application', name: n.displayName, scope: n.tenantId }, { kind: 'federatedIdentityCredential', name: n.googleServiceAccount, scope: n.googleSubject }],
         permissions: [{ principal: 'current transient Graph caller', scope: n.tenantId, actions: ['Application.ReadWrite.All', 'Organization.Read.All'], purpose: 'installation-verification' }], costs: [],
         warnings: [`Browser callback: ${n.redirectUri}. Customer cloud installation remains separately authorized.`,
@@ -166,7 +167,7 @@ export function createEntraOperatorApplicationDriver(options: { fetch?: typeof f
     async mutate(context) {
       let started = false;
       try { return await withClient(context, async call => {
-        const n = settings(context.intent), app = await application(context, call);
+        const n = entraOperatorSettings(context.intent), app = await application(context, call);
         if (context.action.id === n.appAction) {
           if (app) fail('ownership_mismatch');
           await context.beforeMutation(); started = true;
@@ -186,25 +187,29 @@ export function createEntraOperatorApplicationDriver(options: { fetch?: typeof f
   };
   return driver;
 }
+function entraAuthentication(value: Record<string, string>) {
+  const scope = scopeSchema.parse(value), credential = new DefaultAzureCredential({ tenantId: scope.tenantId });
+  return { kind: 'operator-application' as const, administrator: { async getAccessToken(requested: string, signal: AbortSignal) {
+    if (requested !== 'https://graph.microsoft.com/.default' || signal.aborted) fail('authorization_expired');
+    try { const access = await credential.getToken(requested, { tenantId: scope.tenantId, abortSignal: signal });
+      if (!access?.token || access.expiresOnTimestamp <= Date.now() + 60_000) fail('authorization_expired'); return access.token;
+    } catch { fail('authorization_expired'); }
+  } } };
+}
 export function createEntraOperatorApplicationCapability(): OperatorApplicationCapability {
   return { schemaVersion: 1,
     parseDeclaration({ name, declaration, origin, runtimeIdentity }) {
       const selected = z.object({ tenantId: uuid }).strict().parse(declaration.nativeScope);
       if (declaration.provider !== 'microsoft-entra' || declaration.profile !== 'hypercloud-connect-v1' || runtimeIdentity.kind !== 'gcp-service-account') fail();
       return scopeSchema.parse({ ...selected, name, origin, googleSubject: runtimeIdentity.serviceAccountUniqueId, googleServiceAccount: runtimeIdentity.serviceAccountEmail });
-    }, parseRecord: value => parseCloudInstallationRecordV1(value, createEntraOperatorApplicationDriver()),
+    }, parseRecord: value => parseCloudInstallationRecordV1(value, (value as { intent?: { mode?: string } })?.intent?.mode === 'retire' ? createEntraOperatorRetirementDriver() : createEntraOperatorApplicationDriver()),
+    retirement: { async create(value, _context, targets) { return { driver: createEntraOperatorRetirementDriver({ targets }), authentication: entraAuthentication(value) }; } },
     async create(value) {
-      const scope = scopeSchema.parse(value), credential = new DefaultAzureCredential({ tenantId: scope.tenantId });
-      return { driver: createEntraOperatorApplicationDriver(), authentication: { kind: 'operator-application', administrator: { async getAccessToken(requested, signal) {
-        if (requested !== 'https://graph.microsoft.com/.default' || signal.aborted) fail('authorization_expired');
-        try { const access = await credential.getToken(requested, { tenantId: scope.tenantId, abortSignal: signal });
-          if (!access?.token || access.expiresOnTimestamp <= Date.now() + 60_000) fail('authorization_expired'); return access.token;
-        } catch { fail('authorization_expired'); }
-      } } } };
+      return { driver: createEntraOperatorApplicationDriver(), authentication: entraAuthentication(value) };
     }, receipts(record) {
-      const n = settings(record.intent); if (record.status !== 'scope-ready') fail('not_converged');
-      const app = parseEvidence(record.completed[n.appAction], record.intent).resources[0];
-      const fic = parseEvidence(record.completed[n.ficAction], record.intent).resources[0];
+      const n = entraOperatorSettings(record.intent); if (record.status !== 'scope-ready') fail('not_converged');
+      const app = entraOperatorEvidence(record.completed[n.appAction], record.intent).resources[0];
+      const fic = entraOperatorEvidence(record.completed[n.ficAction], record.intent).resources[0];
       return [{ provider: 'microsoft-entra', tenantId: n.tenantId, applicationId: app.id, clientId: app.identity.clientId, federationId: fic.id,
         callback: n.redirectUri, clientAuthentication: 'google-workload-identity', googleSubject: n.googleSubject, browserExchange: 'unverified' }];
     },
