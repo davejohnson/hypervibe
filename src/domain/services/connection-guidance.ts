@@ -679,48 +679,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Never install the management credential into application runtime or widen the sending key for setup or readiness checks. Note some restricted keys cannot call GET /v3/scopes, which fails connection verification even for usable keys.',
     ],
   },
-  twilio: {
-    provider: 'twilio',
-    displayName: 'Twilio',
-    tokenType: 'four values from the same Twilio account or subaccount: Account SID (AC...), Restricted API Key SID (SK...), its one-time API Key Secret, and the primary Account Auth Token',
-    setupUrl: 'https://console.twilio.com/us1/account/keys-credentials/api-keys',
-    setupUrls: [
-      {
-        label: 'Account SID and primary Auth Token (Console Dashboard -> Account Info)',
-        url: 'https://console.twilio.com/',
-      },
-      {
-        label: 'Restricted API Key SID and one-time secret (Settings -> Account settings -> API keys & auth tokens)',
-        url: 'https://console.twilio.com/us1/account/keys-credentials/api-keys',
-      },
-      {
-        label: 'Existing phone numbers and PN... SIDs (Products & Services -> Numbers & Senders -> Phone Numbers)',
-        url: 'https://console.twilio.com/us1/develop/phone-numbers/manage/incoming',
-      },
-      {
-        label: 'Messaging Services and MG... SIDs (Hypervibe normally creates or adopts these)',
-        url: 'https://console.twilio.com/us1/develop/sms/services',
-      },
-    ],
-    permissions: [
-      'On the Restricted key Permissions screen enable twilio/messaging/services/list, twilio/messaging/services/read, twilio/messaging/services/create, and twilio/messaging/services/update.',
-      'Enable twilio/messaging/services.phonenumbers/list, twilio/messaging/services.phonenumbers/create, and twilio/messaging/services.phonenumbers/delete so Hypervibe can observe, attach, and confirmation-gate moves of an existing number.',
-      'Enable twilio/messaging/messages/create so the application can send through the Messaging Service after Hypervibe projects the same restricted key at runtime.',
-      'The primary Account Auth Token has no restricted scopes. It is required at runtime because Twilio signs inbound and delivery-status webhooks with that token in X-Twilio-Signature.',
-    ],
-    credentialExample: 'hv_connections provider="twilio" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"accountSid":"TWILIO_ACCOUNT_SID","apiKeySid":"TWILIO_API_KEY_SID","apiKeySecret":"TWILIO_API_KEY_SECRET","authToken":"TWILIO_AUTH_TOKEN"}',
-    notes: [
-      'First switch the Twilio Console to the exact parent account or subaccount that owns the phone number. The AC..., SK..., Auth Token, and optional PN... SID must all belong to that same account.',
-      'Copy TWILIO_ACCOUNT_SID from Console Dashboard -> Account Info. It is 34 characters and starts with AC.',
-      'Create a Restricted API key under Settings -> Account settings -> API keys & auth tokens. Copy its SK... SID and secret immediately: Twilio displays the secret only once. A Standard key also works but is broader than necessary.',
-      'Reveal the primary Auth Token under Console Dashboard -> Account Info (or the Auth Tokens section on API keys & auth tokens). Do not substitute the API Key Secret or a test credential; webhook validation requires the matching primary account Auth Token.',
-      'Put only the four connection values in the local dotenv file: TWILIO_ACCOUNT_SID=AC..., TWILIO_API_KEY_SID=SK..., TWILIO_API_KEY_SECRET=..., and TWILIO_AUTH_TOKEN=.... Keep that file out of git.',
-      'To attach a sender, open Products & Services -> Numbers & Senders -> Phone Numbers, select an existing SMS-capable number, and copy its 34-character PN... SID into messaging.sender.phoneNumberSid. Use the SID, not the +E.164 phone number.',
-      'Do not add TWILIO_MESSAGING_SERVICE_SID to the connection or spec. Hypervibe creates or explicitly adopts the Messaging Service by service.name, records the resulting MG... SID, and projects it at apply time.',
-      'The sender block is optional. Hypervibe does not buy phone numbers or complete A2P 10DLC, toll-free verification, or other regulatory registration; complete any required registration in Twilio before production sending.',
-      'The Auth Token is a high-privilege account credential. Hypervibe encrypts it locally and projects it only to services explicitly named by messaging.services.',
-    ],
-  },
   stripe: {
     provider: 'stripe',
     displayName: 'Stripe',

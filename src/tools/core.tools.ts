@@ -9,7 +9,8 @@ import { assessBackupReadiness, backupEvidenceSummary } from '../domain/services
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
-import { canonicalizeLegacyGitHubSpec, deepMergeSpec, SpecStore } from '../domain/spec/spec.store.js';
+import { canonicalizeLegacyGitHubSpec,
+  withDefaultDatabaseProviders, deepMergeSpec, SpecStore } from '../domain/spec/spec.store.js';
 import {
   projectSpecSchema,
   type EnvironmentSpec,
@@ -77,7 +78,6 @@ import { planStripeEnvironmentSync } from '../domain/services/stripe-env.service
 import { planEmail } from '../domain/services/email-plan.service.js';
 import { inspectDomainSecurity } from '../domain/services/domain-security.service.js';
 import { inspectWebhookReadiness } from '../domain/services/webhook-readiness.service.js';
-import { planTwilioMessaging } from '../domain/services/twilio-messaging.service.js';
 import { firstProviderSpecValidationFailure } from '../domain/services/provider-spec-validation.js';
 import { buildManagedDatabaseEnvVars } from '../domain/services/database-env.js';
 import { buildCacheEnvVarsFromComponent } from '../domain/services/cache-env.js';
@@ -427,7 +427,6 @@ function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
       ]);
     }
     if (envSpec.email.enabled) add('sendgrid', envName, 'transactional email');
-    if (envSpec.messaging) add('twilio', envName, 'programmable messaging');
     if (envSpec.deploy?.strategy === 'branch' && envSpec.deploy.trigger !== 'native' && devops?.ci) {
       const registration = devOpsProviderRegistry.ciProvider(devops.ci.provider);
       add(
@@ -664,7 +663,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           && repositoryRuntime.runtime
           ? { ...mergedRecord, runtime: repositoryRuntime.runtime }
           : mergedInput;
-        const candidateSpec = projectSpecSchema.parse(canonicalizeLegacyGitHubSpec(candidateInput));
+        const candidateSpec = projectSpecSchema.parse(withDefaultDatabaseProviders(canonicalizeLegacyGitHubSpec(candidateInput)));
         coverageReport = environmentVariableCoverage(candidateSpec);
         const introducedCoverageIssues = introducedEnvironmentVariableCoverageIssues(previousSpec, candidateSpec);
         if (introducedCoverageIssues.length > 0) {
@@ -1242,14 +1241,6 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       });
       const webhookReadiness = inspectWebhookReadiness({ environmentSpec: envSpec, environment, observed, eventSigningReadiness: email.eventSigningReadiness, inboundSigningReadiness: email.inboundSigningReadiness });
       const emailDrift = email.actions.filter((action) => action.type !== 'noop');
-      const messaging = await planTwilioMessaging({
-        project: projectForStatus,
-        environmentName: envName,
-        environmentSpec: envSpec,
-        environment,
-        observed,
-      });
-      const messagingDrift = messaging.actions.filter((action) => action.type !== 'noop');
       const observationIncomplete = observed !== null && (
         observed.partial
         || Object.values(observed.completeness ?? {}).includes('unknown')
@@ -1279,8 +1270,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         || storageDrift.length > 0
         || delegatedSecretDrift.length > 0
         || stripeDrift.length > 0
-        || emailDrift.length > 0
-        || messagingDrift.length > 0;
+        || emailDrift.length > 0;
       const blocked = planService.preflight(envSpec, envName, specResult.spec);
       for (const stripeBlock of stripeSync.blocked) {
         if (!blocked.some((entry) => entry.provider === 'stripe' && entry.scope === stripeBlock.scope)) {
@@ -1371,8 +1361,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
                 },
               }
             : {}),
-          summary: summarizeActions([...pendingSchedules, ...(apiPolicy.action ? [apiPolicy.action] : []), ...maintenance.actions, ...nativeDeploySources.actions, ...diff.actions, ...cache.actions, ...databaseResilience.actions, ...databaseAliasDrift, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...email.actions, ...messaging.actions]),
-          drift: [...pendingSchedules, ...(apiPolicy.action ? [apiPolicy.action] : []), ...maintenanceDrift, ...nativeDeploySourceDrift, ...drift, ...cacheDrift, ...databaseResilienceDrift, ...databaseAliasDrift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift, ...messagingDrift],
+          summary: summarizeActions([...pendingSchedules, ...(apiPolicy.action ? [apiPolicy.action] : []), ...maintenance.actions, ...nativeDeploySources.actions, ...diff.actions, ...cache.actions, ...databaseResilience.actions, ...databaseAliasDrift, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...email.actions]),
+          drift: [...pendingSchedules, ...(apiPolicy.action ? [apiPolicy.action] : []), ...maintenanceDrift, ...nativeDeploySourceDrift, ...drift, ...cacheDrift, ...databaseResilienceDrift, ...databaseAliasDrift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift],
           unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged],
           ...(envSpec.database?.resilience
             ? {
@@ -1402,7 +1392,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           },
         },
         {
-          warnings: [...warnings, ...backupPolicy.warnings, ...maintenance.warnings, ...nativeDeploySources.warnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings],
+          warnings: [...warnings, ...backupPolicy.warnings, ...maintenance.warnings, ...nativeDeploySources.warnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings],
           hint: blocked.length > 0
             ? connectionRecoveryHint(blocked, {
               project: project.name,

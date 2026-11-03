@@ -33,7 +33,6 @@ import {
 import { DATABASE_RESILIENCE_OPERATIONS } from '../../domain/services/database-resilience-plan.service.js';
 import { LOAD_BALANCER_OPERATIONS } from '../../domain/services/load-balancer-plan.service.js';
 import { MAINTENANCE_OPERATIONS } from '../../domain/services/maintenance-plan.service.js';
-import { MESSAGING_OPERATIONS } from '../../domain/services/twilio-messaging.service.js';
 import { DOMAIN_DETACH_OPERATION } from '../../domain/services/domain-attach-policy.js';
 import {
   hasExactPlanActionConfirmationAuthority,
@@ -1024,48 +1023,6 @@ const authorized: AuthorizedCase[] = [
       name: 'owner@example.net',
       provider: 'cloudflare',
       operation: 'emailForwardingDestinationEnsure',
-    }),
-  },
-  {
-    label: 'Twilio Messaging Service mutate',
-    capability: 'messaging.service.mutate',
-    action: action({
-      id: 'messaging:twilio:service',
-      type: 'create',
-      kind: 'messaging',
-      name: 'app-production',
-      provider: 'twilio',
-      operation: MESSAGING_OPERATIONS.serviceEnsure,
-      metadata: { configHash: 'service-config' },
-    }),
-  },
-  {
-    label: 'Twilio sender mutate',
-    capability: 'messaging.sender.mutate',
-    action: action({
-      id: `messaging:twilio:sender:PN${'a'.repeat(32)}`,
-      type: 'create',
-      kind: 'messaging',
-      name: `PN${'a'.repeat(32)}`,
-      provider: 'twilio',
-      operation: MESSAGING_OPERATIONS.senderAttach,
-      metadata: {
-        configHash: 'service-config',
-        phoneNumberSid: `PN${'a'.repeat(32)}`,
-        serviceName: 'app-production',
-      },
-    }),
-  },
-  {
-    label: 'Twilio runtime sync',
-    capability: 'messaging.runtime.sync',
-    action: action({
-      id: 'messaging:twilio:runtime',
-      kind: 'messaging',
-      name: 'production',
-      provider: 'railway',
-      operation: MESSAGING_OPERATIONS.runtimeSync,
-      metadata: { configHash: 'runtime-config', services: ['web'] },
     }),
   },
   {

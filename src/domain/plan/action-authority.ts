@@ -66,7 +66,6 @@ import {
   LOAD_BALANCER_OPERATIONS,
 } from '../services/load-balancer-plan.service.js';
 import { EMAIL_OPERATIONS } from '../services/email-plan.service.js';
-import { MESSAGING_OPERATIONS } from '../services/twilio-messaging.service.js';
 import {
   DOMAIN_ADOPT_OPERATION,
   DOMAIN_DETACH_OPERATION,
@@ -163,9 +162,6 @@ export type PlanMutationCapability =
   | 'email.inbound.mutate'
   | 'email.delivery-events.mutate'
   | 'email.forwarding.mutate'
-  | 'messaging.service.mutate'
-  | 'messaging.sender.mutate'
-  | 'messaging.runtime.sync'
   | 'local.environment.record'
   | 'hosting.project.ensure'
   | 'hosting.schedule.activate'
@@ -1314,33 +1310,6 @@ export function resolvePlanActionAuthority(
       || (forwardingOperation === EMAIL_OPERATIONS.forwardingRuleDestroy && action.type === 'destroy');
     if (forwardingTypeIsValid) return authority(action, 'email.forwarding.mutate');
   }
-  if (
-    exactResource(action, 'messaging', 'twilio')
-    && (
-      action.metadata?.operation === MESSAGING_OPERATIONS.serviceEnsure
-      || action.metadata?.operation === MESSAGING_OPERATIONS.serviceAdopt
-    )
-    && hasType(action, 'create', 'update')
-    && metadataString(action, 'configHash')
-  ) return authority(action, 'messaging.service.mutate');
-  if (
-    exactResource(action, 'messaging', 'twilio')
-    && (
-      action.metadata?.operation === MESSAGING_OPERATIONS.senderAttach
-      || action.metadata?.operation === MESSAGING_OPERATIONS.senderMove
-    )
-    && hasType(action, 'create', 'replace')
-    && metadataString(action, 'phoneNumberSid') === action.resource.name
-    && metadataString(action, 'serviceName')
-    && metadataString(action, 'configHash')
-  ) return authority(action, 'messaging.sender.mutate');
-  if (
-    exactResource(action, 'messaging')
-    && action.metadata?.operation === MESSAGING_OPERATIONS.runtimeSync
-    && action.type === 'update'
-    && metadataString(action, 'configHash')
-    && metadataStringArray(action, 'services')
-  ) return authority(action, 'messaging.runtime.sync');
   if (
     exactResource(action, 'environment')
     && hasType(action, 'create', 'update')

@@ -4221,10 +4221,6 @@ describe('hv_plan / hv_status / hv_apply', () => {
             services: { web: { startCommand: 'npm start' } },
             domain: 'previous-teardown.example.com',
             email: { enabled: true },
-            messaging: {
-              services: ['web'],
-              service: { name: 'Previous teardown messages' },
-            },
             payments: {
               stripe: {
                 catalog: {

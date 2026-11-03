@@ -221,14 +221,14 @@ that every supported path can be kept working end to end.
 - Code hosting and CI: GitHub and GitHub Actions.
 - DNS and domains: Cloudflare. Email: SendGrid. Payments: Stripe (including
   Stripe Projects references). Mobile releases: App Store Connect.
-- Any other service whose integration is "create an API key and put it in an
-  environment variable" (OpenAI, Anthropic, Slack, reCAPTCHA, auth vendors)
-  uses the generic delegated `secrets` contract, not a provider adapter. A
-  dedicated adapter is justified only when Hypervibe must call that service's
-  API itself, for example to register webhooks or verify configuration.
+- Any other service whose integration is "create an API key, put it in an
+  environment variable and register a callback URL" (Twilio, OpenAI, Anthropic,
+  Slack, reCAPTCHA, auth vendors) uses delegated `secrets` plus declared
+  `webhooks` (see Declared Webhooks), not a provider adapter. A dedicated
+  adapter is justified only when Hypervibe must call that service's API itself.
 
 Fly.io, Vercel, DigitalOcean, GitLab/GitLab CI, Neon, Supabase, HashiCorp
-Vault, Doppler, 1Password, Bitwarden and the OpenAI connector were removed.
+Vault, Doppler, 1Password, Bitwarden, Twilio and the OpenAI connector were removed.
 Hypervibe never creates or deletes code repositories. A removed provider may be
 re-added only when a real user needs it and the existing supported paths pass
 live end-to-end conformance, recorded as a deliberate change to this section.
@@ -1266,7 +1266,7 @@ normal reviewed spec/plan/apply flow.
 ## Webhook Readiness
 
 Read-only plan/status webhook readiness summarizes HTTPS URL configuration and
-verification-material wiring for declared Stripe, Twilio, and SendGrid callbacks,
+verification-material wiring for Stripe, SendGrid and declared webhook callbacks,
 plus conventional Stripe webhook env settings. Desired inputs and observed
 hosting presence are distinct evidence; neither proves application signature
 verification or provider endpoint identity. Unknown observations stay unknown,
@@ -1474,30 +1474,22 @@ configuration, runtime projection, observation, and rotation through the full
 spec -> plan -> apply lifecycle. Hypervibe does not store CI messages,
 verification links, or receipt state.
 
-## Messaging Desired State
+## Declared Webhooks
 
-Twilio messaging configuration lives under each environment's `messaging`
-desired state. It owns one Messaging Service, optional inbound-message and
-delivery-status callbacks, an explicit list of application services receiving
-the runtime contract, and optionally one existing Twilio phone-number SID.
-Callback URLs are derived from durable public hosting bindings; webhook targets
-must also receive the runtime contract so they can validate Twilio signatures.
+Services that only need an API key and a callback URL (Twilio, Slack, auth
+vendors and similar) have no provider adapter. Their keys and signing secrets
+are delegated project `secrets`; each callback is an environment `webhooks`
+entry naming the sending vendor, the receiving public web service, a query-free
+path and, optionally, the environment variable holding the signing secret.
 
-Messaging reconciliation separates Messaging Service configuration, sender-pool
-attachment, and hosting runtime variables into distinct reviewed actions. It
-resolves the persisted Messaging Service SID before considering exact-name
-adoption, blocks duplicate names and unknown observations, and verifies provider
-read-back before recording a binding. Moving an existing phone number between
-sender pools is confirmation-gated. A noop action performs no Twilio or hosting
-mutation.
-
-Hypervibe does not purchase or release phone numbers, synthesize webhook
-handlers, or manage Voice, Verify, WhatsApp, A2P registration, campaigns, or
-message sending. Those concerns remain application/account setup until their
-lifecycle can be modeled without weakening the plan authorization boundary.
-Twilio credentials are accepted only through the connection boundary and are
-projected solely to services named by `messaging.services`; secrets and runtime
-values never enter specs, plans, bindings, receipts, or tool output.
+Webhooks are configuration only. Hypervibe never calls the sending service and
+plans no webhook actions. Webhook readiness composes the callback URL from the
+receiving service's durable public binding and the declared path, reports HTTPS
+and signing-material presence without values, and states that application
+signature verification is not verified. Declared URLs supplied by the user are
+never echoed, because they may carry credentials. The removed Twilio
+`messaging` block fails validation with migration guidance instead of being
+ignored.
 
 ## iOS Release Desired State
 

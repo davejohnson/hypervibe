@@ -30,7 +30,7 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
   id: z.string().min(1),
   type: z.enum(['create', 'update', 'replace', 'destroy', 'noop']),
   resource: z.object({
-    kind: z.enum(['project', 'environment', 'service', 'volume', 'database', 'cache', 'storage', 'retained-resource', 'load-balancer', 'domain', 'email', 'messaging', 'ci', 'repo', 'ios', 'queue', 'secret', 'payment', 'maintenance']),
+    kind: z.enum(['project', 'environment', 'service', 'volume', 'database', 'cache', 'storage', 'retained-resource', 'load-balancer', 'domain', 'email', 'ci', 'repo', 'ios', 'queue', 'secret', 'payment', 'maintenance']),
     name: z.string().min(1),
     provider: z.string().min(1),
   }),

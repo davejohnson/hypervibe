@@ -1,5 +1,6 @@
 import { ProjectSpecRepository } from '../../adapters/db/repositories/spec.repository.js';
 import type { Project } from '../entities/project.entity.js';
+export { withDefaultDatabaseProviders } from './database-defaults.js';
 import { projectSpecSchema, type ProjectSpec, type EnvironmentSpec, type ServiceSpec } from './spec.schema.js';
 import {
   preflightRepoSpecWrite,

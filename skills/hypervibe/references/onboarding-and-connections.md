@@ -95,6 +95,28 @@ If the current user does not control the missing access, offer a value-free
 handoff naming the provider, application/environment scope, and blocked task.
 Do not assume they should be invited to the provider or granted wider access.
 
+## API key and webhook services
+
+Most third-party services (for example Twilio, Slack, OpenAI, Anthropic,
+reCAPTCHA or an auth vendor) need no Hypervibe connection. Use this template:
+
+1. Declare each key the app reads under project `secrets` as a delegated secret
+   with the environments that need it, and `githubActions` only when a workflow
+   reads it. The user creates the key in that service's dashboard and supplies
+   it as a `secretRef` when planning.
+2. For each callback the service sends, declare an environment `webhooks` entry:
+   `{ "vendor": "<service>", "service": "<public web service>", "path": "/webhooks/<service>/<event>" }`,
+   plus `signingSecretEnvVar` when the service signs requests (for example
+   `TWILIO_AUTH_TOKEN` or `SLACK_SIGNING_SECRET`), declared under `secrets` too.
+3. After apply, read webhook readiness from `hv_status` or `hv_plan`. Give the
+   user the exact reported `url` to paste into the service's dashboard. Hypervibe
+   never calls that service; report readiness as configuration only, not proof
+   that the app verifies signatures.
+
+Omit `database.provider` to use the hosting platform's own database (Railway
+Postgres, Cloud SQL, RDS or Azure PostgreSQL). Name a provider only when the
+user asks for a different one.
+
 ## Application configuration
 
 For credential adoption or rotation, first inspect `hv_secrets` with an explicit

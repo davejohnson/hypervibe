@@ -29,8 +29,7 @@ Lifecycle maturity is reported by `hv_inspect {}` and `hv_connections {}`. Every
 - **Stripe** - Payment integration, webhooks, products
 - **SendGrid** - Email authentication, domain verification
 - **App Store Connect** - iOS release desired state
-- **Any other API-key service** (OpenAI, Anthropic, Slack, reCAPTCHA, ...) - declare the key under `secrets` and supply it once; Hypervibe delivers it to runtime environments and/or GitHub Actions without a provider-specific connector
-- **Twilio** - Messaging Services, webhook callbacks, existing-number attachment
+- **Any API-key or webhook service** (Twilio, OpenAI, Anthropic, Slack, reCAPTCHA, ...) - declare keys under `secrets` and callbacks under `webhooks`; see [API key and webhook services](#api-key-and-webhook-services)
 
 **Secret Managers**
 - **AWS Secrets Manager** - Versioned reads with the AWS SDK default credential chain
@@ -461,91 +460,38 @@ in front of the webhook. Signature keys, OAuth tokens, message storage, and
 receipt APIs remain application-owned; Hypervibe does not currently provision
 or rotate those credentials.
 
-### Declarative Twilio messaging
+### API key and webhook services
 
-Twilio support deliberately covers the shared setup most applications need: a
-Messaging Service, optional inbound-message and delivery-status callbacks, the
-runtime credentials, and optional attachment of an existing phone number.
-
-Collect these values from the same Twilio account or subaccount:
-
-| Hypervibe field | Twilio value | Where to find it |
-| --- | --- | --- |
-| `accountSid` | `AC...` Account SID | [Console Dashboard](https://console.twilio.com/) -> Account Info |
-| `apiKeySid` | `SK...` Restricted API Key SID | [Settings -> Account settings -> API keys & auth tokens](https://console.twilio.com/us1/account/keys-credentials/api-keys) |
-| `apiKeySecret` | API Key Secret | Shown once when that key is created; copy it immediately |
-| `authToken` | Primary Account Auth Token | Console Dashboard -> Account Info -> Show, or the Auth Tokens section of API keys & auth tokens |
-| `messaging.sender.phoneNumberSid` | Optional existing `PN...` Phone Number SID | [Numbers & Senders -> Phone Numbers](https://console.twilio.com/us1/develop/phone-numbers/manage/incoming); open the SMS-capable number and copy its SID, not its `+...` phone number |
-
-Do not look for an `MG...` SID before setup. The spec declares a friendly
-`service.name`; Hypervibe creates or explicitly adopts that Messaging Service,
-records its `MG...` SID, and projects `TWILIO_MESSAGING_SERVICE_SID` during
-apply.
+Services such as Twilio, Slack or an auth vendor need only an API key and a
+callback URL, so Hypervibe treats them generically instead of with a dedicated
+integration. Declare the keys under `secrets` and each callback under the
+environment's `webhooks`:
 
 ```json
 {
-  "services": {
-    "api": { "workloadKind": "web", "public": true }
+  "secrets": {
+    "TWILIO_ACCOUNT_SID": { "principal": "app owner", "environments": ["production"] },
+    "TWILIO_AUTH_TOKEN": { "principal": "app owner", "environments": ["production"] }
   },
-  "messaging": {
-    "provider": "twilio",
-    "services": ["api"],
-    "service": {
-      "name": "example-production",
-      "inbound": {
-        "service": "api",
-        "path": "/webhooks/twilio/messages"
-      },
-      "deliveryStatus": {
-        "service": "api",
-        "path": "/webhooks/twilio/status"
+  "environments": {
+    "production": {
+      "webhooks": {
+        "twilio-inbound": {
+          "vendor": "twilio",
+          "service": "web",
+          "path": "/webhooks/twilio/messages",
+          "signingSecretEnvVar": "TWILIO_AUTH_TOKEN"
+        }
       }
-    },
-    "sender": {
-      "phoneNumberSid": "PN0123456789abcdef0123456789abcdef"
     }
   }
 }
 ```
 
-Create a Restricted API key with these exact Twilio permissions:
-
-```text
-twilio/messaging/services/list
-twilio/messaging/services/read
-twilio/messaging/services/create
-twilio/messaging/services/update
-twilio/messaging/services.phonenumbers/list
-twilio/messaging/services.phonenumbers/create
-twilio/messaging/services.phonenumbers/delete
-twilio/messaging/messages/create
-```
-
-Keep the four connection values in a local, gitignored env file:
-
-```dotenv
-TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-TWILIO_API_KEY_SID=SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-TWILIO_API_KEY_SECRET=replace-with-the-one-time-secret
-TWILIO_AUTH_TOKEN=replace-with-the-primary-auth-token
-```
-
-Connect that file by reference:
-
-```text
-hv_connections provider="twilio" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"accountSid":"TWILIO_ACCOUNT_SID","apiKeySid":"TWILIO_API_KEY_SID","apiKeySecret":"TWILIO_API_KEY_SECRET","authToken":"TWILIO_AUTH_TOKEN"}
-```
-
-`hv_plan` reviews Messaging Service creation/adoption, sender attachment, and
-runtime projection separately. `hv_apply` derives webhook URLs from the target
-service's public binding and projects the Twilio values only to
-`messaging.services`. Moving a number from another sender pool requires exact
-action confirmation. Hypervibe does not buy numbers or manage Voice, Verify,
-WhatsApp, A2P registration, campaigns, or application message sending.
-Complete any A2P 10DLC, toll-free verification, or other regulatory setup in
-Twilio before production sending. The primary Auth Token is still required even
-when API calls use a restricted key because Twilio uses the account token to
-sign inbound and delivery-status webhooks.
+Create the keys in the service's dashboard and supply them when planning.
+`hv_status` reports each webhook's exact callback URL to paste into that
+dashboard, whether it uses HTTPS, and whether the signing secret is present on
+the receiving service. Hypervibe never calls the third-party service.
 
 ## Team-Shared Desired State
 

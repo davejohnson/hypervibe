@@ -56,8 +56,7 @@ describe('environmentResourceWarnings', () => {
       storage: { uploads: { ...bucket, injectInto: ['web', 'api'] } },
       domain: 'production.example.test', envVars: { PRIVATE_INPUT: 'production-secret-marker' },
       email: { enabled: true, sender: { address: 'owner@production.example.test' } },
-      messaging: { provider: 'twilio', services: ['web', 'api'], service: { name: 'production-sms' },
-        sender: { phoneNumberSid: `PN${'1'.repeat(32)}` } },
+      webhooks: { inbound: { vendor: 'twilio', service: 'web', path: '/webhooks/in' } },
     };
     const input = spec({ production: environment, staging: {
       ...environment, hosting: { provider: 'railway', region: 'different-region' },
@@ -66,8 +65,7 @@ describe('environmentResourceWarnings', () => {
       storage: { uploads: { ...bucket, region: 'iad', injectInto: ['api', 'web'] } },
       domain: 'staging.example.test', envVars: { PRIVATE_INPUT: 'staging-secret-marker' },
       email: { enabled: true, sender: { address: 'owner@staging.example.test' } },
-      messaging: { provider: 'twilio', services: ['api', 'web'], service: { name: 'staging-sms' },
-        sender: { phoneNumberSid: `PN${'2'.repeat(32)}` } },
+      webhooks: { inbound: { vendor: 'twilio', service: 'web', path: '/webhooks/in' } },
     } });
     expect(environmentResourceWarnings(input)).toEqual([]);
     expect(environmentResourceWarnings(spec({ staging: base }))).toEqual([]);
@@ -87,15 +85,14 @@ describe('environmentResourceWarnings', () => {
     expect(warnings.join('\n')).not.toContain('private-env-marker');
   });
 
-  it('notices a missing SMS sender and missing inbound email, not just the integration flag', () => {
-    const messaging = { provider: 'twilio', services: ['web'], service: { name: 'sms' } };
+  it('notices a missing webhook and missing inbound email, not just the integration flag', () => {
     const input = spec({
       production: { ...base, domain: 'production.example.test',
-        messaging: { ...messaging, sender: { phoneNumberSid: `PN${'1'.repeat(32)}` } },
+        webhooks: { inbound: { vendor: 'twilio', service: 'web', path: '/webhooks/in' } },
         email: { enabled: true, inbound: { hostname: 'inbound.production.example.test', service: 'web' } } },
-      staging: { ...base, domain: 'staging.example.test', messaging, email: { enabled: true } },
+      staging: { ...base, domain: 'staging.example.test', email: { enabled: true } },
     });
-    expect(environmentResourceWarnings(input)[0]).toContain('only in "production": email:inbound, messaging:sender');
+    expect(environmentResourceWarnings(input)[0]).toContain('only in "production": email:inbound, webhooks:inbound');
   });
 
   it('detects schedule and bucket consumer changes while ignoring consumer order', () => {

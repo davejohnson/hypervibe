@@ -140,11 +140,6 @@ import {
   resolveEmailIntegrationState,
 } from '../domain/services/email-plan.service.js';
 import {
-  applyTwilioMessagingAction,
-  resolveTwilioMessagingState,
-  twilioMessagingFingerprint,
-} from '../domain/services/twilio-messaging.service.js';
-import {
   applyProviderNativeDeploySourceAction,
 } from '../domain/services/provider-native-deploy-source.service.js';
 import { applyLoadBalancerAction } from '../domain/services/load-balancer-plan.service.js';
@@ -1166,22 +1161,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
     freshIntegrationFingerprints = {
       ...(freshIntegrationFingerprints ?? {}),
       email: emailIntegrationFingerprint(emailState),
-    };
-  }
-  if (shouldRefreshIntegration(Boolean(envSpec.messaging), loaded.document.integrationFingerprints?.messaging)) {
-    if (!envSpec.messaging) {
-      return {
-        kind: 'blocked',
-        applyBlocked: [{ category: 'prerequisite', provider: 'twilio', reason: 'Twilio messaging desired state changed after planning.', policy: 'hard' }],
-      };
-    }
-    const messagingState = await resolveTwilioMessagingState({
-      project: projectForPreflight,
-      spec: envSpec.messaging,
-    });
-    freshIntegrationFingerprints = {
-      ...(freshIntegrationFingerprints ?? {}),
-      messaging: twilioMessagingFingerprint(messagingState),
     };
   }
   const softActionScopedBlocked = actionScopedBlocksAllowedDuringApply(actionScopedBlocked);
@@ -2292,18 +2271,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
         environmentSpec: envSpec,
         action,
         confirmedActionIds,
-      });
-    }
-    if (
-      capability === 'messaging.service.mutate'
-      || capability === 'messaging.sender.mutate'
-      || capability === 'messaging.runtime.sync'
-    ) {
-      return applyTwilioMessagingAction({
-        project: applyProject,
-        environmentName: envName,
-        environmentSpec: envSpec,
-        action,
       });
     }
     if (capability === 'local.environment.record') {

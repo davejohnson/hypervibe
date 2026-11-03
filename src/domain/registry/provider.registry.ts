@@ -8,7 +8,7 @@ import type { WorkloadKind } from '../entities/service.entity.js';
 import type { Receipt } from '../ports/provider.port.js';
 import type { HostedObservationCapability } from '../ports/hosted-observation.port.js';
 
-export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'messaging' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
+export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
 export type ProviderLifecycleCapability =
   | 'hosting'
   | 'database'
@@ -831,6 +831,17 @@ export class ProviderRegistry {
 
   namesFor(capability: ProviderLifecycleCapability): string[] {
     return this.names().filter((name) => this.supports(name, capability));
+  }
+
+  /**
+   * The hosting platform's own database: the single registered database provider
+   * whose connectivity contract names this host. Undefined when none or several match.
+   */
+  defaultDatabaseProviderFor(hostingProvider: string): string | undefined {
+    const matches = this.namesFor('database').filter((name) =>
+      this.getMetadata(name)?.lifecycle?.databaseConnectivity?.compatibleHostingProviders.includes(hostingProvider)
+    );
+    return matches.length === 1 ? matches[0] : undefined;
   }
 
   lifecycleMaturity(

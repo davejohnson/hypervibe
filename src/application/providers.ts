@@ -25,7 +25,6 @@ import '../adapters/providers/azure/azure-blob.adapter.js';
 import '../adapters/providers/stripe/stripe.adapter.js';
 import '../adapters/providers/cloudflare/cloudflare.adapter.js';
 import '../adapters/providers/sendgrid/sendgrid.adapter.js';
-import '../adapters/providers/twilio/twilio.adapter.js';
 import '../adapters/providers/github/github.adapter.js';
 import '../adapters/providers/database/database.adapter.js';
 import '../adapters/providers/appstoreconnect/appstoreconnect.adapter.js';

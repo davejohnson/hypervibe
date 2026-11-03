@@ -225,40 +225,6 @@ describe('connection guidance', () => {
     expect(new URL(GITHUB_TOKEN_URLS.railwayAppScope).searchParams.get('scopes')).toBe('repo');
   });
 
-  it('explains where every Twilio credential and optional provider id comes from', () => {
-    const guidance = formatConnectionGuidance('twilio');
-
-    expect(guidance).toContain('Console Dashboard -> Account Info');
-    expect(guidance).toContain('AC...');
-    expect(guidance).toContain('SK...');
-    expect(guidance).toContain('Twilio displays the secret only once');
-    expect(guidance).toContain('primary Auth Token');
-    expect(guidance).toContain('twilio/messaging/services/list');
-    expect(guidance).toContain('twilio/messaging/services.phonenumbers/create');
-    expect(guidance).toContain('twilio/messaging/messages/create');
-    expect(guidance).toContain('Numbers & Senders -> Phone Numbers');
-    expect(guidance).toContain('PN... SID');
-    expect(guidance).toContain('Use the SID, not the +E.164 phone number');
-    expect(guidance).toContain('Do not add TWILIO_MESSAGING_SERVICE_SID');
-    expect(guidance).toContain('same account');
-
-    const schema = providerRegistry.get('twilio')!.metadata.credentialsSchema;
-    expect(credentialFieldsFromSchema(schema)).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        name: 'accountSid',
-        description: expect.stringContaining('Console Dashboard -> Account Info'),
-      }),
-      expect.objectContaining({
-        name: 'apiKeySecret',
-        description: expect.stringContaining('displayed once'),
-      }),
-      expect.objectContaining({
-        name: 'authToken',
-        description: expect.stringContaining('X-Twilio-Signature'),
-      }),
-    ]));
-  });
-
   it('explains the fast scoped Stripe sandbox workflow and restricted-key permissions', () => {
     const guidance = formatConnectionGuidance('stripe', { scope: 'development-personas' });
 
@@ -284,16 +250,6 @@ describe('connection guidance', () => {
         'mail.send',
         'whitelabel.read',
         'Full Access',
-      ],
-      twilio: [
-        'https://console.twilio.com/us1/account/keys-credentials/api-keys',
-        'https://console.twilio.com/us1/develop/phone-numbers/manage/incoming',
-        'Restricted API Key',
-        'twilio/messaging/services.phonenumbers/list',
-        'twilio/messaging/messages/create',
-        'X-Twilio-Signature',
-        'credentialsRef="dotenv:/absolute/path/.env"',
-        'Hypervibe does not buy phone numbers',
       ],
       cloudrun: [
         'https://console.cloud.google.com/iam-admin/serviceaccounts',

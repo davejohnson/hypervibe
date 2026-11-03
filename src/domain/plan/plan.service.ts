@@ -33,7 +33,6 @@ import { firstProviderSpecValidationFailure } from '../services/provider-spec-va
 import { SpecStore, type SpecResult } from '../spec/spec.store.js';
 import {
   EMAIL_MANAGED_ENV_KEYS,
-  MESSAGING_MANAGED_ENV_KEYS,
   type ProjectSpec,
   type EnvironmentSpec,
 } from '../spec/spec.schema.js';
@@ -130,7 +129,6 @@ import { inspectDomainSecurity, type DomainSecurityReadiness } from '../services
 import { inspectWebhookReadiness, type WebhookReadiness } from '../services/webhook-readiness.service.js';
 import { reservedRuntimeEnvError } from '../services/runtime-env-policy.js';
 import { inspectEmailSenderReadiness, type EmailSenderReadiness } from '../services/email-sender-readiness.service.js';
-import { planTwilioMessaging } from '../services/twilio-messaging.service.js';
 import {
   isProviderNativeDeploySourceAction,
   planProviderNativeDeploySources,
@@ -896,7 +894,6 @@ export class PlanService {
       required.push({ provider: 'cloudflare', scopeHints: cloudflareScopeHintsForDomain(environmentSpec.domain) });
     }
     if (environmentSpec.email.enabled) required.push({ provider: 'sendgrid' });
-    if (environmentSpec.messaging) required.push({ provider: 'twilio' });
     if (environmentSpec.deploy?.strategy === 'branch' && environmentSpec.deploy.trigger !== 'native') {
       const selection = projectSpec ? resolveDevOpsSelection(projectSpec) : null;
       if (selection?.ci) {
@@ -1949,15 +1946,6 @@ export class PlanService {
         error: `Email-managed keys cannot be passed through envVars: ${emailOverrideCollisions.join(', ')}. Configure environments.${environmentName}.email instead.`,
       };
     }
-    const messagingOverrideCollisions = environmentSpec.messaging
-      ? Object.keys(envVarOverrides ?? {})
-        .filter((key) => (MESSAGING_MANAGED_ENV_KEYS as readonly string[]).includes(key))
-      : [];
-    if (messagingOverrideCollisions.length > 0) {
-      return {
-        error: `Messaging-managed keys cannot be passed through envVars: ${messagingOverrideCollisions.join(', ')}. Configure environments.${environmentName}.messaging instead.`,
-      };
-    }
     const managedSecretOverrideCollisions = Object.keys(envVarOverrides ?? {})
       .filter((key) => reservedSecretKeys.has(key));
     if (managedSecretOverrideCollisions.length > 0) {
@@ -2003,7 +1991,6 @@ export class PlanService {
         .flatMap((service) => Object.keys(service.databaseEnvAliases ?? {})),
       ...stripeManagedEnvKeys(environmentSpec),
       ...(environmentSpec.email.enabled ? EMAIL_MANAGED_ENV_KEYS : []),
-      ...(environmentSpec.messaging ? MESSAGING_MANAGED_ENV_KEYS : []),
       ...(environmentSpec.database ? DATABASE_ENV_KEYS : []),
       ...(environmentSpec.cache ? CACHE_ENV_KEYS : []),
       ...(environmentSpec.queues && Object.keys(environmentSpec.queues).length > 0
@@ -2526,19 +2513,6 @@ export class PlanService {
       });
     const webhookReadiness = inspectWebhookReadiness({ environmentSpec, environment, observed, runtimeValues: specForDiff.envVars, eventSigningReadiness: 'eventSigningReadiness' in email ? email.eventSigningReadiness : undefined, inboundSigningReadiness: 'inboundSigningReadiness' in email ? email.inboundSigningReadiness : undefined });
     actions.push(...email.actions);
-    const messaging = serviceFilter
-      ? { actions: [], warnings: [], fingerprint: undefined }
-      : await planTwilioMessaging({
-        project: projectForPlan,
-        environmentName,
-        environmentSpec,
-        environment,
-        observed,
-        serviceDependencies: actions
-          .filter((action) => action.resource.kind === 'service' && action.type !== 'noop' && action.type !== 'destroy')
-          .map((action) => action.id),
-      });
-    actions.push(...messaging.actions);
     const queues = await planQueues({ project: projectForPlan, environmentSpec, environment });
     if (queues.actions.length > 0) {
       const firstServiceIndex = actions.findIndex((action) => action.resource.kind === 'service');
@@ -2711,7 +2685,7 @@ export class PlanService {
         action.type !== 'noop'
         && action.metadata?.operation !== 'hostingEnvRemove'
         && action.metadata?.operation !== DATABASE_RESILIENCE_OPERATIONS.replicaDestroy
-        && ['project', 'environment', 'service', 'database', 'cache', 'storage', 'load-balancer', 'queue', 'secret', 'payment', 'email', 'messaging']
+        && ['project', 'environment', 'service', 'database', 'cache', 'storage', 'load-balancer', 'queue', 'secret', 'payment', 'email']
           .includes(action.resource.kind)
       )
       : [];
@@ -3317,8 +3291,6 @@ export class PlanService {
         ? { stripe: stripeSync.fingerprint } : {}),
       ...((!ciBindingStageActive || actionKinds.has('email')) && email.fingerprint
         ? { email: email.fingerprint } : {}),
-      ...((!ciBindingStageActive || actionKinds.has('messaging')) && messaging.fingerprint
-        ? { messaging: messaging.fingerprint } : {}),
     };
 
     try {
@@ -3346,7 +3318,7 @@ export class PlanService {
       ...(Object.keys(integrationFingerprints).length > 0 ? { integrationFingerprints } : {}),
       actions,
       unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged, ...loadBalancer.unmanaged],
-      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...sourceMaintenanceWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...maintenance.warnings, ...dataMigration.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...loadBalancer.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...managedPostRelease.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings, ...filterWarnings],
+      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...sourceMaintenanceWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...maintenance.warnings, ...dataMigration.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...loadBalancer.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...managedPostRelease.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...filterWarnings],
       ...(planInputRequired.length > 0 ? { inputRequired: planInputRequired } : {}),
       ...(planOverrides ? { overrides: planOverrides } : {}),
     };
