@@ -51,21 +51,12 @@ import {
 } from '../domain/services/delegated-secret.service.js';
 import { recordRuntimeRolloutRequirements } from '../domain/services/runtime-rollout.service.js';
 import {
-  applyGitHubActionsAppliedSpecHash,
-  applyGitHubActionsDeploy,
   applyGitHubActionsRelease,
   isGitHubActionsDeployAction,
 } from '../domain/services/ci-deploy.service.js';
 import { applyManagedCiAction } from '../domain/services/managed-ci.service.js';
 import { resolveDevOpsSelection, resolveGitHubActionsSelection } from '../domain/spec/devops-selection.js';
 import { devOpsProviderRegistry } from '../domain/registry/devops.registry.js';
-import {
-  CI_APPLIED_SPEC_SYNC_OPERATION,
-  CI_BINDING_REMOVE_OPERATION,
-  CI_CONFIGURATION_SYNC_OPERATION,
-  CI_VARIABLE_DELETE_OPERATION,
-  CI_VARIABLE_SYNC_OPERATION,
-} from '../domain/services/managed-ci.contract.js';
 import {
   applyGitHubCollaboration,
   resolveCollaborationRepository,
@@ -1411,7 +1402,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
       capability === 'hosting.service.converge' || capability === 'hosting.service.rollback'
       || capability === 'github.ci.release' || capability === 'github.ci.rollback'
       || capability === 'github.applied-spec-hash.sync'
-      || capability === 'ci.applied-spec-hash.sync'
     );
     if (deployNeedsVolumes && (volumeEnvironment?.platformBindings.serviceVolumes !== undefined || Object.values(envSpec.services).some((s) => s.volume))) {
       const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject);
@@ -1474,33 +1464,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
           `The GitHub deploy target must be ${expectedRepository ?? 'an unset repository'}/${envName} for ${envSpec.hosting.provider}.`
         );
       }
-      return applyGitHubActionsDeploy({
-        project: applyProject,
-        environmentName: envName,
-        environmentSpec: envSpec,
-        action,
-        authority: workflowPublicationOnly ? 'publication-only' : 'secret-sync',
-      });
-    }
-    if (
-      capability === 'ci.configuration.sync'
-      || capability === 'ci.variable.sync'
-      || capability === 'ci.variable.delete'
-      || capability === 'ci.binding.remove'
-    ) {
-      const expectedOperation = capability === 'ci.configuration.sync'
-        ? CI_CONFIGURATION_SYNC_OPERATION
-        : capability === 'ci.variable.sync'
-          ? CI_VARIABLE_SYNC_OPERATION
-          : capability === 'ci.variable.delete'
-            ? CI_VARIABLE_DELETE_OPERATION
-            : CI_BINDING_REMOVE_OPERATION;
-      if (
-        action.metadata?.operation !== expectedOperation
-        || action.metadata?.ciProvider !== action.resource.provider
-      ) {
-        return blockedActionIdentity(action, 'The reviewed CI provider, operation, or resource identity no longer matches.');
-      }
       return applyManagedCiAction({
         project: applyProject,
         spec,
@@ -1508,6 +1471,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
         environmentSpec: envSpec,
         action,
         appliedSpecHash: false,
+        authority: workflowPublicationOnly ? 'publication-only' : 'secret-sync',
       });
     }
     if (capability === 'github.applied-spec-hash.sync') {
@@ -1525,20 +1489,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
           message: 'Applied deployment contract action has stale mutation authority',
           error: 'The reviewed repository, environment, resource name, or desired hash no longer matches. Re-run hv_plan.',
         };
-      }
-      return applyGitHubActionsAppliedSpecHash({
-        project: applyProject,
-        environmentName: envName,
-        desiredHash,
-      });
-    }
-    if (capability === 'ci.applied-spec-hash.sync') {
-      if (
-        action.metadata?.operation !== CI_APPLIED_SPEC_SYNC_OPERATION
-        || action.metadata?.ciProvider !== action.resource.provider
-        || action.metadata?.environmentName !== envName
-      ) {
-        return blockedActionIdentity(action, 'The reviewed applied-spec CI action no longer matches the environment or provider.');
       }
       return applyManagedCiAction({
         project: applyProject,

@@ -15,6 +15,7 @@ import {
   planGitHubActionsAppliedSpecHash,
   planGitHubActionsDeploy,
 } from '../domain/services/ci-deploy.service.js';
+import { executeManagedCiRollback } from '../domain/services/ci-rollback.service.js';
 
 devOpsProviderRegistry.registerCodeHost({
   id: 'github',
@@ -37,17 +38,20 @@ devOpsProviderRegistry.registerCiProvider({
     adapter.connect(credentials as GitHubCredentials);
     return new GitHubActionsOperationsAdapter(adapter);
   },
+  rollback: params => executeManagedCiRollback(params),
   lifecycle: {
     prepareCredentialRollout: params => prepareGitHubCredentialRollout(params),
     observeCredentialRollout: params => observeGitHubCredentialRollout(params),
     async planDeploy(params) {
-      return planGitHubActionsDeploy(params);
+      const result = await planGitHubActionsDeploy(params);
+      return { actions: result.action ? [result.action] : [], warnings: result.warnings, ...(result.error ? { error: result.error } : {}) };
     },
     async applyDeploy(params) {
       return applyGitHubActionsDeploy(params);
     },
     async planAppliedSpecHash(params) {
-      return planGitHubActionsAppliedSpecHash(params);
+      const result = await planGitHubActionsAppliedSpecHash(params);
+      return { actions: result.action ? [result.action] : [], warnings: result.warnings };
     },
     async applyAppliedSpecHash(params) {
       const desiredHash = typeof params.action.metadata?.desiredHash === 'string'

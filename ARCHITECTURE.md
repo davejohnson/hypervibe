@@ -1667,13 +1667,17 @@ variables, release evidence, promotion, or rollback. Pages retains separate
 content-source, static-hosting-target, and optional publication-executor
 bindings; its target need not be the application repository.
 
-Hosting providers emit provider-neutral, versioned deploy recipes. CI adapters
-render those recipes and operate definitions/runs; hosting code never emits
-CI-provider syntax. The neutral program has typed triggers,
-runner requirements, logical variables/secrets, semantic steps, concurrency,
-and release evidence. It has no raw provider-YAML or privileged free-form-shell
-escape hatch. An unknown program/step version or unsupported semantic returns
-`UNSUPPORTED` before mutation.
+Every CI lifecycle step goes through one route: `managed-ci.service` resolves
+the selected CI provider from `devops` (or the legacy `github` block) and calls
+that registration's required `planDeploy`, `applyDeploy`, `planAppliedSpecHash`,
+`applyAppliedSpecHash` and `rollback`. Apply re-checks that each reviewed action
+belongs to the selected provider's connection. GitHub Actions is the only
+registered CI provider; there is no separate legacy or direct-call path.
+
+Hosting providers supply their GitHub Actions deploy steps through their
+`ci.buildGitHubActionsSteps` metadata. A provider-neutral recipe format existed
+only for GitLab and was removed with it; reintroduce one together with a second
+CI provider rather than ahead of it.
 
 CI configuration is an observed authority graph, not just a file hash. The CI
 adapter owns whole-root, provider-proven composable-include, or provider-managed
