@@ -666,6 +666,18 @@ describe('service instance intent export merge', () => {
     expect(mergeRepoPlatformBindings({serviceInstanceCreateHistory:history,serviceCreateRecovery:{web:marker},
       serviceInstanceCreates:{web:{...intent,priorCreateRecoverySha256:digest}}},{serviceCreateRecovery:{web:marker}}).serviceCreateRecovery).toEqual({web:marker});
   });
+  it('rejects an approval introduced by an untrusted repository even when intent identity matches',()=>{
+    const approval={archiveId:'original',activeMarkerSha256:'d'.repeat(64),planId:'plan',actionId:'service:web',intentSha256:'e'.repeat(64)};
+    expect(()=>mergeRepoPlatformBindings({serviceInstanceCreates:{web:intent}},
+      {serviceInstanceCreates:{web:{...intent,recoveryApproval:approval}}})).toThrow(/cannot introduce or change/);
+    expect(()=>mergeRepoPlatformBindings({},
+      {serviceInstanceCreates:{web:{...intent,recoveryApproval:approval}}})).toThrow(/cannot introduce or change/);
+  });
+  it('requires independent private proof even when local and incoming approval fields match',()=>{
+    const approved={...intent,completed:true,recoveryApproval:{archiveId:'original',activeMarkerSha256:'d'.repeat(64),planId:'plan',actionId:'service:web',intentSha256:'e'.repeat(64)}};
+    expect(()=>mergeRepoPlatformBindings({serviceInstanceCreates:{web:approved},services:{web:{serviceId:'web'}}},
+      {serviceInstanceCreates:{web:approved}})).toThrow(/approval could not be verified/);
+  });
   it('preserves acknowledged progress when a repository still has the pre-dispatch intent', () => {
     expect(mergeRepoPlatformBindings({serviceInstanceCreates:{web:{...intent,workflowId:'workflow'}}},
       {serviceInstanceCreates:{web:intent}}).serviceInstanceCreates).toEqual({web:{...intent,workflowId:'workflow'}});

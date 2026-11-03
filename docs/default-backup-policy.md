@@ -4,8 +4,11 @@ Hypervibe reports requested daily backup coverage for an environment's databases
 persistent service volumes and object buckets independently from deployment.
 Ordinary planning, direct apply and generated GitHub/GitLab releases do not
 require backup setup, an archive bucket, a recovery point or a tested restore.
-Missing or unknown coverage remains visible; it is not deployment drift or proof
-that a backup has run.
+Read coverage and recovery health through `hv_status` or an explicit
+`hv_plan scope="backups"`. Ordinary plans do not run recurring-backup health
+checks or read recovery archives. Explicit destructive-operation checkpoints
+remain separately reviewed. Missing or unknown coverage is not deployment drift
+or proof that a backup has run.
 
 An environment may declare daily backup intent:
 

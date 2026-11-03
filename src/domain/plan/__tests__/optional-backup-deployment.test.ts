@@ -7,6 +7,7 @@ import { ProjectRepository } from '../../../adapters/db/repositories/project.rep
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
 import { ComponentRepository } from '../../../adapters/db/repositories/component.repository.js';
+import { RunRepository } from '../../../adapters/db/repositories/run.repository.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { GitHubAdapter } from '../../../adapters/providers/github/github.adapter.js';
 import { PublicDnsClient } from '../../../adapters/dns/public-dns.client.js';
@@ -110,8 +111,14 @@ describe('optional backup policy at the ordinary deployment planning boundary', 
     return { project, spec, environment, observation, checkpointPlanner, plan: () => new PlanService().plan(project, 'production', { includeEnvFile: false }) };
   }
 
+  function forbidBackupObservations() {
+    vi.mocked(backupPolicy.observeBackupPolicy).mockRejectedValue(new Error('Ordinary planning must not read backup policy.'));
+    vi.mocked(backupHealth.observeBackupHealth).mockRejectedValue(new Error('Ordinary planning must not read backup health.'));
+  }
+
   it.each([false, true])('keeps ordinary service changes reachable with explicit backup intent=%s and no completed backup', async explicitBackup => {
     const f = await fixture(explicitBackup);
+    forbidBackupObservations();
     const result = await f.plan();
     if ('error' in result) throw new Error(result.error);
     expect({ scope: result.scope, blocked: result.blocked }).toEqual({ scope: 'full', blocked: [] });
@@ -120,6 +127,13 @@ describe('optional backup policy at the ordinary deployment planning boundary', 
       || action.resource.name === 'hypervibe-backups')).toBe(false);
     expect(new SpecStore().get(f.project)!.spec.environments.production.backups)
       .toEqual(explicitBackup ? { mode: 'daily' } : undefined);
+    expect(result).not.toHaveProperty('backupCoverage');
+    expect(result).not.toHaveProperty('backupReadiness');
+    const persisted = new RunRepository().findById(result.planRunId)!.plan;
+    expect(persisted).not.toHaveProperty('backupCoverage');
+    expect(persisted).not.toHaveProperty('backupReadiness');
+    expect(backupPolicy.observeBackupPolicy).not.toHaveBeenCalled();
+    expect(backupHealth.observeBackupHealth).not.toHaveBeenCalled();
   });
 
   it.each(['action', 'unknown'] as const)('does not turn %s backup-worker setup into a release prerequisite', async state => {
@@ -163,6 +177,7 @@ describe('optional backup policy at the ordinary deployment planning boundary', 
 
   it('retains an explicitly requested destructive-operation checkpoint as an isolated prerequisite', async () => {
     const f = await fixture(false);
+    forbidBackupObservations();
     const checkpoint: PlanAction = { id: 'database:railway:checkpoint:before-replacement', type: 'create',
       resource: { kind: 'database', provider: 'railway', name: 'checkpoint:before-replacement' },
       verified: true, requiresConfirm: true, billable: true, dataBearing: true,
@@ -175,6 +190,7 @@ describe('optional backup policy at the ordinary deployment planning boundary', 
 
   it.each([false, true])('does not infer an archive bucket from application storage in an ordinary plan (daily=%s)', async daily => {
     const f = await fixture(daily, true);
+    forbidBackupObservations();
     const result = await f.plan();
     if ('error' in result) throw new Error(result.error);
     expect(result.scope).toBe('full');

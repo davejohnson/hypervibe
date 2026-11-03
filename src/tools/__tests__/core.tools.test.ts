@@ -4276,8 +4276,8 @@ describe('hv_plan / hv_status / hv_apply', () => {
     // omitting backup intent makes no claim that a provider backup was verified.
     const plan = await t.call('hv_plan', { project: 'seed-apply-app', env: 'production' });
     expect(plan.ok).toBe(true);
-    expect(plan.data.backupCoverage).toMatchObject({ policy: { mode: 'disabled', source: 'default' },
-      backupObserved: 'not-applicable', restoreTested: 'not-applicable' });
+    expect(plan.data).not.toHaveProperty('backupCoverage');
+    expect(plan.data).not.toHaveProperty('backupReadiness');
     expect(plan.data.actions).toContainEqual(expect.objectContaining({
       id: 'database:railway:seed',
       type: 'update',

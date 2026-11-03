@@ -39,7 +39,9 @@ release. Do not dispatch or inspect managed CI through a code-host connector,
 provider CLI, browser, or direct API to work around a Hypervibe blocker.
 
 Ordinary deployment does not require backup setup, an archive bucket or fresh
-recovery evidence. Keep backup gaps visible without presenting them as release
+recovery evidence. Read backup coverage through `hv_status` or an explicit backup
+plan; ordinary plans do not run recurring-backup health checks or read recovery
+archives. Keep backup gaps visible without presenting them as release
 prerequisites. Requested backup work uses `hv_plan scope="backups"` and its exact
 confirmations; preserving native snapshots and accepted backup programs does not
 authorize new resources. Explicit destructive-operation checkpoints retain their
