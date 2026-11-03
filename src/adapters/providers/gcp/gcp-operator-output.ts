@@ -1,3 +1,4 @@
+import { createGcpOperatorOutputRetirementDriver, parseGcpOperatorOutputRetirementRecord } from './gcp-operator-output-retirement.js';
 import { isDeepStrictEqual } from 'node:util';
 import type { OperatorOutputDeliveryCapability } from '../../../domain/ports/operator-output.port.js';
 import { secretContainerBindingSchema, type SecretContainerBinding } from '../../../domain/ports/secret-destination-lifecycle.port.js';
@@ -52,7 +53,16 @@ export function createGcpOperatorOutputClient(input: SecretContainerBinding, aut
   return client;
 }
 export function createGcpOperatorOutputDeliveryCapability(): OperatorOutputDeliveryCapability {
-  return { schemaVersion: 1, providers: ['gcp-secret-manager'], review: (_binding, purpose) => ({
+  return { schemaVersion: 1, retirement: { parseRecord: parseGcpOperatorOutputRetirementRecord, async create(intent, targets) {
+    const selected = intent.outputs?.destinations.filter(item => intent.retirement?.outputTargets?.some(target => target.key === item.key));
+    const destination = selected?.[0]?.binding.destination;
+    if (!destination || destination.provider !== 'gcp-secret-manager' || selected!.some(item => item.binding.destination.provider !== 'gcp-secret-manager'
+      || item.binding.destination.projectId !== destination.projectId || item.binding.destination.projectNumber !== destination.projectNumber)) throw new DestinationBoundaryError('scope_mismatch');
+    const authentication = new GcpLocalDefaultAuthentication(destination.projectId), budget = new DestinationBudget({ deadlineMs: 15_000 });
+    try { await budget.wait(authentication.initialize()); } finally { budget.close(); }
+    return { driver: createGcpOperatorOutputRetirementDriver({ token: () => authentication.token(), request: authentication.request.bind(authentication) }, targets, intent.applicationProvider),
+      authentication: { kind: 'operator-application' as const } };
+  } }, providers: ['gcp-secret-manager'], review: (_binding, purpose) => ({
     permissions: ['secretmanager.secrets.get', 'secretmanager.versions.list', 'secretmanager.versions.get', 'secretmanager.versions.add',
       ...(purpose === 'github-app-signing-key' ? ['secretmanager.versions.access'] : [])],
     cost: 'One immutable secret version per selected operator output, plus Secret Manager storage and API operations.', pricingUrl: 'https://cloud.google.com/secret-manager/pricing',
@@ -63,3 +73,5 @@ export function createGcpOperatorOutputDeliveryCapability(): OperatorOutputDeliv
     return createGcpOperatorOutputClient(binding, { token: () => authentication.token(), request: authentication.request.bind(authentication) });
   } };
 }
+
+export { createGcpOperatorOutputRetirementDriver } from './gcp-operator-output-retirement.js';

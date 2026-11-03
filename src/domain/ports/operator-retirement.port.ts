@@ -6,8 +6,18 @@ export const operatorRetirementReferenceSchema = z.object({ installationId: z.st
 export const operatorRetirementDeclarationSchema = z.object({ from: operatorRetirementReferenceSchema,
   resources: z.literal('delete-owned'), data: z.enum(['retain', 'delete-owned']),
   targets: z.array(operatorRetirementReferenceSchema).min(1).max(20).optional(),
-}).strict();
-export const operatorRetirementIntentSchema = operatorRetirementDeclarationSchema.extend({
+  continueFrom: operatorRetirementReferenceSchema.optional(),
+  outputTargets: z.array(z.object({ from: operatorRetirementReferenceSchema,
+    role: z.string().regex(/^[a-z][a-z0-9-]{0,40}$/), key: z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/),
+    version: z.string().regex(/^[1-9][0-9]{0,19}$/) }).strict()).min(1).max(200).optional(),
+}).strict().refine(value => Boolean(value.continueFrom) === Boolean(value.outputTargets)
+  && (!value.continueFrom || value.data === 'delete-owned'
+    && value.continueFrom.installationId !== value.from.installationId
+    && new Set(value.outputTargets!.map(item => JSON.stringify(item))).size === value.outputTargets!.length
+    && value.outputTargets!.every(item => (value.targets ?? [value.from]).some(target =>
+      target.installationId === item.from.installationId && target.planDigest === item.from.planDigest))),
+  'Output deletion requires a separate completed-retirement reference and exact output versions.');
+export const operatorRetirementIntentSchema = operatorRetirementDeclarationSchema.safeExtend({
   targets: z.array(operatorRetirementReferenceSchema.extend({ evidenceDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict()).min(1).max(20),
 }).strict();
 export type OperatorRetirementIntent = z.infer<typeof operatorRetirementIntentSchema>;

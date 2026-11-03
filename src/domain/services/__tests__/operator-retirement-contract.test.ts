@@ -55,6 +55,36 @@ async function fixture() {
 }
 
 describe('explicit completed operator retirement contract', () => {
+  it('requires a separate exact output-data review after completed retain retirement without rewriting or replaying it', async () => {
+    const f = await fixture(), first = await planCloudInstallationV1({ ...f.context, intent: f.next });
+    const retired = await applyCloudInstallationV1({ ...f.context, installationId: first.installationId, planDigest: first.plan.digest, confirmActions: ['operator:identity'] });
+    expect(retired.status).toBe('retired'); const preserved = structuredClone(retired), nativeDeletes = f.deletes();
+    const reference = { installationId: retired.installationId, planDigest: retired.plan.digest };
+    const next = { ...f.next, installationId: randomUUID(), predecessor: reference, retirement: { ...f.next.retirement, data: 'delete-owned', continueFrom: reference,
+      outputTargets: [{ from: f.next.retirement.from, key: 'MAIL_KEY', role: 'api-key', version: '1' }] } };
+    const policy = { recordType: 'operator-applications:test', allowRetiredPredecessor: (parent: any, child: any) => parent.status === 'retired'
+      && canonicalJsonSha256(child.intent.retirement?.continueFrom) === canonicalJsonSha256({ installationId: parent.installationId, planDigest: parent.plan.digest }) };
+    const store = new CloudScopePreparationRepository<any>({ projectId: f.project.id, environmentId: f.environment.id, environmentName: 'test' },
+      value => parseCloudInstallationRecordV1(value, f.driver), policy as any);
+    let outputExists = true, outputDeletes = 0;
+    const outputProof = { resources: [{ kind: 'operator-output', id: 'exact-container', identity: { version: '1' } }], native: { retirement: { outcome: 'removed', retained: [] } } };
+    const originalPlan = f.driver.plan.bind(f.driver), originalInspect = f.driver.inspect.bind(f.driver), originalMutate = f.driver.mutate.bind(f.driver);
+    f.driver.plan = async (context: any) => context.intent.retirement?.continueFrom ? { actions: [{ id: 'operator:output', type: 'destroy',
+      resource: { kind: 'secret', name: 'MAIL_KEY', provider: 'microsoft-entra' }, verified: true, requiresConfirm: true, dataBearing: true, reason: 'Delete this exact retained output.',
+      metadata: { operation: 'delete-output', category: 'secret-container', execution: 'api', native: {} } }], review: { permissions: [], costs: [], warnings: [] } } : originalPlan(context);
+    f.driver.inspect = async (context: any) => context.action.id === 'operator:output' ? outputExists ? { state: 'action-required' } : { state: 'satisfied', evidence: outputProof } : originalInspect(context);
+    f.driver.mutate = async (context: any) => { if (context.action.id !== 'operator:output') return originalMutate(context); await context.beforeMutation(); outputDeletes++; outputExists = false; return { state: 'acknowledged' }; };
+    const providerPlan = vi.spyOn(f.driver, 'plan');
+    const foreign = { ...next, installationId: randomUUID(), retirement: { ...next.retirement, outputTargets: [{ ...next.retirement.outputTargets[0], from: { installationId: randomUUID(), planDigest: 'f'.repeat(64) } }] } };
+    await expect(planCloudInstallationV1({ ...f.context, store, intent: foreign })).rejects.toThrow();
+    expect(providerPlan).not.toHaveBeenCalled();
+    const plan = await planCloudInstallationV1({ ...f.context, store, intent: next });
+    expect(plan.plan.actions.map(action => action.id)).toEqual(['operator:output']);
+    const result = await applyCloudInstallationV1({ ...f.context, store, installationId: plan.installationId, planDigest: plan.plan.digest, confirmActions: ['operator:output'] });
+    expect(result.status).toBe('retired'); expect(outputDeletes).toBe(1); expect(f.deletes()).toBe(nativeDeletes);
+    expect(await store.read(retired.installationId)).toEqual(preserved);
+  });
+
   it('accepts an exact retirement declaration for applications and artifacts without treating omission as deletion', async () => {
     const f = await fixture();
     const application = { provider: 'microsoft-entra', profile: 'hypercloud-connect-v1', originService: 'web', runtimeService: 'web', nativeScope: { tenantId: 'tenant' } };

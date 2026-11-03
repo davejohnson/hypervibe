@@ -34,11 +34,28 @@ const active = (record: Registration) => record.attempts.length > 0 || Object.ke
 function journal(project: Project, environment: Environment, name: string) {
   return new CloudScopePreparationRepository<Registration>({ projectId: project.id, environmentId: environment.id, environmentName: environment.name }, value => {
     const capability = providerRegistry.getOperatorApplication(route.parse(value).intent.applicationProvider);
-    if (!capability) throw operatorApplicationUnavailable(); return capability.parseRecord(value);
+    if (!capability) throw operatorApplicationUnavailable();
+    const candidate = value as Registration;
+    if (candidate.intent?.retirement?.continueFrom) {
+      const outputs = operatorOutputSelectionSchema.parse(candidate.intent.outputs), retirement = providerRegistry.getOperatorOutputDelivery(outputs.hostingProvider)?.retirement;
+      if (!retirement) throw retirementUnavailable(); return retirement.parseRecord(value);
+    }
+    return capability.parseRecord(value);
   }, { recordType: `operator-applications:${name}`,
+    allowRetiredPredecessor: (parent, next) => outputContinuation(parent, next.intent),
     allowHistoricalPredecessor: (parent, next) => next.intent.mode === 'retire'
       ? !!historicalInstallationEvidence(parent) && isDeepStrictEqual(next.intent.retirement?.from, { installationId: parent.installationId, planDigest: parent.plan.digest })
       : restartEligible(parent, next.intent, environment) });
+}
+function outputContinuation(parent: Registration, next: OperatorApplicationIntent): boolean {
+  return parent.status === 'retired' && parent.intent.mode === 'retire' && parent.intent.retirement?.data === 'retain'
+    && !parent.intent.retirement.continueFrom && next.mode === 'retire' && next.retirement?.data === 'delete-owned'
+    && !!next.retirement.outputTargets && isDeepStrictEqual(next.retirement.continueFrom, { installationId: parent.installationId, planDigest: parent.plan.digest })
+    && isDeepStrictEqual(next.predecessor, next.retirement.continueFrom)
+    && isDeepStrictEqual(parent.intent.retirement.from, next.retirement.from) && isDeepStrictEqual(parent.intent.retirement.targets, next.retirement.targets)
+    && isDeepStrictEqual(parent.intent.nativeScope, next.nativeScope) && parent.intent.applicationProvider === next.applicationProvider
+    && parent.intent.appId === next.appId && parent.intent.customerId === next.customerId && parent.intent.environment === next.environment
+    && parent.intent.source.repository === next.source.repository;
 }
 function localContext(intent: OperatorApplicationIntent, environment: Environment) {
   return { projectId: intent.appId, environmentId: environment.id, installationId: intent.installationId, intentDigest: canonicalJsonSha256(intent) };
@@ -138,15 +155,30 @@ async function retirementSelection(project: Project, environment: Environment, n
     return { record, reference: { ...item, evidenceDigest: canonicalJsonSha256(evidence) } };
   });
   const leaf = acceptedJournalLeaf(history);
-  if (!leaf || leaf.installationId !== parent.installationId && !(leaf.intent.mode === 'retire' && isDeepStrictEqual(leaf.intent.predecessor, reference))) throw retirementUnavailable();
   const retirement = { ...declaration.retirement, targets: targets.map(item => item.reference) };
+  const predecessor = retirement.continueFrom ?? reference;
   const proof = { declarationDigest: canonicalJsonSha256(declaration), nativeScopeDigest: canonicalJsonSha256(parent.intent.nativeScope) };
-  // An accepted retirement is the only active successor. An older unaccepted
-  // proposal cannot become current again by restoring a previous declaration.
-  if (leaf.intent.mode === 'retire' && (!isDeepStrictEqual(leaf.intent.retirement, retirement)
+  if (retirement.continueFrom) {
+    const previous = history.find(item => item.installationId === predecessor.installationId && item.plan.digest === predecessor.planDigest);
+    if (!previous || !outputContinuation(previous, { ...parent.intent, mode: 'retire', predecessor, retirement }) || !parent.intent.outputs
+      || !providerRegistry.getOperatorOutputDelivery(parent.intent.outputs.hostingProvider)?.retirement) throw retirementUnavailable();
+    const bindings = secretContainerBindings(environment.platformBindings.secretDestinationContainers);
+    for (const selected of retirement.outputTargets!) {
+      const target = targets.find(item => isDeepStrictEqual({ installationId: item.record.installationId, planDigest: item.record.plan.digest }, selected.from));
+      const originalOutput = target?.record.intent.outputs?.destinations.find(item => item.key === selected.key && item.role === selected.role);
+      const output = parent.intent.outputs.destinations.find(item => item.key === selected.key && item.role === selected.role);
+      if (!output || !originalOutput || !isDeepStrictEqual(output, originalOutput)
+        || bindings[selected.key] === undefined && !(leaf?.status === 'retired' && leaf.intent.retirement?.continueFrom && leaf.completed[`operator-output:delete:${selected.key}`])
+        || bindings[selected.key] !== undefined && !isDeepStrictEqual(bindings[selected.key], output.binding)) throw retirementUnavailable();
+    }
+  } else if (retirement.data !== 'retain' && parent.intent.outputs) throw retirementUnavailable();
+  if (!leaf || leaf.installationId !== predecessor.installationId && !(leaf.intent.mode === 'retire' && isDeepStrictEqual(leaf.intent.predecessor, predecessor))) throw retirementUnavailable();
+  // An accepted successor cannot be superseded by a changed or older review.
+  if (leaf.installationId !== predecessor.installationId && (!isDeepStrictEqual(leaf.intent.retirement, retirement)
     || !isDeepStrictEqual(leaf.intent.selection, proof) || !isDeepStrictEqual(leaf.intent.nativeScope, parent.intent.nativeScope))) throw retirementUnavailable();
-  return { declaration, capability, parent, targets: targets.map(item => structuredClone(item.record)),
+  return { declaration, capability, parent, targets: targets.map(item => structuredClone(item.record)), predecessor,
     retirement, nativeScope: parent.intent.nativeScope, source: selectedSource, proof };
+
 }
 async function selection(project: Project, environment: Environment, name: string, result: SpecResult) {
   const declaration = result.spec.environments[environment.name]?.operatorApplications?.[name];
@@ -181,7 +213,8 @@ async function current(project: Project, environment: Environment, name: string,
       const selected = await retirementSelection(freshProject, fresh, name, result);
       return selected.declaration.provider === intent.applicationProvider && selected.source.repository === intent.source.repository
         && isDeepStrictEqual(selected.proof, intent.selection) && isDeepStrictEqual(selected.retirement, intent.retirement)
-        && isDeepStrictEqual(selected.nativeScope, intent.nativeScope) && isDeepStrictEqual(selected.declaration.retirement!.from, intent.predecessor);
+        && isDeepStrictEqual(selected.nativeScope, intent.nativeScope) && isDeepStrictEqual(selected.predecessor, intent.predecessor)
+        && (!intent.retirement?.continueFrom || isDeepStrictEqual(selected.parent.intent.outputs, intent.outputs));
     }
     const selected = await selection(freshProject, fresh, name, result);
     if (selected.declaration.provider !== intent.applicationProvider || selected.source.repository !== intent.source.repository
@@ -209,7 +242,32 @@ async function context(project: Project, environment: Environment, name: string,
     if (!record || !evidence || canonicalJsonSha256(evidence) !== target.evidenceDigest) throw retirementUnavailable();
     return structuredClone(record);
   });
-  const connection = targets ? await capability.retirement!.create(intent.nativeScope, local, targets) : await capability.create(intent.nativeScope, local);
+  let connection: Awaited<ReturnType<typeof capability.create>>;
+  if (intent.retirement?.continueFrom) {
+    const outputs = operatorOutputSelectionSchema.parse(intent.outputs), outputCapability = providerRegistry.getOperatorOutputDelivery(outputs.hostingProvider)?.retirement;
+    const previous = history.find(item => item.installationId === intent.retirement!.continueFrom!.installationId && item.plan.digest === intent.retirement!.continueFrom!.planDigest);
+    if (!targets || !outputCapability || !previous || !outputContinuation(previous, intent)) throw retirementUnavailable();
+    connection = await outputCapability.create(intent, targets);
+    const native = await capability.retirement!.create(previous.intent.nativeScope, { ...localContext(previous.intent, environment), authorizeCurrent: local.authorizeCurrent }, targets);
+    const driver = connection.driver;
+    const verifyRemoved = async (signal: AbortSignal) => {
+      for (const action of previous.plan.actions) {
+        const observed = await native.driver.inspect({ intent: structuredClone(previous.intent), authentication: native.authentication, signal,
+          completed: structuredClone(previous.completed), attempts: structuredClone(previous.attempts), action: structuredClone(action),
+          beforeMutation: async () => { throw retirementUnavailable(); } });
+        if (observed.state !== 'satisfied' || !isDeepStrictEqual(observed.evidence, previous.completed[action.id])) throw retirementUnavailable();
+      }
+    };
+    connection = { ...connection, driver: { ...driver,
+      parseScope: value => native.driver.parseScope(value),
+      parseAction: (value, selected) => selected.retirement?.continueFrom ? driver.parseAction(value, selected) : native.driver.parseAction(value, selected),
+      parseEvidence: (value, selected) => selected.retirement?.continueFrom ? driver.parseEvidence(value, selected) : native.driver.parseEvidence(value, selected),
+      plan: async input => { await verifyRemoved(input.signal); return driver.plan(input); },
+      inspect: async input => { await verifyRemoved(input.signal); return driver.inspect(input); },
+      mutate: async input => { await verifyRemoved(input.signal); return driver.mutate(input); },
+      recover: async input => { await verifyRemoved(input.signal); return driver.recover(input); },
+    } };
+  } else connection = targets ? await capability.retirement!.create(intent.nativeScope, local, targets) : await capability.create(intent.nativeScope, local);
   return { ...connection, store: journal(project, environment, name),
     // Registration verifies multiple native identities and every selected output
     // before dispatch. Keep a bounded outer budget above each 30s provider call.
@@ -245,7 +303,8 @@ export type OperatorRetirementSummary = NonNullable<ReturnType<typeof retirement
 function projection(record: Registration, name: string, mode: OperatorApplicationPlan['mode'], retryActions?: OperatorApplicationPlan['retryActions']) {
   const applicationRegistration: OperatorApplicationPlan = { schemaVersion: 1, name, installationId: record.installationId,
     planDigest: record.plan.digest, provider: record.intent.applicationProvider, mode, ...(retryActions ? { retryActions } : {}) };
-  let originals = mode === 'recover' ? record.plan.actions.filter(action => record.attempts.some(attempt => attempt.actionId === action.id)) : record.plan.actions;
+  let originals = mode === 'recover' ? record.plan.actions.filter(action => record.attempts.some(attempt => attempt.actionId === action.id)
+    || !!record.intent.retirement?.continueFrom && !!record.completed[action.id]) : record.plan.actions;
   if (retryActions) {
     if (mode !== 'prepare' && mode !== 'retire') throw operatorApplicationUnavailable();
     const included = new Set(retryActions.map(retry => retry.actionId));
@@ -257,7 +316,8 @@ function projection(record: Registration, name: string, mode: OperatorApplicatio
   }
   const actions: PlanAction[] = mode === 'verified' ? [] : originals.map(action => ({ ...action,
     ...(mode === 'recover' ? { type: 'update' as const, requiresConfirm: false, billable: false, dataBearing: false,
-      reason: 'Read only the exact retained registration identity and operation; do not recreate or replay a credential exchange.' }
+      reason: record.intent.retirement?.continueFrom ? 'Verify the exact output container is absent and finish removing only its retained local binding; do not repeat deletion.'
+        : 'Read only the exact retained registration identity and operation; do not recreate or replay a credential exchange.' }
       : record.completed[action.id] ? { type: 'noop' as const, requiresConfirm: false, billable: false, dataBearing: false } : {}),
     metadata: { ...applicationRegistration, operation: OPERATOR_APPLICATION_OPERATION, nativeActionId: action.id } }));
   return { applicationRegistration, actions };
@@ -314,12 +374,17 @@ export async function planOperatorApplicationRetirement(input: { project: Projec
       const intent: OperatorApplicationIntent = { schemaVersion: 1, installationId: randomUUID(), customerId: input.project.id, appId: input.project.id,
         environment: input.environmentName, source: selected.source, provider: selected.declaration.provider, applicationProvider: selected.declaration.provider,
         mode: 'retire', stage: 'scope-preparation', keys: [], execution: { kind: 'operator-application', authentication: 'local-operator' },
-        selection: selected.proof, nativeScope: selected.nativeScope, predecessor: selected.declaration.retirement!.from, retirement: selected.retirement };
+        selection: selected.proof, nativeScope: selected.nativeScope, predecessor: selected.predecessor, retirement: selected.retirement,
+        ...(selected.retirement.continueFrom ? { outputs: selected.parent.intent.outputs } : {}) };
       record = await planCloudInstallationV1({ ...await context(input.project, environment, name, intent, false), intent });
     } else if (active(record) && record.status !== 'retired') {
       record = await reconcileCloudInstallationV1({ ...await context(input.project, environment, name, record.intent, true), installationId: record.installationId, planDigest: record.plan.digest });
     }
-    if (record.status === 'retired') { terminal = { record, name }; continue; }
+    if (record.status === 'retired') {
+      if (record.intent.retirement?.continueFrom && record.intent.retirement.outputTargets!.some(target =>
+        secretContainerBindings(environment.platformBindings.secretDestinationContainers)[target.key])) return projected(record, name, 'recover', environment);
+      terminal = { record, name }; continue;
+    }
     if (record.plan.blockedReason) throw retirementUnavailable();
     const pending = record.plan.actions.filter(action => !record!.completed[action.id]).map(action => record!.attempts.filter(attempt => attempt.actionId === action.id).at(-1)).filter(attempt => !!attempt);
     const retry = pending.length && pending.every(attempt => attempt.status === 'rejected')
@@ -417,7 +482,25 @@ export async function applyOperatorApplications(input: { project: Project; envir
     const target = { ...await context(input.project, input.environment, proof.name, record.intent, readOnly, input.authorize),
       installationId: record.installationId, planDigest: record.plan.digest, onlyActionId: input.action.id };
     if (proof.retryActions && !isDeepStrictEqual((await reviewCloudInstallationRetryV1(target)).retryActions, proof.retryActions)) throw operatorApplicationUnavailable();
+    const bindingSnapshot = input.environment.platformBindings;
     const updated = readOnly ? await reconcileCloudInstallationV1(target) : await applyCloudInstallationV1({ ...target, confirmActions: [input.action.id], ...(retry ? { retryActions: [retry] } : {}) });
+    if (updated.status === 'retired' && updated.intent.retirement?.continueFrom) {
+      if (!await current(input.project, input.environment, proof.name, updated.intent)) throw retirementUnavailable();
+      for (const action of updated.plan.actions) {
+        const observed = await target.driver.inspect({ intent: structuredClone(updated.intent), authentication: target.authentication,
+          signal: AbortSignal.timeout(60_000), completed: structuredClone(updated.completed), attempts: structuredClone(updated.attempts), action,
+          beforeMutation: async () => { throw retirementUnavailable(); } });
+        if (observed.state !== 'satisfied' || !isDeepStrictEqual(observed.evidence, updated.completed[action.id])) throw retirementUnavailable();
+      }
+      const outputs = operatorOutputSelectionSchema.parse(updated.intent.outputs), bindings = secretContainerBindings(bindingSnapshot.secretDestinationContainers);
+      for (const selected of updated.intent.retirement.outputTargets!) {
+        const output = outputs.destinations.find(item => item.key === selected.key)!;
+        if (bindings[selected.key] !== undefined && !isDeepStrictEqual(bindings[selected.key], output.binding)) throw retirementUnavailable();
+        delete bindings[selected.key];
+      }
+      if (!new EnvironmentRepository().compareAndSwapPlatformBindings(input.environment.id, bindingSnapshot,
+        { ...bindingSnapshot, secretDestinationContainers: bindings })) throw retirementUnavailable();
+    }
     const browserHandoff = target.driver.operatorApplication?.pendingBrowser && await current(input.project, input.environment, proof.name, updated.intent)
       ? await target.driver.operatorApplication.pendingBrowser(updated) : undefined;
     const success = updated.status === 'retired' || updated.status === 'scope-ready' || updated.status === 'pending' && !updated.reason && !!updated.completed[input.action.id];

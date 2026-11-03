@@ -70,7 +70,7 @@ export class CloudScopePreparationRepository<T extends JournalRecord> {
   private readonly scope: Scope;
   private readonly type: string;
   constructor(scope: Scope, private readonly parseRecord: (value: unknown) => T,
-    private readonly policy?: { allowHistoricalPredecessor?(parent: T, next: T): boolean; recordType?: string }) {
+    private readonly policy?: { allowHistoricalPredecessor?(parent: T, next: T): boolean; allowRetiredPredecessor?(parent: T, next: T): boolean; recordType?: string }) {
     this.scope = { ...scope }; this.type = policy?.recordType ?? TYPE;
     if (this.type !== TYPE && this.type !== 'hosting-preparation' && !/^operator-(artifacts|applications):[a-z][a-z0-9-]{0,62}$/.test(this.type)) throw invalid();
   }
@@ -156,7 +156,9 @@ export class CloudScopePreparationRepository<T extends JournalRecord> {
       const prior = ancestors(next);
       if (next.intent.predecessor && expectedRevision === null) {
         const parent = history.find(item => item.installationId === next.intent.predecessor!.installationId);
-        if (!parent || parent.status === 'retired' || parent.status !== 'scope-ready' && !this.policy?.allowHistoricalPredecessor?.(parent, next)) return false;
+        if (!parent || (parent.status === 'retired'
+          ? !this.policy?.allowRetiredPredecessor?.(parent, next)
+          : parent.status !== 'scope-ready' && !this.policy?.allowHistoricalPredecessor?.(parent, next))) return false;
       }
       if (history.some(record => record.installationId !== installationId && (record.attempts.length > 0 || Object.keys(record.completed ?? {}).length > 0)
         && !prior.has(record.installationId) && !ancestors(record).has(installationId))) return false;

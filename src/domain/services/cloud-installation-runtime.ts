@@ -136,7 +136,7 @@ export function parseCloudInstallationIntentV1<I extends CloudInstallationExecut
     if (retirementIntent(parsed)) {
       const selected = parsed.retirement;
       if (driver.operatorRetirement?.schemaVersion !== 1 || !selected || !parsed.predecessor
-        || canonical(parsed.predecessor) !== canonical(selected.from)
+        || canonical(parsed.predecessor) !== canonical(selected.continueFrom ?? selected.from)
         || !selected.targets.some(item => canonical({ installationId: item.installationId, planDigest: item.planDigest }) === canonical(selected.from))
         || new Set(selected.targets.map(item => item.installationId)).size !== selected.targets.length) throw new Error();
     } else if ((applicationIntent(parsed) || artifactIntent(parsed)) && parsed.retirement) throw new Error();
@@ -365,8 +365,19 @@ async function verifyRetirement<I extends CloudInstallationExecutableIntent>(con
     if (ancestors.size >= 20 || ancestors.has(reference.installationId) || reference.installationId === intent.installationId)
       throw new CloudInstallationError('scope_mismatch');
     const previous = await read(context, reference.installationId);
-    if (!previous || previous.plan.digest !== reference.planDigest || retirementIntent(previous.intent)
+    if (!previous || previous.plan.digest !== reference.planDigest
       || !applicationIntent(previous.intent) && !artifactIntent(previous.intent)) throw new CloudInstallationError('scope_mismatch');
+    if (retirementIntent(previous.intent)) {
+      // Only a separately reviewed output continuation can follow a completed
+      // retain disposition. The previous record remains terminal and unchanged.
+      if (ancestors.size !== 0 || !intent.retirement.continueFrom
+        || canonical(reference) !== canonical(intent.retirement.continueFrom)
+        || previous.status !== 'retired' || previous.intent.retirement.data !== 'retain'
+        || previous.intent.retirement.continueFrom || previous.intent.retirement.outputTargets
+        || canonical(previous.intent.retirement.from) !== canonical(intent.retirement.from)
+        || canonical(previous.intent.retirement.targets) !== canonical(intent.retirement.targets)
+        || canonical(previous.intent.nativeScope) !== canonical(intent.nativeScope)) throw new CloudInstallationError('scope_mismatch');
+    }
     for (const key of ['customerId', 'appId', 'environment', 'provider', 'execution'] as const)
       if (canonical(previous.intent[key]) !== canonical(intent[key])) throw new CloudInstallationError('scope_mismatch');
     if (previous.intent.source.repository !== intent.source.repository) throw new CloudInstallationError('scope_mismatch');

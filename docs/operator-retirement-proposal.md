@@ -4,7 +4,7 @@ Shared declaration/journal foundation based on `2f029c9f9683a88320d05b16c27eb28d
 The shared application plan projection and narrow Microsoft Entra, SendGrid and
 reCAPTCHA retirement drivers now have offline command/SQLite/transport coverage.
 Native retirement is untested. Browser registrations, artifact publication, parent
-scope and output-secret retirement remain separate gaps. See [implementation evidence](operator-application-retirement.md).
+scope retirement remain separate gaps. Explicit later GCP output-container retirement now has offline coverage; see [output cleanup](operator-output-retirement.md). See [implementation evidence](operator-application-retirement.md).
 No provider writes, new browser sessions or remote changes were made.
 
 ## Outcome and boundary

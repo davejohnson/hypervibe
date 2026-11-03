@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { secretContainerBindingSchema, type SecretContainerBinding } from './secret-destination-lifecycle.port.js';
+import type { CloudInstallationDriver, CloudInstallationRecord, OperatorApplicationIntent, OperatorApplicationAuthentication } from './cloud-installation.port.js';
 import type { RuntimeSecretReference, SecretDestinationDriver } from './secret-destination.port.js';
 
 export const operatorOutputRolesSchema = z.record(z.string().regex(/^[a-z][a-z0-9-]{0,40}$/), z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/))
@@ -15,6 +16,13 @@ export type OperatorOutputSelection = z.infer<typeof operatorOutputSelectionSche
 /** Local operator-owned credential delivery, separately reviewed from customer collection. */
 export interface OperatorOutputDeliveryCapability {
   schemaVersion: 1;
+  /** Separate review after native registration/trust retirement; no setup or value access. */
+  retirement?: {
+    parseRecord(value: unknown): CloudInstallationRecord<OperatorApplicationIntent>;
+    create(intent: OperatorApplicationIntent, targets: CloudInstallationRecord<OperatorApplicationIntent>[]): Promise<{
+      driver: CloudInstallationDriver<OperatorApplicationIntent>; authentication: OperatorApplicationAuthentication;
+    }>;
+  };
   providers: readonly SecretContainerBinding['destination']['provider'][];
   review(binding: SecretContainerBinding, verificationPurpose?: 'github-app-signing-key'): { permissions: string[]; cost: string; pricingUrl: string };
   create(binding: SecretContainerBinding): Promise<{ driver: SecretDestinationDriver;
