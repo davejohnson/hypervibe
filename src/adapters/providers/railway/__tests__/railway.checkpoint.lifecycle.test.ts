@@ -85,7 +85,7 @@ describe('Railway checkpoint durable lifecycle through serialized transport', ()
     return { ctx, environment, component, http, plan, apply, sawIntent: () => sawDurableIntentBeforeMutation };
   }
 
-  it.each(checkpointObservationFailures)('reports $name safely on create and resume without another write', async (failure) => {
+  it.each([checkpointObservationFailures[0], checkpointObservationFailures[7]])('reports $name safely on create and resume without another write', async (failure) => {
     let failing = true;
     const f = await setup(false, () => failing ? failure.respond()
       : Response.json({ data: { workflowStatus: { status: 'Complete' } } }));

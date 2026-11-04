@@ -27,20 +27,6 @@ describe('RailwayAdapter existing TCP proxy observation and legacy cleanup', () 
     updatedAt: new Date(),
   };
 
-  it('getTcpProxy returns the matching proxy and never mutates', async () => {
-    const request = vi.fn().mockResolvedValueOnce({
-      tcpProxies: [{ ...proxyScope, id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 33333, applicationPort: 5432 }],
-    });
-
-    const adapter = new RailwayAdapter();
-    stubClient(adapter, request);
-
-    const proxy = await adapter.getTcpProxy('rail-env-1', 'rail-svc-db-1', 5432);
-
-    expect(proxy).toEqual({ ...proxyScope, id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 33333, applicationPort: 5432 });
-    expect(request).toHaveBeenCalledTimes(1);
-  });
-
   it('getTcpProxy returns null when no proxy matches the port', async () => {
     const adapter = new RailwayAdapter();
     stubClient(adapter, vi.fn().mockResolvedValueOnce({

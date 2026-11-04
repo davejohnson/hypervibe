@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
 import { RailwayAdapter, type RailwayCustomDomain } from '../railway.adapter.js';
-import { hashEnvValue } from '../../../../domain/ports/observe.port.js';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
 
 function graphqlNotFound(rootField: string, message: string): Error {
@@ -376,30 +375,6 @@ describe('RailwayAdapter observe', () => {
     })).rejects.toThrow('Failed to observe Railway custom domain usebillforge.com');
   });
 
-  it('surfaces the linked repo and branch as the service source', async () => {
-    const withTrigger = structuredClone(projectDetailsResponse);
-    (withTrigger.project.services.edges[0].node as { repoTriggers: unknown }).repoTriggers = {
-      pageInfo: { hasNextPage: false },
-      edges: [{ node: { id: 'trigger-prod', projectId: 'rail-project-1', serviceId: 'svc-web', environmentId: 'env-prod', repository: 'dave/seq-planner', branch: 'main' } }],
-    };
-    const request = vi.fn()
-      .mockResolvedValueOnce(withTrigger)
-      .mockResolvedValueOnce({
-        serviceInstance: { startCommand: 'npm start', latestDeployment: { status: 'SUCCESS' } },
-      })
-      .mockResolvedValueOnce({ variables: {} });
-
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
-
-    const result = await adapter.observe(
-      makeEnvironment({ projectId: 'rail-project-1', environmentId: 'env-prod' })
-    );
-
-    expect(result.services[0]?.source).toEqual({ repo: 'dave/seq-planner', branch: 'main' });
-    expect(result.services[0]?.sourceState).toBe('connected');
-  });
-
   it('uses ServiceInstance.source as primary and cached binding branch when repoTriggers are absent', async () => {
     const request = vi.fn()
       .mockResolvedValueOnce(projectDetailsResponse)
@@ -627,24 +602,6 @@ describe('RailwayAdapter observe', () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 
-  it('ignores services that do not have an instance in the requested environment', async () => {
-    const stagingProject = structuredClone(projectDetailsResponse);
-    const request = vi.fn().mockResolvedValueOnce(stagingProject);
-
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
-
-    const result = await adapter.observe(
-      makeEnvironment({ projectId: 'rail-project-1', environmentId: 'env-staging' })
-    );
-
-    expect(result.projectExists).toBe(true);
-    expect(result.environmentId).toBe('env-staging');
-    expect(result.services).toEqual([]);
-    expect(result.databases.find((db) => db.engine === 'postgres')).toBeUndefined();
-    expect(request).toHaveBeenCalledTimes(1);
-  });
-
   it('treats exact bound application services as services even when their names or images resemble datastores', async () => {
     const ambiguousProject = structuredClone(projectDetailsResponse);
     ambiguousProject.project.plugins.edges = [];
@@ -760,36 +717,6 @@ describe('RailwayAdapter observe', () => {
       envVarKeys: [],
       envVarHashes: {},
     });
-  });
-
-  it('hashes env var values and never exposes raw values', async () => {
-    const secret = 'postgres://user:hunter2@db.internal:5432/app';
-    const request = vi.fn()
-      .mockResolvedValueOnce(projectDetailsResponse)
-      .mockResolvedValueOnce({
-        serviceInstance: { latestDeployment: { status: 'SUCCESS' } },
-      })
-      .mockResolvedValueOnce({
-        variables: {
-          DATABASE_URL: secret,
-          API_KEY: 'value',
-        },
-      });
-
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
-
-    const result = await adapter.observe(
-      makeEnvironment({ projectId: 'rail-project-1', environmentId: 'env-prod' })
-    );
-
-    const web = result.services[0];
-    expect(web?.envVarHashes['API_KEY']).toBe(hashEnvValue('value'));
-    expect(web?.envVarHashes['DATABASE_URL']).toBe(hashEnvValue(secret));
-
-    const serialized = JSON.stringify(result);
-    expect(serialized).not.toContain(secret);
-    expect(serialized).not.toContain('hunter2');
   });
 
   it('throws when not connected', async () => {

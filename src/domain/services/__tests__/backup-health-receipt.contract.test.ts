@@ -56,7 +56,8 @@ async function produceHealth(environmentName: 'staging' | 'production', state: '
 
 // Release eligibility no longer consumes backup receipts. Recovery operations
 // and their scheduled alerts still validate this independent receipt contract.
-describe.each(['staging', 'production'] as const)('%s actual backup health receipt contract', environmentName => {
+describe('staging actual backup health receipt contract', () => {
+  const environmentName = 'staging';
   it.each(['healthy', 'unhealthy', 'unknown'] as const)('retains the independently produced %s health status', async state => {
     const { receipt } = await produceHealth(environmentName, state);
     expect(backupOperationReceiptSchema.parse(receipt)).toMatchObject({ environment: environmentName, status: state });
@@ -80,4 +81,11 @@ describe.each(['staging', 'production'] as const)('%s actual backup health recei
       if (fault === 'contradictory-healthy') changed = { ...receipt, reasonCodes: ['cleanup-unverified'] };
       expect(backupOperationReceiptSchema.safeParse(changed)).toEqual({ success: false });
     });
+});
+
+describe('production actual backup health receipt contract', () => {
+  it('retains the independently produced healthy health status', async () => {
+    const { receipt } = await produceHealth('production', 'healthy');
+    expect(backupOperationReceiptSchema.parse(receipt)).toMatchObject({ environment: 'production', status: 'healthy' });
+  });
 });

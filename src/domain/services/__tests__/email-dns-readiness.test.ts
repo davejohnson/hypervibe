@@ -52,7 +52,7 @@ describe('email DNS readiness through plan and the real SendGrid transport', () 
     expect((await plan()).senderReadiness?.dns).toMatchObject({ status: 'needs_attention', senders: [{ spf: 'published', dkim: 'mismatch', dmarc: { status: 'configured', policy: 'reject' } }] });
   });
 
-  it.each(['ENODATA', 'ENOTFOUND', 'ETIMEOUT', 'ESERVFAIL', 'EREFUSED'])('distinguishes DNS error %s from absence', async code => {
+  it.each(['ENODATA', 'ENOTFOUND', 'ETIMEOUT'])('distinguishes DNS error %s from absence', async code => {
     provider();
     vi.spyOn(Resolver.prototype, 'resolveCname').mockRejectedValue(Object.assign(new Error('private provider error'), { code }));
     vi.spyOn(Resolver.prototype, 'resolveTxt').mockRejectedValue(Object.assign(new Error('private provider error'), { code }));

@@ -26,7 +26,7 @@ import { railwayHttpFixture, projectId, stagingId } from '../../adapters/provide
 
 // Real SQLite and graphql-request against the pinned official Railway SDL.
 // Synthetic scope/volume state, not a recording or live provider certification.
-describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope binding with %s backups', backupMode => {
+describe('reviewed legacy database scope binding', () => {
   let directory: string;
   let ctx: CommandContext;
   beforeEach(() => {
@@ -41,7 +41,7 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true });
   });
 
-  async function fixture(options: Parameters<typeof railwayHttpFixture>[0] = {}, credentialAliases = false) {
+  async function fixture(options: Parameters<typeof railwayHttpFixture>[0] = {}, credentialAliases = false, backupMode: 'daily' | 'disabled' = 'daily') {
     const http = await railwayHttpFixture(options);
     const nativeService = http.addService('staging-postgres', 'postgres', stagingId);
     Object.assign(nativeService.instances.get(stagingId)!, { source: { image: 'ghcr.io/railwayapp-templates/postgres-ssl:16' },
@@ -88,8 +88,8 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     return { http, volume, project, spec, stored, environment, component, service, database, plan, context };
   }
 
-  it('plans a local-only scope repair and preserves accepted project state through apply', async () => {
-    const f = await fixture();
+  it.each(['daily', 'disabled'] as const)('repairs scope locally and preserves accepted state with %s backups', async backupMode => {
+    const f = await fixture({}, false, backupMode);
     const result = await f.plan();
     expect(result).not.toHaveProperty('error');
     if ('error' in result) throw new Error(result.error);
@@ -127,6 +127,7 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     expect(next.actions.find(action => action.resource.kind === 'database')).toMatchObject({ type: 'noop' });
     expect(f.http.mutations).toEqual([]);
     expect(f.http.contractErrors).toEqual([]);
+    expect(f.http.backupSchedules.size).toBe(backupMode === 'disabled' ? 0 : 1);
   });
 
   it.each(['missing', 'provided'] as const)('normalizes legacy scope, repairs aliases and resumes %s deployment input', async input => {
@@ -278,7 +279,6 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     expect((await planDatabaseScopeBinding(f.context())).actions).toEqual([]);
     expect(await r.apply()).toMatchObject({ success: true, data: { applied: 0, skipped: 1, providerMutations: 0 } });
     expect(new SpecStore().get(f.project)?.spec).toEqual(f.spec);
-    if (backupMode === 'disabled') expect(f.http.backupSchedules.size).toBe(0);
     expect(f.http.contractErrors).toEqual([]);
     expect(f.http.mutations).toEqual([]);
   });

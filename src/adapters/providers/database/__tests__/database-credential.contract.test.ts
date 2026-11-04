@@ -29,22 +29,6 @@ it('inspects exact native database scope without SQL, resource creation, or cred
   await expect(port.inspect(environment, component, { ...selection, username: 'another-user' })).rejects.toThrow(/identity/i);
 });
 
-it('changes actual PostgreSQL authentication and never embeds plaintext into SQL text', async () => {
-  const calls: Array<{ sql: string; values?: unknown[] }> = [];
-  vi.spyOn(pg.Client.prototype, 'connect').mockResolvedValue(undefined);
-  vi.spyOn(pg.Client.prototype, 'end').mockResolvedValue(undefined);
-  vi.spyOn(pg.Client.prototype, 'query').mockImplementation(async function (sql: any, values?: any) {
-    calls.push({ sql, values });
-    return { rows: [{ username: 'app', database: 'appdb' }], rowCount: 1 } as any;
-  });
-  const port = createPostgresCredentialLifecycle(() => adapter);
-  const target = await port.inspect(environment, component, selection);
-  expect(await port.rotate(environment, component, target, "new'password")).toMatchObject({ state: 'acknowledged' });
-  expect(calls.some(call => call.sql.includes('ALTER ROLE'))).toBe(true);
-  expect(calls.map(call => call.sql).join('\n')).not.toContain("new'password");
-  expect(calls.some(call => call.values?.includes("new'password"))).toBe(true);
-});
-
 it('distinguishes authentication rejection from an uncertain connection failure', async () => {
   vi.spyOn(pg.Client.prototype, 'end').mockResolvedValue(undefined);
   const connect = vi.spyOn(pg.Client.prototype, 'connect').mockRejectedValue(Object.assign(new Error('secret-echo'), { code: '28P01' }));

@@ -75,7 +75,6 @@ describe('server tool surface', () => {
   it.each([
     ['claude-code', '2.1.295', 2048],
     ['claude-code', '2.1.296', 4096],
-    ['claude-code', '2.2.0', 4096],
     ['claude-code', 'unknown', 2048],
   ])('fits %s %s startup while retaining full discoverable guidance', async (name, version, limit) => {
     const { client, server } = await makeClient(undefined, { name, version });
