@@ -585,12 +585,14 @@ export function createGcpCloudDeploymentDriver(options: { fetch?: typeof fetch; 
         if (acknowledgment.native.actionId !== context.action.id || acknowledgment.native.attemptId !== context.attempt?.id) fail('ownership_mismatch');
         if (!acknowledgment.resources.length) {
           const name = String(acknowledgment.native.operationName), host = op === 'create-registry' ? 'artifactregistry.googleapis.com/v1' : 'run.googleapis.com/v2';
-          for (let poll = 0; poll < 3; poll++) {
+          for (let delay = 250; ; delay = Math.min(delay * 2, 2000)) {
             const operation = checkedOperation(await client.json(`https://${host}/${name}`), context, name);
             if (operation.error) return { state: 'unknown', reason: 'provider_error' };
             if (operation.done) { operationResource = (await observeResource(client, context, operation.response)) ?? undefined; break; }
-            if (poll === 2 || !budget) return { state: 'pending', reason: 'not_converged' };
-            await budget.wait(new Promise<void>(resolve => setTimeout(resolve, 250)));
+            if (!budget) return { state: 'pending', reason: 'not_converged' };
+            // Use the existing caller deadline; a slow operation keeps its saved
+            // acknowledgment and never becomes permission to dispatch create again.
+            await budget.wait(new Promise<void>(resolve => setTimeout(resolve, delay)));
           }
         }
       }

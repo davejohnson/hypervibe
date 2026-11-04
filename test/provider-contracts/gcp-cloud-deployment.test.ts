@@ -540,7 +540,7 @@ describe('durable Google deployment create operations', () => {
       const shared = { driver, store: makeStore(), authentication, authorize: async () => true };
       const prepared = prepareCloudDeploymentIntentV1(spec, { ...intent, appId: project.id }, driver);
       const plan = await planCloudInstallationV1({ ...shared, intent: prepared });
-      const pending = await applyCloudInstallationV1({ ...shared, installationId: plan.installationId, planDigest: plan.plan.digest,
+      const pending = await applyCloudInstallationV1({ ...shared, timeoutMs: 1000, installationId: plan.installationId, planDigest: plan.plan.digest,
         confirmActions: plan.plan.actions.map(action => action.id) });
       const actionId = kind === 'registry' ? 'gcp:deployment:registry' : 'gcp:deployment:service:web';
       const attempt = pending.attempts.find(item => item.actionId === actionId)!;
@@ -615,9 +615,25 @@ describe('Google deployment operation read safety', () => {
   ] as const)('keeps %s unknown without authorizing another create', async (_label, response) => {
     expect((await observeOperation(response)).result.state).toBe('unknown');
   });
-  it('keeps a genuinely unfinished operation pending even when its resource is already visible', async () => {
-    const observed = await observeOperation(x => Response.json({ name: x.name }));
-    expect(observed.result).toEqual({ state: 'pending', reason: 'not_converged' }); expect(observed.calls).toHaveLength(3);
+  it('uses the existing deadline for an unfinished operation even when its resource is already visible', async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = observeOperation(x => Response.json({ name: x.name }));
+      await vi.advanceTimersByTimeAsync(30_000);
+      const observed = await pending;
+      expect(observed.result).toEqual({ state: 'unknown', reason: 'timeout' });
+      expect(observed.calls.length).toBeGreaterThan(3); expect(observed.calls.length).toBeLessThan(20);
+    } finally { vi.useRealTimers(); }
+  });
+  it('waits for a delayed successful operation beyond the former half-second window', async () => {
+    vi.useFakeTimers();
+    try {
+      const started = Date.now();
+      const pending = observeOperation(x => Response.json(Date.now() - started < 5000 ? { name: x.name } : x));
+      await vi.advanceTimersByTimeAsync(10_000);
+      const observed = await pending;
+      expect(observed.result.state).toBe('satisfied'); expect(observed.calls.length).toBeGreaterThan(3);
+    } finally { vi.useRealTimers(); }
   });
   it('finishes a short asynchronous operation within its bounded read polling without another approval', async () => {
     let polls = 0;

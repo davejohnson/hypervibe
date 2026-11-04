@@ -39,8 +39,10 @@ deployment provider suite remains in ordinary `npm test`.
 
 Only registry and service creation change. Their acknowledgment is saved by the
 existing installation kernel before recovery. Recovery reads the exact operation
-at most three times, separated by 250ms, within the existing 30-second request
-budget. Pending/unknown results retain evidence and stop dependent work. No
+with 250ms, 500ms, 1s, then 2s capped backoff until completion or the
+existing caller deadline. The hosted installation kernel currently allows 15
+seconds per authorized action; the provider also retains its 30-second maximum.
+No deadline or request authority is extended. Pending/unknown results retain evidence and stop dependent work. No
 automatic create retry is introduced. Exact terminal resource proof still needs
 fresh ownership, lifetime and configuration observation. A retained full result
 survives expiry of the historical operation. A lost acknowledgment keeps the
@@ -59,3 +61,10 @@ reader/writer together; this change does not claim rollback compatibility with
 an older package after new operation evidence has been recorded. Exact `.` and
 `..` final path segments are rejected before URL normalization or a native GET;
 serialized regressions first demonstrated both escapes.
+
+The follow-up waiting regression first failed for an operation completing after
+five seconds and for one still unfinished at the deadline. Fake clocks exercise
+the actual serialized driver, not a substituted polling implementation. SQLite
+restart tests use the existing one-second test action deadline and retain the
+acknowledgment before read-only recovery. A slower real Cloud Run operation can
+still return pending; automatic browser observation is not added by this change.
