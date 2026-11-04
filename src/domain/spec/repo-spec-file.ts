@@ -1,5 +1,4 @@
 import { randomUUID } from 'crypto';
-import { withDefaultDatabaseProviders } from './database-defaults.js';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs';
 import path from 'path';
 import { projectSpecSchema, type ProjectSpec } from './spec.schema.js';
@@ -184,7 +183,7 @@ export function readRepoSpecFile(startDir = primaryWorkspaceDirectory()): RepoSp
   } catch {
     throw new Error(`${specPath} is not valid JSON. Fix the file (or intentionally delete it to fall back to the local spec) and retry.`);
   }
-  const parsed = projectSpecSchema.safeParse(withDefaultDatabaseProviders(document));
+  const parsed = projectSpecSchema.safeParse(document);
   if (!parsed.success) {
     const issues = parsed.error.issues
       .slice(0, 5)

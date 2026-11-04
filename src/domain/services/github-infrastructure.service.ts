@@ -1950,7 +1950,7 @@ export async function planGitHubInfrastructure(params: {
     : restoreDrillBlockedReason ?? backupPreservationBlockedReason ?? taskPrerequisites.blockedReason;
   const restoreDrillPaths = new Set(restoreDrills.files.map((file) => file.path));
   const taskWorkflowDrift = drift.some((path) => taskPrerequisites.paths.has(path));
-  const actions: PlanAction[] = [infrastructureAction({
+  const publicationAction = infrastructureAction({
     repository,
     files,
     type: drift.length > 0 || Boolean(infrastructureBlockedReason) ? 'update' : 'noop',
@@ -1960,7 +1960,8 @@ export async function planGitHubInfrastructure(params: {
     requiresConfirm: !infrastructureBlockedReason && taskWorkflowDrift,
     preservedManagedPaths: [...deferredBackupPaths].sort(),
     ...(infrastructureBlockedReason ? { blockedReason: infrastructureBlockedReason } : {}),
-  })];
+  });
+  const actions: PlanAction[] = [publicationAction];
   const blocked: GitHubInfrastructureConnectionBlock[] = [];
   const environment = new EnvironmentRepository().findByProjectAndName(params.project.id, params.environmentName);
   const delegatedSecrets = await planGitHubDelegatedSecrets({
@@ -1972,7 +1973,14 @@ export async function planGitHubInfrastructure(params: {
     environment,
     suppliedValues: params.suppliedSecretValues ?? {},
   });
-  actions.push(...delegatedSecrets.actions);
+  // Secret writes and retirement must follow the reviewed files even when a
+  // full plan moves confirmation-gated publication behind ordinary actions.
+  // Accepted secrets remain noops; secret-only setups have no publication.
+  actions.push(...delegatedSecrets.actions.map((action) => (
+    action.type !== 'noop' && publicationAction.type !== 'noop'
+      ? { ...action, dependsOn: [GITHUB_INFRASTRUCTURE_ACTION_ID] }
+      : action
+  )));
   warnings.push(...delegatedSecrets.warnings);
 
   if (drift.length === 0) {
@@ -1987,8 +1995,6 @@ export async function planGitHubInfrastructure(params: {
     blocked.push(...pages.blocked);
   }
 
-  // Secrets/settings are a second stage. A file PR must merge before Hypervibe
-  // exposes an AI key to the newly reviewed workflows.
   // AI-backed automations read OPENAI_API_KEY like any other user-supplied
   // API key: a delegated project secret delivered to GitHub Actions.
   if (githubSpecNeedsOpenAI(githubSpec)) {

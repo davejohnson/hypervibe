@@ -1068,6 +1068,11 @@ Delegated secrets are lifecycle-managed slots, not ordinary environment variable
 - Missing, unaccepted, drifted, or newly reassigned required slots produce `inputRequired`. The plan remains inspectable but `hv_apply` must reject it before connection checks or provider mutations.
 - A successful provider receipt records binding metadata (`delegatedEnvBindings` for hosting and `delegatedActionsBindings` for GitHub) in authoritative local SQLite: key name, destination, principal, SHA-256 value hash, timestamp, and action id. The value itself is never stored in bindings or receipts. The complete binding collections are omitted from `.hypervibe/bindings.json`; a hash must not become a repository-visible offline verifier for a low-entropy delegated value.
 - Live observation compares provider hashes against the accepted hash. Matching values are preserved without needing the secret locally. Drift is reported and preserved until a new explicit plan input is supplied.
+- When a plan changes managed GitHub files, Actions secret writes and removals
+  explicitly depend on that publication. A pending or failed file review cannot
+  change those keys, including when confirmation reorders the plan. Apply rejects
+  older plans missing this dependency before any effects. Accepted unchanged keys
+  remain noops; application runtime secrets use their own hosting prerequisites.
 
 `.hypervibe/spec.json` and the sanitized `.hypervibe/bindings.json` make desired state and non-secret provider identities reconstructible after a local database or checkout is lost. Accepted managed-secret fingerprints, provider connections, and encrypted in-flight plans remain local and must be recreated. A fresh machine therefore needs explicit delegated secret input before it can accept or replace a managed slot; it must never trust a verifier recovered from the repository.
 
@@ -1988,6 +1993,14 @@ browser/UI inspection, or direct CI/provider APIs; a blocked `hv_ci_trigger` or
 stage.
 
 ## Database Provisioning And Persistence
+
+A declared database may omit `provider` (for example, `database: {}`). Canonical
+environment parsing chooses the hosting platform's native database: Railway
+Postgres, Cloud SQL for Cloud Run, RDS for ECS, or Azure PostgreSQL for Container
+Apps. Provider registration and parsing share the same connectivity metadata;
+hosted and CI readers do not need to initialize cloud adapters to apply defaults.
+An absent database declaration stays absent, and an explicit provider is preserved.
+Parsing does not rewrite committed bytes or change the raw deployment-contract hash.
 
 Every database adapter provisions the provider's database product. Railway uses
 the official `postgres` template through `templateDeployV2`, the same API path

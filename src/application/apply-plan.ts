@@ -792,6 +792,18 @@ export async function executePlanApply(ctx: CommandContext, params: {
   if ('error' in loaded) {
     return invalidSpec ?? { kind: 'plan_not_found', error: loaded.error };
   }
+  // Older persisted plans may put GitHub secret writes before reviewed file
+  // publication. Require the prerequisite before any effects, including when
+  // publication was moved to the end for confirmation.
+  const githubPublication = loaded.document.actions.find(action =>
+    action.type !== 'noop' && resolvePlanActionAuthority(action)?.capability === 'github.infrastructure.sync');
+  if (githubPublication && loaded.document.actions.some(action =>
+    action.type !== 'noop'
+    && resolvePlanActionAuthority(action)?.capability === 'github.delegated-secret.sync'
+    && !action.dependsOn?.includes(githubPublication.id))) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'github',
+      reason: 'This plan must publish and verify the reviewed GitHub workflows before changing their keys. Run hv_plan again.' }] };
+  }
   const envName = loaded.document.environmentName;
   const planScope = loaded.document.scope ?? 'full';
   const secretsOnly = planScope === 'secrets';

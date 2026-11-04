@@ -1,3 +1,4 @@
+import { nativeDatabaseConnectivity } from '../../../domain/registry/database-connectivity.js';
 import { createRailwayRegistryCredentialLifecycle } from './railway-registry-credential.js';
 import { railwayDeploySource } from './railway-deploy-source.js';
 import { runRailwayDatabaseTask } from './railway-database-task.js';
@@ -8033,7 +8034,7 @@ providerRegistry.register({
         databaseInitializationTasks: { variableMode: 'references', execution: 'temporary-workload', status: 'ready-for-live', databaseProviders: ['railway'] },
         serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only' } },
       databaseEngines: ['postgres'],
-      databaseConnectivity: { compatibleHostingProviders: ['railway'] },
+      databaseConnectivity: nativeDatabaseConnectivity.railway,
       dailyBackups: { database: true, volume: true },
       databaseResilience: { checkpoints: true },
       cacheEngines: ['redis'],

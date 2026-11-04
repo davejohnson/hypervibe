@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { parse as parseDomain } from 'tldts';
 import { isReservedRuntimeEnvKey, RESERVED_RUNTIME_ENV_ERROR } from '../services/runtime-env-policy.js';
 import { canonicalizeJson } from '../../lib/canonical-json.js';
+import { withDefaultDatabaseProvider } from './database-defaults.js';
 
 /**
  * The canonical desired-state document ("spec") for a project — the single
@@ -1571,7 +1572,7 @@ export const environmentWebhookSchema = z.object({
   signingSecretEnvVar: environmentVariableNameSchema.optional(),
 }).strict();
 
-export const environmentSpecSchema = z.object({
+export const environmentSpecSchema = z.preprocess(withDefaultDatabaseProvider, z.object({
   hosting: z.object({
     /** Hosting provider name; validated against the adapter registry at spec_set time. */
     provider: z.string().min(1),
@@ -2134,7 +2135,7 @@ export const environmentSpecSchema = z.object({
       }
     }
   }
-});
+}));
 
 export const projectSpecSchema = z.object({
   version: z.literal(1),

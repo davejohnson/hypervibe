@@ -1,3 +1,4 @@
+import { nativeDatabaseConnectivity } from '../../../domain/registry/database-connectivity.js';
 import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
 import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { createHash, randomBytes } from 'crypto';
@@ -975,9 +976,7 @@ providerRegistry.register({
     },
     lifecycle: {
       databaseEngines: ['postgres'],
-      databaseConnectivity: {
-        compatibleHostingProviders: ['azure-container-apps'],
-      },
+      databaseConnectivity: nativeDatabaseConnectivity['azure-postgres'],
     },
   },
   inspection: {

@@ -113,9 +113,10 @@ reCAPTCHA or an auth vendor) need no Hypervibe connection. Use this template:
    never calls that service; report readiness as configuration only, not proof
    that the app verifies signatures.
 
-Omit `database.provider` to use the hosting platform's own database (Railway
-Postgres, Cloud SQL, RDS or Azure PostgreSQL). Name a provider only when the
-user asks for a different one.
+When the app needs a database, declare `database: {}` or omit `database.provider`
+from its database settings to use the hosting platform's own database (Railway
+Postgres, Cloud SQL, RDS or Azure PostgreSQL). Preserve an explicit provider choice.
+Leave the database block absent when the app does not need a database.
 
 ## Application configuration
 

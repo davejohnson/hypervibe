@@ -833,17 +833,6 @@ export class ProviderRegistry {
     return this.names().filter((name) => this.supports(name, capability));
   }
 
-  /**
-   * The hosting platform's own database: the single registered database provider
-   * whose connectivity contract names this host. Undefined when none or several match.
-   */
-  defaultDatabaseProviderFor(hostingProvider: string): string | undefined {
-    const matches = this.namesFor('database').filter((name) =>
-      this.getMetadata(name)?.lifecycle?.databaseConnectivity?.compatibleHostingProviders.includes(hostingProvider)
-    );
-    return matches.length === 1 ? matches[0] : undefined;
-  }
-
   lifecycleMaturity(
     name: string,
     capability: ProviderLifecycleCapability

@@ -9,8 +9,7 @@ import { assessBackupReadiness, backupEvidenceSummary } from '../domain/services
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
-import { canonicalizeLegacyGitHubSpec,
-  withDefaultDatabaseProviders, deepMergeSpec, SpecStore } from '../domain/spec/spec.store.js';
+import { canonicalizeLegacyGitHubSpec, deepMergeSpec, SpecStore } from '../domain/spec/spec.store.js';
 import {
   projectSpecSchema,
   type EnvironmentSpec,
@@ -663,7 +662,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           && repositoryRuntime.runtime
           ? { ...mergedRecord, runtime: repositoryRuntime.runtime }
           : mergedInput;
-        const candidateSpec = projectSpecSchema.parse(withDefaultDatabaseProviders(canonicalizeLegacyGitHubSpec(candidateInput)));
+        const candidateSpec = projectSpecSchema.parse(canonicalizeLegacyGitHubSpec(candidateInput));
         coverageReport = environmentVariableCoverage(candidateSpec);
         const introducedCoverageIssues = introducedEnvironmentVariableCoverageIssues(previousSpec, candidateSpec);
         if (introducedCoverageIssues.length > 0) {

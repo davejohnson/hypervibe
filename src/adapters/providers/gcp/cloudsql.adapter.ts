@@ -1,3 +1,4 @@
+import { nativeDatabaseConnectivity } from '../../../domain/registry/database-connectivity.js';
 import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
 import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { z } from 'zod';
@@ -1942,7 +1943,7 @@ providerRegistry.register({
     },
     lifecycle: {
       databaseEngines: ['postgres'],
-      databaseConnectivity: { compatibleHostingProviders: ['cloudrun'] },
+      databaseConnectivity: nativeDatabaseConnectivity.cloudsql,
       dailyBackups: { database: true },
       databaseResilience: {
         availabilityModes: ['zonal', 'regional'],

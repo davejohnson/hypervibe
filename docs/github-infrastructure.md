@@ -306,6 +306,12 @@ those automations until the secret is declared. The value never appears in
 specs, plans, logs, receipts, snapshots or workflow files, and the Codex job
 receives no GitHub write token.
 
+When the same plan changes managed GitHub files, review and merge its file PR,
+then plan again to finish supplying the Actions keys. This applies to all Actions
+keys, including `OPENAI_API_KEY`: writes and removals wait for that publication.
+Accepted unchanged keys are preserved, and application runtime keys follow their
+separate hosting setup.
+
 ## Allow autofix pull requests
 
 Autofix needs GitHub's repository setting **Allow GitHub Actions to create and
