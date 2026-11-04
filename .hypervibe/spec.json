@@ -122,6 +122,7 @@
       },
       "acceptance": {
         "kind": "check",
+        "timeoutMinutes": 45,
         "enabled": true,
         "category": "test",
         "triggers": {
